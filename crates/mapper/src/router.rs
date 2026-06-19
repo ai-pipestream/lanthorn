@@ -368,17 +368,22 @@ mod tests {
 
     #[test]
     fn distorted_flag_propagated_from_layout() {
+        // Impossible northward loop: 1→N→2→N→3→N→1. At least one edge must be distorted
+        // (the loop can't be Euclidean). Verify that the distorted flag is carried through
+        // to the routed edges.
         let mut g = MapGraph::new();
-        g.upsert_room(1, "C".into());
-        g.upsert_room(2, "N1".into());
-        g.upsert_room(3, "N2".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, -1)); // occupies north cell
-        g.add_edge(1, Direction::N, 3); // will be distorted by layout
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::N, 3);
+        g.add_edge(3, Direction::N, 1); // closes impossible loop
         relayout_auto(&mut g);
         let edges = route_all(&g);
-        let e = edges.iter().find(|e| e.origin == 1 && e.dest == 3).unwrap();
-        assert!(e.distorted, "layout-flagged distortion should be carried through");
+        assert!(
+            edges.iter().any(|e| e.distorted),
+            "layout-flagged distortion should be carried through to routed edges"
+        );
     }
 
     #[test]

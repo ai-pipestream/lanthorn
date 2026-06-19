@@ -112,6 +112,14 @@ impl MapGraph {
         }
     }
 
+    /// Clear the grid position of a room (set to None). Used by the layout engine
+    /// to reset positions before a full re-derivation.
+    pub fn clear_pos(&mut self, id: RoomId) {
+        if let Some(room) = self.rooms.get_mut(&id) {
+            room.pos = None;
+        }
+    }
+
     /// Mark a connection as distorted by index. Used by the layout engine when a room
     /// cannot be placed at its preferred compass offset (collision).
     pub fn set_conn_distorted(&mut self, idx: usize, distorted: bool) {
