@@ -65,6 +65,16 @@ pub fn read_var(state: &mut State, mem: &Memory, var: u8) -> u16 {
     }
 }
 
+/// Peek at the top of the eval stack WITHOUT popping (ZMSD §6.3.4: `load sp`).
+pub fn peek_stack(state: &State) -> u16 {
+    *state.eval_stack.last().expect("peek on empty stack")
+}
+
+/// Replace the top of the eval stack in place WITHOUT changing depth (ZMSD §6.3.4: `store sp`).
+pub fn poke_stack(state: &mut State, val: u16) {
+    *state.eval_stack.last_mut().expect("poke on empty stack") = val;
+}
+
 /// Write value `val` to variable `var` in state/memory.
 ///
 /// - var 0x00: push onto the current frame's eval stack region

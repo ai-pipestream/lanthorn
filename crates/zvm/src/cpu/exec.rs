@@ -9,7 +9,7 @@
 // Tasks 10–13 add arms to the same match without restructuring the core.
 
 use crate::cpu::decode::{decode, Branch, Instr, Operand, OperandCount};
-use crate::cpu::state::{call_routine, read_var, return_value, write_var, State};
+use crate::cpu::state::{call_routine, peek_stack, poke_stack, read_var, return_value, write_var, State};
 use crate::memory::Memory;
 use crate::objects;
 
@@ -176,9 +176,15 @@ impl Machine {
                 self.do_store(store, a & b);
                 StepResult::Continue
             }
-            // 0x0D store — write value b into variable a (by reference)
+            // 0x0D store — write value b into variable a (by reference).
+            // ZMSD §6.3.4: if variable number == 0, REPLACE (do not push) the stack top.
             0x0D => {
-                write_var(&mut self.state, &mut self.mem, a as u8, b);
+                let var = a as u8;
+                if var == 0 {
+                    poke_stack(&mut self.state, b);
+                } else {
+                    write_var(&mut self.state, &mut self.mem, var, b);
+                }
                 StepResult::Continue
             }
             // 0x14 add (signed)
@@ -276,9 +282,15 @@ impl Machine {
                 self.state.pc = (self.state.pc as i32 + offset as i32 - 2) as u32;
                 StepResult::Continue
             }
-            // 0x0E load — read value of variable a, store result
+            // 0x0E load — read value of variable a, store result.
+            // ZMSD §6.3.4: if variable number == 0, PEEK (do not pop) the stack top.
             0x0E => {
-                let val = read_var(&mut self.state, &self.mem, a as u8);
+                let var = a as u8;
+                let val = if var == 0 {
+                    peek_stack(&self.state)
+                } else {
+                    read_var(&mut self.state, &self.mem, var)
+                };
                 self.do_store(store, val);
                 StepResult::Continue
             }
@@ -945,6 +957,140 @@ pub(crate) mod tests {
     // ZMSD §4.7: branch offset relative to next_pc; offset N → target = next_pc + N - 2.
     // To skip a 4-byte instruction (long-form add with store): offset = 4 + 2 = 6.
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Test: load sp peeks without popping (ZMSD §6.3.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn load_sp_peeks_not_pops() {
+        // Layout at 0x10:
+        //   push 0xAAAA              (VAR:0x08, 3 bytes: E8 type_byte val)
+        //   push 0xBEEF              (VAR:0x08, 3 bytes)
+        //   load sp -> G0            (1OP:0x0E, small const 0x00, store G0)
+        //     Short form 1OP with small const: 0x9E, operand=0x00, store=0x10
+        //     3 bytes total
+        //   quit
+        //
+        // After load: G0 == 0xBEEF (top value), stack depth still 2.
+        let mut buf = sample_story(5);
+        let mut pos = 0x10usize;
+
+        // push 0xAAAA: 0xE8 type_byte(large=0b00...) value_hi value_lo
+        // VAR:push uses emit_var_ops but for a large constant we need 2 bytes.
+        // Actually looking at the Asm::Push handler: it uses emit_var_ops which emits
+        // a 1-byte type byte + 1-byte operand (small const). For a 16-bit value we
+        // need a different approach. Use raw bytes: write directly.
+        // push 0xBEEF needs a large constant. Emit as VAR:0x08 with large operand:
+        //   0xE8 (VAR push), type byte: large=0b00 for first op → 0b00_11_11_11 = 0x3F
+        //   then 2-byte value: hi, lo
+        buf[pos] = 0xE8; pos += 1;   // VAR push
+        buf[pos] = 0x3F; pos += 1;   // type: first=large(0b00), rest=omit(0b11)
+        buf[pos] = 0xAA; pos += 1;   // 0xAAAA hi
+        buf[pos] = 0xAA; pos += 1;   // 0xAAAA lo
+
+        buf[pos] = 0xE8; pos += 1;   // VAR push
+        buf[pos] = 0x3F; pos += 1;
+        buf[pos] = 0xBE; pos += 1;   // 0xBEEF hi
+        buf[pos] = 0xEF; pos += 1;   // 0xBEEF lo
+
+        // load sp (var 0) -> G0: short 1OP small const, opcode=0x0E → 0x9E
+        buf[pos] = 0x9E; pos += 1;   // load, small const
+        buf[pos] = 0x00; pos += 1;   // operand = variable number 0 (sp)
+        buf[pos] = 0x10; pos += 1;   // store -> G0 (var 0x10)
+
+        buf[pos] = 0xBA;              // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+
+        assert_eq!(m.global(0), 0xBEEF, "load sp: G0 should be top of stack (0xBEEF)");
+        assert_eq!(m.state.eval_stack.len(), 2, "load sp: stack depth must be unchanged (peek, not pop)");
+        assert_eq!(m.state.eval_stack[1], 0xBEEF, "load sp: top value still on stack");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: store sp replaces top without pushing (ZMSD §6.3.4)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn store_sp_replaces_top() {
+        // Layout at 0x10:
+        //   push 0x1234              (VAR:push, large const)
+        //   store sp, 0x56           (2OP:0x0D, a=small const 0x00, b=small const 0x56)
+        //     Long form small+small: 0x0D, a=0x00, b=0x56
+        //     3 bytes total
+        //   quit
+        //
+        // After store: stack depth still 1, top == 0x0056.
+        let mut buf = sample_story(5);
+        let mut pos = 0x10usize;
+
+        // push 0x1234 (large const)
+        buf[pos] = 0xE8; pos += 1;
+        buf[pos] = 0x3F; pos += 1;
+        buf[pos] = 0x12; pos += 1;
+        buf[pos] = 0x34; pos += 1;
+
+        // store sp, 0x56: 2OP:0x0D long form, both small const
+        // Long-form opcode: t1=small(0), t2=small(0), opcode=0x0D → 0x0D
+        buf[pos] = 0x0D; pos += 1;   // store, small+small
+        buf[pos] = 0x00; pos += 1;   // a = variable number 0 (sp)
+        buf[pos] = 0x56; pos += 1;   // b = new value 0x56
+
+        buf[pos] = 0xBA;              // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+
+        assert_eq!(m.state.eval_stack.len(), 1, "store sp: stack depth must be unchanged (replace, not push)");
+        assert_eq!(m.state.eval_stack[0], 0x0056, "store sp: top value must be new value");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: emit_branch two-byte form encodes correctly (ZMSD §4.7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn emit_branch_two_byte_form() {
+        // ZMSD §4.7: when |offset| >= 64, branch is two bytes.
+        // Byte 0: bit7=on_true, bit6=0 (long form), bits5-0 = high 6 bits of 14-bit offset
+        // Byte 1: low 8 bits of 14-bit offset
+        // Test with offset=100 (>= 64), on_true=true.
+        let mut out = Vec::new();
+        emit_branch(&mut out, true, 100);
+        assert_eq!(out.len(), 2, "long branch must emit exactly 2 bytes");
+
+        // offset=100 = 0x0064; 14-bit raw = 0x0064
+        // high6 = (0x0064 >> 8) & 0x3F = 0x00
+        // low8  = 0x0064 & 0xFF        = 0x64
+        // byte0 = on_true(1<<7) | high6 = 0x80 | 0x00 = 0x80
+        // byte1 = 0x64
+        assert_eq!(out[0], 0x80, "byte0: on_true bit set, bit6 clear, high6=0");
+        assert_eq!(out[1], 0x64, "byte1: low8 of offset 100");
+
+        // Also verify: on_true=false with offset=200 (0x00C8)
+        // high6 = (0x00C8 >> 8) & 0x3F = 0x00
+        // low8  = 0x00C8 & 0xFF        = 0xC8
+        // byte0 = 0x00 | 0x00 = 0x00 (bit7=0, bit6=0)
+        let mut out2 = Vec::new();
+        emit_branch(&mut out2, false, 200);
+        assert_eq!(out2[0], 0x00, "byte0: on_true=false, high6=0");
+        assert_eq!(out2[1], 0xC8, "byte1: low8 of offset 200");
+
+        // And offset=64 (boundary: just over single-byte limit)
+        // high6 = 0x00, low8 = 0x40
+        // byte0 = 0x80 (on_true=true)
+        let mut out3 = Vec::new();
+        emit_branch(&mut out3, true, 64);
+        assert_eq!(out3.len(), 2, "offset=64 uses two-byte form");
+        assert_eq!(out3[0], 0x80);
+        assert_eq!(out3[1], 0x40);
+    }
 
     #[test]
     fn inc_chk_and_dec_chk() {
