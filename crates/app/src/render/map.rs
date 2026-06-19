@@ -25,7 +25,6 @@
 //! For Overview zoom, connectors are skipped (step/2=1 but single-glyph boxes fill the cell).
 
 use mapper::render::{RenderMap, RenderRoom};
-use mapper::router::RoutedEdge;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -57,16 +56,6 @@ fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     }
 }
 
-/// Connector gutter offset added to fine_to_screen so that connector glyphs
-/// land in the gutter columns/rows (not under a room box).
-///
-/// offset = box_size - step/2
-fn connector_gutter_offset(zoom: Zoom) -> (i32, i32) {
-    let (bw, bh) = zoom_box_size(zoom);
-    let (sw, sh) = zoom_steps(zoom);
-    (bw as i32 - sw / 2, bh as i32 - sh / 2)
-}
-
 // ── cell_to_screen ────────────────────────────────────────────────────────────
 
 /// Map a logical room cell to an absolute screen coordinate within `area`.
@@ -93,52 +82,6 @@ pub fn cell_to_screen(
     Some((sx as u16, sy as u16))
 }
 
-// ── Fine-grid screen projection ───────────────────────────────────────────────
-
-/// Compute raw (unclipped) screen coordinates for a fine-grid point.
-///
-/// Returns the screen `(x, y)` using the same formula as `fine_to_screen` but without
-/// bounds-checking against `area`.  Used by `segment_screen_points` so that endpoint
-/// projections are available even when an endpoint lies just off the visible area.
-fn fine_to_screen_raw(fine: (i32, i32), zoom: Zoom, scroll: (i32, i32), area: Rect) -> (i32, i32) {
-    let (step_w, step_h) = zoom_steps(zoom);
-    let half_w = step_w / 2;
-    let half_h = step_h / 2;
-    let fine_scroll_x = scroll.0 * 2;
-    let fine_scroll_y = scroll.1 * 2;
-    let (ox, oy) = connector_gutter_offset(zoom);
-    let sx = area.x as i32 + (fine.0 - fine_scroll_x) * half_w + ox;
-    let sy = area.y as i32 + (fine.1 - fine_scroll_y) * half_h + oy;
-    (sx, sy)
-}
-
-/// Project a fine-grid point to screen coordinates.
-///
-/// Returns `None` if outside `area` or if zoom is Overview (connectors not drawn there).
-///
-/// The gutter offset is added so that connector glyphs (which traverse fine-grid
-/// midpoints between adjacent rooms) land in the gutter columns/rows that are
-/// left empty by the smaller room boxes, not under the box itself.
-fn fine_to_screen(
-    fine: (i32, i32),
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-) -> Option<(u16, u16)> {
-    if matches!(zoom, Zoom::Overview) {
-        return None; // Overview: connectors not drawn
-    }
-    let (sx, sy) = fine_to_screen_raw(fine, zoom, scroll, area);
-    if sx < area.x as i32
-        || sx >= area.right() as i32
-        || sy < area.y as i32
-        || sy >= area.bottom() as i32
-    {
-        return None;
-    }
-    Some((sx as u16, sy as u16))
-}
-
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 /// Style for the current room (reversed video — visually distinct).
@@ -152,33 +95,27 @@ const SELECTED_STYLE: Style = Style::new().fg(Color::Yellow);
 /// Style for normal rooms.
 const NORMAL_STYLE: Style = Style::new().fg(Color::White);
 
-/// Style for distorted connectors (dim).
-const DISTORTED_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
+/// Style for normal connectors — solid bright Cyan.
+#[allow(dead_code)]
+const CONNECTOR_STYLE: Style = Style::new().fg(Color::Cyan);
 
-/// Style for normal connectors.
-const CONNECTOR_STYLE: Style = Style::new().fg(Color::DarkGray);
+/// Style for distorted connectors — solid Magenta (different signal, not dim).
+#[allow(dead_code)]
+const DISTORTED_STYLE: Style = Style::new().fg(Color::Magenta);
+
+/// Style for arrowheads — bold Yellow.
+#[allow(dead_code)]
+const ARROWHEAD_STYLE: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 
 // ── Bitmask connector rasterization ──────────────────────────────────────────
 
 /// Convert a NESW bitmask to a box-drawing glyph (rounded corners).
 /// bits: N=1, E=2, S=4, W=8
-pub fn bitmask_to_glyph(mask: u8, dashed: bool) -> &'static str {
+pub fn bitmask_to_glyph(mask: u8) -> &'static str {
     match mask {
         0 => " ",
-        1 | 4 | 5 => {
-            if dashed {
-                "╎"
-            } else {
-                "│"
-            }
-        }
-        2 | 8 | 10 => {
-            if dashed {
-                "╌"
-            } else {
-                "─"
-            }
-        }
+        1 | 4 | 5 => "│",
+        2 | 8 | 10 => "─",
         3 => "╰",   // NE
         6 => "╭",   // ES
         9 => "╯",   // NW
@@ -198,6 +135,7 @@ pub fn bitmask_to_glyph(mask: u8, dashed: bool) -> &'static str {
 /// - from is to the East (from.0 > this.0): E = 2
 /// - from is to the South (from.1 > this.1): S = 4
 /// - from is to the West (from.0 < this.0): W = 8
+#[allow(dead_code)]
 fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
     if from.1 < this.1 {
         1 // N
@@ -210,181 +148,13 @@ fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
     }
 }
 
-/// Return every screen cell between the screen projections of fine-grid points p0 and p1,
-/// inclusive, stepping one screen cell at a time.
-///
-/// Segments are always orthogonal (dx==0 or dy==0 in fine space).  We project both
-/// endpoints to raw (unclipped) screen coords via `fine_to_screen_raw`, then walk from
-/// one to the other in screen space one cell at a time (±1 in x or y).  Each cell is
-/// included only if it falls within `area`.  This guarantees a contiguous run of screen
-/// cells with no gaps regardless of how many fine cells map to the same screen column/row.
-fn segment_screen_points(
-    p0: (i32, i32),
-    p1: (i32, i32),
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-) -> Vec<(u16, u16)> {
-    let mut pts = Vec::new();
-
-    // Raw (unclipped) screen coordinates of the two fine-grid endpoints.
-    let (sx0, sy0) = fine_to_screen_raw(p0, zoom, scroll, area);
-    let (sx1, sy1) = fine_to_screen_raw(p1, zoom, scroll, area);
-
-    let sdx = (sx1 - sx0).signum();
-    let sdy = (sy1 - sy0).signum();
-
-    let mut cx = sx0;
-    let mut cy = sy0;
-    loop {
-        // Include this screen cell only if it lies within the visible area.
-        if cx >= area.x as i32
-            && cx < area.right() as i32
-            && cy >= area.y as i32
-            && cy < area.bottom() as i32
-        {
-            pts.push((cx as u16, cy as u16));
-        }
-        if cx == sx1 && cy == sy1 {
-            break;
-        }
-        cx += sdx;
-        cy += sdy;
-    }
-    pts
-}
-
-/// Build a bitmask map for all non-stub routed edges.
-/// Returns HashMap<(u16,u16), (u8, bool)> — (bitmask, all_distorted)
-fn build_connector_mask(
-    edges: &[RoutedEdge],
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-) -> std::collections::HashMap<(u16, u16), (u8, bool)> {
-    let mut map: std::collections::HashMap<(u16, u16), (u8, bool)> =
-        std::collections::HashMap::new();
-
-    if matches!(zoom, Zoom::Overview) {
-        return map;
-    }
-
-    for edge in edges {
-        if edge.is_stub {
-            continue;
-        }
-        if edge.points.len() < 2 {
-            continue;
-        }
-
-        // Walk consecutive pairs of fine-grid points
-        for window in edge.points.windows(2) {
-            let (p0, p1) = (window[0], window[1]);
-            // Get all screen cells along this segment (inclusive p0..=p1)
-            let screen_pts = segment_screen_points(p0, p1, zoom, scroll, area);
-            // Walk consecutive screen cell pairs and set bitmasks
-            for i in 0..screen_pts.len() {
-                let pos = screen_pts[i];
-                let entry = map.entry(pos).or_insert((0u8, true));
-                // all_distorted only if all edges at this cell are distorted
-                entry.1 = entry.1 && edge.distorted;
-
-                if i > 0 {
-                    let prev = screen_pts[i - 1];
-                    // set bit on this cell pointing toward prev
-                    let bit = dir_bit(prev, pos);
-                    entry.0 |= bit;
-                }
-                if i < screen_pts.len() - 1 {
-                    let next = screen_pts[i + 1];
-                    // set bit on this cell pointing toward next
-                    let bit = dir_bit(next, pos);
-                    entry.0 |= bit;
-                }
-            }
-        }
-    }
-    map
-}
-
-/// Collect arrowhead glyphs for all non-stub edges (one per edge, at last screen point).
-fn collect_arrowheads(
-    edges: &[RoutedEdge],
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-) -> Vec<((u16, u16), &'static str)> {
-    if matches!(zoom, Zoom::Overview) {
-        return Vec::new();
-    }
-
-    let mut arrows = Vec::new();
-    for edge in edges {
-        if edge.is_stub || edge.points.len() < 2 {
-            continue;
-        }
-        // Last segment: from second-to-last point to last point
-        let n = edge.points.len();
-        let p_prev = edge.points[n - 2];
-        let p_last = edge.points[n - 1];
-        let dx = p_last.0 - p_prev.0;
-        let dy = p_last.1 - p_prev.1;
-        let glyph = if dx > 0 {
-            "▸"
-        } else if dx < 0 {
-            "◂"
-        } else if dy < 0 {
-            "▴"
-        } else {
-            "▾"
-        };
-        // The arrowhead goes at the last point's screen position
-        if let Some(screen_pos) = fine_to_screen(p_last, zoom, scroll, area) {
-            arrows.push((screen_pos, glyph));
-        }
-    }
-    arrows
-}
-
 // ── render_map ────────────────────────────────────────────────────────────────
 
 /// Draw the map from `rm` into `buf` for `area`, using view state from `state`.
 pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) {
     let zoom = state.zoom;
     let scroll = state.scroll;
-
-    // 1. Build bitmask map for all non-stub connectors
-    let connector_map = build_connector_mask(&rm.edges, zoom, scroll, area);
-
-    // 2. Render connector glyphs
-    for (&(cx, cy), &(mask, all_distorted)) in &connector_map {
-        let glyph = bitmask_to_glyph(mask, all_distorted);
-        let style = if all_distorted {
-            DISTORTED_STYLE
-        } else {
-            CONNECTOR_STYLE
-        };
-        if let Some(cell) = buf.cell_mut((cx, cy)) {
-            cell.set_symbol(glyph).set_style(style);
-        }
-    }
-
-    // 3. Overlay arrowheads
-    let arrows = collect_arrowheads(&rm.edges, zoom, scroll, area);
-    for ((ax, ay), glyph) in arrows {
-        if let Some(cell) = buf.cell_mut((ax, ay)) {
-            cell.set_symbol(glyph).set_style(CONNECTOR_STYLE);
-        }
-    }
-
-    // 4. Draw stub edges
-    for edge in &rm.edges {
-        if edge.is_stub {
-            draw_stub(edge, zoom, scroll, area, buf);
-        }
-    }
-
-    // 5. Draw rooms on top
+    // Draw rooms on top (connectors replaced in next task)
     for room in &rm.rooms {
         draw_room(room, state, zoom, scroll, area, buf);
     }
@@ -535,55 +305,6 @@ fn draw_box_room(
     draw_char_clipped(buf, sx + w - 1, sy + h - 1, br, style, area);
 }
 
-// ── Stub drawing ──────────────────────────────────────────────────────────────
-
-/// Draw a stub connector: dashed line from origin toward stub endpoint, label at midpoint.
-fn draw_stub(edge: &RoutedEdge, zoom: Zoom, scroll: (i32, i32), area: Rect, buf: &mut Buffer) {
-    if edge.points.len() < 2 {
-        return;
-    }
-    let p0 = edge.points[0]; // origin fine cell
-    let p1 = edge.points[1]; // stub end fine cell
-    let style = CONNECTOR_STYLE;
-
-    let dx = (p1.0 - p0.0).signum();
-    let dy = (p1.1 - p0.1).signum();
-    let h_glyph = "╌";
-    let v_glyph = "╎";
-
-    let mut cur = p0;
-    let mut mid_screen: Option<(u16, u16)> = None;
-    let mut count = 0i32;
-    let total = (p1.0 - p0.0).abs().max((p1.1 - p0.1).abs()) + 1;
-
-    loop {
-        if let Some((sx, sy)) = fine_to_screen(cur, zoom, scroll, area) {
-            // Draw the dashed glyph (not at first point which is under the room box)
-            if count > 0 {
-                let glyph = if dx != 0 { h_glyph } else { v_glyph };
-                if let Some(cell) = buf.cell_mut((sx, sy)) {
-                    cell.set_symbol(glyph).set_style(style);
-                }
-            }
-            // Midpoint for label
-            if count == total / 2 {
-                mid_screen = Some((sx, sy));
-            }
-        }
-        if cur == p1 {
-            break;
-        }
-        cur = (cur.0 + dx, cur.1 + dy);
-        count += 1;
-    }
-
-    // Draw label at midpoint (overwriting dashed glyph)
-    if let Some((mx, my)) = mid_screen.or_else(|| fine_to_screen(p1, zoom, scroll, area)) {
-        let label = edge.label.as_deref().unwrap_or("?");
-        draw_str_clipped(buf, mx, my, label, style, area);
-    }
-}
-
 // ── Clipped drawing helpers ───────────────────────────────────────────────────
 
 use super::{draw_char_clipped, draw_str_clipped};
@@ -691,25 +412,6 @@ mod tests {
             .count();
         // The room boxes themselves use these chars too — we just need more than zero.
         assert!(box_drawing > 0, "should have box-drawing chars from rooms or connectors");
-
-        // NEW: Boxes step (18,6), half=(9,3), box=(14,4), gutter ox = 14 - 9 = 5, oy = 4 - 3 = 1
-        // Room "Start" at cell (0,0) → screen (0,0), box covers cols 0..13, rows 0..3.
-        // Room "East"  at cell (1,0) → screen (18,0), box covers cols 18..31.
-        // Gutter between boxes: cols 14-17.
-        //
-        // Connector fine(1,0) → sx = 0 + 1*9 + 5 = 14, sy = 0 + 0*3 + 1 = 1.
-        let gutter_x = 14u16;
-        let gutter_y = 1u16;
-        let connector_cell = buf.cell((gutter_x, gutter_y));
-        assert!(
-            connector_cell.is_some(),
-            "gutter cell ({gutter_x},{gutter_y}) should exist in buffer"
-        );
-        let sym = connector_cell.unwrap().symbol();
-        assert!(
-            matches!(sym, "─" | "│" | "╌" | "╎" | "▸" | "◂" | "▴" | "▾"),
-            "connector glyph at ({gutter_x},{gutter_y}) should be a connector char; got '{sym}'"
-        );
     }
 
     #[test]
@@ -772,18 +474,15 @@ mod tests {
     #[test]
     fn bitmask_to_glyph_lookup() {
         // Corners
-        assert_eq!(bitmask_to_glyph(3, false), "╰");  // NE
-        assert_eq!(bitmask_to_glyph(6, false), "╭");  // ES
-        assert_eq!(bitmask_to_glyph(12, false), "╮"); // SW
-        assert_eq!(bitmask_to_glyph(9, false), "╯");  // NW
+        assert_eq!(bitmask_to_glyph(3), "╰");  // NE
+        assert_eq!(bitmask_to_glyph(6), "╭");  // ES
+        assert_eq!(bitmask_to_glyph(12), "╮"); // SW
+        assert_eq!(bitmask_to_glyph(9), "╯");  // NW
         // Straights
-        assert_eq!(bitmask_to_glyph(10, false), "─"); // EW
-        assert_eq!(bitmask_to_glyph(5, false), "│");  // NS
+        assert_eq!(bitmask_to_glyph(10), "─"); // EW
+        assert_eq!(bitmask_to_glyph(5), "│");  // NS
         // Junction
-        assert_eq!(bitmask_to_glyph(15, false), "┼"); // NESW
-        // Dashed straight
-        assert_eq!(bitmask_to_glyph(10, true), "╌");
-        assert_eq!(bitmask_to_glyph(5, true), "╎");
+        assert_eq!(bitmask_to_glyph(15), "┼"); // NESW
     }
 
     #[test]
@@ -807,119 +506,12 @@ mod tests {
         assert!(row1_chars.contains("West"), "label row should contain 'West'; got '{row1_chars}'");
     }
 
-    #[test]
-    fn connector_has_corner_glyph() {
-        // Build connector mask for a hand-crafted L edge
-        let edge = mapper::router::RoutedEdge {
-            origin: 1,
-            dest: 2,
-            dir: mapper::direction::Direction::E,
-            points: vec![(1, 0), (3, 0), (3, 2)], // fine-grid L shape
-            distorted: false,
-            is_stub: false,
-            label: None,
-            arrival_dir: None,
-        };
-        let scroll = (0, 0);
-        let zoom = Zoom::Boxes;
-        let area = Rect::new(0, 0, 80, 30);
-        let connector_map = build_connector_mask(&[edge], zoom, scroll, area);
-        // The corner cell should have a non-straight mask (SW=12, or similar corner)
-        let has_bend = connector_map.values().any(|&(mask, _)| {
-            matches!(mask, 3 | 6 | 9 | 12) // NE, ES, NW, SW corners
-        });
-        assert!(has_bend, "L-shaped connector should produce a bend/corner in the bitmask map");
-    }
+    // connector_has_corner_glyph: removed — called build_connector_mask which is gone;
+    // superseded by new tests in Task 4.
 
-    #[test]
-    fn connector_has_arrowhead_at_dest() {
-        let mut m = Mapper::default();
-        m.observe(1, "Start", None);
-        m.observe(2, "East", Some(Direction::E));
-        let rm = render(&m.graph);
-        let state = AppState::default(); // Boxes zoom, scroll (0,0)
-        let area = Rect::new(0, 0, 80, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
+    // connector_has_arrowhead_at_dest: removed — arrowhead rendering is stubbed out in Task 1;
+    // superseded by new tests in Task 4.
 
-        // One of these arrowhead glyphs should appear
-        let has_arrow = buf.content.iter().any(|c| {
-            matches!(c.symbol(), "▸" | "◂" | "▴" | "▾")
-        });
-        assert!(has_arrow, "connector to dest room should have an arrowhead glyph");
-    }
-
-    /// Unit-test `segment_screen_points` directly: for a horizontal fine segment whose
-    /// screen endpoints are N cells apart, the function must return exactly N+1 cells,
-    /// each adjacent (distance 1) to the previous — no gaps.
-    #[test]
-    fn connector_is_contiguous_no_gaps() {
-        // Boxes zoom: step_w=18, half_w=9.
-        // A fine segment from (0,0) to (2,0) spans two fine steps → 2*9 = 18 screen cols apart.
-        // segment_screen_points must return 19 contiguous screen cells.
-        let zoom = Zoom::Boxes;
-        let scroll = (0, 0);
-        let area = Rect::new(0, 0, 120, 40);
-
-        let pts = segment_screen_points((0, 0), (2, 0), zoom, scroll, area);
-
-        // All cells returned must be visible in the area.
-        for &(x, y) in &pts {
-            assert!(
-                x >= area.x && x < area.right() && y >= area.y && y < area.bottom(),
-                "cell ({x},{y}) outside area"
-            );
-        }
-
-        // Must be non-empty.
-        assert!(!pts.is_empty(), "segment_screen_points returned no points");
-
-        // Consecutive cells must be exactly 1 apart (no gaps, no duplicates).
-        for w in pts.windows(2) {
-            let (x0, y0) = (w[0].0 as i32, w[0].1 as i32);
-            let (x1, y1) = (w[1].0 as i32, w[1].1 as i32);
-            let dist = (x1 - x0).abs() + (y1 - y0).abs();
-            assert_eq!(
-                dist, 1,
-                "consecutive screen cells ({},{}) and ({},{}) are not adjacent (dist={dist})",
-                w[0].0, w[0].1, w[1].0, w[1].1
-            );
-        }
-
-        // Full-buffer render: place rooms 2 cells apart so the connector is a multi-cell
-        // horizontal run and verify no space interrupts it.
-        //
-        // Manually build a graph with rooms at (0,0) and (2,0).
-        // Boxes zoom: step_w=18, half_w=9, gutter_ox=5.
-        // dep = fine(1,0) -> screen x = 1*9+5 = 14
-        // arr = fine(3,0) -> screen x = 3*9+5 = 32
-        // segment_screen_points walk produces cols 14..=32 inclusive (19 cells) at row 1.
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "A".into());
-        g.upsert_room(2, "B".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (2, 0)); // two cells apart, not adjacent
-        g.add_edge(1, mapper::direction::Direction::E, 2);
-        let rm2 = render(&g);
-        let state2 = AppState::default();
-        let buf_area = Rect::new(0, 0, 120, 30);
-        let mut buf = Buffer::empty(buf_area);
-        render_map(&rm2, &state2, buf_area, &mut buf);
-
-        // Connector row is row 1 (oy=1 for Boxes).
-        // dep fine(1,0) -> screen x=14; arr fine(3,0) -> screen x=32 (arrowhead).
-        // Check cols 14..=31 (before the arrowhead at 32) are all non-space.
-        let connector_row = 1u16;
-        let seg_start = 14u16;
-        let seg_end = 31u16; // stop one before the arrowhead at col 32
-
-        for col in seg_start..=seg_end {
-            let sym = buf.cell((col, connector_row)).map(|c| c.symbol()).unwrap_or(" ");
-            assert_ne!(
-                sym, " ",
-                "connector cell ({col},{connector_row}) is a space -- gap in multi-cell connector"
-            );
-        }
-    }
+    // connector_is_contiguous_no_gaps: segment_screen_points unit portion removed (function gone);
+    // full-render connector assertions superseded by new tests in Task 4.
 }
