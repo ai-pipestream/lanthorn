@@ -90,6 +90,21 @@ impl MapGraph {
             room.notes = notes.into();
         }
     }
+
+    /// Set the grid position of a room. Used by the layout engine.
+    pub fn set_pos(&mut self, id: RoomId, pos: (i32, i32)) {
+        if let Some(room) = self.rooms.get_mut(&id) {
+            room.pos = Some(pos);
+        }
+    }
+
+    /// Mark a connection as distorted by index. Used by the layout engine when a room
+    /// cannot be placed at its preferred compass offset (collision).
+    pub fn set_conn_distorted(&mut self, idx: usize, distorted: bool) {
+        if let Some(conn) = self.conns.get_mut(idx) {
+            conn.distorted = distorted;
+        }
+    }
 }
 
 #[cfg(test)]

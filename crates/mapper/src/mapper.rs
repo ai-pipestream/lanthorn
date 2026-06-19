@@ -1,9 +1,11 @@
 use crate::direction::{Direction, parse_direction};
 use crate::graph::{MapGraph, RoomId};
+use crate::layout::{relayout_auto, LayoutMode};
 
 #[derive(Debug, Default)]
 pub struct Mapper {
     pub graph: MapGraph,
+    pub mode: LayoutMode,
 }
 
 impl Mapper {
@@ -17,6 +19,9 @@ impl Mapper {
             }
         }
         self.graph.set_current(location);
+        if self.mode == LayoutMode::Auto {
+            relayout_auto(&mut self.graph);
+        }
     }
 
     pub fn observe_command(&mut self, location: RoomId, name: &str, command: &str) {
