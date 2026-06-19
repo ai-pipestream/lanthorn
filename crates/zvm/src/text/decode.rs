@@ -68,7 +68,7 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
         match zc {
             0 => {
                 result.push(' ');
-                // alphabet resets to A0 (it's a shift-for-next-only scheme)
+                // space; any pending shift is consumed
                 alphabet = 0;
             }
             1 | 2 | 3 => {
@@ -189,6 +189,40 @@ mod tests {
         let (s, end) = decode_string(&m, 0x100);
         assert_eq!(s, "abcdef");
         assert_eq!(end, 0x104);
+    }
+
+    #[test]
+    fn decodes_abbreviation() {
+        // Abbreviation set 1 (Z-char 1), index 0 → expands to "abc".
+        //
+        // Abbreviation string at byte 0x0080: Z-chars [6,7,8] = "abc", terminated.
+        //   word = 0x8000 | (6<<10) | (7<<5) | 8
+        //
+        // Abbreviation table base = 0x0040 (confirmed from sample_story header).
+        // Entry for set 1, index 0: table_base + 2*( 32*(1-1)+0 ) = 0x0040.
+        // Entry holds a WORD-address; decoder multiplies by 2 to get byte address.
+        // To point at 0x0080, write word value 0x0040 at 0x0040.
+        //
+        // Main string at 0x0100: Z-chars [1, 0, 5], terminated.
+        //   Z-char 1 = abbreviation trigger, Z-char 0 = index, Z-char 5 = shift (no output).
+        //   word = 0x8000 | (1<<10) | (0<<5) | 5
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+
+        // Write abbreviation string "abc" at 0x0080.
+        let abbrev_word: u16 = 0x8000 | (6 << 10) | (7 << 5) | 8;
+        m.write_word(0x0080, abbrev_word);
+
+        // Write abbreviation table entry at 0x0040: word-address 0x0040 → byte 0x0080.
+        m.write_word(0x0040, 0x0040);
+
+        // Write main string at 0x0100: [1, 0, 5] with terminator.
+        let main_word: u16 = 0x8000 | (1 << 10) | (0 << 5) | 5;
+        m.write_word(0x0100, main_word);
+
+        let (s, end) = decode_string(&m, 0x0100);
+        assert_eq!(s, "abc");
+        assert_eq!(end, 0x0102);
     }
 
     #[test]
