@@ -4,7 +4,7 @@ use crate::direction::Direction;
 
 pub type RoomId = u16;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Room {
     pub id: RoomId,
     pub name: String,
@@ -22,7 +22,7 @@ impl Room {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Connection {
     pub origin: RoomId,
     pub dir: Direction,
@@ -40,6 +40,16 @@ pub struct MapGraph {
 impl MapGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reconstruct a `MapGraph` from persisted vecs. Builds the internal `BTreeMap` keyed by id.
+    pub fn from_parts(
+        rooms: Vec<Room>,
+        connections: Vec<Connection>,
+        current: Option<RoomId>,
+    ) -> Self {
+        let rooms = rooms.into_iter().map(|r| (r.id, r)).collect();
+        Self { rooms, conns: connections, current }
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
