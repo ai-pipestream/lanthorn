@@ -10,6 +10,7 @@
 
 use crate::cpu::decode::{decode, Branch, Instr, Operand, OperandCount};
 use crate::cpu::state::{call_routine, peek_stack, poke_stack, read_var, return_value, write_var, State};
+use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
@@ -38,6 +39,22 @@ pub enum StepResult {
     RestoreRequest,
 }
 
+/// State saved while waiting for player input (`read` / `read_char`).
+///
+/// When `step()` returns `NeedLine` or `NeedChar` the machine suspends; the
+/// host calls `supply_line` / `supply_char` with the input, which uses these
+/// fields to complete the operation (write buffers, store result) before the
+/// next `step()` call.
+struct PendingInput {
+    /// Destination variable for the result (store var of the read/read_char
+    /// instruction; `None` if the instruction has no store — v3 `read` has none).
+    store_var: Option<u8>,
+    /// Address of the text buffer (for `supply_line`).
+    text_buf: u32,
+    /// Address of the parse buffer (for `supply_line`; 0 in v5+ means skip).
+    parse_buf: u32,
+}
+
 /// The Z-machine interpreter — ties memory and CPU state together.
 /// Fields are `pub` so Tasks 11+ can attach I/O channels.
 pub struct Machine {
@@ -45,6 +62,8 @@ pub struct Machine {
     pub state: State,
     /// Pluggable text output sink. Defaults to `BufferOutput` (Task 11).
     pub out: Box<dyn Output>,
+    /// Non-None while the machine is suspended waiting for player input.
+    pending_input: Option<PendingInput>,
 }
 
 impl Machine {
@@ -62,6 +81,7 @@ impl Machine {
             state: State::new(initial_pc),
             mem,
             out,
+            pending_input: None,
         }
     }
 
@@ -561,14 +581,21 @@ impl Machine {
                 call_routine(&mut self.state, &mut self.mem, packed, args, store);
                 StepResult::Continue
             }
-            // 0x04 sread/read — stub for Task 12
+            // 0x04 sread/aread/read — pause execution and wait for a line of input.
+            // v3: no store var. v4+: has a store var (terminating character).
+            // Operands: text_buf, parse_buf (+ optional time/routine in v4+ — ignored).
             0x04 => {
                 let text_buf = ops.get(0).copied().unwrap_or(0) as u32;
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
+                self.pending_input = Some(PendingInput { store_var: store, text_buf, parse_buf });
                 StepResult::NeedLine { text_buf, parse_buf }
             }
-            // 0x16 read_char — stub for Task 12
-            0x16 => StepResult::NeedChar,
+            // 0x16 read_char — pause execution and wait for a single keypress (v4+).
+            // Has a store var for the ZSCII code.
+            0x16 => {
+                self.pending_input = Some(PendingInput { store_var: store, text_buf: 0, parse_buf: 0 });
+                StepResult::NeedChar
+            }
             // 0x18 not (VAR form, v5+) — bitwise complement
             0x18 => {
                 let val = ops.get(0).copied().unwrap_or(0);
@@ -657,6 +684,103 @@ impl Machine {
     pub fn global(&self, n: u8) -> u16 {
         let base = self.mem.global_vars() as u32;
         self.mem.read_word(base + n as u32 * 2)
+    }
+
+    /// Complete a suspended `read` instruction by supplying a line of input.
+    ///
+    /// This is the natural hook for the future automapper to observe the player's
+    /// command — the host calls this method with whatever the player typed, and
+    /// could record `input` before forwarding to this function.
+    ///
+    /// Text-buffer layout (ZMSD §15):
+    ///   v1–4: byte 0 = max chars; text starts at byte 1 (lower-cased, 0-terminated).
+    ///   v5+:  byte 0 = max chars; byte 1 = actual char count; text starts at byte 2
+    ///         (lower-cased, NOT zero-terminated).
+    ///
+    /// Parse-buffer layout (ZMSD §15):
+    ///   byte 0 = max tokens (set by game); byte 1 = token count (we write this);
+    ///   then for each token: 2-byte dict addr, 1-byte len, 1-byte text-buf position.
+    ///   The text-buf position is 1-based from the start of the text buffer, i.e.
+    ///   `text_data_start + token.text_pos` where text_data_start = 1 (v1–4) or 2 (v5+).
+    ///
+    /// For v5+: stores the terminating character (13 = Enter) into the store variable.
+    /// Skips tokenisation when parse_buf == 0 (v5+ only).
+    pub fn supply_line(&mut self, input: &str) {
+        let pending = match self.pending_input.take() {
+            Some(p) => p,
+            None => return, // no pending read — ignore
+        };
+
+        let version = self.mem.version();
+        let text_buf = pending.text_buf;
+        let parse_buf = pending.parse_buf;
+
+        // Read the max-length cap written by the game (byte 0 of text buffer).
+        let max_len = self.mem.read_byte(text_buf) as usize;
+
+        // Lower-case the input and truncate to max_len.
+        let lowered: String = input.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect();
+        let text: &str = if lowered.len() > max_len { &lowered[..max_len] } else { &lowered };
+
+        // Write the text into the buffer and set the count/terminator bytes.
+        if version <= 4 {
+            // v1–4: text starts at byte 1, terminated by a 0 byte.
+            let text_data_start: u32 = 1;
+            for (i, b) in text.bytes().enumerate() {
+                self.mem.write_byte(text_buf + text_data_start + i as u32, b);
+            }
+            // Null-terminate.
+            self.mem.write_byte(text_buf + text_data_start + text.len() as u32, 0);
+        } else {
+            // v5+: byte 1 = char count; text starts at byte 2, no null terminator.
+            let text_data_start: u32 = 2;
+            self.mem.write_byte(text_buf + 1, text.len() as u8);
+            for (i, b) in text.bytes().enumerate() {
+                self.mem.write_byte(text_buf + text_data_start + i as u32, b);
+            }
+        }
+
+        // Tokenise and fill the parse buffer (skip if parse_buf == 0 in v5+).
+        let should_parse = parse_buf != 0 || version <= 4;
+        if should_parse && parse_buf != 0 {
+            let text_data_start: u8 = if version <= 4 { 1 } else { 2 };
+            let max_tokens = self.mem.read_byte(parse_buf) as usize;
+
+            let dict = dictionary::load(&self.mem);
+            let tokens = dict.tokenise(&self.mem, text);
+
+            let count = tokens.len().min(max_tokens);
+            self.mem.write_byte(parse_buf + 1, count as u8);
+
+            for (i, tok) in tokens.iter().take(max_tokens).enumerate() {
+                let entry = parse_buf + 2 + i as u32 * 4;
+                // 2-byte dict address.
+                self.mem.write_word(entry, tok.dict_addr);
+                // 1-byte token length.
+                self.mem.write_byte(entry + 2, tok.len);
+                // 1-byte text-buffer position: convert 0-based text_pos to
+                // 1-based index from start of text buffer.
+                let buf_pos = text_data_start + tok.text_pos;
+                self.mem.write_byte(entry + 3, buf_pos);
+            }
+        }
+
+        // v5+: store the terminating character (13 = newline/Enter).
+        if version >= 5 {
+            self.do_store(pending.store_var, 13);
+        }
+    }
+
+    /// Complete a suspended `read_char` instruction by supplying a single keystroke.
+    ///
+    /// `ch` is the ZSCII code of the key pressed (e.g. 65 = 'A').
+    /// The value is written into the instruction's store variable.
+    pub fn supply_char(&mut self, ch: u8) {
+        let pending = match self.pending_input.take() {
+            Some(p) => p,
+            None => return,
+        };
+        self.do_store(pending.store_var, ch as u16);
     }
 }
 
@@ -1877,6 +2001,349 @@ pub(crate) mod tests {
         run_until_quit(&mut m);
         let out = m.buffer_output().expect("default sink");
         assert_eq!(out.buf, "de");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 12: input opcode tests
+    //
+    // Dictionary layout shared by these tests:
+    //   Same hand-built v3/v5 dict used in dictionary module tests.
+    //   We embed a minimal dictionary containing "north", "open", "mailbox"
+    //   at memory address 0x0200 (where sample_story points `dictionary`).
+    //
+    // Text/parse buffers are placed in dynamic memory away from code:
+    //   text_buf  at 0x0300 (before global_vars which starts at 0x0300 —
+    //   BUT global_vars are at 0x0300 in sample_story! Use 0x0280 instead.)
+    //   parse_buf at 0x02C0
+    // -----------------------------------------------------------------------
+
+    /// Build a story buffer with a hand-crafted dictionary at 0x0200.
+    /// Entries: "north", "open", "mailbox" (sorted by encoded key, 4-byte keys, v3).
+    /// Returns (buf, addr_north, addr_open, addr_mailbox).
+    fn build_input_story(version: u8) -> (Vec<u8>, u16, u16, u16) {
+        use crate::text::encode::encode_word;
+
+        let mut buf = sample_story(version);
+
+        // We use 4-byte keys for v3 and 6-byte keys for v5.
+        let key_len: usize = if version <= 3 { 4 } else { 6 };
+
+        // encode_word takes the story version (not syllable count).
+        let key_north   = encode_word("north",   version);
+        let key_open    = encode_word("open",    version);
+        let key_mailbox = encode_word("mailbox", version);
+
+        // Sort by key bytes for binary search.
+        let mut entries: Vec<(&str, Vec<u8>)> = vec![
+            ("north",   key_north.clone()),
+            ("open",    key_open.clone()),
+            ("mailbox", key_mailbox.clone()),
+        ];
+        entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let entry_length: usize = key_len + 2; // key + 2 bytes game data (total ≥ 4 v3, ≥ 6 v4+)
+
+        // Write dictionary header at 0x0200.
+        buf[0x0200] = 1;    // 1 separator
+        buf[0x0201] = b'.'; // separator = '.'
+        buf[0x0202] = entry_length as u8;
+        buf[0x0203] = 0;
+        buf[0x0204] = 3;    // count = 3
+
+        // Entries start at 0x0205.
+        let entries_base: usize = 0x0205;
+        for (i, (_word, key)) in entries.iter().enumerate() {
+            let base = entries_base + i * entry_length;
+            buf[base..base + key_len].copy_from_slice(&key[..key_len]);
+        }
+
+        // Compute addresses for each word in sorted order.
+        let addr_for = |word: &str| -> u16 {
+            for (i, (w, _)) in entries.iter().enumerate() {
+                if *w == word {
+                    return (entries_base + i * entry_length) as u16;
+                }
+            }
+            panic!("word not found: {}", word);
+        };
+
+        let addr_north   = addr_for("north");
+        let addr_open    = addr_for("open");
+        let addr_mailbox = addr_for("mailbox");
+
+        (buf, addr_north, addr_open, addr_mailbox)
+    }
+
+    /// Build a VAR-form `read` instruction (opcode 0x04) at `buf[offset]`.
+    /// Operands: two Large constants (text_buf addr, parse_buf addr).
+    /// v5+ includes a store byte; v3 does not.
+    /// Returns the number of bytes emitted.
+    fn emit_read(buf: &mut [u8], offset: usize, text_buf: u16, parse_buf: u16, version: u8, store_var: Option<u8>) -> usize {
+        // VAR-form opcode for read: 0b11_1_00100 = 0xE4
+        buf[offset] = 0xE4;
+        // Type byte: first two = large const (0b00), rest = omit (0b11).
+        // 0b00_00_11_11 = 0x0F
+        buf[offset + 1] = 0x0F;
+        // text_buf (large const, 2 bytes)
+        buf[offset + 2] = (text_buf >> 8) as u8;
+        buf[offset + 3] = (text_buf & 0xFF) as u8;
+        // parse_buf (large const, 2 bytes)
+        buf[offset + 4] = (parse_buf >> 8) as u8;
+        buf[offset + 5] = (parse_buf & 0xFF) as u8;
+        let mut len = 6;
+        // v5+ has store byte
+        if version >= 5 {
+            if let Some(sv) = store_var {
+                buf[offset + len] = sv;
+                len += 1;
+            }
+        }
+        len
+    }
+
+    // -----------------------------------------------------------------------
+    // Test (a-v3): v3 read → NeedLine → supply_line("north") → check text/parse buf
+    // -----------------------------------------------------------------------
+    #[test]
+    fn read_v3_need_line_supply_north() {
+        let (mut buf, addr_north, _addr_open, _addr_mailbox) = build_input_story(3);
+
+        // Text buffer at 0x0250: byte0=max_len=10, rest zero.
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10; // max 10 chars
+
+        // Parse buffer at 0x0260: byte0=max_tokens=8, rest zero.
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8; // max 8 tokens
+
+        // Instruction at 0x0010: read text_buf, parse_buf; quit
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 3, None);
+        buf[0x0010 + n] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        // Step 1: step() returns NeedLine with correct addresses.
+        let result = m.step();
+        assert!(
+            matches!(result, StepResult::NeedLine { text_buf: tb, parse_buf: pb } if tb == text_buf as u32 && pb == parse_buf as u32),
+            "expected NeedLine{{text_buf={:#x}, parse_buf={:#x}}}, got {:?}", text_buf, parse_buf, result
+        );
+
+        // Step 2: supply_line("north") and check text buffer (v3 layout).
+        m.supply_line("north");
+
+        // v3: byte 0 = max (untouched), text at byte 1, null-terminated.
+        let tb = text_buf as u32;
+        assert_eq!(m.mem.read_byte(tb + 1), b'n', "text[1] = 'n'");
+        assert_eq!(m.mem.read_byte(tb + 2), b'o', "text[2] = 'o'");
+        assert_eq!(m.mem.read_byte(tb + 3), b'r', "text[3] = 'r'");
+        assert_eq!(m.mem.read_byte(tb + 4), b't', "text[4] = 't'");
+        assert_eq!(m.mem.read_byte(tb + 5), b'h', "text[5] = 'h'");
+        assert_eq!(m.mem.read_byte(tb + 6), 0,    "null terminator at text[6]");
+
+        // Parse buffer: token count = 1, first token has correct fields.
+        let pb = parse_buf as u32;
+        assert_eq!(m.mem.read_byte(pb + 1), 1, "parse buf: 1 token");
+        // Token 0: dict_addr (2 bytes), len (1 byte), text_buf_pos (1 byte).
+        let tok_dict = m.mem.read_word(pb + 2);
+        let tok_len  = m.mem.read_byte(pb + 4);
+        let tok_pos  = m.mem.read_byte(pb + 5);
+        assert_eq!(tok_dict, addr_north, "token dict addr = addr_north ({:#x})", addr_north);
+        assert_eq!(tok_len,  5,          "token len = 5 ('north')");
+        assert_eq!(tok_pos,  1,          "token pos = 1 (v3: text starts at byte 1, 'north' at pos 0 in input → buf pos = 1+0 = 1)");
+
+        // Machine continues normally after supply_line.
+        let r2 = m.step();
+        assert_eq!(r2, StepResult::Quit, "next step is quit");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test (a-v5): v5 read → NeedLine → supply_line("north") → check text/parse buf
+    // -----------------------------------------------------------------------
+    #[test]
+    fn read_v5_need_line_supply_north() {
+        let (mut buf, addr_north, _addr_open, _addr_mailbox) = build_input_story(5);
+
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10; // max 10 chars
+
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+
+        // v5: read has a store var (terminator char).
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 5, Some(0x10)); // store→G0
+        buf[0x0010 + n] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        let result = m.step();
+        assert!(
+            matches!(result, StepResult::NeedLine { text_buf: tb, parse_buf: pb } if tb == text_buf as u32 && pb == parse_buf as u32),
+            "expected NeedLine, got {:?}", result
+        );
+
+        m.supply_line("north");
+
+        // v5: byte 0 = max (untouched), byte 1 = char count, text at byte 2.
+        let tb = text_buf as u32;
+        assert_eq!(m.mem.read_byte(tb + 1), 5,    "v5: char count = 5");
+        assert_eq!(m.mem.read_byte(tb + 2), b'n', "text[2] = 'n'");
+        assert_eq!(m.mem.read_byte(tb + 6), b'h', "text[6] = 'h'");
+
+        // Parse buffer: 1 token, correct position (text_data_start=2 for v5).
+        let pb = parse_buf as u32;
+        assert_eq!(m.mem.read_byte(pb + 1), 1, "1 token");
+        let tok_dict = m.mem.read_word(pb + 2);
+        let tok_len  = m.mem.read_byte(pb + 4);
+        let tok_pos  = m.mem.read_byte(pb + 5);
+        assert_eq!(tok_dict, addr_north, "v5 token dict addr = addr_north");
+        assert_eq!(tok_len,  5,          "v5 token len = 5");
+        assert_eq!(tok_pos,  2,          "v5 token pos = 2 (text_data_start=2, text_pos=0 → 2+0=2)");
+
+        // v5: terminator (13 = Enter) stored in G0.
+        assert_eq!(m.global(0), 13, "v5 read stores terminator 13 in G0");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test (b): two-word input "open mailbox" → 2 tokens, correct positions
+    // -----------------------------------------------------------------------
+    #[test]
+    fn read_v3_two_word_input_open_mailbox() {
+        let (mut buf, _addr_north, addr_open, addr_mailbox) = build_input_story(3);
+
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 20; // max 20 chars
+
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 3, None);
+        buf[0x0010 + n] = 0xBA;
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        let result = m.step();
+        assert!(matches!(result, StepResult::NeedLine { .. }));
+
+        m.supply_line("open mailbox");
+
+        // v3 layout: text at offset 1.
+        // "open mailbox" → 12 chars; null at byte 1+12=13.
+        let tb = text_buf as u32;
+        assert_eq!(m.mem.read_byte(tb + 1), b'o', "starts with 'o'");
+        assert_eq!(m.mem.read_byte(tb + 13), 0, "null terminator");
+
+        let pb = parse_buf as u32;
+        assert_eq!(m.mem.read_byte(pb + 1), 2, "2 tokens");
+
+        // Token 0: "open" at text_pos=0 → buf_pos=1.
+        let tok0_dict = m.mem.read_word(pb + 2);
+        let tok0_len  = m.mem.read_byte(pb + 4);
+        let tok0_pos  = m.mem.read_byte(pb + 5);
+        assert_eq!(tok0_dict, addr_open, "tok0 = 'open'");
+        assert_eq!(tok0_len,  4,         "tok0 len = 4");
+        assert_eq!(tok0_pos,  1,         "tok0 buf_pos = 1 (text_data_start=1, text_pos=0)");
+
+        // Token 1: "mailbox" at text_pos=5 → buf_pos=6.
+        let tok1_dict = m.mem.read_word(pb + 6);
+        let tok1_len  = m.mem.read_byte(pb + 8);
+        let tok1_pos  = m.mem.read_byte(pb + 9);
+        assert_eq!(tok1_dict, addr_mailbox, "tok1 = 'mailbox'");
+        assert_eq!(tok1_len,  7,            "tok1 len = 7");
+        assert_eq!(tok1_pos,  6,            "tok1 buf_pos = 6 (text_data_start=1, text_pos=5 → 1+5=6)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test (c): v5 read stores terminator char (already covered in v5 test,
+    //   but explicit test for completeness)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn read_v5_stores_terminator() {
+        let (mut buf, _addr_north, _addr_open, _addr_mailbox) = build_input_story(5);
+
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 20;
+
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+
+        // Store into G1 (var 0x11)
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 5, Some(0x11));
+        buf[0x0010 + n] = 0xBA;
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        m.step(); // returns NeedLine
+        m.supply_line("hello");
+
+        // G1 should have been set to 13 (Enter).
+        let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
+        assert_eq!(g1, 13, "v5 read terminator stored in G1 = 13");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test (d): read_char → NeedChar → supply_char(65) stores 65 in store var
+    // -----------------------------------------------------------------------
+    #[test]
+    fn read_char_need_char_supply_char() {
+        let mut buf = sample_story(5);
+
+        // VAR-form read_char: opcode 0x16 → 0b11_1_10110 = 0xF6
+        // Operands: first arg = 1 (keyboard, required). Type byte: small const(01), rest omit(11).
+        // Store byte → G0 (0x10).
+        buf[0x0010] = 0xF6; // VAR read_char
+        buf[0x0011] = 0x7F; // type: small(01), omit, omit, omit → 0b01_11_11_11 = 0x7F
+        buf[0x0012] = 1;    // operand: device=1 (keyboard)
+        buf[0x0013] = 0x10; // store → G0
+        buf[0x0014] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+
+        let result = m.step();
+        assert_eq!(result, StepResult::NeedChar, "read_char returns NeedChar");
+
+        m.supply_char(65); // ZSCII 'A'
+
+        assert_eq!(m.global(0), 65, "supply_char(65) stored in G0");
+
+        let r2 = m.step();
+        assert_eq!(r2, StepResult::Quit, "machine resumes after supply_char");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: input is lower-cased before writing to text buffer
+    // -----------------------------------------------------------------------
+    #[test]
+    fn read_lower_cases_input() {
+        let (mut buf, _addr_north, _addr_open, _addr_mailbox) = build_input_story(3);
+
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 20;
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 3, None);
+        buf[0x0010 + n] = 0xBA;
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+        m.step();
+        m.supply_line("NORTH");
+
+        let tb = text_buf as u32;
+        assert_eq!(m.mem.read_byte(tb + 1), b'n', "upper N lower-cased to 'n'");
+        assert_eq!(m.mem.read_byte(tb + 5), b'h', "upper H lower-cased to 'h'");
     }
 
     /// Test: `print_ret` prints inline string + newline + returns true (store var gets 1).
