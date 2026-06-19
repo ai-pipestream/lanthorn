@@ -38,9 +38,14 @@ pub enum StepResult {
 
 /// The Z-machine interpreter — ties memory and CPU state together.
 /// Fields are `pub` so Tasks 11+ can attach I/O channels.
+///
+/// `out_buf` is an interim output sink for `print_obj` (Task 10).
+/// Task 11 will replace or consume it when the real output system is wired up.
 pub struct Machine {
     pub mem: Memory,
     pub state: State,
+    /// Interim text output buffer. `print_obj` appends to this. Task 11 owns output.
+    pub out_buf: Vec<String>,
 }
 
 impl Machine {
@@ -52,6 +57,7 @@ impl Machine {
         Machine {
             state: State::new(initial_pc),
             mem,
+            out_buf: Vec::new(),
         }
     }
 
@@ -166,6 +172,45 @@ impl Machine {
                 self.do_branch(branch, a & b == b);
                 StepResult::Continue
             }
+            // 0x0A test_attr — branch if object a has attribute b set (ZMSD §14)
+            0x0A => {
+                let cond = objects::get_attr(&self.mem, a, b as u8);
+                self.do_branch(branch, cond);
+                StepResult::Continue
+            }
+            // 0x0B set_attr — set attribute b on object a (side effect only)
+            0x0B => {
+                objects::set_attr(&mut self.mem, a, b as u8);
+                StepResult::Continue
+            }
+            // 0x0C clear_attr — clear attribute b on object a (side effect only)
+            0x0C => {
+                objects::clear_attr(&mut self.mem, a, b as u8);
+                StepResult::Continue
+            }
+            // 0x0E insert_obj — make object a the first child of object b
+            0x0E => {
+                objects::insert_obj(&mut self.mem, a, b);
+                StepResult::Continue
+            }
+            // 0x11 get_prop — store property b of object a (fallback to default)
+            0x11 => {
+                let val = objects::get_prop(&self.mem, a, b as u8);
+                self.do_store(store, val);
+                StepResult::Continue
+            }
+            // 0x12 get_prop_addr — store address of property b data in object a (0 if absent)
+            0x12 => {
+                let addr = objects::get_prop_addr(&self.mem, a, b as u8);
+                self.do_store(store, addr);
+                StepResult::Continue
+            }
+            // 0x13 get_next_prop — store next property number after b in object a (0=last/first)
+            0x13 => {
+                let next = objects::get_next_prop(&self.mem, a, b as u8);
+                self.do_store(store, next as u16);
+                StepResult::Continue
+            }
             // 0x08 or — bitwise OR
             0x08 => {
                 self.do_store(store, a | b);
@@ -249,6 +294,43 @@ impl Machine {
             // 0x00 jz — branch if a == 0
             0x00 => {
                 self.do_branch(branch, a == 0);
+                StepResult::Continue
+            }
+            // 0x01 get_sibling — store sibling of a AND branch if sibling != 0 (ZMSD §14)
+            0x01 => {
+                let sib = objects::get_sibling(&self.mem, a);
+                self.do_store(store, sib);
+                self.do_branch(branch, sib != 0);
+                StepResult::Continue
+            }
+            // 0x02 get_child — store child of a AND branch if child != 0 (ZMSD §14)
+            0x02 => {
+                let child = objects::get_child(&self.mem, a);
+                self.do_store(store, child);
+                self.do_branch(branch, child != 0);
+                StepResult::Continue
+            }
+            // 0x03 get_parent — store parent of a, no branch (ZMSD §14)
+            0x03 => {
+                let parent = objects::get_parent(&self.mem, a);
+                self.do_store(store, parent);
+                StepResult::Continue
+            }
+            // 0x04 get_prop_len — store length in bytes of property whose data address is a
+            0x04 => {
+                let len = objects::get_prop_len(&self.mem, a);
+                self.do_store(store, len as u16);
+                StepResult::Continue
+            }
+            // 0x09 remove_obj — remove object a from its parent's child list
+            0x09 => {
+                objects::remove_obj(&mut self.mem, a);
+                StepResult::Continue
+            }
+            // 0x0A print_obj — print the short name of object a to the interim output buffer
+            0x0A => {
+                let name = objects::short_name(&self.mem, a);
+                self.out_buf.push(name);
                 StepResult::Continue
             }
             // 0x05 inc — increment variable by reference (no store/branch)
@@ -390,6 +472,14 @@ impl Machine {
                 let packed = ops.get(0).copied().unwrap_or(0);
                 let args = if ops.len() > 1 { &ops[1..] } else { &[][..] };
                 call_routine(&mut self.state, &mut self.mem, packed, args, store);
+                StepResult::Continue
+            }
+            // 0x03 put_prop — set property ops[1] of object ops[0] to value ops[2]
+            0x03 => {
+                let obj  = ops.get(0).copied().unwrap_or(0);
+                let prop = ops.get(1).copied().unwrap_or(0) as u8;
+                let val  = ops.get(2).copied().unwrap_or(0);
+                objects::put_prop(&mut self.mem, obj, prop, val);
                 StepResult::Continue
             }
             // 0x08 push — push value onto eval stack
@@ -1144,5 +1234,472 @@ pub(crate) mod tests {
         m2.state.pc = 0x10;
         run_until_quit(&mut m2);
         assert_eq!(m2.global(0), 0xFFFF, "dec_chk: G0 should be 0xFFFF (-1 as u16)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Object / property opcode tests (Task 10)
+    //
+    // Object table layout (v3, sample_story(3)):
+    //   object_table = 0x0100 (set by sample_story)
+    //   v3 property-defaults: 31 words = 62 bytes → entries at 0x013E
+    //   Each v3 entry = 9 bytes: [0..3] attrs, [4] parent, [5] sibling, [6] child, [7..8] prop_tbl
+    //
+    //   obj1 at 0x013E: parent=0, sibling=0, child=2, attr0 set, prop_tbl=0x0200
+    //   obj2 at 0x0147: parent=1, sibling=3, child=0, attr7+8 set, prop_tbl=0x0220
+    //   obj3 at 0x0150: parent=1, sibling=0, child=0, prop_tbl=0x0230
+    //
+    // Property table for obj1 (at 0x0200):
+    //   name: 0 words (empty)
+    //   prop 10: 2 bytes 0xABCD → size byte 0x2A, data 0xABCD
+    //   prop 5:  1 byte  0x42  → size byte 0x05, data 0x42
+    //   sentinel 0x00
+    //
+    // Property table for obj2/obj3: name 0 words, sentinel 0x00 only.
+    //
+    // Test programs are placed at 0x10 (pc=0x10) in v3 story buffers.
+    // -----------------------------------------------------------------------
+
+    /// Build a v3 story buffer with a small 3-object tree for executor tests.
+    fn build_obj_story() -> Vec<u8> {
+        let mut buf = sample_story(3);
+
+        const OBJ_TABLE: usize = 0x0100;
+        const ENTRIES: usize   = OBJ_TABLE + 31 * 2; // 0x013E
+        const OBJ1: usize      = ENTRIES;             // 0x013E
+        const OBJ2: usize      = ENTRIES + 9;         // 0x0147
+        const OBJ3: usize      = ENTRIES + 18;        // 0x0150
+
+        const PROP1: u16 = 0x0200;
+        const PROP2: u16 = 0x0220;
+        const PROP3: u16 = 0x0230;
+
+        // obj1: attr0 set, parent=0, sibling=0, child=2
+        buf[OBJ1]   = 0x80; // attr0
+        buf[OBJ1+1] = 0; buf[OBJ1+2] = 0; buf[OBJ1+3] = 0;
+        buf[OBJ1+4] = 0; // parent
+        buf[OBJ1+5] = 0; // sibling
+        buf[OBJ1+6] = 2; // child
+        buf[OBJ1+7] = (PROP1 >> 8) as u8; buf[OBJ1+8] = (PROP1 & 0xFF) as u8;
+
+        // obj2: attr7+attr8 set, parent=1, sibling=3, child=0
+        buf[OBJ2]   = 0x01; // attr7
+        buf[OBJ2+1] = 0x80; // attr8
+        buf[OBJ2+2] = 0; buf[OBJ2+3] = 0;
+        buf[OBJ2+4] = 1; // parent
+        buf[OBJ2+5] = 3; // sibling
+        buf[OBJ2+6] = 0; // child
+        buf[OBJ2+7] = (PROP2 >> 8) as u8; buf[OBJ2+8] = (PROP2 & 0xFF) as u8;
+
+        // obj3: no attrs, parent=1, sibling=0, child=0
+        buf[OBJ3]   = 0; buf[OBJ3+1] = 0; buf[OBJ3+2] = 0; buf[OBJ3+3] = 0;
+        buf[OBJ3+4] = 1; // parent
+        buf[OBJ3+5] = 0; // sibling
+        buf[OBJ3+6] = 0; // child
+        buf[OBJ3+7] = (PROP3 >> 8) as u8; buf[OBJ3+8] = (PROP3 & 0xFF) as u8;
+
+        // prop table obj1: name=0 words, prop10(2B)=0xABCD, prop5(1B)=0x42, sentinel
+        let p1 = PROP1 as usize;
+        buf[p1]   = 0;    // 0 name words
+        buf[p1+1] = 0x2A; // size: (2-1)<<5 | 10 = 0b001_01010
+        buf[p1+2] = 0xAB; buf[p1+3] = 0xCD;
+        buf[p1+4] = 0x05; // size: (1-1)<<5 | 5  = 0b000_00101
+        buf[p1+5] = 0x42;
+        buf[p1+6] = 0x00; // sentinel
+
+        // prop table obj2: name=0 words, no props
+        let p2 = PROP2 as usize;
+        buf[p2] = 0; buf[p2+1] = 0x00; // sentinel
+
+        // prop table obj3: name=0 words, no props
+        let p3 = PROP3 as usize;
+        buf[p3] = 0; buf[p3+1] = 0x00; // sentinel
+
+        // property default for prop10 = 0x5678
+        let def10 = OBJ_TABLE + (10 - 1) * 2;
+        buf[def10]   = 0x56;
+        buf[def10+1] = 0x78;
+
+        buf
+    }
+
+    /// Build a `Machine` from a pre-built story buffer, program at 0x10.
+    fn build_obj_machine_raw(buf: Vec<u8>, prog: &[u8]) -> Machine {
+        let mut buf = buf;
+        for (i, &b) in prog.iter().enumerate() {
+            buf[0x10 + i] = b;
+        }
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        m
+    }
+
+    // -----------------------------------------------------------------------
+    // (a) jin — branch if parent(obj1)==obj2
+    // test_attr — branch if attribute set
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_jin_branch_taken() {
+        // jin obj2, obj1 → branch taken (parent(2)==1)
+        // Long-form 2OP 0x06, both small const: opcode byte = 0x06
+        // branch taken → skip 1 byte nop, reaching quit
+        // Layout: [jin obj2,obj1 + branch(taken, offset=3)][nop][add 99,0→G0][quit]
+        //
+        // jin (3 + 1 branch byte = 4 bytes, next_pc=0x14)
+        // branch: on_true=1, offset=5 → skip 4-byte add, land on quit
+        // nop is 1 byte, add is 4 bytes: to skip both → offset = 5 + 2 = 7?
+        // Actually place nop+add at 0x14..0x18, quit at 0x19.
+        // From next_pc=0x14: to skip to quit at 0x19 → offset = 0x19-0x14+2 = 7.
+        // branch byte: on_true, short, offset=7 → 0x80|0x40|7 = 0xC7
+        //
+        // After branch skips to quit without running add, G0 stays 0.
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x06, 2, 1, 0xC7, // jin obj2,obj1 → branch on_true, offset=7 → skip to quit
+            0xB4,              // nop (1 byte)
+            0x14, 99, 0, 0x10, // add 99,0 → G0 (4 bytes, skipped)
+            0xBA,              // quit
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 0, "jin taken: add skipped, G0 remains 0");
+    }
+
+    #[test]
+    fn obj_jin_branch_not_taken() {
+        // jin obj1, obj2 → NOT taken (parent(1)==0, not 2)
+        // G0 gets set to 99.
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x06, 1, 2, 0xC7, // jin obj1,obj2 → branch on_true, offset=7 (but not taken)
+            0xB4,              // nop
+            0x14, 99, 0, 0x10, // add 99,0 → G0
+            0xBA,              // quit
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 99, "jin not taken: falls through, G0=99");
+    }
+
+    #[test]
+    fn obj_test_attr_branch_taken() {
+        // test_attr obj1, attr0 → taken (attr0 is set on obj1)
+        // Long-form 2OP 0x0A, both small: opcode byte = 0x0A
+        // branch taken → skip 4-byte add, G0 stays 0
+        // next_pc=0x14 after [0x0A,1,0,branch_byte]
+        // to skip 4-byte add at 0x14 and land at 0x18 (quit): offset=0x18-0x14+2=6
+        // branch: on_true=1, short, offset=6 → 0xC6
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x0A, 1, 0, 0xC6, // test_attr obj1,attr0 → branch taken, offset=6
+            0x14, 99, 0, 0x10, // add 99,0 → G0 (skipped)
+            0xBA,              // quit
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 0, "test_attr taken: add skipped");
+    }
+
+    #[test]
+    fn obj_test_attr_branch_not_taken() {
+        // test_attr obj1, attr1 → NOT taken (attr1 is clear)
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x0A, 1, 1, 0xC6, // test_attr obj1,attr1 → not taken
+            0x14, 99, 0, 0x10, // add 99,0 → G0 (runs)
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 99, "test_attr not taken: G0=99");
+    }
+
+    // -----------------------------------------------------------------------
+    // (b) set_attr / clear_attr — verify via get_attr after step()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_set_attr_and_clear_attr() {
+        // set_attr obj1, attr3 → then clear_attr obj1, attr3
+        // Long-form 2OP: set_attr=0x0B, clear_attr=0x0C
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x0B, 1, 3, // set_attr obj1, attr3 (3 bytes)
+            0xBA,        // quit
+        ];
+        let mut m = build_obj_machine_raw(buf.clone(), prog);
+        run_until_quit(&mut m);
+        assert!(objects::get_attr(&m.mem, 1, 3), "attr3 should be set after set_attr");
+        assert!(objects::get_attr(&m.mem, 1, 0), "attr0 still set");
+
+        // Now clear it
+        let prog2: &[u8] = &[
+            0x0B, 1, 3, // set_attr obj1, attr3
+            0x0C, 1, 3, // clear_attr obj1, attr3
+            0xBA,
+        ];
+        let mut m2 = build_obj_machine_raw(buf, prog2);
+        run_until_quit(&mut m2);
+        assert!(!objects::get_attr(&m2.mem, 1, 3), "attr3 should be clear after clear_attr");
+        assert!(objects::get_attr(&m2.mem, 1, 0), "attr0 still set");
+    }
+
+    // -----------------------------------------------------------------------
+    // (c) insert_obj → get_parent / get_child reflect the change
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_insert_obj_updates_tree() {
+        // insert_obj obj2, obj3 (move obj2 to be child of obj3)
+        // Long-form 2OP: insert_obj=0x0E
+        // After: parent(obj2)==3, child(obj3)==2
+        // Verify by reading tree directly after running.
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x0E, 2, 3, // insert_obj obj2, obj3
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(objects::get_parent(&m.mem, 2), 3, "obj2 parent should be 3");
+        assert_eq!(objects::get_child(&m.mem, 3), 2, "obj3 child should be 2");
+    }
+
+    // -----------------------------------------------------------------------
+    // (d) get_parent — store parent, no branch
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_parent_stores() {
+        // get_parent obj2 → G0 (parent of 2 is 1)
+        // Short form 1OP: 0x93, operand=2 (small const), store byte = G0 (0x10)
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x93, 2, 0x10, // get_parent obj2, store → G0
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 1, "get_parent(obj2) should be 1");
+    }
+
+    // -----------------------------------------------------------------------
+    // (e) get_sibling — store AND branch on result != 0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_sibling_stores_and_branches() {
+        // get_sibling obj2 → G0 (sibling of 2 is 3); branch taken (3 != 0)
+        // Short form 1OP: 0x91, operand=2, store=G0(0x10), branch data
+        //
+        // Instruction: 0x91, op=2, store=0x10, branch: on_true, skip 4-byte add
+        // next_pc = 0x10 + 1+1+1+1_branch = 0x15 (5 bytes: opcode+op+store+1_branch_byte)
+        // branch short, on_true=1, offset=6 → skip 4-byte add at 0x15 → land at 0x19
+        // branch byte: 0x80|0x40|6 = 0xC6
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x91, 2, 0x10, 0xC6, // get_sibling obj2, store→G0, branch on_true offset=6
+            0x14, 0, 0, 0x10,    // add 0,0 → G0 (would set G0=0, skipped)
+            0xBA,                 // quit
+        ];
+        let mut m = build_obj_machine_raw(buf.clone(), prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 3, "get_sibling(2) should store 3");
+
+        // get_sibling obj3 → G0 (sibling of 3 is 0); branch NOT taken
+        // Not taken means the add runs, overwriting G0 with 99.
+        let prog2: &[u8] = &[
+            0x91, 3, 0x10, 0xC6, // get_sibling obj3, store→G0, branch on_true offset=6
+            0x14, 99, 0, 0x10,   // add 99,0 → G0 (runs because branch not taken)
+            0xBA,
+        ];
+        let mut m2 = build_obj_machine_raw(buf, prog2);
+        run_until_quit(&mut m2);
+        // G0 was set to 0 (sibling=0), then overwritten to 99 by add
+        assert_eq!(m2.global(0), 99, "get_sibling(3) not taken: add runs, G0=99");
+    }
+
+    // -----------------------------------------------------------------------
+    // (f) get_child — store AND branch on result != 0
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_child_stores_and_branches() {
+        // get_child obj1 → G0 = 2, branch taken
+        // Short form 1OP: 0x92, op=1, store=0x10, branch: on_true, offset=6
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x92, 1, 0x10, 0xC6, // get_child obj1 → G0, branch taken (child=2 ≠ 0)
+            0x14, 0, 0, 0x10,    // add (skipped)
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 2, "get_child(obj1) should store 2 and branch");
+    }
+
+    // -----------------------------------------------------------------------
+    // (g) get_prop — stores the property value, fallback to default
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_prop_stores_value() {
+        // get_prop obj1, prop10 → G0 = 0xABCD
+        // Long-form 2OP 0x11, both small const, + store byte
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x11, 1, 10, 0x10, // get_prop obj1,prop10 → G0
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        // Note: prop10 has 2 bytes: value = 0xABCD; low byte only fits in G0? No, G0 is u16 = 0xABCD.
+        assert_eq!(m.global(0), 0xABCD, "get_prop(obj1,10) should be 0xABCD");
+    }
+
+    #[test]
+    fn obj_get_prop_defaults_fallback() {
+        // get_prop obj2, prop10 → G0 = 0x5678 (default, obj2 has no props)
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x11, 2, 10, 0x10, // get_prop obj2,prop10 → G0
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 0x5678, "get_prop fallback to default");
+    }
+
+    // -----------------------------------------------------------------------
+    // (h) get_prop_addr — store the address of property data
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_prop_addr_stores() {
+        // get_prop_addr obj1, prop10 → G0 = non-zero address
+        // Long-form 2OP 0x12
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x12, 1, 10, 0x10, // get_prop_addr obj1,prop10 → G0
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        let addr = m.global(0);
+        assert_ne!(addr, 0, "get_prop_addr should be non-zero");
+        // The data at that address should be 0xAB (high byte of 0xABCD)
+        assert_eq!(m.mem.read_byte(addr as u32), 0xAB, "prop data at addr");
+    }
+
+    // -----------------------------------------------------------------------
+    // (i) get_next_prop — iterate properties
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_next_prop_iterates() {
+        // get_next_prop obj1, prop=0 → G0 = first prop (10)
+        // Long-form 2OP 0x13
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x13, 1, 0, 0x10, // get_next_prop obj1,0 → G0 (first prop = 10)
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 10, "first prop should be 10");
+    }
+
+    // -----------------------------------------------------------------------
+    // (j) put_prop then get_prop — round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_put_prop_round_trip() {
+        // VAR:put_prop obj1, prop10, 0x1234 → then get_prop obj1,10 → G0
+        // put_prop: VAR form 0x03 → opcode byte 0b11_1_00011 = 0xE3
+        //   type byte: all small const (0b01_01_01_11) = 0x57
+        //   operands: obj=1, prop=10, val_hi=0x12, val_lo=0x34
+        // Wait: put_prop takes 3 operands and val is u16. Since small const max is 255,
+        // can't encode 0x1234 as small. Use large const for val → need Var form.
+        // Alternative: use a smaller value that fits in u8 for simplicity: val=0xAA.
+        //   type byte: obj=small(01), prop=small(01), val=small(01), omit(11) → 0b01_01_01_11 = 0x57
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0xE3, 0x57, 1, 10, 0xAA, // put_prop obj1,prop10,0xAA (1-byte val, but prop is 2 bytes)
+            // Actually put_prop on a 2-byte property writes 2 bytes; 0xAA goes in low byte.
+            // Actually the put_prop implementation: len=2 → write_word → writes 0x00AA.
+            // Let's just check with get_prop that the value is 0x00AA.
+            0x11, 1, 10, 0x10, // get_prop obj1,prop10 → G0
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 0x00AA, "put_prop/get_prop round-trip: 0x00AA");
+    }
+
+    // -----------------------------------------------------------------------
+    // (k) get_prop_len — store length of property data
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_get_prop_len_stores() {
+        // First get_prop_addr for obj1 prop10 → G0 (addr)
+        // Then get_prop_len G0 → G1 (should be 2)
+        // Short form 1OP get_prop_len: 0x94, operand = G0 (var 0x10), store = G1 (0x11)
+        //   Short form with variable operand: 0b10_10_0100 = 0xA4
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x12, 1, 10, 0x10, // get_prop_addr obj1,prop10 → G0 (4 bytes)
+            0xA4, 0x10, 0x11,  // get_prop_len G0 → G1 (3 bytes: 0xA4=short/var, var_num, store)
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        let len = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
+        assert_eq!(len, 2, "get_prop_len for prop10 (2 bytes) should be 2");
+    }
+
+    // -----------------------------------------------------------------------
+    // (l) remove_obj — unlinks object from parent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_remove_obj_unlinks() {
+        // remove_obj obj2 → obj2's parent becomes 0
+        // Short form 1OP: 0x99, op=2 (small const)
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x99, 2, // remove_obj obj2
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(objects::get_parent(&m.mem, 2), 0, "obj2 parent should be 0 after remove_obj");
+        assert_eq!(objects::get_child(&m.mem, 1), 3, "obj1 child should now be 3 (obj2 removed)");
+    }
+
+    // -----------------------------------------------------------------------
+    // (m) print_obj — appends short name to out_buf
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn obj_print_obj_appends_to_out_buf() {
+        // print_obj needs an object with a name. Use a v3 story where obj1 has a name.
+        // We'll build a custom story with obj1's prop table having a name.
+        // The short_name function reads from the property table's name words.
+        // For simplicity, use the build_obj_story() which has 0 name words (empty name),
+        // so let's build a version with a name.
+        //
+        // Simpler: just run print_obj and check out_buf has one entry (possibly empty for
+        // our zero-name objects). The important thing is the opcode is wired up.
+        let buf = build_obj_story();
+        let prog: &[u8] = &[
+            0x9A, 1, // print_obj obj1
+            0xBA,
+        ];
+        let mut m = build_obj_machine_raw(buf, prog);
+        run_until_quit(&mut m);
+        assert_eq!(m.out_buf.len(), 1, "print_obj should push one entry to out_buf");
     }
 }
