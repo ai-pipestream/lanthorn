@@ -30,7 +30,9 @@ pub(crate) fn entries_base(mem: &Memory) -> u32 {
 }
 
 /// Byte address of object `obj`'s entry (object numbers are 1-based).
+/// Object 0 is the null object — callers must guard against it.
 fn entry_addr(mem: &Memory, obj: u16) -> u32 {
+    debug_assert!(obj != 0, "entry_addr called with null object 0");
     entries_base(mem) + (obj as u32 - 1) * entry_size(mem.version())
 }
 
@@ -38,7 +40,11 @@ fn entry_addr(mem: &Memory, obj: u16) -> u32 {
 
 /// Read attribute `attr` of object `obj`.  Attribute N is bit `7-(N%8)` of
 /// attribute byte `N/8` (MSB-first, ZMSD §12.3).
+/// Object 0 is the null object; returns false.
 pub fn get_attr(mem: &Memory, obj: u16, attr: u8) -> bool {
+    if obj == 0 {
+        return false;
+    }
     let byte_addr = entry_addr(mem, obj) + (attr / 8) as u32;
     let bit = 7 - (attr % 8);
     (mem.read_byte(byte_addr) >> bit) & 1 == 1
@@ -46,6 +52,7 @@ pub fn get_attr(mem: &Memory, obj: u16, attr: u8) -> bool {
 
 /// Set attribute `attr` of object `obj`.
 pub fn set_attr(mem: &mut Memory, obj: u16, attr: u8) {
+    if obj == 0 { return; }
     let byte_addr = entry_addr(mem, obj) + (attr / 8) as u32;
     let bit = 7 - (attr % 8);
     let v = mem.read_byte(byte_addr) | (1 << bit);
@@ -54,6 +61,7 @@ pub fn set_attr(mem: &mut Memory, obj: u16, attr: u8) {
 
 /// Clear attribute `attr` of object `obj`.
 pub fn clear_attr(mem: &mut Memory, obj: u16, attr: u8) {
+    if obj == 0 { return; }
     let byte_addr = entry_addr(mem, obj) + (attr / 8) as u32;
     let bit = 7 - (attr % 8);
     let v = mem.read_byte(byte_addr) & !(1 << bit);
@@ -74,6 +82,9 @@ fn tree_offset(version: u8, which: u8) -> u32 {
 }
 
 fn read_tree_ptr(mem: &Memory, obj: u16, which: u8) -> u16 {
+    if obj == 0 {
+        return 0;
+    }
     let base = entry_addr(mem, obj) + tree_offset(mem.version(), which);
     if mem.version() <= 3 {
         mem.read_byte(base) as u16
@@ -167,6 +178,9 @@ fn prop_table_addr(mem: &Memory, obj: u16) -> u32 {
 
 /// Decode the short name of object `obj` from its property table.
 pub fn short_name(mem: &Memory, obj: u16) -> String {
+    if obj == 0 {
+        return String::new();
+    }
     let ptbl = prop_table_addr(mem, obj);
     // Byte 0: number of words of Z-text for the short name.
     let name_words = mem.read_byte(ptbl) as u32;
@@ -218,8 +232,11 @@ fn parse_prop_header(mem: &Memory, addr: u32) -> (u16, u32, u32) {
 }
 
 /// Find the address of property `prop`'s data in `obj`'s property table.
-/// Returns 0 if the property is absent.
+/// Returns 0 if the property is absent or `obj` is 0.
 pub fn get_prop_addr(mem: &Memory, obj: u16, prop: u8) -> u16 {
+    if obj == 0 {
+        return 0;
+    }
     let mut addr = first_prop_addr(mem, obj);
     loop {
         let b0 = mem.read_byte(addr);
@@ -263,6 +280,7 @@ pub fn get_prop_len(mem: &Memory, prop_addr: u16) -> u8 {
 
 /// Read property `prop` of object `obj`.  Falls back to the property-defaults
 /// table if the property is absent from the object.  (ZMSD §12.1)
+/// Object 0 falls back to property defaults immediately.
 pub fn get_prop(mem: &Memory, obj: u16, prop: u8) -> u16 {
     let addr = get_prop_addr(mem, obj, prop);
     if addr == 0 {
@@ -295,6 +313,9 @@ pub fn put_prop(mem: &mut Memory, obj: u16, prop: u8, val: u16) {
 /// table.  If `prop` is 0, returns the first property number.  Returns 0 if
 /// there are no more properties. (ZMSD §12.4.3)
 pub fn get_next_prop(mem: &Memory, obj: u16, prop: u8) -> u8 {
+    if obj == 0 {
+        return 0;
+    }
     let mut addr = first_prop_addr(mem, obj);
     if prop == 0 {
         // Return first property.
