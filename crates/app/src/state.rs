@@ -56,6 +56,8 @@ pub struct AppState {
     pub transcript: Vec<String>,
     pub transcript_scroll: u16,
     pub input: String,
+    // Reserved for future status-bar messages (not yet displayed).
+    #[allow(dead_code)]
     pub status: String,
     /// Active text-entry prompt, if any.  While set, key events are routed to
     /// the prompt buffer instead of the normal map or game bindings.

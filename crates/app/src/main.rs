@@ -1,11 +1,3 @@
-mod export_svg;
-mod ifid;
-mod input;
-mod persist_files;
-mod render;
-mod session;
-mod state;
-
 use std::io::stdout;
 use std::time::Duration;
 
@@ -18,14 +10,15 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
 use ratatui::Terminal;
 
-use crate::export_svg::export_svg;
-use crate::ifid::{compute_ifid, map_path};
-use crate::input::{apply_action, key_to_action, Action};
-use crate::persist_files::{load_map, restore_game, save_game, save_map};
-use crate::render::map::render_map;
-use crate::render::transcript::render_transcript;
-use crate::session::{apply_turn, GameSession, TurnResult};
-use crate::state::{AppState, Layout};
+use app::export_svg::export_svg;
+use app::ifid::{compute_ifid, map_path};
+use app::input::{apply_action, key_to_action, Action};
+use app::persist_files::{load_map, restore_game, save_game, save_map};
+use app::render::map::render_map;
+use app::render::transcript::render_transcript;
+use app::render::draw_str_clipped;
+use app::session::{apply_turn, GameSession, TurnResult};
+use app::state::{AppState, Layout};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -108,14 +101,13 @@ fn draw_frame(
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
                 let label = match &prompt.kind {
-                    crate::state::PromptKind::RenameRoom(_) => "Rename: ",
-                    crate::state::PromptKind::EditNotes(_) => "Notes:  ",
-                    crate::state::PromptKind::RelabelEdge(_, _) => "Dir:    ",
+                    app::state::PromptKind::RenameRoom(_) => "Rename: ",
+                    app::state::PromptKind::EditNotes(_) => "Notes:  ",
+                    app::state::PromptKind::RelabelEdge(_, _) => "Dir:    ",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
                 let style = ratatui::style::Style::default()
                     .add_modifier(ratatui::style::Modifier::REVERSED);
-                use crate::render::draw_str_clipped;
                 draw_str_clipped(buf, overlay_area.x, y, &line, style, overlay_area);
             }
         }
@@ -236,6 +228,8 @@ fn main() {
     // ── 5. Event loop ─────────────────────────────────────────────────────────
 
     // Track the last-known map pane size for accurate recenter_on calls.
+    // Default is used as a fallback; updated after each successful draw.
+    #[allow(unused_assignments)]
     let mut last_map_area = Rect::default();
 
     loop {

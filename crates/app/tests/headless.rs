@@ -1,0 +1,170 @@
+//! Headless end-to-end smoke test for the `app` crate.
+//!
+//! Drives a scripted 3-room walk through state + render + export + persistence
+//! without a real TTY, using `ratatui::backend::TestBackend` buffers.
+
+use app::export_svg::render_svg;
+use app::persist_files::{load_map, save_map};
+use app::render::map::render_map;
+use app::render::transcript::render_transcript;
+use app::session::{apply_turn, TurnResult};
+use app::state::AppState;
+use mapper::mapper::Mapper;
+use mapper::render::render as render_map_data;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use zvm::ObjectSnapshot;
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Build a minimal valid v3 Z-machine (same approach as render::transcript tests).
+fn minimal_machine() -> zvm::cpu::exec::Machine {
+    use zvm::memory::Memory;
+
+    let mut buf = vec![0u8; 0x0800];
+    buf[0x00] = 3; // version = 3
+    buf[0x04] = 0x00; buf[0x05] = 0x40; // high_mem_base = 0x0040
+    buf[0x06] = 0x00; buf[0x07] = 0x40; // initial_pc = 0x0040
+    buf[0x0A] = 0x00; buf[0x0B] = 0x80; // dict = 0x0080
+    buf[0x0C] = 0x01; buf[0x0D] = 0x00; // object table = 0x0100
+    buf[0x0E] = 0x03; buf[0x0F] = 0x00; // global var table = 0x0300
+    buf[0x08] = 0x04; buf[0x09] = 0x00; // static mem = 0x0400
+    buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev table = 0x0060
+    buf[0x0080] = 0; // word-sep count = 0
+    buf[0x0081] = 4; // entry size = 4
+    buf[0x0082] = 0; buf[0x0083] = 0; // entry count = 0
+    buf[0x0040] = 0xba; // quit opcode at initial PC
+
+    let mem = Memory::new(buf).expect("minimal v3 story");
+    zvm::cpu::exec::Machine::new(mem)
+}
+
+/// Build a synthetic `TurnResult` for room `number` / `name`, no quit.
+fn turn(number: u16, name: &str) -> TurnResult {
+    TurnResult {
+        transcript: String::new(),
+        location: Some(ObjectSnapshot { number, parent: 0, name: name.to_owned() }),
+        quit: false,
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+/// Simulate a 3-room walk (Room1 → Room2 via E → Room3 via N), then assert:
+///
+/// 1. The map buffer has the current-room REVERSED highlight.
+/// 2. The transcript buffer shows a pushed line.
+/// 3. The SVG contains all 3 room labels.
+/// 4. save_map + load_map round-trips the connections.
+#[test]
+fn headless_e2e_smoke() {
+    // ── Step 1: Build state + mapper, simulate 3-room walk ────────────────────
+
+    let mut state = AppState::default();
+    let mut mapper = Mapper::default();
+
+    // Room 1: starting room (no command/direction).
+    let r1 = turn(1, "Entrance Hall");
+    apply_turn(&mut mapper, "", &r1);
+
+    // Room 2: move East.
+    let r2 = turn(2, "East Corridor");
+    apply_turn(&mut mapper, "east", &r2);
+
+    // Room 3: move North.
+    let r3 = turn(3, "North Gallery");
+    apply_turn(&mut mapper, "north", &r3);
+
+    // Room 3 is now current.
+    assert_eq!(mapper.graph.current(), Some(3));
+    // Two connections: 1→E→2 and 2→N→3.
+    assert_eq!(mapper.graph.connections().len(), 2);
+
+    // Select room 3 and push a transcript line.
+    state.select_room(Some(3));
+    state.push_transcript("You are in the North Gallery.");
+
+    // ── Step 2: Render map into TestBackend buffer ────────────────────────────
+
+    let rm = render_map_data(&mapper.graph);
+
+    // The current room (room 3) should be in rm.rooms.
+    let current_render_room = rm.rooms.iter().find(|r| r.is_current)
+        .expect("render must have a current room");
+    assert_eq!(current_render_room.id, 3);
+
+    let area = Rect::new(0, 0, 80, 24);
+    let mut map_buf = Buffer::empty(area);
+
+    // Recenter on the current room's cell so it's on screen.
+    // scroll is in cell-grid units; at Boxes zoom (step 8×4), a pane of 80×24
+    // cols/rows shows 10×6 cells, so pass pane dims in cell units.
+    state.recenter_on(current_render_room.cell, 10, 6);
+    render_map(&rm, &state, area, &mut map_buf);
+
+    // Find where the current room was rendered and verify REVERSED modifier.
+    let (cx, cy) = app::render::map::cell_to_screen(
+        current_render_room.cell,
+        state.zoom,
+        state.scroll,
+        area,
+    )
+    .expect("current room must be on screen after recentering");
+
+    let cell = map_buf.cell((cx, cy)).expect("cell must exist");
+    assert!(
+        cell.modifier.contains(Modifier::REVERSED),
+        "current room top-left cell must have REVERSED modifier; got {:?}",
+        cell.modifier
+    );
+
+    // ── Step 3: Render transcript into TestBackend buffer ─────────────────────
+
+    let machine = minimal_machine();
+    let transcript_area = Rect::new(0, 0, 80, 10);
+    let mut trans_buf = Buffer::empty(transcript_area);
+    render_transcript(&machine, &state, transcript_area, &mut trans_buf);
+
+    // Check that the pushed line appears somewhere in the buffer.
+    let buf_text: String = trans_buf.content.iter()
+        .flat_map(|c| c.symbol().chars())
+        .collect();
+    assert!(
+        buf_text.contains("North Gallery"),
+        "transcript buffer must contain the pushed line; buf='{}'",
+        &buf_text[..buf_text.len().min(200)]
+    );
+
+    // ── Step 4: SVG export contains all 3 room labels ─────────────────────────
+
+    let svg = render_svg(&rm);
+    assert!(svg.contains("Entrance Hall"), "SVG must contain 'Entrance Hall'");
+    assert!(svg.contains("East Corridor"), "SVG must contain 'East Corridor'");
+    assert!(svg.contains("North Gallery"), "SVG must contain 'North Gallery'");
+
+    // ── Step 5: save_map + load_map round-trips connections ───────────────────
+
+    let tmp_dir = std::env::temp_dir().join(format!("babelmap-headless-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+    let map_file = tmp_dir.join("test.map.json");
+
+    save_map(&map_file, &mapper).expect("save_map must succeed");
+    let loaded = load_map(&map_file).expect("load_map must return Some");
+
+    // Connections round-trip.
+    let orig_conns = mapper.graph.connections();
+    let load_conns = loaded.graph.connections();
+    assert_eq!(
+        load_conns.len(), orig_conns.len(),
+        "loaded mapper must have same connection count"
+    );
+    for (orig, loaded) in orig_conns.iter().zip(load_conns.iter()) {
+        assert_eq!(orig.origin, loaded.origin, "connection origin must match");
+        assert_eq!(orig.dir, loaded.dir, "connection dir must match");
+        assert_eq!(orig.dest, loaded.dest, "connection dest must match");
+    }
+
+    // Clean up.
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

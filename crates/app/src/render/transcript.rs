@@ -41,11 +41,11 @@ pub(crate) fn format_status(sl: &StatusLine) -> (String, String) {
 ///
 /// The returned slice always has ≤ `rows` entries and is ordered oldest-first
 /// so the caller can draw them top-to-bottom.
-pub(crate) fn visible_lines<'a>(
-    transcript: &'a [String],
+pub(crate) fn visible_lines(
+    transcript: &[String],
     rows: usize,
     scroll: u16,
-) -> &'a [String] {
+) -> &[String] {
     if rows == 0 || transcript.is_empty() {
         return &[];
     }
@@ -63,15 +63,11 @@ pub(crate) fn visible_lines<'a>(
 /// Truncate `line` to at most `width` characters (not bytes).
 pub(crate) fn truncate_line(line: &str, width: usize) -> &str {
     // Find the byte position after `width` chars.
-    let mut chars = 0usize;
-    let mut byte_pos = line.len();
-    for (i, _) in line.char_indices() {
-        if chars == width {
-            byte_pos = i;
-            break;
-        }
-        chars += 1;
-    }
+    let byte_pos = line
+        .char_indices()
+        .nth(width)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
     &line[..byte_pos]
 }
 

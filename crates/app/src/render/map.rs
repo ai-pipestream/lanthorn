@@ -307,6 +307,7 @@ fn draw_stub(
 /// Draw a single orthogonal segment between fine-grid points `p0` and `p1`.
 ///
 /// Determines appropriate box-drawing characters based on direction.
+#[allow(clippy::too_many_arguments)]
 fn draw_segment(
     p0: (i32, i32),
     p1: (i32, i32),

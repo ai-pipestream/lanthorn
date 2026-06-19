@@ -8,7 +8,7 @@ use ratatui::style::Style;
 // ── Shared clipped drawing helpers ────────────────────────────────────────────
 
 /// Write a single char into the buffer, clipped to `area`.
-pub(crate) fn draw_char_clipped(
+pub fn draw_char_clipped(
     buf: &mut Buffer,
     x: u16,
     y: u16,
@@ -26,7 +26,7 @@ pub(crate) fn draw_char_clipped(
 }
 
 /// Write a string into the buffer starting at (x, y), clipped to `area` width.
-pub(crate) fn draw_str_clipped(
+pub fn draw_str_clipped(
     buf: &mut Buffer,
     x: u16,
     y: u16,
@@ -37,12 +37,10 @@ pub(crate) fn draw_str_clipped(
     if y < area.y || y >= area.bottom() {
         return;
     }
-    let mut cx = x;
-    for ch in s.chars() {
+    for (cx, ch) in (x..).zip(s.chars()) {
         if cx >= area.right() {
             break;
         }
         draw_char_clipped(buf, cx, y, ch, style, area);
-        cx += 1;
     }
 }
