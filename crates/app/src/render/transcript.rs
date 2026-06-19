@@ -7,7 +7,7 @@ use zvm::cpu::exec::Machine;
 use zvm::screen::{StatusLine, StatusRight};
 
 use crate::state::{AppState, Focus};
-use super::{draw_str_clipped};
+use super::draw_str_clipped;
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 
@@ -41,6 +41,10 @@ pub(crate) fn format_status(sl: &StatusLine) -> (String, String) {
 ///
 /// The returned slice always has ≤ `rows` entries and is ordered oldest-first
 /// so the caller can draw them top-to-bottom.
+///
+/// Note: the renderer now uses `visible_wrapped_lines` which handles word-wrap.
+/// This function is retained for unit testing the slice logic in isolation.
+#[cfg(test)]
 pub(crate) fn visible_lines(
     transcript: &[String],
     rows: usize,
@@ -69,6 +73,99 @@ pub(crate) fn truncate_line(line: &str, width: usize) -> &str {
         .map(|(i, _)| i)
         .unwrap_or(line.len());
     &line[..byte_pos]
+}
+
+/// Word-wrap a single logical line into display rows of at most `width` columns.
+///
+/// - Tries to break at spaces (word-wrap): the line is split at the last space
+///   that allows a row of ≤ `width` chars.
+/// - Falls back to hard char-break for words longer than `width`.
+/// - An empty line produces a single empty string (preserves blank lines).
+/// - Zero width returns the line unsplit.
+pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
+    let width = width as usize;
+    if width == 0 {
+        return vec![line.to_string()];
+    }
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut rows: Vec<String> = Vec::new();
+    let mut remaining = line;
+
+    while !remaining.is_empty() {
+        let char_count: usize = remaining.chars().count();
+        if char_count <= width {
+            rows.push(remaining.to_string());
+            break;
+        }
+
+        // Collect byte offsets for chars 0..=width (inclusive so we see the boundary char).
+        // We want the last space at char index ≤ width to break at.
+        let mut last_space_before: Option<usize> = None; // byte offset of last space in 0..width
+        let mut byte_at_width: usize = remaining.len();  // byte offset of char #width (the first that doesn't fit)
+        for (i, (byte_i, ch)) in remaining.char_indices().enumerate() {
+            if i == width {
+                byte_at_width = byte_i;
+                // If the char right at the boundary is a space, break here
+                // (the row is exactly `width` non-space chars).
+                if ch == ' ' {
+                    last_space_before = Some(byte_i);
+                }
+                break;
+            }
+            if ch == ' ' {
+                last_space_before = Some(byte_i);
+            }
+        }
+
+        if let Some(sp) = last_space_before {
+            // Break at the space: take everything before it, skip the space.
+            rows.push(remaining[..sp].to_string());
+            // Advance past the space (sp is a byte offset of ' ', so sp+1 is safe for ASCII ' ').
+            let next = sp + ' '.len_utf8();
+            remaining = &remaining[next..];
+        } else {
+            // No space found: hard-break at `width` chars.
+            rows.push(remaining[..byte_at_width].to_string());
+            remaining = &remaining[byte_at_width..];
+        }
+    }
+
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+/// Expand a slice of logical transcript lines into wrapped display rows.
+pub(crate) fn wrap_lines(transcript: &[String], width: u16) -> Vec<String> {
+    transcript
+        .iter()
+        .flat_map(|line| wrap_line(line, width))
+        .collect()
+}
+
+/// Return the slice of **wrapped** display rows visible in `rows` rows,
+/// honouring `scroll` (0 = newest at bottom; higher = further back in history).
+///
+/// The returned vec is ordered oldest-first so the caller can draw top-to-bottom.
+pub(crate) fn visible_wrapped_lines(
+    transcript: &[String],
+    rows: usize,
+    scroll: u16,
+    width: u16,
+) -> Vec<String> {
+    if rows == 0 || transcript.is_empty() {
+        return Vec::new();
+    }
+    let display_rows = wrap_lines(transcript, width);
+    let n = display_rows.len();
+    let scroll = scroll as usize;
+    let end = n.saturating_sub(scroll);
+    let start = end.saturating_sub(rows);
+    display_rows[start..end].to_vec()
 }
 
 /// Format the input prompt line: `"> " + input`.
@@ -149,14 +246,19 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let transcript_bottom = input_y; // exclusive
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
-    let lines = visible_lines(&state.transcript, transcript_rows, state.transcript_scroll);
+    let lines = visible_wrapped_lines(
+        &state.transcript,
+        transcript_rows,
+        state.transcript_scroll,
+        area.width,
+    );
     for (i, line) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
         }
-        let trunc = truncate_line(line, w);
-        draw_str_clipped(buf, area.x, row_y, trunc, NORMAL_STYLE, area);
+        // Lines are already wrapped to width, just draw them.
+        draw_str_clipped(buf, area.x, row_y, line, NORMAL_STYLE, area);
     }
 }
 
@@ -225,6 +327,71 @@ mod tests {
         assert_eq!(truncate_line("hello world", 5), "hello");
         assert_eq!(truncate_line("hi", 10), "hi");
         assert_eq!(truncate_line("abc", 3), "abc");
+    }
+
+    #[test]
+    fn wrap_line_basic_word_wrap() {
+        // "the quick brown fox" at width 9: "the quick" + "brown fox"
+        let result = wrap_line("the quick brown fox", 9);
+        assert_eq!(result, vec!["the quick", "brown fox"]);
+    }
+
+    #[test]
+    fn wrap_line_hard_break_long_word() {
+        // "abcdefghij" at width 4: "abcd" + "efgh" + "ij"
+        let result = wrap_line("abcdefghij", 4);
+        assert_eq!(result, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn wrap_line_fits_in_one_row() {
+        let result = wrap_line("hello", 10);
+        assert_eq!(result, vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_line_empty_string() {
+        let result = wrap_line("", 10);
+        assert_eq!(result, vec![""]);
+    }
+
+    #[test]
+    fn wrap_line_exact_width() {
+        // "abc" at width 3: exactly fits
+        let result = wrap_line("abc", 3);
+        assert_eq!(result, vec!["abc"]);
+    }
+
+    #[test]
+    fn wrap_lines_expands_multiple_logical_lines() {
+        let lines = vec![
+            "hello world test".to_string(),
+            "short".to_string(),
+        ];
+        // width 5: "hello" + "world" + "test" + "short"
+        let result = wrap_lines(&lines, 5);
+        assert_eq!(result, vec!["hello", "world", "test", "short"]);
+    }
+
+    #[test]
+    fn visible_wrapped_lines_newest_at_bottom() {
+        // 3 logical lines at width 5 = 3 display rows; scroll=0, rows=3
+        let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
+        let vis = visible_wrapped_lines(&transcript, 3, 0, 10);
+        assert_eq!(vis.len(), 3);
+        assert_eq!(vis[2], "ghi");
+    }
+
+    #[test]
+    fn visible_wrapped_lines_scroll_offset() {
+        // "hello world" wraps to ["hello", "world"] at width 5
+        let transcript = vec!["hello world".to_string()];
+        // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
+        let vis = visible_wrapped_lines(&transcript, 1, 1, 5);
+        assert_eq!(vis, vec!["hello"]);
+        // scroll=0: end=2, start=1 → ["world"]
+        let vis2 = visible_wrapped_lines(&transcript, 1, 0, 5);
+        assert_eq!(vis2, vec!["world"]);
     }
 
     #[test]

@@ -8,6 +8,8 @@ use mapper::mapper::Mapper;
 use mapper::render::render as render_map_data;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
 use app::export_svg::export_svg;
@@ -18,7 +20,7 @@ use app::render::map::render_map;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::state::{AppState, Layout};
+use app::state::{AppState, Focus, Layout, PromptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -57,8 +59,8 @@ fn map_dir() -> std::path::PathBuf {
 
 // ── Draw helper ───────────────────────────────────────────────────────────────
 
-/// Render one frame.  Returns the map pane rect so the event loop can use its
-/// dimensions for accurate `recenter_on` calls.
+/// Render one frame.  Returns the map pane rect (INNER content area) so the event
+/// loop can use its dimensions for accurate `recenter_on` calls.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     session: &GameSession,
@@ -72,53 +74,92 @@ fn draw_frame(
         let buf = f.buffer_mut();
         let rm = render_map_data(&mapper.graph);
 
+        // ── Change 2: reserve bottom 1 row for help bar ───────────────────────
+        let vert = RatatuiLayout::default()
+            .direction(LayoutDir::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(full);
+        let main_area = vert[0];
+        let help_row = vert[1];
+
         match state.layout {
             Layout::TranscriptFull => {
-                render_transcript(&session.machine, state, full, buf);
+                // Change 1: bordered block wrapping transcript pane.
+                let block = Block::default().borders(Borders::ALL).title("Story");
+                let inner = block.inner(main_area);
+                block.render(main_area, buf);
+                render_transcript(&session.machine, state, inner, buf);
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                map_area = full;
-                render_map(&rm, state, full, buf);
+                // Change 1: bordered block wrapping map pane.
+                let block = Block::default().borders(Borders::ALL).title("Map");
+                let inner = block.inner(main_area);
+                block.render(main_area, buf);
+                render_map(&rm, state, inner, buf);
+                map_area = inner; // use inner for recenter math
             }
             Layout::Split => {
-                // Split 50/1/50 horizontally: transcript | divider | map.
+                // Change 1: Split 50/50 horizontally with bordered blocks (no divider column).
                 let chunks = RatatuiLayout::default()
                     .direction(LayoutDir::Horizontal)
-                    .constraints([
-                        Constraint::Percentage(50),
-                        Constraint::Length(1),
-                        Constraint::Percentage(50),
-                    ])
-                    .split(full);
-                let transcript_area = chunks[0];
-                let divider_area = chunks[1];
-                map_area = chunks[2];
-                render_transcript(&session.machine, state, transcript_area, buf);
-                // Draw a vertical line of │ down the divider column.
-                let divider_style = ratatui::style::Style::default();
-                for y in divider_area.y..divider_area.bottom() {
-                    app::render::draw_char_clipped(buf, divider_area.x, y, '│', divider_style, divider_area);
-                }
-                render_map(&rm, state, map_area, buf);
+                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(main_area);
+
+                let transcript_block = Block::default().borders(Borders::ALL).title("Story");
+                let transcript_inner = transcript_block.inner(chunks[0]);
+                transcript_block.render(chunks[0], buf);
+                render_transcript(&session.machine, state, transcript_inner, buf);
+
+                let map_block = Block::default().borders(Borders::ALL).title("Map");
+                let map_inner = map_block.inner(chunks[1]);
+                map_block.render(chunks[1], buf);
+                render_map(&rm, state, map_inner, buf);
+                map_area = map_inner; // use inner for recenter math
             }
         }
 
-        // Prompt overlay — drawn over the map area (or full screen) as a
-        // single bottom line showing kind and buffer.
+        // ── Change 2: draw help bar in bottom row ─────────────────────────────
+        let help_style = Style::default().add_modifier(Modifier::REVERSED);
+        let help_text = if let Some(prompt) = &state.prompt {
+            // Show prompt label with instructions when a prompt is active.
+            let label = match &prompt.kind {
+                PromptKind::RenameRoom(_) => "Rename",
+                PromptKind::EditNotes(_) => "Notes",
+                PromptKind::RelabelEdge(_, _) => "Direction",
+            };
+            format!("{}: type text | Enter: apply | Esc: cancel", label)
+        } else {
+            match state.focus {
+                Focus::Game => {
+                    "Tab: map | Ctrl+S: save | Ctrl+R: restore | Ctrl+E: export SVG | Ctrl+L: layout | Ctrl+Q: quit".to_string()
+                }
+                Focus::Map => {
+                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/N: select | r/o/d/e: edit | Ctrl+Q: quit".to_string()
+                }
+            }
+        };
+        // Fill help row with reversed style, then draw text.
+        for x in help_row.x..help_row.right() {
+            if let Some(cell) = buf.cell_mut((x, help_row.y)) {
+                cell.set_symbol(" ").set_style(help_style);
+            }
+        }
+        draw_str_clipped(buf, help_row.x, help_row.y, &help_text, help_style, help_row);
+
+        // ── Prompt overlay — drawn over the map area (or full screen) ─────────
         if let Some(prompt) = &state.prompt {
-            let overlay_area = if map_area.height > 0 { map_area } else { full };
+            let overlay_area = if map_area.height > 0 { map_area } else { main_area };
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
                 let label = match &prompt.kind {
-                    app::state::PromptKind::RenameRoom(_) => "Rename: ",
-                    app::state::PromptKind::EditNotes(_) => "Notes:  ",
-                    app::state::PromptKind::RelabelEdge(_, _) => "Dir:    ",
+                    PromptKind::RenameRoom(_) => "Rename: ",
+                    PromptKind::EditNotes(_) => "Notes:  ",
+                    PromptKind::RelabelEdge(_, _) => "Dir:    ",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
-                let style = ratatui::style::Style::default()
-                    .add_modifier(ratatui::style::Modifier::REVERSED);
-                draw_str_clipped(buf, overlay_area.x, y, &line, style, overlay_area);
+                let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
+                draw_str_clipped(buf, overlay_area.x, y, &line, overlay_style, overlay_area);
             }
         }
     })?;
@@ -287,8 +328,11 @@ fn main() {
             }
         };
 
+        // Change 3: handle resize by continuing the loop so the next draw uses
+        // the updated terminal size (CrosstermBackend picks it up automatically).
         let key_event = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => k,
+            Event::Resize(_, _) => continue,
             _ => continue,
         };
 
