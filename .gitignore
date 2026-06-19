@@ -1,0 +1,9 @@
+# Rust build output
+/target/
+
+# Story files — download separately, do not commit
+crates/zvm/tests/fixtures/*.z3
+crates/zvm/tests/fixtures/*.z4
+crates/zvm/tests/fixtures/*.z5
+crates/zvm/tests/fixtures/*.z7
+crates/zvm/tests/fixtures/*.z8
