@@ -36,7 +36,10 @@ The only unit that understands Z-machine bytecode. Responsibilities:
 - Load a story file (v3/v4/v5/v7/v8); reject other versions fast with a clear message (notably a
   specific "v6 graphical games are not supported" message).
 - Execute opcodes; expose a screen model (windows, status line) and input requests.
-- Standard **save/restore** using the **Quetzal** format.
+- **Save/restore mechanism only:** `save() -> bytes` / `restore(bytes)` that serialize and
+  deserialize VM state (dynamic memory, stack, program counter) to/from a standard **Quetzal** byte
+  buffer. `zvm` is the only unit that knows VM internals, so it owns this serialization — but it does
+  **not** touch the filesystem. Where the bytes go is `app`'s concern.
 - Expose a **read-only view of the object tree** and the **current player-object location**.
 
 Boundary: emits two kinds of signal the mapper cares about — screen/transcript output, and
@@ -53,8 +56,14 @@ expandable map (→ full-screen, scrollable). Renders the map graph; routes keys
 Owns view state (zoom level, scroll position, current-room highlight).
 
 ### `app` — orchestration & persistence
-Wires the three units together, owns the run loop, and handles per-game map persistence,
-game saves, and image export.
+Wires the three units together, owns the run loop, and owns all **file I/O and persistence policy**
+for two distinct, independent stores:
+- **Quetzal game saves:** takes the bytes from `zvm.save()` and writes them to a `.qzl` file (and
+  feeds a chosen file's bytes back to `zvm.restore()`). Point-in-time, game-triggered, possibly
+  multiple slots, and **portable** — other interpreters can read/write these files.
+- **The map store:** a single, cumulative, per-IFID map file (see §5). Independent of game saves.
+
+It also owns image export. The two stores are never bundled together (see §5).
 
 ### Data flow per turn
 1. User types a line → `app` notes whether it is a recognized movement direction.
@@ -150,6 +159,23 @@ Custom-verb direction learning (remembering that `climb tree` meant "up" for thi
 deliberate future enhancement, not in v1.
 
 ## 5. Persistence & Light Correction
+
+### Two independent stores
+babelmap keeps two kinds of saved state, owned by `app`, that are **never bundled together**:
+
+1. **Quetzal game saves** — point-in-time VM snapshots, triggered by the game's `save`/`restore`.
+   Stored as standard Quetzal `.qzl` files so they stay **portable** across interpreters. There may
+   be several (slots).
+2. **The map** — a *single, cumulative* per-IFID artifact (below). Not a snapshot: it accumulates
+   everything discovered across all sessions and all save slots.
+
+Keeping them separate is deliberate: bundling a map snapshot into each Quetzal save would break
+Quetzal portability and fragment the map into divergent per-slot copies. A direct consequence is
+that **restoring an old game save keeps your full map** — reloading never makes you "forget" rooms,
+which is exactly what a mapper user wants. (Optionally tying a map view to a specific save point is a
+possible future feature, not v1.)
+
+### Map persistence
 
 - Auto-build is the default behavior.
 - **Persistence:** maps are saved per story file, keyed by **IFID**, and reload automatically when
