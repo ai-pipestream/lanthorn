@@ -69,16 +69,20 @@ impl MapGraph {
     }
 
     pub fn upsert_room(&mut self, id: RoomId, name: String) -> &mut Room {
-        if self.rooms.contains_key(&id) {
-            self.rooms.get_mut(&id).unwrap().name = name;
-        } else {
-            self.rooms.insert(id, Room {
-                id,
-                name,
-                label_override: None,
-                notes: String::new(),
-                pos: None,
-            });
+        use std::collections::btree_map::Entry;
+        match self.rooms.entry(id) {
+            Entry::Occupied(e) => {
+                e.into_mut().name = name;
+            }
+            Entry::Vacant(e) => {
+                e.insert(Room {
+                    id,
+                    name,
+                    label_override: None,
+                    notes: String::new(),
+                    pos: None,
+                });
+            }
         }
         self.rooms.get_mut(&id).unwrap()
     }

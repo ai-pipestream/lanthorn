@@ -1,30 +1,30 @@
-/// Auto layout engine: greedy incremental grid placement with collision avoidance.
-///
-/// # Placement algorithm
-///
-/// `relayout_auto` works in repeated passes over rooms sorted by ascending id (deterministic).
-/// Each pass attempts to place any unplaced room that has at least one already-placed neighbour
-/// (via any connection, in either direction).
-///
-/// For each unplaced room R the algorithm collects candidate positions from all edges that connect
-/// R to an already-placed room:
-///
-///   - Edge (origin, dir, dest=R) where origin is placed and grid_offset(dir) = Some(delta):
-///     candidate = origin.pos + delta
-///   - Edge (origin=R, dir, dest) where dest is placed and grid_offset(dir) = Some(delta):
-///     candidate = dest.pos - delta   (offset inverted: R sits "behind" the placed dest)
-///   - Edge with no grid_offset (Up/Down/In/Out/Unknown): candidate = neighbour.pos (nearest-free
-///     spiral from that point); connection stays non-distorted (vertical/unknown stub).
-///
-/// The first valid candidate that is free is used directly. If the preferred candidate (from a
-/// compass edge) is occupied, we spiral-search for the nearest free cell and mark that connection
-/// `distorted = true`.
-///
-/// After each full pass that placed at least one room, another pass is run. When a full pass
-/// places nothing but unplaced rooms remain (disconnected component), the lowest-id unplaced room
-/// is treated as a new root and placed at the nearest free cell to (0, 0).
-///
-/// Rooms that already have a `pos` are never moved (minimal-movement invariant).
+//! Auto layout engine: greedy incremental grid placement with collision avoidance.
+//!
+//! # Placement algorithm
+//!
+//! `relayout_auto` works in repeated passes over rooms sorted by ascending id (deterministic).
+//! Each pass attempts to place any unplaced room that has at least one already-placed neighbour
+//! (via any connection, in either direction).
+//!
+//! For each unplaced room R the algorithm collects candidate positions from all edges that connect
+//! R to an already-placed room:
+//!
+//!   - Edge (origin, dir, dest=R) where origin is placed and grid_offset(dir) = Some(delta):
+//!     candidate = origin.pos + delta
+//!   - Edge (origin=R, dir, dest) where dest is placed and grid_offset(dir) = Some(delta):
+//!     candidate = dest.pos - delta   (offset inverted: R sits "behind" the placed dest)
+//!   - Edge with no grid_offset (Up/Down/In/Out/Unknown): candidate = neighbour.pos (nearest-free
+//!     spiral from that point); connection stays non-distorted (vertical/unknown stub).
+//!
+//! The first valid candidate that is free is used directly. If the preferred candidate (from a
+//! compass edge) is occupied, we spiral-search for the nearest free cell and mark that connection
+//! `distorted = true`.
+//!
+//! After each full pass that placed at least one room, another pass is run. When a full pass
+//! places nothing but unplaced rooms remain (disconnected component), the lowest-id unplaced room
+//! is treated as a new root and placed at the nearest free cell to (0, 0).
+//!
+//! Rooms that already have a `pos` are never moved (minimal-movement invariant).
 
 use std::collections::BTreeSet;
 
@@ -33,16 +33,11 @@ use crate::graph::{Connection, MapGraph, RoomId};
 
 // ── LayoutMode ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum LayoutMode {
+    #[default]
     Auto,
     Manual,
-}
-
-impl Default for LayoutMode {
-    fn default() -> Self {
-        LayoutMode::Auto
-    }
 }
 
 // ── Public helpers ────────────────────────────────────────────────────────────
@@ -138,7 +133,7 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         let unplaced: Vec<RoomId> = all_ids
             .iter()
             .copied()
-            .filter(|&id| graph.room(id).map_or(false, |r| r.pos.is_none()))
+            .filter(|&id| graph.room(id).is_some_and(|r| r.pos.is_none()))
             .collect();
 
         if unplaced.is_empty() {
@@ -263,6 +258,11 @@ mod tests {
     use super::*;
     use crate::direction::Direction;
     use crate::mapper::Mapper;
+
+    #[test]
+    fn layout_mode_default_is_auto() {
+        assert_eq!(LayoutMode::default(), LayoutMode::Auto);
+    }
 
     #[test]
     fn places_rooms_by_compass_offsets() {

@@ -1,44 +1,46 @@
-/// Orthogonal edge router: turns directed connections into routed connector polylines.
-///
-/// # Fine grid
-///
-/// Each room at logical cell `(c, r)` occupies fine cell `(2c, 2r)`. Odd fine cells are gutters.
-/// This doubles the resolution and gives us gutter lanes between rooms for routing.
-///
-/// # Routing algorithm (L/Z router, ≤2 bends)
-///
-/// For each compass-direction connection:
-/// 1. Compute `departure` = origin room's fine cell offset by 1 in the departure direction.
-/// 2. Compute `arrival` = dest room's fine cell offset by 1 in the *opposite* side's direction.
-/// 3. If departure and arrival share the same axis, emit a straight 2-point segment (0 bends).
-/// 4. Otherwise build two candidate L-bends: horizontal-first and vertical-first. For each,
-///    the interior corner must not collide with any room's fine cell. Pick the first non-colliding
-///    candidate. If both collide, set `routing_failed = true` and emit a 2-point direct segment.
-///
-/// # Diagonal directions (NE, SE, NW, SW)
-///
-/// Diagonal connections depart the side determined by the dominant axis:
-/// - NE → Top (north component wins over east)
-/// - SE → Bottom
-/// - NW → Top
-/// - SW → Bottom
-///
-/// This is a conservative choice: the north/south axis takes precedence to match conventional
-/// adventure-game map conventions (vertical flow dominates). The routing may look slightly
-/// non-intuitive for diagonal edges but remains geometrically consistent.
-///
-/// # Reciprocal dedupe
-///
-/// An edge `(o, d, dst)` is skipped only if its exact reciprocal-opposite `(dst, opposite(d), o)`
-/// was already emitted. This means non-reciprocal back-edges (e.g. A→N→B and B→W→A where W ≠ S)
-/// are both kept. Only true opposite pairs (e.g. A→E→B and B→W→A) are deduped.
-/// Stubs (Up/Down/In/Out/Unknown) are never deduped.
-///
-/// # v1 limitations
-///
-/// Full crossing-minimisation is NOT implemented. The L/Z router is deterministic and correct
-/// but may produce crossings when connections overlap in the grid. A future version may apply
-/// a Sugiyama-style crossing-reduction step.
+//! Orthogonal edge router: turns directed connections into routed connector polylines.
+//!
+//! # Fine grid
+//!
+//! Each room at logical cell `(c, r)` occupies fine cell `(2c, 2r)`. Odd fine cells are gutters.
+//! This doubles the resolution and gives us gutter lanes between rooms for routing.
+//!
+//! # Routing algorithm (L/Z router, ≤2 bends)
+//!
+//! For each compass-direction connection:
+//! 1. Compute `departure` = origin room's fine cell offset by 1 in the departure direction.
+//! 2. Compute `arrival` = dest room's fine cell offset by 1 in the *opposite* side's direction.
+//! 3. If departure and arrival share the same axis, emit a straight 2-point segment (0 bends).
+//! 4. Otherwise build two candidate L-bends: horizontal-first and vertical-first. For each,
+//!    the interior corner must not collide with any room's fine cell. Pick the first non-colliding
+//!    candidate. If both collide, set `routing_failed = true` and emit a 2-point direct segment.
+//!
+//! # Diagonal directions (NE, SE, NW, SW)
+//!
+//! Diagonal connections depart the side determined by the dominant axis:
+//! - NE → Top (north component wins over east)
+//! - SE → Bottom
+//! - NW → Top
+//! - SW → Bottom
+//!
+//! This is a conservative choice: the north/south axis takes precedence to match conventional
+//! adventure-game map conventions (vertical flow dominates). The routing may look slightly
+//! non-intuitive for diagonal edges but remains geometrically consistent.
+//!
+//! # Reciprocal dedupe
+//!
+//! An edge `(o, d, dst)` is skipped only if its exact reciprocal-opposite `(dst, opposite(d), o)`
+//! was already emitted. This means non-reciprocal back-edges (e.g. A→N→B and B→W→A where W ≠ S)
+//! are both kept. Only true opposite pairs (e.g. A→E→B and B→W→A) are deduped.
+//! The kept edge is whichever of the true-reciprocal pair is emitted first (by `connections()`
+//! order); both are geometrically equivalent so render output is unaffected.
+//! Stubs (Up/Down/In/Out/Unknown) are never deduped.
+//!
+//! # v1 limitations
+//!
+//! Full crossing-minimisation is NOT implemented. The L/Z router is deterministic and correct
+//! but may produce crossings when connections overlap in the grid. A future version may apply
+//! a Sugiyama-style crossing-reduction step.
 
 use std::collections::HashSet;
 
