@@ -7,6 +7,7 @@
 use crate::error::ZError;
 use crate::header::{parse_header, Header};
 
+#[derive(Debug)]
 pub struct Memory {
     bytes: Vec<u8>,
     header: Header,
@@ -68,7 +69,7 @@ impl Memory {
             4 | 5 => 4 * p,
             7 => 4 * p + 8 * self.header.routines_offset as u32,
             8 => 8 * p,
-            _ => 2 * p, // unreachable: parse_header already rejected other versions
+            _ => unreachable!("version validated by parse_header"),
         }
     }
 
@@ -80,7 +81,7 @@ impl Memory {
             4 | 5 => 4 * p,
             7 => 4 * p + 8 * self.header.strings_offset as u32,
             8 => 8 * p,
-            _ => 2 * p,
+            _ => unreachable!("version validated by parse_header"),
         }
     }
 }
@@ -104,5 +105,20 @@ mod tests {
         assert_eq!(Memory::new(sample_story(3)).unwrap().unpack_routine(0x0100), 0x0200);
         assert_eq!(Memory::new(sample_story(5)).unwrap().unpack_routine(0x0100), 0x0400);
         assert_eq!(Memory::new(sample_story(8)).unwrap().unpack_routine(0x0100), 0x0800);
+    }
+
+    #[test]
+    fn unpacks_string_addresses_per_version() {
+        assert_eq!(Memory::new(sample_story(3)).unwrap().unpack_string(0x0100), 0x0200);
+        assert_eq!(Memory::new(sample_story(5)).unwrap().unpack_string(0x0100), 0x0400);
+        assert_eq!(Memory::new(sample_story(8)).unwrap().unpack_string(0x0100), 0x0800);
+    }
+
+    #[test]
+    fn rejects_truncated_static_base() {
+        let mut buf = crate::header::tests_support::sample_story(3);
+        buf.truncate(64);
+        let err = Memory::new(buf).unwrap_err();
+        assert!(matches!(err, ZError::Truncated));
     }
 }

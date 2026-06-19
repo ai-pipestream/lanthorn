@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit -q -m 'Add babelmap design spec *)",
+      "Bash(git commit -q -m 'Add layout modes and impossible-layout handling to design *)",
+      "Bash(git commit -q -m 'Adopt routed orthogonal connectors in design *)",
+      "Bash(git commit -q -m 'Expand Z-machine scope to v3/v4/v5/v7/v8, exclude graphical v6 *)",
+      "Bash(git commit -q -m 'Clarify save responsibilities: Quetzal mechanism in zvm, two stores in app *)",
+      "Bash(git commit -q -m 'Add zvm core implementation plan *)"
+    ]
+  }
+}
