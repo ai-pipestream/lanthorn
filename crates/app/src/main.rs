@@ -207,16 +207,19 @@ fn main() {
 
     // ── 4. Terminal setup ─────────────────────────────────────────────────────
 
+    // Install the panic hook FIRST so that any panic after this point (including
+    // one between enable_raw_mode and EnterAlternateScreen) restores the terminal.
+    install_panic_hook();
+
     if let Err(e) = enable_raw_mode() {
         eprintln!("babelmap: cannot enable raw mode (not a TTY?): {}", e);
         std::process::exit(1);
     }
 
     // From here on, raw mode is active — MUST restore on every exit path.
-    install_panic_hook();
 
     if let Err(e) = execute!(stdout(), EnterAlternateScreen) {
-        let _ = disable_raw_mode();
+        restore_terminal();
         eprintln!("babelmap: cannot enter alternate screen: {}", e);
         std::process::exit(1);
     }
