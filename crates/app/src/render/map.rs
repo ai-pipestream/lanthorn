@@ -7,9 +7,9 @@
 //!
 //! | Zoom     | step_w | step_h |
 //! |----------|--------|--------|
-//! | Boxes    |   8    |   4    |
-//! | Compact  |   4    |   2    |
-//! | Overview |   1    |   1    |
+//! | Boxes    |  18    |   6    |
+//! | Compact  |  10    |   4    |
+//! | Overview |   2    |   2    |
 //!
 //! The screen position of a room at cell (cx, cy) with scroll (sx, sy) inside area `a` is:
 //!   screen_x = a.x + (cx - sx) * step_w
@@ -19,10 +19,10 @@
 //!
 //! Connectors live in a fine grid where room cell (c, r) → fine (2c, 2r).
 //! A fine point (fx, fy) maps to screen as:
-//!   screen_x = a.x + (fx - scroll.0 * 2) * (step_w / 2)
-//!   screen_y = a.y + (fy - scroll.1 * 2) * (step_h / 2)
+//!   screen_x = a.x + (fx - scroll.0 * 2) * (step_w / 2) + gutter_offset_x
+//!   screen_y = a.y + (fy - scroll.1 * 2) * (step_h / 2) + gutter_offset_y
 //!
-//! For Overview (step 1×1) step/2 rounds to 0, so connectors are skipped at Overview zoom.
+//! For Overview zoom, connectors are skipped (step/2=1 but single-glyph boxes fill the cell).
 
 use mapper::render::{RenderMap, RenderRoom};
 use mapper::router::RoutedEdge;
@@ -44,15 +44,15 @@ fn zoom_steps(zoom: Zoom) -> (i32, i32) {
 /// The box is drawn SMALLER than the step so there is a gutter on the right/bottom
 /// where connector glyphs are visible between adjacent rooms.
 ///
-/// | Zoom    | step | box  | gutter (right / bottom) |
-/// |---------|------|------|-------------------------|
-/// | Boxes   | 8×4  | 6×3  | 2 cols / 1 row          |
-/// | Compact | 4×2  | 3×1  | 1 col  / 1 row          |
-/// | Overview| 1×1  | 1×1  | —  (single glyph)       |
+/// | Zoom    | step  | box   | gutter (right / bottom) |
+/// |---------|-------|-------|-------------------------|
+/// | Boxes   | 18×6  | 14×4  | 4 cols / 2 rows         |
+/// | Compact | 10×4  | 8×3   | 2 cols / 1 row          |
+/// | Overview| 2×2   | 1×1   | — (single glyph)        |
 fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     match zoom {
-        Zoom::Boxes => (6, 3),
-        Zoom::Compact => (3, 1),
+        Zoom::Boxes => (14, 4),
+        Zoom::Compact => (8, 3),
         Zoom::Overview => (1, 1),
     }
 }
@@ -97,7 +97,7 @@ pub fn cell_to_screen(
 
 /// Project a fine-grid point to screen coordinates.
 ///
-/// Returns `None` if outside `area` or if step/2 == 0 (Overview zoom).
+/// Returns `None` if outside `area` or if zoom is Overview (connectors not drawn there).
 ///
 /// The gutter offset is added so that connector glyphs (which traverse fine-grid
 /// midpoints between adjacent rooms) land in the gutter columns/rows that are
@@ -108,12 +108,12 @@ fn fine_to_screen(
     scroll: (i32, i32),
     area: Rect,
 ) -> Option<(u16, u16)> {
+    if matches!(zoom, Zoom::Overview) {
+        return None; // Overview: connectors not drawn
+    }
     let (step_w, step_h) = zoom_steps(zoom);
     let half_w = step_w / 2;
     let half_h = step_h / 2;
-    if half_w == 0 || half_h == 0 {
-        return None; // Overview: connectors not drawn
-    }
 
     let fine_scroll_x = scroll.0 * 2;
     let fine_scroll_y = scroll.1 * 2;
@@ -151,6 +151,186 @@ const DISTORTED_STYLE: Style = Style::new().add_modifier(Modifier::DIM);
 /// Style for normal connectors.
 const CONNECTOR_STYLE: Style = Style::new().fg(Color::DarkGray);
 
+// ── Bitmask connector rasterization ──────────────────────────────────────────
+
+/// Convert a NESW bitmask to a box-drawing glyph (rounded corners).
+/// bits: N=1, E=2, S=4, W=8
+pub fn bitmask_to_glyph(mask: u8, dashed: bool) -> &'static str {
+    match mask {
+        0 => " ",
+        1 | 4 | 5 => {
+            if dashed {
+                "╎"
+            } else {
+                "│"
+            }
+        }
+        2 | 8 | 10 => {
+            if dashed {
+                "╌"
+            } else {
+                "─"
+            }
+        }
+        3 => "╰",   // NE
+        6 => "╭",   // ES
+        9 => "╯",   // NW
+        12 => "╮",  // SW
+        7 => "├",   // NES
+        11 => "┴",  // NEW
+        13 => "┤",  // NSW
+        14 => "┬",  // ESW
+        15 => "┼",  // NESW
+        _ => " ",
+    }
+}
+
+/// Given a "from" screen cell and "this" screen cell, return the direction bit
+/// pointing from "this" toward "from":
+/// - from is to the North of this (from.1 < this.1): N = 1
+/// - from is to the East (from.0 > this.0): E = 2
+/// - from is to the South (from.1 > this.1): S = 4
+/// - from is to the West (from.0 < this.0): W = 8
+fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
+    if from.1 < this.1 {
+        1 // N
+    } else if from.0 > this.0 {
+        2 // E
+    } else if from.1 > this.1 {
+        4 // S
+    } else {
+        8 // W
+    }
+}
+
+/// Walk from p0 to p1 along fine grid (one step at a time in each axis),
+/// project each to screen, deduplicate consecutive identical screen positions.
+fn segment_screen_points(
+    p0: (i32, i32),
+    p1: (i32, i32),
+    zoom: Zoom,
+    scroll: (i32, i32),
+    area: Rect,
+) -> Vec<(u16, u16)> {
+    let mut pts = Vec::new();
+    let dx = (p1.0 - p0.0).signum();
+    let dy = (p1.1 - p0.1).signum();
+
+    if dx == 0 && dy == 0 {
+        if let Some(s) = fine_to_screen(p0, zoom, scroll, area) {
+            pts.push(s);
+        }
+        return pts;
+    }
+
+    let mut cur = p0;
+    loop {
+        if let Some(s) = fine_to_screen(cur, zoom, scroll, area) {
+            // Only add if different from last (dedup consecutive same screen positions)
+            if pts.last() != Some(&s) {
+                pts.push(s);
+            }
+        }
+        if cur == p1 {
+            break;
+        }
+        cur = (cur.0 + dx, cur.1 + dy);
+    }
+    pts
+}
+
+/// Build a bitmask map for all non-stub routed edges.
+/// Returns HashMap<(u16,u16), (u8, bool)> — (bitmask, all_distorted)
+fn build_connector_mask(
+    edges: &[RoutedEdge],
+    zoom: Zoom,
+    scroll: (i32, i32),
+    area: Rect,
+) -> std::collections::HashMap<(u16, u16), (u8, bool)> {
+    let mut map: std::collections::HashMap<(u16, u16), (u8, bool)> =
+        std::collections::HashMap::new();
+
+    if matches!(zoom, Zoom::Overview) {
+        return map;
+    }
+
+    for edge in edges {
+        if edge.is_stub {
+            continue;
+        }
+        if edge.points.len() < 2 {
+            continue;
+        }
+
+        // Walk consecutive pairs of fine-grid points
+        for window in edge.points.windows(2) {
+            let (p0, p1) = (window[0], window[1]);
+            // Get all screen cells along this segment (inclusive p0..=p1)
+            let screen_pts = segment_screen_points(p0, p1, zoom, scroll, area);
+            // Walk consecutive screen cell pairs and set bitmasks
+            for i in 0..screen_pts.len() {
+                let pos = screen_pts[i];
+                let entry = map.entry(pos).or_insert((0u8, true));
+                // all_distorted only if all edges at this cell are distorted
+                entry.1 = entry.1 && edge.distorted;
+
+                if i > 0 {
+                    let prev = screen_pts[i - 1];
+                    // set bit on this cell pointing toward prev
+                    let bit = dir_bit(prev, pos);
+                    entry.0 |= bit;
+                }
+                if i < screen_pts.len() - 1 {
+                    let next = screen_pts[i + 1];
+                    // set bit on this cell pointing toward next
+                    let bit = dir_bit(next, pos);
+                    entry.0 |= bit;
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Collect arrowhead glyphs for all non-stub edges (one per edge, at last screen point).
+fn collect_arrowheads(
+    edges: &[RoutedEdge],
+    zoom: Zoom,
+    scroll: (i32, i32),
+    area: Rect,
+) -> Vec<((u16, u16), &'static str)> {
+    if matches!(zoom, Zoom::Overview) {
+        return Vec::new();
+    }
+
+    let mut arrows = Vec::new();
+    for edge in edges {
+        if edge.is_stub || edge.points.len() < 2 {
+            continue;
+        }
+        // Last segment: from second-to-last point to last point
+        let n = edge.points.len();
+        let p_prev = edge.points[n - 2];
+        let p_last = edge.points[n - 1];
+        let dx = p_last.0 - p_prev.0;
+        let dy = p_last.1 - p_prev.1;
+        let glyph = if dx > 0 {
+            "▸"
+        } else if dx < 0 {
+            "◂"
+        } else if dy < 0 {
+            "▴"
+        } else {
+            "▾"
+        };
+        // The arrowhead goes at the last point's screen position
+        if let Some(screen_pos) = fine_to_screen(p_last, zoom, scroll, area) {
+            arrows.push((screen_pos, glyph));
+        }
+    }
+    arrows
+}
+
 // ── render_map ────────────────────────────────────────────────────────────────
 
 /// Draw the map from `rm` into `buf` for `area`, using view state from `state`.
@@ -158,12 +338,38 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let zoom = state.zoom;
     let scroll = state.scroll;
 
-    // Draw connectors first (rooms drawn on top).
-    for edge in &rm.edges {
-        draw_edge(edge, zoom, scroll, area, buf);
+    // 1. Build bitmask map for all non-stub connectors
+    let connector_map = build_connector_mask(&rm.edges, zoom, scroll, area);
+
+    // 2. Render connector glyphs
+    for (&(cx, cy), &(mask, all_distorted)) in &connector_map {
+        let glyph = bitmask_to_glyph(mask, all_distorted);
+        let style = if all_distorted {
+            DISTORTED_STYLE
+        } else {
+            CONNECTOR_STYLE
+        };
+        if let Some(cell) = buf.cell_mut((cx, cy)) {
+            cell.set_symbol(glyph).set_style(style);
+        }
     }
 
-    // Draw rooms.
+    // 3. Overlay arrowheads
+    let arrows = collect_arrowheads(&rm.edges, zoom, scroll, area);
+    for ((ax, ay), glyph) in arrows {
+        if let Some(cell) = buf.cell_mut((ax, ay)) {
+            cell.set_symbol(glyph).set_style(CONNECTOR_STYLE);
+        }
+    }
+
+    // 4. Draw stub edges
+    for edge in &rm.edges {
+        if edge.is_stub {
+            draw_stub(edge, zoom, scroll, area, buf);
+        }
+    }
+
+    // 5. Draw rooms on top
     for room in &rm.rooms {
         draw_room(room, state, zoom, scroll, area, buf);
     }
@@ -199,20 +405,18 @@ fn draw_room(
             }
         }
         Zoom::Compact => {
-            // 4×2 box: draw a minimal 3×1 label area.
             draw_compact_room(room, sx, sy, base_style, area, buf);
         }
         Zoom::Boxes => {
-            // 8×4 box: draw a bordered box with label inside.
             draw_box_room(room, sx, sy, base_style, area, buf);
         }
     }
 }
 
-/// Draw a compact (4×2 step) room: 3×1 label — leaves ≥1-col/≥1-row gutter.
+/// Draw a compact (10×4 step) room: 8×3 box with label row.
 ///
-/// Box is 3 cols wide, 1 row tall (the step is 4×2, so gutter = 1 col right, 1 row bottom).
-/// Connectors running through the gutter land at col 3 (right) or row 1 (below) — both outside.
+/// Box is 8 cols wide × 3 rows tall (step 10×4, gutter = 2 cols right, 1 row bottom).
+/// Normal rooms use rounded corners; current room uses heavy border with REVERSED style.
 fn draw_compact_room(
     room: &RenderRoom,
     sx: u16,
@@ -221,21 +425,49 @@ fn draw_compact_room(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    // Label truncated to 3 chars on one row (box is 3 wide).
-    let (bw, _bh) = zoom_box_size(Zoom::Compact);
-    let label: String = room.label.chars().take(bw as usize).collect();
-    draw_str_clipped(buf, sx, sy, &label, style, area);
+    let (bw, bh) = zoom_box_size(Zoom::Compact); // (8, 3)
+    let is_current = style.add_modifier.contains(Modifier::REVERSED);
+
+    let (tl, tr, bl, br, h, v) = if is_current {
+        ('┏', '┓', '┗', '┛', '━', '┃')
+    } else {
+        ('╭', '╮', '╰', '╯', '─', '│')
+    };
+
+    // Top border
+    draw_char_clipped(buf, sx, sy, tl, style, area);
+    for dx in 1..bw - 1 {
+        draw_char_clipped(buf, sx + dx, sy, h, style, area);
+    }
+    draw_char_clipped(buf, sx + bw - 1, sy, tr, style, area);
+
+    // Middle row: sides + label (inner width = bw - 2 = 6)
+    let label_width = (bw - 2) as usize; // 6
+    let label: String = room.label.chars().take(label_width).collect();
+    draw_char_clipped(buf, sx, sy + 1, v, style, area);
+    draw_str_clipped(buf, sx + 1, sy + 1, &label, style, area);
+    draw_char_clipped(buf, sx + bw - 1, sy + 1, v, style, area);
+
+    // Bottom border
+    draw_char_clipped(buf, sx, sy + bh - 1, bl, style, area);
+    for dx in 1..bw - 1 {
+        draw_char_clipped(buf, sx + dx, sy + bh - 1, h, style, area);
+    }
+    draw_char_clipped(buf, sx + bw - 1, sy + bh - 1, br, style, area);
 }
 
-/// Draw a boxes (8×4 step) room: bordered box 6 wide × 3 tall, leaving ≥2-col/≥1-row gutter.
+/// Draw a boxes (18×6 step) room: bordered box 14 wide × 4 tall.
 ///
-/// Layout (6 cols × 3 rows, within an 8×4 step):
-///   Row 0: ┌────┐
-///   Row 1: │lbl*│  (label up to 4 chars, '*' if notes)
-///   Row 2: └────┘
-///   Gutter: cols 6-7 (right), row 3 (bottom)
+/// Layout (14 cols × 4 rows, within an 18×6 step):
+///   Row 0: ╭────────────╮  (or ┏━━━━━━━━━━━━┓ for current room)
+///   Row 1: │label......●│  (label up to 12 chars, ● if notes)
+///   Row 2: │            │
+///   Row 3: ╰────────────╯
+///   Gutter: cols 14-17 (right), rows 4-5 (bottom)
 ///
-/// Connectors run through the gutter: horizontal connector at col 6, vertical at row 3.
+/// Current room: heavy border (┏ ┓ ┗ ┛ ━ ┃) with REVERSED style.
+/// Selected room: yellow style (SELECTED_STYLE).
+/// Notes: ● marker in top-right inner corner (row 1, col bw-2).
 fn draw_box_room(
     room: &RenderRoom,
     sx: u16,
@@ -244,175 +476,97 @@ fn draw_box_room(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let (w, h) = zoom_box_size(Zoom::Boxes);
+    let (w, h) = zoom_box_size(Zoom::Boxes); // (14, 4)
+    let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
-    // Top border: ┌────┐
-    draw_char_clipped(buf, sx, sy, '┌', style, area);
+    let (tl, tr, bl, br, horiz, vert) = if is_current {
+        ('┏', '┓', '┗', '┛', '━', '┃')
+    } else {
+        ('╭', '╮', '╰', '╯', '─', '│')
+    };
+
+    // Top border
+    draw_char_clipped(buf, sx, sy, tl, style, area);
     for dx in 1..w - 1 {
-        draw_char_clipped(buf, sx + dx, sy, '─', style, area);
+        draw_char_clipped(buf, sx + dx, sy, horiz, style, area);
     }
-    draw_char_clipped(buf, sx + w - 1, sy, '┐', style, area);
+    draw_char_clipped(buf, sx + w - 1, sy, tr, style, area);
 
-    // Middle rows (h=3 → one interior row at dy=1).
+    // Inner rows (h=4 → rows 1 and 2 are interior)
     for dy in 1..h - 1 {
-        draw_char_clipped(buf, sx, sy + dy, '│', style, area);
-        draw_char_clipped(buf, sx + w - 1, sy + dy, '│', style, area);
+        draw_char_clipped(buf, sx, sy + dy, vert, style, area);
+        // Fill interior with spaces (for background/style)
+        for dx in 1..w - 1 {
+            draw_char_clipped(buf, sx + dx, sy + dy, ' ', style, area);
+        }
+        draw_char_clipped(buf, sx + w - 1, sy + dy, vert, style, area);
     }
 
-    // Label on the interior row (row 1), up to w-2 = 4 chars.
-    let label_width = (w - 2) as usize;
+    // Label on row 1 (first inner row), up to w-2 = 12 chars.
+    let label_width = (w - 2) as usize; // 12
     let label: String = room.label.chars().take(label_width).collect();
     draw_str_clipped(buf, sx + 1, sy + 1, &label, style, area);
 
-    // Notes marker in the interior row, last col before border.
-    if room.has_notes && h >= 3 {
-        draw_char_clipped(buf, sx + w - 2, sy + 1, '*', style, area);
+    // Notes marker ● in top-right inner corner (row 1, col w-2).
+    if room.has_notes {
+        draw_char_clipped(buf, sx + w - 2, sy + 1, '●', style, area);
     }
 
-    // Bottom border: └────┘
-    draw_char_clipped(buf, sx, sy + h - 1, '└', style, area);
+    // Bottom border
+    draw_char_clipped(buf, sx, sy + h - 1, bl, style, area);
     for dx in 1..w - 1 {
-        draw_char_clipped(buf, sx + dx, sy + h - 1, '─', style, area);
+        draw_char_clipped(buf, sx + dx, sy + h - 1, horiz, style, area);
     }
-    draw_char_clipped(buf, sx + w - 1, sy + h - 1, '┘', style, area);
+    draw_char_clipped(buf, sx + w - 1, sy + h - 1, br, style, area);
 }
 
-// ── Connector drawing ─────────────────────────────────────────────────────────
+// ── Stub drawing ──────────────────────────────────────────────────────────────
 
-/// Draw a routed edge as box-drawing glyphs.
-///
-/// Iterates consecutive point pairs in `edge.points` and draws the segment between them.
-fn draw_edge(
-    edge: &RoutedEdge,
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-    buf: &mut Buffer,
-) {
+/// Draw a stub connector: dashed line from origin toward stub endpoint, label at midpoint.
+fn draw_stub(edge: &RoutedEdge, zoom: Zoom, scroll: (i32, i32), area: Rect, buf: &mut Buffer) {
     if edge.points.len() < 2 {
         return;
     }
-
-    // For stubs, just draw the stub label near the origin room.
-    if edge.is_stub {
-        draw_stub(edge, zoom, scroll, area, buf);
-        return;
-    }
-
-    let style = if edge.distorted {
-        DISTORTED_STYLE
-    } else {
-        CONNECTOR_STYLE
-    };
-
-    // Draw each segment between consecutive waypoints.
-    for window in edge.points.windows(2) {
-        let (p0, p1) = (window[0], window[1]);
-        draw_segment(p0, p1, edge.dir, edge.distorted, zoom, scroll, area, buf, style);
-    }
-}
-
-/// Draw a stub connector with its label.
-fn draw_stub(
-    edge: &RoutedEdge,
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    if edge.points.len() < 2 {
-        return;
-    }
-    // The first point is the origin fine cell; second is one step above it.
-    let p1 = edge.points[1];
+    let p0 = edge.points[0]; // origin fine cell
+    let p1 = edge.points[1]; // stub end fine cell
     let style = CONNECTOR_STYLE;
-    if let Some((sx, sy)) = fine_to_screen(p1, zoom, scroll, area) {
-        if let Some(cell) = buf.cell_mut((sx, sy)) {
-            let glyph = edge.label.as_deref().unwrap_or("?");
-            cell.set_symbol(glyph).set_style(style);
-        }
-    }
-}
 
-/// Draw a single orthogonal segment between fine-grid points `p0` and `p1`.
-///
-/// Determines appropriate box-drawing characters based on direction.
-/// When p0 == p1 (degenerate — adjacent rooms share the same gutter point), draws a single
-/// connector glyph at that point using the connection direction to pick h vs v.
-#[allow(clippy::too_many_arguments)]
-fn draw_segment(
-    p0: (i32, i32),
-    p1: (i32, i32),
-    dir: mapper::direction::Direction,
-    distorted: bool,
-    zoom: Zoom,
-    scroll: (i32, i32),
-    area: Rect,
-    buf: &mut Buffer,
-    style: Style,
-) {
-    use mapper::direction::Direction as D;
-    let dx = p1.0 - p0.0;
-    let dy = p1.1 - p0.1;
+    let dx = (p1.0 - p0.0).signum();
+    let dy = (p1.1 - p0.1).signum();
+    let h_glyph = "╌";
+    let v_glyph = "╎";
 
-    if dx == 0 && dy == 0 {
-        // Degenerate segment: departure == arrival (directly adjacent rooms).
-        // Draw a single connector glyph at this shared gutter point.
-        let glyph = if distorted {
-            match dir {
-                D::E | D::W => "┄",
-                _ => "┊",
-            }
-        } else {
-            match dir {
-                D::E | D::W => "─",
-                _ => "│",
-            }
-        };
-        if let Some((sx, sy)) = fine_to_screen(p0, zoom, scroll, area) {
-            if let Some(cell) = buf.cell_mut((sx, sy)) {
-                cell.set_symbol(glyph).set_style(style);
-            }
-        }
-        return;
-    }
+    let mut cur = p0;
+    let mut mid_screen: Option<(u16, u16)> = None;
+    let mut count = 0i32;
+    let total = (p1.0 - p0.0).abs().max((p1.1 - p0.1).abs()) + 1;
 
-    // Determine the glyph for intermediate cells along the segment.
-    let (h_glyph, v_glyph) = if distorted {
-        ("┄", "┊")
-    } else {
-        ("─", "│")
-    };
-
-    if dy == 0 {
-        // Horizontal segment.
-        let step = if dx > 0 { 1 } else { -1 };
-        let mut fx = p0.0 + step;
-        while fx != p1.0 + step {
-            let fine = (fx, p0.1);
-            if let Some((sx, sy)) = fine_to_screen(fine, zoom, scroll, area) {
+    loop {
+        if let Some((sx, sy)) = fine_to_screen(cur, zoom, scroll, area) {
+            // Draw the dashed glyph (not at first point which is under the room box)
+            if count > 0 {
+                let glyph = if dx != 0 { h_glyph } else { v_glyph };
                 if let Some(cell) = buf.cell_mut((sx, sy)) {
-                    cell.set_symbol(h_glyph).set_style(style);
+                    cell.set_symbol(glyph).set_style(style);
                 }
             }
-            fx += step;
-        }
-    } else if dx == 0 {
-        // Vertical segment.
-        let step = if dy > 0 { 1 } else { -1 };
-        let mut fy = p0.1 + step;
-        while fy != p1.1 + step {
-            let fine = (p0.0, fy);
-            if let Some((sx, sy)) = fine_to_screen(fine, zoom, scroll, area) {
-                if let Some(cell) = buf.cell_mut((sx, sy)) {
-                    cell.set_symbol(v_glyph).set_style(style);
-                }
+            // Midpoint for label
+            if count == total / 2 {
+                mid_screen = Some((sx, sy));
             }
-            fy += step;
         }
+        if cur == p1 {
+            break;
+        }
+        cur = (cur.0 + dx, cur.1 + dy);
+        count += 1;
     }
-    // Non-orthogonal segments (fallback for routing failures) are skipped —
-    // the router guarantees orthogonal paths for planar edges.
+
+    // Draw label at midpoint (overwriting dashed glyph)
+    if let Some((mx, my)) = mid_screen.or_else(|| fine_to_screen(p1, zoom, scroll, area)) {
+        let label = edge.label.as_deref().unwrap_or("?");
+        draw_str_clipped(buf, mx, my, label, style, area);
+    }
 }
 
 // ── Clipped drawing helpers ───────────────────────────────────────────────────
@@ -438,29 +592,29 @@ mod tests {
         let on = cell_to_screen((0, 0), Zoom::Boxes, (0, 0), area);
         assert_eq!(on, Some((0, 0)));
 
-        // Cell (1,0) at Boxes → x = 0 + (1-0)*8 = 8
+        // Cell (1,0) at Boxes → x = 0 + (1-0)*18 = 18
         let right = cell_to_screen((1, 0), Zoom::Boxes, (0, 0), area);
-        assert_eq!(right, Some((8, 0)));
+        assert_eq!(right, Some((18, 0)));
 
-        // Cell (0,1) at Boxes → y = 0 + (1-0)*4 = 4
+        // Cell (0,1) at Boxes → y = 0 + (1-0)*6 = 6
         let down = cell_to_screen((0, 1), Zoom::Boxes, (0, 0), area);
-        assert_eq!(down, Some((0, 4)));
+        assert_eq!(down, Some((0, 6)));
 
         // Far off-area cell.
         let off = cell_to_screen((1000, 1000), Zoom::Boxes, (0, 0), area);
         assert!(off.is_none());
 
-        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*8 = -8 → None.
+        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*18 = -18 → None.
         let scrolled_off = cell_to_screen((0, 0), Zoom::Boxes, (1, 0), area);
         assert!(scrolled_off.is_none());
 
-        // Compact zoom: step 4×2 → cell (1,1) → (4, 2)
+        // Compact zoom: step 10×4 → cell (1,1) → (10, 4)
         let compact = cell_to_screen((1, 1), Zoom::Compact, (0, 0), area);
-        assert_eq!(compact, Some((4, 2)));
+        assert_eq!(compact, Some((10, 4)));
 
-        // Overview zoom: step 1×1 → cell (5,3) → (5, 3)
+        // Overview zoom: step 2×2 → cell (5,3) → (10, 6)
         let overview = cell_to_screen((5, 3), Zoom::Overview, (0, 0), area);
-        assert_eq!(overview, Some((5, 3)));
+        assert_eq!(overview, Some((10, 6)));
     }
 
     #[test]
@@ -470,10 +624,10 @@ mod tests {
         m.observe(2, "North", Some(Direction::N));
         let rm = render(&m.graph);
         // room 2 ("North") is placed at cell (0, -1) by the layout engine.
-        // With default scroll (0,0) and Boxes zoom (step_h=4), its screen y = -4 (off screen).
+        // With default scroll (0,0) and Boxes zoom (step_h=6), its screen y = -6 (off screen).
         // Scroll up by 1 row so that cell (0,-1) maps to screen y=0.
         let mut state = AppState::default();
-        state.scroll = (0, -1); // scroll y=-1 so cell (0,-1) → screen y = 0 + (-1-(-1))*4 = 0
+        state.scroll = (0, -1); // scroll y=-1 so cell (0,-1) → screen y = 0 + (-1-(-1))*6 = 0
 
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
@@ -505,32 +659,31 @@ mod tests {
         m.observe(2, "East", Some(Direction::E));
         let rm = render(&m.graph);
         let state = AppState::default(); // Boxes zoom, scroll (0,0)
-        let area = Rect::new(0, 0, 40, 20);
+        let area = Rect::new(0, 0, 80, 30);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Count box-drawing characters — connectors use ─, │, ┌, ┐, └, ┘, ┄, ┊.
+        // Count box-drawing and rounded corner characters.
         let box_drawing: usize = buf
             .content
             .iter()
             .filter(|c| {
-                matches!(c.symbol(), "─" | "│" | "┌" | "┐" | "└" | "┘" | "┄" | "┊")
+                matches!(
+                    c.symbol(),
+                    "─" | "│" | "╭" | "╮" | "╰" | "╯" | "┏" | "┓" | "┗" | "┛" | "━" | "┃"
+                )
             })
             .count();
         // The room boxes themselves use these chars too — we just need more than zero.
         assert!(box_drawing > 0, "should have box-drawing chars from rooms or connectors");
 
-        // Verify a connector glyph lands in the GUTTER between the two room boxes.
+        // NEW: Boxes step (18,6), half=(9,3), box=(14,4), gutter ox = 14 - 9 = 5, oy = 4 - 3 = 1
+        // Room "Start" at cell (0,0) → screen (0,0), box covers cols 0..13, rows 0..3.
+        // Room "East"  at cell (1,0) → screen (18,0), box covers cols 18..31.
+        // Gutter between boxes: cols 14-17.
         //
-        // Layout at Boxes zoom (step=8×4, box=6×3, gutter offsets ox=2, oy=1):
-        //   Room "Start" at cell (0,0) → screen (0,0), box covers cols 0..5, rows 0..2.
-        //   Room "East"  at cell (1,0) → screen (8,0), box covers cols 8..13.
-        //   Gutter between boxes: cols 6-7 (right of Start's box).
-        //
-        // Connector segment fine(0,0)→fine(2,0) draws at fine(1,0) and fine(2,0):
-        //   fine(1,0) → sx = 0 + 1*4 + 2(ox) = 6, sy = 0 + 0*2 + 1(oy) = 1.
-        //   Col 6 is in the gutter (box ends at col 5). ✓
-        let gutter_x = 6u16;
+        // Connector fine(1,0) → sx = 0 + 1*9 + 5 = 14, sy = 0 + 0*3 + 1 = 1.
+        let gutter_x = 14u16;
         let gutter_y = 1u16;
         let connector_cell = buf.cell((gutter_x, gutter_y));
         assert!(
@@ -539,7 +692,7 @@ mod tests {
         );
         let sym = connector_cell.unwrap().symbol();
         assert!(
-            matches!(sym, "─" | "│" | "┄" | "┊"),
+            matches!(sym, "─" | "│" | "╌" | "╎" | "▸" | "◂" | "▴" | "▾"),
             "connector glyph at ({gutter_x},{gutter_y}) should be a connector char; got '{sym}'"
         );
     }
@@ -558,9 +711,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Notes marker '*' should appear somewhere in the buffer.
-        let has_notes_marker = buf.content.iter().any(|c| c.symbol() == "*");
-        assert!(has_notes_marker, "notes marker '*' should be drawn for a room with notes");
+        // Notes marker '●' should appear somewhere in the buffer.
+        let has_notes_marker = buf.content.iter().any(|c| c.symbol() == "●");
+        assert!(has_notes_marker, "notes marker '●' should be drawn for a room with notes");
     }
 
     #[test]
@@ -599,5 +752,84 @@ mod tests {
 
         let has_block = buf.content.iter().any(|c| c.symbol() == "■");
         assert!(has_block, "overview zoom should draw '■' glyph");
+    }
+
+    #[test]
+    fn bitmask_to_glyph_lookup() {
+        // Corners
+        assert_eq!(bitmask_to_glyph(3, false), "╰");  // NE
+        assert_eq!(bitmask_to_glyph(6, false), "╭");  // ES
+        assert_eq!(bitmask_to_glyph(12, false), "╮"); // SW
+        assert_eq!(bitmask_to_glyph(9, false), "╯");  // NW
+        // Straights
+        assert_eq!(bitmask_to_glyph(10, false), "─"); // EW
+        assert_eq!(bitmask_to_glyph(5, false), "│");  // NS
+        // Junction
+        assert_eq!(bitmask_to_glyph(15, false), "┼"); // NESW
+        // Dashed straight
+        assert_eq!(bitmask_to_glyph(10, true), "╌");
+        assert_eq!(bitmask_to_glyph(5, true), "╎");
+    }
+
+    #[test]
+    fn room_box_shows_label_at_boxes_zoom() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "West of House".into());
+        g.set_pos(1, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default(); // Boxes zoom
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // The box is 14 wide × 4 tall at (0,0). Inner area is cols 1..13, rows 1..3.
+        // Label "West of House" truncated to 12 chars = "West of Hous"
+        // Should find 'W', 'e', 's', 't' at row 1, cols 1..4
+        let row1_chars: String = (1u16..=12).map(|x| {
+            buf.cell((x, 1)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')
+        }).collect();
+        assert!(row1_chars.contains("West"), "label row should contain 'West'; got '{row1_chars}'");
+    }
+
+    #[test]
+    fn connector_has_corner_glyph() {
+        // Build connector mask for a hand-crafted L edge
+        let edge = mapper::router::RoutedEdge {
+            origin: 1,
+            dest: 2,
+            dir: mapper::direction::Direction::E,
+            points: vec![(1, 0), (3, 0), (3, 2)], // fine-grid L shape
+            distorted: false,
+            is_stub: false,
+            label: None,
+        };
+        let scroll = (0, 0);
+        let zoom = Zoom::Boxes;
+        let area = Rect::new(0, 0, 80, 30);
+        let connector_map = build_connector_mask(&[edge], zoom, scroll, area);
+        // The corner cell should have a non-straight mask (SW=12, or similar corner)
+        let has_bend = connector_map.values().any(|&(mask, _)| {
+            matches!(mask, 3 | 6 | 9 | 12) // NE, ES, NW, SW corners
+        });
+        assert!(has_bend, "L-shaped connector should produce a bend/corner in the bitmask map");
+    }
+
+    #[test]
+    fn connector_has_arrowhead_at_dest() {
+        let mut m = Mapper::default();
+        m.observe(1, "Start", None);
+        m.observe(2, "East", Some(Direction::E));
+        let rm = render(&m.graph);
+        let state = AppState::default(); // Boxes zoom, scroll (0,0)
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // One of these arrowhead glyphs should appear
+        let has_arrow = buf.content.iter().any(|c| {
+            matches!(c.symbol(), "▸" | "◂" | "▴" | "▾")
+        });
+        assert!(has_arrow, "connector to dest room should have an arrowhead glyph");
     }
 }

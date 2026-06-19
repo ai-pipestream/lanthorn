@@ -49,9 +49,9 @@ impl Zoom {
     /// Returns (step_w, step_h): the terminal cell stride per map-grid cell.
     pub fn steps(self) -> (i32, i32) {
         match self {
-            Zoom::Boxes => (8, 4),
-            Zoom::Compact => (4, 2),
-            Zoom::Overview => (1, 1),
+            Zoom::Boxes => (18, 6),
+            Zoom::Compact => (10, 4),
+            Zoom::Overview => (2, 2),
         }
     }
 }
@@ -218,12 +218,12 @@ mod tests {
 
     #[test]
     fn recenter_on_centers_cell() {
-        let mut s = AppState::default(); // Boxes zoom (step 8×4)
+        let mut s = AppState::default(); // Boxes zoom (step 18×6)
         // Centering cell (5, 5) in a 20×10 character pane:
-        // cells_w = 20 / 8 = 2, cells_h = 10 / 4 = 2
-        // scroll = (5 - 2/2, 5 - 2/2) = (4, 4)
+        // cells_w = 20 / 18 = 1, cells_h = 10 / 6 = 1
+        // scroll = (5 - 1/2, 5 - 1/2) = (5 - 0, 5 - 0) = (5, 5)
         s.recenter_on((5, 5), 20, 10);
-        assert_eq!(s.scroll, (4, 4));
+        assert_eq!(s.scroll, (5, 5));
     }
 
     #[test]
