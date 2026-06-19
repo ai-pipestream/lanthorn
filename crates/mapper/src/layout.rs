@@ -29,7 +29,7 @@
 use std::collections::BTreeSet;
 
 use crate::direction::grid_offset;
-use crate::graph::{MapGraph, RoomId};
+use crate::graph::{Connection, MapGraph, RoomId};
 
 // ── LayoutMode ────────────────────────────────────────────────────────────────
 
@@ -90,6 +90,28 @@ pub fn nearest_free_cell(occupied: &BTreeSet<(i32, i32)>, from: (i32, i32)) -> (
         }
     }
     unreachable!("infinite grid always has a free cell")
+}
+
+/// Returns true iff the connection's geometry is satisfied by the current room positions.
+///
+/// For a compass edge (one where `grid_offset(conn.dir)` returns `Some(delta)`):
+///   - satisfied iff both endpoints have `pos` AND `pos(dest) - pos(origin) == delta`.
+///
+/// For a non-compass edge (Up/Down/In/Out/Unknown, where `grid_offset` returns `None`):
+///   - returns `true` unconditionally. These edges are stubs with no spatial offset to violate;
+///     treating them as "satisfied" ensures the post-placement sweep never marks them distorted.
+pub fn edge_is_satisfied(graph: &MapGraph, conn: &Connection) -> bool {
+    match grid_offset(conn.dir) {
+        None => true, // non-compass stub — no offset to violate
+        Some(delta) => {
+            let origin_pos = graph.room(conn.origin).and_then(|r| r.pos);
+            let dest_pos = graph.room(conn.dest).and_then(|r| r.pos);
+            match (origin_pos, dest_pos) {
+                (Some(op), Some(dp)) => (dp.0 - op.0, dp.1 - op.1) == delta,
+                _ => false, // unplaced endpoint → unsatisfied
+            }
+        }
+    }
 }
 
 // ── Core layout ───────────────────────────────────────────────────────────────
@@ -163,6 +185,20 @@ pub fn relayout_auto(graph: &mut MapGraph) {
             graph.set_pos(lowest, pos);
             // Next loop iteration will continue placing from this new root.
         }
+    }
+
+    // Post-placement distortion sweep: re-derive distorted flag from final geometry.
+    // Compass edges that aren't honoured → distorted=true; non-compass edges → always false.
+    // This supersedes the ad-hoc per-collision flag set during placement (which remains as a
+    // best-effort hint but is now overwritten here with the authoritative geometry check).
+    let n_conns = graph.connections().len();
+    for idx in 0..n_conns {
+        let conn = graph.connections()[idx].clone();
+        let distorted = match grid_offset(conn.dir) {
+            None => false,                         // non-compass stub: never distorted
+            Some(_) => !edge_is_satisfied(graph, &conn), // compass: distorted iff geometry violated
+        };
+        graph.set_conn_distorted(idx, distorted);
     }
 }
 
@@ -339,6 +375,24 @@ mod tests {
         let cells: Vec<_> = graph.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "disconnected rooms must not overlap");
+    }
+
+    #[test]
+    fn contradictory_geometry_marks_distorted_not_overlap() {
+        use crate::direction::Direction;
+        // A(1) - N -> B(2); B(2) - N -> C(3); C(3) - N -> A(1)  (impossible loop)
+        let mut g = crate::graph::MapGraph::new();
+        for id in 1..=3 { g.upsert_room(id, "r".into()); }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::N, 3);
+        g.add_edge(3, Direction::N, 1); // closes an impossible northward loop
+        relayout_auto(&mut g);
+        // no overlap
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: std::collections::BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len());
+        // at least one edge is distorted (the loop can't be Euclidean)
+        assert!(g.connections().iter().any(|c| c.distorted));
     }
 
     #[test]
