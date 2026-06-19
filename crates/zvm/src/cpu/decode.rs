@@ -203,7 +203,7 @@ fn var_op_sig(opcode: u8, version: u8) -> (bool, bool, bool) {
         0x14 => (false, false, false), // input_stream (v3+)
         0x15 => (false, false, false), // sound_effect (v3+)
         0x16 => (true, false, false),  // read_char (v4+, stores)
-        0x17 => (false, true, false),  // scan_table (v4+, branches)
+        0x17 => (true, true, false),   // scan_table (v4+, stores AND branches)
         0x18 => (true, false, false),  // not (v5+, stores)
         0x19 => (false, false, false), // call_vn (v5+)
         0x1A => (false, false, false), // call_vn2 (v5+, uses 2 type bytes)
@@ -642,6 +642,47 @@ mod tests {
         assert_eq!(br.on_true, true);
         assert_eq!(br.offset, 2);
         assert_eq!(ins.next_pc, 0x15);
+    }
+
+    // Regression: scan_table (VAR:0x17) must store AND branch (ZMSD §14).
+    // Bug was: marked branch-only → store byte never read → next_pc one byte short.
+    #[test]
+    fn decodes_scan_table_stores_and_branches() {
+        // VAR form opcode byte for VAR:0x17:
+        //   bits7-6 = 11 (variable form), bit5 = 1 (VAR class), bits4-0 = 0x17
+        //   = 0b1110_0000 | 0x17 = 0xE0 | 0x17 = 0xF7
+        // Type byte 0b01_01_01_11 → small, small, small, omitted → 3 operands (3 bytes)
+        // Then: store byte (1 byte), branch byte single-byte form (1 byte).
+        // Layout at 0x10:
+        //   0x10: 0xF7          opcode
+        //   0x11: 0b01_01_01_11 type byte (3 small operands)
+        //   0x12: 0x01          operand 1
+        //   0x13: 0x02          operand 2
+        //   0x14: 0x03          operand 3
+        //   0x15: 0x04          store variable
+        //   0x16: 0xC5          branch byte: on_true (bit7=1), short form (bit6=1), offset=5
+        //   next_pc = 0x17
+        let mut m = Memory::new(sample_story(5)).unwrap();
+        m.write_byte(0x10, 0xF7);           // scan_table opcode
+        m.write_byte(0x11, 0b01_01_01_11); // type byte: small,small,small,omitted
+        m.write_byte(0x12, 0x01);           // operand 1
+        m.write_byte(0x13, 0x02);           // operand 2
+        m.write_byte(0x14, 0x03);           // operand 3
+        m.write_byte(0x15, 0x04);           // store variable
+        m.write_byte(0x16, 0xC0 | 5);      // branch: on_true, short form, offset=5
+        let ins = decode(&m, 0x10, 5);
+        assert_eq!(ins.opcode, 0x17);
+        assert_eq!(ins.form, Form::Variable);
+        assert_eq!(ins.operand_count, OperandCount::Var);
+        assert_eq!(ins.operands.len(), 3);
+        assert!(ins.store.is_some(), "scan_table must store");
+        assert_eq!(ins.store, Some(0x04));
+        assert!(ins.branch.is_some(), "scan_table must branch");
+        let br = ins.branch.as_ref().unwrap();
+        assert_eq!(br.on_true, true);
+        assert_eq!(br.offset, 5);
+        // 1 opcode + 1 type byte + 3 operand bytes + 1 store byte + 1 branch byte = 7 bytes
+        assert_eq!(ins.next_pc, 0x17);
     }
 
     // Supplementary: long-form with variable operand types (bits 6 and 5 set).
