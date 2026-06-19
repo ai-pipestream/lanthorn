@@ -1,9 +1,32 @@
+use mapper::direction::Direction;
 use mapper::graph::RoomId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Game,
     Map,
+}
+
+// ── Prompt sub-mode ───────────────────────────────────────────────────────────
+
+/// What triggered the prompt, carrying the target room (and edge direction where
+/// applicable).  Used by `apply_action` to know which mapper method to call on
+/// Enter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptKind {
+    RenameRoom(RoomId),
+    EditNotes(RoomId),
+    /// Relabel the edge that exits `RoomId` in the given direction.
+    RelabelEdge(RoomId, Direction),
+}
+
+/// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
+/// is `Some`, key events are routed to the prompt buffer rather than to the
+/// normal map bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    pub kind: PromptKind,
+    pub buffer: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +57,9 @@ pub struct AppState {
     pub transcript_scroll: u16,
     pub input: String,
     pub status: String,
+    /// Active text-entry prompt, if any.  While set, key events are routed to
+    /// the prompt buffer instead of the normal map or game bindings.
+    pub prompt: Option<Prompt>,
 }
 
 impl Default for AppState {
@@ -48,6 +74,7 @@ impl Default for AppState {
             transcript_scroll: 0,
             input: String::new(),
             status: String::new(),
+            prompt: None,
         }
     }
 }
