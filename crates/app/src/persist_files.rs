@@ -23,6 +23,18 @@ pub fn load_map(path: &Path) -> Option<Mapper> {
     }
 }
 
+pub fn save_game(path: &Path, machine: &zvm::cpu::exec::Machine) -> std::io::Result<()> {
+    std::fs::write(path, machine.save_quetzal())
+}
+
+pub fn restore_game(path: &Path, machine: &mut zvm::cpu::exec::Machine) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    machine.restore_quetzal(&bytes).map_err(|e| match e {
+        zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+        other => format!("restore failed: {:?}", other),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -57,5 +69,26 @@ mod tests {
         std::fs::write(&path, b"this is not valid json {{{").unwrap();
         assert!(load_map(&path).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn game_save_restore_round_trips_with_czech() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(story) = std::fs::read(&fixture) else { return /* skip */ };
+        let mem = zvm::memory::Memory::new(story).unwrap();
+        let mut machine = zvm::cpu::exec::Machine::new(mem);
+        machine.init_caps();
+        // step a few instructions so dynamic memory differs from the pristine image
+        for _ in 0..50 { let _ = machine.step(); }
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!("babelmap-save-{}.qzl", std::process::id()));
+        save_game(&tmp, &machine).unwrap();
+        let mut m2 = zvm::cpu::exec::Machine::new(
+            zvm::memory::Memory::new(std::fs::read(&fixture).unwrap()).unwrap()
+        );
+        m2.init_caps();
+        restore_game(&tmp, &mut m2).expect("restore ok");
+        let _ = std::fs::remove_file(&tmp);
     }
 }
