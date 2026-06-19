@@ -180,7 +180,7 @@ pub fn init_header_caps(mem: &mut Memory) {
         //   bit 4: fixed-space font available — set
         //   bit 5: sound effects available — clear
         //   bit 7: timed keyboard available — clear
-        (f1 & 0x00)   // start from 0 for interpreter-set field
+        f1 & !((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 7))  // clear unsupported
           | (1 << 4)  // fixed-space font available
     };
     mem.write_byte(0x01, new_f1);

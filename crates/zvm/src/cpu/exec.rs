@@ -98,6 +98,11 @@ impl Machine {
     /// Not called automatically by `new`/`with_output` because the writes
     /// overlap with address 0x10 (Flags2) which test programs occupy at that
     /// same address — real story files have static programs above 0x40.
+    ///
+    /// # Caller
+    /// Call this from the host after loading a real story file, before the first
+    /// `step()`. Not needed for test harnesses built from `sample_story` (whose
+    /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
         init_header_caps(&mut self.mem);
     }
@@ -779,9 +784,15 @@ impl Machine {
     /// screen).  Otherwise it goes to `self.out` (subject to stream 1 being
     /// active).
     pub fn print_text(&mut self, s: &str) {
+        // ZMSD 7.1.2.5: when stream 3 is selected it is the ONLY output stream —
+        // any future stream-2/4 transcript sink MUST be added below this early
+        // return, never above it.
         if self.streams.stream3_active() {
             self.streams.write_stream3(s);
-        } else if self.streams.stream1 {
+            return;
+        }
+        // Stream 3 is inactive; streams 1/2/4 apply.
+        if self.streams.stream1 {
             self.out.print(s);
         }
     }
