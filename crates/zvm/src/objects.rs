@@ -693,9 +693,11 @@ mod tests {
     const ENTRIES_V5: u32 = OBJ_TABLE + 63 * 2; // = 0x017E
     const V5_OBJ1_ENTRY: u32 = ENTRIES_V5;        // 0x017E
     const V5_OBJ2_ENTRY: u32 = ENTRIES_V5 + 14;   // 0x018C
+    const V5_OBJ3_ENTRY: u32 = ENTRIES_V5 + 28;   // 0x019A
 
     const V5_PROP1_TBL: u32 = 0x0280;
     const V5_PROP2_TBL: u32 = 0x02A0;
+    const V5_PROP3_TBL: u32 = 0x02C0;
 
     fn build_v5_story() -> Vec<u8> {
         let mut buf = sample_story(5);
@@ -865,6 +867,94 @@ mod tests {
         assert_eq!(next, 5);
         let end = get_next_prop(&m, 1, 5);
         assert_eq!(end, 0);
+    }
+
+    // ── v5 two-byte property header tests ────────────────────────────────────
+    //
+    // Builds on build_v5_story() by wiring up obj3 (at V5_OBJ3_ENTRY) with a
+    // property table that uses the two-byte header form (ZMSD §12.4.2):
+    //
+    //   first byte:  0x80 | prop_num  (bit 7 set → two-byte form; bits 5-0 = prop num)
+    //   second byte: 0x80 | size      (bit 7 set; bits 5-0 = data length; 0 → 64)
+    //
+    // Properties (descending order):
+    //   prop 20: 4 bytes data (0xDEAD_BEEF)  — normal case, expect get_prop_len == 4
+    //   prop 15: 64 bytes data (zeroed)       — escape case (size bits == 0), expect 64
+
+    fn build_v5_two_byte_story() -> Vec<u8> {
+        let mut buf = build_v5_story();
+
+        // ── Object 3 entry (v5, 14 bytes) ───────────────────────────────────
+        for i in 0..6 {
+            buf[V5_OBJ3_ENTRY as usize + i] = 0; // no attributes
+        }
+        put_word(&mut buf, V5_OBJ3_ENTRY as usize + 6, 0);  // parent = none
+        put_word(&mut buf, V5_OBJ3_ENTRY as usize + 8, 0);  // sibling = none
+        put_word(&mut buf, V5_OBJ3_ENTRY as usize + 10, 0); // child = none
+        put_word(&mut buf, V5_OBJ3_ENTRY as usize + 12, V5_PROP3_TBL as u16);
+
+        // ── Property table for obj3 ──────────────────────────────────────────
+        // Short name: "room" encoded for v5 (6 bytes, 3 Z-words)
+        let name = encode_word("room", 5);
+        let name_words = (name.len() / 2) as u8; // 3 words
+        let base = V5_PROP3_TBL as usize;
+        buf[base] = name_words;
+        buf[base + 1..base + 1 + name.len()].copy_from_slice(&name);
+        let mut p = base + 1 + name.len(); // first property byte offset
+
+        // Property 20, 4 bytes data: two-byte header
+        //   byte 0: 0x80 | 20 = 0x94
+        //   byte 1: 0x80 | 4  = 0x84  (bits 5-0 = 4 → data length 4)
+        buf[p]     = 0x94; // first size byte: two-byte form, prop 20
+        buf[p + 1] = 0x84; // second size byte: length 4
+        buf[p + 2] = 0xDE;
+        buf[p + 3] = 0xAD;
+        buf[p + 4] = 0xBE;
+        buf[p + 5] = 0xEF;
+        p += 6; // 2 header bytes + 4 data bytes
+
+        // Property 15, 64 bytes data: two-byte header with length-escape
+        //   byte 0: 0x80 | 15 = 0x8F
+        //   byte 1: 0x80 | 0  = 0x80  (bits 5-0 = 0 → data length 64)
+        buf[p]     = 0x8F; // first size byte: two-byte form, prop 15
+        buf[p + 1] = 0x80; // second size byte: length escape → 64
+        // 64 bytes of data (zeroed — the buffer is already 0 there)
+        p += 2 + 64;
+
+        // End sentinel
+        buf[p] = 0x00;
+
+        buf
+    }
+
+    #[test]
+    fn v5_two_byte_property_header() {
+        let buf = build_v5_two_byte_story();
+        let m = Memory::new(buf).unwrap();
+
+        // ── Normal case: prop 20, 4 bytes ────────────────────────────────────
+        let addr20 = get_prop_addr(&m, 3, 20);
+        assert_ne!(addr20, 0, "prop 20 should be present in obj3");
+        // Data address must point just past the two size bytes.
+        // The two size bytes are at addr20-2 (first) and addr20-1 (second).
+        assert_eq!(m.read_byte(addr20 as u32 - 2), 0x94, "first size byte for prop 20");
+        assert_eq!(m.read_byte(addr20 as u32 - 1), 0x84, "second size byte for prop 20");
+        // get_prop_addr returns address of DATA, not header.
+        assert_eq!(m.read_byte(addr20 as u32),     0xDE);
+        assert_eq!(m.read_byte(addr20 as u32 + 1), 0xAD);
+        assert_eq!(m.read_byte(addr20 as u32 + 2), 0xBE);
+        assert_eq!(m.read_byte(addr20 as u32 + 3), 0xEF);
+        // get_prop_len reads the byte immediately before prop_addr; for two-byte
+        // form that is the SECOND size byte (0x84), so len = 0x84 & 0x3F = 4.
+        assert_eq!(get_prop_len(&m, addr20), 4, "normal two-byte prop len should be 4");
+
+        // ── Escape case: prop 15, 64 bytes ───────────────────────────────────
+        let addr15 = get_prop_addr(&m, 3, 15);
+        assert_ne!(addr15, 0, "prop 15 should be present in obj3");
+        assert_eq!(m.read_byte(addr15 as u32 - 2), 0x8F, "first size byte for prop 15");
+        assert_eq!(m.read_byte(addr15 as u32 - 1), 0x80, "second size byte for prop 15");
+        // get_prop_len: second size byte = 0x80; 0x80 & 0x3F = 0 → returns 64.
+        assert_eq!(get_prop_len(&m, addr15), 64, "escape two-byte prop len should be 64");
     }
 
     // ── Fixture test ──────────────────────────────────────────────────────────
