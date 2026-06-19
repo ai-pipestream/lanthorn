@@ -100,13 +100,28 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
     (result, end_addr)
 }
 
+/// Default Unicode translation table for ZSCII 155–223 (ZMSD §3.8.5).
+const UNICODE_TABLE: [char; 69] = [
+    'ä', 'ö', 'ü', 'Ä', 'Ö', 'Ü', 'ß', '»', '«', // 155–163
+    'ë', 'ï', 'ÿ', 'Ë', 'Ï', 'á', 'é', 'í', 'ó',  // 164–172
+    'ú', 'ý', 'Á', 'É', 'Í', 'Ó', 'Ú', 'Ý', 'à',  // 173–181
+    'è', 'ì', 'ò', 'ù', 'À', 'È', 'Ì', 'Ò', 'Ù',  // 182–190
+    'â', 'ê', 'î', 'ô', 'û', 'Â', 'Ê', 'Î', 'Ô',  // 191–199
+    'Û', 'å', 'Å', 'ø', 'Ø', 'ã', 'ñ', 'õ', 'Ã',  // 200–208
+    'Ñ', 'Õ', 'æ', 'Æ', 'ç', 'Ç', 'þ', 'ð', 'Þ',  // 209–217
+    'Ð', '£', 'œ', 'Œ', '¡', '¿',                  // 218–223
+];
+
 /// Map a ZSCII value to a Rust `char` (ZMSD §3.8).
 ///
-/// ZSCII 13 → '\n'. ASCII 32–126 are identity. Everything else maps to '?'.
+/// ZSCII 13 → '\n'. ASCII 32–126 are identity.
+/// ZSCII 155–223 → default Unicode translation table (ZMSD §3.8.5).
+/// Everything else maps to '?'.
 pub(crate) fn zscii_to_char(zscii: u16) -> char {
     match zscii {
         13 => '\n',
         32..=126 => zscii as u8 as char,
+        155..=223 => UNICODE_TABLE[(zscii - 155) as usize],
         _ => '?',
     }
 }
@@ -213,6 +228,18 @@ mod tests {
         let (s, end) = decode_string(&m, 0x0100);
         assert_eq!(s, "abc");
         assert_eq!(end, 0x0102);
+    }
+
+    #[test]
+    fn zscii_extended_chars_decode() {
+        assert_eq!(zscii_to_char(155), 'ä');
+        assert_eq!(zscii_to_char(161), 'ß');
+        assert_eq!(zscii_to_char(219), '£');
+        assert_eq!(zscii_to_char(220), 'œ');
+        assert_eq!(zscii_to_char(223), '¿');
+        // boundary: just outside the table
+        assert_eq!(zscii_to_char(154), '?');
+        assert_eq!(zscii_to_char(224), '?');
     }
 
     #[test]
