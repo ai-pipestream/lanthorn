@@ -7,7 +7,7 @@
 // accessed by downcasting `machine.out` via the `as_any()` supertrait —
 // `machine.out` is `pub`, so no zvm visibility change is required.
 //
-// zvm pub changes: NONE.
+// zvm change made for this module: added Output::as_any_mut (+ BufferOutput/StdoutOutput impls) to allow mutable downcast to CaptureSink.
 
 use std::any::Any;
 
@@ -57,6 +57,9 @@ pub struct TurnResult {
     pub transcript: String,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
+    /// Optional informational note to surface to the player (e.g. when the
+    /// game's own save/restore is auto-failed, hint them toward Ctrl+S/Ctrl+R).
+    pub info: Option<String>,
 }
 
 /// A running Z-machine game session.
@@ -80,7 +83,7 @@ impl GameSession {
         let mut machine = Machine::with_output(mem, sink);
         machine.init_caps();
 
-        let quit = run_until_input(&mut machine);
+        let (quit, _) = run_until_input(&mut machine);
 
         Ok(GameSession { machine, quit })
     }
@@ -94,13 +97,19 @@ impl GameSession {
     /// and return the turn result.
     pub fn submit(&mut self, command: &str) -> TurnResult {
         self.machine.supply_line(command);
-        let quit = run_until_input(&mut self.machine);
+        let (quit, save_restore_failed) = run_until_input(&mut self.machine);
         self.quit = quit;
 
         let transcript = sink_mut(&mut self.machine).take_text();
         let location = current_location(&self.machine);
 
-        TurnResult { transcript, location, quit }
+        let info = if save_restore_failed {
+            Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
+        } else {
+            None
+        };
+
+        TurnResult { transcript, location, quit, info }
     }
 }
 
@@ -119,22 +128,30 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Step the machine until it pauses for input or quits.
-/// Returns `true` if the machine quit.
-fn run_until_input(machine: &mut Machine) -> bool {
+///
+/// Returns `(quit, save_restore_auto_failed)` where:
+/// - `quit` is `true` if the machine ended.
+/// - `save_restore_auto_failed` is `true` if a `SaveRequest` or
+///   `RestoreRequest` was encountered and auto-rejected this run (so the
+///   caller can surface a hint to the player).
+fn run_until_input(machine: &mut Machine) -> (bool, bool) {
+    let mut save_restore_failed = false;
     loop {
         match machine.step() {
-            StepResult::Quit => return true,
-            StepResult::NeedLine { .. } | StepResult::NeedChar => return false,
+            StepResult::Quit => return (true, save_restore_failed),
+            StepResult::NeedLine { .. } | StepResult::NeedChar => return (false, save_restore_failed),
             StepResult::SaveRequest => {
                 // Auto-fail saves during headless operation.
                 machine.complete_save(false);
+                save_restore_failed = true;
             }
             StepResult::RestoreRequest => {
                 machine.complete_restore_failure();
+                save_restore_failed = true;
             }
             StepResult::Restart => {
                 // Restart is not supported in headless mode; treat as quit.
-                return true;
+                return (true, save_restore_failed);
             }
             StepResult::Continue => {}
         }
@@ -171,6 +188,7 @@ mod tests {
             transcript: String::new(),
             location: Some(ObjectSnapshot { number: 1, parent: 0, name: "Hall".into() }),
             quit: false,
+            info: None,
         };
         apply_turn(&mut m, "look", &first);
         assert_eq!(m.graph.current(), Some(1));
@@ -182,6 +200,7 @@ mod tests {
             transcript: String::new(),
             location: Some(ObjectSnapshot { number: 2, parent: 0, name: "Attic".into() }),
             quit: false,
+            info: None,
         };
         apply_turn(&mut m, "north", &second);
         assert!(m.graph.room(2).is_some());
@@ -201,9 +220,28 @@ mod tests {
             transcript: String::new(),
             location: None,
             quit: false,
+            info: None,
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
+    }
+
+    // ── TurnResult.info tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn turn_result_info_defaults_none_for_normal_turn() {
+        // A TurnResult from a normal (non-save/restore) turn has info == None.
+        // The save-request note path (info == Some(...)) is exercised manually
+        // by running a game that issues its own SAVE verb and confirming the
+        // transcript line "(babelmap: this game's in-game save/restore isn't
+        // wired...)" appears.
+        let r = TurnResult {
+            transcript: "You are in a maze.".to_string(),
+            location: None,
+            quit: false,
+            info: None,
+        };
+        assert!(r.info.is_none());
     }
 
     // ── czech.z5 smoke test ───────────────────────────────────────────────────

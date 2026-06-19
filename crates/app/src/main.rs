@@ -141,7 +141,15 @@ fn main() {
     let mut session = match GameSession::new(story_bytes.clone()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("babelmap: {:?}", e);
+            use zvm::error::ZError;
+            let msg = match e {
+                ZError::GraphicalV6 => "this is a version 6 (graphical) story; v6 graphical games are not supported".to_string(),
+                ZError::UnsupportedVersion(v) => format!("unsupported Z-machine version {v}"),
+                ZError::NotAStoryFile => "file is not a valid Z-machine story file".to_string(),
+                ZError::Truncated => "story file is truncated".to_string(),
+                _ => format!("{e:?}"),
+            };
+            eprintln!("babelmap: {msg}");
             std::process::exit(1);
         }
     };
@@ -174,6 +182,7 @@ fn main() {
             transcript: String::new(),
             location: Some(snap),
             quit: session.quit,
+            info: None,
         };
         apply_turn(&mut mapper, "", &seed_result);
         let rid = snap_number as mapper::graph::RoomId;
@@ -298,6 +307,9 @@ fn main() {
                 let result = session.submit(&cmd);
                 state.push_transcript(&format!("> {}", cmd));
                 state.push_transcript(&result.transcript);
+                if let Some(note) = &result.info {
+                    state.push_transcript(note);
+                }
 
                 apply_turn(&mut mapper, &cmd, &result);
 
@@ -345,6 +357,7 @@ fn main() {
                                 transcript: String::new(),
                                 location: Some(snap),
                                 quit: false,
+                                info: None,
                             };
                             apply_turn(&mut mapper, "", &restore_result);
                             state.select_room(Some(rid));
