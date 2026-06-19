@@ -95,6 +95,23 @@ pub fn cell_to_screen(
 
 // ── Fine-grid screen projection ───────────────────────────────────────────────
 
+/// Compute raw (unclipped) screen coordinates for a fine-grid point.
+///
+/// Returns the screen `(x, y)` using the same formula as `fine_to_screen` but without
+/// bounds-checking against `area`.  Used by `segment_screen_points` so that endpoint
+/// projections are available even when an endpoint lies just off the visible area.
+fn fine_to_screen_raw(fine: (i32, i32), zoom: Zoom, scroll: (i32, i32), area: Rect) -> (i32, i32) {
+    let (step_w, step_h) = zoom_steps(zoom);
+    let half_w = step_w / 2;
+    let half_h = step_h / 2;
+    let fine_scroll_x = scroll.0 * 2;
+    let fine_scroll_y = scroll.1 * 2;
+    let (ox, oy) = connector_gutter_offset(zoom);
+    let sx = area.x as i32 + (fine.0 - fine_scroll_x) * half_w + ox;
+    let sy = area.y as i32 + (fine.1 - fine_scroll_y) * half_h + oy;
+    (sx, sy)
+}
+
 /// Project a fine-grid point to screen coordinates.
 ///
 /// Returns `None` if outside `area` or if zoom is Overview (connectors not drawn there).
@@ -111,17 +128,7 @@ fn fine_to_screen(
     if matches!(zoom, Zoom::Overview) {
         return None; // Overview: connectors not drawn
     }
-    let (step_w, step_h) = zoom_steps(zoom);
-    let half_w = step_w / 2;
-    let half_h = step_h / 2;
-
-    let fine_scroll_x = scroll.0 * 2;
-    let fine_scroll_y = scroll.1 * 2;
-    let (ox, oy) = connector_gutter_offset(zoom);
-
-    let sx = area.x as i32 + (fine.0 - fine_scroll_x) * half_w + ox;
-    let sy = area.y as i32 + (fine.1 - fine_scroll_y) * half_h + oy;
-
+    let (sx, sy) = fine_to_screen_raw(fine, zoom, scroll, area);
     if sx < area.x as i32
         || sx >= area.right() as i32
         || sy < area.y as i32
@@ -203,8 +210,14 @@ fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
     }
 }
 
-/// Walk from p0 to p1 along fine grid (one step at a time in each axis),
-/// project each to screen, deduplicate consecutive identical screen positions.
+/// Return every screen cell between the screen projections of fine-grid points p0 and p1,
+/// inclusive, stepping one screen cell at a time.
+///
+/// Segments are always orthogonal (dx==0 or dy==0 in fine space).  We project both
+/// endpoints to raw (unclipped) screen coords via `fine_to_screen_raw`, then walk from
+/// one to the other in screen space one cell at a time (±1 in x or y).  Each cell is
+/// included only if it falls within `area`.  This guarantees a contiguous run of screen
+/// cells with no gaps regardless of how many fine cells map to the same screen column/row.
 fn segment_screen_points(
     p0: (i32, i32),
     p1: (i32, i32),
@@ -213,28 +226,30 @@ fn segment_screen_points(
     area: Rect,
 ) -> Vec<(u16, u16)> {
     let mut pts = Vec::new();
-    let dx = (p1.0 - p0.0).signum();
-    let dy = (p1.1 - p0.1).signum();
 
-    if dx == 0 && dy == 0 {
-        if let Some(s) = fine_to_screen(p0, zoom, scroll, area) {
-            pts.push(s);
-        }
-        return pts;
-    }
+    // Raw (unclipped) screen coordinates of the two fine-grid endpoints.
+    let (sx0, sy0) = fine_to_screen_raw(p0, zoom, scroll, area);
+    let (sx1, sy1) = fine_to_screen_raw(p1, zoom, scroll, area);
 
-    let mut cur = p0;
+    let sdx = (sx1 - sx0).signum();
+    let sdy = (sy1 - sy0).signum();
+
+    let mut cx = sx0;
+    let mut cy = sy0;
     loop {
-        if let Some(s) = fine_to_screen(cur, zoom, scroll, area) {
-            // Only add if different from last (dedup consecutive same screen positions)
-            if pts.last() != Some(&s) {
-                pts.push(s);
-            }
+        // Include this screen cell only if it lies within the visible area.
+        if cx >= area.x as i32
+            && cx < area.right() as i32
+            && cy >= area.y as i32
+            && cy < area.bottom() as i32
+        {
+            pts.push((cx as u16, cy as u16));
         }
-        if cur == p1 {
+        if cx == sx1 && cy == sy1 {
             break;
         }
-        cur = (cur.0 + dx, cur.1 + dy);
+        cx += sdx;
+        cy += sdy;
     }
     pts
 }
@@ -831,5 +846,79 @@ mod tests {
             matches!(c.symbol(), "▸" | "◂" | "▴" | "▾")
         });
         assert!(has_arrow, "connector to dest room should have an arrowhead glyph");
+    }
+
+    /// Unit-test `segment_screen_points` directly: for a horizontal fine segment whose
+    /// screen endpoints are N cells apart, the function must return exactly N+1 cells,
+    /// each adjacent (distance 1) to the previous — no gaps.
+    #[test]
+    fn connector_is_contiguous_no_gaps() {
+        // Boxes zoom: step_w=18, half_w=9.
+        // A fine segment from (0,0) to (2,0) spans two fine steps → 2*9 = 18 screen cols apart.
+        // segment_screen_points must return 19 contiguous screen cells.
+        let zoom = Zoom::Boxes;
+        let scroll = (0, 0);
+        let area = Rect::new(0, 0, 120, 40);
+
+        let pts = segment_screen_points((0, 0), (2, 0), zoom, scroll, area);
+
+        // All cells returned must be visible in the area.
+        for &(x, y) in &pts {
+            assert!(
+                x >= area.x && x < area.right() && y >= area.y && y < area.bottom(),
+                "cell ({x},{y}) outside area"
+            );
+        }
+
+        // Must be non-empty.
+        assert!(!pts.is_empty(), "segment_screen_points returned no points");
+
+        // Consecutive cells must be exactly 1 apart (no gaps, no duplicates).
+        for w in pts.windows(2) {
+            let (x0, y0) = (w[0].0 as i32, w[0].1 as i32);
+            let (x1, y1) = (w[1].0 as i32, w[1].1 as i32);
+            let dist = (x1 - x0).abs() + (y1 - y0).abs();
+            assert_eq!(
+                dist, 1,
+                "consecutive screen cells ({},{}) and ({},{}) are not adjacent (dist={dist})",
+                w[0].0, w[0].1, w[1].0, w[1].1
+            );
+        }
+
+        // Full-buffer render: place rooms 2 cells apart so the connector is a multi-cell
+        // horizontal run and verify no space interrupts it.
+        //
+        // Manually build a graph with rooms at (0,0) and (2,0).
+        // Boxes zoom: step_w=18, half_w=9, gutter_ox=5.
+        // dep = fine(1,0) -> screen x = 1*9+5 = 14
+        // arr = fine(3,0) -> screen x = 3*9+5 = 32
+        // segment_screen_points walk produces cols 14..=32 inclusive (19 cells) at row 1.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0)); // two cells apart, not adjacent
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        let rm2 = render(&g);
+        let state2 = AppState::default();
+        let buf_area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(buf_area);
+        render_map(&rm2, &state2, buf_area, &mut buf);
+
+        // Connector row is row 1 (oy=1 for Boxes).
+        // dep fine(1,0) -> screen x=14; arr fine(3,0) -> screen x=32 (arrowhead).
+        // Check cols 14..=31 (before the arrowhead at 32) are all non-space.
+        let connector_row = 1u16;
+        let seg_start = 14u16;
+        let seg_end = 31u16; // stop one before the arrowhead at col 32
+
+        for col in seg_start..=seg_end {
+            let sym = buf.cell((col, connector_row)).map(|c| c.symbol()).unwrap_or(" ");
+            assert_ne!(
+                sym, " ",
+                "connector cell ({col},{connector_row}) is a space -- gap in multi-cell connector"
+            );
+        }
     }
 }
