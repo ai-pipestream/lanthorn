@@ -20,12 +20,12 @@ fn attr_bytes(version: u8) -> u32 {
 }
 
 /// Size of a single object entry in bytes.
-fn entry_size(version: u8) -> u32 {
+pub(crate) fn entry_size(version: u8) -> u32 {
     if version <= 3 { 9 } else { 14 }
 }
 
 /// Base address of the object-entries region (after the property-defaults table).
-fn entries_base(mem: &Memory) -> u32 {
+pub(crate) fn entries_base(mem: &Memory) -> u32 {
     mem.object_table() as u32 + prop_defaults_count(mem.version()) * 2
 }
 
@@ -148,7 +148,7 @@ pub fn insert_obj(mem: &mut Memory, obj: u16, dest: u16) {
 // ── Property table address ────────────────────────────────────────────────────
 
 /// Address of the property-table pointer field within the object entry.
-fn prop_table_ptr_offset(version: u8) -> u32 {
+pub(crate) fn prop_table_ptr_offset(version: u8) -> u32 {
     // After attributes (4 or 6 bytes) + 3 tree fields (1-byte each v3, 2-byte each v4+).
     if version <= 3 {
         4 + 3

@@ -45,7 +45,7 @@
 //   - v8 and v7 stories use the same heuristic as v4+ for location.
 
 use crate::cpu::exec::Machine;
-use crate::objects::{object_snapshot, ObjectSnapshot};
+use crate::objects::{entries_base, entry_size, object_snapshot, prop_table_ptr_offset, ObjectSnapshot};
 
 /// Returns the object representing the player's current location, or `None` if
 /// the heuristic cannot determine a plausible location.
@@ -92,13 +92,13 @@ pub fn object_tree_view(machine: &Machine) -> Vec<ObjectSnapshot> {
 /// against pathological data.
 fn max_object_number(mem: &crate::memory::Memory) -> u16 {
     let version = mem.version();
-    let entries_base = object_entries_base(mem);
+    let base = entries_base(mem);
     let esize = entry_size(version) as u32;
 
     let mut n: u16 = 0;
     for candidate in 1u16..=2000 {
         // Address of this candidate's entry.
-        let entry_addr = entries_base + (candidate as u32 - 1) * esize;
+        let entry_addr = base + (candidate as u32 - 1) * esize;
         // Property-table pointer is the last word of the entry.
         let prop_ptr_offset = prop_table_ptr_offset(version);
         let ptbl_addr = mem.read_word(entry_addr + prop_ptr_offset) as u32;
@@ -111,23 +111,6 @@ fn max_object_number(mem: &crate::memory::Memory) -> u16 {
         n = candidate;
     }
     n
-}
-
-/// Base address of the object-entries region (after property-defaults table).
-fn object_entries_base(mem: &crate::memory::Memory) -> u32 {
-    let prop_defaults_words: u32 = if mem.version() <= 3 { 31 } else { 63 };
-    mem.object_table() as u32 + prop_defaults_words * 2
-}
-
-/// Size of one object entry in bytes.
-fn entry_size(version: u8) -> u32 {
-    if version <= 3 { 9 } else { 14 }
-}
-
-/// Byte offset within an entry of the property-table address pointer.
-fn prop_table_ptr_offset(version: u8) -> u32 {
-    // attr bytes + 3 tree fields (1-byte v3, 2-byte v4+)
-    if version <= 3 { 4 + 3 } else { 6 + 6 }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -297,11 +280,9 @@ mod tests {
         let mem = Memory::new(story).unwrap();
         let machine = Machine::new(mem);
         // In minizork the opening location is set in global 0 before the first
-        // read instruction.  We just check that we get Some result; the automapper
-        // tolerates wrong values so we don't assert on the exact name.
+        // read instruction.  A well-formed v3 story sets global 0 before the
+        // first status-line read, so we assert Some here.
         let loc = current_location(&machine);
-        // It's acceptable to be None here if the fixture starts with global0==0,
-        // but in well-formed Z3 games it should be set.
-        let _ = loc; // accept either Some or None; the test just must not panic
+        assert!(loc.is_some(), "minizork: expected a location from global 0, got None");
     }
 }
