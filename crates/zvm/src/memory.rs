@@ -93,6 +93,11 @@ impl Memory {
         self.header.dictionary
     }
 
+    /// Global variables table base address from the header.
+    pub fn global_vars(&self) -> u16 {
+        self.header.global_vars
+    }
+
     /// Unpack a packed string address (ZMSD §1.2.3).
     pub fn unpack_string(&self, packed: u16) -> u32 {
         let p = packed as u32;

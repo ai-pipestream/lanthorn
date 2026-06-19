@@ -1,3 +1,4 @@
+pub mod cpu;
 pub mod dictionary;
 pub mod error;
 pub mod fixtures;
