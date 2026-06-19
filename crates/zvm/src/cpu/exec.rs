@@ -76,6 +76,9 @@ pub struct Machine {
     /// Pending save-request context: branch/store info from the save opcode so
     /// complete_save() can deliver the version-appropriate result.
     pending_save: Option<PendingSave>,
+    /// Store variable captured from the restore opcode (v4+), used by
+    /// complete_restore_failure() to store 0 into the correct variable.
+    pending_restore_store: Option<u8>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -112,6 +115,7 @@ impl Machine {
             streams: StreamState::new(),
             original_dynamic,
             pending_save: None,
+            pending_restore_store: None,
         }
     }
 
@@ -577,10 +581,16 @@ impl Machine {
                 StepResult::SaveRequest
             }
             // 0x06 restore — suspend and let the host supply bytes (Task 14).
-            // v3: branch on success; v4+: store 2 on the resumed branch (the
-            // restored machine delivers the result via the saved state, but we
-            // also provide complete_restore_failure for the no-data case).
-            0x06 => StepResult::RestoreRequest,
+            // v3: branch on success; v4+: store result (2 = restored from save,
+            // 0 = failure). The store byte is decoded by the decoder and passed
+            // here; capture it so complete_restore_failure() can use it without
+            // reading from state.pc (which has already advanced past the store byte).
+            0x06 => {
+                if self.mem.version() >= 4 {
+                    self.pending_restore_store = store;
+                }
+                StepResult::RestoreRequest
+            }
             // 0x0C show_status (v3 only) — signal host to redraw the status line
             0x0C => {
                 self.screen.show_status_requested = true;
@@ -996,20 +1006,19 @@ impl Machine {
     /// Signal that a restore operation failed (no data / invalid data).
     ///
     /// v3: fall through (no branch taken); v4+: store 0 into the restore's
-    /// store variable.  For v4+ we use the store byte that immediately follows
-    /// the restore opcode (which is now at state.pc after the step() advance).
-    /// The simplest correct approach: for v4+, the store var is at current pc,
-    /// so we read it and advance pc by 1.
+    /// store variable.  The store variable was captured into `pending_restore_store`
+    /// when the restore opcode fired, so state.pc is already correct (pointing to
+    /// the instruction after restore) and must not be modified here.
     pub fn complete_restore_failure(&mut self) {
         if self.mem.version() <= 3 {
             // v3 restore is a branch instruction; on failure just fall through
             // (no state change needed — execution continues at state.pc which
             // is already past the restore instruction).
         } else {
-            // v4+ restore has a store byte at the current pc
-            let sv = self.mem.read_byte(self.state.pc);
-            self.state.pc += 1;
-            self.do_store(Some(sv), 0);
+            // v4+: use the store variable captured when the restore opcode fired.
+            if let Some(sv) = self.pending_restore_store.take() {
+                self.do_store(Some(sv), 0);
+            }
         }
     }
 }
@@ -2841,5 +2850,55 @@ pub(crate) mod tests {
         // Interpreter number and version.
         assert_eq!(m.mem.read_byte(0x1E), 6, "interpreter number = 6");
         assert_eq!(m.mem.read_byte(0x1F), b'A', "interpreter version = 'A'");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: v4+ restore-failure stores 0 into the correct store variable
+    // and does not corrupt state.pc.
+    //
+    // Program layout (v5 story at 0x10):
+    //   0x10: 0OP restore (0x06), store byte = 0x10 (global 0)
+    //         Encoded as short 0OP: 0xB6, then store byte 0x10
+    //         → step() decodes this, captures store=G0, sets state.pc=0x12,
+    //           then returns RestoreRequest.
+    //   0x12: quit (0xBA)
+    //
+    // After complete_restore_failure():
+    //   global(0) == 0  (failure result stored into G0)
+    //   state.pc  == 0x12 (unchanged — points to quit)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn restore_failure_stores_zero_into_correct_var_and_pc_unchanged() {
+        let mut buf = sample_story(5);
+        // restore opcode: short 0OP form = 0xB6, followed by store byte
+        buf[0x10] = 0xB6; // 0OP:0x06 restore
+        buf[0x11] = 0x10; // store → global 0 (var 0x10)
+        buf[0x12] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+
+        // Pre-condition: global 0 is 0 (default), but set it to a non-zero sentinel
+        // so we can prove it was written by complete_restore_failure.
+        let base = m.mem.global_vars() as u32;
+        m.mem.write_word(base, 0xABCD); // G0 = 0xABCD (sentinel)
+
+        // Execute the restore instruction.
+        let result = m.step();
+        assert_eq!(result, StepResult::RestoreRequest, "restore opcode must return RestoreRequest");
+
+        // After step(): pc must be 0x12 (past the store byte).
+        assert_eq!(m.state.pc, 0x12, "state.pc must point to instruction after restore (0x12)");
+
+        // Simulate restore failure (no save data).
+        m.complete_restore_failure();
+
+        // G0 must now be 0 (failure result).
+        assert_eq!(m.global(0), 0, "restore failure must store 0 into the store variable (G0)");
+
+        // state.pc must still be 0x12 — complete_restore_failure must not advance pc.
+        assert_eq!(m.state.pc, 0x12, "state.pc must not be corrupted by complete_restore_failure");
     }
 }

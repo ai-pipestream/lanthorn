@@ -119,17 +119,17 @@ fn validate_ifhd(machine: &Machine, ifhd: &[u8]) -> Result<(), ZError> {
     let mem = &machine.mem;
     // Release
     if ifhd[0] != mem.read_byte(0x02) || ifhd[1] != mem.read_byte(0x03) {
-        return Err(ZError::Truncated);
+        return Err(ZError::SaveMismatch);
     }
     // Serial
     for (i, j) in (0x12u32..0x18).enumerate() {
         if ifhd[2 + i] != mem.read_byte(j) {
-            return Err(ZError::Truncated);
+            return Err(ZError::SaveMismatch);
         }
     }
     // Checksum
     if ifhd[8] != mem.read_byte(0x1C) || ifhd[9] != mem.read_byte(0x1D) {
-        return Err(ZError::Truncated);
+        return Err(ZError::SaveMismatch);
     }
     Ok(())
 }
@@ -240,7 +240,7 @@ fn encode_stks(state: &State) -> Vec<u8> {
     write_frame_raw(
         &mut out,
         0,         // return_pc
-        0,         // flags: 0 locals, result discarded
+        0x10,      // flags: 0 locals, result discarded (bit 4 = discard, per Quetzal §4.3)
         0,         // result var
         0,         // arg bitmap
         main_eval,
@@ -560,7 +560,7 @@ mod tests {
         let mut m2 = Machine::new(mem2);
 
         let result = restore_quetzal(&mut m2, &saved);
-        assert!(result.is_err(), "should reject mismatched serial");
+        assert_eq!(result, Err(ZError::SaveMismatch), "should reject mismatched serial with SaveMismatch");
     }
 
     // -----------------------------------------------------------------------

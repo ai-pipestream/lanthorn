@@ -11,4 +11,6 @@ pub enum ZError {
     UnsupportedVersion(u8),
     /// A memory or data access fell outside the story file bounds.
     Truncated,
+    /// The save file is for a different story (release/serial/checksum mismatch).
+    SaveMismatch,
 }
