@@ -73,6 +73,16 @@ impl Memory {
         }
     }
 
+    /// Z-machine version from the header.
+    pub fn version(&self) -> u8 {
+        self.header.version
+    }
+
+    /// Abbreviation table base address from the header.
+    pub fn abbrev_table(&self) -> u16 {
+        self.header.abbrev_table
+    }
+
     /// Unpack a packed string address (ZMSD §1.2.3).
     pub fn unpack_string(&self, packed: u16) -> u32 {
         let p = packed as u32;
