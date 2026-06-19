@@ -6,5 +6,6 @@ pub mod header;
 pub mod io;
 pub mod memory;
 pub mod objects;
+pub mod quetzal;
 pub mod screen;
 pub mod text;

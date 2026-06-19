@@ -98,6 +98,16 @@ impl Memory {
         self.header.global_vars
     }
 
+    /// Static memory base address (= end of dynamic memory region).
+    pub fn static_mem_base(&self) -> u16 {
+        self.header.static_mem_base
+    }
+
+    /// Raw read access to the underlying byte slice (for Quetzal CMem XOR).
+    pub fn raw_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// Unpack a packed string address (ZMSD §1.2.3).
     pub fn unpack_string(&self, packed: u16) -> u32 {
         let p = packed as u32;

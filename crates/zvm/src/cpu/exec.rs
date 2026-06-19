@@ -69,6 +69,24 @@ pub struct Machine {
     pub screen: ScreenState,
     /// Output stream routing: streams 1/2/3/4 state.
     pub streams: StreamState,
+    /// Snapshot of the original dynamic memory (bytes 0..static_mem_base) taken
+    /// at construction time.  Used by Quetzal CMem encoding (XOR diff).
+    /// Story files are small (< 256 KB) so the memory cost is acceptable.
+    pub original_dynamic: Vec<u8>,
+    /// Pending save-request context: branch/store info from the save opcode so
+    /// complete_save() can deliver the version-appropriate result.
+    pending_save: Option<PendingSave>,
+}
+
+/// Context captured when the `save` opcode fires, needed by `complete_save`.
+struct PendingSave {
+    /// v3: the branch descriptor; v4+: the store variable number.
+    result_dest: SaveDest,
+}
+
+enum SaveDest {
+    Branch(crate::cpu::decode::Branch),
+    Store(u8),
 }
 
 impl Machine {
@@ -82,6 +100,9 @@ impl Machine {
     /// Create a new `Machine` with a custom output sink.
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
         let initial_pc = mem.initial_pc();
+        // Capture original dynamic memory for Quetzal CMem XOR diff.
+        let dyn_len = mem.static_mem_base() as usize;
+        let original_dynamic = mem.raw_bytes()[..dyn_len].to_vec();
         Machine {
             state: State::new(initial_pc),
             mem,
@@ -89,6 +110,8 @@ impl Machine {
             pending_input: None,
             screen: ScreenState::default(),
             streams: StreamState::new(),
+            original_dynamic,
+            pending_save: None,
         }
     }
 
@@ -532,9 +555,31 @@ impl Machine {
                 self.do_branch(branch, true);
                 StepResult::Continue
             }
-            // 0x05 save — stub for Task 13
-            0x05 => StepResult::SaveRequest,
-            // 0x06 restore — stub for Task 13
+            // 0x05 save — suspend and let the host serialise state (Task 14).
+            // v3: branch on success; v4+: store result (1=ok, 0=fail).
+            // PC has already advanced past the instruction (standard step() contract),
+            // so state.pc at this point is the correct resume address.
+            0x05 => {
+                let dest = if self.mem.version() <= 3 {
+                    // v3: save is a branch instruction; branch is present
+                    match branch {
+                        Some(b) => SaveDest::Branch(b),
+                        None => SaveDest::Store(0), // shouldn't happen; safe fallback
+                    }
+                } else {
+                    // v4+: save is a store instruction; store is present
+                    match store {
+                        Some(sv) => SaveDest::Store(sv),
+                        None => SaveDest::Store(0),
+                    }
+                };
+                self.pending_save = Some(PendingSave { result_dest: dest });
+                StepResult::SaveRequest
+            }
+            // 0x06 restore — suspend and let the host supply bytes (Task 14).
+            // v3: branch on success; v4+: store 2 on the resumed branch (the
+            // restored machine delivers the result via the saved state, but we
+            // also provide complete_restore_failure for the no-data case).
             0x06 => StepResult::RestoreRequest,
             // 0x0C show_status (v3 only) — signal host to redraw the status line
             0x0C => {
@@ -903,6 +948,69 @@ impl Machine {
             None => return,
         };
         self.do_store(pending.store_var, ch as u16);
+    }
+
+    // -----------------------------------------------------------------------
+    // Quetzal save / restore (Task 14)
+    // -----------------------------------------------------------------------
+
+    /// Serialise the current machine state to a Quetzal IFF byte buffer.
+    ///
+    /// The host (CLI / app) should call this after receiving `StepResult::SaveRequest`,
+    /// then write the returned bytes to a file (or wherever), then call `complete_save`.
+    pub fn save_quetzal(&self) -> Vec<u8> {
+        crate::quetzal::save_quetzal(self)
+    }
+
+    /// Deliver the result of a save operation back to the machine.
+    ///
+    /// `ok = true`  → save succeeded (v3: branch taken; v4+: store 1).
+    /// `ok = false` → save failed    (v3: fall through; v4+: store 0).
+    ///
+    /// Must be called after `StepResult::SaveRequest` before the next `step()`.
+    pub fn complete_save(&mut self, ok: bool) {
+        let pending = match self.pending_save.take() {
+            Some(p) => p,
+            None => return,
+        };
+        match pending.result_dest {
+            SaveDest::Branch(br) => self.do_branch(Some(br), ok),
+            SaveDest::Store(sv) => self.do_store(Some(sv), if ok { 1 } else { 0 }),
+        }
+    }
+
+    /// Restore machine state from a Quetzal byte buffer supplied by the host.
+    ///
+    /// On success the machine state (dynamic memory, frames, eval stack, PC) is
+    /// replaced with the saved state and `Ok(())` is returned.  On failure the
+    /// machine is untouched and an error is returned; the host should then call
+    /// `complete_restore_failure()` to set the failure result.
+    ///
+    /// On a successful restore execution continues from the saved PC — the saved
+    /// state already contains the correct resume address (the instruction after
+    /// the save opcode) so no additional store/branch is needed.
+    pub fn restore_quetzal(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
+        crate::quetzal::restore_quetzal(self, data)
+    }
+
+    /// Signal that a restore operation failed (no data / invalid data).
+    ///
+    /// v3: fall through (no branch taken); v4+: store 0 into the restore's
+    /// store variable.  For v4+ we use the store byte that immediately follows
+    /// the restore opcode (which is now at state.pc after the step() advance).
+    /// The simplest correct approach: for v4+, the store var is at current pc,
+    /// so we read it and advance pc by 1.
+    pub fn complete_restore_failure(&mut self) {
+        if self.mem.version() <= 3 {
+            // v3 restore is a branch instruction; on failure just fall through
+            // (no state change needed — execution continues at state.pc which
+            // is already past the restore instruction).
+        } else {
+            // v4+ restore has a store byte at the current pc
+            let sv = self.mem.read_byte(self.state.pc);
+            self.state.pc += 1;
+            self.do_store(Some(sv), 0);
+        }
     }
 }
 
