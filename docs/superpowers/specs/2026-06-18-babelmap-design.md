@@ -6,20 +6,26 @@
 ## 1. Overview & Scope
 
 babelmap is a TUI interactive-fiction interpreter built around **automapping**. The
-first version targets the **Z-machine** — versions **3, 5, and 8**, covering classic
-Infocom games and Inform 6 output. We write our **own Z-machine VM** in **Rust** so the
+first version targets the **Z-machine** — all text-mode versions: **3, 4, 5, 7, and 8**, covering
+classic Infocom games and Inform 6 output. The **graphical** version **6** is deliberately excluded
+(see below). We write our **own Z-machine VM** in **Rust** so the
 automapper can read the VM's object tree directly, which is what makes reliable,
 game-agnostic mapping possible.
 
 The name nods to the *Treaty of Babel* IF metadata standard; the per-game map is keyed by
 the story's **IFID** (the Babel identifier).
 
-**Explicitly in scope (v1):** Z-machine v3/v5/v8 execution, automapping with light manual
+**Explicitly in scope (v1):** Z-machine v3/v4/v5/v7/v8 execution, automapping with light manual
 correction, persistent per-game maps, a split TUI with scroll/zoom, room notes, current-room
 tracking, and image export.
 
+**Why v6 is excluded:** v6 is the *graphical* Z-machine — bitmap pictures, complex multi-window
+layout, and mouse input. It is a fundamentally different and much larger machine that does not fit a
+text TUI. This is a principled boundary, not an oversight: all *text-mode* versions are supported.
+(v1/v2 are trivial historical variants with essentially no game catalog and are also out of scope.)
+
 **Explicitly out of scope (v1), but the architecture must not preclude:** Glulx (and other
-VMs), a full freehand map editor, custom-verb direction learning.
+VMs), v6 graphical support, a full freehand map editor, custom-verb direction learning.
 
 ## 2. Architecture
 
@@ -27,7 +33,8 @@ Four well-bounded units, each understandable and testable on its own.
 
 ### `zvm` — the Z-machine core
 The only unit that understands Z-machine bytecode. Responsibilities:
-- Load a story file (v3/v5/v8); reject other versions fast with a clear message.
+- Load a story file (v3/v4/v5/v7/v8); reject other versions fast with a clear message (notably a
+  specific "v6 graphical games are not supported" message).
 - Execute opcodes; expose a screen model (windows, status line) and input requests.
 - Standard **save/restore** using the **Quetzal** format.
 - Expose a **read-only view of the object tree** and the **current player-object location**.
@@ -190,5 +197,5 @@ using the same graph + layout the TUI uses (so the export matches what is on scr
   fallback, no room overlap), edge routing (departure side matches direction; paths avoid room cells;
   routing stable across incremental additions), and re-layout stability (minimal movement on
   incremental additions).
-- **Unsupported inputs** (Z-machine v4/v6/v7, Glulx, corrupt files) fail fast with a clear message
-  rather than mis-executing.
+- **Unsupported inputs** (Z-machine v1/v2/v6, Glulx, corrupt files) fail fast with a clear message
+  rather than mis-executing — with a specific note for v6 that graphical games are not supported.
