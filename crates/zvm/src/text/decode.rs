@@ -103,7 +103,7 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
 /// Map a ZSCII value to a Rust `char` (ZMSD §3.8).
 ///
 /// ZSCII 13 → '\n'. ASCII 32–126 are identity. Everything else maps to '?'.
-fn zscii_to_char(zscii: u16) -> char {
+pub(crate) fn zscii_to_char(zscii: u16) -> char {
     match zscii {
         13 => '\n',
         32..=126 => zscii as u8 as char,
