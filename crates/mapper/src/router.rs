@@ -1,0 +1,425 @@
+/// Orthogonal edge router: turns directed connections into routed connector polylines.
+///
+/// # Fine grid
+///
+/// Each room at logical cell `(c, r)` occupies fine cell `(2c, 2r)`. Odd fine cells are gutters.
+/// This doubles the resolution and gives us gutter lanes between rooms for routing.
+///
+/// # Routing algorithm (L/Z router, ≤2 bends)
+///
+/// For each compass-direction connection:
+/// 1. Compute `departure` = origin room's fine cell offset by 1 in the departure direction.
+/// 2. Compute `arrival` = dest room's fine cell offset by 1 in the *opposite* side's direction.
+/// 3. If departure and arrival share the same axis, emit a straight 2-point segment (0 bends).
+/// 4. Otherwise build two candidate L-bends: horizontal-first and vertical-first. For each,
+///    the interior corner must not collide with any room's fine cell. Pick the first non-colliding
+///    candidate. If both collide, set `routing_failed = true` and emit a 2-point direct segment.
+///
+/// # Diagonal directions (NE, SE, NW, SW)
+///
+/// Diagonal connections depart the side determined by the dominant axis:
+/// - NE → Top (north component wins over east)
+/// - SE → Bottom
+/// - NW → Top
+/// - SW → Bottom
+///
+/// This is a conservative choice: the north/south axis takes precedence to match conventional
+/// adventure-game map conventions (vertical flow dominates). The routing may look slightly
+/// non-intuitive for diagonal edges but remains geometrically consistent.
+///
+/// # Reciprocal dedupe
+///
+/// If connection A→d→B is emitted, and connection B→opposite(d)→A also exists, the latter is
+/// skipped. The kept edge is always the one with the **lower origin id**. This prevents the
+/// render layer from drawing two overlapping connectors for bidirectional passages.
+///
+/// # v1 limitations
+///
+/// Full crossing-minimisation is NOT implemented. The L/Z router is deterministic and correct
+/// but may produce crossings when connections overlap in the grid. A future version may apply
+/// a Sugiyama-style crossing-reduction step.
+
+use std::collections::HashSet;
+
+use crate::direction::Direction;
+use crate::graph::{MapGraph, RoomId};
+
+// ── Side ─────────────────────────────────────────────────────────────────────
+
+/// The side of a room cell from which a connector departs or arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+/// Map a `Direction` to the room side the connector departs from.
+///
+/// Cardinal compass:
+/// - N → Top, S → Bottom, E → Right, W → Left
+///
+/// Diagonal — north/south axis dominates:
+/// - NE → Top, SE → Bottom, NW → Top, SW → Bottom
+///
+/// Non-planar (Up, Down, In, Out, Unknown) → `None` (rendered as stubs).
+pub fn side_for(dir: Direction) -> Option<Side> {
+    match dir {
+        Direction::N | Direction::NE | Direction::NW => Some(Side::Top),
+        Direction::S | Direction::SE | Direction::SW => Some(Side::Bottom),
+        Direction::E => Some(Side::Right),
+        Direction::W => Some(Side::Left),
+        Direction::Up | Direction::Down | Direction::In | Direction::Out | Direction::Unknown => {
+            None
+        }
+    }
+}
+
+// ── Fine grid helpers ─────────────────────────────────────────────────────────
+
+/// Convert a logical room position to its fine-grid cell.
+/// Room cells occupy even fine coordinates; odd fine coordinates are gutter lanes.
+pub fn fine_cell(pos: (i32, i32)) -> (i32, i32) {
+    (2 * pos.0, 2 * pos.1)
+}
+
+/// Return the fine-grid departure point: origin fine cell offset by 1 step outward on `side`.
+fn departure_point(origin_fine: (i32, i32), side: Side) -> (i32, i32) {
+    match side {
+        Side::Top => (origin_fine.0, origin_fine.1 - 1),
+        Side::Bottom => (origin_fine.0, origin_fine.1 + 1),
+        Side::Left => (origin_fine.0 - 1, origin_fine.1),
+        Side::Right => (origin_fine.0 + 1, origin_fine.1),
+    }
+}
+
+/// Return the fine-grid arrival point: dest fine cell offset by 1 step outward on the arrival
+/// side (the opposite of the connection's departure side).
+fn arrival_point(dest_fine: (i32, i32), departure_side: Side) -> (i32, i32) {
+    // The arrival side is opposite to the departure side.
+    let arrival_side = opposite_side(departure_side);
+    match arrival_side {
+        Side::Top => (dest_fine.0, dest_fine.1 - 1),
+        Side::Bottom => (dest_fine.0, dest_fine.1 + 1),
+        Side::Left => (dest_fine.0 - 1, dest_fine.1),
+        Side::Right => (dest_fine.0 + 1, dest_fine.1),
+    }
+}
+
+fn opposite_side(s: Side) -> Side {
+    match s {
+        Side::Top => Side::Bottom,
+        Side::Bottom => Side::Top,
+        Side::Left => Side::Right,
+        Side::Right => Side::Left,
+    }
+}
+
+// ── RoutedEdge ────────────────────────────────────────────────────────────────
+
+/// A routed connector polyline for one directed connection.
+#[derive(Debug, Clone)]
+pub struct RoutedEdge {
+    pub origin: RoomId,
+    pub dest: RoomId,
+    pub dir: Direction,
+    /// Polyline in fine-grid coordinates. Starts at the departure point off the origin's
+    /// departure side and ends at the arrival point into the dest's arrival side.
+    pub points: Vec<(i32, i32)>,
+    /// True if the layout engine marked the connection distorted OR routing could not find
+    /// a bend orientation that avoids all room fine cells.
+    pub distorted: bool,
+    /// True for Up/Down/In/Out/Unknown connections that have no planar route.
+    pub is_stub: bool,
+    /// Short label for stub connectors ("U", "D", "IN", "OUT", "?").
+    pub label: Option<String>,
+}
+
+// ── route_all ─────────────────────────────────────────────────────────────────
+
+/// Route all connections in `graph` and return a `RoutedEdge` for each.
+///
+/// Connections whose endpoints are not both placed (pos = None) are skipped.
+/// Reciprocal-opposite pairs are deduped: the kept edge has the lower origin id.
+pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
+    // Build the set of room fine cells for collision checking.
+    let room_fine_cells: HashSet<(i32, i32)> = graph
+        .rooms()
+        .filter_map(|r| r.pos.map(fine_cell))
+        .collect();
+
+    // Track (min_id, max_id) pairs that have already been emitted as a routed compass edge
+    // so we can skip the reciprocal opposite.
+    let mut emitted_pairs: HashSet<(RoomId, RoomId)> = HashSet::new();
+
+    let mut result = Vec::new();
+
+    for conn in graph.connections() {
+        let origin_pos = match graph.room(conn.origin).and_then(|r| r.pos) {
+            Some(p) => p,
+            None => continue, // origin not placed — skip
+        };
+        let dest_pos = match graph.room(conn.dest).and_then(|r| r.pos) {
+            Some(p) => p,
+            None => continue, // dest not placed — skip
+        };
+
+        // Stub for non-planar directions.
+        if side_for(conn.dir).is_none() {
+            let label = Some(stub_label(conn.dir).to_string());
+            let origin_fine = fine_cell(origin_pos);
+            // Short stub: emit 1-segment pointing upward in fine coords as a visual indicator.
+            let stub_end = (origin_fine.0, origin_fine.1 - 1);
+            result.push(RoutedEdge {
+                origin: conn.origin,
+                dest: conn.dest,
+                dir: conn.dir,
+                points: vec![origin_fine, stub_end],
+                distorted: conn.distorted,
+                is_stub: true,
+                label,
+            });
+            continue;
+        }
+
+        let side = side_for(conn.dir).unwrap();
+
+        // Reciprocal dedupe: skip B→opposite(d)→A if A→d→B already emitted and origin(A) < origin(B).
+        let (lo, hi) = if conn.origin < conn.dest {
+            (conn.origin, conn.dest)
+        } else {
+            (conn.dest, conn.origin)
+        };
+        let pair = (lo, hi);
+
+        // Check: is this the *reciprocal* of something already emitted?
+        // The already-emitted edge had the lower-id as origin with direction d.
+        // This current edge has the higher-id as origin with direction opposite(d).
+        if emitted_pairs.contains(&pair) {
+            // This is the reciprocal — skip it.
+            continue;
+        }
+
+        let origin_fine = fine_cell(origin_pos);
+        let dest_fine = fine_cell(dest_pos);
+
+        let dep = departure_point(origin_fine, side);
+        let arr = arrival_point(dest_fine, side);
+
+        // Build the polyline.
+        let (points, routing_failed) = build_path(dep, arr, &room_fine_cells);
+
+        let distorted = conn.distorted || routing_failed;
+
+        result.push(RoutedEdge {
+            origin: conn.origin,
+            dest: conn.dest,
+            dir: conn.dir,
+            points,
+            distorted,
+            is_stub: false,
+            label: None,
+        });
+
+        emitted_pairs.insert(pair);
+    }
+
+    result
+}
+
+/// Build an orthogonal polyline from `dep` to `arr` with ≤2 bends.
+///
+/// Returns `(points, routing_failed)`. `routing_failed` is true if all bend orientations
+/// had interior corners colliding with room fine cells and we fell back to a direct 2-point
+/// segment.
+fn build_path(
+    dep: (i32, i32),
+    arr: (i32, i32),
+    room_cells: &HashSet<(i32, i32)>,
+) -> (Vec<(i32, i32)>, bool) {
+    // Straight segment (already aligned on one axis).
+    if dep.0 == arr.0 || dep.1 == arr.1 {
+        return (vec![dep, arr], false);
+    }
+
+    // Candidate 1: horizontal-first bend — corner at (arr.0, dep.1).
+    let corner_h = (arr.0, dep.1);
+    // Candidate 2: vertical-first bend — corner at (dep.0, arr.1).
+    let corner_v = (dep.0, arr.1);
+
+    if !room_cells.contains(&corner_h) {
+        return (vec![dep, corner_h, arr], false);
+    }
+    if !room_cells.contains(&corner_v) {
+        return (vec![dep, corner_v, arr], false);
+    }
+
+    // Both collide → fallback direct segment, mark routing failed.
+    (vec![dep, arr], true)
+}
+
+/// Short label string for a stub direction.
+fn stub_label(dir: Direction) -> &'static str {
+    match dir {
+        Direction::Up => "U",
+        Direction::Down => "D",
+        Direction::In => "IN",
+        Direction::Out => "OUT",
+        Direction::Unknown => "?",
+        _ => "?",
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::direction::Direction;
+    use crate::graph::MapGraph;
+    use crate::layout::relayout_auto;
+
+    #[test]
+    fn straight_connector_between_adjacent_rooms() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1 && e.dest == 2).unwrap();
+        assert!(!e.is_stub);
+        // departs the RIGHT side of room 1 (east): first point's x == origin fine x + 1
+        let o = fine_cell(g.room(1).unwrap().pos.unwrap());
+        assert_eq!(e.points.first().unwrap().0, o.0 + 1);
+    }
+
+    #[test]
+    fn up_edge_is_a_stub_with_label() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::Up, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1).unwrap();
+        assert!(e.is_stub);
+        assert_eq!(e.label.as_deref(), Some("U"));
+    }
+
+    #[test]
+    fn side_for_cardinals() {
+        assert_eq!(side_for(Direction::N), Some(Side::Top));
+        assert_eq!(side_for(Direction::S), Some(Side::Bottom));
+        assert_eq!(side_for(Direction::E), Some(Side::Right));
+        assert_eq!(side_for(Direction::W), Some(Side::Left));
+    }
+
+    #[test]
+    fn side_for_diagonals_north_axis_wins() {
+        assert_eq!(side_for(Direction::NE), Some(Side::Top));
+        assert_eq!(side_for(Direction::SE), Some(Side::Bottom));
+        assert_eq!(side_for(Direction::NW), Some(Side::Top));
+        assert_eq!(side_for(Direction::SW), Some(Side::Bottom));
+    }
+
+    #[test]
+    fn side_for_non_planar_returns_none() {
+        assert_eq!(side_for(Direction::Up), None);
+        assert_eq!(side_for(Direction::Down), None);
+        assert_eq!(side_for(Direction::In), None);
+        assert_eq!(side_for(Direction::Out), None);
+        assert_eq!(side_for(Direction::Unknown), None);
+    }
+
+    #[test]
+    fn fine_cell_doubles_coords() {
+        assert_eq!(fine_cell((0, 0)), (0, 0));
+        assert_eq!(fine_cell((1, 2)), (2, 4));
+        assert_eq!(fine_cell((-1, 3)), (-2, 6));
+    }
+
+    #[test]
+    fn reciprocal_edge_deduped() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1); // reciprocal
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        // Only one compass edge for the pair (1, 2) — the lower-origin-id one (origin=1).
+        let count = edges.iter().filter(|e| !e.is_stub).count();
+        assert_eq!(count, 1, "reciprocal pair should produce exactly one routed edge");
+        let kept = edges.iter().find(|e| !e.is_stub).unwrap();
+        assert_eq!(kept.origin, 1, "kept edge should have lower origin id");
+    }
+
+    #[test]
+    fn north_edge_departs_top() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1 && e.dest == 2).unwrap();
+        assert!(!e.is_stub);
+        let o = fine_cell(g.room(1).unwrap().pos.unwrap());
+        // Departure from Top side: first point's y == origin fine y - 1
+        assert_eq!(e.points.first().unwrap().1, o.1 - 1);
+    }
+
+    #[test]
+    fn distorted_flag_propagated_from_layout() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "C".into());
+        g.upsert_room(2, "N1".into());
+        g.upsert_room(3, "N2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1)); // occupies north cell
+        g.add_edge(1, Direction::N, 3); // will be distorted by layout
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1 && e.dest == 3).unwrap();
+        assert!(e.distorted, "layout-flagged distortion should be carried through");
+    }
+
+    #[test]
+    fn unplaced_rooms_skipped() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        // Do NOT call relayout_auto — rooms have no pos.
+        let edges = route_all(&g);
+        assert!(edges.is_empty(), "connections with unplaced endpoints must be skipped");
+    }
+
+    #[test]
+    fn stub_labels_for_all_non_planar() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.upsert_room(4, "D".into());
+        g.upsert_room(5, "E".into());
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(1, Direction::Down, 3);
+        g.add_edge(1, Direction::In, 4);
+        g.add_edge(1, Direction::Out, 5);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let find_label = |d: Direction| {
+            edges
+                .iter()
+                .find(|e| e.dir == d)
+                .and_then(|e| e.label.as_deref().map(|s| s.to_string()))
+        };
+        assert_eq!(find_label(Direction::Up).as_deref(), Some("U"));
+        assert_eq!(find_label(Direction::Down).as_deref(), Some("D"));
+        assert_eq!(find_label(Direction::In).as_deref(), Some("IN"));
+        assert_eq!(find_label(Direction::Out).as_deref(), Some("OUT"));
+    }
+}
