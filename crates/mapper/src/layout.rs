@@ -28,6 +28,44 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::direction::grid_offset;
 use crate::graph::{Connection, MapGraph, RoomId};
 
+// ── pair_offset ───────────────────────────────────────────────────────────────
+
+/// Compute the combined grid offset of room `b` relative to room `a`, using the
+/// directed edges between them.
+///
+/// - Let `fwd_off` = `grid_offset(dir)` for any edge `a → dir → b` (compass only).
+/// - Let `rev_off` = `grid_offset(dir)` for any edge `b → dir → a` (compass only).
+/// - If both exist: `combined = fwd_off - rev_off`, each axis clamped to [-1, 1].
+///   (e.g. A→N→B: (0,-1); B→W→A: (-1,0); combined=(0,-1)-(-1,0)=(1,-1) → NE)
+///   (e.g. A→N→B / B→S→A: (0,-1)-(0,1)=(0,-2) → clamp (0,-1) = one step N)
+/// - If only `fwd_off`: `fwd_off`.
+/// - If only `rev_off`: `(-rev_off.0, -rev_off.1)` (b is opposite of rev from a).
+/// - If neither is a compass direction: `None`.
+pub fn pair_offset(graph: &MapGraph, a: RoomId, b: RoomId) -> Option<(i32, i32)> {
+    let fwd_off = graph
+        .connections()
+        .iter()
+        .find(|c| c.origin == a && c.dest == b)
+        .and_then(|c| grid_offset(c.dir));
+
+    let rev_off = graph
+        .connections()
+        .iter()
+        .find(|c| c.origin == b && c.dest == a)
+        .and_then(|c| grid_offset(c.dir));
+
+    match (fwd_off, rev_off) {
+        (Some(f), Some(r)) => {
+            let dx = (f.0 - r.0).clamp(-1, 1);
+            let dy = (f.1 - r.1).clamp(-1, 1);
+            Some((dx, dy))
+        }
+        (Some(f), None) => Some(f),
+        (None, Some(r)) => Some((-r.0, -r.1)),
+        (None, None) => None,
+    }
+}
+
 // ── LayoutMode ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -87,7 +125,14 @@ pub fn nearest_free_cell(occupied: &BTreeSet<(i32, i32)>, from: (i32, i32)) -> (
 /// Returns true iff the connection's geometry is satisfied by the current room positions.
 ///
 /// For a compass edge (one where `grid_offset(conn.dir)` returns `Some(delta)`):
-///   - satisfied iff both endpoints have `pos` AND `pos(dest) - pos(origin) == delta`.
+///   - Uses a sign-based check: satisfied iff each non-zero axis of `delta` agrees in SIGN
+///     with the corresponding axis of `pos(dest) - pos(origin)`, and each zero axis of `delta`
+///     is also zero in the actual offset.
+///   - Rationale: when both directed edges of a connection are known, `pair_offset` may place
+///     a room at a combined diagonal (e.g. northeast) that doesn't exactly match `grid_offset`
+///     (e.g. one step north). The sign-based check treats such placements as "satisfied" as long
+///     as the directional sense is correct (e.g. a North edge is satisfied whenever dest is
+///     *anywhere* north, i.e. `dest.y < origin.y`).
 ///
 /// For a non-compass edge (Up/Down/In/Out/Unknown, where `grid_offset` returns `None`):
 ///   - returns `true` unconditionally. These edges are stubs with no spatial offset to violate;
@@ -99,10 +144,26 @@ pub fn edge_is_satisfied(graph: &MapGraph, conn: &Connection) -> bool {
             let origin_pos = graph.room(conn.origin).and_then(|r| r.pos);
             let dest_pos = graph.room(conn.dest).and_then(|r| r.pos);
             match (origin_pos, dest_pos) {
-                (Some(op), Some(dp)) => (dp.0 - op.0, dp.1 - op.1) == delta,
+                (Some(op), Some(dp)) => {
+                    let actual = (dp.0 - op.0, dp.1 - op.1);
+                    // Sign-based: each axis of delta must agree in sign (or be zero if delta is 0).
+                    axis_sign_ok(actual.0, delta.0) && axis_sign_ok(actual.1, delta.1)
+                }
                 _ => false, // unplaced endpoint → unsatisfied
             }
         }
+    }
+}
+
+/// Returns true iff the sign of `actual` is consistent with the sign of `expected`:
+/// - `expected == 0`: actual must also be 0.
+/// - `expected > 0`: actual must be > 0.
+/// - `expected < 0`: actual must be < 0.
+fn axis_sign_ok(actual: i32, expected: i32) -> bool {
+    match expected.cmp(&0) {
+        std::cmp::Ordering::Equal => actual == 0,
+        std::cmp::Ordering::Greater => actual > 0,
+        std::cmp::Ordering::Less => actual < 0,
     }
 }
 
@@ -216,17 +277,21 @@ pub fn relayout_auto(graph: &mut MapGraph) {
                 }
                 bfs_visited.insert(neighbor_id);
 
-                let desired = if let Some(delta) = grid_offset(conn.dir) {
-                    if conn.origin == placed_id {
-                        // forward: dest = placed + delta
-                        (placed_pos.0 + delta.0, placed_pos.1 + delta.1)
-                    } else {
-                        // backward: origin = placed - delta
-                        (placed_pos.0 - delta.0, placed_pos.1 - delta.1)
+                // Use pair_offset for compass edges: when both directed edges are known, the
+                // combined offset captures the real discovered geometry (e.g. diagonal NE).
+                // For non-compass edges, fall back to nearest-free placement near placed room.
+                let desired = if conn.origin == placed_id {
+                    // forward: neighbor is placed_id's dest
+                    match pair_offset(graph, placed_id, neighbor_id) {
+                        Some(delta) => (placed_pos.0 + delta.0, placed_pos.1 + delta.1),
+                        None => placed_pos,
                     }
                 } else {
-                    // Non-compass: place near the placed room.
-                    placed_pos
+                    // backward: neighbor is placed_id's origin (placed_id is the dest)
+                    match pair_offset(graph, neighbor_id, placed_id) {
+                        Some(delta) => (placed_pos.0 - delta.0, placed_pos.1 - delta.1),
+                        None => placed_pos,
+                    }
                 };
 
                 let cell = nearest_free_cell(&occupied, desired);
@@ -476,5 +541,50 @@ mod tests {
         assert_ne!(free, (0, 0));
         let dist = (free.0.abs()).max(free.1.abs());
         assert_eq!(dist, 1, "nearest free cell should be at radius 1");
+    }
+
+    #[test]
+    fn combined_offset_places_northeast() {
+        // A(1) →N→ B(2) and B(2) →W→ A(1).
+        // grid_offset(N)=(0,-1), grid_offset(W)=(-1,0).
+        // combined = (0,-1) - (-1,0) = (1,-1) → clamp (1,-1) = northeast.
+        // So B should land at A.pos + (1,-1).
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::W, 1);
+        relayout_auto(&mut g);
+        let pa = g.room(1).unwrap().pos.unwrap();
+        let pb = g.room(2).unwrap().pos.unwrap();
+        assert_eq!(
+            (pb.0 - pa.0, pb.1 - pa.1),
+            (1, -1),
+            "B should be northeast (1,-1) of A when A→N→B and B→W→A"
+        );
+        // No overlap.
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "rooms must not overlap");
+    }
+
+    #[test]
+    fn reciprocal_places_one_step_north() {
+        // A(1) →N→ B(2) and B(2) →S→ A(1): true reciprocal-opposite.
+        // grid_offset(N)=(0,-1), grid_offset(S)=(0,1).
+        // combined = (0,-1) - (0,1) = (0,-2) → clamp (0,-1) = one step north.
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        relayout_auto(&mut g);
+        let pa = g.room(1).unwrap().pos.unwrap();
+        let pb = g.room(2).unwrap().pos.unwrap();
+        assert_eq!(
+            (pb.0 - pa.0, pb.1 - pa.1),
+            (0, -1),
+            "B should be exactly one step north (0,-1) of A for reciprocal A→N→B / B→S→A"
+        );
     }
 }

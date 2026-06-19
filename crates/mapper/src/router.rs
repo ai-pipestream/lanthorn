@@ -137,6 +137,18 @@ pub struct RoutedEdge {
     pub is_stub: bool,
     /// Short label for stub connectors ("U", "D", "IN", "OUT", "?").
     pub label: Option<String>,
+    /// The side of the destination room this connection touches, if known.
+    ///
+    /// This is discovered from a reverse edge `(dest, dir2, origin)`: if such an edge exists
+    /// in the graph, `arrival_dir = Some(dir2)`. This is the direction the player travels
+    /// when leaving `dest` back toward `origin`, which tells us which side of `dest` the
+    /// connection touches.
+    ///
+    /// `None` means no reverse edge has been observed — the arrival side is undiscovered.
+    /// We do NOT assume `opposite(self.dir)` because connections are not assumed reciprocal.
+    ///
+    /// Stubs (is_stub = true) always have `arrival_dir = None`.
+    pub arrival_dir: Option<Direction>,
 }
 
 // ── route_all ─────────────────────────────────────────────────────────────────
@@ -183,6 +195,7 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
                 distorted: conn.distorted,
                 is_stub: true,
                 label,
+                arrival_dir: None,
             });
             continue;
         }
@@ -207,6 +220,14 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
 
         let distorted = conn.distorted || routing_failed;
 
+        // Discover arrival_dir from the reverse edge (dest → ? → origin), if it exists.
+        // We do NOT assume opposite(dir) because connections are not assumed reciprocal.
+        let arrival_dir = graph
+            .connections()
+            .iter()
+            .find(|c| c.origin == conn.dest && c.dest == conn.origin)
+            .map(|c| c.dir);
+
         result.push(RoutedEdge {
             origin: conn.origin,
             dest: conn.dest,
@@ -215,6 +236,7 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
             distorted,
             is_stub: false,
             label: None,
+            arrival_dir,
         });
 
         emitted.insert((conn.origin, conn.dir, conn.dest));
@@ -491,5 +513,71 @@ mod tests {
         // Departure from Top: y decreases by 1, x is unchanged.
         assert_eq!(e.points.first().unwrap().1, o.1 - 1, "y should be origin_fine.y - 1");
         assert_eq!(e.points.first().unwrap().0, o.0, "x should equal origin_fine.x for Top departure");
+    }
+
+    #[test]
+    fn arrival_dir_known_when_reverse_exists() {
+        // A(1) →N→ B(2) and B(2) →W→ A(1): non-reciprocal pair.
+        // The A→N→B edge should have arrival_dir = Some(W) (the discovered side of B),
+        // NOT Some(S) which would be the assumed opposite of N.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::W, 1);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges
+            .iter()
+            .find(|e| e.origin == 1 && e.dir == Direction::N)
+            .expect("A→N→B edge must be present");
+        assert_eq!(
+            e.arrival_dir,
+            Some(Direction::W),
+            "arrival_dir for A→N→B should be Some(W) (the discovered reverse direction), not Some(S)"
+        );
+    }
+
+    #[test]
+    fn arrival_dir_none_when_no_reverse() {
+        // Only A(1) →N→ B(2), no reverse edge.
+        // The arrival side of B is undiscovered, so arrival_dir must be None.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges
+            .iter()
+            .find(|e| e.origin == 1 && e.dir == Direction::N)
+            .expect("A→N→B edge must be present");
+        assert_eq!(
+            e.arrival_dir,
+            None,
+            "arrival_dir should be None when no reverse edge exists"
+        );
+    }
+
+    #[test]
+    fn arrival_dir_reciprocal_opposite() {
+        // A(1) →N→ B(2) and B(2) →S→ A(1): true reciprocal-opposite pair.
+        // The pair is deduped to one edge. The surviving edge has arrival_dir = Some(S).
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        // Only one non-stub edge should exist (deduped).
+        let non_stubs: Vec<_> = edges.iter().filter(|e| !e.is_stub).collect();
+        assert_eq!(non_stubs.len(), 1, "reciprocal-opposite pair should be deduped to one edge");
+        let e = non_stubs[0];
+        assert_eq!(
+            e.arrival_dir,
+            Some(Direction::S),
+            "arrival_dir for the surviving A→N→B edge should be Some(S) (the discovered reverse)"
+        );
     }
 }

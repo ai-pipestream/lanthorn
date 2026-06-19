@@ -818,6 +818,7 @@ mod tests {
             distorted: false,
             is_stub: false,
             label: None,
+            arrival_dir: None,
         };
         let scroll = (0, 0);
         let zoom = Zoom::Boxes;
