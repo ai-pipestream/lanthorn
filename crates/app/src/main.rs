@@ -82,14 +82,24 @@ fn draw_frame(
                 render_map(&rm, state, full, buf);
             }
             Layout::Split => {
-                // Split 50/50 horizontally (transcript left, map right).
+                // Split 50/1/50 horizontally: transcript | divider | map.
                 let chunks = RatatuiLayout::default()
                     .direction(LayoutDir::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .constraints([
+                        Constraint::Percentage(50),
+                        Constraint::Length(1),
+                        Constraint::Percentage(50),
+                    ])
                     .split(full);
                 let transcript_area = chunks[0];
-                map_area = chunks[1];
+                let divider_area = chunks[1];
+                map_area = chunks[2];
                 render_transcript(&session.machine, state, transcript_area, buf);
+                // Draw a vertical line of │ down the divider column.
+                let divider_style = ratatui::style::Style::default();
+                for y in divider_area.y..divider_area.bottom() {
+                    app::render::draw_char_clipped(buf, divider_area.x, y, '│', divider_style, divider_area);
+                }
                 render_map(&rm, state, map_area, buf);
             }
         }

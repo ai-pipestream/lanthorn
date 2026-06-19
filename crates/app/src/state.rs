@@ -45,6 +45,17 @@ pub enum Zoom {
     Overview,
 }
 
+impl Zoom {
+    /// Returns (step_w, step_h): the terminal cell stride per map-grid cell.
+    pub fn steps(self) -> (i32, i32) {
+        match self {
+            Zoom::Boxes => (8, 4),
+            Zoom::Compact => (4, 2),
+            Zoom::Overview => (1, 1),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -124,14 +135,14 @@ impl AppState {
 
     /// Set scroll so that `cell` is centered in a pane of size `pane_w` × `pane_h`.
     ///
-    /// Formula: scroll = cell - floor(pane / 2)
-    /// i.e. scroll.x = cell.0 - pane_w/2, scroll.y = cell.1 - pane_h/2
-    /// This places `cell` at the center of the visible pane.
+    /// `pane_w` and `pane_h` are in terminal characters; this method converts
+    /// them to map-grid cells using the current zoom step before centering,
+    /// so that `scroll` stays in cell units (matching `cell_to_screen`).
     pub fn recenter_on(&mut self, cell: (i32, i32), pane_w: u16, pane_h: u16) {
-        self.scroll = (
-            cell.0 - (pane_w / 2) as i32,
-            cell.1 - (pane_h / 2) as i32,
-        );
+        let (sw, sh) = self.zoom.steps();
+        let cells_w = (pane_w as i32 / sw).max(1);
+        let cells_h = (pane_h as i32 / sh).max(1);
+        self.scroll = (cell.0 - cells_w / 2, cell.1 - cells_h / 2);
     }
 
     /// Split `text` on `'\n'` and append each line to the transcript.
@@ -207,12 +218,12 @@ mod tests {
 
     #[test]
     fn recenter_on_centers_cell() {
-        let mut s = AppState::default();
-        // Centering cell (5, 5) in a 20×10 pane:
-        // scroll.x = 5 - 20/2 = 5 - 10 = -5
-        // scroll.y = 5 - 10/2 = 5 - 5 = 0
+        let mut s = AppState::default(); // Boxes zoom (step 8×4)
+        // Centering cell (5, 5) in a 20×10 character pane:
+        // cells_w = 20 / 8 = 2, cells_h = 10 / 4 = 2
+        // scroll = (5 - 2/2, 5 - 2/2) = (4, 4)
         s.recenter_on((5, 5), 20, 10);
-        assert_eq!(s.scroll, (-5, 0));
+        assert_eq!(s.scroll, (4, 4));
     }
 
     #[test]

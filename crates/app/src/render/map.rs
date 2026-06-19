@@ -36,11 +36,7 @@ use crate::state::{AppState, Zoom};
 
 /// Returns (step_w, step_h) for the given zoom level.
 fn zoom_steps(zoom: Zoom) -> (i32, i32) {
-    match zoom {
-        Zoom::Boxes => (8, 4),
-        Zoom::Compact => (4, 2),
-        Zoom::Overview => (1, 1),
-    }
+    zoom.steps()
 }
 
 // ── cell_to_screen ────────────────────────────────────────────────────────────
@@ -502,6 +498,29 @@ mod tests {
         // Notes marker '*' should appear somewhere in the buffer.
         let has_notes_marker = buf.content.iter().any(|c| c.symbol() == "*");
         assert!(has_notes_marker, "notes marker '*' should be drawn for a room with notes");
+    }
+
+    #[test]
+    fn recenter_keeps_cell_on_screen() {
+        // After recenter_on(cell, pane_w, pane_h), cell_to_screen must return
+        // Some((x,y)) that lies inside the area — proving the map is not blank.
+        let area = Rect::new(40, 0, 40, 24); // right-half pane, x offset 40
+        let cell = (0_i32, 0_i32);
+
+        let mut state = AppState::default(); // Boxes zoom
+        state.recenter_on(cell, area.width, area.height);
+
+        let result = cell_to_screen(cell, state.zoom, state.scroll, area);
+        assert!(
+            result.is_some(),
+            "cell_to_screen should return Some after recenter_on; scroll={:?}",
+            state.scroll
+        );
+        let (sx, sy) = result.unwrap();
+        assert!(
+            sx >= area.x && sx < area.right() && sy >= area.y && sy < area.bottom(),
+            "screen position ({sx},{sy}) should be inside area {area:?}"
+        );
     }
 
     #[test]
