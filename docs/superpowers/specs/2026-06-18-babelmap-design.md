@@ -1,0 +1,148 @@
+# babelmap — Design
+
+**Date:** 2026-06-18
+**Status:** Approved design, pre-implementation
+
+## 1. Overview & Scope
+
+babelmap is a TUI interactive-fiction interpreter built around **automapping**. The
+first version targets the **Z-machine** — versions **3, 5, and 8**, covering classic
+Infocom games and Inform 6 output. We write our **own Z-machine VM** in **Rust** so the
+automapper can read the VM's object tree directly, which is what makes reliable,
+game-agnostic mapping possible.
+
+The name nods to the *Treaty of Babel* IF metadata standard; the per-game map is keyed by
+the story's **IFID** (the Babel identifier).
+
+**Explicitly in scope (v1):** Z-machine v3/v5/v8 execution, automapping with light manual
+correction, persistent per-game maps, a split TUI with scroll/zoom, room notes, current-room
+tracking, and image export.
+
+**Explicitly out of scope (v1), but the architecture must not preclude:** Glulx (and other
+VMs), a full freehand map editor, custom-verb direction learning.
+
+## 2. Architecture
+
+Four well-bounded units, each understandable and testable on its own.
+
+### `zvm` — the Z-machine core
+The only unit that understands Z-machine bytecode. Responsibilities:
+- Load a story file (v3/v5/v8); reject other versions fast with a clear message.
+- Execute opcodes; expose a screen model (windows, status line) and input requests.
+- Standard **save/restore** using the **Quetzal** format.
+- Expose a **read-only view of the object tree** and the **current player-object location**.
+
+Boundary: emits two kinds of signal the mapper cares about — screen/transcript output, and
+"player's room object is now X". Knows nothing about rendering or map layout.
+
+### `mapper` — the automapper
+VM-agnostic. Consumes: (a) "player's room object changed to X" and (b) "last command was
+direction D" (parsed from input). Maintains the **map graph** and **grid layout**. Knows
+nothing about bytecode or rendering. Unit-testable with synthetic event streams.
+
+### `tui` — the terminal UI (ratatui)
+Split view: transcript pane + map pane. Collapsible map (→ full-screen transcript) and
+expandable map (→ full-screen, scrollable). Renders the map graph; routes keys/commands.
+Owns view state (zoom level, scroll position, current-room highlight).
+
+### `app` — orchestration & persistence
+Wires the three units together, owns the run loop, and handles per-game map persistence,
+game saves, and image export.
+
+### Data flow per turn
+1. User types a line → `app` notes whether it is a recognized movement direction.
+2. `zvm` runs the turn → reports new player location + screen output.
+3. `mapper` adds/updates the room and, if a direction was recognized, the directed edge.
+4. `tui` re-renders transcript + map.
+
+The clean `zvm` ↔ `mapper` ↔ `tui` boundaries are what allow a second VM (Glulx) to be added
+later as an additive step rather than a rewrite: a Glulx core would emit the same location and
+screen signals the mapper and UI already consume.
+
+## 3. Map Data Model
+
+### Rooms
+- **Identity = Z-machine object number** (stable within a game), read from the object tree —
+  *not* the room name. This is how same-named rooms are differentiated: two "Forest" rooms with
+  different object numbers are distinct nodes; a genuinely revisited room (same object number) is
+  the same node even when its description text varies (darkness, weather).
+- **Label** = the object's short name, with a player-editable override.
+- **Disambiguation:** when labels collide on screen, render distinct suffixes (e.g. `Forest`,
+  `Forest·2`), with the object number visible on inspect.
+- **Notes:** a first-class, freeform, per-room text field (e.g. "blue key here", "troll blocks
+  west until fed"). Persisted; shown on inspect; a small marker on the room indicates notes exist.
+- **Grid position:** assigned by layout (see below); player-nudgeable.
+
+### Connections
+- A connection is a **directed edge** keyed by `(origin room, direction)` → destination room.
+- **No symmetry is assumed anywhere.** Exits in IF are frequently non-reciprocal (enter a room
+  going *north*, leave it going *west*; or one-way passages).
+- The renderer draws each arrow from the **origin room's** corresponding side. A reciprocal-opposite
+  pair (A→north→B and B→south→A) may collapse to a single clean line; a non-reciprocal pair
+  (A→north→B, B→west→A) renders as two separate arrows leaving from different sides.
+- **Unknown-direction edges:** a room change after a non-compass command (or a game-initiated
+  teleport) still creates the destination room, joined by an "unknown direction" edge the player
+  can relabel.
+
+### Layout
+- Trizbort-style grid. Compass directions map to grid offsets.
+- `up`/`down`/`in`/`out` render as labeled stubs/special connectors rather than grid moves.
+- **Collisions** (two rooms wanting the same cell) are detected; the new room is placed in the
+  nearest free cell and its edge is bent to reach it.
+
+## 4. Direction Capture
+
+Recognize `n/s/e/w/ne/nw/se/sw/u/d/in/out` and their long forms.
+- Room change after a recognized direction → that directed edge.
+- Room change after anything else, or a game-initiated teleport → destination room is still added,
+  joined by an "unknown direction" edge.
+- **Rooms are never lost.** Weird transitions are represented honestly rather than guessed at.
+
+Custom-verb direction learning (remembering that `climb tree` meant "up" for this game) is a
+deliberate future enhancement, not in v1.
+
+## 5. Persistence & Light Correction
+
+- Auto-build is the default behavior.
+- **Persistence:** maps are saved per story file, keyed by **IFID**, and reload automatically when
+  the same story is opened. Persisted data: rooms (identity, label override, notes, grid position)
+  and connections (including relabeled directions). View state (zoom, scroll) is **not** persisted.
+- **Manual corrections (the only editing in v1):**
+  - rename a room (label override),
+  - nudge a room to a free cell,
+  - delete a bad connection,
+  - relabel an "unknown direction" edge,
+  - edit a room's notes.
+- No room-adding or freehand drawing — that is a possible future full editor, out of scope for v1.
+
+## 6. TUI Behavior
+
+- **Layout:** split view (transcript + map) by default; map collapsible to full-screen transcript;
+  map expandable to full-screen.
+- **Current room:** always tracked; rendered with a clear "you are here" highlight (distinct
+  border/color). Full-screen map can recenter on it.
+- **Navigation (both side-pane and full-screen):** pan the viewport (arrows / `hjkl`) and zoom.
+  Zoom is a set of discrete levels suited to a text grid:
+  - closest: full room boxes with labels and connectors,
+  - mid: smaller boxes with abbreviated labels,
+  - overview: a single glyph per room for whole-map orientation.
+  A key recenters on the current room. Zoom and scroll are view state, not persisted.
+
+## 7. Image Export
+
+A **headless map renderer**, separate from the TUI's text rendering, draws the map graph to a file
+using the same graph + layout the TUI uses (so the export matches what is on screen).
+- Default format: **SVG** (vector, crisp at any zoom, minimal dependencies).
+- Optional: **PNG** (rasterized from the same render).
+- Triggered by a key in the UI and/or a CLI flag.
+
+## 8. Error Handling & Testing
+
+- **VM correctness** is verified against the standard Z-machine regression suites (e.g.
+  **CZECH** / **Praxix**) run as automated tests — the objective oracle for "is the interpreter
+  right".
+- **Mapper** is unit-tested with synthetic location/direction event streams (no VM needed),
+  covering: non-reciprocal exits, grid collisions, unknown-direction edges, same-name/different-object
+  rooms, and revisited-room recognition.
+- **Unsupported inputs** (Z-machine v4/v6/v7, Glulx, corrupt files) fail fast with a clear message
+  rather than mis-executing.
