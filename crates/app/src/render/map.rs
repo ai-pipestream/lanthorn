@@ -364,31 +364,7 @@ fn draw_segment(
 
 // ── Clipped drawing helpers ───────────────────────────────────────────────────
 
-/// Write a single char into the buffer, clipped to `area`.
-fn draw_char_clipped(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style, area: Rect) {
-    if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
-        return;
-    }
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        let mut s = [0u8; 4];
-        cell.set_symbol(ch.encode_utf8(&mut s)).set_style(style);
-    }
-}
-
-/// Write a string into the buffer starting at (x, y), clipped to `area` width.
-fn draw_str_clipped(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style, area: Rect) {
-    if y < area.y || y >= area.bottom() {
-        return;
-    }
-    let mut cx = x;
-    for ch in s.chars() {
-        if cx >= area.right() {
-            break;
-        }
-        draw_char_clipped(buf, cx, y, ch, style, area);
-        cx += 1;
-    }
-}
+use super::{draw_char_clipped, draw_str_clipped};
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
