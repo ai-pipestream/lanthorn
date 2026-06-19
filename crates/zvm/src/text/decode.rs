@@ -6,17 +6,7 @@
 // temporarily switch to A1/A2 for the next character only.
 
 use crate::memory::Memory;
-
-// Default alphabet tables (ZMSD §3.5.3).
-// Each table covers Z-chars 6–31 (26 entries; index = Z-char − 6).
-//
-// A0: lowercase a–z
-const A0: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
-// A1: uppercase A–Z
-const A1: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-// A2: Z-char 6 = 10-bit ZSCII escape (0x00 placeholder, handled specially)
-//     Z-char 7 = newline, Z-chars 8–31 = space, 0–9, punctuation
-const A2: &[u8; 26] = b"\x00\n 0123456789.,!?_#'\"/\\-:(";
+use super::{A0, A1, A2};
 
 /// Decode a Z-encoded string starting at `addr`.
 ///

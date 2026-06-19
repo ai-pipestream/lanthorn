@@ -8,11 +8,7 @@
 // Scope: letters (A0) + A2 characters (shift-5 then A2 position).
 // 10-bit ZSCII escapes are not implemented (real dictionary words are letters).
 
-// A0 alphabet: lowercase a–z, Z-chars 6–31.
-const A0: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
-// A2 alphabet (excluding index 0 = escape and index 1 = newline): Z-chars 8–31.
-// index 2 = space, indices 3–12 = '0'–'9', indices 13+ = punctuation.
-const A2: &[u8; 26] = b"\x00\n 0123456789.,!?_#'\"/\\-:(";
+use super::{A0, A2};
 
 /// Encode `text` to its dictionary-resolution Z-character form.
 ///
@@ -139,6 +135,7 @@ mod tests {
         // A word longer than 6 Z-chars for v3 must still produce 4 bytes.
         let enc = encode_word("abcdefghij", 3);
         assert_eq!(enc.len(), 4);
+        assert_eq!(encode_word("abcdefghij", 3), encode_word("abcdef", 3));
     }
 
     #[test]
@@ -146,7 +143,7 @@ mod tests {
         // A very short word pads to the right length.
         let enc = encode_word("a", 3);
         assert_eq!(enc.len(), 4);
-        // Last byte must have high bit set (terminator).
-        assert_eq!(enc[3] & 0x80, 0x80);
+        // High byte of final word has the terminator bit set.
+        assert_eq!(enc[2] & 0x80, 0x80);
     }
 }
