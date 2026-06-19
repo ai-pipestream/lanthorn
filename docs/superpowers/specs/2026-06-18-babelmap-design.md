@@ -88,7 +88,33 @@ screen signals the mapper and UI already consume.
 - Trizbort-style grid. Compass directions map to grid offsets.
 - `up`/`down`/`in`/`out` render as labeled stubs/special connectors rather than grid moves.
 - **Collisions** (two rooms wanting the same cell) are detected; the new room is placed in the
-  nearest free cell and its edge is bent to reach it.
+  nearest free cell and its edge is bent to reach it. Rooms **never** overlap.
+
+### Layout modes
+Layout is a per-game **mode**, persisted with the map.
+
+- **Auto (default).** A constraint-based layout engine owns all room positions. Each directed
+  edge is a relative-position constraint (e.g. "B is north of A"). As play reveals more
+  constraints, the engine refines placements to (a) satisfy as many directional constraints as
+  possible and (b) minimize overlapping/crossing arrows.
+  - **Stability:** re-layout prefers **minimal movement** — existing rooms stay put unless a new
+    constraint genuinely forces a move, so the map does not "jump" every turn.
+- **Manual.** Auto is disabled; positions are frozen and the player nudges rooms freely.
+  Switching Auto→Manual seeds manual positions from the current auto layout (start from what is on
+  screen, not a reshuffle).
+
+### When a clean layout is impossible
+IF geography is frequently non-Euclidean (e.g. `north` four times returning to start; A north of B
+*and* B north of A; tangles unrepresentable on a 2D grid without a crossing). The engine handles
+this without ever forcing rooms to overlap:
+- It relaxes the **least-confident** constraints and marks the affected connection as **distorted**
+  — drawn with a labeled/broken connector rather than a clean directional line, so it is visually
+  honest that the exit exists but does not fit the grid cleanly.
+- Unavoidable arrow **crossings** are allowed as a last resort, and drawn so they read as crossings
+  rather than junctions.
+
+Per-room pinning while remaining in Auto (fix one room, let the engine place the rest) is a future
+enhancement, out of scope for v1 — the v1 mode model is a clean Auto/Manual binary.
 
 ## 4. Direction Capture
 
@@ -105,8 +131,10 @@ deliberate future enhancement, not in v1.
 
 - Auto-build is the default behavior.
 - **Persistence:** maps are saved per story file, keyed by **IFID**, and reload automatically when
-  the same story is opened. Persisted data: rooms (identity, label override, notes, grid position)
-  and connections (including relabeled directions). View state (zoom, scroll) is **not** persisted.
+  the same story is opened. Persisted data: the **layout mode** (Auto/Manual), rooms (identity,
+  label override, notes), connections (including relabeled directions), and room positions — in
+  Manual mode positions are authoritative; in Auto mode they are derived from the constraint graph
+  and may be cached for fast reload. View state (zoom, scroll) is **not** persisted.
 - **Manual corrections (the only editing in v1):**
   - rename a room (label override),
   - nudge a room to a free cell,
@@ -143,6 +171,7 @@ using the same graph + layout the TUI uses (so the export matches what is on scr
   right".
 - **Mapper** is unit-tested with synthetic location/direction event streams (no VM needed),
   covering: non-reciprocal exits, grid collisions, unknown-direction edges, same-name/different-object
-  rooms, and revisited-room recognition.
+  rooms, revisited-room recognition, non-Euclidean/contradictory-constraint layouts (distorted-edge
+  fallback, no room overlap), and re-layout stability (minimal movement on incremental additions).
 - **Unsupported inputs** (Z-machine v4/v6/v7, Glulx, corrupt files) fail fast with a clear message
   rather than mis-executing.
