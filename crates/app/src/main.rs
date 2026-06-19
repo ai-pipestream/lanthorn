@@ -1,3 +1,4 @@
+mod export_svg;
 mod ifid;
 mod input;
 mod persist_files;
