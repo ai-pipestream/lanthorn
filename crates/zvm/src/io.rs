@@ -12,6 +12,8 @@ use std::any::Any;
 pub trait Output: Any {
     fn print(&mut self, s: &str);
     fn as_any(&self) -> &dyn Any;
+    /// Mutable downcast support — required to drain sink state (e.g. `CaptureSink::take_text`).
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// Simple accumulating sink for tests and headless use.
@@ -36,6 +38,9 @@ impl Output for BufferOutput {
         self.buf.push_str(s);
     }
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
