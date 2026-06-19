@@ -195,14 +195,14 @@ impl Machine {
         store: Option<u8>,
         branch: Option<Branch>,
     ) -> StepResult {
-        let a = ops.get(0).copied().unwrap_or(0);
+        let a = ops.first().copied().unwrap_or(0);
         let b = ops.get(1).copied().unwrap_or(0);
 
         match opcode {
             // 0x01 je — branch if a equals ANY of ops[1..]
             // Variable form allows up to 4 operands (ZMSD §14).
             0x01 => {
-                let cond = ops.len() > 1 && ops[1..].iter().any(|&x| x == a);
+                let cond = ops.len() > 1 && ops[1..].contains(&a);
                 self.do_branch(branch, cond);
                 StepResult::Continue
             }
@@ -384,7 +384,7 @@ impl Machine {
         store: Option<u8>,
         branch: Option<Branch>,
     ) -> StepResult {
-        let a = ops.get(0).copied().unwrap_or(0);
+        let a = ops.first().copied().unwrap_or(0);
 
         match opcode {
             // 0x00 jz — branch if a == 0
@@ -633,14 +633,14 @@ impl Machine {
         match opcode {
             // 0x00 call / call_vs — call with up to 3 args, store result
             0x00 => {
-                let packed = ops.get(0).copied().unwrap_or(0);
+                let packed = ops.first().copied().unwrap_or(0);
                 let args = if ops.len() > 1 { &ops[1..] } else { &[][..] };
                 call_routine(&mut self.state, &mut self.mem, packed, args, store);
                 StepResult::Continue
             }
             // 0x01 storew — store word: mem[ops[0] + 2*ops[1]] = ops[2]
             0x01 => {
-                let array = ops.get(0).copied().unwrap_or(0) as u32;
+                let array = ops.first().copied().unwrap_or(0) as u32;
                 let index = ops.get(1).copied().unwrap_or(0) as u32;
                 let val   = ops.get(2).copied().unwrap_or(0);
                 self.mem.write_word(array.wrapping_add(2u32.wrapping_mul(index)), val);
@@ -648,7 +648,7 @@ impl Machine {
             }
             // 0x02 storeb — store byte: mem[ops[0] + ops[1]] = ops[2] & 0xFF
             0x02 => {
-                let array = ops.get(0).copied().unwrap_or(0) as u32;
+                let array = ops.first().copied().unwrap_or(0) as u32;
                 let index = ops.get(1).copied().unwrap_or(0) as u32;
                 let val   = (ops.get(2).copied().unwrap_or(0) & 0xFF) as u8;
                 self.mem.write_byte(array.wrapping_add(index), val);
@@ -656,7 +656,7 @@ impl Machine {
             }
             // 0x03 put_prop — set property ops[1] of object ops[0] to value ops[2]
             0x03 => {
-                let obj  = ops.get(0).copied().unwrap_or(0);
+                let obj  = ops.first().copied().unwrap_or(0);
                 let prop = ops.get(1).copied().unwrap_or(0) as u8;
                 let val  = ops.get(2).copied().unwrap_or(0);
                 objects::put_prop(&mut self.mem, obj, prop, val);
@@ -664,7 +664,7 @@ impl Machine {
             }
             // 0x05 print_char — print a single ZSCII character
             0x05 => {
-                let zscii = ops.get(0).copied().unwrap_or(0);
+                let zscii = ops.first().copied().unwrap_or(0);
                 let ch = zscii_to_char(zscii);
                 let mut buf = [0u8; 4];
                 let s = ch.encode_utf8(&mut buf);
@@ -673,7 +673,7 @@ impl Machine {
             }
             // 0x06 print_num — print operand as signed decimal
             0x06 => {
-                let val = ops.get(0).copied().unwrap_or(0) as i16;
+                let val = ops.first().copied().unwrap_or(0) as i16;
                 let s = format!("{}", val);
                 self.print_text(&s);
                 StepResult::Continue
@@ -683,7 +683,7 @@ impl Machine {
             //   range == 0 → reseed from entropy (we use a fixed step; return 0)
             //   range < 0 → seed with |range| (predictable mode); return 0
             0x07 => {
-                let range = ops.get(0).copied().unwrap_or(0) as i16;
+                let range = ops.first().copied().unwrap_or(0) as i16;
                 let result = if range > 0 {
                     // xorshift32 step
                     let mut s = self.rng_state;
@@ -692,7 +692,7 @@ impl Machine {
                     s ^= s << 5;
                     self.rng_state = s;
                     // Map to 1..=range
-                    ((s as u32) % (range as u32) + 1) as u16
+                    (s % (range as u32) + 1) as u16
                 } else if range < 0 {
                     // Predictable seed: use |range| as the new state (nonzero guard)
                     let seed = (-range) as u32;
@@ -709,7 +709,7 @@ impl Machine {
             }
             // 0x08 push — push value onto eval stack
             0x08 => {
-                let val = ops.get(0).copied().unwrap_or(0);
+                let val = ops.first().copied().unwrap_or(0);
                 write_var(&mut self.state, &mut self.mem, 0, val); // var 0 = push
                 StepResult::Continue
             }
@@ -720,7 +720,7 @@ impl Machine {
             // stack [a, b, TOP] → pop TOP → stack [a, b], then overwrite b
             // → stack [a, TOP]. Net: removes the second-from-top element.
             0x09 => {
-                let var = ops.get(0).copied().unwrap_or(0) as u8;
+                let var = ops.first().copied().unwrap_or(0) as u8;
                 let val = read_var(&mut self.state, &self.mem, 0); // pop stack
                 if var == 0 {
                     // Destination is sp: overwrite new top (not push-back)
@@ -732,7 +732,7 @@ impl Machine {
             }
             // 0x0C call_vs2 — like call_vs but with 2 type bytes, stores result
             0x0C => {
-                let packed = ops.get(0).copied().unwrap_or(0);
+                let packed = ops.first().copied().unwrap_or(0);
                 let args = if ops.len() > 1 { &ops[1..] } else { &[][..] };
                 call_routine(&mut self.state, &mut self.mem, packed, args, store);
                 StepResult::Continue
@@ -741,7 +741,7 @@ impl Machine {
             // v3: no store var. v4+: has a store var (terminating character).
             // Operands: text_buf, parse_buf (+ optional time/routine in v4+ — ignored).
             0x04 => {
-                let text_buf = ops.get(0).copied().unwrap_or(0) as u32;
+                let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
                 self.pending_input = Some(PendingInput { store_var: store, text_buf, parse_buf });
                 StepResult::NeedLine { text_buf, parse_buf }
@@ -754,27 +754,27 @@ impl Machine {
             }
             // 0x18 not (VAR form, v5+) — bitwise complement
             0x18 => {
-                let val = ops.get(0).copied().unwrap_or(0);
+                let val = ops.first().copied().unwrap_or(0);
                 self.do_store(store, !val);
                 StepResult::Continue
             }
             // 0x19 call_vn — call with up to 3 args, discard result (v5+)
             0x19 => {
-                let packed = ops.get(0).copied().unwrap_or(0);
+                let packed = ops.first().copied().unwrap_or(0);
                 let args = if ops.len() > 1 { &ops[1..] } else { &[][..] };
                 call_routine(&mut self.state, &mut self.mem, packed, args, None);
                 StepResult::Continue
             }
             // 0x1A call_vn2 — like call_vn but with 2 type bytes
             0x1A => {
-                let packed = ops.get(0).copied().unwrap_or(0);
+                let packed = ops.first().copied().unwrap_or(0);
                 let args = if ops.len() > 1 { &ops[1..] } else { &[][..] };
                 call_routine(&mut self.state, &mut self.mem, packed, args, None);
                 StepResult::Continue
             }
             // 0x1F check_arg_count (v5+) — branch if arg_count >= ops[0]
             0x1F => {
-                let n = ops.get(0).copied().unwrap_or(0);
+                let n = ops.first().copied().unwrap_or(0);
                 let arg_count = self.state.frames.last().map(|f| f.arg_count as u16).unwrap_or(0);
                 self.do_branch(branch, arg_count >= n);
                 StepResult::Continue
@@ -783,13 +783,13 @@ impl Machine {
 
             // 0x0A split_window — set upper window to N rows (v3+)
             0x0A => {
-                let rows = ops.get(0).copied().unwrap_or(0);
+                let rows = ops.first().copied().unwrap_or(0);
                 self.screen.upper_window_rows = rows;
                 StepResult::Continue
             }
             // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+)
             0x0B => {
-                let win = ops.get(0).copied().unwrap_or(0) as u8;
+                let win = ops.first().copied().unwrap_or(0) as u8;
                 self.screen.current_window = win;
                 StepResult::Continue
             }
@@ -797,7 +797,7 @@ impl Machine {
             0x0D => {
                 // Erase window: -1 = all windows + unsplit, -2 = all without unsplit,
                 // 0 = lower, 1 = upper. We just update upper_window_rows if -1.
-                let win = ops.get(0).copied().unwrap_or(0) as i16;
+                let win = ops.first().copied().unwrap_or(0) as i16;
                 if win == -1 {
                     self.screen.upper_window_rows = 0;
                 }
@@ -805,7 +805,7 @@ impl Machine {
             }
             // 0x0F set_cursor — update cursor position (row, col) in upper window
             0x0F => {
-                let row = ops.get(0).copied().unwrap_or(1);
+                let row = ops.first().copied().unwrap_or(1);
                 let col = ops.get(1).copied().unwrap_or(1);
                 self.screen.cursor_row = row;
                 self.screen.cursor_col = col;
@@ -813,13 +813,13 @@ impl Machine {
             }
             // 0x11 set_text_style — update text style bitmask (v4+)
             0x11 => {
-                let style = ops.get(0).copied().unwrap_or(0) as u8;
+                let style = ops.first().copied().unwrap_or(0) as u8;
                 self.screen.text_style = style;
                 StepResult::Continue
             }
             // 0x12 buffer_mode — toggle output buffering (v4+)
             0x12 => {
-                let mode = ops.get(0).copied().unwrap_or(0);
+                let mode = ops.first().copied().unwrap_or(0);
                 self.screen.buffer_mode = mode != 0;
                 StepResult::Continue
             }
@@ -830,7 +830,7 @@ impl Machine {
             //   -3:    stream 3 off — finalise table, restore routing
             //   +4/-4: stream 4 (commands) on/off
             0x13 => {
-                let stream = ops.get(0).copied().unwrap_or(0) as i16;
+                let stream = ops.first().copied().unwrap_or(0) as i16;
                 match stream {
                     1  => { self.streams.stream1 = true; }
                     -1 => { self.streams.stream1 = false; }
@@ -877,7 +877,7 @@ impl Machine {
             // EXT:0x02 log_shift — logical (unsigned) shift
             // places > 0 → left shift; places < 0 → right shift (zero-fill)
             0x02 => {
-                let n = ops.get(0).copied().unwrap_or(0);
+                let n = ops.first().copied().unwrap_or(0);
                 let places = ops.get(1).copied().unwrap_or(0) as i16;
                 let result = if places >= 16 || places <= -16 {
                     0u16
@@ -894,7 +894,7 @@ impl Machine {
             // EXT:0x03 art_shift — arithmetic (signed) shift
             // places > 0 → left shift; places < 0 → arithmetic right shift
             0x03 => {
-                let n = ops.get(0).copied().unwrap_or(0) as i16;
+                let n = ops.first().copied().unwrap_or(0) as i16;
                 let places = ops.get(1).copied().unwrap_or(0) as i16;
                 let result: i16 = if places >= 16 || places <= -16 {
                     if n < 0 { -1 } else { 0 }

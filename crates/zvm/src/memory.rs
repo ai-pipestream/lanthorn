@@ -27,6 +27,8 @@ impl Memory {
     }
 
     /// Length of the story file in bytes.
+    #[allow(clippy::len_without_is_empty)]
+    // A loaded Memory always holds at least a 64-byte header; never empty.
     pub fn len(&self) -> usize {
         self.bytes.len()
     }

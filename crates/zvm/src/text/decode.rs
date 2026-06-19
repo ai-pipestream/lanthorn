@@ -61,7 +61,7 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
                 // space; any pending shift is consumed
                 alphabet = 0;
             }
-            1 | 2 | 3 => {
+            1..=3 => {
                 abbrev_pending = zc;
                 alphabet = 0;
             }

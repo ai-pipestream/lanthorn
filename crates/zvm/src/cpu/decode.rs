@@ -130,10 +130,9 @@ fn one_op_sig(opcode: u8, version: u8) -> (bool, bool, bool) {
         0x0C => (false, false, false), // jump
         0x0D => (false, false, false), // print_paddr
         0x0E => (true, false, false),  // load (stores)
-        0x0F => {
+        0x0F
             // `not` (stores) in v1–4; `call_1n` (no store) in v5+
-            if version <= 4 { (true, false, false) } else { (false, false, false) }
-        }
+            if version <= 4 => { (true, false, false) }
         _ => (false, false, false),
     }
 }

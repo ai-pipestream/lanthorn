@@ -192,9 +192,7 @@ fn decode_cmem(cmem: &[u8], orig: &[u8]) -> Result<Vec<u8>, ZError> {
             }
             let count = cmem[i] as usize + 1;
             i += 1;
-            for _ in 0..count {
-                xored.push(0x00);
-            }
+            xored.resize(xored.len() + count, 0x00);
         }
     }
 
@@ -388,13 +386,15 @@ fn write_chunk(out: &mut Vec<u8>, tag: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(tag);
     write_u32_be(out, data.len() as u32);
     out.extend_from_slice(data);
-    if data.len() % 2 != 0 {
+    if !data.len().is_multiple_of(2) {
         out.push(0x00); // pad to even length
     }
 }
 
+type IffChunk<'a> = ([u8; 4], &'a [u8]);
+
 /// Parse an IFF FORM/IFZS file into a list of (tag, data) pairs.
-fn parse_iff(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>, ZError> {
+fn parse_iff(data: &[u8]) -> Result<Vec<IffChunk<'_>>, ZError> {
     if data.len() < 12 {
         return Err(ZError::Truncated);
     }
@@ -422,7 +422,7 @@ fn parse_iff(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>, ZError> {
         }
         chunks.push((tag, &data[pos..pos + chunk_len]));
         pos += chunk_len;
-        if chunk_len % 2 != 0 {
+        if !chunk_len.is_multiple_of(2) {
             pos += 1; // skip pad byte
         }
     }

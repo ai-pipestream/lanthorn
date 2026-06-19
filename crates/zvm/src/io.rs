@@ -19,6 +19,12 @@ pub struct BufferOutput {
     pub buf: String,
 }
 
+impl Default for BufferOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BufferOutput {
     pub fn new() -> Self {
         BufferOutput { buf: String::new() }

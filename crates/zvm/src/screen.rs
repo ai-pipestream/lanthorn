@@ -85,6 +85,12 @@ pub struct StreamState {
     stream3_stack: Vec<Stream3Frame>,
 }
 
+impl Default for StreamState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamState {
     pub fn new() -> Self {
         StreamState {

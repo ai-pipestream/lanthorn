@@ -93,7 +93,7 @@ pub fn object_tree_view(machine: &Machine) -> Vec<ObjectSnapshot> {
 fn max_object_number(mem: &crate::memory::Memory) -> u16 {
     let version = mem.version();
     let base = entries_base(mem);
-    let esize = entry_size(version) as u32;
+    let esize = entry_size(version);
 
     let mut n: u16 = 0;
     for candidate in 1u16..=2000 {
