@@ -26,6 +26,11 @@ impl Memory {
         Ok(Memory { bytes, header })
     }
 
+    /// Length of the story file in bytes.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
     /// Read a single byte at `addr`.
     pub fn read_byte(&self, addr: u32) -> u8 {
         self.bytes[addr as usize]

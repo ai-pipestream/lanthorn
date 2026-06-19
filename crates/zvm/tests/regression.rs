@@ -53,13 +53,53 @@ fn czech_reports_no_failures() {
     let out = run_to_quit(story);
     // Print full output for debugging during development.
     println!("CZECH output:\n{out}");
+
+    // Hard-coded section presence: all major sections must run.
+    for section in &["Jumps", "Variables", "Arithmetic ops", "Logical ops",
+                     "Memory", "Subroutines", "Objects", "Indirect Opcodes",
+                     "Misc"] {
+        assert!(
+            out.contains(section),
+            "CZECH missing section {section:?}:\n{out}"
+        );
+    }
+
+    // Extract "Passed- NNN" and "Failed- NNN" from the summary line.
+    // CZECH format: "Passed- 406. Failed- 0. Print tests- 19"
+    let passed: u32 = out
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            if l.starts_with("Passed-") || l.starts_with("Passed- ") {
+                l.split_whitespace().nth(1).and_then(|s| s.trim_end_matches('.').parse().ok())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+    let failed: u32 = out
+        .lines()
+        .find_map(|l| {
+            let l = l.trim();
+            if l.contains("Failed-") {
+                // "Failed- 0." appears mid-line in the summary
+                l.split("Failed-")
+                    .nth(1)
+                    .and_then(|s| s.split_whitespace().next())
+                    .and_then(|s| s.trim_end_matches('.').parse().ok())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(u32::MAX);
+
     assert!(
-        out.contains("Passed") || out.contains("passed") || out.contains("PASSED"),
-        "CZECH did not report passing:\n{out}"
+        passed >= 406,
+        "CZECH passed {passed} tests, expected >= 406:\n{out}"
     );
     assert!(
-        !out.to_lowercase().contains("failed:"),
-        "CZECH reported failures:\n{out}"
+        failed == 0,
+        "CZECH reported {failed} failure(s):\n{out}"
     );
 }
 

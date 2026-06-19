@@ -360,17 +360,27 @@ pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
             }
         }
         Form::Variable | Form::Extended => {
-            // call_vs2 (VAR:0x0C) and call_vn2 (VAR:0x1A) use two type bytes
-            let two_type_bytes = form == Form::Variable && (opcode == 0x0C || opcode == 0x1A);
-
-            let type_byte1 = mem.read_byte(cursor);
-            cursor += 1;
-            read_operands_from_type_byte(mem, type_byte1, &mut cursor, &mut operands);
+            // call_vs2 (VAR:0x0C) and call_vn2 (VAR:0x1A) use two type bytes.
+            // The two-type-byte rule only applies to the VAR opcode class, NOT to
+            // 2OP opcodes encoded in variable form (e.g. call_2n = 2OP:0x1A).
+            let two_type_bytes = form == Form::Variable
+                && operand_count == OperandCount::Var
+                && (opcode == 0x0C || opcode == 0x1A);
 
             if two_type_bytes {
+                // Read BOTH type bytes first (before reading any operands), then decode
+                // operands for both.  This is necessary because the second type byte
+                // immediately follows the first, and operands come after both.
+                let type_byte1 = mem.read_byte(cursor);
+                cursor += 1;
                 let type_byte2 = mem.read_byte(cursor);
                 cursor += 1;
+                read_operands_from_type_byte(mem, type_byte1, &mut cursor, &mut operands);
                 read_operands_from_type_byte(mem, type_byte2, &mut cursor, &mut operands);
+            } else {
+                let type_byte1 = mem.read_byte(cursor);
+                cursor += 1;
+                read_operands_from_type_byte(mem, type_byte1, &mut cursor, &mut operands);
             }
         }
     }

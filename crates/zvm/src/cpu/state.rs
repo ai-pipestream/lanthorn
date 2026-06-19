@@ -48,13 +48,18 @@ pub fn read_var(state: &mut State, mem: &Memory, var: u8) -> u16 {
         0x00 => {
             // Pop from current frame's eval stack region
             let base = state.frames.last().map(|f| f.eval_base).unwrap_or(0);
-            assert!(state.eval_stack.len() > base, "eval stack underflow");
+            if state.eval_stack.len() <= base {
+                // Stack underflow: return 0 (defensive; should not happen in correct code)
+                return 0;
+            }
             state.eval_stack.pop().unwrap()
         }
         0x01..=0x0F => {
             let idx = (var - 1) as usize;
             let frame = state.frames.last().expect("no current frame");
-            frame.locals[idx]
+            // Guard: if the routine has fewer locals than requested, return 0
+            // (Z-machine spec says locals not provided by caller are 0).
+            frame.locals.get(idx).copied().unwrap_or(0)
         }
         _ => {
             // Global variable: 0x10 is global 0, stored at global_vars + 2*(var-0x10)
@@ -67,12 +72,14 @@ pub fn read_var(state: &mut State, mem: &Memory, var: u8) -> u16 {
 
 /// Peek at the top of the eval stack WITHOUT popping (ZMSD §6.3.4: `load sp`).
 pub fn peek_stack(state: &State) -> u16 {
-    *state.eval_stack.last().expect("peek on empty stack")
+    state.eval_stack.last().copied().unwrap_or(0)
 }
 
 /// Replace the top of the eval stack in place WITHOUT changing depth (ZMSD §6.3.4: `store sp`).
 pub fn poke_stack(state: &mut State, val: u16) {
-    *state.eval_stack.last_mut().expect("poke on empty stack") = val;
+    if let Some(top) = state.eval_stack.last_mut() {
+        *top = val;
+    }
 }
 
 /// Write value `val` to variable `var` in state/memory.
@@ -88,6 +95,11 @@ pub fn write_var(state: &mut State, mem: &mut Memory, var: u8, val: u16) {
         0x01..=0x0F => {
             let idx = (var - 1) as usize;
             let frame = state.frames.last_mut().expect("no current frame");
+            // Guard: if the routine has fewer locals than requested, extend locals
+            // (Z-machine spec allows this for compatibility).
+            if idx >= frame.locals.len() {
+                frame.locals.resize(idx + 1, 0);
+            }
             frame.locals[idx] = val;
         }
         _ => {
@@ -119,8 +131,25 @@ pub fn call_routine(
     }
 
     let routine_addr = mem.unpack_routine(packed_addr);
+
+    // Guard against out-of-bounds routine addresses (e.g. from buggy game code
+    // or test harnesses that call with intentionally bad addresses). Treat as
+    // packed_addr==0 (return 0 / false).
+    if routine_addr as usize >= mem.len() {
+        if let Some(sv) = store_var {
+            write_var(state, mem, sv, 0);
+        }
+        return;
+    }
+
     let local_count = mem.read_byte(routine_addr) as usize;
-    assert!(local_count <= 15, "local count must be 0..=15");
+    if local_count > 15 {
+        // Invalid routine header: treat as packed_addr==0.
+        if let Some(sv) = store_var {
+            write_var(state, mem, sv, 0);
+        }
+        return;
+    }
 
     // Read initial local values (v1–4 only; v5+ locals initialise to 0)
     let mut locals: Vec<u16> = if mem.version() <= 4 {

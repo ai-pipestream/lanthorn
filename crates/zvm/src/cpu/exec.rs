@@ -79,6 +79,9 @@ pub struct Machine {
     /// Store variable captured from the restore opcode (v4+), used by
     /// complete_restore_failure() to store 0 into the correct variable.
     pending_restore_store: Option<u8>,
+    /// PRNG state for the `random` opcode (xorshift32).
+    /// Initialised to a fixed nonzero constant; seeded by `random` with negative arg.
+    rng_state: u32,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -116,6 +119,7 @@ impl Machine {
             original_dynamic,
             pending_save: None,
             pending_restore_store: None,
+            rng_state: 0x12345678, // fixed nonzero seed
         }
     }
 
@@ -269,6 +273,20 @@ impl Machine {
             // 0x0E insert_obj — make object a the first child of object b
             0x0E => {
                 objects::insert_obj(&mut self.mem, a, b);
+                StepResult::Continue
+            }
+            // 0x0F loadw — load word from array: result = mem[a + 2*b]
+            0x0F => {
+                let addr = (a as u32).wrapping_add(2u32.wrapping_mul(b as u32));
+                let result = self.mem.read_word(addr);
+                self.do_store(store, result);
+                StepResult::Continue
+            }
+            // 0x10 loadb — load byte from array: result = mem[a + b]
+            0x10 => {
+                let addr = (a as u32).wrapping_add(b as u32);
+                let result = self.mem.read_byte(addr) as u16;
+                self.do_store(store, result);
                 StepResult::Continue
             }
             // 0x11 get_prop — store property b of object a (fallback to default)
@@ -620,6 +638,22 @@ impl Machine {
                 call_routine(&mut self.state, &mut self.mem, packed, args, store);
                 StepResult::Continue
             }
+            // 0x01 storew — store word: mem[ops[0] + 2*ops[1]] = ops[2]
+            0x01 => {
+                let array = ops.get(0).copied().unwrap_or(0) as u32;
+                let index = ops.get(1).copied().unwrap_or(0) as u32;
+                let val   = ops.get(2).copied().unwrap_or(0);
+                self.mem.write_word(array.wrapping_add(2u32.wrapping_mul(index)), val);
+                StepResult::Continue
+            }
+            // 0x02 storeb — store byte: mem[ops[0] + ops[1]] = ops[2] & 0xFF
+            0x02 => {
+                let array = ops.get(0).copied().unwrap_or(0) as u32;
+                let index = ops.get(1).copied().unwrap_or(0) as u32;
+                let val   = (ops.get(2).copied().unwrap_or(0) & 0xFF) as u8;
+                self.mem.write_byte(array.wrapping_add(index), val);
+                StepResult::Continue
+            }
             // 0x03 put_prop — set property ops[1] of object ops[0] to value ops[2]
             0x03 => {
                 let obj  = ops.get(0).copied().unwrap_or(0);
@@ -644,17 +678,56 @@ impl Machine {
                 self.print_text(&s);
                 StepResult::Continue
             }
+            // 0x07 random — ZMSD §15: random number generator
+            //   range > 0 → uniform random in 1..=range
+            //   range == 0 → reseed from entropy (we use a fixed step; return 0)
+            //   range < 0 → seed with |range| (predictable mode); return 0
+            0x07 => {
+                let range = ops.get(0).copied().unwrap_or(0) as i16;
+                let result = if range > 0 {
+                    // xorshift32 step
+                    let mut s = self.rng_state;
+                    s ^= s << 13;
+                    s ^= s >> 17;
+                    s ^= s << 5;
+                    self.rng_state = s;
+                    // Map to 1..=range
+                    ((s as u32) % (range as u32) + 1) as u16
+                } else if range < 0 {
+                    // Predictable seed: use |range| as the new state (nonzero guard)
+                    let seed = (-range) as u32;
+                    self.rng_state = if seed == 0 { 1 } else { seed };
+                    0
+                } else {
+                    // range == 0: re-randomise (use a fixed increment so no OS calls)
+                    self.rng_state = self.rng_state.wrapping_add(0x9E3779B9);
+                    if self.rng_state == 0 { self.rng_state = 1; }
+                    0
+                };
+                self.do_store(store, result);
+                StepResult::Continue
+            }
             // 0x08 push — push value onto eval stack
             0x08 => {
                 let val = ops.get(0).copied().unwrap_or(0);
                 write_var(&mut self.state, &mut self.mem, 0, val); // var 0 = push
                 StepResult::Continue
             }
-            // 0x09 pull — pop from eval stack and store into variable ops[0]
+            // 0x09 pull — pop from eval stack and store into variable ops[0].
+            // ZMSD §14 / frotz semantics: when destination var == 0 (sp),
+            // pop the top value, then OVERWRITE the new top with that value
+            // (rather than pushing it back). This is the "pull to sp" effect:
+            // stack [a, b, TOP] → pop TOP → stack [a, b], then overwrite b
+            // → stack [a, TOP]. Net: removes the second-from-top element.
             0x09 => {
                 let var = ops.get(0).copied().unwrap_or(0) as u8;
                 let val = read_var(&mut self.state, &self.mem, 0); // pop stack
-                write_var(&mut self.state, &mut self.mem, var, val);
+                if var == 0 {
+                    // Destination is sp: overwrite new top (not push-back)
+                    poke_stack(&mut self.state, val);
+                } else {
+                    write_var(&mut self.state, &mut self.mem, var, val);
+                }
                 StepResult::Continue
             }
             // 0x0C call_vs2 — like call_vs but with 2 type bytes, stores result
@@ -786,9 +859,73 @@ impl Machine {
     // -----------------------------------------------------------------------
 
     fn exec_ext(&mut self, opcode: u8, ops: &[u16], store: Option<u8>) -> StepResult {
-        // No EXT opcodes needed in this task group. No-op seam for Tasks 10+.
-        let _ = (opcode, ops, store);
-        StepResult::Continue
+        match opcode {
+            // EXT:0x00 save — like 0OP save but store-only (v5+)
+            0x00 => {
+                let dest = match store {
+                    Some(sv) => SaveDest::Store(sv),
+                    None => SaveDest::Store(0),
+                };
+                self.pending_save = Some(PendingSave { result_dest: dest });
+                StepResult::SaveRequest
+            }
+            // EXT:0x01 restore — like 0OP restore but store-only (v5+)
+            0x01 => {
+                self.pending_restore_store = store;
+                StepResult::RestoreRequest
+            }
+            // EXT:0x02 log_shift — logical (unsigned) shift
+            // places > 0 → left shift; places < 0 → right shift (zero-fill)
+            0x02 => {
+                let n = ops.get(0).copied().unwrap_or(0);
+                let places = ops.get(1).copied().unwrap_or(0) as i16;
+                let result = if places >= 16 || places <= -16 {
+                    0u16
+                } else if places > 0 {
+                    n << (places as u16)
+                } else if places < 0 {
+                    n >> ((-places) as u16)
+                } else {
+                    n
+                };
+                self.do_store(store, result);
+                StepResult::Continue
+            }
+            // EXT:0x03 art_shift — arithmetic (signed) shift
+            // places > 0 → left shift; places < 0 → arithmetic right shift
+            0x03 => {
+                let n = ops.get(0).copied().unwrap_or(0) as i16;
+                let places = ops.get(1).copied().unwrap_or(0) as i16;
+                let result: i16 = if places >= 16 || places <= -16 {
+                    if n < 0 { -1 } else { 0 }
+                } else if places > 0 {
+                    n << (places as u16)
+                } else if places < 0 {
+                    n >> ((-places) as u16)
+                } else {
+                    n
+                };
+                self.do_store(store, result as u16);
+                StepResult::Continue
+            }
+            // EXT:0x04 set_font — return 0 (font change unsupported)
+            0x04 => {
+                self.do_store(store, 0);
+                StepResult::Continue
+            }
+            // EXT:0x09 save_undo — unsupported; store -1 (0xFFFF)
+            0x09 => {
+                self.do_store(store, 0xFFFF);
+                StepResult::Continue
+            }
+            // EXT:0x0A restore_undo — unsupported; store -1 (0xFFFF)
+            0x0A => {
+                self.do_store(store, 0xFFFF);
+                StepResult::Continue
+            }
+            // Other EXT opcodes: no-op
+            _ => StepResult::Continue,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2900,5 +3037,242 @@ pub(crate) mod tests {
 
         // state.pc must still be 0x12 — complete_restore_failure must not advance pc.
         assert_eq!(m.state.pc, 0x12, "state.pc must not be corrupted by complete_restore_failure");
+    }
+
+    // -----------------------------------------------------------------------
+    // loadw / loadb / storew / storeb round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loadw_storew_round_trip() {
+        // storew G0 #0 G1  — store G1 at dynamic_mem[G0 + 0]
+        // loadw G0 #0 → G2  — read back from same address
+        //
+        // Hand-assembled bytes:
+        //   storew: VAR:01, type_byte=[Var,Small,Var,omit], G0, 0, G1
+        //     0xC1 (VAR bit5=0=2OP? No, VAR:01 with bit5=1=Var)
+        //     Wait: VAR:01 opcode byte = 0b11_1_00001 = 0xE1, type_byte=0b10_01_10_11=0xAB
+        //
+        // Actually easier to set base address to a known dynamic address (e.g. 0x40)
+        // and use raw bytes.
+        //
+        // storew: 0xE1 (VAR:01), type=0xAB([Var,Small,Var,omit]), G0, 0, G1
+        // loadw:  VAR:0F = 0b11_1_01111 = 0xEF, type=0b10_01_11_11=0x9F, G0, 0, store=G2
+        let mut buf = sample_story(5);
+        // Set up globals: G0=0x40 (base address in dynamic mem), G1=0xBEEF (value to store)
+        let gbase = {
+            let tmp = Memory::new(buf.clone()).unwrap();
+            tmp.global_vars() as usize
+        };
+        // G0 = 0x40
+        buf[gbase]     = 0x00;
+        buf[gbase + 1] = 0x40;
+        // G1 = 0xBEEF
+        buf[gbase + 2] = 0xBE;
+        buf[gbase + 3] = 0xEF;
+
+        // storew G0 #0 G1:  E1 AB 10 00 11
+        buf[0x10] = 0xE1; // VAR:01 storew
+        buf[0x11] = 0xAB; // type: [Var=10, Small=01, Var=10, omit=11]
+        buf[0x12] = 0x10; // G0 (var 0x10)
+        buf[0x13] = 0x00; // index 0
+        buf[0x14] = 0x11; // G1 (var 0x11)
+        // loadw G0 #0 → G2:  EF 9F 10 00 12
+        buf[0x15] = 0xEF; // VAR:0F (but 0xEF with bit5=1=Var, opcode=0x0F=15)
+        // Wait: 0xEF = 0b11_1_01111: VAR form, bit5=1→Var, opcode=0x0F=loadw
+        // but loadw is 2OP:0x0F. In VAR form with bit5=0→Two, 0xCF would be loadw.
+        // 0xEF has bit5=1→Var, so that's VAR:0x0F (not 2OP). But loadw is 2OP!
+        // Use Long form instead: 0x4F (bit6=1=Var, bit5=0=Small, op=0x0F=loadw)
+        //   Long: 0b01_0_01111 = 0x4F, G0, 0, store=G2
+        buf[0x15] = 0x4F; // long form: Var, Small, opcode=0x0F=loadw
+        buf[0x16] = 0x10; // G0
+        buf[0x17] = 0x00; // index 0
+        buf[0x18] = 0x12; // store → G2
+        buf[0x19] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(2), 0xBEEF, "loadw round-trip: should read back 0xBEEF");
+    }
+
+    #[test]
+    fn loadb_storeb_round_trip() {
+        // storeb base #0 val  — write byte at base+0
+        // loadb base #0 → G2  — read back the byte
+        let mut buf = sample_story(5);
+        let gbase = {
+            let tmp = Memory::new(buf.clone()).unwrap();
+            tmp.global_vars() as usize
+        };
+        // G0 = 0x40 (base)
+        buf[gbase]     = 0x00;
+        buf[gbase + 1] = 0x40;
+        // G1 = 0x42 (byte value to store)
+        buf[gbase + 2] = 0x00;
+        buf[gbase + 3] = 0x42;
+
+        // storeb G0 #0 G1:  E2 AB 10 00 11  (VAR:02)
+        buf[0x10] = 0xE2; // VAR:02 storeb
+        buf[0x11] = 0xAB; // [Var, Small, Var, omit]
+        buf[0x12] = 0x10;
+        buf[0x13] = 0x00;
+        buf[0x14] = 0x11;
+        // loadb G0 #0 → G2:  Long form 0x50, Var G0, Small 0, store G2
+        //   long: bit6=1(var), bit5=0(small), opcode=0x10=loadb → 0b01_0_10000=0x50
+        buf[0x15] = 0x50;
+        buf[0x16] = 0x10;
+        buf[0x17] = 0x00;
+        buf[0x18] = 0x12;
+        buf[0x19] = 0xBA;
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(2), 0x42, "loadb round-trip: should read back 0x42");
+    }
+
+    // -----------------------------------------------------------------------
+    // random — result must be in [1, range] for positive range
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn random_in_range() {
+        // random #10 → G0; quit
+        // VAR:07 random: 0xE7 (bit5=1→Var, op=7), type_byte=0x7F([Small,omit,omit,omit]),
+        //   operand=10, store=G0(0x10)
+        let mut buf = sample_story(5);
+        buf[0x10] = 0xE7; // VAR:07 random
+        buf[0x11] = 0x7F; // type: [Small, omit, omit, omit]
+        buf[0x12] = 10;   // range = 10
+        buf[0x13] = 0x10; // store → G0
+        buf[0x14] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let result = m.global(0);
+        assert!(result >= 1 && result <= 10,
+            "random(10) must be in [1,10], got {result}");
+    }
+
+    // -----------------------------------------------------------------------
+    // log_shift / art_shift (EXT opcodes)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn log_shift_left_and_right() {
+        // log_shift value places → store
+        // EXT:02 format: 0xBE 0x02 type_byte [operands] store
+        //
+        // Type byte encoding (2-bit fields, MSB-first):
+        //   00=Large(16-bit), 01=Small(8-bit), 10=Variable, 11=omit
+        // For [Small, Small, omit, omit]: 0b01_01_11_11 = 0x5F
+        // For [Small, Large, omit, omit]: 0b01_00_11_11 = 0x4F (Large places)
+        //
+        // Test 1: log_shift 8 places=2 → G0  (8u << 2 = 32)
+        // Test 2: log_shift 8 places=-1 → G1 (8u >> 1 = 4, unsigned shift)
+        //   places=-1 requires Large constant 0xFFFF (Small only covers 0..255)
+        let mut buf = sample_story(5);
+        let mut pc = 0x10usize;
+
+        // EXT:02, [Small value=8, Small places=2, omit, omit], store=G0
+        buf[pc] = 0xBE; buf[pc+1] = 0x02; buf[pc+2] = 0x5F; // type: [S,S,_,_]
+        buf[pc+3] = 8; buf[pc+4] = 2; buf[pc+5] = 0x10; pc += 6;
+
+        // EXT:02, [Small value=8, Large places=0xFFFF(-1), omit, omit], store=G1
+        buf[pc] = 0xBE; buf[pc+1] = 0x02; buf[pc+2] = 0x4F; // type: [S,L,_,_]
+        buf[pc+3] = 8; buf[pc+4] = 0xFF; buf[pc+5] = 0xFF; buf[pc+6] = 0x11; pc += 7;
+
+        buf[pc] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 32, "log_shift 8 << 2 = 32");
+        assert_eq!(m.global(1), 4, "log_shift 8 >> 1 = 4 (unsigned)");
+    }
+
+    #[test]
+    fn art_shift_preserves_sign() {
+        // art_shift value places → store
+        // EXT:03 format: 0xBE 0x03 type_byte [operands] store
+        //
+        // Test 1: art_shift 0xFFF8 places=-1 → G0  (-8 >> 1 = -4 = 0xFFFC, sign-extended)
+        // Test 2: art_shift 0xFFF8 places=2  → G1  (-8 << 2 = -32 = 0xFFE0)
+        // Both need Large(0xFFF8) and either Large(0xFFFF=-1) or Small(2).
+        // Type [Large, Large, omit, omit]: 0b00_00_11_11 = 0x0F
+        // Type [Large, Small, omit, omit]: 0b00_01_11_11 = 0x1F
+        let mut buf = sample_story(5);
+        let mut pc = 0x10usize;
+
+        // EXT:03, [Large value=0xFFF8, Large places=0xFFFF(-1), omit, omit], store=G0
+        buf[pc] = 0xBE; buf[pc+1] = 0x03; buf[pc+2] = 0x0F; // type: [L,L,_,_]
+        buf[pc+3] = 0xFF; buf[pc+4] = 0xF8; // value = 0xFFF8
+        buf[pc+5] = 0xFF; buf[pc+6] = 0xFF; // places = 0xFFFF = -1
+        buf[pc+7] = 0x10; // store → G0
+        pc += 8;
+
+        // EXT:03, [Large value=0xFFF8, Small places=2, omit, omit], store=G1
+        buf[pc] = 0xBE; buf[pc+1] = 0x03; buf[pc+2] = 0x1F; // type: [L,S,_,_]
+        buf[pc+3] = 0xFF; buf[pc+4] = 0xF8; // value = 0xFFF8
+        buf[pc+5] = 0x02; // places = 2
+        buf[pc+6] = 0x11; // store → G1
+        pc += 7;
+
+        buf[pc] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        // 0xFFF8 = -8 signed. arithmetic right-shift by 1 = -4 = 0xFFFC
+        assert_eq!(m.global(0), 0xFFFC, "art_shift(-8, -1) = -4 = 0xFFFC");
+        // arithmetic left-shift by 2: -8 << 2 = -32 = 0xFFE0
+        assert_eq!(m.global(1), 0xFFE0, "art_shift(-8, 2) = -32 = 0xFFE0");
+    }
+
+    // -----------------------------------------------------------------------
+    // pull sp — overwrite-new-top semantics (frotz §z_pull)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pull_sp_overwrites_new_top() {
+        // Stack before: [10, 20, 30] (10=bottom, 30=top)
+        // pull #0 (pull Small(0) = destination is sp):
+        //   pop 30 (value), stack=[10, 20], poke_stack(30) → stack=[10, 30]
+        // pull #0 again:
+        //   pop 30, stack=[10], poke_stack(30) → stack=[30]
+        // pull Small(G0) = pop 30 into G0.
+        // Then G0 should be 30, and the stack should have one item (30).
+        //
+        // We push 10, 20, 30 using push opcodes, then do two pull-sp, then
+        // do a normal pull into G0, then quit.
+        //
+        // push: VAR:08 = 0xE8, type_byte=[Small,omit,omit,omit]=0x7F, value
+        // pull Small(0): VAR:09 = 0xE9, type_byte=[Small,omit,omit,omit]=0x7F, 0
+        // pull Small(G0_var=0x10): 0xE9, 0x7F, 0x10
+        let mut buf = sample_story(5);
+        let prog: &[u8] = &[
+            0xE8, 0x7F, 10,   // push 10
+            0xE8, 0x7F, 20,   // push 20
+            0xE8, 0x7F, 30,   // push 30  — stack = [10, 20, 30]
+            0xE9, 0x7F, 0x00, // pull #0 (sp)  — pops 30, pokes 30 over 20 → [10, 30]
+            0xE9, 0x7F, 0x00, // pull #0 (sp)  — pops 30, pokes 30 over 10 → [30]
+            0xE9, 0x7F, 0x10, // pull Small(G0=var 0x10)  — pops 30 into G0
+            0xBA,             // quit
+        ];
+        for (i, &b) in prog.iter().enumerate() {
+            buf[0x10 + i] = b;
+        }
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 30, "pull sp: final value pulled into G0 should be 30");
     }
 }
