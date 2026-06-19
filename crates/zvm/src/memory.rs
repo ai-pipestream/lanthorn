@@ -88,6 +88,11 @@ impl Memory {
         self.header.object_table
     }
 
+    /// Dictionary base address from the header.
+    pub fn dictionary(&self) -> u16 {
+        self.header.dictionary
+    }
+
     /// Unpack a packed string address (ZMSD §1.2.3).
     pub fn unpack_string(&self, packed: u16) -> u32 {
         let p = packed as u32;
