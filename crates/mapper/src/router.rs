@@ -29,9 +29,10 @@
 ///
 /// # Reciprocal dedupe
 ///
-/// If connection A→d→B is emitted, and connection B→opposite(d)→A also exists, the latter is
-/// skipped. The kept edge is always the one with the **lower origin id**. This prevents the
-/// render layer from drawing two overlapping connectors for bidirectional passages.
+/// An edge `(o, d, dst)` is skipped only if its exact reciprocal-opposite `(dst, opposite(d), o)`
+/// was already emitted. This means non-reciprocal back-edges (e.g. A→N→B and B→W→A where W ≠ S)
+/// are both kept. Only true opposite pairs (e.g. A→E→B and B→W→A) are deduped.
+/// Stubs (Up/Down/In/Out/Unknown) are never deduped.
 ///
 /// # v1 limitations
 ///
@@ -41,7 +42,7 @@
 
 use std::collections::HashSet;
 
-use crate::direction::Direction;
+use crate::direction::{opposite, Direction};
 use crate::graph::{MapGraph, RoomId};
 
 // ── Side ─────────────────────────────────────────────────────────────────────
@@ -141,7 +142,8 @@ pub struct RoutedEdge {
 /// Route all connections in `graph` and return a `RoutedEdge` for each.
 ///
 /// Connections whose endpoints are not both placed (pos = None) are skipped.
-/// Reciprocal-opposite pairs are deduped: the kept edge has the lower origin id.
+/// Reciprocal-opposite pairs are deduped: an edge `(o, d, dst)` is skipped only if its
+/// true reciprocal-opposite `(dst, opposite(d), o)` was already emitted.
 pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
     // Build the set of room fine cells for collision checking.
     let room_fine_cells: HashSet<(i32, i32)> = graph
@@ -149,9 +151,9 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
         .filter_map(|r| r.pos.map(fine_cell))
         .collect();
 
-    // Track (min_id, max_id) pairs that have already been emitted as a routed compass edge
-    // so we can skip the reciprocal opposite.
-    let mut emitted_pairs: HashSet<(RoomId, RoomId)> = HashSet::new();
+    // Track emitted directed edges as (origin, dir, dest) triples.
+    // An edge is skipped only when its exact reciprocal-opposite was already emitted.
+    let mut emitted: HashSet<(RoomId, Direction, RoomId)> = HashSet::new();
 
     let mut result = Vec::new();
 
@@ -165,7 +167,7 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
             None => continue, // dest not placed — skip
         };
 
-        // Stub for non-planar directions.
+        // Stubs are never deduped — always emit them.
         if side_for(conn.dir).is_none() {
             let label = Some(stub_label(conn.dir).to_string());
             let origin_fine = fine_cell(origin_pos);
@@ -185,19 +187,10 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
 
         let side = side_for(conn.dir).unwrap();
 
-        // Reciprocal dedupe: skip B→opposite(d)→A if A→d→B already emitted and origin(A) < origin(B).
-        let (lo, hi) = if conn.origin < conn.dest {
-            (conn.origin, conn.dest)
-        } else {
-            (conn.dest, conn.origin)
-        };
-        let pair = (lo, hi);
-
-        // Check: is this the *reciprocal* of something already emitted?
-        // The already-emitted edge had the lower-id as origin with direction d.
-        // This current edge has the higher-id as origin with direction opposite(d).
-        if emitted_pairs.contains(&pair) {
-            // This is the reciprocal — skip it.
+        // Reciprocal dedupe: skip this edge only if its true reciprocal-opposite
+        // (dest → opposite(dir) → origin) was already emitted.
+        let partner = (conn.dest, opposite(conn.dir), conn.origin);
+        if emitted.contains(&partner) {
             continue;
         }
 
@@ -222,7 +215,7 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
             label: None,
         });
 
-        emitted_pairs.insert(pair);
+        emitted.insert((conn.origin, conn.dir, conn.dest));
     }
 
     result
@@ -421,5 +414,75 @@ mod tests {
         assert_eq!(find_label(Direction::Down).as_deref(), Some("D"));
         assert_eq!(find_label(Direction::In).as_deref(), Some("IN"));
         assert_eq!(find_label(Direction::Out).as_deref(), Some("OUT"));
+    }
+
+    #[test]
+    fn unknown_stub_label() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::Unknown, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.dir == Direction::Unknown).unwrap();
+        assert!(e.is_stub);
+        assert_eq!(e.label.as_deref(), Some("?"));
+    }
+
+    #[test]
+    fn non_reciprocal_back_edge_both_kept() {
+        // A(1) →N→ B(2) and B(2) →W→ A(1).
+        // N's opposite is S, not W — these are NOT reciprocal-opposites; both must be kept.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::W, 1);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let has_n = edges
+            .iter()
+            .any(|e| e.origin == 1 && e.dir == Direction::N && !e.is_stub);
+        let has_w = edges
+            .iter()
+            .any(|e| e.origin == 2 && e.dir == Direction::W && !e.is_stub);
+        assert!(has_n, "A→N→B must be present");
+        assert!(has_w, "B→W→A must be present (non-reciprocal back-edge)");
+    }
+
+    #[test]
+    fn multi_edge_same_pair_both_kept() {
+        // A→E→B and A→W→B: same pair, different directions, neither is the other's partner.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(1, Direction::W, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let has_e = edges
+            .iter()
+            .any(|e| e.origin == 1 && e.dir == Direction::E && !e.is_stub);
+        let has_w = edges
+            .iter()
+            .any(|e| e.origin == 1 && e.dir == Direction::W && !e.is_stub);
+        assert!(has_e, "A→E→B must be present");
+        assert!(has_w, "A→W→B must be present (multi-edge, not a reciprocal)");
+    }
+
+    #[test]
+    fn north_edge_departs_top_x_unchanged() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1 && e.dest == 2).unwrap();
+        assert!(!e.is_stub);
+        let o = fine_cell(g.room(1).unwrap().pos.unwrap());
+        // Departure from Top: y decreases by 1, x is unchanged.
+        assert_eq!(e.points.first().unwrap().1, o.1 - 1, "y should be origin_fine.y - 1");
+        assert_eq!(e.points.first().unwrap().0, o.0, "x should equal origin_fine.x for Top departure");
     }
 }
