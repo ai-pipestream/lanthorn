@@ -7,3 +7,6 @@ crates/zvm/tests/fixtures/*.z4
 crates/zvm/tests/fixtures/*.z5
 crates/zvm/tests/fixtures/*.z7
 crates/zvm/tests/fixtures/*.z8
+.DS_Store
+**/.DS_Store
+.claude/settings.local.json
