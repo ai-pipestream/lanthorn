@@ -77,9 +77,16 @@ screen signals the mapper and UI already consume.
 - A connection is a **directed edge** keyed by `(origin room, direction)` → destination room.
 - **No symmetry is assumed anywhere.** Exits in IF are frequently non-reciprocal (enter a room
   going *north*, leave it going *west*; or one-way passages).
-- The renderer draws each arrow from the **origin room's** corresponding side. A reciprocal-opposite
-  pair (A→north→B and B→south→A) may collapse to a single clean line; a non-reciprocal pair
-  (A→north→B, B→west→A) renders as two separate arrows leaving from different sides.
+- The renderer draws each connector as a **routed orthogonal path** (box-drawing glyphs
+  `┌ ┐ └ ┘ ─ │` with bends), not a forced straight line. This decouples two concerns:
+  - **direction** is encoded by *which side of the origin room the connector departs* (a north exit
+    leaves the top edge) — this preserves the per-origin-room arrow semantics, and
+  - the **path** to the destination is free to bend through the gutters between rooms, so a
+    destination that is not directly north on the grid can still be reached by a connector that
+    *departs north* and then routes over to it.
+- A reciprocal-opposite pair (A→north→B and B→south→A) may collapse to a single clean line; a
+  non-reciprocal pair (A→north→B, B→west→A) renders as two separate connectors leaving from
+  different sides.
 - **Unknown-direction edges:** a room change after a non-compass command (or a game-initiated
   teleport) still creates the destination room, joined by an "unknown direction" edge the player
   can relabel.
@@ -97,8 +104,13 @@ Layout is a per-game **mode**, persisted with the map.
   edge is a relative-position constraint (e.g. "B is north of A"). As play reveals more
   constraints, the engine refines placements to (a) satisfy as many directional constraints as
   possible and (b) minimize overlapping/crossing arrows.
+  - **Edge routing:** a path router places connectors as routed orthogonal paths (see Connections)
+    that avoid room cells, minimize total crossings and bends, and are stable turn-to-turn. This
+    requires **gutter space** between rooms — the grid keeps channels between cells for connectors to
+    run, so rooms are not packed edge-to-edge.
   - **Stability:** re-layout prefers **minimal movement** — existing rooms stay put unless a new
-    constraint genuinely forces a move, so the map does not "jump" every turn.
+    constraint genuinely forces a move, and routing stays stable likewise, so the map does not
+    "jump" every turn.
 - **Manual.** Auto is disabled; positions are frozen and the player nudges rooms freely.
   Switching Auto→Manual seeds manual positions from the current auto layout (start from what is on
   screen, not a reshuffle).
@@ -107,9 +119,12 @@ Layout is a per-game **mode**, persisted with the map.
 IF geography is frequently non-Euclidean (e.g. `north` four times returning to start; A north of B
 *and* B north of A; tangles unrepresentable on a 2D grid without a crossing). The engine handles
 this without ever forcing rooms to overlap:
-- It relaxes the **least-confident** constraints and marks the affected connection as **distorted**
-  — drawn with a labeled/broken connector rather than a clean directional line, so it is visually
-  honest that the exit exists but does not fit the grid cleanly.
+- Routed orthogonal connectors (see Connections) already absorb most awkward cases, so **distorted**
+  is the genuine last resort: it applies only when even a routed path cannot honor the
+  departure-side direction given the placement, or the geometry is outright contradictory.
+- In that case it relaxes the **least-confident** constraints and marks the affected connection as
+  **distorted** — drawn with a labeled/broken connector rather than a clean directional path, so it
+  is visually honest that the exit exists but does not fit the grid cleanly.
 - Unavoidable arrow **crossings** are allowed as a last resort, and drawn so they read as crossings
   rather than junctions.
 
@@ -172,6 +187,8 @@ using the same graph + layout the TUI uses (so the export matches what is on scr
 - **Mapper** is unit-tested with synthetic location/direction event streams (no VM needed),
   covering: non-reciprocal exits, grid collisions, unknown-direction edges, same-name/different-object
   rooms, revisited-room recognition, non-Euclidean/contradictory-constraint layouts (distorted-edge
-  fallback, no room overlap), and re-layout stability (minimal movement on incremental additions).
+  fallback, no room overlap), edge routing (departure side matches direction; paths avoid room cells;
+  routing stable across incremental additions), and re-layout stability (minimal movement on
+  incremental additions).
 - **Unsupported inputs** (Z-machine v4/v6/v7, Glulx, corrupt files) fail fast with a clear message
   rather than mis-executing.
