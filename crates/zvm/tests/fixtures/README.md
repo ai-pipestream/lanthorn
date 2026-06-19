@@ -1,15 +1,10 @@
-# Test Fixtures
+# Test fixtures (not committed — binary story files, gitignored)
 
-Story files used by the `zvm` integration tests. These are NOT committed to the
-repository (see `.gitignore`). Download them from the IF Archive before running
-the integration tests.
+These regression/story files are fetched on demand; `crate::fixtures::load(name)`
+returns `None` when absent so fixture-backed tests skip cleanly.
 
-## Required fixtures
-
-| File         | Description                          | IF Archive URL                                                    | SHA-256 |
-|--------------|--------------------------------------|-------------------------------------------------------------------|---------|
-| `zork1.z3`  | Zork I (v3 story file)               | https://ifarchive.org/if-archive/games/zcode/zork1.z3            | _TBD_   |
-| `zork1.z5`  | Zork I (v5 story file, for v5 tests) | https://ifarchive.org/if-archive/games/zcode/zork1.z5            | _TBD_   |
-| `anchorhead.z8` | Anchorhead (v8 story file)       | https://ifarchive.org/if-archive/games/zcode/anchorhead.z8       | _TBD_   |
-
-SHA-256 hashes will be filled in when the files are first downloaded and verified.
+| file | purpose | source | status |
+|------|---------|--------|--------|
+| `czech.z5` | CZECH opcode regression suite (primary acceptance oracle, Task 16) | https://www.ifarchive.org/if-archive/infocom/interpreters/tools/czech_0_8.zip (unzip, extract czech.z5) | ✅ verified, sha256 9f7e01b94353798e1eb8c3b4521f06db4c830a6120f5b3ab7f0d1ec1bc882b5a |
+| `praxix.z5` | Praxix arithmetic/edge-case checker (Task 16) | IF Archive — URL needs verification (previous guess 404'd) | ⬜ TODO |
+| `minizork.z3` | small real v3 game (smoke tests, Tasks 5/6/15) | URL needs verification (eblong path 404'd) | ⬜ TODO |
