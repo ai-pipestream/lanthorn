@@ -14,6 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
+use crate::screen::{init_header_caps, ScreenState, StreamState};
 use crate::text::decode::{decode_string, zscii_to_char};
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,10 @@ pub struct Machine {
     pub out: Box<dyn Output>,
     /// Non-None while the machine is suspended waiting for player input.
     pending_input: Option<PendingInput>,
+    /// Screen model: window layout, cursor, text style.
+    pub screen: ScreenState,
+    /// Output stream routing: streams 1/2/3/4 state.
+    pub streams: StreamState,
 }
 
 impl Machine {
@@ -82,7 +87,19 @@ impl Machine {
             mem,
             out,
             pending_input: None,
+            screen: ScreenState::default(),
+            streams: StreamState::new(),
         }
+    }
+
+    /// Set interpreter capability bits in the story header (ZMSD §11.1).
+    ///
+    /// Call this once after loading a real story file and before running.
+    /// Not called automatically by `new`/`with_output` because the writes
+    /// overlap with address 0x10 (Flags2) which test programs occupy at that
+    /// same address — real story files have static programs above 0x40.
+    pub fn init_caps(&mut self) {
+        init_header_caps(&mut self.mem);
     }
 
     /// Borrow the default `BufferOutput` sink if that is what `out` holds, else `None`.
@@ -354,7 +371,7 @@ impl Machine {
             // 0x07 print_addr — print string at byte address a
             0x07 => {
                 let (s, _) = decode_string(&self.mem, a as u32);
-                self.out.print(&s);
+                self.print_text(&s);
                 StepResult::Continue
             }
             // 0x09 remove_obj — remove object a from its parent's child list
@@ -365,14 +382,14 @@ impl Machine {
             // 0x0A print_obj — print the short name of object a via the output sink
             0x0A => {
                 let name = objects::short_name(&self.mem, a);
-                self.out.print(&name);
+                self.print_text(&name);
                 StepResult::Continue
             }
             // 0x0D print_paddr — print string at packed address a
             0x0D => {
                 let byte_addr = self.mem.unpack_string(a);
                 let (s, _) = decode_string(&self.mem, byte_addr);
-                self.out.print(&s);
+                self.print_text(&s);
                 StepResult::Continue
             }
             // 0x05 inc — increment variable by reference (no store/branch)
@@ -458,16 +475,16 @@ impl Machine {
             // 0x02 print — print the inline string (from Instr.text)
             0x02 => {
                 if let Some((s, _)) = text {
-                    self.out.print(&s);
+                    self.print_text(&s);
                 }
                 StepResult::Continue
             }
             // 0x03 print_ret — print inline string + newline, then return true
             0x03 => {
                 if let Some((s, _)) = text {
-                    self.out.print(&s);
+                    self.print_text(&s);
                 }
-                self.out.print("\n");
+                self.print_text("\n");
                 return_value(&mut self.state, &mut self.mem, 1);
                 StepResult::Continue
             }
@@ -497,7 +514,7 @@ impl Machine {
             0x0A => StepResult::Quit,
             // 0x0B new_line — print newline
             0x0B => {
-                self.out.print("\n");
+                self.print_text("\n");
                 StepResult::Continue
             }
             // 0x0D verify — branch always true (stub; real checksum in Task 16)
@@ -514,6 +531,11 @@ impl Machine {
             0x05 => StepResult::SaveRequest,
             // 0x06 restore — stub for Task 13
             0x06 => StepResult::RestoreRequest,
+            // 0x0C show_status (v3 only) — signal host to redraw the status line
+            0x0C => {
+                self.screen.show_status_requested = true;
+                StepResult::Continue
+            }
             // Unknown / unimplemented 0OP — no-op
             _ => StepResult::Continue,
         }
@@ -551,14 +573,15 @@ impl Machine {
                 let zscii = ops.get(0).copied().unwrap_or(0);
                 let ch = zscii_to_char(zscii);
                 let mut buf = [0u8; 4];
-                self.out.print(ch.encode_utf8(&mut buf));
+                let s = ch.encode_utf8(&mut buf);
+                self.print_text(s);
                 StepResult::Continue
             }
             // 0x06 print_num — print operand as signed decimal
             0x06 => {
                 let val = ops.get(0).copied().unwrap_or(0) as i16;
                 let s = format!("{}", val);
-                self.out.print(&s);
+                self.print_text(&s);
                 StepResult::Continue
             }
             // 0x08 push — push value onto eval stack
@@ -623,6 +646,76 @@ impl Machine {
                 self.do_branch(branch, arg_count >= n);
                 StepResult::Continue
             }
+            // ── Screen / stream opcodes (Task 13) ────────────────────────────
+
+            // 0x0A split_window — set upper window to N rows (v3+)
+            0x0A => {
+                let rows = ops.get(0).copied().unwrap_or(0);
+                self.screen.upper_window_rows = rows;
+                StepResult::Continue
+            }
+            // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+)
+            0x0B => {
+                let win = ops.get(0).copied().unwrap_or(0) as u8;
+                self.screen.current_window = win;
+                StepResult::Continue
+            }
+            // 0x0D erase_window — clear window (state-tracking only; no render)
+            0x0D => {
+                // Erase window: -1 = all windows + unsplit, -2 = all without unsplit,
+                // 0 = lower, 1 = upper. We just update upper_window_rows if -1.
+                let win = ops.get(0).copied().unwrap_or(0) as i16;
+                if win == -1 {
+                    self.screen.upper_window_rows = 0;
+                }
+                StepResult::Continue
+            }
+            // 0x0F set_cursor — update cursor position (row, col) in upper window
+            0x0F => {
+                let row = ops.get(0).copied().unwrap_or(1);
+                let col = ops.get(1).copied().unwrap_or(1);
+                self.screen.cursor_row = row;
+                self.screen.cursor_col = col;
+                StepResult::Continue
+            }
+            // 0x11 set_text_style — update text style bitmask (v4+)
+            0x11 => {
+                let style = ops.get(0).copied().unwrap_or(0) as u8;
+                self.screen.text_style = style;
+                StepResult::Continue
+            }
+            // 0x12 buffer_mode — toggle output buffering (v4+)
+            0x12 => {
+                let mode = ops.get(0).copied().unwrap_or(0);
+                self.screen.buffer_mode = mode != 0;
+                StepResult::Continue
+            }
+            // 0x13 output_stream — select/deselect output streams (ZMSD §7.1.2.5)
+            //   +1/-1: stream 1 (screen) on/off
+            //   +2/-2: stream 2 (transcript) on/off
+            //   +3:    stream 3 on — second operand is table address
+            //   -3:    stream 3 off — finalise table, restore routing
+            //   +4/-4: stream 4 (commands) on/off
+            0x13 => {
+                let stream = ops.get(0).copied().unwrap_or(0) as i16;
+                match stream {
+                    1  => { self.streams.stream1 = true; }
+                    -1 => { self.streams.stream1 = false; }
+                    2  => { self.streams.stream2 = true; }
+                    -2 => { self.streams.stream2 = false; }
+                    3  => {
+                        let table = ops.get(1).copied().unwrap_or(0) as u32;
+                        self.streams.push_stream3(table);
+                    }
+                    -3 => {
+                        self.streams.pop_stream3(&mut self.mem);
+                    }
+                    4  => { self.streams.stream4 = true; }
+                    -4 => { self.streams.stream4 = false; }
+                    _  => {}
+                }
+                StepResult::Continue
+            }
             // Unknown / unimplemented VAR — no-op seam (screen/text ops in Tasks 11–12)
             _ => StepResult::Continue,
         }
@@ -678,6 +771,24 @@ impl Machine {
         if let Some(v) = var {
             write_var(&mut self.state, &mut self.mem, v, val);
         }
+    }
+
+    /// Route text through the output-stream state.
+    ///
+    /// If stream 3 is active, text goes to the memory table buffer (NOT the
+    /// screen).  Otherwise it goes to `self.out` (subject to stream 1 being
+    /// active).
+    pub fn print_text(&mut self, s: &str) {
+        if self.streams.stream3_active() {
+            self.streams.write_stream3(s);
+        } else if self.streams.stream1 {
+            self.out.print(s);
+        }
+    }
+
+    /// Compute the v3 status line from memory globals.
+    pub fn status_line(&self) -> crate::screen::StatusLine {
+        crate::screen::compute_status_line(&self.mem)
     }
 
     /// Read global variable N (0-based). Convenience for tests and Tasks 11+.
@@ -2388,5 +2499,228 @@ pub(crate) mod tests {
         let out = m.buffer_output().expect("default sink");
         assert!(out.buf.ends_with('\n'), "print_ret output must end with newline");
         assert!(out.buf.starts_with("ab"), "print_ret output starts with the inline string");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 13: screen model, output stream 3, window opcodes
+    // -----------------------------------------------------------------------
+
+    /// Helper: emit a VAR-form instruction with up to 4 small-const operands.
+    /// `opcode` is the VAR opcode number (0x00–0x1F).
+    fn emit_var_instr(buf: &mut Vec<u8>, opcode: u8, ops: &[u8]) {
+        // VAR form: 0b11_1_xxxxx
+        buf.push(0b1110_0000 | (opcode & 0x1F));
+        // Type byte: each op = small-const (0b01), unused = omit (0b11).
+        let mut type_byte: u8 = 0xFF;
+        for (i, _) in ops.iter().enumerate().take(4) {
+            let shift = 6u8.saturating_sub(2 * i as u8);
+            type_byte &= !(0b11 << shift);
+            type_byte |= 0b01 << shift; // small const
+        }
+        buf.push(type_byte);
+        for &op in ops.iter().take(4) {
+            buf.push(op);
+        }
+    }
+
+    /// Emit VAR output_stream (0x13) with a large-const signed stream number.
+    /// Z-machine signed stream numbers (e.g. -1, -3) require 16-bit large constants.
+    fn emit_output_stream_large(buf: &mut Vec<u8>, stream_val: i16) {
+        let v = stream_val as u16;
+        buf.push(0b1110_0000 | 0x13);  // VAR:0x13
+        // Type byte: first=large(0b00), rest=omit(0b11) → 0b00_11_11_11 = 0x3F
+        buf.push(0x3F);
+        buf.push((v >> 8) as u8);
+        buf.push((v & 0xFF) as u8);
+    }
+
+    /// Emit output_stream +3 with a large-const table address.
+    /// stream=3 (small const), table_addr (large const).
+    /// type_byte: first=small(01), second=large(00), rest=omit(11) → 0b01_00_11_11 = 0x4F
+    fn emit_output_stream3_on(buf: &mut Vec<u8>, table_addr: u16) {
+        buf.push(0b1110_0000 | 0x13); // VAR:0x13
+        // Type byte: op0=small(01), op1=large(00), rest=omit(11)
+        buf.push(0b01_00_11_11);      // 0x4F
+        buf.push(3u8);                // stream number = 3 (small const)
+        buf.push((table_addr >> 8) as u8);
+        buf.push((table_addr & 0xFF) as u8);
+    }
+
+    // ── (a) set_text_style and split_window update ScreenState ───────────────
+
+    #[test]
+    fn screen_set_text_style_and_split_window() {
+        // Program at 0x10 (v5):
+        //   set_text_style 1  (bold)   → screen.text_style = 1
+        //   split_window  3           → screen.upper_window_rows = 3
+        //   set_window    1           → screen.current_window = 1
+        //   quit
+        //
+        // set_text_style = VAR:0x11
+        // split_window   = VAR:0x0A
+        // set_window     = VAR:0x0B
+        let mut buf = sample_story(5);
+        let mut pos: usize = 0x10;
+
+        // set_text_style 1: VAR:0x11, small 1
+        let instr = {let mut v = vec![]; emit_var_instr(&mut v, 0x11, &[1]); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        // split_window 3: VAR:0x0A, small 3
+        let instr = {let mut v = vec![]; emit_var_instr(&mut v, 0x0A, &[3]); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        // set_window 1: VAR:0x0B, small 1
+        let instr = {let mut v = vec![]; emit_var_instr(&mut v, 0x0B, &[1]); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        buf[pos] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+
+        assert_eq!(m.screen.text_style, 1, "set_text_style(1) → text_style=1");
+        assert_eq!(m.screen.upper_window_rows, 3, "split_window(3) → upper_window_rows=3");
+        assert_eq!(m.screen.current_window, 1, "set_window(1) → current_window=1");
+    }
+
+    // ── (b) show_status (v3 0OP:0x0C) sets the flag ─────────────────────────
+
+    #[test]
+    fn screen_show_status_v3_sets_flag() {
+        // v3 program: show_status (0xBC), quit
+        let mut buf = sample_story(3);
+        buf[0x10] = 0xBC; // 0OP:0x0C show_status
+        buf[0x11] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert!(m.screen.show_status_requested, "show_status should set the flag");
+    }
+
+    // ── (c) output_stream 3: text goes to memory table, NOT screen ───────────
+
+    #[test]
+    fn output_stream3_redirects_text_to_table() {
+        // Program at 0x10 (v5):
+        //   output_stream +3 table_addr    → select stream 3
+        //   print "ab"                     → goes to table, NOT screen
+        //   output_stream -3               → deselect stream 3
+        //   print "cd"                     → goes to screen (stream 1)
+        //   quit
+        //
+        // Table at 0x0060 (inside dynamic memory, safely below 0x0400).
+        // "ab" Z-encoded: a=Z6, b=Z7, pad=Z5 → word = 0x8000|(6<<10)|(7<<5)|5 = 0x99C5
+        // "cd" Z-encoded: c=Z8, d=Z9, pad=Z5 → word = 0x8000|(8<<10)|(9<<5)|5
+
+        let table_addr: u16 = 0x0060;
+        let mut buf = sample_story(5);
+        let mut pos: usize = 0x10;
+
+        // output_stream +3, table_addr
+        let instr = {let mut v = vec![]; emit_output_stream3_on(&mut v, table_addr); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        // print "ab" (0OP:0x02 inline)
+        let ab_word: u16 = 0x8000 | (6u16 << 10) | (7u16 << 5) | 5u16;
+        buf[pos] = 0xB2; pos += 1; // 0OP print
+        buf[pos] = (ab_word >> 8) as u8; pos += 1;
+        buf[pos] = (ab_word & 0xFF) as u8; pos += 1;
+
+        // output_stream -3 (deselect stream 3)
+        let instr = {let mut v = vec![]; emit_output_stream_large(&mut v, -3); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        // print "cd" (0OP:0x02 inline)
+        let cd_word: u16 = 0x8000 | (8u16 << 10) | (9u16 << 5) | 5u16;
+        buf[pos] = 0xB2; pos += 1;
+        buf[pos] = (cd_word >> 8) as u8; pos += 1;
+        buf[pos] = (cd_word & 0xFF) as u8; pos += 1;
+
+        buf[pos] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+
+        // Screen should only have "cd" (stream 1).
+        let screen_text = &m.buffer_output().expect("BufferOutput").buf;
+        assert_eq!(screen_text.as_str(), "cd", "screen should only receive 'cd' (not 'ab')");
+
+        // Table at 0x0060: word=length=2, then 'a','b'
+        assert_eq!(m.mem.read_word(table_addr as u32), 2, "table length word = 2");
+        assert_eq!(m.mem.read_byte(table_addr as u32 + 2), b'a', "table[0] = 'a'");
+        assert_eq!(m.mem.read_byte(table_addr as u32 + 3), b'b', "table[1] = 'b'");
+    }
+
+    // ── (d) stream 1 off: screen receives nothing ─────────────────────────────
+
+    #[test]
+    fn output_stream1_off_suppresses_screen() {
+        // output_stream -1 (disable screen), print "x", output_stream +1, print "y", quit
+        // Screen should only have "y".
+        let mut buf = sample_story(5);
+        let mut pos: usize = 0x10;
+
+        // output_stream -1
+        let instr = {let mut v = vec![]; emit_output_stream_large(&mut v, -1); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        // print "x": Z-encode x (A0: z=Z31; x is... wait let's use print_char)
+        // print_char ZSCII 120 = 'x': VAR:0x05
+        buf[pos] = 0xE5; pos += 1;     // VAR print_char
+        buf[pos] = 0x7F; pos += 1;     // type: small, omit, omit, omit
+        buf[pos] = 120u8; pos += 1;    // 'x' = ZSCII 120
+
+        // output_stream +1
+        let instr = {let mut v = vec![]; emit_output_stream_large(&mut v, 1); v};
+        buf[pos..pos+instr.len()].copy_from_slice(&instr); pos += instr.len();
+
+        // print_char 'y' = 121
+        buf[pos] = 0xE5; pos += 1;
+        buf[pos] = 0x7F; pos += 1;
+        buf[pos] = 121u8; pos += 1;    // 'y'
+
+        buf[pos] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+
+        let out = m.buffer_output().expect("BufferOutput");
+        assert_eq!(out.buf, "y", "only 'y' reaches screen (stream 1 was off for 'x')");
+    }
+
+    // ── (e) Machine::init_caps sets header bits correctly ────────────────────
+
+    #[test]
+    fn machine_init_caps_sets_header_bits() {
+        // Build a machine on a story where the initial_pc is past 0x40
+        // (so there's no program at 0x10 that conflicts with Flags2).
+        // sample_story sets initial_pc = 0x0040 and programs at 0x40+.
+        // But we need programs at a safe location. Let's use 0x80 as initial_pc.
+        let mut buf = sample_story(5);
+        // Place quit at 0x80 so the machine doesn't crash.
+        buf[0x80] = 0xBA;
+        // Override initial_pc to 0x0080 in the header.
+        buf[0x06] = 0x00;
+        buf[0x07] = 0x80;
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.init_caps();
+
+        // Check that Flags1 has fixed-space font bit set (bit 4 for v5).
+        let f1 = m.mem.read_byte(0x01);
+        assert_ne!(f1 & (1 << 4), 0, "Flags1 bit 4 (fixed-space font) should be set");
+
+        // Interpreter number and version.
+        assert_eq!(m.mem.read_byte(0x1E), 6, "interpreter number = 6");
+        assert_eq!(m.mem.read_byte(0x1F), b'A', "interpreter version = 'A'");
     }
 }

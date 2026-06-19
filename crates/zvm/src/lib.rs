@@ -6,4 +6,5 @@ pub mod header;
 pub mod io;
 pub mod memory;
 pub mod objects;
+pub mod screen;
 pub mod text;
