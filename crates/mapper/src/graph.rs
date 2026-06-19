@@ -105,6 +105,43 @@ impl MapGraph {
             conn.distorted = distorted;
         }
     }
+
+    /// Set or clear the label_override for a room.
+    pub fn set_label_override(&mut self, id: RoomId, label: Option<String>) {
+        if let Some(room) = self.rooms.get_mut(&id) {
+            room.label_override = label;
+        }
+    }
+
+    /// Set the notes for a room.
+    pub fn set_notes(&mut self, id: RoomId, notes: String) {
+        if let Some(room) = self.rooms.get_mut(&id) {
+            room.notes = notes;
+        }
+    }
+
+    /// Remove the connection with key (origin, dir). Returns true if removed.
+    pub fn remove_connection(&mut self, origin: RoomId, dir: Direction) -> bool {
+        let before = self.conns.len();
+        self.conns.retain(|c| !(c.origin == origin && c.dir == dir));
+        self.conns.len() < before
+    }
+
+    /// Change the direction of the edge keyed (origin, old) to (origin, new).
+    /// If an edge with key (origin, new) already exists, refuses and returns false.
+    /// Returns true if the relabel happened.
+    pub fn relabel_connection(&mut self, origin: RoomId, old: Direction, new: Direction) -> bool {
+        // Refuse if a connection with (origin, new) already exists.
+        if self.conns.iter().any(|c| c.origin == origin && c.dir == new) {
+            return false;
+        }
+        if let Some(conn) = self.conns.iter_mut().find(|c| c.origin == origin && c.dir == old) {
+            conn.dir = new;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
