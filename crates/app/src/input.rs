@@ -1,10 +1,17 @@
 //! Input → `Action` mapping and application.
 //!
 //! # Focus routing
-//! `key_to_action` checks global bindings first (Ctrl+Q/C/S/R/E/L, Tab), then
-//! routes to the per-focus keymap.  While `state.prompt` is `Some` (text-entry
-//! sub-mode), printable chars, Backspace, Enter and Esc are routed to the prompt
-//! buffer regardless of focus.
+//! `key_to_action` applies bindings in this strict precedence order:
+//! 1. Ctrl+Q / Ctrl+C → Quit (always wins, even during a prompt).
+//! 2. Prompt active → route to prompt only; all other keys (Tab, Ctrl+S/R/E/L,
+//!    …) are absorbed as `Action::None` so the prompt cannot be escaped by a
+//!    global shortcut.
+//! 3. Remaining globals (Ctrl+S/R/E/L, Tab) — only reached when no prompt.
+//! 4. Per-focus routing (Game / Map).
+//!
+//! While `state.prompt` is `Some` (text-entry sub-mode), printable chars,
+//! Backspace, Enter and Esc are routed to the prompt buffer; everything else is
+//! absorbed.
 //!
 //! # Caller-handled actions
 //! `apply_action` handles view/light-correction actions in-process.  The
@@ -74,22 +81,33 @@ pub enum Action {
 /// Map a crossterm `KeyEvent` to an `Action` given the current `AppState`.
 ///
 /// Routing order:
-/// 1. **Prompt active** — printable chars, Backspace, Enter, Esc go to the
-///    prompt buffer (via dedicated prompt actions).  Global shortcuts still
-///    work.
-/// 2. **Global** (any focus) — Ctrl+Q/C → Quit; Ctrl+S → SaveGame;
-///    Ctrl+R → RestoreGame; Ctrl+E → ExportSvg; Ctrl+L → CycleLayout;
-///    plain Tab → ToggleFocus.
-/// 3. **Game focus** — printable char → InputChar; Backspace → Backspace;
+/// 1. **Quit** — Ctrl+Q / Ctrl+C → `Quit`, unconditionally (even mid-prompt).
+/// 2. **Prompt active** — all input is consumed by the prompt; Tab and other
+///    global shortcuts return `Action::None` so a prompt can never be abandoned
+///    by an accidental global key.
+/// 3. **Global** (any focus, no prompt) — Ctrl+S → SaveGame; Ctrl+R →
+///    RestoreGame; Ctrl+E → ExportSvg; Ctrl+L → CycleLayout; Tab →
+///    ToggleFocus.
+/// 4. **Game focus** — printable char → InputChar; Backspace → Backspace;
 ///    Enter → SubmitCommand.
-/// 4. **Map focus** — navigation, zoom, select, edit bindings.
+/// 5. **Map focus** — navigation, zoom, select, edit bindings.
 pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
-    // ── Global shortcuts (checked before focus routing) ───────────────────
+    // 1. Quit always wins — even while a prompt is active.
+    if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('c')) {
+        return Action::Quit;
+    }
+
+    // 2. Prompt sub-mode: consume all keys; only prompt-relevant ones produce
+    //    an action, everything else (Tab, Ctrl+S/R/E/L, …) is absorbed.
+    if state.prompt.is_some() {
+        return prompt_key_to_action(key);
+    }
+
+    // 3. Remaining global shortcuts (only reached when no prompt is active).
     if ctrl {
         return match key.code {
-            KeyCode::Char('q') | KeyCode::Char('c') => Action::Quit,
             KeyCode::Char('s') => Action::SaveGame,
             KeyCode::Char('r') => Action::RestoreGame,
             KeyCode::Char('e') => Action::ExportSvg,
@@ -101,12 +119,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return Action::ToggleFocus;
     }
 
-    // ── Prompt sub-mode (overrides focus routing for text keys) ───────────
-    if state.prompt.is_some() {
-        return prompt_key_to_action(key);
-    }
-
-    // ── Per-focus routing ─────────────────────────────────────────────────
+    // 4 & 5. Per-focus routing.
     match state.focus {
         Focus::Game => game_key_to_action(state, key),
         Focus::Map => map_key_to_action(key),
@@ -471,6 +484,49 @@ mod tests {
     fn ctrl_q_quits_in_any_focus() {
         let s = AppState::default();
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
+    }
+
+    // ── Prompt-precedence tests ───────────────────────────────────────────────
+
+    /// Helper: build an AppState with an active RenameRoom prompt.
+    fn state_with_rename_prompt() -> AppState {
+        let mut s = AppState::default();
+        s.toggle_focus(); // Map
+        s.select_room(Some(1));
+        s.prompt = Some(crate::state::Prompt {
+            kind: crate::state::PromptKind::RenameRoom(1),
+            buffer: String::new(),
+        });
+        s
+    }
+
+    #[test]
+    fn ctrl_q_quits_during_prompt() {
+        let s = state_with_rename_prompt();
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('q'))),
+            Action::Quit
+        ));
+    }
+
+    #[test]
+    fn tab_ignored_during_prompt() {
+        let s = state_with_rename_prompt();
+        // Tab must be absorbed (Action::None), NOT ToggleFocus.
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Tab)),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn ctrl_s_ignored_during_prompt() {
+        let s = state_with_rename_prompt();
+        // Ctrl+S must be absorbed (Action::None), NOT SaveGame.
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('s'))),
+            Action::None
+        ));
     }
 
     // ── Additional tests ──────────────────────────────────────────────────────
