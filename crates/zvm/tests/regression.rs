@@ -64,14 +64,25 @@ fn czech_reports_no_failures() {
         );
     }
 
-    // Extract "Passed- NNN" and "Failed- NNN" from the summary line.
-    // CZECH format: "Passed- 406. Failed- 0. Print tests- 19"
+    // Extract passed/failed counts from the CZECH summary line.
+    // With the fixed A2 alphabet the line reads:
+    //   "Passed: 406, Failed: 0, Print tests: 19"
+    // (Previously the buggy A2 shifted ':' → '-' and ',' → '.', producing
+    //  "Passed- 406. Failed- 0." — the parser now handles both forms.)
+    fn parse_after(line: &str, prefix: &str) -> Option<u32> {
+        let rest = line.split(prefix).nth(1)?;
+        rest.split_whitespace()
+            .next()?
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse()
+            .ok()
+    }
     let passed: u32 = out
         .lines()
         .find_map(|l| {
             let l = l.trim();
-            if l.starts_with("Passed-") || l.starts_with("Passed- ") {
-                l.split_whitespace().nth(1).and_then(|s| s.trim_end_matches('.').parse().ok())
+            if l.starts_with("Passed") {
+                parse_after(l, "Passed:").or_else(|| parse_after(l, "Passed-"))
             } else {
                 None
             }
@@ -81,12 +92,8 @@ fn czech_reports_no_failures() {
         .lines()
         .find_map(|l| {
             let l = l.trim();
-            if l.contains("Failed-") {
-                // "Failed- 0." appears mid-line in the summary
-                l.split("Failed-")
-                    .nth(1)
-                    .and_then(|s| s.split_whitespace().next())
-                    .and_then(|s| s.trim_end_matches('.').parse().ok())
+            if l.contains("Failed") {
+                parse_after(l, "Failed:").or_else(|| parse_after(l, "Failed-"))
             } else {
                 None
             }

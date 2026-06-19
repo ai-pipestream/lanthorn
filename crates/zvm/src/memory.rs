@@ -11,6 +11,57 @@ use crate::header::{parse_header, Header};
 pub struct Memory {
     bytes: Vec<u8>,
     header: Header,
+    /// Custom Unicode translation table parsed from the header-extension table
+    /// (ZMSD §3.8.5.4). Maps ZSCII codes 155, 156, … to Unicode chars.
+    /// `None` if the story has no custom table; the default table is used instead.
+    unicode_table: Option<Vec<char>>,
+}
+
+/// Parse the custom Unicode translation table from raw story bytes if present
+/// (ZMSD §3.8.5.4). Returns `None` if no custom table is defined.
+///
+/// Header byte 0x36 (word) → header-extension table address.
+/// Header-ext word 0 = number of words in that table.
+/// Header-ext word 3 (1-indexed) = address of Unicode translation table.
+/// Unicode table: 1 byte N, then N big-endian 16-bit Unicode code points
+/// mapping ZSCII 155, 156, … 154+N.
+fn parse_unicode_table(bytes: &[u8]) -> Option<Vec<char>> {
+    // Byte 0x36 is only present in v5+ headers (which are ≥ 64 bytes).
+    if bytes.len() < 0x38 {
+        return None;
+    }
+    let ext_addr = (((bytes[0x36] as u16) << 8) | bytes[0x37] as u16) as usize;
+    if ext_addr == 0 || ext_addr + 2 > bytes.len() {
+        return None;
+    }
+    // Word 0 of header-ext table: number of words in the table.
+    let ext_len = (((bytes[ext_addr] as u16) << 8) | bytes[ext_addr + 1] as u16) as usize;
+    if ext_len < 3 {
+        return None;
+    }
+    // Word 3 (byte offset 6 from table start) = Unicode table address.
+    let uni_word_addr = ext_addr + 6;
+    if uni_word_addr + 2 > bytes.len() {
+        return None;
+    }
+    let uni_addr = (((bytes[uni_word_addr] as u16) << 8) | bytes[uni_word_addr + 1] as u16) as usize;
+    if uni_addr == 0 || uni_addr >= bytes.len() {
+        return None;
+    }
+    let n = bytes[uni_addr] as usize;
+    if n == 0 {
+        return None;
+    }
+    let mut table = Vec::with_capacity(n);
+    for i in 0..n {
+        let off = uni_addr + 1 + i * 2;
+        if off + 2 > bytes.len() {
+            break;
+        }
+        let cp = ((bytes[off] as u32) << 8) | bytes[off + 1] as u32;
+        table.push(char::from_u32(cp).unwrap_or('?'));
+    }
+    Some(table)
 }
 
 impl Memory {
@@ -23,7 +74,8 @@ impl Memory {
         if header.static_mem_base as usize > bytes.len() {
             return Err(ZError::Truncated);
         }
-        Ok(Memory { bytes, header })
+        let unicode_table = parse_unicode_table(&bytes);
+        Ok(Memory { bytes, header, unicode_table })
     }
 
     /// Length of the story file in bytes.
@@ -113,6 +165,16 @@ impl Memory {
     /// Raw read access to the underlying byte slice (for Quetzal CMem XOR).
     pub fn raw_bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Look up a ZSCII code ≥ 155 in the custom Unicode translation table
+    /// (ZMSD §3.8.5.4). Returns `Some(char)` if the story defines a custom
+    /// table and the code falls within it; `None` otherwise (caller falls back
+    /// to the default table).
+    pub fn unicode_char(&self, zscii: u16) -> Option<char> {
+        let table = self.unicode_table.as_ref()?;
+        let idx = zscii.checked_sub(155)? as usize;
+        table.get(idx).copied()
     }
 
     /// Unpack a packed string address (ZMSD §1.2.3).

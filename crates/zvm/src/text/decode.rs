@@ -80,7 +80,10 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
                     let lo = if i + 1 < zchars.len() { zchars[i + 1] } else { 0 };
                     i += 2;
                     let zscii = ((hi as u16) << 5) | (lo as u16);
-                    result.push(zscii_to_char(zscii));
+                    // Consult the story's custom Unicode table first (ZMSD §3.8.5.4);
+                    // fall back to the default ZSCII table.
+                    let ch = mem.unicode_char(zscii).unwrap_or_else(|| zscii_to_char(zscii));
+                    result.push(ch);
                     alphabet = 0;
                 } else {
                     // Normal lookup: Z-char 6 → table index 0
@@ -170,11 +173,11 @@ mod tests {
 
     #[test]
     fn decodes_a2_digit() {
-        // '0' via shift-to-A2 (Z-char 5) followed by Z-char 9 (A2 index 3 = '0').
-        // A2: idx 0=escape, 1=\n, 2=space, 3='0', ...
+        // '0' via shift-to-A2 (Z-char 5) followed by Z-char 8 (A2 index 2 = '0').
+        // A2: idx 0=escape, 1=\n, 2='0', 3='1', ...
         // Third Z-char is 5 (another shift) — string ends, no output.
         let bytes = sample_story(3);
-        let w: u16 = 0x8000 | (5 << 10) | (9 << 5) | 5;
+        let w: u16 = 0x8000 | (5 << 10) | (8 << 5) | 5;
         let mut m = Memory::new(bytes).unwrap();
         m.write_word(0x100, w);
         let (s, end) = decode_string(&m, 0x100);
@@ -231,6 +234,42 @@ mod tests {
     }
 
     #[test]
+    fn custom_unicode_table_overrides_default_zscii_155() {
+        // Build a story with a header-extension table (at 0x0200) that points
+        // to a Unicode translation table (at 0x0210).
+        // Header word 0x36 = address of header-extension table (0x0200).
+        // Header-ext word 0 = number of words in table = 3.
+        // Header-ext word 3 (byte offset 6) = address of Unicode table (0x0210).
+        // Unicode table: byte 0 = N=1, then 1 word = U+00A9 (©).
+        // This maps ZSCII 155 → '©' (overriding default 'ä').
+        //
+        // Encode ZSCII 155 via the 10-bit escape: A2 shift (5), Z-char 6 (escape),
+        // hi = 155 >> 5 = 4, lo = 155 & 31 = 27.
+        // Pack into two words:
+        //   w1 = [5, 6, 4]
+        //   w2 (end) = [27, 5, 5]
+        let mut bytes = sample_story(5); // v5 has header-extension table
+        // header-ext table address at byte 0x36
+        bytes[0x36] = 0x02; bytes[0x37] = 0x00; // 0x0200
+        // header-ext table at 0x0200: word 0 = 3 (table has 3 words)
+        bytes[0x0200] = 0x00; bytes[0x0201] = 0x03; // word 0: length=3
+        bytes[0x0202] = 0x00; bytes[0x0203] = 0x00; // word 1: unused
+        bytes[0x0204] = 0x00; bytes[0x0205] = 0x00; // word 2: unused
+        bytes[0x0206] = 0x02; bytes[0x0207] = 0x10; // word 3: Unicode table at 0x0210
+        // Unicode translation table at 0x0210: N=1, then word U+00A9 (©)
+        bytes[0x0210] = 0x01;                        // N=1
+        bytes[0x0211] = 0x00; bytes[0x0212] = 0xA9; // U+00A9 = ©
+        let mut m = Memory::new(bytes).unwrap();
+        // Encode ZSCII 155 via 10-bit escape
+        let w1: u16 = (5 << 10) | (6 << 5) | 4;
+        let w2: u16 = 0x8000 | (27 << 10) | (5 << 5) | 5;
+        m.write_word(0x0100, w1);
+        m.write_word(0x0102, w2);
+        let (s, _end) = decode_string(&m, 0x0100);
+        assert_eq!(s, "©", "custom Unicode table should map ZSCII 155 to © not ä");
+    }
+
+    #[test]
     fn zscii_extended_chars_decode() {
         assert_eq!(zscii_to_char(155), 'ä');
         assert_eq!(zscii_to_char(161), 'ß');
@@ -240,6 +279,49 @@ mod tests {
         // boundary: just outside the table
         assert_eq!(zscii_to_char(154), '?');
         assert_eq!(zscii_to_char(224), '?');
+    }
+
+    #[test]
+    fn decodes_digits_and_punctuation() {
+        // Regression: A2 table must NOT have a space at index 2.
+        // Per ZMSD §3.5.3, fixed A2: idx 2='0', idx 11='9', idx 12='.', idx 18='\''.
+        // Z-char 5 = A2 shift; the following Z-char selects the character.
+        // Period ('.') = A2 idx 12 = Z-char 18.
+        // '9'         = A2 idx 11 = Z-char 17.
+        // Apostrophe  = A2 idx 18 = Z-char 24.
+        //
+        // Word 1: [5, 18, 5]  → '.' then shift-A2
+        // Word 2: [17, 5, 24] → '9' then shift-A2 then '\''? No: after shift+char,
+        //   alphabet resets. So: [5, 18, 5] → '.', shift pending; [17] → wrong.
+        //
+        // Use three words for clarity:
+        // Word 1 (no-end): Z-chars [5, 18, 5]  → period, then shift-A2 starts
+        // Word 2 (no-end): Z-chars [17, 5, 24] → '9', shift-A2, '\''
+        // Word 3 (end):    Z-chars [5, 5, 5]   → three unused shifts (no chars)
+        //
+        // Actually pack more carefully — each Z-char needs its own shift:
+        // Word 1: [5, 18, 5]   → '.', A2-shift for next char
+        // Word 2: [17, 5, 24]  → '9', A2-shift, '\''  ← shift is consumed by 24
+        // Wait: after outputting '.', alphabet resets to 0.
+        // [5, 18, 5]:  5=A2-shift, 18='.' output, 5=A2-shift again
+        // [17, ...]    but alphabet=2 so 17 → A2 idx 11 = '9'; alphabet resets
+        // [5, 24, 5]   5=A2-shift, 24='\'' output, 5=unused-shift
+        // So three words:
+        //   w1 = [5, 18, 5]
+        //   w2 = [17, 5, 24]
+        //   w3 (end) = [5, 5, 5]
+        // Result: '.', '9', '\''
+        let bytes = sample_story(3);
+        let w1: u16 = (5 << 10) | (18 << 5) | 5;
+        let w2: u16 = (17 << 10) | (5 << 5) | 24;
+        let w3: u16 = 0x8000 | (5 << 10) | (5 << 5) | 5;
+        let mut m = Memory::new(bytes).unwrap();
+        m.write_word(0x100, w1);
+        m.write_word(0x102, w2);
+        m.write_word(0x104, w3);
+        let (s, end) = decode_string(&m, 0x100);
+        assert_eq!(s, ".9'", "period should be '.' not '9', apostrophe should be '\\'' not '#'");
+        assert_eq!(end, 0x106);
     }
 
     #[test]

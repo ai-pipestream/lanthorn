@@ -8,8 +8,8 @@ pub(crate) const A0: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
 // A1: uppercase A–Z
 pub(crate) const A1: &[u8; 26] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 // A2: Z-char 6 = 10-bit ZSCII escape (0x00 placeholder, handled specially)
-//     Z-char 7 = newline, Z-chars 8–31 = space, 0–9, punctuation
-pub(crate) const A2: &[u8; 26] = b"\x00\n 0123456789.,!?_#'\"/\\-:(";
+//     Z-char 7 = newline, Z-chars 8–17 = 0–9, Z-chars 18–31 = punctuation
+pub(crate) const A2: &[u8; 26] = b"\x00\n0123456789.,!?_#'\"/\\-:()";
 
 pub mod decode;
 pub use decode::decode_string;
