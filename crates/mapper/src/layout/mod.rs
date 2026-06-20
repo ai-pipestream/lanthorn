@@ -28,6 +28,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::direction::grid_offset;
 use crate::graph::{Connection, MapGraph, RoomId};
 
+mod vpsc;
+
 // ── pair_offset ───────────────────────────────────────────────────────────────
 
 /// Compute the combined grid offset of room `b` relative to room `a`, using the
