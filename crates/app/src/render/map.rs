@@ -75,28 +75,143 @@ fn side_anchor(rect: Rect, side: Side) -> (i32, i32) {
     }
 }
 
-/// Build an orthogonal L-path from `dep` to `arr` whose first step leaves in
+/// Build an obstacle-aware orthogonal path from `dep` to `arr` whose first step leaves in
 /// `dep_side`'s direction.
 ///
-/// - dep_side is Left or Right → go horizontally first, then vertically
-/// - dep_side is Top or Bottom → go vertically first, then horizontally
+/// Uses A* on the integer screen grid. `blocked` contains all screen cells that are
+/// interior to other room boxes (excluding the origin and dest rooms for this edge).
 ///
-/// Returns the list of every screen cell along the path (contiguous, step 1).
-fn route_ortho(dep: (i32, i32), arr: (i32, i32), dep_side: Side) -> Vec<(i32, i32)> {
+/// Falls back to a simple L-path if A* cannot find a path (blocked or cap exceeded).
+fn route_ortho(
+    dep: (i32, i32),
+    arr: (i32, i32),
+    dep_side: Side,
+    blocked: &std::collections::HashSet<(i32, i32)>,
+) -> Vec<(i32, i32)> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
     if dep == arr {
         return vec![dep];
     }
 
-    // Determine corner point based on which axis leads.
-    let corner = match dep_side {
-        Side::Left | Side::Right => (arr.0, dep.1), // horizontal first
-        Side::Top | Side::Bottom => (dep.0, arr.1), // vertical first
+    // Map dep_side to the forced first-step delta.
+    let first_delta: (i32, i32) = match dep_side {
+        Side::Right  => (1, 0),
+        Side::Left   => (-1, 0),
+        Side::Top    => (0, -1),
+        Side::Bottom => (0, 1),
     };
 
+    // Search bounds: bounding box of dep/arr expanded by 6, capped at 200×200.
+    let min_x = (dep.0.min(arr.0) - 6).max(dep.0.min(arr.0) - 200);
+    let min_y = (dep.1.min(arr.1) - 6).max(dep.1.min(arr.1) - 200);
+    let mut max_x = dep.0.max(arr.0) + 6;
+    let mut max_y = dep.1.max(arr.1) + 6;
+    if max_x - min_x > 200 { max_x = min_x + 200; }
+    if max_y - min_y > 200 { max_y = min_y + 200; }
+
+    // State: (cell, incoming_dir)
+    type State = ((i32, i32), Option<(i32, i32)>);
+
+    // Heap entries: (Reverse(f_cost), g_cost, cell, incoming_dir)
+    // Using i32 for costs; all costs are non-negative.
+    let manhattan = |a: (i32, i32), b: (i32, i32)| -> i32 {
+        (a.0 - b.0).abs() + (a.1 - b.1).abs()
+    };
+
+    // Seed: forced first step from dep in dep_side direction.
+    let start_cell = (dep.0 + first_delta.0, dep.1 + first_delta.1);
+    // If the forced first step is out of bounds or blocked (and not arr), fall back.
+    let first_blocked = blocked.contains(&start_cell) && start_cell != arr;
+    let first_oob = start_cell.0 < min_x || start_cell.0 > max_x
+        || start_cell.1 < min_y || start_cell.1 > max_y;
+
+    if !first_blocked && !first_oob {
+        let start_g: i32 = 1;
+        let start_f: i32 = start_g + manhattan(start_cell, arr);
+        let start_dir = Some(first_delta);
+
+        type HeapEntry = (Reverse<i32>, i32, (i32, i32), Option<(i32, i32)>);
+        let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
+        heap.push((Reverse(start_f), start_g, start_cell, start_dir));
+
+        let mut visited: std::collections::HashSet<State> = std::collections::HashSet::new();
+        let mut parent: std::collections::HashMap<State, State> =
+            std::collections::HashMap::new();
+
+        // Seed parent for start_cell so we can reconstruct path back through dep.
+        // We represent dep as having no parent (it's the true start).
+        parent.insert((start_cell, start_dir), (dep, None));
+
+        let neighbors: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+        'astar: while let Some((_, g, cell, inc_dir)) = heap.pop() {
+            let state: State = (cell, inc_dir);
+            if !visited.insert(state) {
+                continue;
+            }
+
+            if visited.len() > 4000 {
+                break 'astar;
+            }
+
+            if cell == arr {
+                // Reconstruct path: walk parent map back to dep.
+                let mut path_rev: Vec<(i32, i32)> = Vec::new();
+                let mut cur_state: State = (cell, inc_dir);
+                loop {
+                    path_rev.push(cur_state.0);
+                    match parent.get(&cur_state) {
+                        Some(&prev) => {
+                            if prev.0 == dep {
+                                path_rev.push(dep);
+                                break;
+                            }
+                            cur_state = prev;
+                        }
+                        None => break,
+                    }
+                }
+                path_rev.reverse();
+                return path_rev;
+            }
+
+            for &delta in &neighbors {
+                let next = (cell.0 + delta.0, cell.1 + delta.1);
+                // Bounds check.
+                if next.0 < min_x || next.0 > max_x || next.1 < min_y || next.1 > max_y {
+                    continue;
+                }
+                // Blocked check (arr is always passable).
+                if next != arr && blocked.contains(&next) {
+                    continue;
+                }
+                let next_dir = Some(delta);
+                let next_state: State = (next, next_dir);
+                if visited.contains(&next_state) {
+                    continue;
+                }
+                // Turn penalty.
+                let turn_cost: i32 = if inc_dir.is_some() && inc_dir != Some(delta) { 2 } else { 0 };
+                let next_g = g + 1 + turn_cost;
+                let next_f = next_g + manhattan(next, arr);
+                if let std::collections::hash_map::Entry::Vacant(e) = parent.entry(next_state) {
+                    e.insert((cell, inc_dir));
+                    heap.push((Reverse(next_f), next_g, next, next_dir));
+                }
+            }
+        }
+    }
+
+    // Fallback: simple L-path (same as original logic).
+    let corner = match dep_side {
+        Side::Left | Side::Right => (arr.0, dep.1),
+        Side::Top | Side::Bottom => (dep.0, arr.1),
+    };
     let mut pts = Vec::new();
-    // Walk dep → corner → arr, each step ±1.
     walk_to(&mut pts, dep, corner);
-    pts.pop(); // remove corner so walk_to below includes it exactly once
+    pts.pop();
     walk_to(&mut pts, corner, arr);
     pts
 }
@@ -292,8 +407,21 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             };
             let arr = side_anchor(dest_rect, arr_side);
 
+            // Build blocked set: all cells of every room box except origin and dest.
+            let blocked: std::collections::HashSet<(i32, i32)> = placed
+                .iter()
+                .filter(|(&id, _)| id != edge.origin && id != edge.dest)
+                .flat_map(|(_, &rect)| {
+                    let x0 = rect.x as i32;
+                    let y0 = rect.y as i32;
+                    let x1 = rect.right() as i32;
+                    let y1 = rect.bottom() as i32;
+                    (x0..x1).flat_map(move |x| (y0..y1).map(move |y| (x, y)))
+                })
+                .collect();
+
             // Route the path.
-            let path = route_ortho(dep, arr, dep_side);
+            let path = route_ortho(dep, arr, dep_side, &blocked);
 
             // Rasterize into bitmask map (screen cells inside area only).
             let screen_pts: Vec<(u16, u16)> = path
@@ -861,5 +989,91 @@ mod tests {
             "connector should not be dim; modifier={:?}",
             cell.modifier
         );
+    }
+
+    #[test]
+    fn route_avoids_blocked_box() {
+        // dep=(0,5), arr=(20,5), dep_side=Right
+        // blocked = all cells of rect x in 8..14, y in 3..8
+        let dep = (0i32, 5i32);
+        let arr = (20i32, 5i32);
+        let mut blocked = std::collections::HashSet::new();
+        for x in 8..14i32 {
+            for y in 3..8i32 {
+                blocked.insert((x, y));
+            }
+        }
+        let path = route_ortho(dep, arr, Side::Right, &blocked);
+        // Path must not contain any blocked cell
+        for &pt in &path {
+            assert!(!blocked.contains(&pt), "path goes through blocked cell {:?}", pt);
+        }
+        // Path must be contiguous
+        for w in path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let dist = (a.0 - b.0).abs() + (a.1 - b.1).abs();
+            assert_eq!(dist, 1, "path has gap between {:?} and {:?}", a, b);
+        }
+        // Must start at dep and end at arr
+        assert_eq!(path[0], dep);
+        assert_eq!(*path.last().unwrap(), arr);
+        // First step must be east (dep_side=Right)
+        assert_eq!(path[1], (1, 5), "first step should be east");
+    }
+
+    #[test]
+    fn route_straight_when_clear() {
+        // With empty blocked, dep/arr on the same row → straight line
+        let dep = (0i32, 5i32);
+        let arr = (5i32, 5i32);
+        let blocked = std::collections::HashSet::new();
+        let path = route_ortho(dep, arr, Side::Right, &blocked);
+        // Should be straight line: (0,5),(1,5),(2,5),(3,5),(4,5),(5,5)
+        let expected: Vec<(i32, i32)> = (0..=5).map(|x| (x, 5)).collect();
+        assert_eq!(path, expected, "should be straight line when clear");
+    }
+
+    #[test]
+    fn render_no_connector_glyph_inside_other_room() {
+        // Verify via rendering: 3 rooms where A→C would naively cross B.
+        // Room A at (0,0), Room B at (1,0), Room C at (2,0).
+        // Direct edge from A to C (not via B) so the connector crosses B's area.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(3, (2, 0));
+        // Direct edge from A(0,0) to C(2,0) — passes through B's space naively
+        g.add_edge(1, mapper::direction::Direction::E, 3);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default(); // Boxes zoom
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Room B box: Boxes zoom, step=18×6, room at cell (1,0) → screen (18,0), box 14×4
+        // Interior: cols 19..31, rows 1..3
+        let b_rect = Rect::new(18, 0, 14, 4);
+        let connector_glyphs = [
+            "─", "│", "╭", "╮", "╰", "╯", "├", "┤", "┴", "┬", "┼",
+            "▶", "◀", "▲", "▼", "▷", "◁", "△", "▽",
+        ];
+        for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
+            for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
+                if let Some(cell) = buf.cell((x, y)) {
+                    let sym = cell.symbol();
+                    assert!(
+                        !connector_glyphs.contains(&sym),
+                        "connector glyph '{}' found inside room B's interior at ({},{})",
+                        sym,
+                        x,
+                        y
+                    );
+                }
+            }
+        }
     }
 }
