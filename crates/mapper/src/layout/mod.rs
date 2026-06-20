@@ -385,6 +385,9 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         pack_x = max_x_used + 2; // 1-cell gap between components
     }
 
+    // Open routing channels: shift rooms so every drawn edge has a clean lane.
+    routability::repair_routability(graph, &mut final_pos);
+
     // Anchor the lowest-id room at (0,0) for a stable reference.
     if let Some(&(ax, ay)) = final_pos.get(&ids[0]) {
         for p in final_pos.values_mut() {
@@ -668,5 +671,62 @@ mod tests {
         let p1 = g.room(1).unwrap().pos.unwrap();
         let p2 = g.room(2).unwrap().pos.unwrap();
         assert!(p2.1 < p1.1, "room 2 (north of 1) must be above it: {p2:?} vs {p1:?}");
+    }
+
+    #[test]
+    fn repair_opens_channel_for_a129_corner() {
+        // The exact #25/#74/#76 failure: three mutually inconsistent compass hints.
+        // After relayout, every compass edge must be routable, and 25->W->76 must
+        // become a clean (non-distorted) west shot once #25 shifts off #74's row.
+        use crate::direction::Direction;
+        let mut g = crate::graph::MapGraph::new();
+        for (id, name) in [(25, "Canyon View"), (74, "Clearing"), (76, "Forest")] {
+            g.upsert_room(id, name.into());
+        }
+        g.add_edge(74, Direction::E, 25);
+        g.add_edge(74, Direction::S, 76);
+        g.add_edge(25, Direction::W, 76);
+        relayout_auto(&mut g);
+
+        // Build the occupancy + bbox the way repair does, then assert all 3 edges route.
+        let pos: std::collections::BTreeMap<RoomId, (i32, i32)> =
+            g.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+        let occ: std::collections::BTreeMap<(i32, i32), RoomId> =
+            pos.iter().map(|(&id, &c)| (c, id)).collect();
+        let xs: Vec<i32> = pos.values().map(|p| p.0).collect();
+        let ys: Vec<i32> = pos.values().map(|p| p.1).collect();
+        let bb = (
+            xs.iter().min().unwrap() - super::routability::BBOX_MARGIN,
+            ys.iter().min().unwrap() - super::routability::BBOX_MARGIN,
+            xs.iter().max().unwrap() + super::routability::BBOX_MARGIN,
+            ys.iter().max().unwrap() + super::routability::BBOX_MARGIN,
+        );
+        for c in g.connections() {
+            assert!(
+                super::routability::edge_routable(pos[&c.origin], pos[&c.dest], c.dir, &occ, bb),
+                "edge {}-{:?}->{} must be routable after repair; positions {pos:?}",
+                c.origin, c.dir, c.dest
+            );
+        }
+        // 25->76 is now geometrically truthful → not distorted.
+        let e = g.connections().iter().find(|c| c.origin == 25 && c.dest == 76).unwrap();
+        assert!(!e.distorted, "25->W->76 should be a clean west shot after repair; pos {pos:?}");
+    }
+
+    #[test]
+    fn repair_terminates_on_impossible_mutual_south() {
+        // A -S-> B and B -S-> A can't both be true. Repair must terminate, leave no
+        // overlap, and leave at least one of the two edges distorted (unsatisfiable).
+        use crate::direction::Direction;
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::S, 2);
+        g.add_edge(2, Direction::S, 1);
+        relayout_auto(&mut g);
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no overlap");
+        assert!(g.connections().iter().any(|c| c.distorted), "one mutual-S edge stays distorted");
     }
 }

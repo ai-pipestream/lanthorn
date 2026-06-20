@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::direction::{grid_offset, Direction};
-use crate::graph::RoomId;
+use crate::graph::{MapGraph, RoomId};
 
 /// BFS search bound: the room bounding box is expanded by this many cells so a
 /// route may detour just outside the outermost rooms.
@@ -74,6 +74,113 @@ pub fn edge_routable(
         }
     }
     false
+}
+
+/// Max hill-climb passes. A backstop: each accepted move strictly lowers the score,
+/// so the loop terminates well before this on real maps.
+const MAX_REPAIR_PASSES: usize = 30;
+
+fn occupied_map(pos: &BTreeMap<RoomId, (i32, i32)>) -> BTreeMap<(i32, i32), RoomId> {
+    pos.iter().map(|(&id, &c)| (c, id)).collect()
+}
+
+fn bbox_of(pos: &BTreeMap<RoomId, (i32, i32)>) -> (i32, i32, i32, i32) {
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut max_y = i32::MIN;
+    for &(x, y) in pos.values() {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    (min_x - BBOX_MARGIN, min_y - BBOX_MARGIN, max_x + BBOX_MARGIN, max_y + BBOX_MARGIN)
+}
+
+/// Number of drawn edges with no clean channel under `pos`.
+fn unroutable_count(
+    pos: &BTreeMap<RoomId, (i32, i32)>,
+    drawn: &[(RoomId, RoomId, Direction)],
+) -> usize {
+    let occ = occupied_map(pos);
+    let bb = bbox_of(pos);
+    drawn
+        .iter()
+        .filter(|&&(o, d, dir)| !edge_routable(pos[&o], pos[&d], dir, &occ, bb))
+        .count()
+}
+
+/// Total L1 displacement of `pos` from the pre-repair `stress` positions (the
+/// deterministic tiebreaker — keeps the search from drifting needlessly).
+fn displacement(
+    pos: &BTreeMap<RoomId, (i32, i32)>,
+    stress: &BTreeMap<RoomId, (i32, i32)>,
+) -> i64 {
+    pos.iter()
+        .map(|(id, &(x, y))| {
+            let (sx, sy) = stress[id];
+            ((x - sx).abs() + (y - sy).abs()) as i64
+        })
+        .sum()
+}
+
+/// Greedily shift rooms into free grid cells until the number of un-routable drawn
+/// edges can no longer be reduced. Score is lexicographic `(unroutable, displacement)`;
+/// only strictly-improving moves are accepted, so the search is deterministic and
+/// terminates. Drawn edges are compass edges (the only ones rendered as paths).
+pub fn repair_routability(graph: &MapGraph, pos: &mut BTreeMap<RoomId, (i32, i32)>) {
+    let drawn: Vec<(RoomId, RoomId, Direction)> = graph
+        .connections()
+        .iter()
+        .filter(|c| grid_offset(c.dir).is_some())
+        .map(|c| (c.origin, c.dest, c.dir))
+        .collect();
+    if drawn.is_empty() {
+        return;
+    }
+    let stress = pos.clone();
+
+    for _ in 0..MAX_REPAIR_PASSES {
+        let base = (unroutable_count(pos, &drawn), displacement(pos, &stress));
+        if base.0 == 0 {
+            break;
+        }
+        let occ_now = occupied_map(pos);
+        let bb = bbox_of(pos);
+        // (room to move, target cell, score)
+        type BestMove = Option<(RoomId, (i32, i32), (usize, i64))>;
+        let mut best: BestMove = None;
+
+        for &(o, d, dir) in &drawn {
+            // Only try to fix edges that are currently un-routable.
+            if edge_routable(pos[&o], pos[&d], dir, &occ_now, bb) {
+                continue;
+            }
+            for cand in [o, d] {
+                let from = pos[&cand];
+                for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                    let to = (from.0 + dx, from.1 + dy);
+                    if pos.values().any(|&p| p == to) {
+                        continue; // occupied → would overlap
+                    }
+                    let mut trial = pos.clone();
+                    trial.insert(cand, to);
+                    let s = (unroutable_count(&trial, &drawn), displacement(&trial, &stress));
+                    if s < base && best.as_ref().is_none_or(|&(_, _, bs)| s < bs) {
+                        best = Some((cand, to, s));
+                    }
+                }
+            }
+        }
+
+        match best {
+            Some((room, to, _)) => {
+                pos.insert(room, to);
+            }
+            None => break, // no strictly-improving move
+        }
+    }
 }
 
 #[cfg(test)]
