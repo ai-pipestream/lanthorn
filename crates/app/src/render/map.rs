@@ -7,8 +7,8 @@
 //!
 //! | Zoom     | step_w | step_h |
 //! |----------|--------|--------|
-//! | Boxes    |  18    |   6    |
-//! | Compact  |  10    |   4    |
+//! | Boxes    |  22    |   9    |
+//! | Compact  |  12    |   5    |
 //! | Overview |   2    |   2    |
 //!
 //! The screen position of a room at cell (cx, cy) with scroll (sx, sy) inside area `a` is:
@@ -47,8 +47,8 @@ fn zoom_steps(zoom: Zoom) -> (i32, i32) {
 ///
 /// | Zoom    | step  | box   | gutter (right / bottom) |
 /// |---------|-------|-------|-------------------------|
-/// | Boxes   | 18×6  | 14×4  | 4 cols / 2 rows         |
-/// | Compact | 10×4  | 8×3   | 2 cols / 1 row          |
+/// | Boxes   | 22×9  | 14×4  | 8 cols / 5 rows         |
+/// | Compact | 12×5  | 8×3   | 4 cols / 2 rows         |
 /// | Overview| 2×2   | 1×1   | — (single glyph)        |
 fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     match zoom {
@@ -112,13 +112,14 @@ fn route_ortho(
         Side::Bottom => (0, 1),
     };
 
-    // Search bounds: bounding box of dep/arr expanded by 6, capped at 200×200.
-    let min_x = (dep.0.min(arr.0) - 6).max(dep.0.min(arr.0) - 200);
-    let min_y = (dep.1.min(arr.1) - 6).max(dep.1.min(arr.1) - 200);
-    let mut max_x = dep.0.max(arr.0) + 6;
-    let mut max_y = dep.1.max(arr.1) + 6;
-    if max_x - min_x > 200 { max_x = min_x + 200; }
-    if max_y - min_y > 200 { max_y = min_y + 200; }
+    // Search bounds: bounding box of dep/arr expanded by 24 so a path can detour well
+    // around intervening rooms, capped at 400×400.
+    let min_x = dep.0.min(arr.0) - 24;
+    let min_y = dep.1.min(arr.1) - 24;
+    let mut max_x = dep.0.max(arr.0) + 24;
+    let mut max_y = dep.1.max(arr.1) + 24;
+    if max_x - min_x > 400 { max_x = min_x + 400; }
+    if max_y - min_y > 400 { max_y = min_y + 400; }
 
     // State: (cell, incoming_dir)
     type State = ((i32, i32), Option<(i32, i32)>);
@@ -161,7 +162,7 @@ fn route_ortho(
                 continue;
             }
 
-            if visited.len() > 4000 {
+            if visited.len() > 20000 {
                 break 'astar;
             }
 
@@ -215,16 +216,25 @@ fn route_ortho(
         }
     }
 
-    // Fallback: simple L-path (same as original logic).
-    let corner = match dep_side {
-        Side::Left | Side::Right => (arr.0, dep.1),
-        Side::Top | Side::Bottom => (dep.0, arr.1),
+    // Fallback (A* exhausted): build both L-orientations and pick whichever crosses
+    // fewer blocked cells, so even a fallback avoids cutting through rooms when possible.
+    let l_via = |corner: (i32, i32)| -> Vec<(i32, i32)> {
+        let mut pts = Vec::new();
+        walk_to(&mut pts, dep, corner);
+        pts.pop();
+        walk_to(&mut pts, corner, arr);
+        pts
     };
-    let mut pts = Vec::new();
-    walk_to(&mut pts, dep, corner);
-    pts.pop();
-    walk_to(&mut pts, corner, arr);
-    pts
+    let count_blocked = |path: &[(i32, i32)]| -> usize {
+        path.iter().filter(|&&p| p != arr && blocked.contains(&p)).count()
+    };
+    let l_h = l_via((arr.0, dep.1)); // horizontal-first
+    let l_v = l_via((dep.0, arr.1)); // vertical-first
+    if count_blocked(&l_h) <= count_blocked(&l_v) {
+        l_h
+    } else {
+        l_v
+    }
 }
 
 /// Walk from `from` to `to` one step at a time (orthogonal), appending each cell.
@@ -699,25 +709,25 @@ mod tests {
         let on = cell_to_screen((0, 0), Zoom::Boxes, (0, 0), area);
         assert_eq!(on, Some((0, 0)));
 
-        // Cell (1,0) at Boxes → x = 0 + (1-0)*18 = 18
+        // Cell (1,0) at Boxes → x = 0 + (1-0)*22 = 22
         let right = cell_to_screen((1, 0), Zoom::Boxes, (0, 0), area);
-        assert_eq!(right, Some((18, 0)));
+        assert_eq!(right, Some((22, 0)));
 
-        // Cell (0,1) at Boxes → y = 0 + (1-0)*6 = 6
+        // Cell (0,1) at Boxes → y = 0 + (1-0)*9 = 9
         let down = cell_to_screen((0, 1), Zoom::Boxes, (0, 0), area);
-        assert_eq!(down, Some((0, 6)));
+        assert_eq!(down, Some((0, 9)));
 
         // Far off-area cell.
         let off = cell_to_screen((1000, 1000), Zoom::Boxes, (0, 0), area);
         assert!(off.is_none());
 
-        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*18 = -18 → None.
+        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*22 = -22 → None.
         let scrolled_off = cell_to_screen((0, 0), Zoom::Boxes, (1, 0), area);
         assert!(scrolled_off.is_none());
 
-        // Compact zoom: step 10×4 → cell (1,1) → (10, 4)
+        // Compact zoom: step 12×5 → cell (1,1) → (12, 5)
         let compact = cell_to_screen((1, 1), Zoom::Compact, (0, 0), area);
-        assert_eq!(compact, Some((10, 4)));
+        assert_eq!(compact, Some((12, 5)));
 
         // Overview zoom: step 2×2 → cell (5,3) → (10, 6)
         let overview = cell_to_screen((5, 3), Zoom::Overview, (0, 0), area);
@@ -1161,8 +1171,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // B box: cell (1,0) → screen (18,0), size 14×4 → cols 18..31, rows 0..3.
-        let b = Rect::new(18, 0, 14, 4);
+        // B box: cell (1,0) → screen (22,0), size 14×4 → cols 22..35, rows 0..3.
+        let b = Rect::new(22, 0, 14, 4);
         // Ring = the 1-cell halo around B, excluding B's own box cells. No path ribbon
         // (Cyan/Magenta background) may touch it.
         for y in (b.y as i32 - 1)..=(b.bottom() as i32) {
@@ -1209,9 +1219,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Room B box: Boxes zoom, step=18×6, room at cell (1,0) → screen (18,0), box 14×4.
+        // Room B box: Boxes zoom, step=22×9, room at cell (1,0) → screen (22,0), box 14×4.
         // No path ribbon (Cyan/Magenta background) may appear inside B's interior.
-        let b_rect = Rect::new(18, 0, 14, 4);
+        let b_rect = Rect::new(22, 0, 14, 4);
         for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
             for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
                 if let Some(cell) = buf.cell((x, y)) {

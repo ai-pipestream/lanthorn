@@ -47,10 +47,15 @@ pub enum Zoom {
 
 impl Zoom {
     /// Returns (step_w, step_h): the terminal cell stride per map-grid cell.
+    ///
+    /// The stride is larger than the box size (see `zoom_box_size`), and the
+    /// difference is gutter where connectors route. Boxes-zoom strides are kept
+    /// generous so dense maps have clear routing channels between rooms (Phase 1
+    /// uniform spread): 22×9 stride with 14×4 boxes → 8-col / 5-row gutters.
     pub fn steps(self) -> (i32, i32) {
         match self {
-            Zoom::Boxes => (18, 6),
-            Zoom::Compact => (10, 4),
+            Zoom::Boxes => (22, 9),
+            Zoom::Compact => (12, 5),
             Zoom::Overview => (2, 2),
         }
     }
