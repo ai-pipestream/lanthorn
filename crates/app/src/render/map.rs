@@ -338,6 +338,42 @@ fn nearest_free_side(dest_rect: VRect, dep: (i32, i32), occupied: &[Side]) -> Si
         .unwrap_or(sides[0])
 }
 
+/// Anchor point on `side` of `rect` for a NON-reciprocal arrival, offset from the side's
+/// centre by `index` slots. The centre of every side is reserved for departures (whose
+/// outgoing arrow sits there), so an arriving line that isn't a verified reciprocal must
+/// land beside the centre — otherwise a centred arrival is indistinguishable from a
+/// departure and you can't tell which way an edge actually goes. `index` (0-based count of
+/// arrivals already on this side) walks outward in alternating +/- slots so multiple
+/// arrivals on one side don't collide.
+fn arrival_anchor(rect: VRect, side: Side, index: i32) -> (i32, i32) {
+    // Quarter-of-side step keeps the offset clearly off-centre yet on the box edge.
+    let step = match side {
+        Side::Top | Side::Bottom => (rect.w / 4).max(1),
+        Side::Left | Side::Right => (rect.h / 4).max(1),
+    };
+    let k = index / 2 + 1; // 1,1,2,2,3,3,…
+    let sign = if index % 2 == 0 { 1 } else { -1 };
+    let off = sign * k * step;
+    match side {
+        Side::Right => {
+            let y = (rect.y + rect.h / 2 + off).clamp(rect.y, rect.bottom() - 1);
+            (rect.right(), y)
+        }
+        Side::Left => {
+            let y = (rect.y + rect.h / 2 + off).clamp(rect.y, rect.bottom() - 1);
+            (rect.x - 1, y)
+        }
+        Side::Top => {
+            let x = (rect.x + rect.w / 2 + off).clamp(rect.x, rect.right() - 1);
+            (x, rect.y - 1)
+        }
+        Side::Bottom => {
+            let x = (rect.x + rect.w / 2 + off).clamp(rect.x, rect.right() - 1);
+            (x, rect.bottom())
+        }
+    }
+}
+
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
 ///
 /// Arrows signify the outgoing direction only — the departure direction is always
@@ -518,22 +554,27 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         // the destination's own outgoing arrow. When unknown, fall back to the
         // geometrically nearest side and draw no far-end arrow.
         let dest_back_side = edge.arrival_dir.and_then(side_for);
-        let arr_side = match dest_back_side {
-            // Confirmed reciprocal: use the matched return side (one shared path).
-            Some(s) => s,
+        let arr = match dest_back_side {
+            // Confirmed reciprocal: both ends are departures, so arrive at the matched
+            // side's centre (one shared, centred path with an arrow at each end).
+            Some(s) => side_anchor(dest_rect, s),
             // Non-reciprocal: connect to the nearest side of dest not already used by a
-            // departure or a prior arrival, then claim it.
+            // departure or a prior arrival, off-centre so the side's centre stays reserved
+            // for departures (and the arrival reads as an arrival, not an exit).
             None => {
                 let mut occupied = dep_sides.get(&edge.dest).cloned().unwrap_or_default();
                 if let Some(u) = used_arr.get(&edge.dest) {
                     occupied.extend(u.iter().copied());
                 }
                 let s = nearest_free_side(dest_rect, dep, &occupied);
+                let idx = used_arr
+                    .get(&edge.dest)
+                    .map(|u| u.iter().filter(|&&x| x == s).count() as i32)
+                    .unwrap_or(0);
                 used_arr.entry(edge.dest).or_default().push(s);
-                s
+                arrival_anchor(dest_rect, s, idx)
             }
         };
-        let arr = side_anchor(dest_rect, arr_side);
 
         // Build blocked set: EVERY room box (including this edge's own origin and dest)
         // expanded by a 1-cell halo, so a connector keeps clearance from rooms and can
@@ -1350,6 +1391,29 @@ mod tests {
         // Left + the next-nearest also occupied → still avoids both.
         let s2 = nearest_free_side(dest, dep, &[Side::Left, s]);
         assert!(s2 != Side::Left && s2 != s, "arrival must avoid all occupied sides; got {s2:?}");
+    }
+
+    #[test]
+    fn arrival_anchor_is_off_centre() {
+        // The centre of a side is reserved for departures; a non-reciprocal arrival must
+        // land beside it. Box 21×11: Top centre x = 10, Left/Right centre y = 5.
+        let r = VRect { x: 0, y: 0, w: 21, h: 11 };
+
+        // Top side: off-centre in x (centre would be x=10), still on the box edge row.
+        let (tx, ty) = arrival_anchor(r, Side::Top, 0);
+        assert_ne!(tx, r.x + r.w / 2, "top arrival must be off the centre column");
+        assert_eq!(ty, r.y - 1, "top arrival sits on the row above the box");
+        assert!(tx >= r.x && tx < r.right(), "top arrival stays on the box edge");
+
+        // Right side: off-centre in y (centre would be y=5).
+        let (rx, ry) = arrival_anchor(r, Side::Right, 0);
+        assert_eq!(rx, r.right(), "right arrival sits on the column right of the box");
+        assert_ne!(ry, r.y + r.h / 2, "right arrival must be off the centre row");
+
+        // Consecutive indices on the same side land on distinct cells (no collision).
+        let a0 = arrival_anchor(r, Side::Top, 0);
+        let a1 = arrival_anchor(r, Side::Top, 1);
+        assert_ne!(a0, a1, "two arrivals on one side must not share a cell");
     }
 
     #[test]
