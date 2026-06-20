@@ -58,20 +58,52 @@ fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     }
 }
 
+// ── Virtual map space ─────────────────────────────────────────────────────────
+//
+// The whole map is built in a scroll-independent "virtual" coordinate space where
+// a room at logical cell (c, r) sits at pixel (c * step_w, r * step_h). Rooms and
+// connectors are placed and routed here ONCE, regardless of scroll, so the routes
+// never change as the view pans. Scrolling is then a pure translate-and-clip blit:
+// screen = virtual + (area.origin - scroll * step).
+
+/// An integer rectangle in virtual map space (coordinates may be negative).
+#[derive(Clone, Copy)]
+struct VRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl VRect {
+    fn right(&self) -> i32 {
+        self.x + self.w
+    }
+    fn bottom(&self) -> i32 {
+        self.y + self.h
+    }
+}
+
+/// Virtual top-left pixel of a room cell: `cell * step` (no scroll, no area offset).
+fn cell_to_virtual(cell: (i32, i32), zoom: Zoom) -> (i32, i32) {
+    let (sw, sh) = zoom_steps(zoom);
+    (cell.0 * sw, cell.1 * sh)
+}
+
 // ── Box-geometry routing helpers ──────────────────────────────────────────────
 
 /// Return the gutter cell just outside `rect` on the given side, at the side's midpoint.
 ///
-/// - Right: (rect.right(), rect.y + rect.height/2)
-/// - Left:  (rect.x - 1,   rect.y + rect.height/2)
-/// - Top:   (rect.x + rect.width/2, rect.y - 1)
-/// - Bottom:(rect.x + rect.width/2, rect.bottom())
-fn side_anchor(rect: Rect, side: Side) -> (i32, i32) {
+/// - Right: (rect.right(), rect.y + rect.h/2)
+/// - Left:  (rect.x - 1,   rect.y + rect.h/2)
+/// - Top:   (rect.x + rect.w/2, rect.y - 1)
+/// - Bottom:(rect.x + rect.w/2, rect.bottom())
+fn side_anchor(rect: VRect, side: Side) -> (i32, i32) {
     match side {
-        Side::Right  => (rect.right() as i32,              rect.y as i32 + rect.height as i32 / 2),
-        Side::Left   => (rect.x as i32 - 1,               rect.y as i32 + rect.height as i32 / 2),
-        Side::Top    => (rect.x as i32 + rect.width as i32 / 2,  rect.y as i32 - 1),
-        Side::Bottom => (rect.x as i32 + rect.width as i32 / 2,  rect.bottom() as i32),
+        Side::Right  => (rect.right(),        rect.y + rect.h / 2),
+        Side::Left   => (rect.x - 1,          rect.y + rect.h / 2),
+        Side::Top    => (rect.x + rect.w / 2, rect.y - 1),
+        Side::Bottom => (rect.x + rect.w / 2, rect.bottom()),
     }
 }
 
@@ -256,7 +288,7 @@ fn walk_to(pts: &mut Vec<(i32, i32)>, from: (i32, i32), to: (i32, i32)) {
 
 /// Pick the side of `dest_rect` whose anchor is geometrically nearest to `dep`.
 /// Used when `arrival_dir` is None (undiscovered).
-fn nearest_side(dest_rect: Rect, dep: (i32, i32)) -> Side {
+fn nearest_side(dest_rect: VRect, dep: (i32, i32)) -> Side {
     let candidates = [Side::Top, Side::Bottom, Side::Left, Side::Right];
     candidates
         .into_iter()
@@ -282,20 +314,19 @@ fn arrow_for_departure(dep_side: Side) -> &'static str {
     }
 }
 
-/// Queue an arrowhead at screen cell `pos` if it falls inside `area`.
-fn push_arrow(
-    arrowheads: &mut Vec<((u16, u16), &'static str, bool)>,
-    pos: (i32, i32),
-    glyph: &'static str,
-    distorted: bool,
-    area: Rect,
-) {
-    if pos.0 >= area.x as i32
-        && pos.0 < area.right() as i32
-        && pos.1 >= area.y as i32
-        && pos.1 < area.bottom() as i32
-    {
-        arrowheads.push(((pos.0 as u16, pos.1 as u16), glyph, distorted));
+/// True if screen cell `(sx, sy)` lies inside `area`.
+fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
+    sx >= area.x as i32 && sx < area.right() as i32 && sy >= area.y as i32 && sy < area.bottom() as i32
+}
+
+/// Style for a room given the current selection/current state.
+fn room_style(room: &RenderRoom, state: &AppState) -> Style {
+    if room.is_current {
+        CURRENT_STYLE
+    } else if state.selected_room == Some(room.id) {
+        SELECTED_STYLE
+    } else {
+        NORMAL_STYLE
     }
 }
 
@@ -364,170 +395,177 @@ const PATH_ARROW_DISTORTED: Style = Style::new()
 // ── render_map ────────────────────────────────────────────────────────────────
 
 /// Draw the map from `rm` into `buf` for `area`, using view state from `state`.
+///
+/// The whole map is built in scroll-independent virtual space (see [`VRect`]) and
+/// blitted to the screen with a single translation, so panning never re-routes
+/// connectors — the routes are identical at every scroll offset.
 pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) {
     let zoom = state.zoom;
     let scroll = state.scroll;
+    let (step_w, step_h) = zoom_steps(zoom);
 
-    // ── 1. Build placed: HashMap<RoomId, Rect> ────────────────────────────────
-    let mut placed: std::collections::HashMap<RoomId, Rect> =
-        std::collections::HashMap::new();
+    // Virtual → screen translation: screen = virtual + offset.
+    let off_x = area.x as i32 - scroll.0 * step_w;
+    let off_y = area.y as i32 - scroll.1 * step_h;
 
-    if !matches!(zoom, crate::state::Zoom::Overview) {
-        let (bw, bh) = zoom_box_size(zoom);
+    // Overview zoom: one glyph per room, no connectors.
+    if matches!(zoom, crate::state::Zoom::Overview) {
         for room in &rm.rooms {
-            if let Some((sx, sy)) = cell_to_screen(room.cell, zoom, scroll, area) {
-                placed.insert(room.id, Rect::new(sx, sy, bw, bh));
-            }
+            let (vx, vy) = cell_to_virtual(room.cell, zoom);
+            put_char(buf, vx + off_x, vy + off_y, '■', room_style(room, state), area);
         }
+        return;
     }
 
-    // ── 2. Draw connectors (below rooms) ─────────────────────────────────────
-    if !matches!(zoom, crate::state::Zoom::Overview) {
-        // Collect path ribbon cells (cell → all_distorted) and arrowheads to embed.
-        let mut path_cells: std::collections::HashMap<(u16, u16), bool> =
-            std::collections::HashMap::new();
-        let mut arrowheads: Vec<((u16, u16), &'static str, bool)> = Vec::new(); // (pos, glyph, distorted)
+    // ── 1. Place ALL rooms in virtual space (independent of scroll/area) ──────
+    let (bw, bh) = zoom_box_size(zoom);
+    let mut placed: std::collections::HashMap<RoomId, VRect> =
+        std::collections::HashMap::new();
+    for room in &rm.rooms {
+        let (vx, vy) = cell_to_virtual(room.cell, zoom);
+        placed.insert(room.id, VRect { x: vx, y: vy, w: bw as i32, h: bh as i32 });
+    }
 
-        // Cells occupied by already-routed connectors (plus a 1-cell halo). Later edges
-        // pay SOFT_PENALTY to enter these, so paths keep a minimum gap between each other.
-        let mut soft: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    // ── 2. Route ALL connectors in virtual space (computed once, scroll-free) ─
+    let mut path_cells: std::collections::HashMap<(i32, i32), bool> =
+        std::collections::HashMap::new();
+    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
+    let mut soft: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
+        std::collections::HashSet::new();
 
-        // Directed connections (origin, dest) already drawn. A connection between two
-        // rooms is rendered as ONE path; the reverse edge's outgoing arrow is placed as
-        // the far-end arrow of the forward edge, so we skip an edge whose reverse is drawn.
-        let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
-            std::collections::HashSet::new();
+    for edge in &rm.edges {
+        if edge.is_stub {
+            continue;
+        }
+        let (Some(&origin_rect), Some(&dest_rect)) =
+            (placed.get(&edge.origin), placed.get(&edge.dest))
+        else {
+            continue;
+        };
 
-        for edge in &rm.edges {
-            if edge.is_stub {
-                continue;
-            }
-            let (Some(&origin_rect), Some(&dest_rect)) =
-                (placed.get(&edge.origin), placed.get(&edge.dest))
-            else {
-                continue;
-            };
+        let Some(dep_side) = side_for(edge.dir) else {
+            continue; // non-planar slipped through (shouldn't happen for non-stub)
+        };
 
-            let Some(dep_side) = side_for(edge.dir) else {
-                continue; // non-planar slipped through (shouldn't happen for non-stub)
-            };
-
-            // Reciprocal reuse: if the reverse edge (dest → origin) was already drawn,
-            // this edge's outgoing arrow was already placed as that path's far-end arrow.
-            // Skip it so the connection is drawn once, not as two separate paths.
-            if drawn.contains(&(edge.dest, edge.origin)) {
-                continue;
-            }
-
-            let dep = side_anchor(origin_rect, dep_side);
-
-            // Which side of the destination box the line connects to, and whether a
-            // return trip (dest → origin) has been observed. `arrival_dir` is the
-            // direction the player leaves `dest` to get back here; that side carries
-            // the destination's own outgoing arrow. When unknown, fall back to the
-            // geometrically nearest side and draw no far-end arrow.
-            let dest_back_side = edge.arrival_dir.and_then(side_for);
-            let arr_side = dest_back_side.unwrap_or_else(|| nearest_side(dest_rect, dep));
-            let arr = side_anchor(dest_rect, arr_side);
-
-            // Build blocked set: every OTHER room box expanded by a 1-cell halo, so a
-            // passing connector always keeps at least one cell of clearance from rooms it
-            // is not connecting to (it never hugs a wall).
-            let mut blocked: std::collections::HashSet<(i32, i32)> = placed
-                .iter()
-                .filter(|(&id, _)| id != edge.origin && id != edge.dest)
-                .flat_map(|(_, &rect)| {
-                    let x0 = rect.x as i32 - 1;
-                    let y0 = rect.y as i32 - 1;
-                    let x1 = rect.right() as i32; // one column past the box (halo)
-                    let y1 = rect.bottom() as i32; // one row past the box (halo)
-                    (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
-                })
-                .collect();
-
-            // Never block this connection's own exit/entry lanes: clear the departure and
-            // arrival anchors plus their orthogonal neighbours so routing can always begin
-            // and end even when an endpoint sits next to a third room's halo.
-            for &(px, py) in &[dep, arr] {
-                blocked.remove(&(px, py));
-                blocked.remove(&(px + 1, py));
-                blocked.remove(&(px - 1, py));
-                blocked.remove(&(px, py + 1));
-                blocked.remove(&(px, py - 1));
-            }
-
-            // Route the path, avoiding earlier paths' cells via the soft congestion set.
-            let path = route_ortho(dep, arr, dep_side, &blocked, &soft);
-
-            // Record this path (plus a 1-cell halo) so later edges keep a gap from it.
-            for &(x, y) in &path {
-                for dx in -1..=1 {
-                    for dy in -1..=1 {
-                        soft.insert((x + dx, y + dy));
-                    }
-                }
-            }
-
-            // Fill the path ribbon: every routed cell inside the area becomes a solid
-            // background block. A cell is styled distorted only if EVERY path through it
-            // is distorted (AND across overlapping edges).
-            for &(x, y) in &path {
-                if x >= area.x as i32
-                    && x < area.right() as i32
-                    && y >= area.y as i32
-                    && y < area.bottom() as i32
-                {
-                    let entry = path_cells.entry((x as u16, y as u16)).or_insert(true);
-                    *entry = *entry && edge.distorted;
-                }
-            }
-
-            // Outgoing arrow at the origin's departure anchor `dep`.
-            push_arrow(&mut arrowheads, dep, arrow_for_departure(dep_side), edge.distorted, area);
-
-            // Outgoing arrow at the destination, only when a return trip is known:
-            // it points outward from `dest` back toward this room.
-            if let Some(back_side) = dest_back_side {
-                push_arrow(&mut arrowheads, arr, arrow_for_departure(back_side), edge.distorted, area);
-            }
-
-            drawn.insert((edge.origin, edge.dest));
+        // Reciprocal reuse: if the reverse edge (dest → origin) was already drawn,
+        // this edge's outgoing arrow was already placed as that path's far-end arrow.
+        // Skip it so the connection is drawn once, not as two separate paths.
+        if drawn.contains(&(edge.dest, edge.origin)) {
+            continue;
         }
 
-        // Fill path ribbons (solid background blocks).
-        for (&(cx, cy), &all_distorted) in &path_cells {
+        let dep = side_anchor(origin_rect, dep_side);
+
+        // Which side of the destination box the line connects to, and whether a
+        // return trip (dest → origin) has been observed. `arrival_dir` is the
+        // direction the player leaves `dest` to get back here; that side carries
+        // the destination's own outgoing arrow. When unknown, fall back to the
+        // geometrically nearest side and draw no far-end arrow.
+        let dest_back_side = edge.arrival_dir.and_then(side_for);
+        let arr_side = dest_back_side.unwrap_or_else(|| nearest_side(dest_rect, dep));
+        let arr = side_anchor(dest_rect, arr_side);
+
+        // Build blocked set: every OTHER room box expanded by a 1-cell halo, so a
+        // passing connector always keeps at least one cell of clearance from rooms it
+        // is not connecting to (it never hugs a wall).
+        let mut blocked: std::collections::HashSet<(i32, i32)> = placed
+            .iter()
+            .filter(|(&id, _)| id != edge.origin && id != edge.dest)
+            .flat_map(|(_, &rect)| {
+                let x0 = rect.x - 1;
+                let y0 = rect.y - 1;
+                let x1 = rect.right(); // one column past the box (halo)
+                let y1 = rect.bottom(); // one row past the box (halo)
+                (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
+            })
+            .collect();
+
+        // Never block this connection's own exit/entry lanes: clear the departure and
+        // arrival anchors plus their orthogonal neighbours so routing can always begin
+        // and end even when an endpoint sits next to a third room's halo.
+        for &(px, py) in &[dep, arr] {
+            blocked.remove(&(px, py));
+            blocked.remove(&(px + 1, py));
+            blocked.remove(&(px - 1, py));
+            blocked.remove(&(px, py + 1));
+            blocked.remove(&(px, py - 1));
+        }
+
+        // Route the path, avoiding earlier paths' cells via the soft congestion set.
+        let path = route_ortho(dep, arr, dep_side, &blocked, &soft);
+
+        // Record this path (plus a 1-cell halo) so later edges keep a gap from it.
+        for &(x, y) in &path {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    soft.insert((x + dx, y + dy));
+                }
+            }
+        }
+
+        // Fill the path ribbon in virtual space (clipping happens at blit time).
+        // A cell is styled distorted only if EVERY path through it is distorted.
+        for &(x, y) in &path {
+            let entry = path_cells.entry((x, y)).or_insert(true);
+            *entry = *entry && edge.distorted;
+        }
+
+        // Outgoing arrow at the origin's departure anchor `dep`.
+        arrowheads.push((dep, arrow_for_departure(dep_side), edge.distorted));
+
+        // Outgoing arrow at the destination, only when a return trip is known:
+        // it points outward from `dest` back toward this room.
+        if let Some(back_side) = dest_back_side {
+            arrowheads.push((arr, arrow_for_departure(back_side), edge.distorted));
+        }
+
+        drawn.insert((edge.origin, edge.dest));
+    }
+
+    // ── 3. Blit ribbons (translate virtual → screen, clip to area) ───────────
+    for (&(vx, vy), &all_distorted) in &path_cells {
+        let (sx, sy) = (vx + off_x, vy + off_y);
+        if in_area(sx, sy, area) {
             let style = if all_distorted { PATH_BG_DISTORTED } else { PATH_BG };
-            if let Some(cell) = buf.cell_mut((cx, cy)) {
+            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(" ").set_style(style);
             }
         }
+    }
 
-        // Embed arrowheads into the ribbon (keep the ribbon background, dark bold glyph).
-        for ((ax, ay), glyph, distorted) in arrowheads {
+    // Blit arrowheads embedded in the ribbon.
+    for ((vx, vy), glyph, distorted) in arrowheads {
+        let (sx, sy) = (vx + off_x, vy + off_y);
+        if in_area(sx, sy, area) {
             let style = if distorted { PATH_ARROW_DISTORTED } else { PATH_ARROW };
-            if let Some(cell) = buf.cell_mut((ax, ay)) {
+            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(style);
-            }
-        }
-
-        // Draw stub edges.
-        for edge in &rm.edges {
-            if edge.is_stub {
-                draw_stub(edge, &placed, area, buf);
             }
         }
     }
 
-    // ── 3. Draw rooms on top ──────────────────────────────────────────────────
+    // Stub edges (translate + clip).
+    for edge in &rm.edges {
+        if edge.is_stub {
+            draw_stub(edge, &placed, off_x, off_y, area, buf);
+        }
+    }
+
+    // ── 4. Draw rooms on top (translate + clip) ──────────────────────────────
     for room in &rm.rooms {
-        draw_room(room, state, zoom, scroll, area, buf);
+        let (vx, vy) = cell_to_virtual(room.cell, zoom);
+        draw_room(room, state, zoom, vx + off_x, vy + off_y, area, buf);
     }
 }
 
 /// Draw a stub connector label in the top-right gutter cell outside the origin box.
+/// `off_x`/`off_y` translate the origin's virtual rect into screen space.
 fn draw_stub(
     edge: &RoutedEdge,
-    placed: &std::collections::HashMap<RoomId, Rect>,
+    placed: &std::collections::HashMap<RoomId, VRect>,
+    off_x: i32,
+    off_y: i32,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -536,39 +574,29 @@ fn draw_stub(
     };
     let label = edge.label.as_deref().unwrap_or("?");
     // Top-right gutter: just right of the box, at the top row.
-    let lx = origin_rect.right();
-    let ly = origin_rect.y;
-    draw_str_clipped(buf, lx, ly, label, CONNECTOR_STYLE, area);
+    let lx = origin_rect.right() + off_x;
+    let ly = origin_rect.y + off_y;
+    put_str(buf, lx, ly, label, CONNECTOR_STYLE, area);
 }
 
 // ── Room drawing ──────────────────────────────────────────────────────────────
 
+/// Draw a room at screen top-left `(sx, sy)` (already translated from virtual space;
+/// may be partially or fully off-area — drawing is clipped per cell).
 fn draw_room(
     room: &RenderRoom,
     state: &AppState,
     zoom: Zoom,
-    scroll: (i32, i32),
+    sx: i32,
+    sy: i32,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let Some((sx, sy)) = cell_to_screen(room.cell, zoom, scroll, area) else {
-        return;
-    };
-
-    let base_style = if room.is_current {
-        CURRENT_STYLE
-    } else if state.selected_room == Some(room.id) {
-        SELECTED_STYLE
-    } else {
-        NORMAL_STYLE
-    };
+    let base_style = room_style(room, state);
 
     match zoom {
         Zoom::Overview => {
-            // Single glyph per room.
-            if let Some(cell) = buf.cell_mut((sx, sy)) {
-                cell.set_symbol("■").set_style(base_style);
-            }
+            put_char(buf, sx, sy, '■', base_style, area);
         }
         Zoom::Compact => {
             draw_compact_room(room, sx, sy, base_style, area, buf);
@@ -585,13 +613,14 @@ fn draw_room(
 /// Normal rooms use rounded corners; current room uses heavy border with REVERSED style.
 fn draw_compact_room(
     room: &RenderRoom,
-    sx: u16,
-    sy: u16,
+    sx: i32,
+    sy: i32,
     style: Style,
     area: Rect,
     buf: &mut Buffer,
 ) {
     let (bw, bh) = zoom_box_size(Zoom::Compact); // (8, 3)
+    let (bw, bh) = (bw as i32, bh as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
     let (tl, tr, bl, br, h, v) = if is_current {
@@ -601,25 +630,25 @@ fn draw_compact_room(
     };
 
     // Top border
-    draw_char_clipped(buf, sx, sy, tl, style, area);
+    put_char(buf, sx, sy, tl, style, area);
     for dx in 1..bw - 1 {
-        draw_char_clipped(buf, sx + dx, sy, h, style, area);
+        put_char(buf, sx + dx, sy, h, style, area);
     }
-    draw_char_clipped(buf, sx + bw - 1, sy, tr, style, area);
+    put_char(buf, sx + bw - 1, sy, tr, style, area);
 
     // Middle row: sides + label (inner width = bw - 2 = 6)
     let label_width = (bw - 2) as usize; // 6
     let label: String = room.label.chars().take(label_width).collect();
-    draw_char_clipped(buf, sx, sy + 1, v, style, area);
-    draw_str_clipped(buf, sx + 1, sy + 1, &label, style, area);
-    draw_char_clipped(buf, sx + bw - 1, sy + 1, v, style, area);
+    put_char(buf, sx, sy + 1, v, style, area);
+    put_str(buf, sx + 1, sy + 1, &label, style, area);
+    put_char(buf, sx + bw - 1, sy + 1, v, style, area);
 
     // Bottom border
-    draw_char_clipped(buf, sx, sy + bh - 1, bl, style, area);
+    put_char(buf, sx, sy + bh - 1, bl, style, area);
     for dx in 1..bw - 1 {
-        draw_char_clipped(buf, sx + dx, sy + bh - 1, h, style, area);
+        put_char(buf, sx + dx, sy + bh - 1, h, style, area);
     }
-    draw_char_clipped(buf, sx + bw - 1, sy + bh - 1, br, style, area);
+    put_char(buf, sx + bw - 1, sy + bh - 1, br, style, area);
 }
 
 /// Draw a boxes (18×6 step) room: bordered box 14 wide × 4 tall.
@@ -636,13 +665,14 @@ fn draw_compact_room(
 /// Notes: ● marker in top-right inner corner (row 1, col bw-2).
 fn draw_box_room(
     room: &RenderRoom,
-    sx: u16,
-    sy: u16,
+    sx: i32,
+    sy: i32,
     style: Style,
     area: Rect,
     buf: &mut Buffer,
 ) {
     let (w, h) = zoom_box_size(Zoom::Boxes); // (14, 4)
+    let (w, h) = (w as i32, h as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
     let (tl, tr, bl, br, horiz, vert) = if is_current {
@@ -652,43 +682,43 @@ fn draw_box_room(
     };
 
     // Top border
-    draw_char_clipped(buf, sx, sy, tl, style, area);
+    put_char(buf, sx, sy, tl, style, area);
     for dx in 1..w - 1 {
-        draw_char_clipped(buf, sx + dx, sy, horiz, style, area);
+        put_char(buf, sx + dx, sy, horiz, style, area);
     }
-    draw_char_clipped(buf, sx + w - 1, sy, tr, style, area);
+    put_char(buf, sx + w - 1, sy, tr, style, area);
 
     // Inner rows (h=4 → rows 1 and 2 are interior)
     for dy in 1..h - 1 {
-        draw_char_clipped(buf, sx, sy + dy, vert, style, area);
+        put_char(buf, sx, sy + dy, vert, style, area);
         // Fill interior with spaces (for background/style)
         for dx in 1..w - 1 {
-            draw_char_clipped(buf, sx + dx, sy + dy, ' ', style, area);
+            put_char(buf, sx + dx, sy + dy, ' ', style, area);
         }
-        draw_char_clipped(buf, sx + w - 1, sy + dy, vert, style, area);
+        put_char(buf, sx + w - 1, sy + dy, vert, style, area);
     }
 
     // Label on row 1 (first inner row), up to w-2 = 12 chars.
     let label_width = (w - 2) as usize; // 12
     let label: String = room.label.chars().take(label_width).collect();
-    draw_str_clipped(buf, sx + 1, sy + 1, &label, style, area);
+    put_str(buf, sx + 1, sy + 1, &label, style, area);
 
     // Notes marker ● in top-right inner corner (row 1, col w-2).
     if room.has_notes {
-        draw_char_clipped(buf, sx + w - 2, sy + 1, '●', style, area);
+        put_char(buf, sx + w - 2, sy + 1, '●', style, area);
     }
 
     // Bottom border
-    draw_char_clipped(buf, sx, sy + h - 1, bl, style, area);
+    put_char(buf, sx, sy + h - 1, bl, style, area);
     for dx in 1..w - 1 {
-        draw_char_clipped(buf, sx + dx, sy + h - 1, horiz, style, area);
+        put_char(buf, sx + dx, sy + h - 1, horiz, style, area);
     }
-    draw_char_clipped(buf, sx + w - 1, sy + h - 1, br, style, area);
+    put_char(buf, sx + w - 1, sy + h - 1, br, style, area);
 }
 
 // ── Clipped drawing helpers ───────────────────────────────────────────────────
 
-use super::{draw_char_clipped, draw_str_clipped};
+use super::{put_char, put_str};
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -1124,6 +1154,55 @@ mod tests {
         let left = buf.content.iter().filter(|c| c.symbol() == "◀").count();
         assert_eq!(right, 1, "A's east exit ▶ must be kept; got {right}");
         assert_eq!(left, 1, "A's west exit ◀ must be kept (not deduped as reciprocal); got {left}");
+    }
+
+    #[test]
+    fn connectors_are_scroll_invariant() {
+        // The routed connector geometry must be identical at every scroll offset —
+        // scrolling is a pure translate-and-clip, never a re-layout. Render the same
+        // map at two scrolls, map each ribbon cell back to virtual space, and assert
+        // the two virtual ribbon sets are equal.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(3, (2, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        g.add_edge(2, mapper::direction::Direction::E, 3);
+        let rm = mapper::render::render(&g);
+
+        let area = Rect::new(0, 0, 120, 40);
+        let (sw, sh) = (22i32, 9i32); // Boxes stride
+
+        let virtual_ribbon = |scroll: (i32, i32)| -> std::collections::BTreeSet<(i32, i32)> {
+            let mut st = AppState::default();
+            st.scroll = scroll;
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &st, area, &mut buf);
+            let off = (-scroll.0 * sw, -scroll.1 * sh);
+            let mut set = std::collections::BTreeSet::new();
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    let c = buf.cell((x, y)).unwrap();
+                    if c.bg == Color::Cyan || c.bg == Color::Magenta {
+                        set.insert((x as i32 - off.0, y as i32 - off.1));
+                    }
+                }
+            }
+            set
+        };
+
+        // Both scrolls keep all three rooms fully on-screen, so nothing clips away.
+        let a = virtual_ribbon((0, 0));
+        let b = virtual_ribbon((-1, -1));
+        assert!(!a.is_empty(), "expected some ribbon cells");
+        assert_eq!(
+            a, b,
+            "connector geometry must be scroll-independent (identical in virtual space)"
+        );
     }
 
     #[test]
