@@ -171,44 +171,37 @@ fn route_ortho(
         (a.0 - b.0).abs() + (a.1 - b.1).abs()
     };
 
-    // Seed: forced first step from dep in dep_side direction.
-    let start_cell = (dep.0 + first_delta.0, dep.1 + first_delta.1);
-    // If the forced first step is out of bounds or blocked (and not arr), fall back.
-    let first_blocked = blocked.contains(&start_cell) && start_cell != arr;
-    let first_oob = start_cell.0 < min_x || start_cell.0 > max_x
-        || start_cell.1 < min_y || start_cell.1 > max_y;
+    type HeapEntry = (Reverse<i32>, i32, (i32, i32), Option<(i32, i32)>);
+    let neighbors: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
 
-    if !first_blocked && !first_oob {
-        let start_g: i32 = 1;
-        let start_f: i32 = start_g + manhattan(start_cell, arr);
+    // A* that always honours room `blocked` clearance, plus the path-vs-path rules carried
+    // in `pr`. Returns None when no route is found, so the caller can degrade.
+    let astar = |pr: &std::collections::HashMap<(i32, i32), u8>| -> Option<Vec<(i32, i32)>> {
+        let start_cell = (dep.0 + first_delta.0, dep.1 + first_delta.1);
+        if (blocked.contains(&start_cell) && start_cell != arr)
+            || start_cell.0 < min_x
+            || start_cell.0 > max_x
+            || start_cell.1 < min_y
+            || start_cell.1 > max_y
+        {
+            return None;
+        }
         let start_dir = Some(first_delta);
-
-        type HeapEntry = (Reverse<i32>, i32, (i32, i32), Option<(i32, i32)>);
         let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
-        heap.push((Reverse(start_f), start_g, start_cell, start_dir));
-
+        heap.push((Reverse(1 + manhattan(start_cell, arr)), 1, start_cell, start_dir));
         let mut visited: std::collections::HashSet<State> = std::collections::HashSet::new();
-        let mut parent: std::collections::HashMap<State, State> =
-            std::collections::HashMap::new();
-
-        // Seed parent for start_cell so we can reconstruct path back through dep.
-        // We represent dep as having no parent (it's the true start).
+        let mut parent: std::collections::HashMap<State, State> = std::collections::HashMap::new();
         parent.insert((start_cell, start_dir), (dep, None));
 
-        let neighbors: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
-        'astar: while let Some((_, g, cell, inc_dir)) = heap.pop() {
+        while let Some((_, g, cell, inc_dir)) = heap.pop() {
             let state: State = (cell, inc_dir);
             if !visited.insert(state) {
                 continue;
             }
-
             if visited.len() > 20000 {
-                break 'astar;
+                break;
             }
-
             if cell == arr {
-                // Reconstruct path: walk parent map back to dep.
                 let mut path_rev: Vec<(i32, i32)> = Vec::new();
                 let mut cur_state: State = (cell, inc_dir);
                 loop {
@@ -225,54 +218,45 @@ fn route_ortho(
                     }
                 }
                 path_rev.reverse();
-                return path_rev;
+                return Some(path_rev);
             }
-
             for &delta in &neighbors {
                 let next = (cell.0 + delta.0, cell.1 + delta.1);
-                // Bounds check.
                 if next.0 < min_x || next.0 > max_x || next.1 < min_y || next.1 > max_y {
                     continue;
                 }
-                // Blocked check (arr — a room anchor — is always passable).
                 if next != arr && blocked.contains(&next) {
                     continue;
                 }
-
                 // Hard path-interaction rules (skipped for the final hop into `arr`).
                 if next != arr {
                     let our_bit = if delta.1 == 0 { HORIZ } else { VERT };
-                    let occ_next = paths.get(&next).copied().unwrap_or(0);
-                    // (a) No overlap with a same-orientation path at `next`.
-                    if occ_next & our_bit != 0 {
+                    // (a) no overlap with a same-orientation path.
+                    if pr.get(&next).copied().unwrap_or(0) & our_bit != 0 {
                         continue;
                     }
-                    // (b) No turning onto a cell already carrying a path: an existing path
-                    //     cell may only be passed straight through (perpendicular crossing).
+                    // (b) no turning onto a path cell (crossings are straight-through only).
                     let turning = inc_dir.is_some() && inc_dir != Some(delta);
-                    if turning && paths.get(&cell).copied().unwrap_or(0) != 0 {
+                    if turning && pr.get(&cell).copied().unwrap_or(0) != 0 {
                         continue;
                     }
-                    // (c) No running alongside: forbid sitting parallel-adjacent to an
-                    //     existing path of the same orientation (keep a 1-cell gap).
+                    // (c) no running alongside a same-orientation path (keep a 1-cell gap).
                     let alongside = if our_bit == HORIZ {
-                        paths.get(&(next.0, next.1 - 1)).copied().unwrap_or(0) & HORIZ != 0
-                            || paths.get(&(next.0, next.1 + 1)).copied().unwrap_or(0) & HORIZ != 0
+                        pr.get(&(next.0, next.1 - 1)).copied().unwrap_or(0) & HORIZ != 0
+                            || pr.get(&(next.0, next.1 + 1)).copied().unwrap_or(0) & HORIZ != 0
                     } else {
-                        paths.get(&(next.0 - 1, next.1)).copied().unwrap_or(0) & VERT != 0
-                            || paths.get(&(next.0 + 1, next.1)).copied().unwrap_or(0) & VERT != 0
+                        pr.get(&(next.0 - 1, next.1)).copied().unwrap_or(0) & VERT != 0
+                            || pr.get(&(next.0 + 1, next.1)).copied().unwrap_or(0) & VERT != 0
                     };
                     if alongside {
                         continue;
                     }
                 }
-
                 let next_dir = Some(delta);
                 let next_state: State = (next, next_dir);
                 if visited.contains(&next_state) {
                     continue;
                 }
-                // Turn penalty (prefer straight runs / fewer bends).
                 let turn_cost: i32 = if inc_dir.is_some() && inc_dir != Some(delta) { 2 } else { 0 };
                 let next_g = g + 1 + turn_cost;
                 let next_f = next_g + manhattan(next, arr);
@@ -282,10 +266,22 @@ fn route_ortho(
                 }
             }
         }
+        None
+    };
+
+    // Tier 1: full clearance + path-vs-path rules.
+    // Tier 2: keep room clearance but drop the path rules, so an edge boxed in by other
+    //   connectors still routes cleanly around ROOMS (it may touch/cross a path) instead of
+    //   hugging a wall.
+    // Tier 3: L fallback (rooms-aware orientation choice).
+    let empty_paths = std::collections::HashMap::new();
+    if let Some(p) = astar(paths) {
+        return p;
+    }
+    if let Some(p) = astar(&empty_paths) {
+        return p;
     }
 
-    // Fallback (A* exhausted): build both L-orientations and pick whichever crosses
-    // fewer blocked cells, so even a fallback avoids cutting through rooms when possible.
     let l_via = |corner: (i32, i32)| -> Vec<(i32, i32)> {
         let mut pts = Vec::new();
         walk_to(&mut pts, dep, corner);
@@ -322,19 +318,24 @@ fn walk_to(pts: &mut Vec<(i32, i32)>, from: (i32, i32), to: (i32, i32)) {
     }
 }
 
-/// Pick the side of `dest_rect` whose anchor is geometrically nearest to `dep`.
-/// Used when `arrival_dir` is None (undiscovered).
-fn nearest_side(dest_rect: VRect, dep: (i32, i32)) -> Side {
-    let candidates = [Side::Top, Side::Bottom, Side::Left, Side::Right];
-    candidates
-        .into_iter()
-        .min_by_key(|&s| {
-            let a = side_anchor(dest_rect, s);
-            let dx = a.0 - dep.0;
-            let dy = a.1 - dep.1;
-            dx * dx + dy * dy
-        })
-        .unwrap_or(Side::Bottom)
+/// Pick the side of `dest_rect` to connect an undiscovered (non-reciprocal) arrival to:
+/// the geometrically nearest side to `dep` that is NOT already `occupied` by one of the
+/// destination's departures or another arrival. Falls back to the nearest side if every
+/// side is occupied. This keeps an arriving line off the centre anchor that a departure
+/// arrow (or another arrival) already uses, so they don't collide.
+fn nearest_free_side(dest_rect: VRect, dep: (i32, i32), occupied: &[Side]) -> Side {
+    let mut sides = [Side::Top, Side::Bottom, Side::Left, Side::Right];
+    sides.sort_by_key(|&s| {
+        let a = side_anchor(dest_rect, s);
+        let dx = a.0 - dep.0;
+        let dy = a.1 - dep.1;
+        dx * dx + dy * dy
+    });
+    sides
+        .iter()
+        .find(|s| !occupied.contains(s))
+        .copied()
+        .unwrap_or(sides[0])
 }
 
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
@@ -472,6 +473,22 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
         std::collections::HashSet::new();
 
+    // The sides each room uses for its OUTGOING compass edges (departure arrows sit there).
+    // A non-reciprocal arrival avoids these sides so it doesn't land on a departure anchor.
+    let mut dep_sides: std::collections::HashMap<RoomId, Vec<Side>> =
+        std::collections::HashMap::new();
+    for e in &rm.edges {
+        if e.is_stub {
+            continue;
+        }
+        if let Some(s) = side_for(e.dir) {
+            dep_sides.entry(e.origin).or_default().push(s);
+        }
+    }
+    // Sides already claimed by arrivals into each room (so two arrivals don't collide).
+    let mut used_arr: std::collections::HashMap<RoomId, Vec<Side>> =
+        std::collections::HashMap::new();
+
     for edge in &rm.edges {
         if edge.is_stub {
             continue;
@@ -501,16 +518,30 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         // the destination's own outgoing arrow. When unknown, fall back to the
         // geometrically nearest side and draw no far-end arrow.
         let dest_back_side = edge.arrival_dir.and_then(side_for);
-        let arr_side = dest_back_side.unwrap_or_else(|| nearest_side(dest_rect, dep));
+        let arr_side = match dest_back_side {
+            // Confirmed reciprocal: use the matched return side (one shared path).
+            Some(s) => s,
+            // Non-reciprocal: connect to the nearest side of dest not already used by a
+            // departure or a prior arrival, then claim it.
+            None => {
+                let mut occupied = dep_sides.get(&edge.dest).cloned().unwrap_or_default();
+                if let Some(u) = used_arr.get(&edge.dest) {
+                    occupied.extend(u.iter().copied());
+                }
+                let s = nearest_free_side(dest_rect, dep, &occupied);
+                used_arr.entry(edge.dest).or_default().push(s);
+                s
+            }
+        };
         let arr = side_anchor(dest_rect, arr_side);
 
-        // Build blocked set: every OTHER room box expanded by a 1-cell halo, so a
-        // passing connector always keeps at least one cell of clearance from rooms it
-        // is not connecting to (it never hugs a wall).
+        // Build blocked set: EVERY room box (including this edge's own origin and dest)
+        // expanded by a 1-cell halo, so a connector keeps clearance from rooms and can
+        // never pass through one — including the destination, which it must approach from
+        // outside rather than cutting across to reach a far-side anchor.
         let mut blocked: std::collections::HashSet<(i32, i32)> = placed
-            .iter()
-            .filter(|(&id, _)| id != edge.origin && id != edge.dest)
-            .flat_map(|(_, &rect)| {
+            .values()
+            .flat_map(|&rect| {
                 let x0 = rect.x - 1;
                 let y0 = rect.y - 1;
                 let x1 = rect.right(); // one column past the box (halo)
@@ -521,7 +552,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
         // Never block this connection's own exit/entry lanes: clear the departure and
         // arrival anchors plus their orthogonal neighbours so routing can always begin
-        // and end even when an endpoint sits next to a third room's halo.
+        // and end even though the origin/dest boxes are otherwise blocked.
         for &(px, py) in &[dep, arr] {
             blocked.remove(&(px, py));
             blocked.remove(&(px + 1, py));
@@ -1300,6 +1331,25 @@ mod tests {
             !p2.iter().any(|&(_, y)| y == 5),
             "second path must not overlap the first; got {p2:?}"
         );
+    }
+
+    #[test]
+    fn arrival_avoids_occupied_side() {
+        // A non-reciprocal arrival must not land on a side the destination already uses
+        // for a departure (or another arrival) — that's the "two paths on one arrow" bug.
+        let dest = VRect { x: 0, y: 0, w: 21, h: 11 };
+        let dep = (-10, 5); // due west of dest → nearest side is Left
+
+        // Nothing occupied → the geometrically nearest side (Left).
+        assert_eq!(nearest_free_side(dest, dep, &[]), Side::Left);
+
+        // Left occupied (a departure sits there) → must pick a different side.
+        let s = nearest_free_side(dest, dep, &[Side::Left]);
+        assert_ne!(s, Side::Left, "arrival must avoid the occupied departure side; got {s:?}");
+
+        // Left + the next-nearest also occupied → still avoids both.
+        let s2 = nearest_free_side(dest, dep, &[Side::Left, s]);
+        assert!(s2 != Side::Left && s2 != s, "arrival must avoid all occupied sides; got {s2:?}");
     }
 
     #[test]
