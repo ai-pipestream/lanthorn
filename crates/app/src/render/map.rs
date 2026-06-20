@@ -332,6 +332,38 @@ fn arrival_anchor(rect: VRect, side: Side, index: i32) -> (i32, i32) {
     }
 }
 
+/// Walk from `from` to `to` one step at a time (orthogonal), appending each cell.
+/// `from` is included on first call; subsequent `walk_to` calls should share an
+/// endpoint to avoid duplicates — the caller handles this by starting each segment
+/// at the current last point.
+fn walk_to(pts: &mut Vec<(i32, i32)>, from: (i32, i32), to: (i32, i32)) {
+    let dx = (to.0 - from.0).signum();
+    let dy = (to.1 - from.1).signum();
+    let mut cur = from;
+    loop {
+        pts.push(cur);
+        if cur == to {
+            break;
+        }
+        cur = (cur.0 + dx, cur.1 + dy);
+    }
+}
+
+/// A simple two-segment L from `dep` to `arr` whose first step leaves on `dep_side`.
+/// Used only to give an UNROUTED edge a visible (flagged) shape; it may overlap and is
+/// never recorded in the path-occupancy map.
+fn unrouted_l(dep: (i32, i32), arr: (i32, i32), dep_side: Side) -> Vec<(i32, i32)> {
+    let corner = match dep_side {
+        Side::Left | Side::Right => (arr.0, dep.1), // horizontal-first
+        Side::Top | Side::Bottom => (dep.0, arr.1), // vertical-first
+    };
+    let mut pts = Vec::new();
+    walk_to(&mut pts, dep, corner);
+    pts.pop();
+    walk_to(&mut pts, corner, arr);
+    pts
+}
+
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
 ///
 /// Arrows signify the outgoing direction only — the departure direction is always
@@ -411,6 +443,10 @@ const PATH_BG: Style = Style::new().bg(Color::Cyan);
 /// Solid background fill for a path ribbon (distorted — different signal).
 const PATH_BG_DISTORTED: Style = Style::new().bg(Color::Magenta);
 
+/// Ribbon background for an edge with no clean route — visibly distinct (dimmed) so a
+/// rare routing failure is obvious rather than mistaken for a normal connector.
+const PATH_BG_UNROUTED: Style = Style::new().bg(Color::DarkGray);
+
 /// Arrow embedded in a normal path ribbon: dark bold glyph on the ribbon colour.
 const PATH_ARROW: Style = Style::new()
     .fg(Color::Black)
@@ -460,6 +496,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // ── 2. Route ALL connectors in virtual space (computed once, scroll-free) ─
     let mut path_cells: std::collections::HashMap<(i32, i32), bool> =
         std::collections::HashMap::new();
+    // Cells belonging to UNROUTED edges (no clean channel). Rendered distinctly and
+    // deliberately NOT added to `paths`, so they never constrain later clean routes.
+    let mut unrouted_cells: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
     // Cells occupied by already-routed connectors, keyed to their orientation bits, so
     // later edges can keep clearance and cross only at perpendicular straight-throughs.
@@ -562,26 +601,28 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
         // Route the path with hard clearance + perpendicular-crossing-only rules vs
         // earlier paths.
-        let path = match route_ortho(dep, arr, dep_side, &blocked, &paths) {
-            Some(p) => p,
-            None => continue, // Task 4 replaces this with an unrouted-line render
-        };
-
-        // Record this path's cells with their per-segment orientation, so later edges
-        // keep clearance and may only cross it perpendicularly. A corner cell (where the
-        // path turns) accumulates both bits and so blocks crossings there.
-        for w in path.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            let bit = if a.1 == b.1 { HORIZ } else { VERT };
-            *paths.entry(a).or_insert(0) |= bit;
-            *paths.entry(b).or_insert(0) |= bit;
-        }
-
-        // Fill the path ribbon in virtual space (clipping happens at blit time).
-        // A cell is styled distorted only if EVERY path through it is distorted.
-        for &(x, y) in &path {
-            let entry = path_cells.entry((x, y)).or_insert(true);
-            *entry = *entry && edge.distorted;
+        match route_ortho(dep, arr, dep_side, &blocked, &paths) {
+            Some(path) => {
+                // Record this clean path's cells with orientation, so later edges keep
+                // clearance and may only cross it perpendicularly.
+                for w in path.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    let bit = if a.1 == b.1 { HORIZ } else { VERT };
+                    *paths.entry(a).or_insert(0) |= bit;
+                    *paths.entry(b).or_insert(0) |= bit;
+                }
+                for &(x, y) in &path {
+                    let entry = path_cells.entry((x, y)).or_insert(true);
+                    *entry = *entry && edge.distorted;
+                }
+            }
+            None => {
+                // No clean channel: draw a distinct, flagged L (may overlap); do NOT add
+                // it to `paths` occupancy.
+                for &(x, y) in &unrouted_l(dep, arr, dep_side) {
+                    unrouted_cells.insert((x, y));
+                }
+            }
         }
 
         // Outgoing arrow at the origin's departure anchor `dep`.
@@ -603,6 +644,20 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             let style = if all_distorted { PATH_BG_DISTORTED } else { PATH_BG };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(" ").set_style(style);
+            }
+        }
+    }
+
+    // Blit unrouted ribbons (translate virtual → screen, clip). A clean path always
+    // wins a shared cell, so skip cells already in path_cells.
+    for &(vx, vy) in &unrouted_cells {
+        if path_cells.contains_key(&(vx, vy)) {
+            continue;
+        }
+        let (sx, sy) = (vx + off_x, vy + off_y);
+        if in_area(sx, sy, area) {
+            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
+                cell.set_symbol(" ").set_style(PATH_BG_UNROUTED);
             }
         }
     }
@@ -1493,5 +1548,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unroutable_edge_renders_distinct_and_keeps_clean_edges_cyan() {
+        // Force an edge that cannot route: erect an unbroken wall of rooms between
+        // rooms 1 and 2 so route_ortho has no clean channel and must flag the edge
+        // as unrouted (DarkGray ribbon). We set positions explicitly (bypassing
+        // relayout) so the renderer must confront an un-routable edge.
+        //
+        // NOTE: Compact zoom is used because step_h == halo_h (5 == 5), so consecutive
+        // rooms in the same column leave NO vertical gap — a single column of 13 rooms
+        // creates an impenetrable wall covering the full A* search-space in y.
+        // Boxes zoom (step_h=17, halo_h=13) would leave 4-row gaps that the A* can
+        // thread through, so the wall cannot be built with Boxes zoom alone.
+        use mapper::graph::MapGraph;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let mut g = MapGraph::new();
+        // Room 1: origin (east side of wall).
+        // Room 2: destination (west of wall — unroutable from room 1).
+        // Room 3: clean destination to the east of room 1.
+        g.upsert_room(1, "r".into());
+        g.upsert_room(2, "r".into());
+        g.upsert_room(3, "r".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (-6, 0)); // west of the wall
+        g.set_pos(3, (1, 0));  // east of origin — clean path exists
+
+        // Wall of 13 rooms at column -2 (Compact: step_h=5, halo_h=5 → no gaps).
+        // Halo covers x=-25..-16 for ALL y in the A* search bounds (-24..+24 around dep/arr).
+        for k in -6i32..=6 {
+            let id = 4 + (k + 6) as u16; // IDs 4..16
+            g.upsert_room(id, "w".into());
+            g.set_pos(id, (-2, k));
+        }
+
+        g.add_edge(1, mapper::direction::Direction::W, 2); // blocked by wall → unrouted
+        g.add_edge(1, mapper::direction::Direction::E, 3); // clear path → clean Cyan ribbon
+        let rm = mapper::render::render(&g);
+
+        let area = Rect::new(0, 0, 200, 120);
+        let mut buf = Buffer::empty(area);
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        state.scroll = (-4, -4);
+        render_map(&rm, &state, area, &mut buf);
+
+        let mut has_unrouted = false;
+        let mut has_clean = false;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                match buf.cell((x, y)).map(|c| c.bg) {
+                    Some(Color::DarkGray) => has_unrouted = true,
+                    Some(Color::Cyan) => has_clean = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(has_unrouted, "the boxed-in edge must render as a distinct DarkGray ribbon");
+        assert!(has_clean, "the clean edge must still render as a normal Cyan ribbon");
     }
 }
