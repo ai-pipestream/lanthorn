@@ -30,6 +30,7 @@ use crate::graph::{Connection, MapGraph, RoomId};
 
 mod vpsc;
 mod constraints;
+mod stress;
 
 // ── pair_offset ───────────────────────────────────────────────────────────────
 
