@@ -96,6 +96,7 @@ fn route_ortho(dep: (i32, i32), arr: (i32, i32), dep_side: Side) -> Vec<(i32, i3
     let mut pts = Vec::new();
     // Walk dep → corner → arr, each step ±1.
     walk_to(&mut pts, dep, corner);
+    pts.pop(); // remove corner so walk_to below includes it exactly once
     walk_to(&mut pts, corner, arr);
     pts
 }
@@ -138,15 +139,15 @@ fn nearest_side(dest_rect: Rect, dep: (i32, i32)) -> Side {
 fn arrowhead_glyph(arrival_side: Side, discovered: bool) -> &'static str {
     if discovered {
         match arrival_side {
-            Side::Right  => "▶", // entering from the right (going east into dest)
-            Side::Left   => "◀",
+            Side::Left   => "▶", // entering from the left (going east into dest)
+            Side::Right  => "◀",
             Side::Top    => "▲",
             Side::Bottom => "▼",
         }
     } else {
         match arrival_side {
-            Side::Right  => "▷",
-            Side::Left   => "◁",
+            Side::Left   => "▷",
+            Side::Right  => "◁",
             Side::Top    => "△",
             Side::Bottom => "▽",
         }
