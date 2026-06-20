@@ -736,4 +736,130 @@ mod tests {
 
     // connector_is_contiguous_no_gaps: segment_screen_points unit portion removed (function gone);
     // full-render connector assertions superseded by new tests in Task 4.
+
+    #[test]
+    fn connector_departs_origin_correct_side() {
+        // room1 at (0,0) →E→ room2 at (1,0). Boxes zoom, area (0,0,80,30).
+        // room1 box: Rect{x:0,y:0,w:14,h:4}. Right-side anchor: col=14, row=2.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default(); // Boxes zoom, scroll (0,0)
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // The departure anchor for room1→E is Right side: col=14, row=2.
+        // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..13).
+        let dep_col = 14u16;
+        let dep_row = 2u16;
+        let sym = buf.cell((dep_col, dep_row)).map(|c| c.symbol()).unwrap_or(" ");
+        assert_ne!(sym, " ", "departure gutter cell ({dep_col},{dep_row}) should have a connector glyph");
+        assert!(
+            dep_col >= 14, // outside room1 box (cols 0..13)
+            "departure cell col={dep_col} should be outside room1 box"
+        );
+        // Must be a connector glyph (line or arrowhead), not a room box border
+        assert!(
+            matches!(sym, "─" | "│" | "╭" | "╮" | "╰" | "╯" | "├" | "┤" | "┴" | "┬" | "┼"
+                        | "▶" | "◀" | "▲" | "▼" | "▷" | "◁" | "△" | "▽"),
+            "cell ({dep_col},{dep_row}) should be a connector glyph; got '{sym}'"
+        );
+    }
+
+    #[test]
+    fn arrowhead_filled_when_arrival_discovered() {
+        // room1(0,0) →E→ room2(1,0) AND room2(1,0) →W→ room1(0,0).
+        // arrival_dir for the E edge = Some(W), so discovered=true → filled arrow ▶/◀/▲/▼.
+        // room2 box: Rect{x:18,y:0,w:14,h:4}. Left anchor: col=17, row=2.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        g.add_edge(2, mapper::direction::Direction::W, 1); // reverse edge — arrival discovered
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // There must be a FILLED arrowhead somewhere in the buffer.
+        let has_filled = buf.content.iter().any(|c| matches!(c.symbol(), "▶" | "◀" | "▲" | "▼"));
+        assert!(has_filled, "filled arrowhead (▶◀▲▼) should appear when arrival_dir is discovered");
+
+        // No hollow arrowhead should appear for this discovered edge.
+        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
+        assert!(!has_hollow, "hollow arrowhead should NOT appear when arrival is discovered");
+    }
+
+    #[test]
+    fn arrowhead_hollow_when_arrival_undiscovered() {
+        // Only room1 →E→ room2, no reverse edge. arrival_dir=None → hollow arrow.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Must have a HOLLOW arrowhead.
+        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
+        assert!(has_hollow, "hollow arrowhead (▷◁△▽) should appear when arrival_dir is None");
+
+        // Must NOT have a filled arrowhead.
+        let has_filled = buf.content.iter().any(|c| matches!(c.symbol(), "▶" | "◀" | "▲" | "▼"));
+        assert!(!has_filled, "filled arrowhead should NOT appear when arrival is undiscovered");
+    }
+
+    #[test]
+    fn connector_is_solid_not_dim() {
+        // Connector between two adjacent rooms must use Cyan fg and solid glyph ─, not ╌.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Find a horizontal connector glyph ─ and verify it's Cyan, not DarkGray.
+        // Right anchor col=14, row=2 — should be a solid glyph with Cyan style.
+        let dep_col = 14u16;
+        let dep_row = 2u16;
+        let cell = buf.cell((dep_col, dep_row)).expect("connector cell must exist");
+        let sym = cell.symbol();
+        assert_ne!(sym, "╌", "connector should be solid ─ not dashed ╌");
+        assert_ne!(sym, "╎", "connector should be solid │ not dashed ╎");
+        assert_eq!(
+            cell.fg,
+            Color::Cyan,
+            "connector fg should be Cyan; got {:?} at ({dep_col},{dep_row}) sym='{sym}'",
+            cell.fg
+        );
+        // Must not have DIM modifier.
+        assert!(
+            !cell.modifier.contains(Modifier::DIM),
+            "connector should not be dim; modifier={:?}",
+            cell.modifier
+        );
+    }
 }
