@@ -76,8 +76,10 @@ fn side_anchor(rect: Rect, side: Side) -> (i32, i32) {
 }
 
 /// Penalty (in path cost) for stepping onto a cell occupied/haloed by an earlier path.
-/// Soft, not blocking: paths spread apart when there is room but may still cross when tight.
-const SOFT_PENALTY: i32 = 4;
+/// Soft, not blocking: paths overlap only when no clear alternative exists in the search
+/// window. High enough that A* prefers any available detour over running over/next to a
+/// previous path, but finite so a genuinely boxed-in path still completes.
+const SOFT_PENALTY: i32 = 40;
 
 /// Build an obstacle-aware orthogonal path from `dep` to `arr` whose first step leaves in
 /// `dep_side`'s direction.
@@ -444,18 +446,31 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             let arr_side = dest_back_side.unwrap_or_else(|| nearest_side(dest_rect, dep));
             let arr = side_anchor(dest_rect, arr_side);
 
-            // Build blocked set: all cells of every room box except origin and dest.
-            let blocked: std::collections::HashSet<(i32, i32)> = placed
+            // Build blocked set: every OTHER room box expanded by a 1-cell halo, so a
+            // passing connector always keeps at least one cell of clearance from rooms it
+            // is not connecting to (it never hugs a wall).
+            let mut blocked: std::collections::HashSet<(i32, i32)> = placed
                 .iter()
                 .filter(|(&id, _)| id != edge.origin && id != edge.dest)
                 .flat_map(|(_, &rect)| {
-                    let x0 = rect.x as i32;
-                    let y0 = rect.y as i32;
-                    let x1 = rect.right() as i32;
-                    let y1 = rect.bottom() as i32;
-                    (x0..x1).flat_map(move |x| (y0..y1).map(move |y| (x, y)))
+                    let x0 = rect.x as i32 - 1;
+                    let y0 = rect.y as i32 - 1;
+                    let x1 = rect.right() as i32; // one column past the box (halo)
+                    let y1 = rect.bottom() as i32; // one row past the box (halo)
+                    (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
                 })
                 .collect();
+
+            // Never block this connection's own exit/entry lanes: clear the departure and
+            // arrival anchors plus their orthogonal neighbours so routing can always begin
+            // and end even when an endpoint sits next to a third room's halo.
+            for &(px, py) in &[dep, arr] {
+                blocked.remove(&(px, py));
+                blocked.remove(&(px + 1, py));
+                blocked.remove(&(px - 1, py));
+                blocked.remove(&(px, py + 1));
+                blocked.remove(&(px, py - 1));
+            }
 
             // Route the path, avoiding earlier paths' cells via the soft congestion set.
             let path = route_ortho(dep, arr, dep_side, &blocked, &soft);
@@ -1180,6 +1195,56 @@ mod tests {
             p2.iter().any(|&(_, y)| y >= 7),
             "second path should detour out of the first path's halo; got {p2:?}"
         );
+    }
+
+    #[test]
+    fn render_keeps_one_cell_gap_around_passed_room() {
+        // A(0,0) →E→ C(2,0) with B(1,0) in between. The connector must keep at least one
+        // cell of clearance from B: no connector glyph in the ring of cells immediately
+        // surrounding B's box (B's own border cells are excluded).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(3, (2, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 3); // A→C, passing B
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // B box: cell (1,0) → screen (18,0), size 14×4 → cols 18..31, rows 0..3.
+        let b = Rect::new(18, 0, 14, 4);
+        let connector_glyphs = [
+            "─", "│", "╭", "╮", "╰", "╯", "├", "┤", "┴", "┬", "┼",
+            "▶", "◀", "▲", "▼", "▷", "◁", "△", "▽",
+        ];
+        // Ring = the 1-cell halo around B, excluding B's own box cells.
+        for y in (b.y as i32 - 1)..=(b.bottom() as i32) {
+            for x in (b.x as i32 - 1)..=(b.right() as i32) {
+                if x < 0 || y < 0 {
+                    continue;
+                }
+                let in_box = x >= b.x as i32
+                    && x < b.right() as i32
+                    && y >= b.y as i32
+                    && y < b.bottom() as i32;
+                if in_box {
+                    continue; // skip B's own border/interior
+                }
+                if let Some(cell) = buf.cell((x as u16, y as u16)) {
+                    assert!(
+                        !connector_glyphs.contains(&cell.symbol()),
+                        "connector glyph '{}' hugs room B at ({x},{y}); expected a 1-cell gap",
+                        cell.symbol()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
