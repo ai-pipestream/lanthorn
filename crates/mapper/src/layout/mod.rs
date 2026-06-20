@@ -29,6 +29,7 @@ use crate::direction::grid_offset;
 use crate::graph::{Connection, MapGraph, RoomId};
 
 mod vpsc;
+mod constraints;
 
 // ── pair_offset ───────────────────────────────────────────────────────────────
 
