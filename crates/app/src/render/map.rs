@@ -735,10 +735,17 @@ fn draw_box_room(
         put_char(buf, sx + w - 1, sy + dy, vert, style, area);
     }
 
-    // Label on row 1 (first inner row), up to w-2 = 12 chars.
-    let label_width = (w - 2) as usize; // 12
+    // Label on row 1 (first inner row), up to w-2 chars.
+    let label_width = (w - 2) as usize;
     let label: String = room.label.chars().take(label_width).collect();
     put_str(buf, sx + 1, sy + 1, &label, style, area);
+
+    // Unique room id (object number) on row 2, so rooms can be referenced. Only when
+    // the box is tall enough that row 2 is interior (Boxes zoom).
+    if h > 3 {
+        let id_str: String = format!("#{}", room.id).chars().take(label_width).collect();
+        put_str(buf, sx + 1, sy + 2, &id_str, style, area);
+    }
 
     // Notes marker ● in top-right inner corner (row 1, col w-2).
     if room.has_notes {
@@ -938,6 +945,25 @@ mod tests {
             buf.cell((x, 1)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')
         }).collect();
         assert!(row1_chars.contains("West"), "label row should contain 'West'; got '{row1_chars}'");
+    }
+
+    #[test]
+    fn room_box_shows_id() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(7, "Hall".into());
+        g.set_pos(7, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default(); // Boxes zoom
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // The unique id "#7" is drawn on row 2 (under the label) at cols 1..3.
+        let row2: String = (1u16..=3)
+            .map(|x| buf.cell((x, 2)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(row2.contains("#7"), "row 2 should show the room id '#7'; got '{row2}'");
     }
 
     // connector_has_corner_glyph: removed — called build_connector_mask which is gone;

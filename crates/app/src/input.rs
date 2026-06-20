@@ -72,6 +72,8 @@ pub enum Action {
     ExportSvg,
     /// Caller: export the map as a Graphviz DOT graph.
     ExportDot,
+    /// Caller: write an annotatable text/ASCII map dump.
+    ExportDump,
     /// Caller: exit the application.
     Quit,
     /// No binding found — no-op.
@@ -114,6 +116,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('r') => Action::RestoreGame,
             KeyCode::Char('e') => Action::ExportSvg,
             KeyCode::Char('g') => Action::ExportDot,
+            KeyCode::Char('d') => Action::ExportDump,
             KeyCode::Char('l') => Action::CycleLayout,
             _ => Action::None,
         };
@@ -344,6 +347,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::RestoreGame
         | Action::ExportSvg
         | Action::ExportDot
+        | Action::ExportDump
         | Action::Quit => {}
 
         Action::None => {}
@@ -588,6 +592,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::ExportSvg));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::ExportDump));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::CycleLayout));
     }
 

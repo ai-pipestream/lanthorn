@@ -14,6 +14,7 @@ use ratatui::Terminal;
 
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
+use app::map_dump::render_dump;
 use app::ifid::{compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
 use app::persist_files::{load_map, restore_game, save_game, save_map};
@@ -133,7 +134,7 @@ fn draw_frame(
         } else {
             match state.focus {
                 Focus::Game => {
-                    "Tab: map | Ctrl+S: save | Ctrl+R: restore | Ctrl+E: SVG | Ctrl+G: DOT | Ctrl+L: layout | Ctrl+Q: quit".to_string()
+                    "Tab: map | Ctrl+S: save | Ctrl+R: restore | Ctrl+E: SVG | Ctrl+G: DOT | Ctrl+D: dump | Ctrl+L: layout | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
                     "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/N: select | r/o/d/e: edit | Ctrl+Q: quit".to_string()
@@ -218,6 +219,7 @@ fn main() {
     let save_slot = dir.join(format!("{}.qzl", ifid));
     let svg_path = dir.join(format!("{}.svg", ifid));
     let dot_path = dir.join(format!("{}.dot", ifid));
+    let dump_path = dir.join(format!("{}.map.txt", ifid));
 
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
@@ -461,6 +463,17 @@ fn main() {
                     }
                     Err(e) => {
                         state.push_transcript(&format!("[DOT export failed: {}]", e));
+                    }
+                }
+            }
+
+            Action::ExportDump => {
+                match std::fs::write(&dump_path, render_dump(&mapper.graph)) {
+                    Ok(()) => {
+                        state.push_transcript(&format!("[map dump written to {}]", dump_path.display()));
+                    }
+                    Err(e) => {
+                        state.push_transcript(&format!("[map dump failed: {}]", e));
                     }
                 }
             }

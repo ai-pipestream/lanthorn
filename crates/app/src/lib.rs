@@ -1,6 +1,7 @@
 pub mod export_dot;
 pub mod export_svg;
 pub mod ifid;
+pub mod map_dump;
 pub mod input;
 pub mod persist_files;
 pub mod render;
