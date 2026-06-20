@@ -12,6 +12,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
+use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::ifid::{compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
@@ -132,7 +133,7 @@ fn draw_frame(
         } else {
             match state.focus {
                 Focus::Game => {
-                    "Tab: map | Ctrl+S: save | Ctrl+R: restore | Ctrl+E: export SVG | Ctrl+L: layout | Ctrl+Q: quit".to_string()
+                    "Tab: map | Ctrl+S: save | Ctrl+R: restore | Ctrl+E: SVG | Ctrl+G: DOT | Ctrl+L: layout | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
                     "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/N: select | r/o/d/e: edit | Ctrl+Q: quit".to_string()
@@ -213,9 +214,10 @@ fn main() {
 
     let mut mapper = load_map(&map_file).unwrap_or_default();
 
-    // Save-slot and SVG-export paths (fixed single slot per IFID).
+    // Save-slot and export paths (fixed single slot per IFID).
     let save_slot = dir.join(format!("{}.qzl", ifid));
     let svg_path = dir.join(format!("{}.svg", ifid));
+    let dot_path = dir.join(format!("{}.dot", ifid));
 
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
@@ -444,6 +446,21 @@ fn main() {
                     }
                     Err(e) => {
                         state.push_transcript(&format!("[SVG export failed: {}]", e));
+                    }
+                }
+            }
+
+            Action::ExportDot => {
+                match export_dot(&dot_path, &mapper.graph) {
+                    Ok(()) => {
+                        state.push_transcript(&format!(
+                            "[DOT exported to {} — render with: dot -Tsvg {} -o map.svg]",
+                            dot_path.display(),
+                            dot_path.display()
+                        ));
+                    }
+                    Err(e) => {
+                        state.push_transcript(&format!("[DOT export failed: {}]", e));
                     }
                 }
             }

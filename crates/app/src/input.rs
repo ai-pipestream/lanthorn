@@ -70,6 +70,8 @@ pub enum Action {
     RestoreGame,
     /// Caller: export the map as SVG.
     ExportSvg,
+    /// Caller: export the map as a Graphviz DOT graph.
+    ExportDot,
     /// Caller: exit the application.
     Quit,
     /// No binding found — no-op.
@@ -86,8 +88,8 @@ pub enum Action {
 ///    global shortcuts return `Action::None` so a prompt can never be abandoned
 ///    by an accidental global key.
 /// 3. **Global** (any focus, no prompt) — Ctrl+S → SaveGame; Ctrl+R →
-///    RestoreGame; Ctrl+E → ExportSvg; Ctrl+L → CycleLayout; Tab →
-///    ToggleFocus.
+///    RestoreGame; Ctrl+E → ExportSvg; Ctrl+G → ExportDot; Ctrl+L →
+///    CycleLayout; Tab → ToggleFocus.
 /// 4. **Game focus** — printable char → InputChar; Backspace → Backspace;
 ///    Enter → SubmitCommand.
 /// 5. **Map focus** — navigation, zoom, select, edit bindings.
@@ -111,6 +113,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('s') => Action::SaveGame,
             KeyCode::Char('r') => Action::RestoreGame,
             KeyCode::Char('e') => Action::ExportSvg,
+            KeyCode::Char('g') => Action::ExportDot,
             KeyCode::Char('l') => Action::CycleLayout,
             _ => Action::None,
         };
@@ -340,6 +343,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::SaveGame
         | Action::RestoreGame
         | Action::ExportSvg
+        | Action::ExportDot
         | Action::Quit => {}
 
         Action::None => {}
@@ -583,6 +587,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::ExportSvg));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::CycleLayout));
     }
 
