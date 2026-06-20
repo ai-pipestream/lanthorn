@@ -32,6 +32,13 @@ mod vpsc;
 mod constraints;
 mod stress;
 
+/// Separation gap and ideal edge length (in grid cells).
+const GAP: f64 = 1.0;
+/// Fixed SMACOF iterations (determinism + bounded cost).
+const ITERS: usize = 60;
+/// Above this node count, skip the O(ITERS·n²) solve and use the seed grid.
+const MAX_NODES: usize = 400;
+
 // ── pair_offset ───────────────────────────────────────────────────────────────
 
 /// Compute the combined grid offset of room `b` relative to room `a`, using the
@@ -298,8 +305,10 @@ fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
 
 /// Re-derive all room positions from scratch on every call.
 ///
-/// Clears all existing positions, then BFS-places rooms from the lowest-id root
-/// of each connected component, following directed-edge constraints.
+/// Uses constrained stress majorization (SMACOF + VPSC) per connected component,
+/// snaps to grid, packs components left-to-right, resolves residual overlaps,
+/// and anchors the lowest-id room at (0,0). Falls back to the seed grid for
+/// graphs above MAX_NODES rooms.
 pub fn relayout_auto(graph: &mut MapGraph) {
     let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
     ids.sort_unstable();
@@ -309,12 +318,84 @@ pub fn relayout_auto(graph: &mut MapGraph) {
     clear_all_positions(graph, &ids);
 
     let seed = seed_layout(graph);
-    for &id in &ids {
-        if let Some(&p) = seed.get(&id) {
-            graph.set_pos(id, p);
+
+    // Large-graph fallback: keep the deterministic seed grid.
+    if ids.len() > MAX_NODES {
+        for &id in &ids {
+            if let Some(&p) = seed.get(&id) {
+                graph.set_pos(id, p);
+            }
+        }
+        mark_distorted(graph, &BTreeSet::new());
+        return;
+    }
+
+    let components = connected_components(graph, &ids);
+    let mut dropped_all: BTreeSet<usize> = BTreeSet::new();
+    let mut final_pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    let mut occupied: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let mut pack_x: i32 = 0; // left edge for the next component
+
+    for comp in &components {
+        let n = comp.len();
+        let index: std::collections::HashMap<RoomId, usize> =
+            comp.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+
+        // Local undirected adjacency for BFS distances.
+        let mut adj = vec![Vec::new(); n];
+        for c in graph.connections() {
+            if let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) {
+                adj[a].push(b);
+                adj[b].push(a);
+            }
+        }
+        let dist = stress::all_pairs_dist(n, &adj);
+        let ac = constraints::build_axis_constraints(graph, comp, GAP);
+        dropped_all.extend(ac.dropped.iter().copied());
+
+        let seed_local: Vec<(f64, f64)> = comp
+            .iter()
+            .map(|&id| {
+                let p = seed.get(&id).copied().unwrap_or((0, 0));
+                (p.0 as f64, p.1 as f64)
+            })
+            .collect();
+
+        let cont = stress::stress_layout(n, &dist, &ac.x, &ac.y, &seed_local, ITERS);
+        let mut snapped: Vec<(i32, i32)> =
+            cont.iter().map(|&(x, y)| (x.round() as i32, y.round() as i32)).collect();
+
+        // Pack this component to the right of the previous, top-aligned.
+        let min_x = snapped.iter().map(|p| p.0).min().unwrap();
+        let min_y = snapped.iter().map(|p| p.1).min().unwrap();
+        for p in &mut snapped {
+            p.0 += pack_x - min_x;
+            p.1 -= min_y;
+        }
+
+        // Resolve residual same-cell collisions in ascending room-id order.
+        let mut max_x_used = pack_x;
+        for (i, &id) in comp.iter().enumerate() {
+            let cell = nearest_free_cell(&occupied, snapped[i]);
+            occupied.insert(cell);
+            final_pos.insert(id, cell);
+            max_x_used = max_x_used.max(cell.0);
+        }
+        pack_x = max_x_used + 2; // 1-cell gap between components
+    }
+
+    // Anchor the lowest-id room at (0,0) for a stable reference.
+    if let Some(&(ax, ay)) = final_pos.get(&ids[0]) {
+        for p in final_pos.values_mut() {
+            p.0 -= ax;
+            p.1 -= ay;
         }
     }
-    mark_distorted(graph, &BTreeSet::new());
+
+    for (&id, &p) in &final_pos {
+        graph.set_pos(id, p);
+    }
+    mark_distorted(graph, &dropped_all);
 }
 
 /// Clear the `pos` of every room in `ids`.
@@ -345,7 +426,7 @@ mod tests {
         relayout_auto(&mut m.graph);
         let p1 = m.graph.room(1).unwrap().pos.unwrap();
         let p2 = m.graph.room(2).unwrap().pos.unwrap();
-        assert_eq!((p2.0 - p1.0, p2.1 - p1.1), (0, -1)); // north = up
+        assert!(p2.1 < p1.1, "north room must be above center: {p2:?} vs {p1:?}");
     }
 
     #[test]
@@ -439,14 +520,12 @@ mod tests {
         let mut graph = MapGraph::new();
         graph.upsert_room(1, "A".into());
         graph.upsert_room(2, "B".into());
-        // Pre-set a non-origin position — must be IGNORED by new layout.
         graph.set_pos(1, (5, 5));
         graph.add_edge(1, Direction::N, 2);
         relayout_auto(&mut graph);
-        // Root (lowest id = 1) must be anchored at (0,0), NOT preserved at (5,5).
-        assert_eq!(graph.room(1).unwrap().pos, Some((0, 0)));
-        // Room 2 placed north of room 1: (0,0) + (0,-1) = (0,-1).
-        assert_eq!(graph.room(2).unwrap().pos, Some((0, -1)));
+        assert_eq!(graph.room(1).unwrap().pos, Some((0, 0)), "lowest-id room anchors at origin");
+        let p2 = graph.room(2).unwrap().pos.unwrap();
+        assert!(p2.1 < 0, "room 2 must be north of the anchor: {p2:?}");
     }
 
     #[test]
@@ -468,29 +547,21 @@ mod tests {
 
     #[test]
     fn dynamic_relayout_updates_positions() {
-        // Build a 2-room graph: room 1 and room 2 with no constraint.
-        // After first layout: room 2 is placed by non-compass (Unknown) → near room 1.
-        // Then ADD a compass edge 1→N→2 and re-layout: room 2 MUST move to (0,-1).
         let mut graph = MapGraph::new();
         graph.upsert_room(1, "A".into());
         graph.upsert_room(2, "B".into());
-        graph.add_edge(1, Direction::Unknown, 2); // no compass constraint yet
+        graph.add_edge(1, Direction::Unknown, 2);
         relayout_auto(&mut graph);
         let pos2_before = graph.room(2).unwrap().pos.unwrap();
-        // Now give room 2 a strong compass constraint: north of room 1.
-        // Replace the Unknown edge with a North edge.
         graph.remove_connection(1, Direction::Unknown);
         graph.add_edge(1, Direction::N, 2);
         relayout_auto(&mut graph);
         let pos2_after = graph.room(2).unwrap().pos.unwrap();
-        // Room 2 must now be exactly north of room 1 = (0,-1) since root is (0,0).
-        assert_eq!(pos2_after, (0, -1), "room 2 must sit north of room 1 after compass edge added");
-        // And it must have CHANGED from the non-compass placement (proving dynamic, not pinned).
-        assert_ne!(pos2_before, pos2_after, "room 2 must reposition when new constraint is added");
-        // No overlap.
+        assert!(pos2_after.1 < graph.room(1).unwrap().pos.unwrap().1, "room 2 must be north now");
+        assert_ne!(pos2_before, pos2_after, "room 2 must reposition when the constraint changes");
         let cells: Vec<_> = graph.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
-        assert_eq!(cells.len(), set.len(), "rooms must not overlap after dynamic relayout");
+        assert_eq!(cells.len(), set.len(), "rooms must not overlap");
     }
 
     #[test]
@@ -543,10 +614,6 @@ mod tests {
 
     #[test]
     fn combined_offset_places_northeast() {
-        // A(1) →N→ B(2) and B(2) →W→ A(1).
-        // grid_offset(N)=(0,-1), grid_offset(W)=(-1,0).
-        // combined = (0,-1) - (-1,0) = (1,-1) → clamp (1,-1) = northeast.
-        // So B should land at A.pos + (1,-1).
         let mut g = crate::graph::MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -555,12 +622,7 @@ mod tests {
         relayout_auto(&mut g);
         let pa = g.room(1).unwrap().pos.unwrap();
         let pb = g.room(2).unwrap().pos.unwrap();
-        assert_eq!(
-            (pb.0 - pa.0, pb.1 - pa.1),
-            (1, -1),
-            "B should be northeast (1,-1) of A when A→N→B and B→W→A"
-        );
-        // No overlap.
+        assert!(pb.0 > pa.0 && pb.1 < pa.1, "B must be north-east of A: {pb:?} vs {pa:?}");
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "rooms must not overlap");
@@ -568,9 +630,6 @@ mod tests {
 
     #[test]
     fn reciprocal_places_one_step_north() {
-        // A(1) →N→ B(2) and B(2) →S→ A(1): true reciprocal-opposite.
-        // grid_offset(N)=(0,-1), grid_offset(S)=(0,1).
-        // combined = (0,-1) - (0,1) = (0,-2) → clamp (0,-1) = one step north.
         let mut g = crate::graph::MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -579,10 +638,34 @@ mod tests {
         relayout_auto(&mut g);
         let pa = g.room(1).unwrap().pos.unwrap();
         let pb = g.room(2).unwrap().pos.unwrap();
-        assert_eq!(
-            (pb.0 - pa.0, pb.1 - pa.1),
-            (0, -1),
-            "B should be exactly one step north (0,-1) of A for reciprocal A→N→B / B→S→A"
-        );
+        assert!(pb.1 < pa.1, "B must be north of A: {pb:?} vs {pa:?}");
+        assert_eq!(pb.0, pa.0, "no east/west constraint → B stays in A's column");
+    }
+
+    #[test]
+    fn east_room_is_east() {
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        relayout_auto(&mut m.graph);
+        let pa = m.graph.room(1).unwrap().pos.unwrap();
+        let pb = m.graph.room(2).unwrap().pos.unwrap();
+        assert!(pb.0 > pa.0, "east room must be to the right: {pb:?} vs {pa:?}");
+    }
+
+    #[test]
+    fn orientation_pinned_north_is_up() {
+        // North must map to smaller y every solve (no rotation), regardless of ids.
+        let mut g = crate::graph::MapGraph::new();
+        for id in 1..=4 {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::E, 3);
+        g.add_edge(3, Direction::S, 4);
+        relayout_auto(&mut g);
+        let p1 = g.room(1).unwrap().pos.unwrap();
+        let p2 = g.room(2).unwrap().pos.unwrap();
+        assert!(p2.1 < p1.1, "room 2 (north of 1) must be above it: {p2:?} vs {p1:?}");
     }
 }
