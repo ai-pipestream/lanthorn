@@ -270,6 +270,23 @@ fn arrow_for_departure(dep_side: Side) -> &'static str {
     }
 }
 
+/// Queue an arrowhead at screen cell `pos` if it falls inside `area`.
+fn push_arrow(
+    arrowheads: &mut Vec<((u16, u16), &'static str, bool)>,
+    pos: (i32, i32),
+    glyph: &'static str,
+    distorted: bool,
+    area: Rect,
+) {
+    if pos.0 >= area.x as i32
+        && pos.0 < area.right() as i32
+        && pos.1 >= area.y as i32
+        && pos.1 < area.bottom() as i32
+    {
+        arrowheads.push(((pos.0 as u16, pos.1 as u16), glyph, distorted));
+    }
+}
+
 // ── cell_to_screen ────────────────────────────────────────────────────────────
 
 /// Map a logical room cell to an absolute screen coordinate within `area`.
@@ -389,6 +406,12 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         // pay SOFT_PENALTY to enter these, so paths keep a minimum gap between each other.
         let mut soft: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
 
+        // Directed connections (origin, dest) already drawn. A connection between two
+        // rooms is rendered as ONE path; the reverse edge's outgoing arrow is placed as
+        // the far-end arrow of the forward edge, so we skip an edge whose reverse is drawn.
+        let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
+            std::collections::HashSet::new();
+
         for edge in &rm.edges {
             if edge.is_stub {
                 continue;
@@ -403,14 +426,22 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 continue; // non-planar slipped through (shouldn't happen for non-stub)
             };
 
+            // Reciprocal reuse: if the reverse edge (dest → origin) was already drawn,
+            // this edge's outgoing arrow was already placed as that path's far-end arrow.
+            // Skip it so the connection is drawn once, not as two separate paths.
+            if drawn.contains(&(edge.dest, edge.origin)) {
+                continue;
+            }
+
             let dep = side_anchor(origin_rect, dep_side);
 
-            // Determine which side of the destination box the line connects to. Use the
-            // discovered arrival direction when known, else the geometrically nearest side.
-            let arr_side = match edge.arrival_dir.and_then(side_for) {
-                Some(s) => s,
-                None => nearest_side(dest_rect, dep),
-            };
+            // Which side of the destination box the line connects to, and whether a
+            // return trip (dest → origin) has been observed. `arrival_dir` is the
+            // direction the player leaves `dest` to get back here; that side carries
+            // the destination's own outgoing arrow. When unknown, fall back to the
+            // geometrically nearest side and draw no far-end arrow.
+            let dest_back_side = edge.arrival_dir.and_then(side_for);
+            let arr_side = dest_back_side.unwrap_or_else(|| nearest_side(dest_rect, dep));
             let arr = side_anchor(dest_rect, arr_side);
 
             // Build blocked set: all cells of every room box except origin and dest.
@@ -464,17 +495,16 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 }
             }
 
-            // Arrowhead at the departure anchor `dep`, pointing in the outgoing direction.
-            let dx = dep.0;
-            let dy = dep.1;
-            if dx >= area.x as i32
-                && dx < area.right() as i32
-                && dy >= area.y as i32
-                && dy < area.bottom() as i32
-            {
-                let glyph = arrow_for_departure(dep_side);
-                arrowheads.push(((dx as u16, dy as u16), glyph, edge.distorted));
+            // Outgoing arrow at the origin's departure anchor `dep`.
+            push_arrow(&mut arrowheads, dep, arrow_for_departure(dep_side), edge.distorted, area);
+
+            // Outgoing arrow at the destination, only when a return trip is known:
+            // it points outward from `dest` back toward this room.
+            if let Some(back_side) = dest_back_side {
+                push_arrow(&mut arrowheads, arr, arrow_for_departure(back_side), edge.distorted, area);
             }
+
+            drawn.insert((edge.origin, edge.dest));
         }
 
         // Draw connector glyphs.
@@ -1049,6 +1079,82 @@ mod tests {
         // Should be straight line: (0,5),(1,5),(2,5),(3,5),(4,5),(5,5)
         let expected: Vec<(i32, i32)> = (0..=5).map(|x| (x, 5)).collect();
         assert_eq!(path, expected, "should be straight line when clear");
+    }
+
+    #[test]
+    fn backtracking_reciprocal_draws_arrow_at_both_rooms() {
+        // A(1) at (1,1) →N→ B(2) at (1,0), then backtrack B →S→ A (reciprocal-opposite).
+        // route_all dedupes to one edge, but BOTH outgoing arrows must render:
+        // ▲ at A (leaving north) and ▼ at B (leaving south).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 1));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, mapper::direction::Direction::N, 2);
+        g.add_edge(2, mapper::direction::Direction::S, 1); // backtrack
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let up = buf.content.iter().filter(|c| c.symbol() == "▲").count();
+        let down = buf.content.iter().filter(|c| c.symbol() == "▼").count();
+        assert_eq!(up, 1, "exactly one ▲ (A leaving north); got {up}");
+        assert_eq!(down, 1, "exactly one ▼ (B leaving south, the backtrack); got {down}");
+    }
+
+    #[test]
+    fn return_from_different_direction_reuses_single_path() {
+        // A(1) at (1,1) →N→ B(2) at (1,0), then return B →W→ A (non-opposite).
+        // Both edges are kept by route_all, but the connection must render as ONE path
+        // with one arrow per room: exactly one ▲ (A north) and one ◀ (B west) — not two
+        // separate parallel paths (which would yield two of each).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 1));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, mapper::direction::Direction::N, 2);
+        g.add_edge(2, mapper::direction::Direction::W, 1); // return from a different side
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let up = buf.content.iter().filter(|c| c.symbol() == "▲").count();
+        let left = buf.content.iter().filter(|c| c.symbol() == "◀").count();
+        assert_eq!(up, 1, "exactly one ▲ (A leaving north); two would mean a duplicate path; got {up}");
+        assert_eq!(left, 1, "exactly one ◀ (B leaving west); got {left}");
+    }
+
+    #[test]
+    fn multi_exit_same_pair_keeps_both_arrows() {
+        // A →E→ B AND A →W→ B: two genuinely distinct exits from A to the same room.
+        // These are NOT reciprocal (both originate at A), so both arrows must survive
+        // the reciprocal-reuse dedupe: one ▶ and one ◀, both departing A.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 1));
+        g.set_pos(2, (3, 1));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+        g.add_edge(1, mapper::direction::Direction::W, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let right = buf.content.iter().filter(|c| c.symbol() == "▶").count();
+        let left = buf.content.iter().filter(|c| c.symbol() == "◀").count();
+        assert_eq!(right, 1, "A's east exit ▶ must be kept; got {right}");
+        assert_eq!(left, 1, "A's west exit ◀ must be kept (not deduped as reciprocal); got {left}");
     }
 
     #[test]
