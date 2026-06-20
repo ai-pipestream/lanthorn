@@ -24,7 +24,9 @@
 //!
 //! For Overview zoom, connectors are skipped (step/2=1 but single-glyph boxes fill the cell).
 
+use mapper::graph::RoomId;
 use mapper::render::{RenderMap, RenderRoom};
+use mapper::router::{RoutedEdge, Side, side_for};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -53,6 +55,101 @@ fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
         Zoom::Boxes => (14, 4),
         Zoom::Compact => (8, 3),
         Zoom::Overview => (1, 1),
+    }
+}
+
+// ── Box-geometry routing helpers ──────────────────────────────────────────────
+
+/// Return the gutter cell just outside `rect` on the given side, at the side's midpoint.
+///
+/// - Right: (rect.right(), rect.y + rect.height/2)
+/// - Left:  (rect.x - 1,   rect.y + rect.height/2)
+/// - Top:   (rect.x + rect.width/2, rect.y - 1)
+/// - Bottom:(rect.x + rect.width/2, rect.bottom())
+fn side_anchor(rect: Rect, side: Side) -> (i32, i32) {
+    match side {
+        Side::Right  => (rect.right() as i32,              rect.y as i32 + rect.height as i32 / 2),
+        Side::Left   => (rect.x as i32 - 1,               rect.y as i32 + rect.height as i32 / 2),
+        Side::Top    => (rect.x as i32 + rect.width as i32 / 2,  rect.y as i32 - 1),
+        Side::Bottom => (rect.x as i32 + rect.width as i32 / 2,  rect.bottom() as i32),
+    }
+}
+
+/// Build an orthogonal L-path from `dep` to `arr` whose first step leaves in
+/// `dep_side`'s direction.
+///
+/// - dep_side is Left or Right → go horizontally first, then vertically
+/// - dep_side is Top or Bottom → go vertically first, then horizontally
+///
+/// Returns the list of every screen cell along the path (contiguous, step 1).
+fn route_ortho(dep: (i32, i32), arr: (i32, i32), dep_side: Side) -> Vec<(i32, i32)> {
+    if dep == arr {
+        return vec![dep];
+    }
+
+    // Determine corner point based on which axis leads.
+    let corner = match dep_side {
+        Side::Left | Side::Right => (arr.0, dep.1), // horizontal first
+        Side::Top | Side::Bottom => (dep.0, arr.1), // vertical first
+    };
+
+    let mut pts = Vec::new();
+    // Walk dep → corner → arr, each step ±1.
+    walk_to(&mut pts, dep, corner);
+    walk_to(&mut pts, corner, arr);
+    pts
+}
+
+/// Walk from `from` to `to` one step at a time (orthogonal), appending each cell.
+/// `from` is included on first call; subsequent `walk_to` calls should share an
+/// endpoint to avoid duplicates — the caller handles this by starting each segment
+/// at the current last point.
+fn walk_to(pts: &mut Vec<(i32, i32)>, from: (i32, i32), to: (i32, i32)) {
+    let dx = (to.0 - from.0).signum();
+    let dy = (to.1 - from.1).signum();
+    let mut cur = from;
+    loop {
+        pts.push(cur);
+        if cur == to {
+            break;
+        }
+        cur = (cur.0 + dx, cur.1 + dy);
+    }
+}
+
+/// Pick the side of `dest_rect` whose anchor is geometrically nearest to `dep`.
+/// Used when `arrival_dir` is None (undiscovered).
+fn nearest_side(dest_rect: Rect, dep: (i32, i32)) -> Side {
+    let candidates = [Side::Top, Side::Bottom, Side::Left, Side::Right];
+    candidates
+        .into_iter()
+        .min_by_key(|&s| {
+            let a = side_anchor(dest_rect, s);
+            let dx = a.0 - dep.0;
+            let dy = a.1 - dep.1;
+            dx * dx + dy * dy
+        })
+        .unwrap_or(Side::Bottom)
+}
+
+/// Return the arrowhead glyph that points INTO the dest from `arrival_side`.
+///
+/// `discovered`: filled arrows (▶◀▲▼); undiscovered: hollow (▷◁△▽).
+fn arrowhead_glyph(arrival_side: Side, discovered: bool) -> &'static str {
+    if discovered {
+        match arrival_side {
+            Side::Right  => "▶", // entering from the right (going east into dest)
+            Side::Left   => "◀",
+            Side::Top    => "▲",
+            Side::Bottom => "▼",
+        }
+    } else {
+        match arrival_side {
+            Side::Right  => "▷",
+            Side::Left   => "◁",
+            Side::Top    => "△",
+            Side::Bottom => "▽",
+        }
     }
 }
 
@@ -96,15 +193,12 @@ const SELECTED_STYLE: Style = Style::new().fg(Color::Yellow);
 const NORMAL_STYLE: Style = Style::new().fg(Color::White);
 
 /// Style for normal connectors — solid bright Cyan.
-#[allow(dead_code)]
 const CONNECTOR_STYLE: Style = Style::new().fg(Color::Cyan);
 
 /// Style for distorted connectors — solid Magenta (different signal, not dim).
-#[allow(dead_code)]
 const DISTORTED_STYLE: Style = Style::new().fg(Color::Magenta);
 
 /// Style for arrowheads — bold Yellow.
-#[allow(dead_code)]
 const ARROWHEAD_STYLE: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
 
 // ── Bitmask connector rasterization ──────────────────────────────────────────
@@ -135,7 +229,6 @@ pub fn bitmask_to_glyph(mask: u8) -> &'static str {
 /// - from is to the East (from.0 > this.0): E = 2
 /// - from is to the South (from.1 > this.1): S = 4
 /// - from is to the West (from.0 < this.0): W = 8
-#[allow(dead_code)]
 fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
     if from.1 < this.1 {
         1 // N
@@ -154,10 +247,138 @@ fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
 pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) {
     let zoom = state.zoom;
     let scroll = state.scroll;
-    // Draw rooms on top (connectors replaced in next task)
+
+    // ── 1. Build placed: HashMap<RoomId, Rect> ────────────────────────────────
+    let mut placed: std::collections::HashMap<RoomId, Rect> =
+        std::collections::HashMap::new();
+
+    if !matches!(zoom, crate::state::Zoom::Overview) {
+        let (bw, bh) = zoom_box_size(zoom);
+        for room in &rm.rooms {
+            if let Some((sx, sy)) = cell_to_screen(room.cell, zoom, scroll, area) {
+                placed.insert(room.id, Rect::new(sx, sy, bw, bh));
+            }
+        }
+    }
+
+    // ── 2. Draw connectors (below rooms) ─────────────────────────────────────
+    if !matches!(zoom, crate::state::Zoom::Overview) {
+        // Collect bitmask per screen cell and arrowheads to overlay.
+        let mut mask_map: std::collections::HashMap<(u16, u16), (u8, bool)> =
+            std::collections::HashMap::new();
+        let mut arrowheads: Vec<((u16, u16), &'static str, bool)> = Vec::new(); // (pos, glyph, distorted)
+
+        for edge in &rm.edges {
+            if edge.is_stub {
+                continue;
+            }
+            let (Some(&origin_rect), Some(&dest_rect)) =
+                (placed.get(&edge.origin), placed.get(&edge.dest))
+            else {
+                continue;
+            };
+
+            let Some(dep_side) = side_for(edge.dir) else {
+                continue; // non-planar slipped through (shouldn't happen for non-stub)
+            };
+
+            let dep = side_anchor(origin_rect, dep_side);
+
+            // Determine arrival side and whether it's confirmed.
+            let (arr_side, discovered) = match edge.arrival_dir.and_then(side_for) {
+                Some(s) => (s, true),
+                None => (nearest_side(dest_rect, dep), false),
+            };
+            let arr = side_anchor(dest_rect, arr_side);
+
+            // Route the path.
+            let path = route_ortho(dep, arr, dep_side);
+
+            // Rasterize into bitmask map (screen cells inside area only).
+            let screen_pts: Vec<(u16, u16)> = path
+                .iter()
+                .filter(|&&(x, y)| {
+                    x >= area.x as i32
+                        && x < area.right() as i32
+                        && y >= area.y as i32
+                        && y < area.bottom() as i32
+                })
+                .map(|&(x, y)| (x as u16, y as u16))
+                .collect();
+
+            for i in 0..screen_pts.len() {
+                let pos = screen_pts[i];
+                let entry = mask_map.entry(pos).or_insert((0u8, true));
+                entry.1 = entry.1 && edge.distorted;
+                if i > 0 {
+                    let bit = dir_bit(screen_pts[i - 1], pos);
+                    entry.0 |= bit;
+                }
+                if i + 1 < screen_pts.len() {
+                    let bit = dir_bit(screen_pts[i + 1], pos);
+                    entry.0 |= bit;
+                }
+            }
+
+            // Arrowhead at `arr` if it's inside area.
+            let ax = arr.0;
+            let ay = arr.1;
+            if ax >= area.x as i32
+                && ax < area.right() as i32
+                && ay >= area.y as i32
+                && ay < area.bottom() as i32
+            {
+                let glyph = arrowhead_glyph(arr_side, discovered);
+                arrowheads.push(((ax as u16, ay as u16), glyph, edge.distorted));
+            }
+        }
+
+        // Draw connector glyphs.
+        for (&(cx, cy), &(mask, all_distorted)) in &mask_map {
+            let glyph = bitmask_to_glyph(mask);
+            let style = if all_distorted { DISTORTED_STYLE } else { CONNECTOR_STYLE };
+            if let Some(cell) = buf.cell_mut((cx, cy)) {
+                cell.set_symbol(glyph).set_style(style);
+            }
+        }
+
+        // Overlay arrowheads (win over line glyphs).
+        for ((ax, ay), glyph, distorted) in arrowheads {
+            let style = if distorted { DISTORTED_STYLE } else { ARROWHEAD_STYLE };
+            if let Some(cell) = buf.cell_mut((ax, ay)) {
+                cell.set_symbol(glyph).set_style(style);
+            }
+        }
+
+        // Draw stub edges.
+        for edge in &rm.edges {
+            if edge.is_stub {
+                draw_stub(edge, &placed, area, buf);
+            }
+        }
+    }
+
+    // ── 3. Draw rooms on top ──────────────────────────────────────────────────
     for room in &rm.rooms {
         draw_room(room, state, zoom, scroll, area, buf);
     }
+}
+
+/// Draw a stub connector label in the top-right gutter cell outside the origin box.
+fn draw_stub(
+    edge: &RoutedEdge,
+    placed: &std::collections::HashMap<RoomId, Rect>,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let Some(&origin_rect) = placed.get(&edge.origin) else {
+        return;
+    };
+    let label = edge.label.as_deref().unwrap_or("?");
+    // Top-right gutter: just right of the box, at the top row.
+    let lx = origin_rect.right();
+    let ly = origin_rect.y;
+    draw_str_clipped(buf, lx, ly, label, CONNECTOR_STYLE, area);
 }
 
 // ── Room drawing ──────────────────────────────────────────────────────────────
