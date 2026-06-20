@@ -129,8 +129,9 @@ const VERT: u8 = 2;
 ///   - crossings are perpendicular straight-throughs only: an existing path cell may be
 ///     entered only across its orientation, and the new path may not turn on it.
 ///
-/// Falls back to a simple L-path (rooms-aware only) if A* cannot find a clean route, so a
-/// genuinely congested edge still draws rather than vanishing.
+/// Returns `Some(path)` for a clean Tier-1 route honouring all the above constraints, or
+/// `None` if no clean route exists — there is no overlap-permitting fallback, so a routed
+/// connector never overlaps. The caller decides how to render an unrouted edge.
 fn route_ortho(
     dep: (i32, i32),
     arr: (i32, i32),
