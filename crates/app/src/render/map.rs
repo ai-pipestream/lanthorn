@@ -107,27 +107,33 @@ fn side_anchor(rect: VRect, side: Side) -> (i32, i32) {
     }
 }
 
-/// Penalty (in path cost) for stepping onto a cell occupied/haloed by an earlier path.
-/// Soft, not blocking: paths overlap only when no clear alternative exists in the search
-/// window. High enough that A* prefers any available detour over running over/next to a
-/// previous path, but finite so a genuinely boxed-in path still completes.
-const SOFT_PENALTY: i32 = 40;
+/// Orientation bits for a cell occupied by an earlier-routed connector.
+/// A cell may carry both (a corner of one path, or a perpendicular crossing of two).
+const HORIZ: u8 = 1;
+const VERT: u8 = 2;
 
 /// Build an obstacle-aware orthogonal path from `dep` to `arr` whose first step leaves in
 /// `dep_side`'s direction.
 ///
 /// Uses A* on the integer screen grid. `blocked` contains all screen cells that are
-/// interior to other room boxes (excluding the origin and dest rooms for this edge).
-/// `soft` contains cells occupied by earlier-routed connectors (plus a 1-cell halo);
-/// entering one costs `SOFT_PENALTY`, so later paths keep a minimum gap where possible.
+/// interior to other room boxes plus a 1-cell halo (excluding this edge's own rooms), so
+/// a routed path keeps clearance from rooms. `paths` maps each cell occupied by an
+/// earlier-routed connector to its orientation bits (`HORIZ`/`VERT`). The router enforces,
+/// as HARD constraints against earlier paths:
+///   - no overlap: never run along a cell already carrying the same orientation;
+///   - no running alongside: never sit orthogonally adjacent-and-parallel to an existing
+///     path of the same orientation (a 1-cell gap is required);
+///   - crossings are perpendicular straight-throughs only: an existing path cell may be
+///     entered only across its orientation, and the new path may not turn on it.
 ///
-/// Falls back to a simple L-path if A* cannot find a path (blocked or cap exceeded).
+/// Falls back to a simple L-path (rooms-aware only) if A* cannot find a clean route, so a
+/// genuinely congested edge still draws rather than vanishing.
 fn route_ortho(
     dep: (i32, i32),
     arr: (i32, i32),
     dep_side: Side,
     blocked: &std::collections::HashSet<(i32, i32)>,
-    soft: &std::collections::HashSet<(i32, i32)>,
+    paths: &std::collections::HashMap<(i32, i32), u8>,
 ) -> Vec<(i32, i32)> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -170,7 +176,7 @@ fn route_ortho(
         || start_cell.1 < min_y || start_cell.1 > max_y;
 
     if !first_blocked && !first_oob {
-        let start_g: i32 = 1 + if soft.contains(&start_cell) { SOFT_PENALTY } else { 0 };
+        let start_g: i32 = 1;
         let start_f: i32 = start_g + manhattan(start_cell, arr);
         let start_dir = Some(first_delta);
 
@@ -225,20 +231,47 @@ fn route_ortho(
                 if next.0 < min_x || next.0 > max_x || next.1 < min_y || next.1 > max_y {
                     continue;
                 }
-                // Blocked check (arr is always passable).
+                // Blocked check (arr — a room anchor — is always passable).
                 if next != arr && blocked.contains(&next) {
                     continue;
                 }
+
+                // Hard path-interaction rules (skipped for the final hop into `arr`).
+                if next != arr {
+                    let our_bit = if delta.1 == 0 { HORIZ } else { VERT };
+                    let occ_next = paths.get(&next).copied().unwrap_or(0);
+                    // (a) No overlap with a same-orientation path at `next`.
+                    if occ_next & our_bit != 0 {
+                        continue;
+                    }
+                    // (b) No turning onto a cell already carrying a path: an existing path
+                    //     cell may only be passed straight through (perpendicular crossing).
+                    let turning = inc_dir.is_some() && inc_dir != Some(delta);
+                    if turning && paths.get(&cell).copied().unwrap_or(0) != 0 {
+                        continue;
+                    }
+                    // (c) No running alongside: forbid sitting parallel-adjacent to an
+                    //     existing path of the same orientation (keep a 1-cell gap).
+                    let alongside = if our_bit == HORIZ {
+                        paths.get(&(next.0, next.1 - 1)).copied().unwrap_or(0) & HORIZ != 0
+                            || paths.get(&(next.0, next.1 + 1)).copied().unwrap_or(0) & HORIZ != 0
+                    } else {
+                        paths.get(&(next.0 - 1, next.1)).copied().unwrap_or(0) & VERT != 0
+                            || paths.get(&(next.0 + 1, next.1)).copied().unwrap_or(0) & VERT != 0
+                    };
+                    if alongside {
+                        continue;
+                    }
+                }
+
                 let next_dir = Some(delta);
                 let next_state: State = (next, next_dir);
                 if visited.contains(&next_state) {
                     continue;
                 }
-                // Turn penalty.
+                // Turn penalty (prefer straight runs / fewer bends).
                 let turn_cost: i32 = if inc_dir.is_some() && inc_dir != Some(delta) { 2 } else { 0 };
-                // Congestion penalty: discourage running over/next to earlier paths.
-                let soft_cost: i32 = if soft.contains(&next) { SOFT_PENALTY } else { 0 };
-                let next_g = g + 1 + turn_cost + soft_cost;
+                let next_g = g + 1 + turn_cost;
                 let next_f = next_g + manhattan(next, arr);
                 if let std::collections::hash_map::Entry::Vacant(e) = parent.entry(next_state) {
                     e.insert((cell, inc_dir));
@@ -430,7 +463,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let mut path_cells: std::collections::HashMap<(i32, i32), bool> =
         std::collections::HashMap::new();
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
-    let mut soft: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+    // Cells occupied by already-routed connectors, keyed to their orientation bits, so
+    // later edges can keep clearance and cross only at perpendicular straight-throughs.
+    let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
     let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
         std::collections::HashSet::new();
 
@@ -492,16 +527,18 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             blocked.remove(&(px, py - 1));
         }
 
-        // Route the path, avoiding earlier paths' cells via the soft congestion set.
-        let path = route_ortho(dep, arr, dep_side, &blocked, &soft);
+        // Route the path with hard clearance + perpendicular-crossing-only rules vs
+        // earlier paths.
+        let path = route_ortho(dep, arr, dep_side, &blocked, &paths);
 
-        // Record this path (plus a 1-cell halo) so later edges keep a gap from it.
-        for &(x, y) in &path {
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    soft.insert((x + dx, y + dy));
-                }
-            }
+        // Record this path's cells with their per-segment orientation, so later edges
+        // keep clearance and may only cross it perpendicularly. A corner cell (where the
+        // path turns) accumulates both bits and so blocks crossings there.
+        for w in path.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let bit = if a.1 == b.1 { HORIZ } else { VERT };
+            *paths.entry(a).or_insert(0) |= bit;
+            *paths.entry(b).or_insert(0) |= bit;
         }
 
         // Fill the path ribbon in virtual space (clipping happens at blit time).
@@ -1050,7 +1087,7 @@ mod tests {
                 blocked.insert((x, y));
             }
         }
-        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashSet::new());
+        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new());
         // Path must not contain any blocked cell
         for &pt in &path {
             assert!(!blocked.contains(&pt), "path goes through blocked cell {:?}", pt);
@@ -1074,7 +1111,7 @@ mod tests {
         let dep = (0i32, 5i32);
         let arr = (5i32, 5i32);
         let blocked = std::collections::HashSet::new();
-        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashSet::new());
+        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new());
         // Should be straight line: (0,5),(1,5),(2,5),(3,5),(4,5),(5,5)
         let expected: Vec<(i32, i32)> = (0..=5).map(|x| (x, 5)).collect();
         assert_eq!(path, expected, "should be straight line when clear");
@@ -1207,27 +1244,54 @@ mod tests {
 
     #[test]
     fn route_keeps_gap_from_earlier_path() {
-        // First path runs straight along row 5. A second parallel path that would
-        // otherwise stack on the adjacent row 6 should detour clear of row 5's halo.
-        let empty = std::collections::HashSet::new();
-        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &empty, &empty);
+        // First path runs straight along row 5 (HORIZ). A second horizontal path that
+        // would otherwise run alongside it on the adjacent row 6 must bend away to keep a
+        // 1-cell gap (it may not sit parallel-adjacent to an existing same-orientation path).
+        let no_blocked = std::collections::HashSet::new();
+        let no_paths = std::collections::HashMap::new();
+        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths);
 
-        // Build the soft set from p1's cells plus a 1-cell halo (same as render_map).
-        let mut soft = std::collections::HashSet::new();
-        for &(x, y) in &p1 {
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    soft.insert((x + dx, y + dy));
-                }
-            }
+        // Record p1's cells with their orientation (same as render_map).
+        let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
+        for w in p1.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let bit = if a.1 == b.1 { HORIZ } else { VERT };
+            *paths.entry(a).or_insert(0) |= bit;
+            *paths.entry(b).or_insert(0) |= bit;
         }
 
-        // Second path on row 6 (inside p1's halo) — it should bend away to row >= 7.
-        let p2 = route_ortho((0, 6), (20, 6), Side::Right, &empty, &soft);
+        let p2 = route_ortho((0, 6), (20, 6), Side::Right, &no_blocked, &paths);
+        // p2 detours to row >= 7 (row 6 would run alongside p1's row 5).
         assert!(
             p2.iter().any(|&(_, y)| y >= 7),
-            "second path should detour out of the first path's halo; got {p2:?}"
+            "second path must keep a gap from the first (detour to row >=7); got {p2:?}"
         );
+        // p2 must never overlap p1 (no shared cell on row 5).
+        assert!(
+            !p2.iter().any(|&(_, y)| y == 5),
+            "second path must not overlap the first; got {p2:?}"
+        );
+    }
+
+    #[test]
+    fn route_crosses_perpendicular_straight_through() {
+        // A horizontal path on row 5; a vertical path crossing it should pass straight
+        // through the crossing cell (perpendicular crossings ARE allowed), not detour.
+        let no_blocked = std::collections::HashSet::new();
+        let no_paths = std::collections::HashMap::new();
+        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths);
+        let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
+        for w in p1.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let bit = if a.1 == b.1 { HORIZ } else { VERT };
+            *paths.entry(a).or_insert(0) |= bit;
+            *paths.entry(b).or_insert(0) |= bit;
+        }
+
+        // Vertical path down column 10 from row 0 to row 10, crossing p1 at (10,5).
+        let p2 = route_ortho((10, 0), (10, 10), Side::Bottom, &no_blocked, &paths);
+        let expected: Vec<(i32, i32)> = (0..=10).map(|y| (10, y)).collect();
+        assert_eq!(p2, expected, "perpendicular crossing should go straight through; got {p2:?}");
     }
 
     #[test]
