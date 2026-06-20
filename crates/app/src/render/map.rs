@@ -75,11 +75,17 @@ fn side_anchor(rect: Rect, side: Side) -> (i32, i32) {
     }
 }
 
+/// Penalty (in path cost) for stepping onto a cell occupied/haloed by an earlier path.
+/// Soft, not blocking: paths spread apart when there is room but may still cross when tight.
+const SOFT_PENALTY: i32 = 4;
+
 /// Build an obstacle-aware orthogonal path from `dep` to `arr` whose first step leaves in
 /// `dep_side`'s direction.
 ///
 /// Uses A* on the integer screen grid. `blocked` contains all screen cells that are
 /// interior to other room boxes (excluding the origin and dest rooms for this edge).
+/// `soft` contains cells occupied by earlier-routed connectors (plus a 1-cell halo);
+/// entering one costs `SOFT_PENALTY`, so later paths keep a minimum gap where possible.
 ///
 /// Falls back to a simple L-path if A* cannot find a path (blocked or cap exceeded).
 fn route_ortho(
@@ -87,6 +93,7 @@ fn route_ortho(
     arr: (i32, i32),
     dep_side: Side,
     blocked: &std::collections::HashSet<(i32, i32)>,
+    soft: &std::collections::HashSet<(i32, i32)>,
 ) -> Vec<(i32, i32)> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
@@ -128,7 +135,7 @@ fn route_ortho(
         || start_cell.1 < min_y || start_cell.1 > max_y;
 
     if !first_blocked && !first_oob {
-        let start_g: i32 = 1;
+        let start_g: i32 = 1 + if soft.contains(&start_cell) { SOFT_PENALTY } else { 0 };
         let start_f: i32 = start_g + manhattan(start_cell, arr);
         let start_dir = Some(first_delta);
 
@@ -194,7 +201,9 @@ fn route_ortho(
                 }
                 // Turn penalty.
                 let turn_cost: i32 = if inc_dir.is_some() && inc_dir != Some(delta) { 2 } else { 0 };
-                let next_g = g + 1 + turn_cost;
+                // Congestion penalty: discourage running over/next to earlier paths.
+                let soft_cost: i32 = if soft.contains(&next) { SOFT_PENALTY } else { 0 };
+                let next_g = g + 1 + turn_cost + soft_cost;
                 let next_f = next_g + manhattan(next, arr);
                 if let std::collections::hash_map::Entry::Vacant(e) = parent.entry(next_state) {
                     e.insert((cell, inc_dir));
@@ -248,24 +257,16 @@ fn nearest_side(dest_rect: Rect, dep: (i32, i32)) -> Side {
         .unwrap_or(Side::Bottom)
 }
 
-/// Return the arrowhead glyph that points INTO the dest from `arrival_side`.
+/// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
 ///
-/// `discovered`: filled arrows (▶◀▲▼); undiscovered: hollow (▷◁△▽).
-fn arrowhead_glyph(arrival_side: Side, discovered: bool) -> &'static str {
-    if discovered {
-        match arrival_side {
-            Side::Left   => "▶", // entering from the left (going east into dest)
-            Side::Right  => "◀",
-            Side::Top    => "▲",
-            Side::Bottom => "▼",
-        }
-    } else {
-        match arrival_side {
-            Side::Left   => "▷",
-            Side::Right  => "◁",
-            Side::Top    => "△",
-            Side::Bottom => "▽",
-        }
+/// Arrows signify the outgoing direction only — the departure direction is always
+/// known, so arrows are always filled (▶◀▲▼).
+fn arrow_for_departure(dep_side: Side) -> &'static str {
+    match dep_side {
+        Side::Right  => "▶", // leaving east
+        Side::Left   => "◀", // leaving west
+        Side::Top    => "▲", // leaving north
+        Side::Bottom => "▼", // leaving south
     }
 }
 
@@ -384,6 +385,10 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             std::collections::HashMap::new();
         let mut arrowheads: Vec<((u16, u16), &'static str, bool)> = Vec::new(); // (pos, glyph, distorted)
 
+        // Cells occupied by already-routed connectors (plus a 1-cell halo). Later edges
+        // pay SOFT_PENALTY to enter these, so paths keep a minimum gap between each other.
+        let mut soft: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+
         for edge in &rm.edges {
             if edge.is_stub {
                 continue;
@@ -400,10 +405,11 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
             let dep = side_anchor(origin_rect, dep_side);
 
-            // Determine arrival side and whether it's confirmed.
-            let (arr_side, discovered) = match edge.arrival_dir.and_then(side_for) {
-                Some(s) => (s, true),
-                None => (nearest_side(dest_rect, dep), false),
+            // Determine which side of the destination box the line connects to. Use the
+            // discovered arrival direction when known, else the geometrically nearest side.
+            let arr_side = match edge.arrival_dir.and_then(side_for) {
+                Some(s) => s,
+                None => nearest_side(dest_rect, dep),
             };
             let arr = side_anchor(dest_rect, arr_side);
 
@@ -420,8 +426,17 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 })
                 .collect();
 
-            // Route the path.
-            let path = route_ortho(dep, arr, dep_side, &blocked);
+            // Route the path, avoiding earlier paths' cells via the soft congestion set.
+            let path = route_ortho(dep, arr, dep_side, &blocked, &soft);
+
+            // Record this path (plus a 1-cell halo) so later edges keep a gap from it.
+            for &(x, y) in &path {
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        soft.insert((x + dx, y + dy));
+                    }
+                }
+            }
 
             // Rasterize into bitmask map (screen cells inside area only).
             let screen_pts: Vec<(u16, u16)> = path
@@ -449,16 +464,16 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 }
             }
 
-            // Arrowhead at `arr` if it's inside area.
-            let ax = arr.0;
-            let ay = arr.1;
-            if ax >= area.x as i32
-                && ax < area.right() as i32
-                && ay >= area.y as i32
-                && ay < area.bottom() as i32
+            // Arrowhead at the departure anchor `dep`, pointing in the outgoing direction.
+            let dx = dep.0;
+            let dy = dep.1;
+            if dx >= area.x as i32
+                && dx < area.right() as i32
+                && dy >= area.y as i32
+                && dy < area.bottom() as i32
             {
-                let glyph = arrowhead_glyph(arr_side, discovered);
-                arrowheads.push(((ax as u16, ay as u16), glyph, edge.distorted));
+                let glyph = arrow_for_departure(dep_side);
+                arrowheads.push(((dx as u16, dy as u16), glyph, edge.distorted));
             }
         }
 
@@ -903,8 +918,9 @@ mod tests {
     #[test]
     fn arrowhead_filled_when_arrival_discovered() {
         // room1(0,0) →E→ room2(1,0) AND room2(1,0) →W→ room1(0,0).
-        // arrival_dir for the E edge = Some(W), so discovered=true → filled arrow ▶/◀/▲/▼.
-        // room2 box: Rect{x:18,y:0,w:14,h:4}. Left anchor: col=17, row=2.
+        // Arrows mark the outgoing direction at each origin's departure side: the E edge
+        // puts ▶ at room1's right anchor, the W edge puts ◀ at room2's left anchor.
+        // Both are filled; no hollow arrows are ever drawn.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -929,8 +945,10 @@ mod tests {
     }
 
     #[test]
-    fn arrowhead_hollow_when_arrival_undiscovered() {
-        // Only room1 →E→ room2, no reverse edge. arrival_dir=None → hollow arrow.
+    fn arrowhead_marks_outgoing_departure_side() {
+        // Only room1 →E→ room2, no reverse edge. The arrow signifies the OUTGOING
+        // direction: a filled ▶ at room1's right departure anchor (col 14, row 2).
+        // No arrival-side or hollow arrow is drawn.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -944,13 +962,13 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Must have a HOLLOW arrowhead.
-        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
-        assert!(has_hollow, "hollow arrowhead (▷◁△▽) should appear when arrival_dir is None");
+        // The outgoing arrow is a filled ▶ at the departure anchor (col 14, row 2).
+        let sym = buf.cell((14, 2)).map(|c| c.symbol()).unwrap_or(" ");
+        assert_eq!(sym, "▶", "outgoing east arrow ▶ should be at room1's right anchor (14,2)");
 
-        // Must NOT have a filled arrowhead.
-        let has_filled = buf.content.iter().any(|c| matches!(c.symbol(), "▶" | "◀" | "▲" | "▼"));
-        assert!(!has_filled, "filled arrowhead should NOT appear when arrival is undiscovered");
+        // No hollow arrowhead should ever be drawn.
+        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
+        assert!(!has_hollow, "hollow arrowheads must not appear; arrows are always filled");
     }
 
     #[test]
@@ -970,8 +988,8 @@ mod tests {
         render_map(&rm, &state, area, &mut buf);
 
         // Find a horizontal connector glyph ─ and verify it's Cyan, not DarkGray.
-        // Right anchor col=14, row=2 — should be a solid glyph with Cyan style.
-        let dep_col = 14u16;
+        // Col 14 holds the outgoing arrowhead; the line itself runs east through col 16.
+        let dep_col = 16u16;
         let dep_row = 2u16;
         let cell = buf.cell((dep_col, dep_row)).expect("connector cell must exist");
         let sym = cell.symbol();
@@ -1003,7 +1021,7 @@ mod tests {
                 blocked.insert((x, y));
             }
         }
-        let path = route_ortho(dep, arr, Side::Right, &blocked);
+        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashSet::new());
         // Path must not contain any blocked cell
         for &pt in &path {
             assert!(!blocked.contains(&pt), "path goes through blocked cell {:?}", pt);
@@ -1027,10 +1045,35 @@ mod tests {
         let dep = (0i32, 5i32);
         let arr = (5i32, 5i32);
         let blocked = std::collections::HashSet::new();
-        let path = route_ortho(dep, arr, Side::Right, &blocked);
+        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashSet::new());
         // Should be straight line: (0,5),(1,5),(2,5),(3,5),(4,5),(5,5)
         let expected: Vec<(i32, i32)> = (0..=5).map(|x| (x, 5)).collect();
         assert_eq!(path, expected, "should be straight line when clear");
+    }
+
+    #[test]
+    fn route_keeps_gap_from_earlier_path() {
+        // First path runs straight along row 5. A second parallel path that would
+        // otherwise stack on the adjacent row 6 should detour clear of row 5's halo.
+        let empty = std::collections::HashSet::new();
+        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &empty, &empty);
+
+        // Build the soft set from p1's cells plus a 1-cell halo (same as render_map).
+        let mut soft = std::collections::HashSet::new();
+        for &(x, y) in &p1 {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    soft.insert((x + dx, y + dy));
+                }
+            }
+        }
+
+        // Second path on row 6 (inside p1's halo) — it should bend away to row >= 7.
+        let p2 = route_ortho((0, 6), (20, 6), Side::Right, &empty, &soft);
+        assert!(
+            p2.iter().any(|&(_, y)| y >= 7),
+            "second path should detour out of the first path's halo; got {p2:?}"
+        );
     }
 
     #[test]
