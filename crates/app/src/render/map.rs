@@ -7,7 +7,7 @@
 //!
 //! | Zoom     | step_w | step_h |
 //! |----------|--------|--------|
-//! | Boxes    |  29    |  29    |
+//! | Boxes    |  29    |  17    |
 //! | Compact  |  12    |   5    |
 //! | Overview |   2    |   2    |
 //!
@@ -47,12 +47,15 @@ fn zoom_steps(zoom: Zoom) -> (i32, i32) {
 ///
 /// | Zoom    | step  | box   | gutter (right / bottom) |
 /// |---------|-------|-------|-------------------------|
-/// | Boxes   | 29×29 | 21×21 | 8 cols / 8 rows         |
+/// | Boxes   | 29×17 | 21×11 | 8 cols / 6 rows         |
 /// | Compact | 12×5  | 8×3   | 4 cols / 2 rows         |
 /// | Overview| 2×2   | 1×1   | — (single glyph)        |
+///
+/// The 21×11 box (both odd) is ~2:1 width:height so it reads as square given the
+/// terminal's ~1:2 cell aspect, and odd dims centre the side anchors on the box.
 fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     match zoom {
-        Zoom::Boxes => (21, 21),
+        Zoom::Boxes => (21, 11),
         Zoom::Compact => (8, 3),
         Zoom::Overview => (1, 1),
     }
@@ -787,9 +790,9 @@ mod tests {
         let right = cell_to_screen((1, 0), Zoom::Boxes, (0, 0), area);
         assert_eq!(right, Some((29, 0)));
 
-        // Cell (0,1) at Boxes → y = 0 + (1-0)*29 = 29
+        // Cell (0,1) at Boxes → y = 0 + (1-0)*17 = 17
         let down = cell_to_screen((0, 1), Zoom::Boxes, (0, 0), area);
-        assert_eq!(down, Some((0, 29)));
+        assert_eq!(down, Some((0, 17)));
 
         // Far off-area cell.
         let off = cell_to_screen((1000, 1000), Zoom::Boxes, (0, 0), area);
@@ -995,7 +998,7 @@ mod tests {
         // The departure anchor for room1→E is Right side: col=21, row=10.
         // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..20).
         let dep_col = 21u16;
-        let dep_row = 10u16;
+        let dep_row = 5u16;
         let sym = buf.cell((dep_col, dep_row)).map(|c| c.symbol()).unwrap_or(" ");
         assert_ne!(sym, " ", "departure gutter cell ({dep_col},{dep_row}) should have a connector glyph");
         assert!(
@@ -1059,8 +1062,8 @@ mod tests {
 
         // The outgoing arrow is a filled ▶ at the departure anchor (col 21, row 10),
         // embedded in the ribbon (Cyan background behind the glyph).
-        let cell = buf.cell((21, 10)).expect("arrow cell must exist");
-        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (21,10)");
+        let cell = buf.cell((21, 5)).expect("arrow cell must exist");
+        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (21,5)");
         assert_eq!(cell.bg, Color::Cyan, "arrow should be embedded in the ribbon (Cyan bg); got {:?}", cell.bg);
 
         // No hollow arrowhead should ever be drawn.
@@ -1086,12 +1089,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        let cell = buf.cell((24, 10)).expect("ribbon cell must exist");
+        let cell = buf.cell((24, 5)).expect("ribbon cell must exist");
         assert_eq!(cell.symbol(), " ", "ribbon cell should be a space, got '{}'", cell.symbol());
         assert_eq!(
             cell.bg,
             Color::Cyan,
-            "ribbon background should be Cyan; got {:?} at (24,10)",
+            "ribbon background should be Cyan; got {:?} at (24,5)",
             cell.bg
         );
         assert!(
@@ -1238,7 +1241,7 @@ mod tests {
         let rm = mapper::render::render(&g);
 
         let area = Rect::new(0, 0, 120, 40);
-        let (sw, sh) = (29i32, 29i32); // Boxes stride
+        let (sw, sh) = (29i32, 17i32); // Boxes stride
 
         let virtual_ribbon = |scroll: (i32, i32)| -> std::collections::BTreeSet<(i32, i32)> {
             let mut st = AppState::default();
@@ -1341,7 +1344,7 @@ mod tests {
         render_map(&rm, &state, area, &mut buf);
 
         // B box: cell (1,0) → screen (29,0), size 21×21 → cols 29..49, rows 0..20.
-        let b = Rect::new(29, 0, 21, 21);
+        let b = Rect::new(29, 0, 21, 11);
         // Ring = the 1-cell halo around B, excluding B's own box cells. No path ribbon
         // (Cyan/Magenta background) may touch it.
         for y in (b.y as i32 - 1)..=(b.bottom() as i32) {
@@ -1390,7 +1393,7 @@ mod tests {
 
         // Room B box: Boxes zoom, step=29×29, room at cell (1,0) → screen (29,0), box 21×21.
         // No path ribbon (Cyan/Magenta background) may appear inside B's interior.
-        let b_rect = Rect::new(29, 0, 21, 21);
+        let b_rect = Rect::new(29, 0, 21, 11);
         for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
             for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
                 if let Some(cell) = buf.cell((x, y)) {

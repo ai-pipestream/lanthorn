@@ -49,12 +49,14 @@ impl Zoom {
     /// Returns (step_w, step_h): the terminal cell stride per map-grid cell.
     ///
     /// The stride is larger than the box size (see `zoom_box_size`), and the
-    /// difference is gutter where connectors route. Boxes-zoom stride leaves an
-    /// 8-cell gutter around the 21×21 default room box so the direction-aware
-    /// router has room for clearance + perpendicular-crossing-only lanes.
+    /// difference is gutter where connectors route. The Boxes-zoom box is 21×11
+    /// (a ~2:1 width:height ratio so it looks square given the ~1:2 terminal cell
+    /// aspect; both odd so side anchors land on the exact box centre). The stride
+    /// adds an 8-col / 6-row gutter for the direction-aware router's clearance and
+    /// perpendicular-crossing lanes.
     pub fn steps(self) -> (i32, i32) {
         match self {
-            Zoom::Boxes => (29, 29),
+            Zoom::Boxes => (29, 17),
             Zoom::Compact => (12, 5),
             Zoom::Overview => (2, 2),
         }

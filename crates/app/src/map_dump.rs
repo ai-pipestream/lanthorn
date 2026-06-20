@@ -25,7 +25,8 @@ use crate::render::map::render_map;
 use crate::state::{AppState, Zoom};
 
 /// Boxes-zoom stride (must match `Zoom::Boxes.steps()`); used to size the dump buffer.
-const STEP: i32 = 29;
+const STEP_W: i32 = 29;
+const STEP_H: i32 = 17;
 /// Max dump buffer dimension (cells) to bound memory on very large maps.
 const MAX_DIM: i32 = 4000;
 
@@ -91,8 +92,8 @@ fn ascii_map(graph: &MapGraph) -> String {
 
     // Pad by 2 room-steps each side so connectors detouring outside the room
     // bounding box are captured rather than clipped.
-    let area_w = ((cols + 4) * STEP).clamp(STEP, MAX_DIM);
-    let area_h = ((rows + 4) * STEP).clamp(STEP, MAX_DIM);
+    let area_w = ((cols + 4) * STEP_W).clamp(STEP_W, MAX_DIM);
+    let area_h = ((rows + 4) * STEP_H).clamp(STEP_H, MAX_DIM);
     let area = Rect::new(0, 0, area_w as u16, area_h as u16);
 
     // Render at Boxes zoom (AppState default) with scroll set to pad the map.
