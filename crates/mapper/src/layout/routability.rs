@@ -220,4 +220,48 @@ mod tests {
         let occupied = occ(&[((0, 1), 25), ((-1, 0), 74), ((-1, 1), 76)]);
         assert!(edge_routable((0, 1), (-1, 1), Direction::W, &occupied, (-3, -3, 3, 3)));
     }
+
+    #[test]
+    fn repair_shifts_room_to_open_blocked_channel() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        // The cramped #25/#74/#76 corner as the stress solver can produce it inside a
+        // larger graph: #74 sits due west of #25, blocking 25->W->76's only departure.
+        let mut g = MapGraph::new();
+        for (id, name) in [(25u16, "Canyon View"), (74, "Clearing"), (76, "Forest")] {
+            g.upsert_room(id, name.into());
+        }
+        g.add_edge(74, Direction::E, 25);
+        g.add_edge(74, Direction::S, 76);
+        g.add_edge(25, Direction::W, 76);
+
+        let mut pos: BTreeMap<RoomId, (i32, i32)> =
+            [(25u16, (0, 0)), (74, (-1, 0)), (76, (-1, 1))].into_iter().collect();
+
+        let all_routable = |pos: &BTreeMap<RoomId, (i32, i32)>| {
+            let occ: BTreeMap<(i32, i32), RoomId> =
+                pos.iter().map(|(&id, &c)| (c, id)).collect();
+            let xs: Vec<i32> = pos.values().map(|p| p.0).collect();
+            let ys: Vec<i32> = pos.values().map(|p| p.1).collect();
+            let bb = (
+                xs.iter().min().unwrap() - BBOX_MARGIN,
+                ys.iter().min().unwrap() - BBOX_MARGIN,
+                xs.iter().max().unwrap() + BBOX_MARGIN,
+                ys.iter().max().unwrap() + BBOX_MARGIN,
+            );
+            g.connections()
+                .iter()
+                .all(|c| edge_routable(pos[&c.origin], pos[&c.dest], c.dir, &occ, bb))
+        };
+
+        // Before repair: 25->W->76 is blocked by #74 due west.
+        assert!(!all_routable(&pos), "precondition: the cramped corner has an unroutable edge");
+
+        repair_routability(&g, &mut pos);
+
+        // After repair: every edge has a clean channel, and no two rooms overlap.
+        assert!(all_routable(&pos), "repair must open a channel for every edge; got {pos:?}");
+        let cells: std::collections::BTreeSet<_> = pos.values().collect();
+        assert_eq!(cells.len(), pos.len(), "repair must not overlap rooms");
+    }
 }
