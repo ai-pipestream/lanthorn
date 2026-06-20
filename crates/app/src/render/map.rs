@@ -137,12 +137,12 @@ fn route_ortho(
     dep_side: Side,
     blocked: &std::collections::HashSet<(i32, i32)>,
     paths: &std::collections::HashMap<(i32, i32), u8>,
-) -> Vec<(i32, i32)> {
+) -> Option<Vec<(i32, i32)>> {
     use std::cmp::Reverse;
     use std::collections::BinaryHeap;
 
     if dep == arr {
-        return vec![dep];
+        return Some(vec![dep]);
     }
 
     // Map dep_side to the forced first-step delta.
@@ -269,53 +269,10 @@ fn route_ortho(
         None
     };
 
-    // Tier 1: full clearance + path-vs-path rules.
-    // Tier 2: keep room clearance but drop the path rules, so an edge boxed in by other
-    //   connectors still routes cleanly around ROOMS (it may touch/cross a path) instead of
-    //   hugging a wall.
-    // Tier 3: L fallback (rooms-aware orientation choice).
-    let empty_paths = std::collections::HashMap::new();
-    if let Some(p) = astar(paths) {
-        return p;
-    }
-    if let Some(p) = astar(&empty_paths) {
-        return p;
-    }
-
-    let l_via = |corner: (i32, i32)| -> Vec<(i32, i32)> {
-        let mut pts = Vec::new();
-        walk_to(&mut pts, dep, corner);
-        pts.pop();
-        walk_to(&mut pts, corner, arr);
-        pts
-    };
-    let count_blocked = |path: &[(i32, i32)]| -> usize {
-        path.iter().filter(|&&p| p != arr && blocked.contains(&p)).count()
-    };
-    let l_h = l_via((arr.0, dep.1)); // horizontal-first
-    let l_v = l_via((dep.0, arr.1)); // vertical-first
-    if count_blocked(&l_h) <= count_blocked(&l_v) {
-        l_h
-    } else {
-        l_v
-    }
-}
-
-/// Walk from `from` to `to` one step at a time (orthogonal), appending each cell.
-/// `from` is included on first call; subsequent `walk_to` calls should share an
-/// endpoint to avoid duplicates — the caller handles this by starting each segment
-/// at the current last point.
-fn walk_to(pts: &mut Vec<(i32, i32)>, from: (i32, i32), to: (i32, i32)) {
-    let dx = (to.0 - from.0).signum();
-    let dy = (to.1 - from.1).signum();
-    let mut cur = from;
-    loop {
-        pts.push(cur);
-        if cur == to {
-            break;
-        }
-        cur = (cur.0 + dx, cur.1 + dy);
-    }
+    // Clean route only: full room-clearance + path-vs-path rules. If A* cannot find
+    // one, the edge has no clean channel — return None so the renderer can flag it as
+    // unrouted rather than draw an overlapping fallback.
+    astar(paths)
 }
 
 /// Pick the side of `dest_rect` to connect an undiscovered (non-reciprocal) arrival to:
@@ -604,7 +561,10 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
         // Route the path with hard clearance + perpendicular-crossing-only rules vs
         // earlier paths.
-        let path = route_ortho(dep, arr, dep_side, &blocked, &paths);
+        let path = match route_ortho(dep, arr, dep_side, &blocked, &paths) {
+            Some(p) => p,
+            None => continue, // Task 4 replaces this with an unrouted-line render
+        };
 
         // Record this path's cells with their per-segment orientation, so later edges
         // keep clearance and may only cross it perpendicularly. A corner cell (where the
@@ -1188,7 +1148,7 @@ mod tests {
                 blocked.insert((x, y));
             }
         }
-        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new());
+        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new()).expect("clean Tier-1 route");
         // Path must not contain any blocked cell
         for &pt in &path {
             assert!(!blocked.contains(&pt), "path goes through blocked cell {:?}", pt);
@@ -1212,7 +1172,7 @@ mod tests {
         let dep = (0i32, 5i32);
         let arr = (5i32, 5i32);
         let blocked = std::collections::HashSet::new();
-        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new());
+        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new()).expect("clean Tier-1 route");
         // Should be straight line: (0,5),(1,5),(2,5),(3,5),(4,5),(5,5)
         let expected: Vec<(i32, i32)> = (0..=5).map(|x| (x, 5)).collect();
         assert_eq!(path, expected, "should be straight line when clear");
@@ -1350,7 +1310,7 @@ mod tests {
         // 1-cell gap (it may not sit parallel-adjacent to an existing same-orientation path).
         let no_blocked = std::collections::HashSet::new();
         let no_paths = std::collections::HashMap::new();
-        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths);
+        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths).expect("clean Tier-1 route");
 
         // Record p1's cells with their orientation (same as render_map).
         let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
@@ -1361,7 +1321,7 @@ mod tests {
             *paths.entry(b).or_insert(0) |= bit;
         }
 
-        let p2 = route_ortho((0, 6), (20, 6), Side::Right, &no_blocked, &paths);
+        let p2 = route_ortho((0, 6), (20, 6), Side::Right, &no_blocked, &paths).expect("clean Tier-1 route");
         // p2 detours to row >= 7 (row 6 would run alongside p1's row 5).
         assert!(
             p2.iter().any(|&(_, y)| y >= 7),
@@ -1372,6 +1332,19 @@ mod tests {
             !p2.iter().any(|&(_, y)| y == 5),
             "second path must not overlap the first; got {p2:?}"
         );
+    }
+
+    #[test]
+    fn route_ortho_returns_none_when_boxed_in() {
+        // A full vertical wall of blocked cells between dep and arr leaves no clean
+        // route → route_ortho must report None rather than an overlapping fallback.
+        let mut blocked = std::collections::HashSet::new();
+        for y in -30..30 {
+            blocked.insert((2, y));
+        }
+        let no_paths = std::collections::HashMap::new();
+        let r = route_ortho((0, 0), (10, 0), Side::Right, &blocked, &no_paths);
+        assert!(r.is_none(), "a fully walled-off edge must return None; got {r:?}");
     }
 
     #[test]
@@ -1422,7 +1395,7 @@ mod tests {
         // through the crossing cell (perpendicular crossings ARE allowed), not detour.
         let no_blocked = std::collections::HashSet::new();
         let no_paths = std::collections::HashMap::new();
-        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths);
+        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths).expect("clean Tier-1 route");
         let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
         for w in p1.windows(2) {
             let (a, b) = (w[0], w[1]);
@@ -1432,7 +1405,7 @@ mod tests {
         }
 
         // Vertical path down column 10 from row 0 to row 10, crossing p1 at (10,5).
-        let p2 = route_ortho((10, 0), (10, 10), Side::Bottom, &no_blocked, &paths);
+        let p2 = route_ortho((10, 0), (10, 10), Side::Bottom, &no_blocked, &paths).expect("clean Tier-1 route");
         let expected: Vec<(i32, i32)> = (0..=10).map(|y| (10, y)).collect();
         assert_eq!(p2, expected, "perpendicular crossing should go straight through; got {p2:?}");
     }
