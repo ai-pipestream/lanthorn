@@ -7,7 +7,7 @@
 //!
 //! | Zoom     | step_w | step_h |
 //! |----------|--------|--------|
-//! | Boxes    |  22    |   9    |
+//! | Boxes    |  29    |  29    |
 //! | Compact  |  12    |   5    |
 //! | Overview |   2    |   2    |
 //!
@@ -47,12 +47,12 @@ fn zoom_steps(zoom: Zoom) -> (i32, i32) {
 ///
 /// | Zoom    | step  | box   | gutter (right / bottom) |
 /// |---------|-------|-------|-------------------------|
-/// | Boxes   | 22×9  | 14×4  | 8 cols / 5 rows         |
+/// | Boxes   | 29×29 | 21×21 | 8 cols / 8 rows         |
 /// | Compact | 12×5  | 8×3   | 4 cols / 2 rows         |
 /// | Overview| 2×2   | 1×1   | — (single glyph)        |
 fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     match zoom {
-        Zoom::Boxes => (14, 4),
+        Zoom::Boxes => (21, 21),
         Zoom::Compact => (8, 3),
         Zoom::Overview => (1, 1),
     }
@@ -733,25 +733,25 @@ mod tests {
 
     #[test]
     fn cell_to_screen_respects_scroll_and_offarea() {
-        let area = Rect::new(0, 0, 40, 20);
+        let area = Rect::new(0, 0, 80, 80);
 
         // Cell (0,0) with no scroll at Boxes → screen (0,0), inside area.
         let on = cell_to_screen((0, 0), Zoom::Boxes, (0, 0), area);
         assert_eq!(on, Some((0, 0)));
 
-        // Cell (1,0) at Boxes → x = 0 + (1-0)*22 = 22
+        // Cell (1,0) at Boxes → x = 0 + (1-0)*29 = 29
         let right = cell_to_screen((1, 0), Zoom::Boxes, (0, 0), area);
-        assert_eq!(right, Some((22, 0)));
+        assert_eq!(right, Some((29, 0)));
 
-        // Cell (0,1) at Boxes → y = 0 + (1-0)*9 = 9
+        // Cell (0,1) at Boxes → y = 0 + (1-0)*29 = 29
         let down = cell_to_screen((0, 1), Zoom::Boxes, (0, 0), area);
-        assert_eq!(down, Some((0, 9)));
+        assert_eq!(down, Some((0, 29)));
 
         // Far off-area cell.
         let off = cell_to_screen((1000, 1000), Zoom::Boxes, (0, 0), area);
         assert!(off.is_none());
 
-        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*22 = -22 → None.
+        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*29 = -29 → None.
         let scrolled_off = cell_to_screen((0, 0), Zoom::Boxes, (1, 0), area);
         assert!(scrolled_off.is_none());
 
@@ -914,8 +914,8 @@ mod tests {
 
     #[test]
     fn connector_departs_origin_correct_side() {
-        // room1 at (0,0) →E→ room2 at (1,0). Boxes zoom, area (0,0,80,30).
-        // room1 box: Rect{x:0,y:0,w:14,h:4}. Right-side anchor: col=14, row=2.
+        // room1 at (0,0) →E→ room2 at (1,0). Boxes zoom (box 21×21, step 29×29).
+        // room1 box: VRect{x:0,y:0,w:21,h:21}. Right-side anchor: col=21, row=10.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -929,14 +929,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The departure anchor for room1→E is Right side: col=14, row=2.
-        // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..13).
-        let dep_col = 14u16;
-        let dep_row = 2u16;
+        // The departure anchor for room1→E is Right side: col=21, row=10.
+        // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..20).
+        let dep_col = 21u16;
+        let dep_row = 10u16;
         let sym = buf.cell((dep_col, dep_row)).map(|c| c.symbol()).unwrap_or(" ");
         assert_ne!(sym, " ", "departure gutter cell ({dep_col},{dep_row}) should have a connector glyph");
         assert!(
-            dep_col >= 14, // outside room1 box (cols 0..13)
+            dep_col >= 21, // outside room1 box (cols 0..20)
             "departure cell col={dep_col} should be outside room1 box"
         );
         // Must be a connector glyph (line or arrowhead), not a room box border
@@ -994,10 +994,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The outgoing arrow is a filled ▶ at the departure anchor (col 14, row 2),
+        // The outgoing arrow is a filled ▶ at the departure anchor (col 21, row 10),
         // embedded in the ribbon (Cyan background behind the glyph).
-        let cell = buf.cell((14, 2)).expect("arrow cell must exist");
-        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (14,2)");
+        let cell = buf.cell((21, 10)).expect("arrow cell must exist");
+        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (21,10)");
         assert_eq!(cell.bg, Color::Cyan, "arrow should be embedded in the ribbon (Cyan bg); got {:?}", cell.bg);
 
         // No hollow arrowhead should ever be drawn.
@@ -1007,9 +1007,9 @@ mod tests {
 
     #[test]
     fn connector_is_solid_background_ribbon() {
-        // A connector is a solid background ribbon, not a line glyph. The ribbon cell at
-        // col 16 (between the col-14 arrow and the col-17 destination anchor) must have a
-        // Cyan background and a plain space symbol — not a dim/dashed line.
+        // A connector is a solid background ribbon, not a line glyph. Room1 right anchor
+        // is (21,10), room2 left anchor (28,10); the straight ribbon runs row 10. The cell
+        // at (24,10) must have a Cyan background and a plain space symbol — not a line.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -1023,12 +1023,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        let cell = buf.cell((16, 2)).expect("ribbon cell must exist");
+        let cell = buf.cell((24, 10)).expect("ribbon cell must exist");
         assert_eq!(cell.symbol(), " ", "ribbon cell should be a space, got '{}'", cell.symbol());
         assert_eq!(
             cell.bg,
             Color::Cyan,
-            "ribbon background should be Cyan; got {:?} at (16,2)",
+            "ribbon background should be Cyan; got {:?} at (24,10)",
             cell.bg
         );
         assert!(
@@ -1140,13 +1140,13 @@ mod tests {
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
-        g.set_pos(1, (1, 1));
-        g.set_pos(2, (3, 1));
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (3, 0));
         g.add_edge(1, mapper::direction::Direction::E, 2);
         g.add_edge(1, mapper::direction::Direction::W, 2);
         let rm = mapper::render::render(&g);
         let state = AppState::default();
-        let area = Rect::new(0, 0, 100, 30);
+        let area = Rect::new(0, 0, 120, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
@@ -1175,7 +1175,7 @@ mod tests {
         let rm = mapper::render::render(&g);
 
         let area = Rect::new(0, 0, 120, 40);
-        let (sw, sh) = (22i32, 9i32); // Boxes stride
+        let (sw, sh) = (29i32, 29i32); // Boxes stride
 
         let virtual_ribbon = |scroll: (i32, i32)| -> std::collections::BTreeSet<(i32, i32)> {
             let mut st = AppState::default();
@@ -1250,8 +1250,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // B box: cell (1,0) → screen (22,0), size 14×4 → cols 22..35, rows 0..3.
-        let b = Rect::new(22, 0, 14, 4);
+        // B box: cell (1,0) → screen (29,0), size 21×21 → cols 29..49, rows 0..20.
+        let b = Rect::new(29, 0, 21, 21);
         // Ring = the 1-cell halo around B, excluding B's own box cells. No path ribbon
         // (Cyan/Magenta background) may touch it.
         for y in (b.y as i32 - 1)..=(b.bottom() as i32) {
@@ -1298,9 +1298,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Room B box: Boxes zoom, step=22×9, room at cell (1,0) → screen (22,0), box 14×4.
+        // Room B box: Boxes zoom, step=29×29, room at cell (1,0) → screen (29,0), box 21×21.
         // No path ribbon (Cyan/Magenta background) may appear inside B's interior.
-        let b_rect = Rect::new(22, 0, 14, 4);
+        let b_rect = Rect::new(29, 0, 21, 21);
         for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
             for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
                 if let Some(cell) = buf.cell((x, y)) {
