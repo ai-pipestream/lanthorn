@@ -318,64 +318,38 @@ pub fn cell_to_screen(
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 /// Style for the current room (reversed video — visually distinct).
+/// `bg(Reset)` ensures the room cell clears any path ribbon drawn underneath.
 const CURRENT_STYLE: Style = Style::new()
     .add_modifier(Modifier::REVERSED)
-    .fg(Color::White);
+    .fg(Color::White)
+    .bg(Color::Reset);
 
 /// Style for the selected room (yellow border).
-const SELECTED_STYLE: Style = Style::new().fg(Color::Yellow);
+const SELECTED_STYLE: Style = Style::new().fg(Color::Yellow).bg(Color::Reset);
 
 /// Style for normal rooms.
-const NORMAL_STYLE: Style = Style::new().fg(Color::White);
+const NORMAL_STYLE: Style = Style::new().fg(Color::White).bg(Color::Reset);
 
-/// Style for normal connectors — solid bright Cyan.
+/// Style for stub-connector labels — Cyan text.
 const CONNECTOR_STYLE: Style = Style::new().fg(Color::Cyan);
 
-/// Style for distorted connectors — solid Magenta (different signal, not dim).
-const DISTORTED_STYLE: Style = Style::new().fg(Color::Magenta);
+/// Solid background fill for a path ribbon (normal).
+const PATH_BG: Style = Style::new().bg(Color::Cyan);
 
-/// Style for arrowheads — bold Yellow.
-const ARROWHEAD_STYLE: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+/// Solid background fill for a path ribbon (distorted — different signal).
+const PATH_BG_DISTORTED: Style = Style::new().bg(Color::Magenta);
 
-// ── Bitmask connector rasterization ──────────────────────────────────────────
+/// Arrow embedded in a normal path ribbon: dark bold glyph on the ribbon colour.
+const PATH_ARROW: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Cyan)
+    .add_modifier(Modifier::BOLD);
 
-/// Convert a NESW bitmask to a box-drawing glyph (rounded corners).
-/// bits: N=1, E=2, S=4, W=8
-pub fn bitmask_to_glyph(mask: u8) -> &'static str {
-    match mask {
-        0 => " ",
-        1 | 4 | 5 => "│",
-        2 | 8 | 10 => "─",
-        3 => "╰",   // NE
-        6 => "╭",   // ES
-        9 => "╯",   // NW
-        12 => "╮",  // SW
-        7 => "├",   // NES
-        11 => "┴",  // NEW
-        13 => "┤",  // NSW
-        14 => "┬",  // ESW
-        15 => "┼",  // NESW
-        _ => " ",
-    }
-}
-
-/// Given a "from" screen cell and "this" screen cell, return the direction bit
-/// pointing from "this" toward "from":
-/// - from is to the North of this (from.1 < this.1): N = 1
-/// - from is to the East (from.0 > this.0): E = 2
-/// - from is to the South (from.1 > this.1): S = 4
-/// - from is to the West (from.0 < this.0): W = 8
-fn dir_bit(from: (u16, u16), this: (u16, u16)) -> u8 {
-    if from.1 < this.1 {
-        1 // N
-    } else if from.0 > this.0 {
-        2 // E
-    } else if from.1 > this.1 {
-        4 // S
-    } else {
-        8 // W
-    }
-}
+/// Arrow embedded in a distorted path ribbon.
+const PATH_ARROW_DISTORTED: Style = Style::new()
+    .fg(Color::Black)
+    .bg(Color::Magenta)
+    .add_modifier(Modifier::BOLD);
 
 // ── render_map ────────────────────────────────────────────────────────────────
 
@@ -399,8 +373,8 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 2. Draw connectors (below rooms) ─────────────────────────────────────
     if !matches!(zoom, crate::state::Zoom::Overview) {
-        // Collect bitmask per screen cell and arrowheads to overlay.
-        let mut mask_map: std::collections::HashMap<(u16, u16), (u8, bool)> =
+        // Collect path ribbon cells (cell → all_distorted) and arrowheads to embed.
+        let mut path_cells: std::collections::HashMap<(u16, u16), bool> =
             std::collections::HashMap::new();
         let mut arrowheads: Vec<((u16, u16), &'static str, bool)> = Vec::new(); // (pos, glyph, distorted)
 
@@ -484,29 +458,17 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 }
             }
 
-            // Rasterize into bitmask map (screen cells inside area only).
-            let screen_pts: Vec<(u16, u16)> = path
-                .iter()
-                .filter(|&&(x, y)| {
-                    x >= area.x as i32
-                        && x < area.right() as i32
-                        && y >= area.y as i32
-                        && y < area.bottom() as i32
-                })
-                .map(|&(x, y)| (x as u16, y as u16))
-                .collect();
-
-            for i in 0..screen_pts.len() {
-                let pos = screen_pts[i];
-                let entry = mask_map.entry(pos).or_insert((0u8, true));
-                entry.1 = entry.1 && edge.distorted;
-                if i > 0 {
-                    let bit = dir_bit(screen_pts[i - 1], pos);
-                    entry.0 |= bit;
-                }
-                if i + 1 < screen_pts.len() {
-                    let bit = dir_bit(screen_pts[i + 1], pos);
-                    entry.0 |= bit;
+            // Fill the path ribbon: every routed cell inside the area becomes a solid
+            // background block. A cell is styled distorted only if EVERY path through it
+            // is distorted (AND across overlapping edges).
+            for &(x, y) in &path {
+                if x >= area.x as i32
+                    && x < area.right() as i32
+                    && y >= area.y as i32
+                    && y < area.bottom() as i32
+                {
+                    let entry = path_cells.entry((x as u16, y as u16)).or_insert(true);
+                    *entry = *entry && edge.distorted;
                 }
             }
 
@@ -522,18 +484,17 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             drawn.insert((edge.origin, edge.dest));
         }
 
-        // Draw connector glyphs.
-        for (&(cx, cy), &(mask, all_distorted)) in &mask_map {
-            let glyph = bitmask_to_glyph(mask);
-            let style = if all_distorted { DISTORTED_STYLE } else { CONNECTOR_STYLE };
+        // Fill path ribbons (solid background blocks).
+        for (&(cx, cy), &all_distorted) in &path_cells {
+            let style = if all_distorted { PATH_BG_DISTORTED } else { PATH_BG };
             if let Some(cell) = buf.cell_mut((cx, cy)) {
-                cell.set_symbol(glyph).set_style(style);
+                cell.set_symbol(" ").set_style(style);
             }
         }
 
-        // Overlay arrowheads (win over line glyphs).
+        // Embed arrowheads into the ribbon (keep the ribbon background, dark bold glyph).
         for ((ax, ay), glyph, distorted) in arrowheads {
-            let style = if distorted { DISTORTED_STYLE } else { ARROWHEAD_STYLE };
+            let style = if distorted { PATH_ARROW_DISTORTED } else { PATH_ARROW };
             if let Some(cell) = buf.cell_mut((ax, ay)) {
                 cell.set_symbol(glyph).set_style(style);
             }
@@ -882,20 +843,6 @@ mod tests {
     }
 
     #[test]
-    fn bitmask_to_glyph_lookup() {
-        // Corners
-        assert_eq!(bitmask_to_glyph(3), "╰");  // NE
-        assert_eq!(bitmask_to_glyph(6), "╭");  // ES
-        assert_eq!(bitmask_to_glyph(12), "╮"); // SW
-        assert_eq!(bitmask_to_glyph(9), "╯");  // NW
-        // Straights
-        assert_eq!(bitmask_to_glyph(10), "─"); // EW
-        assert_eq!(bitmask_to_glyph(5), "│");  // NS
-        // Junction
-        assert_eq!(bitmask_to_glyph(15), "┼"); // NESW
-    }
-
-    #[test]
     fn room_box_shows_label_at_boxes_zoom() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
@@ -1007,9 +954,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The outgoing arrow is a filled ▶ at the departure anchor (col 14, row 2).
-        let sym = buf.cell((14, 2)).map(|c| c.symbol()).unwrap_or(" ");
-        assert_eq!(sym, "▶", "outgoing east arrow ▶ should be at room1's right anchor (14,2)");
+        // The outgoing arrow is a filled ▶ at the departure anchor (col 14, row 2),
+        // embedded in the ribbon (Cyan background behind the glyph).
+        let cell = buf.cell((14, 2)).expect("arrow cell must exist");
+        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (14,2)");
+        assert_eq!(cell.bg, Color::Cyan, "arrow should be embedded in the ribbon (Cyan bg); got {:?}", cell.bg);
 
         // No hollow arrowhead should ever be drawn.
         let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
@@ -1017,8 +966,10 @@ mod tests {
     }
 
     #[test]
-    fn connector_is_solid_not_dim() {
-        // Connector between two adjacent rooms must use Cyan fg and solid glyph ─, not ╌.
+    fn connector_is_solid_background_ribbon() {
+        // A connector is a solid background ribbon, not a line glyph. The ribbon cell at
+        // col 16 (between the col-14 arrow and the col-17 destination anchor) must have a
+        // Cyan background and a plain space symbol — not a dim/dashed line.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -1032,24 +983,17 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Find a horizontal connector glyph ─ and verify it's Cyan, not DarkGray.
-        // Col 14 holds the outgoing arrowhead; the line itself runs east through col 16.
-        let dep_col = 16u16;
-        let dep_row = 2u16;
-        let cell = buf.cell((dep_col, dep_row)).expect("connector cell must exist");
-        let sym = cell.symbol();
-        assert_ne!(sym, "╌", "connector should be solid ─ not dashed ╌");
-        assert_ne!(sym, "╎", "connector should be solid │ not dashed ╎");
+        let cell = buf.cell((16, 2)).expect("ribbon cell must exist");
+        assert_eq!(cell.symbol(), " ", "ribbon cell should be a space, got '{}'", cell.symbol());
         assert_eq!(
-            cell.fg,
+            cell.bg,
             Color::Cyan,
-            "connector fg should be Cyan; got {:?} at ({dep_col},{dep_row}) sym='{sym}'",
-            cell.fg
+            "ribbon background should be Cyan; got {:?} at (16,2)",
+            cell.bg
         );
-        // Must not have DIM modifier.
         assert!(
             !cell.modifier.contains(Modifier::DIM),
-            "connector should not be dim; modifier={:?}",
+            "ribbon should not be dim; modifier={:?}",
             cell.modifier
         );
     }
@@ -1219,11 +1163,8 @@ mod tests {
 
         // B box: cell (1,0) → screen (18,0), size 14×4 → cols 18..31, rows 0..3.
         let b = Rect::new(18, 0, 14, 4);
-        let connector_glyphs = [
-            "─", "│", "╭", "╮", "╰", "╯", "├", "┤", "┴", "┬", "┼",
-            "▶", "◀", "▲", "▼", "▷", "◁", "△", "▽",
-        ];
-        // Ring = the 1-cell halo around B, excluding B's own box cells.
+        // Ring = the 1-cell halo around B, excluding B's own box cells. No path ribbon
+        // (Cyan/Magenta background) may touch it.
         for y in (b.y as i32 - 1)..=(b.bottom() as i32) {
             for x in (b.x as i32 - 1)..=(b.right() as i32) {
                 if x < 0 || y < 0 {
@@ -1238,9 +1179,9 @@ mod tests {
                 }
                 if let Some(cell) = buf.cell((x as u16, y as u16)) {
                     assert!(
-                        !connector_glyphs.contains(&cell.symbol()),
-                        "connector glyph '{}' hugs room B at ({x},{y}); expected a 1-cell gap",
-                        cell.symbol()
+                        cell.bg != Color::Cyan && cell.bg != Color::Magenta,
+                        "path ribbon ({:?}) hugs room B at ({x},{y}); expected a 1-cell gap",
+                        cell.bg
                     );
                 }
             }
@@ -1248,7 +1189,7 @@ mod tests {
     }
 
     #[test]
-    fn render_no_connector_glyph_inside_other_room() {
+    fn render_no_path_ribbon_inside_other_room() {
         // Verify via rendering: 3 rooms where A→C would naively cross B.
         // Room A at (0,0), Room B at (1,0), Room C at (2,0).
         // Direct edge from A to C (not via B) so the connector crosses B's area.
@@ -1268,23 +1209,16 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Room B box: Boxes zoom, step=18×6, room at cell (1,0) → screen (18,0), box 14×4
-        // Interior: cols 19..31, rows 1..3
+        // Room B box: Boxes zoom, step=18×6, room at cell (1,0) → screen (18,0), box 14×4.
+        // No path ribbon (Cyan/Magenta background) may appear inside B's interior.
         let b_rect = Rect::new(18, 0, 14, 4);
-        let connector_glyphs = [
-            "─", "│", "╭", "╮", "╰", "╯", "├", "┤", "┴", "┬", "┼",
-            "▶", "◀", "▲", "▼", "▷", "◁", "△", "▽",
-        ];
         for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
             for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
                 if let Some(cell) = buf.cell((x, y)) {
-                    let sym = cell.symbol();
                     assert!(
-                        !connector_glyphs.contains(&sym),
-                        "connector glyph '{}' found inside room B's interior at ({},{})",
-                        sym,
-                        x,
-                        y
+                        cell.bg != Color::Cyan && cell.bg != Color::Magenta,
+                        "path ribbon ({:?}) found inside room B's interior at ({x},{y})",
+                        cell.bg
                     );
                 }
             }
