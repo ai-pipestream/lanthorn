@@ -173,48 +173,28 @@ fn axis_sign_ok(actual: i32, expected: i32) -> bool {
 
 // ── Core layout ───────────────────────────────────────────────────────────────
 
-/// Re-derive all room positions from scratch on every call.
-///
-/// Clears all existing positions, then BFS-places rooms from the lowest-id root
-/// of each connected component, following directed-edge constraints.
-pub fn relayout_auto(graph: &mut MapGraph) {
-    let all_ids: Vec<RoomId> = {
-        let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
-        ids.sort_unstable();
-        ids
-    };
-
-    if all_ids.is_empty() {
-        return;
-    }
-
-    // Step 1: Clear all positions so re-derivation starts from scratch.
-    clear_all_positions(graph, &all_ids);
-
-    // Step 2: Build adjacency (undirected) for connected components.
-    // adjacency[id] = sorted list of neighbor ids
+/// Connected components over the undirected projection of the graph. Each
+/// component is sorted ascending; components are returned in ascending-root order.
+fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<RoomId>> {
     let mut adjacency: BTreeMap<RoomId, Vec<RoomId>> = BTreeMap::new();
-    for &id in &all_ids {
+    for &id in ids {
         adjacency.entry(id).or_default();
     }
     for conn in graph.connections() {
         adjacency.entry(conn.origin).or_default().push(conn.dest);
         adjacency.entry(conn.dest).or_default().push(conn.origin);
     }
-    // Deduplicate and sort neighbor lists for determinism.
     for neighbors in adjacency.values_mut() {
         neighbors.sort_unstable();
         neighbors.dedup();
     }
 
-    // Step 3: Find connected components in ascending-id order.
     let mut visited: BTreeSet<RoomId> = BTreeSet::new();
     let mut components: Vec<Vec<RoomId>> = Vec::new();
-    for &id in &all_ids {
+    for &id in ids {
         if visited.contains(&id) {
             continue;
         }
-        // BFS to collect this component.
         let mut component = Vec::new();
         let mut queue: VecDeque<RoomId> = VecDeque::new();
         queue.push_back(id);
@@ -232,89 +212,109 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         component.sort_unstable();
         components.push(component);
     }
+    components
+}
 
-    // Step 4: For each component, anchor the lowest-id room and BFS-place the rest.
+/// The greedy grid placement (former `relayout_auto` body) as a pure function:
+/// BFS from each component's lowest-id root, placing neighbours at `pair_offset`
+/// deltas with spiral collision avoidance. No graph mutation; used only to seed
+/// the stress solver and as the large-graph fallback.
+fn seed_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
+    let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
+    ids.sort_unstable();
+    let mut pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    if ids.is_empty() {
+        return pos;
+    }
+    let components = connected_components(graph, &ids);
     let mut occupied: BTreeSet<(i32, i32)> = BTreeSet::new();
-    let first_anchor = (0, 0);
 
     for component in &components {
         let root = *component.iter().min().unwrap();
-        // Anchor root: first component at (0,0), subsequent at nearest free cell to (0,0).
-        let anchor = nearest_free_cell(&occupied, first_anchor);
-        place_room(graph, root, anchor, &mut occupied);
+        let anchor = nearest_free_cell(&occupied, (0, 0));
+        pos.insert(root, anchor);
+        occupied.insert(anchor);
 
-        // BFS from root over this component.
         let mut bfs: VecDeque<RoomId> = VecDeque::new();
         let mut bfs_visited: BTreeSet<RoomId> = BTreeSet::new();
         bfs.push_back(root);
         bfs_visited.insert(root);
 
         while let Some(placed_id) = bfs.pop_front() {
-            let placed_pos = graph.room(placed_id).and_then(|r| r.pos).unwrap();
-
-            // Collect incident edges involving placed_id, sorted by connection index (determinism).
-            let incident: Vec<(usize, Connection)> = graph
+            let placed_pos = *pos.get(&placed_id).unwrap();
+            let incident: Vec<Connection> = graph
                 .connections()
                 .iter()
-                .enumerate()
-                .filter(|(_, c)| c.origin == placed_id || c.dest == placed_id)
-                .map(|(i, c)| (i, c.clone()))
+                .filter(|c| c.origin == placed_id || c.dest == placed_id)
+                .cloned()
                 .collect();
-            // incident is already in connection-index order (enumerate preserves it).
-
-            // First pass: compass edges (exact offset) → then non-compass (nearest-free).
-            // We process compass edges first to prefer exact geometry over proximity.
-            let compass_first: Vec<_> = incident
+            let compass_first: Vec<&Connection> = incident
                 .iter()
-                .filter(|(_, c)| grid_offset(c.dir).is_some())
-                .chain(incident.iter().filter(|(_, c)| grid_offset(c.dir).is_none()))
+                .filter(|c| grid_offset(c.dir).is_some())
+                .chain(incident.iter().filter(|c| grid_offset(c.dir).is_none()))
                 .collect();
 
-            for (_, conn) in compass_first {
+            for conn in compass_first {
                 let neighbor_id = if conn.origin == placed_id { conn.dest } else { conn.origin };
-                if bfs_visited.contains(&neighbor_id) {
-                    continue;
-                }
-                // Only place rooms in this component.
-                if !component.contains(&neighbor_id) {
+                if bfs_visited.contains(&neighbor_id) || !component.contains(&neighbor_id) {
                     continue;
                 }
                 bfs_visited.insert(neighbor_id);
-
-                // Use pair_offset for compass edges: when both directed edges are known, the
-                // combined offset captures the real discovered geometry (e.g. diagonal NE).
-                // For non-compass edges, fall back to nearest-free placement near placed room.
                 let desired = if conn.origin == placed_id {
-                    // forward: neighbor is placed_id's dest
                     match pair_offset(graph, placed_id, neighbor_id) {
                         Some(delta) => (placed_pos.0 + delta.0, placed_pos.1 + delta.1),
                         None => placed_pos,
                     }
                 } else {
-                    // backward: neighbor is placed_id's origin (placed_id is the dest)
                     match pair_offset(graph, neighbor_id, placed_id) {
                         Some(delta) => (placed_pos.0 - delta.0, placed_pos.1 - delta.1),
                         None => placed_pos,
                     }
                 };
-
                 let cell = nearest_free_cell(&occupied, desired);
-                place_room(graph, neighbor_id, cell, &mut occupied);
+                pos.insert(neighbor_id, cell);
+                occupied.insert(cell);
                 bfs.push_back(neighbor_id);
             }
         }
     }
+    pos
+}
 
-    // Step 5: Post-placement distortion sweep.
+/// Set the `distorted` flag on every connection: a compass edge is distorted if
+/// its connection index is in `dropped`, or its final grid geometry violates its
+/// direction. Non-compass edges are never distorted.
+fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
     let n_conns = graph.connections().len();
     for idx in 0..n_conns {
         let conn = graph.connections()[idx].clone();
         let distorted = match grid_offset(conn.dir) {
             None => false,
-            Some(_) => !edge_is_satisfied(graph, &conn),
+            Some(_) => dropped.contains(&idx) || !edge_is_satisfied(graph, &conn),
         };
         graph.set_conn_distorted(idx, distorted);
     }
+}
+
+/// Re-derive all room positions from scratch on every call.
+///
+/// Clears all existing positions, then BFS-places rooms from the lowest-id root
+/// of each connected component, following directed-edge constraints.
+pub fn relayout_auto(graph: &mut MapGraph) {
+    let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
+    ids.sort_unstable();
+    if ids.is_empty() {
+        return;
+    }
+    clear_all_positions(graph, &ids);
+
+    let seed = seed_layout(graph);
+    for &id in &ids {
+        if let Some(&p) = seed.get(&id) {
+            graph.set_pos(id, p);
+        }
+    }
+    mark_distorted(graph, &BTreeSet::new());
 }
 
 /// Clear the `pos` of every room in `ids`.
@@ -322,12 +322,6 @@ fn clear_all_positions(graph: &mut MapGraph, ids: &[RoomId]) {
     for &id in ids {
         graph.clear_pos(id);
     }
-}
-
-/// Place `room_id` at `cell`, updating both the graph and the occupied set.
-fn place_room(graph: &mut MapGraph, id: RoomId, cell: (i32, i32), occupied: &mut BTreeSet<(i32, i32)>) {
-    graph.set_pos(id, cell);
-    occupied.insert(cell);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
