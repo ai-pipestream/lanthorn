@@ -31,6 +31,7 @@ use crate::graph::{Connection, MapGraph, RoomId};
 mod vpsc;
 mod constraints;
 mod stress;
+mod routability;
 
 /// Separation gap and ideal edge length (in grid cells).
 const GAP: f64 = 1.0;
