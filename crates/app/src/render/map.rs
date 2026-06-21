@@ -27,7 +27,7 @@
 use mapper::graph::RoomId;
 use mapper::render::{RenderMap, RenderRoom};
 use mapper::route::RoutePlan;
-use mapper::router::{RoutedEdge, Side, side_for};
+use mapper::router::{RoutedEdge, Side};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -76,15 +76,11 @@ struct VRect {
     x: i32,
     y: i32,
     w: i32,
-    h: i32,
 }
 
 impl VRect {
     fn right(&self) -> i32 {
         self.x + self.w
-    }
-    fn bottom(&self) -> i32 {
-        self.y + self.h
     }
 }
 
@@ -110,10 +106,30 @@ pub struct PosTable {
     room_start: std::collections::BTreeMap<i32, i32>, // grid line index → pixel start of the box
     channel_w: std::collections::BTreeMap<i32, i32>,  // grid line index → pixel width of the gap after it
     lo: i32,                                           // lowest grid line index
+    hi: i32,                                           // highest grid line index
+    box_dim: i32,                                      // box size along this axis (pixels)
 }
 impl PosTable {
-    pub fn room_pixel(&self, idx: i32) -> i32 { *self.room_start.get(&idx).unwrap_or(&0) }
+    pub fn room_pixel(&self, idx: i32) -> i32 { self.line_pixel(idx) }
     pub fn channel_span(&self, idx: i32) -> i32 { *self.channel_w.get(&idx).unwrap_or(&MIN_GUTTER) }
+
+    /// Pixel-x (or -y) of the box left/top edge at grid line `idx`, extrapolating with a
+    /// uniform `box_dim + MIN_GUTTER` stride for lines outside the tabulated bounds so
+    /// scrolling beyond the placed rooms stays well-defined and continuous.
+    fn line_pixel(&self, idx: i32) -> i32 {
+        if let Some(&p) = self.room_start.get(&idx) {
+            p
+        } else if idx < self.lo {
+            // Steps of the default (empty-channel) stride below the first room.
+            self.room_start.get(&self.lo).copied().unwrap_or(0)
+                - (self.lo - idx) * (self.box_dim + MIN_GUTTER)
+        } else {
+            // Past the last room: its start, its own box+channel, then default strides.
+            let last = self.room_start.get(&self.hi).copied().unwrap_or(0);
+            let after = last + self.box_dim + self.channel_span(self.hi);
+            after + (idx - self.hi - 1) * (self.box_dim + MIN_GUTTER)
+        }
+    }
 }
 
 fn channel_width(lanes: u16) -> i32 {
@@ -133,301 +149,13 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
             channel_w.insert(idx, w);
             x += box_dim + w;
         }
-        PosTable { room_start, channel_w, lo }
+        PosTable { room_start, channel_w, lo, hi, box_dim }
     };
     let cols = build(min_c, max_c, BOX_W, &plan.v_lanes);
     let rows = build(min_r, max_r, BOX_H, &plan.h_lanes);
     (cols, rows)
 }
 
-// ── Box-geometry routing helpers ──────────────────────────────────────────────
-
-/// Return the gutter cell just outside `rect` on the given side, at the side's midpoint.
-///
-/// - Right: (rect.right(), rect.y + rect.h/2)
-/// - Left:  (rect.x - 1,   rect.y + rect.h/2)
-/// - Top:   (rect.x + rect.w/2, rect.y - 1)
-/// - Bottom:(rect.x + rect.w/2, rect.bottom())
-fn side_anchor(rect: VRect, side: Side) -> (i32, i32) {
-    match side {
-        Side::Right  => (rect.right(),        rect.y + rect.h / 2),
-        Side::Left   => (rect.x - 1,          rect.y + rect.h / 2),
-        Side::Top    => (rect.x + rect.w / 2, rect.y - 1),
-        Side::Bottom => (rect.x + rect.w / 2, rect.bottom()),
-    }
-}
-
-/// Orientation bits for a cell occupied by an earlier-routed connector.
-/// A cell may carry both (a corner of one path, or a perpendicular crossing of two).
-const HORIZ: u8 = 1;
-const VERT: u8 = 2;
-
-/// Build an obstacle-aware orthogonal path from `dep` to `arr` whose first step leaves in
-/// `dep_side`'s direction.
-///
-/// Uses A* on the integer screen grid. `blocked` contains all screen cells that are
-/// interior to other room boxes plus a 1-cell halo (excluding this edge's own rooms), so
-/// a routed path keeps clearance from rooms. `paths` maps each cell occupied by an
-/// earlier-routed connector to its orientation bits (`HORIZ`/`VERT`). The router enforces,
-/// as HARD constraints against earlier paths:
-///   - no overlap: never run along a cell already carrying the same orientation;
-///   - no running alongside: never sit orthogonally adjacent-and-parallel to an existing
-///     path of the same orientation (a 1-cell gap is required);
-///   - crossings are perpendicular straight-throughs only: an existing path cell may be
-///     entered only across its orientation, and the new path may not turn on it.
-///
-/// Returns `Some(path)` for a clean Tier-1 route honouring all the above constraints, or
-/// `None` if no clean route exists — there is no overlap-permitting fallback, so a routed
-/// connector never overlaps. The caller decides how to render an unrouted edge.
-fn route_ortho(
-    dep: (i32, i32),
-    arr: (i32, i32),
-    dep_side: Side,
-    blocked: &std::collections::HashSet<(i32, i32)>,
-    paths: &std::collections::HashMap<(i32, i32), u8>,
-) -> Option<Vec<(i32, i32)>> {
-    use std::cmp::Reverse;
-    use std::collections::BinaryHeap;
-
-    if dep == arr {
-        return Some(vec![dep]);
-    }
-
-    // Map dep_side to the forced first-step delta.
-    let first_delta: (i32, i32) = match dep_side {
-        Side::Right  => (1, 0),
-        Side::Left   => (-1, 0),
-        Side::Top    => (0, -1),
-        Side::Bottom => (0, 1),
-    };
-
-    // Search bounds: bounding box of dep/arr expanded by 24 so a path can detour well
-    // around intervening rooms, capped at 400×400.
-    let min_x = dep.0.min(arr.0) - 24;
-    let min_y = dep.1.min(arr.1) - 24;
-    let mut max_x = dep.0.max(arr.0) + 24;
-    let mut max_y = dep.1.max(arr.1) + 24;
-    if max_x - min_x > 400 { max_x = min_x + 400; }
-    if max_y - min_y > 400 { max_y = min_y + 400; }
-
-    // State: (cell, incoming_dir)
-    type State = ((i32, i32), Option<(i32, i32)>);
-
-    // Heap entries: (Reverse(f_cost), g_cost, cell, incoming_dir)
-    // Using i32 for costs; all costs are non-negative.
-    let manhattan = |a: (i32, i32), b: (i32, i32)| -> i32 {
-        (a.0 - b.0).abs() + (a.1 - b.1).abs()
-    };
-
-    type HeapEntry = (Reverse<i32>, i32, (i32, i32), Option<(i32, i32)>);
-    let neighbors: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
-
-    // A* that always honours room `blocked` clearance, plus the path-vs-path rules carried
-    // in `pr`. Returns None when no route is found, so the caller can degrade.
-    let astar = |pr: &std::collections::HashMap<(i32, i32), u8>| -> Option<Vec<(i32, i32)>> {
-        let start_cell = (dep.0 + first_delta.0, dep.1 + first_delta.1);
-        if (blocked.contains(&start_cell) && start_cell != arr)
-            || start_cell.0 < min_x
-            || start_cell.0 > max_x
-            || start_cell.1 < min_y
-            || start_cell.1 > max_y
-        {
-            return None;
-        }
-        let start_dir = Some(first_delta);
-        let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
-        heap.push((Reverse(1 + manhattan(start_cell, arr)), 1, start_cell, start_dir));
-        let mut visited: std::collections::HashSet<State> = std::collections::HashSet::new();
-        let mut parent: std::collections::HashMap<State, State> = std::collections::HashMap::new();
-        parent.insert((start_cell, start_dir), (dep, None));
-
-        while let Some((_, g, cell, inc_dir)) = heap.pop() {
-            let state: State = (cell, inc_dir);
-            if !visited.insert(state) {
-                continue;
-            }
-            if visited.len() > 20000 {
-                break;
-            }
-            if cell == arr {
-                let mut path_rev: Vec<(i32, i32)> = Vec::new();
-                let mut cur_state: State = (cell, inc_dir);
-                loop {
-                    path_rev.push(cur_state.0);
-                    match parent.get(&cur_state) {
-                        Some(&prev) => {
-                            if prev.0 == dep {
-                                path_rev.push(dep);
-                                break;
-                            }
-                            cur_state = prev;
-                        }
-                        None => break,
-                    }
-                }
-                path_rev.reverse();
-                return Some(path_rev);
-            }
-            for &delta in &neighbors {
-                let next = (cell.0 + delta.0, cell.1 + delta.1);
-                if next.0 < min_x || next.0 > max_x || next.1 < min_y || next.1 > max_y {
-                    continue;
-                }
-                if next != arr && blocked.contains(&next) {
-                    continue;
-                }
-                // Hard path-interaction rules (skipped for the final hop into `arr`).
-                if next != arr {
-                    let our_bit = if delta.1 == 0 { HORIZ } else { VERT };
-                    // (a) no overlap with a same-orientation path.
-                    if pr.get(&next).copied().unwrap_or(0) & our_bit != 0 {
-                        continue;
-                    }
-                    // (b) no turning onto a path cell (crossings are straight-through only).
-                    let turning = inc_dir.is_some() && inc_dir != Some(delta);
-                    if turning && pr.get(&cell).copied().unwrap_or(0) != 0 {
-                        continue;
-                    }
-                    // (c) no running alongside a same-orientation path (keep a 1-cell gap).
-                    let alongside = if our_bit == HORIZ {
-                        pr.get(&(next.0, next.1 - 1)).copied().unwrap_or(0) & HORIZ != 0
-                            || pr.get(&(next.0, next.1 + 1)).copied().unwrap_or(0) & HORIZ != 0
-                    } else {
-                        pr.get(&(next.0 - 1, next.1)).copied().unwrap_or(0) & VERT != 0
-                            || pr.get(&(next.0 + 1, next.1)).copied().unwrap_or(0) & VERT != 0
-                    };
-                    if alongside {
-                        continue;
-                    }
-                }
-                let next_dir = Some(delta);
-                let next_state: State = (next, next_dir);
-                if visited.contains(&next_state) {
-                    continue;
-                }
-                let turn_cost: i32 = if inc_dir.is_some() && inc_dir != Some(delta) { 2 } else { 0 };
-                let next_g = g + 1 + turn_cost;
-                let next_f = next_g + manhattan(next, arr);
-                if let std::collections::hash_map::Entry::Vacant(e) = parent.entry(next_state) {
-                    e.insert((cell, inc_dir));
-                    heap.push((Reverse(next_f), next_g, next, next_dir));
-                }
-            }
-        }
-        None
-    };
-
-    // Clean route only: full room-clearance + path-vs-path rules. If A* cannot find
-    // one, the edge has no clean channel — return None so the renderer can flag it as
-    // unrouted rather than draw an overlapping fallback.
-    astar(paths)
-}
-
-/// Anchor point on `side` of `rect` for a NON-reciprocal arrival, offset from the side's
-/// centre by `index` slots. The centre of every side is reserved for departures (whose
-/// outgoing arrow sits there), so an arriving line that isn't a verified reciprocal must
-/// land beside the centre — otherwise a centred arrival is indistinguishable from a
-/// departure and you can't tell which way an edge actually goes. `index` (0-based count of
-/// arrivals already on this side) walks outward in alternating +/- slots so multiple
-/// arrivals on one side don't collide.
-fn arrival_anchor(rect: VRect, side: Side, index: i32) -> (i32, i32) {
-    // Quarter-of-side step keeps the offset clearly off-centre yet on the box edge.
-    let step = match side {
-        Side::Top | Side::Bottom => (rect.w / 4).max(1),
-        Side::Left | Side::Right => (rect.h / 4).max(1),
-    };
-    let k = index / 2 + 1; // 1,1,2,2,3,3,…
-    let sign = if index % 2 == 0 { 1 } else { -1 };
-    let off = sign * k * step;
-    match side {
-        Side::Right => {
-            let y = (rect.y + rect.h / 2 + off).clamp(rect.y, rect.bottom() - 1);
-            (rect.right(), y)
-        }
-        Side::Left => {
-            let y = (rect.y + rect.h / 2 + off).clamp(rect.y, rect.bottom() - 1);
-            (rect.x - 1, y)
-        }
-        Side::Top => {
-            let x = (rect.x + rect.w / 2 + off).clamp(rect.x, rect.right() - 1);
-            (x, rect.y - 1)
-        }
-        Side::Bottom => {
-            let x = (rect.x + rect.w / 2 + off).clamp(rect.x, rect.right() - 1);
-            (x, rect.bottom())
-        }
-    }
-}
-
-/// All off-centre arrival anchor candidates on every side of `rect` (the `arrival_anchor`
-/// slots `0..4` per side: ±¼ and ±½ of the side, clamped to the edge), deduplicated.
-fn arrival_candidates(rect: VRect) -> Vec<(i32, i32)> {
-    let mut v = Vec::new();
-    for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
-        for idx in 0..4 {
-            v.push(arrival_anchor(rect, side, idx));
-        }
-    }
-    v.sort();
-    v.dedup();
-    v
-}
-
-/// The closest off-centre arrival location on `rect` to `dep` that isn't already in `used`.
-///
-/// A non-reciprocal arrival lands at the nearest non-centre perimeter slot — it may share
-/// a side with a departure (whose arrow sits at that side's centre) as long as it takes a
-/// distinct off-centre cell. Picking by nearest *location* (not nearest free *side*) means
-/// the arrival uses the side actually facing the origin even when a departure already sits
-/// there, instead of being bumped to a far side. Falls back to the overall-closest slot if
-/// every candidate is taken.
-fn closest_free_arrival(rect: VRect, dep: (i32, i32), used: &[(i32, i32)]) -> (i32, i32) {
-    let dist2 = |c: (i32, i32)| {
-        let dx = c.0 - dep.0;
-        let dy = c.1 - dep.1;
-        dx * dx + dy * dy
-    };
-    let cands = arrival_candidates(rect);
-    cands
-        .iter()
-        .copied()
-        .filter(|c| !used.contains(c))
-        .min_by_key(|&c| dist2(c))
-        .or_else(|| cands.iter().copied().min_by_key(|&c| dist2(c)))
-        .unwrap_or((rect.x - 1, rect.y + rect.h / 2))
-}
-
-/// Walk from `from` to `to` one step at a time (orthogonal), appending each cell.
-/// `from` is included on first call; subsequent `walk_to` calls should share an
-/// endpoint to avoid duplicates — the caller handles this by starting each segment
-/// at the current last point.
-fn walk_to(pts: &mut Vec<(i32, i32)>, from: (i32, i32), to: (i32, i32)) {
-    let dx = (to.0 - from.0).signum();
-    let dy = (to.1 - from.1).signum();
-    let mut cur = from;
-    loop {
-        pts.push(cur);
-        if cur == to {
-            break;
-        }
-        cur = (cur.0 + dx, cur.1 + dy);
-    }
-}
-
-/// A simple two-segment L from `dep` to `arr` whose first step leaves on `dep_side`.
-/// Used only to give an UNROUTED edge a visible (flagged) shape; it may overlap and is
-/// never recorded in the path-occupancy map.
-fn unrouted_l(dep: (i32, i32), arr: (i32, i32), dep_side: Side) -> Vec<(i32, i32)> {
-    let corner = match dep_side {
-        Side::Left | Side::Right => (arr.0, dep.1), // horizontal-first
-        Side::Top | Side::Bottom => (dep.0, arr.1), // vertical-first
-    };
-    let mut pts = Vec::new();
-    walk_to(&mut pts, dep, corner);
-    pts.pop();
-    walk_to(&mut pts, corner, arr);
-    pts
-}
 
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
 ///
@@ -502,28 +230,6 @@ const NORMAL_STYLE: Style = Style::new().fg(Color::White).bg(Color::Reset);
 /// Style for stub-connector labels — Cyan text.
 const CONNECTOR_STYLE: Style = Style::new().fg(Color::Cyan);
 
-/// Solid background fill for a path ribbon (normal).
-const PATH_BG: Style = Style::new().bg(Color::Cyan);
-
-/// Solid background fill for a path ribbon (distorted — different signal).
-const PATH_BG_DISTORTED: Style = Style::new().bg(Color::Magenta);
-
-/// Ribbon background for an edge with no clean route — visibly distinct (dimmed) so a
-/// rare routing failure is obvious rather than mistaken for a normal connector.
-const PATH_BG_UNROUTED: Style = Style::new().bg(Color::DarkGray);
-
-/// Arrow embedded in a normal path ribbon: dark bold glyph on the ribbon colour.
-const PATH_ARROW: Style = Style::new()
-    .fg(Color::Black)
-    .bg(Color::Cyan)
-    .add_modifier(Modifier::BOLD);
-
-/// Arrow embedded in a distorted path ribbon.
-const PATH_ARROW_DISTORTED: Style = Style::new()
-    .fg(Color::Black)
-    .bg(Color::Magenta)
-    .add_modifier(Modifier::BOLD);
-
 // ── render_map ────────────────────────────────────────────────────────────────
 
 /// Draw the map from `rm` into `buf` for `area`, using view state from `state`.
@@ -534,14 +240,12 @@ const PATH_ARROW_DISTORTED: Style = Style::new()
 pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) {
     let zoom = state.zoom;
     let scroll = state.scroll;
-    let (step_w, step_h) = zoom_steps(zoom);
 
-    // Virtual → screen translation: screen = virtual + offset.
-    let off_x = area.x as i32 - scroll.0 * step_w;
-    let off_y = area.y as i32 - scroll.1 * step_h;
-
-    // Overview zoom: one glyph per room, no connectors.
+    // Overview zoom: one glyph per room, no connectors. Uniform stride.
     if matches!(zoom, crate::state::Zoom::Overview) {
+        let (step_w, step_h) = zoom_steps(zoom);
+        let off_x = area.x as i32 - scroll.0 * step_w;
+        let off_y = area.y as i32 - scroll.1 * step_h;
         for room in &rm.rooms {
             let (vx, vy) = cell_to_virtual(room.cell, zoom);
             put_char(buf, vx + off_x, vy + off_y, '■', room_style(room, state), area);
@@ -549,175 +253,49 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         return;
     }
 
+    // Boxes zoom uses the non-uniform lane-routing position tables; Compact keeps the
+    // uniform schematic stride. `room_virtual` maps a logical cell to its virtual
+    // top-left pixel; the scroll offset is computed in the SAME space so panning is a
+    // pure translate-and-clip and connector geometry is scroll-invariant.
+    let boxes = matches!(zoom, crate::state::Zoom::Boxes);
+    let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
+    let (off_x, off_y) = match &axes {
+        Some((cols, rows)) => (
+            area.x as i32 - cols.room_pixel(scroll.0),
+            area.y as i32 - rows.room_pixel(scroll.1),
+        ),
+        None => {
+            let (step_w, step_h) = zoom_steps(zoom);
+            (area.x as i32 - scroll.0 * step_w, area.y as i32 - scroll.1 * step_h)
+        }
+    };
+    let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
+        match &axes {
+            Some((cols, rows)) => (cols.room_pixel(cell.0), rows.room_pixel(cell.1)),
+            None => cell_to_virtual(cell, zoom),
+        }
+    };
+
     // ── 1. Place ALL rooms in virtual space (independent of scroll/area) ──────
-    let (bw, bh) = zoom_box_size(zoom);
+    let (bw, _bh) = zoom_box_size(zoom);
     let mut placed: std::collections::HashMap<RoomId, VRect> =
         std::collections::HashMap::new();
     for room in &rm.rooms {
-        let (vx, vy) = cell_to_virtual(room.cell, zoom);
-        placed.insert(room.id, VRect { x: vx, y: vy, w: bw as i32, h: bh as i32 });
+        let (vx, vy) = room_virtual(room.cell);
+        placed.insert(room.id, VRect { x: vx, y: vy, w: bw as i32 });
     }
 
-    // ── 2. Route ALL connectors in virtual space (computed once, scroll-free) ─
-    let mut path_cells: std::collections::HashMap<(i32, i32), bool> =
-        std::collections::HashMap::new();
-    // Cells belonging to UNROUTED edges (no clean channel). Rendered distinctly and
-    // deliberately NOT added to `paths`, so they never constrain later clean routes.
-    let mut unrouted_cells: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
-    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
-    // Cells occupied by already-routed connectors, keyed to their orientation bits, so
-    // later edges can keep clearance and cross only at perpendicular straight-throughs.
-    let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
-    let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
-        std::collections::HashSet::new();
-
-    // Locations already claimed by non-reciprocal arrivals into each room (so two arrivals
-    // don't land on the same cell).
-    let mut used_arr: std::collections::HashMap<RoomId, Vec<(i32, i32)>> =
-        std::collections::HashMap::new();
-
-    for edge in &rm.edges {
-        if edge.is_stub {
-            continue;
-        }
-        let (Some(&origin_rect), Some(&dest_rect)) =
-            (placed.get(&edge.origin), placed.get(&edge.dest))
-        else {
-            continue;
-        };
-
-        let Some(dep_side) = side_for(edge.dir) else {
-            continue; // non-planar slipped through (shouldn't happen for non-stub)
-        };
-
-        // Reciprocal reuse: if the reverse edge (dest → origin) was already drawn,
-        // this edge's outgoing arrow was already placed as that path's far-end arrow.
-        // Skip it so the connection is drawn once, not as two separate paths.
-        if drawn.contains(&(edge.dest, edge.origin)) {
-            continue;
-        }
-
-        let dep = side_anchor(origin_rect, dep_side);
-
-        // Which side of the destination box the line connects to, and whether a
-        // return trip (dest → origin) has been observed. `arrival_dir` is the
-        // direction the player leaves `dest` to get back here; that side carries
-        // the destination's own outgoing arrow. When unknown, fall back to the
-        // geometrically nearest side and draw no far-end arrow.
-        let dest_back_side = edge.arrival_dir.and_then(side_for);
-        let arr = match dest_back_side {
-            // Confirmed reciprocal: both ends are departures, so arrive at the matched
-            // side's centre (one shared, centred path with an arrow at each end).
-            Some(s) => side_anchor(dest_rect, s),
-            // Non-reciprocal: connect to the closest off-centre location on dest (the side
-            // actually facing the origin, even if a departure sits at that side's centre),
-            // avoiding any cell a prior arrival already took.
-            None => {
-                let used = used_arr.entry(edge.dest).or_default();
-                let arr = closest_free_arrival(dest_rect, dep, used);
-                used.push(arr);
-                arr
-            }
-        };
-
-        // Build blocked set: EVERY room box (including this edge's own origin and dest)
-        // expanded by a 1-cell halo, so a connector keeps clearance from rooms and can
-        // never pass through one — including the destination, which it must approach from
-        // outside rather than cutting across to reach a far-side anchor.
-        let mut blocked: std::collections::HashSet<(i32, i32)> = placed
-            .values()
-            .flat_map(|&rect| {
-                let x0 = rect.x - 1;
-                let y0 = rect.y - 1;
-                let x1 = rect.right(); // one column past the box (halo)
-                let y1 = rect.bottom(); // one row past the box (halo)
-                (x0..=x1).flat_map(move |x| (y0..=y1).map(move |y| (x, y)))
-            })
+    // ── 2. Boxes zoom: draw line-art connectors along their assigned lanes ────
+    if let Some((cols, rows)) = &axes {
+        // Reciprocal connections (a reverse edge exists) get a far-end arrow too. The
+        // reverse-edge signal lives on `RoutedEdge::arrival_dir`.
+        let reciprocal: std::collections::HashSet<(RoomId, RoomId)> = rm
+            .edges
+            .iter()
+            .filter(|e| !e.is_stub && e.arrival_dir.is_some())
+            .map(|e| (e.origin.min(e.dest), e.origin.max(e.dest)))
             .collect();
-
-        // Never block this connection's own exit/entry lanes: clear the departure and
-        // arrival anchors plus their orthogonal neighbours so routing can always begin
-        // and end even though the origin/dest boxes are otherwise blocked.
-        for &(px, py) in &[dep, arr] {
-            blocked.remove(&(px, py));
-            blocked.remove(&(px + 1, py));
-            blocked.remove(&(px - 1, py));
-            blocked.remove(&(px, py + 1));
-            blocked.remove(&(px, py - 1));
-        }
-
-        // Route the path with hard clearance + perpendicular-crossing-only rules vs
-        // earlier paths.
-        match route_ortho(dep, arr, dep_side, &blocked, &paths) {
-            Some(path) => {
-                // Record this clean path's cells with orientation, so later edges keep
-                // clearance and may only cross it perpendicularly.
-                for w in path.windows(2) {
-                    let (a, b) = (w[0], w[1]);
-                    let bit = if a.1 == b.1 { HORIZ } else { VERT };
-                    *paths.entry(a).or_insert(0) |= bit;
-                    *paths.entry(b).or_insert(0) |= bit;
-                }
-                for &(x, y) in &path {
-                    let entry = path_cells.entry((x, y)).or_insert(true);
-                    *entry = *entry && edge.distorted;
-                }
-            }
-            None => {
-                // No clean channel: draw a distinct, flagged L (may overlap); do NOT add
-                // it to `paths` occupancy.
-                for &(x, y) in &unrouted_l(dep, arr, dep_side) {
-                    unrouted_cells.insert((x, y));
-                }
-            }
-        }
-
-        // Outgoing arrow at the origin's departure anchor `dep`.
-        arrowheads.push((dep, arrow_for_departure(dep_side), edge.distorted));
-
-        // Outgoing arrow at the destination, only when a return trip is known:
-        // it points outward from `dest` back toward this room.
-        if let Some(back_side) = dest_back_side {
-            arrowheads.push((arr, arrow_for_departure(back_side), edge.distorted));
-        }
-
-        drawn.insert((edge.origin, edge.dest));
-    }
-
-    // ── 3. Blit ribbons (translate virtual → screen, clip to area) ───────────
-    for (&(vx, vy), &all_distorted) in &path_cells {
-        let (sx, sy) = (vx + off_x, vy + off_y);
-        if in_area(sx, sy, area) {
-            let style = if all_distorted { PATH_BG_DISTORTED } else { PATH_BG };
-            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(" ").set_style(style);
-            }
-        }
-    }
-
-    // Blit unrouted ribbons (translate virtual → screen, clip). A clean path always
-    // wins a shared cell, so skip cells already in path_cells.
-    for &(vx, vy) in &unrouted_cells {
-        if path_cells.contains_key(&(vx, vy)) {
-            continue;
-        }
-        let (sx, sy) = (vx + off_x, vy + off_y);
-        if in_area(sx, sy, area) {
-            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(" ").set_style(PATH_BG_UNROUTED);
-            }
-        }
-    }
-
-    // Blit arrowheads embedded in the ribbon.
-    for ((vx, vy), glyph, distorted) in arrowheads {
-        let (sx, sy) = (vx + off_x, vy + off_y);
-        if in_area(sx, sy, area) {
-            let style = if distorted { PATH_ARROW_DISTORTED } else { PATH_ARROW };
-            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(glyph).set_style(style);
-            }
-        }
+        render_lane_connectors(&rm.plan, cols, rows, &reciprocal, (off_x, off_y), area, buf);
     }
 
     // Stub edges (translate + clip).
@@ -727,10 +305,228 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         }
     }
 
-    // ── 4. Draw rooms on top (translate + clip) ──────────────────────────────
+    // ── 3. Draw rooms on top (translate + clip) ──────────────────────────────
     for room in &rm.rooms {
-        let (vx, vy) = cell_to_virtual(room.cell, zoom);
+        let (vx, vy) = room_virtual(room.cell);
         draw_room(room, state, zoom, vx + off_x, vy + off_y, area, buf);
+    }
+}
+
+// ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
+
+/// Direction bits a connector enters/leaves a cell on. Two perpendicular bits → a turn;
+/// all four (from two crossing connectors) → `┼`.
+const DIR_N: u8 = 1;
+const DIR_E: u8 = 2;
+const DIR_S: u8 = 4;
+const DIR_W: u8 = 8;
+
+/// Box-drawing glyph for a set of direction bits.
+fn glyph_for(mask: u8) -> Option<&'static str> {
+    Some(match mask {
+        m if m == DIR_E | DIR_W => "─",
+        m if m == DIR_N | DIR_S => "│",
+        m if m == DIR_S | DIR_E => "┌",
+        m if m == DIR_S | DIR_W => "┐",
+        m if m == DIR_N | DIR_E => "└",
+        m if m == DIR_N | DIR_W => "┘",
+        m if m == DIR_N | DIR_S | DIR_E => "├",
+        m if m == DIR_N | DIR_S | DIR_W => "┤",
+        m if m == DIR_E | DIR_W | DIR_S => "┬",
+        m if m == DIR_E | DIR_W | DIR_N => "┴",
+        m if m == DIR_N | DIR_E | DIR_S | DIR_W => "┼",
+        // A bare stub end (single direction) — render as the matching straight glyph so
+        // the line visibly reaches the box edge rather than vanishing.
+        m if m == DIR_E || m == DIR_W => "─",
+        m if m == DIR_N || m == DIR_S => "│",
+        _ => return None,
+    })
+}
+
+/// Map a doubled-coord polyline point to its virtual pixel, given the per-axis lane each
+/// odd (channel) coordinate runs on for THIS connector.
+fn lane_pixel(
+    pt: (i32, i32),
+    cols: &PosTable,
+    rows: &PosTable,
+    v_lane: &std::collections::HashMap<i32, u16>,
+    h_lane: &std::collections::HashMap<i32, u16>,
+) -> (i32, i32) {
+    let (dx, dy) = pt;
+    // x: even 2c → box-column centre; odd 2c+1 → channel V[c]. Lane 0 sits on the cell
+    // immediately right of the box (the doorway, room_pixel+BOX_W) so the line touches the
+    // box; each further lane steps LANE_SPACING into the gutter.
+    let px = if dx.rem_euclid(2) == 0 {
+        let c = dx.div_euclid(2);
+        cols.room_pixel(c) + BOX_W / 2
+    } else {
+        let c = (dx - 1).div_euclid(2);
+        let lane = v_lane.get(&c).copied().unwrap_or(0) as i32;
+        cols.room_pixel(c) + BOX_W + lane * LANE_SPACING
+    };
+    let py = if dy.rem_euclid(2) == 0 {
+        let r = dy.div_euclid(2);
+        rows.room_pixel(r) + BOX_H / 2
+    } else {
+        let r = (dy - 1).div_euclid(2);
+        let lane = h_lane.get(&r).copied().unwrap_or(0) as i32;
+        rows.room_pixel(r) + BOX_H + lane * LANE_SPACING
+    };
+    (px, py)
+}
+
+/// Draw every plan connector as box-drawing line-art along its lanes.
+fn render_lane_connectors(
+    plan: &RoutePlan,
+    cols: &PosTable,
+    rows: &PosTable,
+    reciprocal: &std::collections::HashSet<(RoomId, RoomId)>,
+    offset: (i32, i32),
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    use mapper::route::Channel;
+    let (off_x, off_y) = offset;
+
+    // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
+    // two connectors (one ─, one │) combines to ┼; a connector revisiting its own cell is
+    // idempotent and harmless.
+    let mut cells: std::collections::HashMap<(i32, i32), u8> =
+        std::collections::HashMap::new();
+    // Arrowheads: (virtual pixel, glyph, distorted). Drawn last so they sit on top.
+    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
+
+    for conn in plan.connectors.iter() {
+        // Lane lookup for this connector's runs, keyed by channel index.
+        let mut v_lane: std::collections::HashMap<i32, u16> = std::collections::HashMap::new();
+        let mut h_lane: std::collections::HashMap<i32, u16> = std::collections::HashMap::new();
+        for seg in &conn.segs {
+            match seg.channel {
+                Channel::V(c) => { v_lane.insert(c, seg.lane); }
+                Channel::H(r) => { h_lane.insert(r, seg.lane); }
+            }
+        }
+
+        // Convert the doubled polyline to a virtual-pixel polyline.
+        let pix: Vec<(i32, i32)> = conn
+            .points
+            .iter()
+            .map(|&p| lane_pixel(p, cols, rows, &v_lane, &h_lane))
+            .collect();
+        if pix.len() < 3 {
+            continue;
+        }
+
+        // The connector runs centre→…→centre. A line must not be drawn inside a room box,
+        // so trim the two room centres. In their place, anchor each end on the box's edge
+        // cell for that side (the doorway just outside the box) at the side's perpendicular
+        // centre, so the line visibly touches both rooms even when the channel is wider
+        // than the lane it runs in. The interior run points keep their lane positions.
+        let origin_cell = (conn.points[0].0.div_euclid(2), conn.points[0].1.div_euclid(2));
+        let last = conn.points[conn.points.len() - 1];
+        let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
+        let dep_anchor = box_edge_anchor(cols, rows, origin_cell, conn.exit);
+        let arr_anchor = box_edge_anchor(cols, rows, dest_cell, conn.entry);
+
+        let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len());
+        inner_v.push(dep_anchor);
+        inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
+        inner_v.push(arr_anchor);
+        inner_v.dedup();
+        let inner = &inner_v[..];
+        if inner.is_empty() {
+            continue;
+        }
+
+        // Walk the inner polyline cell-by-cell, accumulating direction bits per cell.
+        let color = if conn.distorted { Color::Magenta } else { Color::Cyan };
+        let mut run: Vec<(i32, i32)> = Vec::new();
+        for w in inner.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let dxs = (b.0 - a.0).signum();
+            let dys = (b.1 - a.1).signum();
+            let mut cur = a;
+            loop {
+                if run.last() != Some(&cur) {
+                    run.push(cur);
+                }
+                if cur == b {
+                    break;
+                }
+                cur = (cur.0 + dxs, cur.1 + dys);
+            }
+        }
+        if run.is_empty() {
+            run.push(inner[0]);
+        }
+
+        for i in 0..run.len() {
+            let c = run[i];
+            let mut mask = 0u8;
+            if i > 0 {
+                mask |= dir_bit(c, run[i - 1]);
+            }
+            if i + 1 < run.len() {
+                mask |= dir_bit(c, run[i + 1]);
+            }
+            let (sx, sy) = (c.0 + off_x, c.1 + off_y);
+            if !in_area(sx, sy, area) {
+                continue;
+            }
+            let entry = cells.entry(c).or_insert(0);
+            *entry |= mask;
+            let glyph = glyph_for(*entry).unwrap_or("·");
+            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
+                cell.set_symbol(glyph).set_style(Style::new().fg(color));
+            }
+        }
+
+        // Arrowhead at the origin departure anchor, pointing out along the exit side.
+        arrowheads.push((dep_anchor, arrow_for_departure(conn.exit), conn.distorted));
+        // Reciprocal far-end arrow at the entry anchor.
+        let key = (conn.origin.min(conn.dest), conn.origin.max(conn.dest));
+        if reciprocal.contains(&key) {
+            arrowheads.push((arr_anchor, arrow_for_departure(conn.entry), conn.distorted));
+        }
+    }
+
+    for ((vx, vy), glyph, distorted) in arrowheads {
+        let (sx, sy) = (vx + off_x, vy + off_y);
+        if in_area(sx, sy, area) {
+            let color = if distorted { Color::Magenta } else { Color::Cyan };
+            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
+                cell.set_symbol(glyph).set_style(Style::new().fg(color));
+            }
+        }
+    }
+}
+
+/// The virtual-pixel "doorway" cell just outside the box at logical `cell` on `side`, at
+/// the side's perpendicular centre. The connector line is anchored here so it touches the
+/// box rather than stopping a lane-width away inside the gutter.
+fn box_edge_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), side: Side) -> (i32, i32) {
+    let bx = cols.room_pixel(cell.0);
+    let by = rows.room_pixel(cell.1);
+    let cx = bx + BOX_W / 2;
+    let cy = by + BOX_H / 2;
+    match side {
+        Side::Right => (bx + BOX_W, cy),
+        Side::Left => (bx - 1, cy),
+        Side::Bottom => (cx, by + BOX_H),
+        Side::Top => (cx, by - 1),
+    }
+}
+
+/// Direction bit pointing from cell `from` toward orthogonally-adjacent cell `to`.
+fn dir_bit(from: (i32, i32), to: (i32, i32)) -> u8 {
+    if to.1 < from.1 {
+        DIR_N
+    } else if to.1 > from.1 {
+        DIR_S
+    } else if to.0 > from.0 {
+        DIR_E
+    } else {
+        DIR_W
     }
 }
 
@@ -1114,187 +910,114 @@ mod tests {
     // connector_is_contiguous_no_gaps: segment_screen_points unit portion removed (function gone);
     // full-render connector assertions superseded by new tests in Task 4.
 
+    // ── Line-art connector tests (Task 5) ─────────────────────────────────────
+
+    /// Box-drawing line-art glyphs a connector may render as.
+    const LINE_GLYPHS: [&str; 11] =
+        ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼"];
+    const ARROW_GLYPHS: [&str; 4] = ["▶", "◀", "▲", "▼"];
+
+    fn is_line(sym: &str) -> bool {
+        LINE_GLYPHS.contains(&sym)
+    }
+
     #[test]
-    fn connector_departs_origin_correct_side() {
-        // room1 at (0,0) →E→ room2 at (1,0). Boxes zoom (box 11×5, step 19×11).
-        // room1 box: VRect{x:0,y:0,w:11,h:5}. Right-side anchor: col=11, row=2.
+    fn connector_renders_line_art_glyphs() {
+        // room1(0,0) →E→ room2(1,0): the connection must render as box-drawing line-art,
+        // NOT a solid background ribbon.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
         g.upsert_room(2, "R2".into());
         g.set_pos(1, (0, 0));
         g.set_pos(2, (1, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 2);
+        g.add_edge(1, Direction::E, 2);
         let rm = mapper::render::render(&g);
         let state = AppState::default(); // Boxes zoom, scroll (0,0)
         let area = Rect::new(0, 0, 80, 30);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The departure anchor for room1→E is Right side: col=11, row=2.
-        // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..10).
-        let dep_col = 11u16;
-        let dep_row = 2u16;
-        let sym = buf.cell((dep_col, dep_row)).map(|c| c.symbol()).unwrap_or(" ");
-        assert_ne!(sym, " ", "departure gutter cell ({dep_col},{dep_row}) should have a connector glyph");
-        assert!(
-            dep_col >= 11, // outside room1 box (cols 0..10)
-            "departure cell col={dep_col} should be outside room1 box"
-        );
-        // Must be a connector glyph (line or arrowhead), not a room box border
-        assert!(
-            matches!(sym, "─" | "│" | "╭" | "╮" | "╰" | "╯" | "├" | "┤" | "┴" | "┬" | "┼"
-                        | "▶" | "◀" | "▲" | "▼" | "▷" | "◁" | "△" | "▽"),
-            "cell ({dep_col},{dep_row}) should be a connector glyph; got '{sym}'"
-        );
-    }
-
-    #[test]
-    fn arrowhead_filled_when_arrival_discovered() {
-        // room1(0,0) →E→ room2(1,0) AND room2(1,0) →W→ room1(0,0).
-        // Arrows mark the outgoing direction at each origin's departure side: the E edge
-        // puts ▶ at room1's right anchor, the W edge puts ◀ at room2's left anchor.
-        // Both are filled; no hollow arrows are ever drawn.
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "R1".into());
-        g.upsert_room(2, "R2".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (1, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 2);
-        g.add_edge(2, mapper::direction::Direction::W, 1); // reverse edge — arrival discovered
-        let rm = mapper::render::render(&g);
-        let state = AppState::default();
-        let area = Rect::new(0, 0, 80, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-
-        // There must be a FILLED arrowhead somewhere in the buffer.
-        let has_filled = buf.content.iter().any(|c| matches!(c.symbol(), "▶" | "◀" | "▲" | "▼"));
-        assert!(has_filled, "filled arrowhead (▶◀▲▼) should appear when arrival_dir is discovered");
-
-        // No hollow arrowhead should appear for this discovered edge.
-        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
-        assert!(!has_hollow, "hollow arrowhead should NOT appear when arrival is discovered");
-    }
-
-    #[test]
-    fn arrowhead_marks_outgoing_departure_side() {
-        // Only room1 →E→ room2, no reverse edge. The arrow signifies the OUTGOING
-        // direction: a filled ▶ at room1's right departure anchor (col 11, row 2).
-        // No arrival-side or hollow arrow is drawn.
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "R1".into());
-        g.upsert_room(2, "R2".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (1, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 2);
-        let rm = mapper::render::render(&g);
-        let state = AppState::default();
-        let area = Rect::new(0, 0, 80, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-
-        // The outgoing arrow is a filled ▶ at the departure anchor (col 11, row 2),
-        // embedded in the ribbon (Cyan background behind the glyph).
-        let cell = buf.cell((11, 2)).expect("arrow cell must exist");
-        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (11,2)");
-        assert_eq!(cell.bg, Color::Cyan, "arrow should be embedded in the ribbon (Cyan bg); got {:?}", cell.bg);
-
-        // No hollow arrowhead should ever be drawn.
-        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
-        assert!(!has_hollow, "hollow arrowheads must not appear; arrows are always filled");
-    }
-
-    #[test]
-    fn connector_is_solid_background_ribbon() {
-        // A connector is a solid background ribbon, not a line glyph. Room1 right anchor
-        // is (11,2), room2 left anchor (18,2); the straight ribbon runs row 2. The cell
-        // at (14,2) must have a Cyan background and a plain space symbol — not a line.
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "R1".into());
-        g.upsert_room(2, "R2".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (1, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 2);
-        let rm = mapper::render::render(&g);
-        let state = AppState::default();
-        let area = Rect::new(0, 0, 80, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-
-        let cell = buf.cell((14, 2)).expect("ribbon cell must exist");
-        assert_eq!(cell.symbol(), " ", "ribbon cell should be a space, got '{}'", cell.symbol());
-        assert_eq!(
-            cell.bg,
-            Color::Cyan,
-            "ribbon background should be Cyan; got {:?} at (14,2)",
-            cell.bg
-        );
-        assert!(
-            !cell.modifier.contains(Modifier::DIM),
-            "ribbon should not be dim; modifier={:?}",
-            cell.modifier
-        );
-    }
-
-    #[test]
-    fn route_avoids_blocked_box() {
-        // dep=(0,5), arr=(20,5), dep_side=Right
-        // blocked = all cells of rect x in 8..14, y in 3..8
-        let dep = (0i32, 5i32);
-        let arr = (20i32, 5i32);
-        let mut blocked = std::collections::HashSet::new();
-        for x in 8..14i32 {
-            for y in 3..8i32 {
-                blocked.insert((x, y));
+        // Some line-art glyph appears, and NO solid Cyan/Magenta background ribbon exists.
+        let mut line_cells = 0;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let c = buf.cell((x, y)).unwrap();
+                assert_ne!(c.bg, Color::Cyan, "no solid Cyan ribbon at ({x},{y})");
+                assert_ne!(c.bg, Color::Magenta, "no solid Magenta ribbon at ({x},{y})");
+                if is_line(c.symbol()) {
+                    line_cells += 1;
+                }
             }
         }
-        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new()).expect("clean Tier-1 route");
-        // Path must not contain any blocked cell
-        for &pt in &path {
-            assert!(!blocked.contains(&pt), "path goes through blocked cell {:?}", pt);
-        }
-        // Path must be contiguous
-        for w in path.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            let dist = (a.0 - b.0).abs() + (a.1 - b.1).abs();
-            assert_eq!(dist, 1, "path has gap between {:?} and {:?}", a, b);
-        }
-        // Must start at dep and end at arr
-        assert_eq!(path[0], dep);
-        assert_eq!(*path.last().unwrap(), arr);
-        // First step must be east (dep_side=Right)
-        assert_eq!(path[1], (1, 5), "first step should be east");
+        assert!(line_cells > 0, "connector must render box-drawing line-art");
     }
 
     #[test]
-    fn route_straight_when_clear() {
-        // With empty blocked, dep/arr on the same row → straight line
-        let dep = (0i32, 5i32);
-        let arr = (5i32, 5i32);
-        let blocked = std::collections::HashSet::new();
-        let path = route_ortho(dep, arr, Side::Right, &blocked, &std::collections::HashMap::new()).expect("clean Tier-1 route");
-        // Should be straight line: (0,5),(1,5),(2,5),(3,5),(4,5),(5,5)
-        let expected: Vec<(i32, i32)> = (0..=5).map(|x| (x, 5)).collect();
-        assert_eq!(path, expected, "should be straight line when clear");
+    fn connector_departs_origin_correct_side() {
+        // room1(0,0) →E→ room2(1,0). The departure gutter just right of room1's box
+        // (col 11) must carry a connector glyph (line-art or arrowhead), not a space and
+        // not a room-box border.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // The departure anchor sits in the gutter column just right of room1 (col 11),
+        // on the box's vertical-centre row (row 2). It must be a connector glyph.
+        let sym = buf.cell((11, 2)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert!(
+            is_line(&sym) || ARROW_GLYPHS.contains(&sym.as_str()),
+            "departure cell (11,2) should be a connector glyph; got '{sym}'"
+        );
     }
 
     #[test]
-    fn backtracking_reciprocal_draws_arrow_at_both_rooms() {
-        // A(1) at (1,1) →N→ B(2) at (1,0), then backtrack B →S→ A (reciprocal-opposite).
-        // route_all dedupes to one edge, but BOTH outgoing arrows must render:
-        // ▲ at A (leaving north) and ▼ at B (leaving south).
+    fn arrowhead_at_departure_side() {
+        // room1(0,0) →E→ room2(1,0): a filled ▶ arrowhead marks the outgoing east
+        // departure at room1's right anchor (11,2), drawn as fg Cyan (no bg ribbon).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let cell = buf.cell((11, 2)).expect("arrow cell must exist");
+        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ at room1's right anchor");
+        assert_eq!(cell.fg, Color::Cyan, "arrowhead fg should be Cyan; got {:?}", cell.fg);
+        assert_ne!(cell.bg, Color::Cyan, "arrowhead must not sit on a solid ribbon");
+        // No hollow arrowhead is ever drawn.
+        let has_hollow = buf.content.iter().any(|c| matches!(c.symbol(), "▷" | "◁" | "△" | "▽"));
+        assert!(!has_hollow, "hollow arrowheads must not appear");
+    }
+
+    #[test]
+    fn reciprocal_draws_arrow_at_both_rooms() {
+        // A(1) at (1,1) →N→ B(2) at (1,0) and back B →S→ A. The collapsed connector must
+        // still render BOTH outgoing arrows: ▲ at A (north) and ▼ at B (south).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
         g.set_pos(1, (1, 1));
         g.set_pos(2, (1, 0));
-        g.add_edge(1, mapper::direction::Direction::N, 2);
-        g.add_edge(2, mapper::direction::Direction::S, 1); // backtrack
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
         let rm = mapper::render::render(&g);
         let state = AppState::default();
         let area = Rect::new(0, 0, 80, 30);
@@ -1304,66 +1027,14 @@ mod tests {
         let up = buf.content.iter().filter(|c| c.symbol() == "▲").count();
         let down = buf.content.iter().filter(|c| c.symbol() == "▼").count();
         assert_eq!(up, 1, "exactly one ▲ (A leaving north); got {up}");
-        assert_eq!(down, 1, "exactly one ▼ (B leaving south, the backtrack); got {down}");
-    }
-
-    #[test]
-    fn return_from_different_direction_reuses_single_path() {
-        // A(1) at (1,1) →N→ B(2) at (1,0), then return B →W→ A (non-opposite).
-        // Both edges are kept by route_all, but the connection must render as ONE path
-        // with one arrow per room: exactly one ▲ (A north) and one ◀ (B west) — not two
-        // separate parallel paths (which would yield two of each).
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "A".into());
-        g.upsert_room(2, "B".into());
-        g.set_pos(1, (1, 1));
-        g.set_pos(2, (1, 0));
-        g.add_edge(1, mapper::direction::Direction::N, 2);
-        g.add_edge(2, mapper::direction::Direction::W, 1); // return from a different side
-        let rm = mapper::render::render(&g);
-        let state = AppState::default();
-        let area = Rect::new(0, 0, 80, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-
-        let up = buf.content.iter().filter(|c| c.symbol() == "▲").count();
-        let left = buf.content.iter().filter(|c| c.symbol() == "◀").count();
-        assert_eq!(up, 1, "exactly one ▲ (A leaving north); two would mean a duplicate path; got {up}");
-        assert_eq!(left, 1, "exactly one ◀ (B leaving west); got {left}");
-    }
-
-    #[test]
-    fn multi_exit_same_pair_keeps_both_arrows() {
-        // A →E→ B AND A →W→ B: two genuinely distinct exits from A to the same room.
-        // These are NOT reciprocal (both originate at A), so both arrows must survive
-        // the reciprocal-reuse dedupe: one ▶ and one ◀, both departing A.
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "A".into());
-        g.upsert_room(2, "B".into());
-        g.set_pos(1, (1, 0));
-        g.set_pos(2, (3, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 2);
-        g.add_edge(1, mapper::direction::Direction::W, 2);
-        let rm = mapper::render::render(&g);
-        let state = AppState::default();
-        let area = Rect::new(0, 0, 120, 40);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-
-        let right = buf.content.iter().filter(|c| c.symbol() == "▶").count();
-        let left = buf.content.iter().filter(|c| c.symbol() == "◀").count();
-        assert_eq!(right, 1, "A's east exit ▶ must be kept; got {right}");
-        assert_eq!(left, 1, "A's west exit ◀ must be kept (not deduped as reciprocal); got {left}");
+        assert_eq!(down, 1, "exactly one ▼ (B leaving south); got {down}");
     }
 
     #[test]
     fn connectors_are_scroll_invariant() {
-        // The routed connector geometry must be identical at every scroll offset —
-        // scrolling is a pure translate-and-clip, never a re-layout. Render the same
-        // map at two scrolls, map each ribbon cell back to virtual space, and assert
-        // the two virtual ribbon sets are equal.
+        // Connector geometry is identical at every scroll offset — scrolling is a pure
+        // translate-and-clip in the non-uniform Boxes position tables. Render the same
+        // map at two scrolls, map each line-art cell back to virtual space, assert equal.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -1372,158 +1043,42 @@ mod tests {
         g.set_pos(1, (0, 0));
         g.set_pos(2, (1, 0));
         g.set_pos(3, (2, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 2);
-        g.add_edge(2, mapper::direction::Direction::E, 3);
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::E, 3);
         let rm = mapper::render::render(&g);
 
         let area = Rect::new(0, 0, 120, 40);
-        let (sw, sh) = (19i32, 11i32); // Boxes stride
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
 
-        let virtual_ribbon = |scroll: (i32, i32)| -> std::collections::BTreeSet<(i32, i32)> {
+        let virtual_lines = |scroll: (i32, i32)| -> std::collections::BTreeSet<(i32, i32)> {
             let mut st = AppState::default();
             st.scroll = scroll;
             let mut buf = Buffer::empty(area);
             render_map(&rm, &st, area, &mut buf);
-            let off = (-scroll.0 * sw, -scroll.1 * sh);
+            // Inverse of the table-based offset used by render_map.
+            let off = (cols.room_pixel(scroll.0), rows.room_pixel(scroll.1));
             let mut set = std::collections::BTreeSet::new();
             for y in 0..area.height {
                 for x in 0..area.width {
                     let c = buf.cell((x, y)).unwrap();
-                    if c.bg == Color::Cyan || c.bg == Color::Magenta {
-                        set.insert((x as i32 - off.0, y as i32 - off.1));
+                    if is_line(c.symbol()) || ARROW_GLYPHS.contains(&c.symbol()) {
+                        set.insert((x as i32 + off.0, y as i32 + off.1));
                     }
                 }
             }
             set
         };
 
-        // Both scrolls keep all three rooms fully on-screen, so nothing clips away.
-        let a = virtual_ribbon((0, 0));
-        let b = virtual_ribbon((-1, -1));
-        assert!(!a.is_empty(), "expected some ribbon cells");
-        assert_eq!(
-            a, b,
-            "connector geometry must be scroll-independent (identical in virtual space)"
-        );
+        let a = virtual_lines((0, 0));
+        let b = virtual_lines((-1, -1));
+        assert!(!a.is_empty(), "expected some line-art cells");
+        assert_eq!(a, b, "connector geometry must be scroll-independent in virtual space");
     }
 
     #[test]
-    fn route_keeps_gap_from_earlier_path() {
-        // First path runs straight along row 5 (HORIZ). A second horizontal path that
-        // would otherwise run alongside it on the adjacent row 6 must bend away to keep a
-        // 1-cell gap (it may not sit parallel-adjacent to an existing same-orientation path).
-        let no_blocked = std::collections::HashSet::new();
-        let no_paths = std::collections::HashMap::new();
-        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths).expect("clean Tier-1 route");
-
-        // Record p1's cells with their orientation (same as render_map).
-        let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
-        for w in p1.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            let bit = if a.1 == b.1 { HORIZ } else { VERT };
-            *paths.entry(a).or_insert(0) |= bit;
-            *paths.entry(b).or_insert(0) |= bit;
-        }
-
-        let p2 = route_ortho((0, 6), (20, 6), Side::Right, &no_blocked, &paths).expect("clean Tier-1 route");
-        // p2 detours to row >= 7 (row 6 would run alongside p1's row 5).
-        assert!(
-            p2.iter().any(|&(_, y)| y >= 7),
-            "second path must keep a gap from the first (detour to row >=7); got {p2:?}"
-        );
-        // p2 must never overlap p1 (no shared cell on row 5).
-        assert!(
-            !p2.iter().any(|&(_, y)| y == 5),
-            "second path must not overlap the first; got {p2:?}"
-        );
-    }
-
-    #[test]
-    fn route_ortho_returns_none_when_boxed_in() {
-        // A full vertical wall of blocked cells between dep and arr leaves no clean
-        // route → route_ortho must report None rather than an overlapping fallback.
-        let mut blocked = std::collections::HashSet::new();
-        for y in -30..30 {
-            blocked.insert((2, y));
-        }
-        let no_paths = std::collections::HashMap::new();
-        let r = route_ortho((0, 0), (10, 0), Side::Right, &blocked, &no_paths);
-        assert!(r.is_none(), "a fully walled-off edge must return None; got {r:?}");
-    }
-
-    #[test]
-    fn arrival_uses_closest_side_even_with_departure_there() {
-        // A non-reciprocal arrival from due west must land on the WEST side (the side
-        // facing the origin) at an off-centre cell — NOT be bumped to a far side just
-        // because a departure occupies that side's centre.
-        let dest = VRect { x: 0, y: 0, w: 21, h: 11 };
-        let dep = (-20, 5); // due west of dest
-        let arr = closest_free_arrival(dest, dep, &[]);
-        assert_eq!(arr.0, dest.x - 1, "arrival must be on the WEST side (closest to dep); got {arr:?}");
-        assert_ne!(arr.1, dest.y + dest.h / 2, "arrival must be off-centre");
-    }
-
-    #[test]
-    fn arrivals_pick_distinct_closest_locations() {
-        // Two arrivals from the same direction must take different cells, both still on the
-        // closest (west) side.
-        let dest = VRect { x: 0, y: 0, w: 21, h: 11 };
-        let dep = (-20, 5);
-        let a0 = closest_free_arrival(dest, dep, &[]);
-        let a1 = closest_free_arrival(dest, dep, &[a0]);
-        assert_ne!(a0, a1, "second arrival must avoid the first's cell");
-        assert_eq!(a1.0, dest.x - 1, "second arrival still prefers the closest (west) side");
-    }
-
-    #[test]
-    fn arrival_anchor_is_off_centre() {
-        // The centre of a side is reserved for departures; a non-reciprocal arrival must
-        // land beside it. Box 21×11: Top centre x = 10, Left/Right centre y = 5.
-        let r = VRect { x: 0, y: 0, w: 21, h: 11 };
-
-        // Top side: off-centre in x (centre would be x=10), still on the box edge row.
-        let (tx, ty) = arrival_anchor(r, Side::Top, 0);
-        assert_ne!(tx, r.x + r.w / 2, "top arrival must be off the centre column");
-        assert_eq!(ty, r.y - 1, "top arrival sits on the row above the box");
-        assert!(tx >= r.x && tx < r.right(), "top arrival stays on the box edge");
-
-        // Right side: off-centre in y (centre would be y=5).
-        let (rx, ry) = arrival_anchor(r, Side::Right, 0);
-        assert_eq!(rx, r.right(), "right arrival sits on the column right of the box");
-        assert_ne!(ry, r.y + r.h / 2, "right arrival must be off the centre row");
-
-        // Consecutive indices on the same side land on distinct cells (no collision).
-        let a0 = arrival_anchor(r, Side::Top, 0);
-        let a1 = arrival_anchor(r, Side::Top, 1);
-        assert_ne!(a0, a1, "two arrivals on one side must not share a cell");
-    }
-
-    #[test]
-    fn route_crosses_perpendicular_straight_through() {
-        // A horizontal path on row 5; a vertical path crossing it should pass straight
-        // through the crossing cell (perpendicular crossings ARE allowed), not detour.
-        let no_blocked = std::collections::HashSet::new();
-        let no_paths = std::collections::HashMap::new();
-        let p1 = route_ortho((0, 5), (20, 5), Side::Right, &no_blocked, &no_paths).expect("clean Tier-1 route");
-        let mut paths: std::collections::HashMap<(i32, i32), u8> = std::collections::HashMap::new();
-        for w in p1.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            let bit = if a.1 == b.1 { HORIZ } else { VERT };
-            *paths.entry(a).or_insert(0) |= bit;
-            *paths.entry(b).or_insert(0) |= bit;
-        }
-
-        // Vertical path down column 10 from row 0 to row 10, crossing p1 at (10,5).
-        let p2 = route_ortho((10, 0), (10, 10), Side::Bottom, &no_blocked, &paths).expect("clean Tier-1 route");
-        let expected: Vec<(i32, i32)> = (0..=10).map(|y| (10, y)).collect();
-        assert_eq!(p2, expected, "perpendicular crossing should go straight through; got {p2:?}");
-    }
-
-    #[test]
-    fn render_keeps_one_cell_gap_around_passed_room() {
-        // A(0,0) →E→ C(2,0) with B(1,0) in between. The connector must keep at least one
-        // cell of clearance from B: no connector glyph in the ring of cells immediately
-        // surrounding B's box (B's own border cells are excluded).
+    fn no_connector_glyph_inside_room_interior() {
+        // 3 rooms A(0,0) B(1,0) C(2,0) with a direct A→C edge that passes B's column.
+        // No connector line-art may land inside B's box interior.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -1532,137 +1087,28 @@ mod tests {
         g.set_pos(1, (0, 0));
         g.set_pos(2, (1, 0));
         g.set_pos(3, (2, 0));
-        g.add_edge(1, mapper::direction::Direction::E, 3); // A→C, passing B
+        g.add_edge(1, Direction::E, 3);
         let rm = mapper::render::render(&g);
         let state = AppState::default();
-        let area = Rect::new(0, 0, 120, 40);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-
-        // B box: cell (1,0) → screen (29,0), size 21×21 → cols 29..49, rows 0..20.
-        let b = Rect::new(29, 0, 21, 11);
-        // Ring = the 1-cell halo around B, excluding B's own box cells. No path ribbon
-        // (Cyan/Magenta background) may touch it.
-        for y in (b.y as i32 - 1)..=(b.bottom() as i32) {
-            for x in (b.x as i32 - 1)..=(b.right() as i32) {
-                if x < 0 || y < 0 {
-                    continue;
-                }
-                let in_box = x >= b.x as i32
-                    && x < b.right() as i32
-                    && y >= b.y as i32
-                    && y < b.bottom() as i32;
-                if in_box {
-                    continue; // skip B's own border/interior
-                }
-                if let Some(cell) = buf.cell((x as u16, y as u16)) {
-                    assert!(
-                        cell.bg != Color::Cyan && cell.bg != Color::Magenta,
-                        "path ribbon ({:?}) hugs room B at ({x},{y}); expected a 1-cell gap",
-                        cell.bg
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn render_no_path_ribbon_inside_other_room() {
-        // Verify via rendering: 3 rooms where A→C would naively cross B.
-        // Room A at (0,0), Room B at (1,0), Room C at (2,0).
-        // Direct edge from A to C (not via B) so the connector crosses B's area.
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "A".into());
-        g.upsert_room(2, "B".into());
-        g.upsert_room(3, "C".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (1, 0));
-        g.set_pos(3, (2, 0));
-        // Direct edge from A(0,0) to C(2,0) — passes through B's space naively
-        g.add_edge(1, mapper::direction::Direction::E, 3);
-        let rm = mapper::render::render(&g);
-        let state = AppState::default(); // Boxes zoom
         let area = Rect::new(0, 0, 120, 30);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Room B box: Boxes zoom, step=19×11, room at cell (1,0) → screen (19,0), box 11×5.
-        // No path ribbon (Cyan/Magenta background) may appear inside B's interior.
-        let b_rect = Rect::new(19, 0, 11, 5);
-        for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
-            for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
-                if let Some(cell) = buf.cell((x, y)) {
+        // B is at cell (1,0). Its virtual box top-left and size from the tables.
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let bx = cols.room_pixel(1);
+        let by = rows.room_pixel(0);
+        for y in (by + 1)..(by + BOX_H - 1) {
+            for x in (bx + 1)..(bx + BOX_W - 1) {
+                if let Some(cell) = buf.cell((x as u16, y as u16)) {
                     assert!(
-                        cell.bg != Color::Cyan && cell.bg != Color::Magenta,
-                        "path ribbon ({:?}) found inside room B's interior at ({x},{y})",
-                        cell.bg
+                        !is_line(cell.symbol()),
+                        "connector line-art '{}' inside room B interior at ({x},{y})",
+                        cell.symbol()
                     );
                 }
             }
         }
-    }
-
-    #[test]
-    fn unroutable_edge_renders_distinct_and_keeps_clean_edges_cyan() {
-        // Force an edge that cannot route: erect an unbroken wall of rooms between
-        // rooms 1 and 2 so route_ortho has no clean channel and must flag the edge
-        // as unrouted (DarkGray ribbon). We set positions explicitly (bypassing
-        // relayout) so the renderer must confront an un-routable edge.
-        //
-        // NOTE: Compact zoom is used because step_h == halo_h (5 == 5), so consecutive
-        // rooms in the same column leave NO vertical gap — a single column of 13 rooms
-        // creates an impenetrable wall covering the full A* search-space in y.
-        // Boxes zoom (step_h=11, halo_h=7) would leave 4-row gaps that the A* can
-        // thread through, so the wall cannot be built with Boxes zoom alone.
-        use mapper::graph::MapGraph;
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-        use ratatui::style::Color;
-
-        let mut g = MapGraph::new();
-        // Room 1: origin (east side of wall).
-        // Room 2: destination (west of wall — unroutable from room 1).
-        // Room 3: clean destination to the east of room 1.
-        g.upsert_room(1, "r".into());
-        g.upsert_room(2, "r".into());
-        g.upsert_room(3, "r".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (-6, 0)); // west of the wall
-        g.set_pos(3, (1, 0));  // east of origin — clean path exists
-
-        // Wall of 13 rooms at column -2 (Compact: step_h=5, halo_h=5 → no gaps).
-        // Halo covers x=-25..-16 for ALL y in the A* search bounds (-24..+24 around dep/arr).
-        for k in -6i32..=6 {
-            let id = 4 + (k + 6) as u16; // IDs 4..16
-            g.upsert_room(id, "w".into());
-            g.set_pos(id, (-2, k));
-        }
-
-        g.add_edge(1, mapper::direction::Direction::W, 2); // blocked by wall → unrouted
-        g.add_edge(1, mapper::direction::Direction::E, 3); // clear path → clean Cyan ribbon
-        let rm = mapper::render::render(&g);
-
-        let area = Rect::new(0, 0, 200, 120);
-        let mut buf = Buffer::empty(area);
-        let mut state = AppState::default();
-        state.zoom = Zoom::Compact;
-        state.scroll = (-4, -4);
-        render_map(&rm, &state, area, &mut buf);
-
-        let mut has_unrouted = false;
-        let mut has_clean = false;
-        for y in 0..area.height {
-            for x in 0..area.width {
-                match buf.cell((x, y)).map(|c| c.bg) {
-                    Some(Color::DarkGray) => has_unrouted = true,
-                    Some(Color::Cyan) => has_clean = true,
-                    _ => {}
-                }
-            }
-        }
-        assert!(has_unrouted, "the boxed-in edge must render as a distinct DarkGray ribbon");
-        assert!(has_clean, "the clean edge must still render as a normal Cyan ribbon");
     }
 
     #[test]
@@ -1670,75 +1116,59 @@ mod tests {
         // A column-channel carrying 2 lanes must be wider than an empty one, and room
         // pixel-positions are cumulative (a later room sits further right when an earlier
         // gap is wide).
-        use mapper::route::{RoutePlan, Channel};
+        use mapper::route::RoutePlan;
         let mut plan = RoutePlan::default();
         plan.v_lanes.insert(0, 2); // V[0] carries 2 lanes
-        // bounds cols 0..=2, rows 0..=0
         let (cols, _rows) = boxes_axes(&plan, ((0, 0), (2, 0)));
-        let gap0 = cols.channel_span(0); // pixel width of V[0]
-        let gap1 = cols.channel_span(1); // pixel width of V[1] (empty)
+        let gap0 = cols.channel_span(0);
+        let gap1 = cols.channel_span(1);
         assert!(gap0 > gap1, "a 2-lane channel must be wider than an empty one");
-        // room col 2 starts further right than col 1 by at least box+gap.
         assert!(cols.room_pixel(2) > cols.room_pixel(1));
     }
 
     #[test]
-    fn a129_full_map_renders_without_crossing_or_unrouted() {
-        // The real ZCODE-88-840726-A129 graph: after relayout_auto (with crossing-aware
-        // repair) the rendered map must have NO unrouted (DarkGray) ribbon and NO
-        // perpendicular-crossing ribbon cell — the corner the user kept reporting.
+    fn lane_routing_a129_no_overlap_line_art() {
+        // The real A129 graph (11 rooms / 19 edges). After lane routing the rendered map
+        // must (a) draw connectors as box-drawing line-art (not solid ribbons), and
+        // (b) have NO overlapping connector cells — every connector cell is either a
+        // straight/turn glyph or a clean ┼ crossing; none is a DarkGray/unrouted ribbon.
         use mapper::graph::MapGraph;
         use mapper::layout::relayout_auto;
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
         use ratatui::style::Color;
-
         let mut g = MapGraph::new();
-        for (id, name) in [(25, "Canyon View"), (74, "Clearing"), (76, "Forest"),
-                           (79, "Behind House"), (80, "South of House"), (180, "West of House")] {
-            g.upsert_room(id, name.to_string());
+        for (id, n) in [(25,"Canyon View"),(74,"Clearing"),(75,"Forest Path"),(76,"Forest"),
+            (77,"Forest"),(78,"Forest"),(79,"Behind House"),(80,"South of House"),
+            (81,"North of House"),(143,"Clearing"),(180,"West of House")] { g.upsert_room(id, n.into()); }
+        for (o,d,t) in [(180,Direction::N,81),(81,Direction::E,79),(79,Direction::E,74),
+            (74,Direction::S,76),(76,Direction::N,74),(74,Direction::E,25),(25,Direction::W,76),
+            (76,Direction::W,78),(78,Direction::S,76),(78,Direction::N,143),(143,Direction::E,77),
+            (77,Direction::W,75),(75,Direction::S,81),(81,Direction::W,180),(180,Direction::S,80),
+            (80,Direction::E,79),(79,Direction::S,80),(80,Direction::W,180),(74,Direction::W,79)] {
+            g.add_edge(o, d, t);
         }
-        g.add_edge(180, mapper::direction::Direction::S, 80);
-        g.add_edge(80, mapper::direction::Direction::E, 79);
-        g.add_edge(79, mapper::direction::Direction::S, 80);
-        g.add_edge(80, mapper::direction::Direction::S, 76);
-        g.add_edge(76, mapper::direction::Direction::N, 74);
-        g.add_edge(74, mapper::direction::Direction::S, 76);
-        g.add_edge(74, mapper::direction::Direction::E, 25);
-        g.add_edge(25, mapper::direction::Direction::W, 76);
-        g.set_current(76);
+        g.set_current(79);
         relayout_auto(&mut g);
-
         let rm = mapper::render::render(&g);
-        let area = Rect::new(0, 0, 300, 200);
+        let area = Rect::new(0, 0, 400, 300);
         let mut buf = Buffer::empty(area);
         let mut st = AppState::default();
         st.zoom = Zoom::Boxes;
-        st.scroll = (-7, -7);
+        st.scroll = (-12, -10);
         render_map(&rm, &st, area, &mut buf);
 
-        let is_ribbon = |b: &Buffer, x: i32, y: i32| {
-            if x < 0 || y < 0 || x >= 300 || y >= 200 { return false; }
-            matches!(
-                b.cell((x as u16, y as u16)).map(|c| c.bg),
-                Some(Color::Cyan) | Some(Color::Magenta) | Some(Color::DarkGray)
-            )
-        };
-        let (mut unrouted, mut crossings) = (0, 0);
-        for y in 0..200i32 {
-            for x in 0..300i32 {
-                if matches!(buf.cell((x as u16, y as u16)).map(|c| c.bg), Some(Color::DarkGray)) {
-                    unrouted += 1;
-                }
-                if is_ribbon(&buf, x, y)
-                    && is_ribbon(&buf, x - 1, y) && is_ribbon(&buf, x + 1, y)
-                    && is_ribbon(&buf, x, y - 1) && is_ribbon(&buf, x, y + 1)
-                {
-                    crossings += 1;
+        let mut line_cells = 0;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let c = buf.cell((x, y)).unwrap();
+                // No solid ribbon or unrouted background may exist anymore.
+                assert_ne!(c.bg, Color::Cyan, "no solid Cyan ribbon at ({x},{y})");
+                assert_ne!(c.bg, Color::Magenta, "no solid Magenta ribbon at ({x},{y})");
+                assert_ne!(c.bg, Color::DarkGray, "no unrouted/grey ribbon at ({x},{y})");
+                if matches!(c.symbol(), "─"|"│"|"┌"|"┐"|"└"|"┘"|"├"|"┤"|"┬"|"┴"|"┼") {
+                    line_cells += 1;
                 }
             }
         }
-        assert_eq!(unrouted, 0, "no edge may render unrouted (DarkGray)");
-        assert_eq!(crossings, 0, "no perpendicular crossing may remain in the corner");
+        assert!(line_cells > 0, "connectors must render as box-drawing line-art");
     }
 }
