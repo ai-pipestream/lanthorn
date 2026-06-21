@@ -50,7 +50,7 @@ use crate::graph::{MapGraph, RoomId};
 // ── Side ─────────────────────────────────────────────────────────────────────
 
 /// The side of a room cell from which a connector departs or arrives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Side {
     Top,
     Bottom,

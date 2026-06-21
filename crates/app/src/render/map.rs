@@ -94,6 +94,9 @@ fn cell_to_virtual(cell: (i32, i32), zoom: Zoom) -> (i32, i32) {
 
 /// Cells between adjacent lanes in a channel (so lines are visually separated).
 const LANE_SPACING: i32 = 2;
+/// Gap between the box edge (doorway) and lane 0, so channel runs never graze the box edge
+/// where same-side departure/arrival anchors live.
+const LANE_BASE: i32 = 1;
 /// Minimum channel pixel size even when it carries no lanes.
 const MIN_GUTTER: i32 = 2;
 /// Boxes-zoom box size (matches `zoom_box_size(Zoom::Boxes)`), in cells.
@@ -133,7 +136,14 @@ impl PosTable {
 }
 
 fn channel_width(lanes: u16) -> i32 {
-    (lanes as i32 * LANE_SPACING).max(MIN_GUTTER)
+    // Reserve LANE_BASE before lane 0 plus LANE_SPACING per additional lane, so the widest
+    // lane (LANE_BASE + (lanes-1)*LANE_SPACING) stays inside the channel. Empty channels keep
+    // MIN_GUTTER so adjacent boxes never touch.
+    if lanes == 0 {
+        MIN_GUTTER
+    } else {
+        (LANE_BASE + (lanes as i32 - 1) * LANE_SPACING + 1).max(MIN_GUTTER)
+    }
 }
 
 /// Build the (columns, rows) position tables from the plan and the room bounds.
@@ -343,36 +353,162 @@ fn glyph_for(mask: u8) -> Option<&'static str> {
     })
 }
 
-/// Map a doubled-coord polyline point to its virtual pixel, given the per-axis lane each
-/// odd (channel) coordinate runs on for THIS connector.
+/// Resolve the lane a connector point runs on within `channel`, by finding the `LaneSeg`
+/// whose channel AND doubled-coord extent (`start..=end`) contains the point's position
+/// along that channel's free axis. A single connector legitimately has TWO segments in the
+/// same channel on different lanes (one per run), so a per-channel-index lookup is wrong —
+/// it would collapse both runs onto one lane and draw them overlapping.
+fn seg_lane(segs: &[mapper::route::LaneSeg], channel: mapper::route::Channel, along: i32) -> u16 {
+    segs.iter()
+        .find(|s| s.channel == channel && s.start <= along && along <= s.end)
+        .map(|s| s.lane)
+        .unwrap_or(0)
+}
+
+/// Map a doubled-coord polyline point to its virtual pixel, resolving each odd (channel)
+/// coordinate's lane against THIS connector's lane segments by extent.
 fn lane_pixel(
     pt: (i32, i32),
     cols: &PosTable,
     rows: &PosTable,
-    v_lane: &std::collections::HashMap<i32, u16>,
-    h_lane: &std::collections::HashMap<i32, u16>,
+    segs: &[mapper::route::LaneSeg],
 ) -> (i32, i32) {
+    use mapper::route::Channel;
     let (dx, dy) = pt;
-    // x: even 2c → box-column centre; odd 2c+1 → channel V[c]. Lane 0 sits on the cell
-    // immediately right of the box (the doorway, room_pixel+BOX_W) so the line touches the
-    // box; each further lane steps LANE_SPACING into the gutter.
+    // x: even 2c → box-column centre; odd 2c+1 → channel V[c]. Lane 0 sits ONE cell into the
+    // gutter (room_pixel + BOX_W + LANE_BASE), NOT on the box-edge doorway, so a channel run
+    // never grazes the box edge where departure/arrival anchors live (otherwise an arriving
+    // lane-0 line would run right alongside every same-side departure anchor). Each further
+    // lane steps LANE_SPACING deeper. The departure/arrival anchors bridge to lane 0 across
+    // the doorway cell, so lines still visibly touch the box.
     let px = if dx.rem_euclid(2) == 0 {
         let c = dx.div_euclid(2);
         cols.room_pixel(c) + BOX_W / 2
     } else {
         let c = (dx - 1).div_euclid(2);
-        let lane = v_lane.get(&c).copied().unwrap_or(0) as i32;
-        cols.room_pixel(c) + BOX_W + lane * LANE_SPACING
+        // A V(c) run varies along y; pick the segment whose y-extent contains dy.
+        let lane = seg_lane(segs, Channel::V(c), dy) as i32;
+        cols.room_pixel(c) + BOX_W + LANE_BASE + lane * LANE_SPACING
     };
     let py = if dy.rem_euclid(2) == 0 {
         let r = dy.div_euclid(2);
         rows.room_pixel(r) + BOX_H / 2
     } else {
         let r = (dy - 1).div_euclid(2);
-        let lane = h_lane.get(&r).copied().unwrap_or(0) as i32;
-        rows.room_pixel(r) + BOX_H + lane * LANE_SPACING
+        // An H(r) run varies along x; pick the segment whose x-extent contains dx.
+        let lane = seg_lane(segs, Channel::H(r), dx) as i32;
+        rows.room_pixel(r) + BOX_H + LANE_BASE + lane * LANE_SPACING
     };
     (px, py)
+}
+
+/// The cells (in virtual space) one connector writes, each with the direction-bit mask it
+/// contributes there, plus its departure/arrival arrowhead anchors. This is the single
+/// source of truth for connector plotting: the renderer ORs these per-cell masks into the
+/// shared buffer, and tests re-derive per-connector ownership from the same geometry.
+struct ConnectorPlot {
+    cells: Vec<((i32, i32), u8)>,
+    dep_anchor: (i32, i32),
+    arr_anchor: (i32, i32),
+}
+
+/// Compute the virtual cells + per-cell masks a single connector occupies.
+fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: &PosTable) -> Option<ConnectorPlot> {
+    // Convert the doubled polyline to a virtual-pixel polyline, resolving each point's lane
+    // against this connector's segments by channel + extent (a connector may have two runs
+    // in one channel on different lanes).
+    let pix: Vec<(i32, i32)> = conn
+        .points
+        .iter()
+        .map(|&p| lane_pixel(p, cols, rows, &conn.segs))
+        .collect();
+    if pix.len() < 3 {
+        return None;
+    }
+
+    // The connector runs centre→…→centre. A line must not be drawn inside a room box, so
+    // trim the two room centres. In their place, anchor each end on the box's edge cell for
+    // that side (the doorway just outside the box), displaced along the edge by the slot, so
+    // the line visibly touches both rooms even when the channel is wider than the lane it
+    // runs in, and two connectors sharing a side land on distinct cells.
+    let origin_cell = (conn.points[0].0.div_euclid(2), conn.points[0].1.div_euclid(2));
+    let last = conn.points[conn.points.len() - 1];
+    let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
+    let dep_anchor = box_edge_anchor(cols, rows, origin_cell, conn.exit, conn.exit_slot);
+    let arr_anchor = box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot);
+
+    // The anchor may be displaced along the box edge by its slot, so the bridge to the
+    // first/last interior point is built as an orthogonal L: step perpendicular to the side
+    // first (out of the box into the channel), then along the edge to the interior point.
+    let first_interior = pix[1];
+    let last_interior = pix[pix.len() - 2];
+    let dep_turn = bridge_turn(dep_anchor, first_interior, conn.exit);
+    let arr_turn = bridge_turn(arr_anchor, last_interior, conn.entry);
+
+    let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len() + 2);
+    inner_v.push(dep_anchor);
+    if let Some(t) = dep_turn { inner_v.push(t); }
+    inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
+    if let Some(t) = arr_turn { inner_v.push(t); }
+    inner_v.push(arr_anchor);
+    inner_v.dedup();
+    let inner = &inner_v[..];
+    if inner.is_empty() {
+        return None;
+    }
+
+    // Walk the inner polyline cell-by-cell.
+    let mut run: Vec<(i32, i32)> = Vec::new();
+    for w in inner.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        debug_assert!(a.0 == b.0 || a.1 == b.1, "bridge must be orthogonal: {a:?}->{b:?}");
+        let dxs = (b.0 - a.0).signum();
+        let dys = (b.1 - a.1).signum();
+        let mut cur = a;
+        loop {
+            if run.last() != Some(&cur) {
+                run.push(cur);
+            }
+            if cur == b {
+                break;
+            }
+            cur = (cur.0 + dxs, cur.1 + dys);
+        }
+    }
+    if run.is_empty() {
+        run.push(inner[0]);
+    }
+    // Remove out-and-back spurs: a slot-offset anchor whose stub centre sits one cell off the
+    // run's natural direction can leave a 1-cell dead-end (…A,B,A…). Collapse them so the
+    // line is a clean path with no dangling tail that would clip a neighbour.
+    let mut changed = true;
+    while changed && run.len() >= 3 {
+        changed = false;
+        let mut i = 1;
+        while i + 1 < run.len() {
+            if run[i - 1] == run[i + 1] {
+                run.remove(i + 1);
+                run.remove(i);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    let mut cells = Vec::with_capacity(run.len());
+    for i in 0..run.len() {
+        let c = run[i];
+        let mut mask = 0u8;
+        if i > 0 {
+            mask |= dir_bit(c, run[i - 1]);
+        }
+        if i + 1 < run.len() {
+            mask |= dir_bit(c, run[i + 1]);
+        }
+        cells.push((c, mask));
+    }
+    Some(ConnectorPlot { cells, dep_anchor, arr_anchor })
 }
 
 /// Draw every plan connector as box-drawing line-art along its lanes.
@@ -385,7 +521,6 @@ fn render_lane_connectors(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    use mapper::route::Channel;
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -397,84 +532,16 @@ fn render_lane_connectors(
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
 
     for conn in plan.connectors.iter() {
-        // Lane lookup for this connector's runs, keyed by channel index.
-        let mut v_lane: std::collections::HashMap<i32, u16> = std::collections::HashMap::new();
-        let mut h_lane: std::collections::HashMap<i32, u16> = std::collections::HashMap::new();
-        for seg in &conn.segs {
-            match seg.channel {
-                Channel::V(c) => { v_lane.insert(c, seg.lane); }
-                Channel::H(r) => { h_lane.insert(r, seg.lane); }
-            }
-        }
-
-        // Convert the doubled polyline to a virtual-pixel polyline.
-        let pix: Vec<(i32, i32)> = conn
-            .points
-            .iter()
-            .map(|&p| lane_pixel(p, cols, rows, &v_lane, &h_lane))
-            .collect();
-        if pix.len() < 3 {
-            continue;
-        }
-
-        // The connector runs centre→…→centre. A line must not be drawn inside a room box,
-        // so trim the two room centres. In their place, anchor each end on the box's edge
-        // cell for that side (the doorway just outside the box) at the side's perpendicular
-        // centre, so the line visibly touches both rooms even when the channel is wider
-        // than the lane it runs in. The interior run points keep their lane positions.
-        let origin_cell = (conn.points[0].0.div_euclid(2), conn.points[0].1.div_euclid(2));
-        let last = conn.points[conn.points.len() - 1];
-        let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
-        let dep_anchor = box_edge_anchor(cols, rows, origin_cell, conn.exit);
-        let arr_anchor = box_edge_anchor(cols, rows, dest_cell, conn.entry);
-
-        let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len());
-        inner_v.push(dep_anchor);
-        inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
-        inner_v.push(arr_anchor);
-        inner_v.dedup();
-        let inner = &inner_v[..];
-        if inner.is_empty() {
-            continue;
-        }
-
-        // Walk the inner polyline cell-by-cell, accumulating direction bits per cell.
+        let Some(plot) = plot_connector(conn, cols, rows) else { continue };
         let color = if conn.distorted { Color::Magenta } else { Color::Cyan };
-        let mut run: Vec<(i32, i32)> = Vec::new();
-        for w in inner.windows(2) {
-            let (a, b) = (w[0], w[1]);
-            let dxs = (b.0 - a.0).signum();
-            let dys = (b.1 - a.1).signum();
-            let mut cur = a;
-            loop {
-                if run.last() != Some(&cur) {
-                    run.push(cur);
-                }
-                if cur == b {
-                    break;
-                }
-                cur = (cur.0 + dxs, cur.1 + dys);
-            }
-        }
-        if run.is_empty() {
-            run.push(inner[0]);
-        }
 
-        for i in 0..run.len() {
-            let c = run[i];
-            let mut mask = 0u8;
-            if i > 0 {
-                mask |= dir_bit(c, run[i - 1]);
-            }
-            if i + 1 < run.len() {
-                mask |= dir_bit(c, run[i + 1]);
-            }
+        for (c, mask) in &plot.cells {
             let (sx, sy) = (c.0 + off_x, c.1 + off_y);
             if !in_area(sx, sy, area) {
                 continue;
             }
-            let entry = cells.entry(c).or_insert(0);
-            *entry |= mask;
+            let entry = cells.entry(*c).or_insert(0);
+            *entry |= *mask;
             let glyph = glyph_for(*entry).unwrap_or("·");
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(Style::new().fg(color));
@@ -482,11 +549,11 @@ fn render_lane_connectors(
         }
 
         // Arrowhead at the origin departure anchor, pointing out along the exit side.
-        arrowheads.push((dep_anchor, arrow_for_departure(conn.exit), conn.distorted));
+        arrowheads.push((plot.dep_anchor, arrow_for_departure(conn.exit), conn.distorted));
         // Reciprocal far-end arrow at the entry anchor.
         let key = (conn.origin.min(conn.dest), conn.origin.max(conn.dest));
         if reciprocal.contains(&key) {
-            arrowheads.push((arr_anchor, arrow_for_departure(conn.entry), conn.distorted));
+            arrowheads.push((plot.arr_anchor, arrow_for_departure(conn.entry), conn.distorted));
         }
     }
 
@@ -501,19 +568,52 @@ fn render_lane_connectors(
     }
 }
 
-/// The virtual-pixel "doorway" cell just outside the box at logical `cell` on `side`, at
-/// the side's perpendicular centre. The connector line is anchored here so it touches the
-/// box rather than stopping a lane-width away inside the gutter.
-fn box_edge_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), side: Side) -> (i32, i32) {
+/// Orthogonal L turn-point bridging a slot-displaced anchor to its first/last interior
+/// channel point. The stub leaves the box perpendicular to `side` first, then runs along
+/// the edge to meet the interior point — so the two legs are each single-axis. Returns
+/// `None` when anchor and interior already share the perpendicular coordinate (no turn).
+fn bridge_turn(anchor: (i32, i32), interior: (i32, i32), side: Side) -> Option<(i32, i32)> {
+    let turn = match side {
+        // Vertical sides: leave horizontally (to interior.x at anchor.y), then go vertical.
+        Side::Right | Side::Left => (interior.0, anchor.1),
+        // Horizontal sides: leave vertically (to interior.y at anchor.x), then go horizontal.
+        Side::Top | Side::Bottom => (anchor.0, interior.1),
+    };
+    if turn == anchor || turn == interior {
+        None
+    } else {
+        Some(turn)
+    }
+}
+
+/// Map a per-(room, side) slot index to a signed offset ALONG the box edge so multiple
+/// connectors on one side anchor on distinct cells. Slot 0 stays on the side centre;
+/// further slots fan out symmetrically (+1, -1, +2, -2, …), clamped to `max` so anchors
+/// never leave the box edge.
+fn slot_offset(slot: u16, max: i32) -> i32 {
+    let step = ((slot as i32) + 1) / 2;
+    let signed = if slot % 2 == 1 { step } else { -step };
+    signed.clamp(-max, max)
+}
+
+/// The virtual-pixel "doorway" cell just outside the box at logical `cell` on `side`,
+/// displaced ALONG the box edge by this connector's per-(room, side) `slot`. The connector
+/// line is anchored here so it touches the box rather than stopping a lane-width away inside
+/// the gutter, and two connectors sharing a side land on distinct cells.
+fn box_edge_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), side: Side, slot: u16) -> (i32, i32) {
     let bx = cols.room_pixel(cell.0);
     let by = rows.room_pixel(cell.1);
     let cx = bx + BOX_W / 2;
     let cy = by + BOX_H / 2;
+    // Along a vertical side (Left/Right) the edge runs in y; offset rows, clamped so the
+    // anchor stays on the box's height. Along a horizontal side (Top/Bottom) offset cols.
+    let v_max = BOX_H / 2 - 1; // keep off the corners
+    let h_max = BOX_W / 2 - 1;
     match side {
-        Side::Right => (bx + BOX_W, cy),
-        Side::Left => (bx - 1, cy),
-        Side::Bottom => (cx, by + BOX_H),
-        Side::Top => (cx, by - 1),
+        Side::Right => (bx + BOX_W, cy + slot_offset(slot, v_max)),
+        Side::Left => (bx - 1, cy + slot_offset(slot, v_max)),
+        Side::Bottom => (cx + slot_offset(slot, h_max), by + BOX_H),
+        Side::Top => (cx + slot_offset(slot, h_max), by - 1),
     }
 }
 
@@ -1126,15 +1226,9 @@ mod tests {
         assert!(cols.room_pixel(2) > cols.room_pixel(1));
     }
 
-    #[test]
-    fn lane_routing_a129_no_overlap_line_art() {
-        // The real A129 graph (11 rooms / 19 edges). After lane routing the rendered map
-        // must (a) draw connectors as box-drawing line-art (not solid ribbons), and
-        // (b) have NO overlapping connector cells — every connector cell is either a
-        // straight/turn glyph or a clean ┼ crossing; none is a DarkGray/unrouted ribbon.
+    /// Build the real A129 graph (11 rooms / 19 edges) used by the acceptance test.
+    fn a129_graph() -> mapper::graph::MapGraph {
         use mapper::graph::MapGraph;
-        use mapper::layout::relayout_auto;
-        use ratatui::style::Color;
         let mut g = MapGraph::new();
         for (id, n) in [(25,"Canyon View"),(74,"Clearing"),(75,"Forest Path"),(76,"Forest"),
             (77,"Forest"),(78,"Forest"),(79,"Behind House"),(80,"South of House"),
@@ -1147,28 +1241,173 @@ mod tests {
             g.add_edge(o, d, t);
         }
         g.set_current(79);
-        relayout_auto(&mut g);
+        g
+    }
+
+    /// Per-virtual-cell connector ownership: which connector indices wrote each cell and the
+    /// OR of the direction-bit masks they contributed. Re-derives plotting per connector from
+    /// the same `plot_connector` geometry the renderer uses, so a cell shared by ≥2 distinct
+    /// connectors is a genuine overlap unless it is a clean perpendicular `┼`.
+    fn connector_ownership(
+        plan: &mapper::route::RoutePlan,
+        cols: &PosTable,
+        rows: &PosTable,
+    ) -> std::collections::HashMap<(i32, i32), (std::collections::BTreeSet<usize>, u8)> {
+        let mut owners: std::collections::HashMap<(i32, i32), (std::collections::BTreeSet<usize>, u8)> =
+            std::collections::HashMap::new();
+        for (ci, conn) in plan.connectors.iter().enumerate() {
+            if let Some(plot) = plot_connector(conn, cols, rows) {
+                for (c, mask) in &plot.cells {
+                    let e = owners.entry(*c).or_default();
+                    e.0.insert(ci);
+                    e.1 |= *mask;
+                }
+            }
+        }
+        owners
+    }
+
+    /// Assert no virtual cell is written by ≥2 distinct connectors unless the combined mask is
+    /// exactly a clean perpendicular `┼` (all four direction bits). Returns the number of clean
+    /// `┼` crossings seen (so tests can also assert a crossing exists).
+    fn assert_no_overlap(
+        owners: &std::collections::HashMap<(i32, i32), (std::collections::BTreeSet<usize>, u8)>,
+    ) -> usize {
+        let all = DIR_N | DIR_E | DIR_S | DIR_W;
+        let mut crossings = 0;
+        for (cell, (conns, mask)) in owners {
+            if conns.len() >= 2 {
+                assert_eq!(
+                    *mask, all,
+                    "cell {cell:?} shared by connectors {conns:?} is not a clean ┼ crossing \
+                     (mask={mask:#06b}) — connectors overlap or run alongside",
+                );
+                crossings += 1;
+            }
+        }
+        crossings
+    }
+
+    #[test]
+    fn two_connectors_perpendicular_crossing_is_single_cross() {
+        // A vertical connector (1 above 2) and a horizontal connector (3 left of 4) routed so
+        // their long runs cross exactly once. The shared cell must be a single clean ┼.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (2, 0));
+        g.set_pos(2, (2, 2));
+        g.set_pos(3, (0, 1));
+        g.set_pos(4, (4, 1));
+        g.add_edge(1, Direction::S, 2);
+        g.add_edge(3, Direction::E, 4);
         let rm = mapper::render::render(&g);
-        let area = Rect::new(0, 0, 400, 300);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let owners = connector_ownership(&rm.plan, &cols, &rows);
+        let crossings = assert_no_overlap(&owners);
+        assert_eq!(crossings, 1, "the two perpendicular connectors must cross at exactly one ┼");
+
+        // The rendered glyph at the crossing is ┼.
+        let cross_cell = owners.iter().find(|(_, (c, _))| c.len() >= 2).map(|(k, _)| *k).unwrap();
+        let area = Rect::new(0, 0, 160, 80);
         let mut buf = Buffer::empty(area);
         let mut st = AppState::default();
         st.zoom = Zoom::Boxes;
-        st.scroll = (-12, -10);
+        st.scroll = rm.bounds.0;
         render_map(&rm, &st, area, &mut buf);
+        let off = (cols.room_pixel(rm.bounds.0.0), rows.room_pixel(rm.bounds.0.1));
+        let (sx, sy) = (cross_cell.0 - off.0, cross_cell.1 - off.1);
+        assert_eq!(
+            buf.cell((sx as u16, sy as u16)).unwrap().symbol(), "┼",
+            "the crossing cell must render as ┼",
+        );
+    }
 
+    #[test]
+    fn multi_lane_in_one_channel_resolves_per_segment() {
+        // Regression for the CRITICAL bug: a connector with TWO runs in the SAME channel on
+        // DIFFERENT lanes must map each run's points to its OWN lane, resolved by the segment
+        // whose extent contains the point — not by a per-channel-index lookup that overwrites
+        // and collapses both runs onto one lane (which drew two connectors overlapping).
+        use mapper::route::{Channel, LaneSeg};
+        let plan = mapper::route::RoutePlan::default();
+        let (cols, rows) = boxes_axes(&plan, ((0, 0), (1, 0)));
+        // Two V(0) runs at different y-extents on different lanes.
+        let segs = vec![
+            LaneSeg { channel: Channel::V(0), lane: 0, start: 1, end: 3 },
+            LaneSeg { channel: Channel::V(0), lane: 1, start: 5, end: 7 },
+        ];
+        let p_lane0 = lane_pixel((1, 2), &cols, &rows, &segs); // odd x=1 → V(0), y=2 ∈ [1,3]
+        let p_lane1 = lane_pixel((1, 6), &cols, &rows, &segs); // odd x=1 → V(0), y=6 ∈ [5,7]
+        assert_ne!(
+            p_lane0.0, p_lane1.0,
+            "two runs in one channel on different lanes must map to different columns; \
+             a per-channel-index map would collapse them (both {:?})",
+            p_lane0.0,
+        );
+        assert_eq!(p_lane1.0 - p_lane0.0, LANE_SPACING, "lane 1 sits one LANE_SPACING beyond lane 0");
+    }
+
+    #[test]
+    fn lane_routing_a129_no_overlap_line_art() {
+        // The real A129 graph (11 rooms / 19 edges). After lane routing the rendered map must:
+        //  (a) draw connectors as box-drawing line-art (not solid ribbons);
+        //  (b) have NO cross-connector overlap: any cell written by ≥2 distinct connectors must
+        //      be a clean perpendicular ┼ (not a parallel run, T-stomp, or arrow stomp);
+        //  (c) have NO connector line-art inside ANY room's interior.
+        use mapper::layout::relayout_auto;
+        use ratatui::style::Color;
+        let mut g = a129_graph();
+        relayout_auto(&mut g);
+        let rm = mapper::render::render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+
+        // (b) Cross-connector overlap check in virtual space (scroll-independent).
+        let owners = connector_ownership(&rm.plan, &cols, &rows);
+        assert_no_overlap(&owners);
+
+        // Render the whole map with no clipping, sized to the table extent.
+        let total_w = (cols.room_pixel(rm.bounds.1.0 + 1) - cols.room_pixel(rm.bounds.0.0) + 20).max(1);
+        let total_h = (rows.room_pixel(rm.bounds.1.1 + 1) - rows.room_pixel(rm.bounds.0.1) + 10).max(1);
+        let area = Rect::new(0, 0, total_w as u16, total_h as u16);
+        let mut buf = Buffer::empty(area);
+        let mut st = AppState::default();
+        st.zoom = Zoom::Boxes;
+        st.scroll = rm.bounds.0;
+        render_map(&rm, &st, area, &mut buf);
+        let off = (cols.room_pixel(rm.bounds.0.0), rows.room_pixel(rm.bounds.0.1));
+
+        // (a) line-art exists and no ribbons.
         let mut line_cells = 0;
         for y in 0..area.height {
             for x in 0..area.width {
                 let c = buf.cell((x, y)).unwrap();
-                // No solid ribbon or unrouted background may exist anymore.
                 assert_ne!(c.bg, Color::Cyan, "no solid Cyan ribbon at ({x},{y})");
                 assert_ne!(c.bg, Color::Magenta, "no solid Magenta ribbon at ({x},{y})");
                 assert_ne!(c.bg, Color::DarkGray, "no unrouted/grey ribbon at ({x},{y})");
-                if matches!(c.symbol(), "─"|"│"|"┌"|"┐"|"└"|"┘"|"├"|"┤"|"┬"|"┴"|"┼") {
+                if is_line(c.symbol()) {
                     line_cells += 1;
                 }
             }
         }
         assert!(line_cells > 0, "connectors must render as box-drawing line-art");
+
+        // (c) No connector line-art inside any room's interior rectangle.
+        for room in &rm.rooms {
+            let bx = cols.room_pixel(room.cell.0) - off.0;
+            let by = rows.room_pixel(room.cell.1) - off.1;
+            for vy in (by + 1)..(by + BOX_H - 1) {
+                for vx in (bx + 1)..(bx + BOX_W - 1) {
+                    if vx < 0 || vy < 0 { continue; }
+                    if let Some(cell) = buf.cell((vx as u16, vy as u16)) {
+                        assert!(
+                            !is_line(cell.symbol()),
+                            "connector line-art '{}' inside room {} interior at ({vx},{vy})",
+                            cell.symbol(), room.id,
+                        );
+                    }
+                }
+            }
+        }
     }
 }

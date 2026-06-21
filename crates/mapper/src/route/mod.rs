@@ -28,6 +28,13 @@ pub struct RoutedConnector {
     pub entry: Side,
     pub points: Vec<(i32, i32)>, // doubled-coord polyline, centre→…→centre
     pub segs: Vec<LaneSeg>,      // laned long-runs (filled by lane assignment)
+    /// Slot index of this connector's exit anchor among all connectors sharing the
+    /// origin room's exit side (0,1,2,…). Used by the renderer to offset the departure
+    /// anchor along the box edge so two connectors on one side don't collide.
+    pub exit_slot: u16,
+    /// Slot index of this connector's entry anchor among all connectors sharing the
+    /// destination room's entry side.
+    pub entry_slot: u16,
 }
 
 /// The logical route plan: connectors plus per-channel lane counts.
@@ -83,6 +90,13 @@ fn build_points(a_cell: (i32, i32), exit: Side, b_cell: (i32, i32), entry: Side)
     let cb = cell_to_doubled(b_cell);
     let ea = exit_point(a_cell, exit);
     let eb = exit_point(b_cell, entry);
+    // Adjacent facing rooms: the exit stub and entry stub are the SAME lattice cell
+    // (the shared doorway between the two boxes). Route straight through it with no
+    // lattice dip — there is no channel run, hence no lane. Dipping into the channel
+    // and back to the same point would draw a dangling out-and-back tail.
+    if ea == eb {
+        return vec![ca, ea, cb];
+    }
     let ga = snap_to_lattice(ea, cb); // first all-odd point
     let gb = snap_to_lattice(eb, ca); // last all-odd point
     // L on the gap lattice: ga → corner(gb.x, ga.y) → gb (horizontal then vertical).
@@ -94,7 +108,27 @@ fn build_points(a_cell: (i32, i32), exit: Side, b_cell: (i32, i32), entry: Side)
     pts.push(cb);
     // Drop consecutive duplicates.
     pts.dedup();
+    // Merge collinear consecutive points: a degenerate L (zero-length leg) leaves three
+    // collinear points, which would split one straight channel run into two windows and
+    // hence two LaneSegs that could be assigned different lanes — drawing the single line
+    // as a diagonal. Collapse them so each straight run is one segment.
+    merge_collinear(&mut pts);
     pts
+}
+
+/// Remove interior points that lie on the straight line between their neighbours (same x
+/// or same y on both sides), so each maximal straight run is a single polyline segment.
+fn merge_collinear(pts: &mut Vec<(i32, i32)>) {
+    let mut i = 1;
+    while i + 1 < pts.len() {
+        let (a, b, c) = (pts[i - 1], pts[i], pts[i + 1]);
+        let collinear = (a.0 == b.0 && b.0 == c.0) || (a.1 == b.1 && b.1 == c.1);
+        if collinear {
+            pts.remove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Route every drawn (compass) edge into a connector polyline. Reciprocal pairs collapse
@@ -122,6 +156,8 @@ pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
             entry,
             points: build_points(a, exit, b, entry),
             segs: Vec::new(),
+            exit_slot: 0,
+            entry_slot: 0,
         });
     }
     out
@@ -178,9 +214,41 @@ fn assign_lanes(
     (lane_of, counts)
 }
 
+/// Assign per-(room, side) slot indices to every connector endpoint so that two
+/// connectors sharing one room side (e.g. an arrival and a departure, or two departures)
+/// anchor on distinct cells along that side instead of colliding on the side centre.
+///
+/// Each connector has an exit endpoint at `(origin, exit)` and an entry endpoint at
+/// `(dest, entry)`. Endpoints are grouped by `(room, side)` and assigned 0,1,2,… in a
+/// deterministic order (by room, side, then connector index) so rendering is stable.
+fn assign_side_slots(connectors: &mut [RoutedConnector]) {
+    // Collect every endpoint as (room, side, is_exit, connector index).
+    let mut endpoints: Vec<(RoomId, Side, bool, usize)> = Vec::new();
+    for (ci, c) in connectors.iter().enumerate() {
+        endpoints.push((c.origin, c.exit, true, ci));
+        endpoints.push((c.dest, c.entry, false, ci));
+    }
+    // Group by (room, side); assign slots in connector-index order within each group.
+    let mut by_side: BTreeMap<(RoomId, Side), Vec<(bool, usize)>> = BTreeMap::new();
+    for (room, side, is_exit, ci) in endpoints {
+        by_side.entry((room, side)).or_default().push((is_exit, ci));
+    }
+    for (_key, mut members) in by_side {
+        members.sort_by_key(|&(is_exit, ci)| (ci, is_exit));
+        for (slot, (is_exit, ci)) in members.into_iter().enumerate() {
+            if is_exit {
+                connectors[ci].exit_slot = slot as u16;
+            } else {
+                connectors[ci].entry_slot = slot as u16;
+            }
+        }
+    }
+}
+
 /// Full logical route: topology + lane assignment.
 pub fn route_lanes(graph: &MapGraph) -> RoutePlan {
     let mut connectors = route_topology(graph);
+    assign_side_slots(&mut connectors);
 
     // Flatten every connector's long runs into a global list with stable ids.
     let mut runs: Vec<(usize, Channel, i32, i32)> = Vec::new();
@@ -359,6 +427,60 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_facing_rooms_route_straight_no_dip() {
+        // A(0,0) -E-> B(1,0): the two boxes are adjacent and facing, so the exit stub and
+        // entry stub are the SAME shared-doorway cell. The route must go straight through it
+        // (ca → ea → cb) with NO lattice dip — no out-and-back tail, and no channel run/lane.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let plan = route_lanes(&g);
+        assert_eq!(plan.connectors.len(), 1);
+        let c = &plan.connectors[0];
+        assert_eq!(c.points, vec![(0, 0), (1, 0), (2, 0)], "straight ca→ea→cb, no dip");
+        assert!(c.segs.is_empty(), "an adjacent straight route needs no laned run; got {:?}", c.segs);
+        // No cell is visited twice (no out-and-back).
+        let cells = trace_cells(&c.points);
+        let unique: std::collections::BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), unique.len(), "route must not revisit any cell");
+    }
+
+    #[test]
+    fn degenerate_l_is_merged_to_single_run() {
+        // A connector whose L has a zero-length leg leaves three collinear points; merge_collinear
+        // collapses them so a straight channel run is ONE segment (not two on possibly different
+        // lanes — the cause of a line rendering as a diagonal).
+        let mut pts = vec![(0, 0), (1, 0), (1, 1), (1, 2), (1, 3), (2, 3)];
+        merge_collinear(&mut pts);
+        assert_eq!(pts, vec![(0, 0), (1, 0), (1, 3), (2, 3)], "collinear midpoints removed");
+    }
+
+    #[test]
+    fn same_side_endpoints_get_distinct_slots() {
+        // Room 1 has TWO endpoints on its Right side: a departure (1 -E-> 2) and an arrival
+        // (3 -W-> 1, entering 1 from the right). They must receive distinct slot indices so
+        // the renderer can offset their anchors onto separate cells along that side.
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0));
+        g.set_pos(3, (2, 1));
+        g.add_edge(1, Direction::E, 2); // exits room 1 on its Right
+        g.add_edge(3, Direction::W, 1); // enters room 1 from the right (entry Right on room 1)
+        let plan = route_lanes(&g);
+        let mut slots = Vec::new();
+        for c in &plan.connectors {
+            if c.origin == 1 && c.exit == Side::Right { slots.push(c.exit_slot); }
+            if c.dest == 1 && c.entry == Side::Right { slots.push(c.entry_slot); }
+        }
+        assert_eq!(slots.len(), 2, "two endpoints on room 1's Right side; got {slots:?}");
+        assert_ne!(slots[0], slots[1], "same-side endpoints must get distinct slots");
+    }
+
+    #[test]
     fn reciprocal_pair_collapses_to_one_connector() {
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -381,3 +503,4 @@ mod tests {
         assert!(route_topology(&g).is_empty(), "non-compass edges are not routed");
     }
 }
+
