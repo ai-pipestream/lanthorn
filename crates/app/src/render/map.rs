@@ -1611,4 +1611,64 @@ mod tests {
         assert!(has_unrouted, "the boxed-in edge must render as a distinct DarkGray ribbon");
         assert!(has_clean, "the clean edge must still render as a normal Cyan ribbon");
     }
+
+    #[test]
+    fn a129_full_map_renders_without_crossing_or_unrouted() {
+        // The real ZCODE-88-840726-A129 graph: after relayout_auto (with crossing-aware
+        // repair) the rendered map must have NO unrouted (DarkGray) ribbon and NO
+        // perpendicular-crossing ribbon cell — the corner the user kept reporting.
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::Color;
+
+        let mut g = MapGraph::new();
+        for (id, name) in [(25, "Canyon View"), (74, "Clearing"), (76, "Forest"),
+                           (79, "Behind House"), (80, "South of House"), (180, "West of House")] {
+            g.upsert_room(id, name.to_string());
+        }
+        g.add_edge(180, mapper::direction::Direction::S, 80);
+        g.add_edge(80, mapper::direction::Direction::E, 79);
+        g.add_edge(79, mapper::direction::Direction::S, 80);
+        g.add_edge(80, mapper::direction::Direction::S, 76);
+        g.add_edge(76, mapper::direction::Direction::N, 74);
+        g.add_edge(74, mapper::direction::Direction::S, 76);
+        g.add_edge(74, mapper::direction::Direction::E, 25);
+        g.add_edge(25, mapper::direction::Direction::W, 76);
+        g.set_current(76);
+        relayout_auto(&mut g);
+
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 300, 200);
+        let mut buf = Buffer::empty(area);
+        let mut st = AppState::default();
+        st.zoom = Zoom::Boxes;
+        st.scroll = (-7, -7);
+        render_map(&rm, &st, area, &mut buf);
+
+        let is_ribbon = |b: &Buffer, x: i32, y: i32| {
+            if x < 0 || y < 0 || x >= 300 || y >= 200 { return false; }
+            matches!(
+                b.cell((x as u16, y as u16)).map(|c| c.bg),
+                Some(Color::Cyan) | Some(Color::Magenta) | Some(Color::DarkGray)
+            )
+        };
+        let (mut unrouted, mut crossings) = (0, 0);
+        for y in 0..200i32 {
+            for x in 0..300i32 {
+                if matches!(buf.cell((x as u16, y as u16)).map(|c| c.bg), Some(Color::DarkGray)) {
+                    unrouted += 1;
+                }
+                if is_ribbon(&buf, x, y)
+                    && is_ribbon(&buf, x - 1, y) && is_ribbon(&buf, x + 1, y)
+                    && is_ribbon(&buf, x, y - 1) && is_ribbon(&buf, x, y + 1)
+                {
+                    crossings += 1;
+                }
+            }
+        }
+        assert_eq!(unrouted, 0, "no edge may render unrouted (DarkGray)");
+        assert_eq!(crossings, 0, "no perpendicular crossing may remain in the corner");
+    }
 }
