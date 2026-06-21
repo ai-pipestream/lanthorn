@@ -6,9 +6,9 @@
 //!   2. an EDGE list (directed `origin DIR dest`, marked `distorted` when the
 //!      layout could not satisfy the compass direction),
 //!   3. an ASCII rendering of the actual map — produced by rendering the real
-//!      `render_map` into an off-screen buffer at Boxes zoom and serializing the
-//!      colored ribbons back into `─│┼` line-art — so it faithfully shows the
-//!      routing (clearances, perpendicular crossings, overlaps) the TUI draws.
+//!      `render_map` into an off-screen buffer at Boxes zoom and copying each
+//!      cell's symbol directly (blank cells become spaces) — so it faithfully
+//!      shows the routing (clearances, crossings) the TUI draws as box-drawing line-art.
 //!
 //! Lines starting with `#` are comments: the file is meant to be annotated (mark
 //! which room ids look wrong) and handed back for analysis.
@@ -47,7 +47,6 @@ fn dir_str(d: Direction) -> &'static str {
         Direction::Unknown => "?",
     }
 }
-
 
 /// Render the map to a line-art ASCII string (rooms as boxes, connectors as
 /// `─│┼` lines, exits as arrowheads).
