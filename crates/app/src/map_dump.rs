@@ -25,8 +25,8 @@ use crate::render::map::render_map;
 use crate::state::{AppState, Zoom};
 
 /// Boxes-zoom stride (must match `Zoom::Boxes.steps()`); used to size the dump buffer.
-const STEP_W: i32 = 29;
-const STEP_H: i32 = 17;
+const STEP_W: i32 = 19;
+const STEP_H: i32 = 11;
 /// Max dump buffer dimension (cells) to bound memory on very large maps.
 const MAX_DIM: i32 = 4000;
 
@@ -67,14 +67,26 @@ fn mask_glyph(mask: u8) -> char {
     }
 }
 
-/// True if `(x, y)` in `buf` is a connector cell (ribbon background — also covers
-/// embedded arrowheads, which carry the same background).
+/// True if `(x, y)` in `buf` is a cleanly-routed connector cell (Cyan/Magenta ribbon
+/// background — also covers embedded arrowheads, which carry the same background).
 fn is_path(buf: &Buffer, x: i32, y: i32, area: Rect) -> bool {
     if x < 0 || y < 0 || x >= area.width as i32 || y >= area.height as i32 {
         return false;
     }
     buf.cell((x as u16, y as u16))
         .map(|c| c.bg == Color::Cyan || c.bg == Color::Magenta)
+        .unwrap_or(false)
+}
+
+/// True if `(x, y)` is an UNROUTED connector cell (DarkGray ribbon — an edge that had
+/// no clean route). These render as a distinct `▒` trail so they're visible and
+/// annotatable instead of silently missing from the dump.
+fn is_unrouted(buf: &Buffer, x: i32, y: i32, area: Rect) -> bool {
+    if x < 0 || y < 0 || x >= area.width as i32 || y >= area.height as i32 {
+        return false;
+    }
+    buf.cell((x as u16, y as u16))
+        .map(|c| c.bg == Color::DarkGray)
         .unwrap_or(false)
 }
 
@@ -119,6 +131,8 @@ fn ascii_map(graph: &MapGraph) -> String {
                 if is_path(&buf, x, y + 1, area) { mask |= 4; }
                 if is_path(&buf, x - 1, y, area) { mask |= 8; }
                 line.push(mask_glyph(mask));
+            } else if is_unrouted(&buf, x, y, area) {
+                line.push('▒'); // unrouted edge (shown grey in the app)
             } else {
                 line.push(' ');
             }
@@ -170,7 +184,7 @@ pub fn render_dump(graph: &MapGraph) -> String {
         out.push_str(&format!("EDGE {} {} {}{}\n", c.origin, dir_str(c.dir), c.dest, dist));
     }
 
-    out.push_str("#\n# === MAP (#id = room, lines = connectors, ▶◀▲▼ = exits) ===\n");
+    out.push_str("#\n# === MAP (#id = room, lines = connectors, ▶◀▲▼ = exits, ▒ = unrouted) ===\n");
     out.push_str(&ascii_map(graph));
     out.push_str("\n#\n# Annotate problems below — lines starting with # are comments:\n#\n");
 
@@ -221,5 +235,20 @@ mod tests {
         let dump = render_dump(&g);
         assert!(dump.contains("# babelmap map dump"));
         assert!(dump.contains("(empty map)"));
+    }
+
+    #[test]
+    fn unrouted_cell_serializes_to_block_glyph() {
+        // An unrouted edge renders as a DarkGray ribbon in the app; the dump must show it
+        // as `▒` (not blank), so it isn't silently missing. `is_path` (clean) excludes it.
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((1, 0)).unwrap().set_bg(Color::DarkGray);
+        assert!(is_unrouted(&buf, 1, 0, area), "DarkGray cell is unrouted");
+        assert!(!is_path(&buf, 1, 0, area), "DarkGray is not a clean (Cyan/Magenta) path");
+        // The MAP legend advertises the glyph.
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        assert!(render_dump(&m.graph).contains("▒ = unrouted"), "legend must document ▒");
     }
 }

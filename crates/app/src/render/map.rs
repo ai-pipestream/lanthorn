@@ -47,15 +47,15 @@ fn zoom_steps(zoom: Zoom) -> (i32, i32) {
 ///
 /// | Zoom    | step  | box   | gutter (right / bottom) |
 /// |---------|-------|-------|-------------------------|
-/// | Boxes   | 29×17 | 21×11 | 8 cols / 6 rows         |
+/// | Boxes   | 19×11 | 11×5  | 8 cols / 6 rows         |
 /// | Compact | 12×5  | 8×3   | 4 cols / 2 rows         |
 /// | Overview| 2×2   | 1×1   | — (single glyph)        |
 ///
-/// The 21×11 box (both odd) is ~2:1 width:height so it reads as square given the
+/// The 11×5 box (both odd) is ~2:1 width:height so it reads as square given the
 /// terminal's ~1:2 cell aspect, and odd dims centre the side anchors on the box.
 fn zoom_box_size(zoom: Zoom) -> (u16, u16) {
     match zoom {
-        Zoom::Boxes => (21, 11),
+        Zoom::Boxes => (11, 5),
         Zoom::Compact => (8, 3),
         Zoom::Overview => (1, 1),
     }
@@ -779,14 +779,15 @@ fn draw_compact_room(
     put_char(buf, sx + bw - 1, sy + bh - 1, br, style, area);
 }
 
-/// Draw a boxes (18×6 step) room: bordered box 14 wide × 4 tall.
+/// Draw a boxes (19×11 step) room: bordered box 11 wide × 5 tall.
 ///
-/// Layout (14 cols × 4 rows, within an 18×6 step):
-///   Row 0: ╭────────────╮  (or ┏━━━━━━━━━━━━┓ for current room)
-///   Row 1: │label......●│  (label up to 12 chars, ● if notes)
-///   Row 2: │            │
-///   Row 3: ╰────────────╯
-///   Gutter: cols 14-17 (right), rows 4-5 (bottom)
+/// Layout (11 cols × 5 rows, within a 19×11 step):
+///   Row 0: ╭─────────╮  (or ┏━━━━━━━━━┓ for current room)
+///   Row 1: │label...●│  (label up to 9 chars, ● if notes)
+///   Row 2: │#id      │  (unique room id)
+///   Row 3: │         │
+///   Row 4: ╰─────────╯
+///   Gutter: cols 11-18 (right), rows 5-10 (bottom)
 ///
 /// Current room: heavy border (┏ ┓ ┗ ┛ ━ ┃) with REVERSED style.
 /// Selected room: yellow style (SELECTED_STYLE).
@@ -799,7 +800,7 @@ fn draw_box_room(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let (w, h) = zoom_box_size(Zoom::Boxes); // (14, 4)
+    let (w, h) = zoom_box_size(Zoom::Boxes); // (11, 5)
     let (w, h) = (w as i32, h as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
@@ -874,19 +875,19 @@ mod tests {
         let on = cell_to_screen((0, 0), Zoom::Boxes, (0, 0), area);
         assert_eq!(on, Some((0, 0)));
 
-        // Cell (1,0) at Boxes → x = 0 + (1-0)*29 = 29
+        // Cell (1,0) at Boxes → x = 0 + (1-0)*19 = 19
         let right = cell_to_screen((1, 0), Zoom::Boxes, (0, 0), area);
-        assert_eq!(right, Some((29, 0)));
+        assert_eq!(right, Some((19, 0)));
 
-        // Cell (0,1) at Boxes → y = 0 + (1-0)*17 = 17
+        // Cell (0,1) at Boxes → y = 0 + (1-0)*11 = 11
         let down = cell_to_screen((0, 1), Zoom::Boxes, (0, 0), area);
-        assert_eq!(down, Some((0, 17)));
+        assert_eq!(down, Some((0, 11)));
 
         // Far off-area cell.
         let off = cell_to_screen((1000, 1000), Zoom::Boxes, (0, 0), area);
         assert!(off.is_none());
 
-        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*29 = -29 → None.
+        // Scroll pushes cell off-screen: scroll=(1,0) so cell (0,0) → x = 0+(0-1)*19 = -19 → None.
         let scrolled_off = cell_to_screen((0, 0), Zoom::Boxes, (1, 0), area);
         assert!(scrolled_off.is_none());
 
@@ -1068,8 +1069,8 @@ mod tests {
 
     #[test]
     fn connector_departs_origin_correct_side() {
-        // room1 at (0,0) →E→ room2 at (1,0). Boxes zoom (box 21×21, step 29×29).
-        // room1 box: VRect{x:0,y:0,w:21,h:21}. Right-side anchor: col=21, row=10.
+        // room1 at (0,0) →E→ room2 at (1,0). Boxes zoom (box 11×5, step 19×11).
+        // room1 box: VRect{x:0,y:0,w:11,h:5}. Right-side anchor: col=11, row=2.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -1083,14 +1084,14 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The departure anchor for room1→E is Right side: col=21, row=10.
-        // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..20).
-        let dep_col = 21u16;
-        let dep_row = 5u16;
+        // The departure anchor for room1→E is Right side: col=11, row=2.
+        // It must NOT be a space and NOT have a room box glyph from room1 (room1 cols 0..10).
+        let dep_col = 11u16;
+        let dep_row = 2u16;
         let sym = buf.cell((dep_col, dep_row)).map(|c| c.symbol()).unwrap_or(" ");
         assert_ne!(sym, " ", "departure gutter cell ({dep_col},{dep_row}) should have a connector glyph");
         assert!(
-            dep_col >= 21, // outside room1 box (cols 0..20)
+            dep_col >= 11, // outside room1 box (cols 0..10)
             "departure cell col={dep_col} should be outside room1 box"
         );
         // Must be a connector glyph (line or arrowhead), not a room box border
@@ -1133,7 +1134,7 @@ mod tests {
     #[test]
     fn arrowhead_marks_outgoing_departure_side() {
         // Only room1 →E→ room2, no reverse edge. The arrow signifies the OUTGOING
-        // direction: a filled ▶ at room1's right departure anchor (col 14, row 2).
+        // direction: a filled ▶ at room1's right departure anchor (col 11, row 2).
         // No arrival-side or hollow arrow is drawn.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
@@ -1148,10 +1149,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The outgoing arrow is a filled ▶ at the departure anchor (col 21, row 10),
+        // The outgoing arrow is a filled ▶ at the departure anchor (col 11, row 2),
         // embedded in the ribbon (Cyan background behind the glyph).
-        let cell = buf.cell((21, 5)).expect("arrow cell must exist");
-        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (21,5)");
+        let cell = buf.cell((11, 2)).expect("arrow cell must exist");
+        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ should be at room1's right anchor (11,2)");
         assert_eq!(cell.bg, Color::Cyan, "arrow should be embedded in the ribbon (Cyan bg); got {:?}", cell.bg);
 
         // No hollow arrowhead should ever be drawn.
@@ -1162,8 +1163,8 @@ mod tests {
     #[test]
     fn connector_is_solid_background_ribbon() {
         // A connector is a solid background ribbon, not a line glyph. Room1 right anchor
-        // is (21,10), room2 left anchor (28,10); the straight ribbon runs row 10. The cell
-        // at (24,10) must have a Cyan background and a plain space symbol — not a line.
+        // is (11,2), room2 left anchor (18,2); the straight ribbon runs row 2. The cell
+        // at (14,2) must have a Cyan background and a plain space symbol — not a line.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -1177,12 +1178,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        let cell = buf.cell((24, 5)).expect("ribbon cell must exist");
+        let cell = buf.cell((14, 2)).expect("ribbon cell must exist");
         assert_eq!(cell.symbol(), " ", "ribbon cell should be a space, got '{}'", cell.symbol());
         assert_eq!(
             cell.bg,
             Color::Cyan,
-            "ribbon background should be Cyan; got {:?} at (24,5)",
+            "ribbon background should be Cyan; got {:?} at (14,2)",
             cell.bg
         );
         assert!(
@@ -1329,7 +1330,7 @@ mod tests {
         let rm = mapper::render::render(&g);
 
         let area = Rect::new(0, 0, 120, 40);
-        let (sw, sh) = (29i32, 17i32); // Boxes stride
+        let (sw, sh) = (19i32, 11i32); // Boxes stride
 
         let virtual_ribbon = |scroll: (i32, i32)| -> std::collections::BTreeSet<(i32, i32)> {
             let mut st = AppState::default();
@@ -1539,9 +1540,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // Room B box: Boxes zoom, step=29×29, room at cell (1,0) → screen (29,0), box 21×21.
+        // Room B box: Boxes zoom, step=19×11, room at cell (1,0) → screen (19,0), box 11×5.
         // No path ribbon (Cyan/Magenta background) may appear inside B's interior.
-        let b_rect = Rect::new(29, 0, 21, 11);
+        let b_rect = Rect::new(19, 0, 11, 5);
         for y in (b_rect.y + 1)..(b_rect.y + b_rect.height - 1) {
             for x in (b_rect.x + 1)..(b_rect.x + b_rect.width - 1) {
                 if let Some(cell) = buf.cell((x, y)) {
@@ -1565,7 +1566,7 @@ mod tests {
         // NOTE: Compact zoom is used because step_h == halo_h (5 == 5), so consecutive
         // rooms in the same column leave NO vertical gap — a single column of 13 rooms
         // creates an impenetrable wall covering the full A* search-space in y.
-        // Boxes zoom (step_h=17, halo_h=13) would leave 4-row gaps that the A* can
+        // Boxes zoom (step_h=11, halo_h=7) would leave 4-row gaps that the A* can
         // thread through, so the wall cannot be built with Boxes zoom alone.
         use mapper::graph::MapGraph;
         use ratatui::buffer::Buffer;
