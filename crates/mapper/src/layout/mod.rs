@@ -294,7 +294,7 @@ fn seed_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
 /// Set the `distorted` flag on every connection: a compass edge is distorted if
 /// its connection index is in `dropped`, or its final grid geometry violates its
 /// direction. Non-compass edges are never distorted.
-fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
+pub(crate) fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
     let n_conns = graph.connections().len();
     for idx in 0..n_conns {
         let conn = graph.connections()[idx].clone();

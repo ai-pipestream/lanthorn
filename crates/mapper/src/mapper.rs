@@ -1,6 +1,8 @@
+use std::collections::BTreeSet;
 use crate::direction::{Direction, parse_direction};
 use crate::graph::{MapGraph, RoomId};
-use crate::layout::{occupied_cells, relayout_auto, LayoutMode};
+use crate::layout::{occupied_cells, place_incremental, LayoutMode};
+use crate::layout::mark_distorted;
 
 #[derive(Debug, Default)]
 pub struct Mapper {
@@ -12,15 +14,27 @@ impl Mapper {
     pub fn observe(&mut self, location: RoomId, name: &str, via: Option<Direction>) {
         self.graph.upsert_room(location, name.to_string());
         let prev = self.graph.current();
-        if let Some(prev_id) = prev {
-            if location != prev_id {
-                let edge_dir = via.unwrap_or(Direction::Unknown);
-                self.graph.add_edge(prev_id, edge_dir, location);
+        match prev {
+            None => {
+                // First room ever: anchor at the origin.
+                if self.graph.room(location).and_then(|r| r.pos).is_none() {
+                    self.graph.set_pos(location, (0, 0));
+                }
+            }
+            Some(prev_id) => {
+                if location != prev_id {
+                    let edge_dir = via.unwrap_or(Direction::Unknown);
+                    self.graph.add_edge(prev_id, edge_dir, location);
+                    if self.mode == LayoutMode::Auto {
+                        place_incremental(&mut self.graph, prev_id, location, edge_dir);
+                    }
+                }
             }
         }
         self.graph.set_current(location);
         if self.mode == LayoutMode::Auto {
-            relayout_auto(&mut self.graph);
+            // Re-evaluate distortion over the whole graph (cheap); no relayout.
+            mark_distorted(&mut self.graph, &BTreeSet::new());
         }
     }
 
@@ -29,15 +43,10 @@ impl Mapper {
     }
 
     /// Switch layout mode.
-    /// Auto→Manual: run relayout_auto first so every room has a pos, then freeze.
-    /// Manual→Auto: re-enable auto relayout (existing positions are kept as starting point).
     /// Setting the same mode is a no-op.
     pub fn set_mode(&mut self, mode: LayoutMode) {
         if self.mode == mode {
             return;
-        }
-        if mode == LayoutMode::Manual {
-            relayout_auto(&mut self.graph);
         }
         self.mode = mode;
     }
@@ -141,6 +150,41 @@ mod tests {
         let free = (before.0 + 5, before.1 + 5);
         assert!(m.nudge(2, free));
         assert_eq!(m.graph.room(2).unwrap().pos, Some(free));
+    }
+
+    #[test]
+    fn first_room_anchors_at_origin() {
+        let mut m = Mapper::default();
+        m.observe(1, "Start", None);
+        assert_eq!(m.graph.room(1).unwrap().pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn incremental_observe_does_not_move_existing_rooms() {
+        use crate::direction::Direction;
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E)); // east of A
+        let a = m.graph.room(1).unwrap().pos.unwrap();
+        let b = m.graph.room(2).unwrap().pos.unwrap();
+        m.observe(3, "C", Some(Direction::E)); // east of B
+        // A and B must not have moved (C is placed past them, not into them).
+        assert_eq!(m.graph.room(1).unwrap().pos.unwrap(), a, "A stayed put");
+        assert_eq!(m.graph.room(2).unwrap().pos.unwrap(), b, "B stayed put");
+        assert!(m.graph.room(3).unwrap().pos.unwrap().0 > b.0, "C is east of B");
+    }
+
+    #[test]
+    fn revisit_adds_edge_without_moving_rooms() {
+        use crate::direction::Direction;
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::N));
+        let snapshot: Vec<_> = m.graph.rooms().map(|r| (r.id, r.pos)).collect();
+        // walk back south to A (already-placed room)
+        m.observe(1, "A", Some(Direction::S));
+        let after: Vec<_> = m.graph.rooms().map(|r| (r.id, r.pos)).collect();
+        assert_eq!(snapshot, after, "returning to a placed room moves nothing");
     }
 
     #[test]
