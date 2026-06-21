@@ -26,6 +26,7 @@
 
 use mapper::graph::RoomId;
 use mapper::render::{RenderMap, RenderRoom};
+use mapper::route::RoutePlan;
 use mapper::router::{RoutedEdge, Side, side_for};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -91,6 +92,52 @@ impl VRect {
 fn cell_to_virtual(cell: (i32, i32), zoom: Zoom) -> (i32, i32) {
     let (sw, sh) = zoom_steps(zoom);
     (cell.0 * sw, cell.1 * sh)
+}
+
+// ── Boxes-zoom position tables ────────────────────────────────────────────────
+
+/// Cells between adjacent lanes in a channel (so lines are visually separated).
+const LANE_SPACING: i32 = 2;
+/// Minimum channel pixel size even when it carries no lanes.
+const MIN_GUTTER: i32 = 2;
+/// Boxes-zoom box size (matches `zoom_box_size(Zoom::Boxes)`), in cells.
+const BOX_W: i32 = 11;
+const BOX_H: i32 = 5;
+
+/// One axis of the non-uniform Boxes-zoom layout: where each room line starts (pixels)
+/// and how wide each channel after it is.
+pub struct PosTable {
+    room_start: std::collections::BTreeMap<i32, i32>, // grid line index → pixel start of the box
+    channel_w: std::collections::BTreeMap<i32, i32>,  // grid line index → pixel width of the gap after it
+    lo: i32,                                           // lowest grid line index
+}
+impl PosTable {
+    pub fn room_pixel(&self, idx: i32) -> i32 { *self.room_start.get(&idx).unwrap_or(&0) }
+    pub fn channel_span(&self, idx: i32) -> i32 { *self.channel_w.get(&idx).unwrap_or(&MIN_GUTTER) }
+}
+
+fn channel_width(lanes: u16) -> i32 {
+    (lanes as i32 * LANE_SPACING).max(MIN_GUTTER)
+}
+
+/// Build the (columns, rows) position tables from the plan and the room bounds.
+pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTable, PosTable) {
+    let ((min_c, min_r), (max_c, max_r)) = bounds;
+    let build = |lo: i32, hi: i32, box_dim: i32, lanes: &std::collections::BTreeMap<i32, u16>| {
+        let mut room_start = std::collections::BTreeMap::new();
+        let mut channel_w = std::collections::BTreeMap::new();
+        let mut x = 0;
+        for idx in lo..=hi {
+            room_start.insert(idx, x);
+            let w = channel_width(lanes.get(&idx).copied().unwrap_or(0));
+            channel_w.insert(idx, w);
+            x += box_dim + w;
+        }
+        PosTable { room_start, channel_w, lo }
+    };
+    let cols = build(min_c, max_c, BOX_W, &plan.v_lanes);
+    let rows = build(min_r, max_r, BOX_H, &plan.h_lanes);
+    (cols, rows)
 }
 
 // ── Box-geometry routing helpers ──────────────────────────────────────────────
@@ -1616,6 +1663,23 @@ mod tests {
         }
         assert!(has_unrouted, "the boxed-in edge must render as a distinct DarkGray ribbon");
         assert!(has_clean, "the clean edge must still render as a normal Cyan ribbon");
+    }
+
+    #[test]
+    fn boxes_axes_widen_busy_channels() {
+        // A column-channel carrying 2 lanes must be wider than an empty one, and room
+        // pixel-positions are cumulative (a later room sits further right when an earlier
+        // gap is wide).
+        use mapper::route::{RoutePlan, Channel};
+        let mut plan = RoutePlan::default();
+        plan.v_lanes.insert(0, 2); // V[0] carries 2 lanes
+        // bounds cols 0..=2, rows 0..=0
+        let (cols, _rows) = boxes_axes(&plan, ((0, 0), (2, 0)));
+        let gap0 = cols.channel_span(0); // pixel width of V[0]
+        let gap1 = cols.channel_span(1); // pixel width of V[1] (empty)
+        assert!(gap0 > gap1, "a 2-lane channel must be wider than an empty one");
+        // room col 2 starts further right than col 1 by at least box+gap.
+        assert!(cols.room_pixel(2) > cols.room_pixel(1));
     }
 
     #[test]

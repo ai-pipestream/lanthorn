@@ -10,6 +10,7 @@
 /// in `edges` only if their partner room is also placed; however, `route_all` already skips
 /// connections where either endpoint is unplaced.
 use crate::graph::{MapGraph, RoomId};
+use crate::route::{route_lanes, RoutePlan};
 use crate::router::{route_all, RoutedEdge};
 
 /// A single room's render data in grid coordinates.
@@ -33,6 +34,7 @@ pub struct RenderMap {
     /// `(min_cell, max_cell)` over placed room cells, for the TUI to size/scroll.
     /// Both components satisfy `min <= max`. Empty graph → `((0,0),(0,0))`.
     pub bounds: ((i32, i32), (i32, i32)),
+    pub plan: RoutePlan,
 }
 
 /// Build a `RenderMap` from `graph`.
@@ -64,8 +66,9 @@ pub fn render(graph: &MapGraph) -> RenderMap {
     };
 
     let edges = route_all(graph);
+    let plan = route_lanes(graph);
 
-    RenderMap { rooms, edges, bounds }
+    RenderMap { rooms, edges, bounds, plan }
 }
 
 #[cfg(test)]
@@ -109,6 +112,16 @@ mod tests {
         let rm = render(&g);
         assert_eq!(rm.rooms.len(), 1);
         assert_eq!(rm.rooms[0].id, 1);
+    }
+
+    #[test]
+    fn render_attaches_route_plan() {
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        let rm = render(&m.graph);
+        // The plan routes the single drawn edge as one connector.
+        assert_eq!(rm.plan.connectors.len(), 1, "render must attach a 1-connector plan");
     }
 
     #[test]
