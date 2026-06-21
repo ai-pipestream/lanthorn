@@ -306,15 +306,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // ── 2. Boxes zoom: draw line-art connectors along their assigned lanes ────
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        // Reciprocal connections (a reverse edge exists) get a far-end arrow too. The
-        // reverse-edge signal lives on `RoutedEdge::arrival_dir`.
-        let reciprocal: std::collections::HashSet<(RoomId, RoomId)> = rm
-            .edges
-            .iter()
-            .filter(|e| !e.is_stub && e.arrival_dir.is_some())
-            .map(|e| (e.origin.min(e.dest), e.origin.max(e.dest)))
-            .collect();
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, &reciprocal, (off_x, off_y), area, buf);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf);
     }
 
     // Stub edges (translate + clip).
@@ -534,7 +526,6 @@ fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
     rows: &PosTable,
-    reciprocal: &std::collections::HashSet<(RoomId, RoomId)>,
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
@@ -569,9 +560,8 @@ fn render_lane_connectors(
 
         // Arrowhead at the origin departure anchor, pointing out along the exit side.
         arrowheads.push((plot.dep_anchor, arrow_for_departure(conn.exit), conn.distorted));
-        // Reciprocal far-end arrow at the entry anchor.
-        let key = (conn.origin.min(conn.dest), conn.origin.max(conn.dest));
-        if reciprocal.contains(&key) {
+        // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
+        if conn.reciprocal {
             arrowheads.push((plot.arr_anchor, arrow_for_departure(conn.entry), conn.distorted));
         }
     }
@@ -1357,22 +1347,20 @@ mod tests {
 
     /// Collect every arrowhead cell with its owning connector index. Mirrors the renderer's
     /// logic in `render_lane_connectors`: every connector gets a departure arrow at its
-    /// `dep_anchor`; connectors whose (origin, dest) pair appears in `reciprocal` also get an
-    /// arrival arrow at `arr_anchor`. Returns a `Vec<(virtual_cell, connector_idx)>`.
+    /// `dep_anchor`; connectors with `reciprocal == true` also get an arrival arrow at
+    /// `arr_anchor`. Returns a `Vec<(virtual_cell, connector_idx)>`.
     fn connector_arrows(
         plan: &mapper::route::RoutePlan,
         cols: &PosTable,
         rows: &PosTable,
-        reciprocal: &std::collections::HashSet<(mapper::graph::RoomId, mapper::graph::RoomId)>,
     ) -> Vec<((i32, i32), usize)> {
         let mut arrows: Vec<((i32, i32), usize)> = Vec::new();
         for (ci, conn) in plan.connectors.iter().enumerate() {
             let Some(plot) = plot_connector(conn, cols, rows) else { continue };
             // Departure arrow at dep_anchor.
             arrows.push((plot.dep_anchor, ci));
-            // Reciprocal far-end arrow at arr_anchor (same logic as renderer).
-            let key = (conn.origin.min(conn.dest), conn.origin.max(conn.dest));
-            if reciprocal.contains(&key) {
+            // Far-end arrow only for true reciprocal connectors.
+            if conn.reciprocal {
                 arrows.push((plot.arr_anchor, ci));
             }
         }
@@ -1504,14 +1492,7 @@ mod tests {
         assert_no_overlap(&owners);
 
         // (d) Arrow-stomp check: no arrowhead lands on another connector's line or arrow.
-        // Derive the reciprocal set the same way the renderer does (from rm.edges).
-        let reciprocal: std::collections::HashSet<(mapper::graph::RoomId, mapper::graph::RoomId)> = rm
-            .edges
-            .iter()
-            .filter(|e| !e.is_stub && e.arrival_dir.is_some())
-            .map(|e| (e.origin.min(e.dest), e.origin.max(e.dest)))
-            .collect();
-        let arrows = connector_arrows(&rm.plan, &cols, &rows, &reciprocal);
+        let arrows = connector_arrows(&rm.plan, &cols, &rows);
         assert_no_arrow_stomp(&arrows, &owners);
 
         // Render the whole map with no clipping, sized to the table extent.

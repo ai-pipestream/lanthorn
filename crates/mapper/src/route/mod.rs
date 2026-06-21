@@ -35,6 +35,9 @@ pub struct RoutedConnector {
     /// Slot index of this connector's entry anchor among all connectors sharing the
     /// destination room's entry side.
     pub entry_slot: u16,
+    /// true when this connector represents a collapsed true-opposite pair
+    /// `a→dir→b` + `b→opposite(dir)→a`; the renderer draws a far-end arrow only for these.
+    pub reciprocal: bool,
 }
 
 /// The logical route plan: connectors plus per-channel lane counts.
@@ -131,8 +134,9 @@ fn merge_collinear(pts: &mut Vec<(i32, i32)>) {
     }
 }
 
-/// Route every drawn (compass) edge into a connector polyline. Reciprocal pairs collapse
-/// to one (keep the lower-origin-id direction).
+/// Route every drawn (compass) edge into a connector polyline. True reciprocal pairs
+/// (`a→dir→b` + `b→opposite(dir)→a`) collapse to one connector; which member is kept
+/// depends on insertion order in `connections()` (the first-seen direction is drawn).
 pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
     use crate::direction::opposite;
     // Draw every compass edge on its OWN exit side, EXCEPT collapse a TRUE reciprocal pair
@@ -168,6 +172,7 @@ pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
             segs: Vec::new(),
             exit_slot: 0,
             entry_slot: 0,
+            reciprocal: has_reciprocal,
         });
         drawn.insert((c.origin, c.dest));
     }
@@ -516,6 +521,51 @@ mod tests {
         g.add_edge(1, Direction::E, 2);
         g.add_edge(2, Direction::W, 1); // reciprocal
         assert_eq!(route_topology(&g).len(), 1, "reciprocal pair → one connector");
+    }
+
+    /// Regression: non-opposite back edges must NOT set `reciprocal`.
+    ///
+    /// Graph: 1→N→2, 1→S→2, 2→E→1 — none of these pairs are true opposites
+    /// (N↔S is opposite, but 2→E→1 is not the opposite of 1→N→2 or 1→S→2).
+    /// All three edges have shared room-pair partners, but none should be collapsed.
+    /// Every connector must have `reciprocal == false` so no far-end arrow is drawn.
+    #[test]
+    fn non_opposite_back_edges_are_not_reciprocal() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -2));
+        g.add_edge(1, Direction::N, 2); // 1→N→2
+        g.add_edge(1, Direction::S, 2); // 1→S→2  (same pair, not an opposite-direction match for either)
+        g.add_edge(2, Direction::E, 1); // 2→E→1  (reverse room-pair, not opposite of N or S)
+        let conns = route_topology(&g);
+        // All three edges share room-pairs but NONE are true opposite pairs — each must be drawn
+        // separately (no collapse), and none must have reciprocal == true.
+        assert_eq!(conns.len(), 3, "no pair collapses — all three drawn; got {}", conns.len());
+        for c in &conns {
+            assert!(
+                !c.reciprocal,
+                "connector {}→{}({:?}) wrongly marked reciprocal; only true opposite pairs collapse",
+                c.origin, c.dest, c.exit,
+            );
+        }
+    }
+
+    /// Regression: a true opposite pair `1→N→2` + `2→S→1` collapses to exactly ONE
+    /// connector and that connector must have `reciprocal == true`.
+    #[test]
+    fn true_opposite_pair_is_reciprocal() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -2));
+        g.add_edge(1, Direction::N, 2); // 1→N→2
+        g.add_edge(2, Direction::S, 1); // 2→S→1  (true opposite: S == opposite(N))
+        let conns = route_topology(&g);
+        assert_eq!(conns.len(), 1, "true opposite pair collapses to one connector");
+        assert!(conns[0].reciprocal, "collapsed true-opposite connector must have reciprocal == true");
     }
 
     #[test]
