@@ -116,6 +116,14 @@ impl PosTable {
     pub fn room_pixel(&self, idx: i32) -> i32 { self.line_pixel(idx) }
     pub fn channel_span(&self, idx: i32) -> i32 { *self.channel_w.get(&idx).unwrap_or(&MIN_GUTTER) }
 
+    /// Total pixel extent from the first room's box-left to just past the last room's
+    /// trailing channel. This is the minimum pixel span needed to draw all rooms and
+    /// their inter-room channels without clipping.
+    pub fn total_pixels(&self) -> i32 {
+        let last = self.room_pixel(self.hi);
+        last + self.box_dim + self.channel_span(self.hi)
+    }
+
     /// Pixel-x (or -y) of the box left/top edge at grid line `idx`, extrapolating with a
     /// uniform `box_dim + MIN_GUTTER` stride for lines outside the tabulated bounds so
     /// scrolling beyond the placed rooms stays well-defined and continuous.

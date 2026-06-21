@@ -5,7 +5,8 @@
 //! reaches the destination cell without entering any other room's cell. A clear grid
 //! cell corresponds to a full empty 29×17 render stride (≫ the 21×11 box), so a
 //! grid-level channel implies a render-level channel for room obstacles. Path-vs-path
-//! congestion is out of scope (handled by the renderer's unrouted-line fallback).
+//! congestion is handled by the lane router, which assigns each connector to a reserved
+//! lane in the inter-room channels so connectors never overlap (no unrouted fallback).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 

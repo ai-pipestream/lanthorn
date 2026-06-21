@@ -20,12 +20,9 @@ use mapper::direction::Direction;
 use mapper::graph::MapGraph;
 use mapper::render::render;
 
-use crate::render::map::render_map;
+use crate::render::map::{boxes_axes, render_map};
 use crate::state::{AppState, Zoom};
 
-/// Boxes-zoom stride (must match `Zoom::Boxes.steps()`); used to size the dump buffer.
-const STEP_W: i32 = 19;
-const STEP_H: i32 = 11;
 /// Max dump buffer dimension (cells) to bound memory on very large maps.
 const MAX_DIM: i32 = 4000;
 
@@ -56,14 +53,26 @@ fn ascii_map(graph: &MapGraph) -> String {
     if rm.rooms.is_empty() {
         return "(empty map)".to_string();
     }
-    let ((min_col, min_row), (max_col, max_row)) = rm.bounds;
-    let cols = max_col - min_col + 1;
-    let rows = max_row - min_row + 1;
+    let ((min_col, min_row), _) = rm.bounds;
 
-    // Pad by 2 room-steps each side so connectors detouring outside the room
-    // bounding box are captured rather than clipped.
-    let area_w = ((cols + 4) * STEP_W).clamp(STEP_W, MAX_DIM);
-    let area_h = ((rows + 4) * STEP_H).clamp(STEP_H, MAX_DIM);
+    // Build the lane-aware position tables so the buffer is sized from the ACTUAL
+    // non-uniform column/row widths, not a uniform estimate.  A busy channel that
+    // carries ≥5 lanes grows wider than the old STEP_W constant, so the old
+    // formula would undercount and clip connectors on the right/bottom.
+    let (col_table, row_table) = boxes_axes(&rm.plan, rm.bounds);
+
+    // Pad by 2 default-stride steps each side so connectors detouring outside the
+    // room bounding box are captured rather than clipped.  The default step for an
+    // empty channel is BOX_W + MIN_GUTTER (13) / BOX_H + MIN_GUTTER (7); we use
+    // the table's extrapolation via room_pixel on indices outside the map.
+    let default_step_w = col_table.room_pixel(min_col) - col_table.room_pixel(min_col - 1);
+    let default_step_h = row_table.room_pixel(min_row) - row_table.room_pixel(min_row - 1);
+    let pad_w = col_table.room_pixel(min_col) - col_table.room_pixel(min_col - 2);
+    let pad_h = row_table.room_pixel(min_row) - row_table.room_pixel(min_row - 2);
+    // Left/top padding: from scroll origin to map start (pad_w / pad_h).
+    // Right/bottom padding: 2 extra default steps beyond the real map extent.
+    let area_w = (col_table.total_pixels() + pad_w + 2 * default_step_w).clamp(1, MAX_DIM);
+    let area_h = (row_table.total_pixels() + pad_h + 2 * default_step_h).clamp(1, MAX_DIM);
     let area = Rect::new(0, 0, area_w as u16, area_h as u16);
 
     // Render at Boxes zoom (AppState default) with scroll set to pad the map.
@@ -191,5 +200,54 @@ mod tests {
         // A connector line-art glyph appears, and the legend no longer advertises ▒.
         assert!(dump.contains('─') || dump.contains('│'), "line-art connector expected:\n{dump}");
         assert!(!dump.contains("▒ = unrouted"), "unrouted concept removed from legend");
+    }
+
+    /// Regression: the dump buffer must NOT truncate when a channel carries many lanes.
+    ///
+    /// With the OLD uniform sizing (`(cols+4)*STEP_W` where STEP_W=19), a busy vertical
+    /// channel carrying ≥5 lanes grows wider than the 19-cell estimate (channel_width(5)
+    /// = LANE_BASE + 4*LANE_SPACING + 1 = 10 which, added to BOX_W=11, gives stride 21
+    /// vs the estimated 19), so the cumulative map width overflows the buffer and
+    /// `render_map` silently clips connectors on the right side. The new sizing derives
+    /// the buffer dimensions from the actual lane-aware `boxes_axes` tables.
+    ///
+    /// Setup: hub room at (1,0), plus 5 spoke rooms at (0,1)..(0,5) each connecting
+    /// East to the hub. The spoke connectors from rows 1–5 all route through V(0) at
+    /// overlapping doubled-coord extents (each extends from its row down to y=1), so the
+    /// lane router must assign them 5 separate lanes in V(0), widening that channel
+    /// beyond the STEP_W constant.
+    #[test]
+    fn dump_buffer_not_truncated_on_busy_channel() {
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        // Hub at column 1, row 0.
+        g.upsert_room(1, "Hub".into());
+        g.set_pos(1, (1, 0));
+        // Five spoke rooms at column 0, rows 1..5.
+        for row in 1i32..=5 {
+            let id = (row + 1) as u16;
+            g.upsert_room(id, format!("S{row}").into());
+            g.set_pos(id, (0, row));
+            g.add_edge(id, Direction::E, 1);
+        }
+
+        let dump = render_dump(&g);
+
+        // Every room's id label must appear in the dump.
+        for id in 1u16..=6 {
+            assert!(
+                dump.contains(&format!("#{id}")),
+                "room #{id} must appear in dump (not clipped); dump:\n{dump}",
+            );
+        }
+
+        // Every room box's right border must be present: look for the '╯' or '╮'
+        // closing corners (bottom-right / top-right of a normal room box).
+        let right_corners = dump.matches('╯').count() + dump.matches('╮').count();
+        assert!(
+            right_corners >= 6,
+            "expected ≥6 right-border corners (one per room), got {right_corners}; dump may be clipped:\n{dump}",
+        );
     }
 }
