@@ -202,4 +202,27 @@ mod tests {
         assert!(m.delete_connection(1, Direction::Down));
         assert_eq!(m.graph.connections().len(), 0);
     }
+
+    #[test]
+    fn observe_incremental_shift_beyond_is_not_global_relayout() {
+        // Discriminates incremental placement from a from-scratch global solve.
+        // Build: A at origin, B north of A. Return to A, then observe C north of A.
+        // C's ideal cell (0,-1) is occupied by B, so shift-beyond moves the BLOCKER
+        // (B) further north and places the newcomer (C) truthfully at (0,-1) while A
+        // stays put. A global relayout never shifts a blocker like this, so these
+        // exact coordinates can only come from the incremental path.
+        use crate::direction::Direction;
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);                 // (0,0)
+        m.observe(2, "B", Some(Direction::N));    // (0,-1)
+        m.observe(1, "A", Some(Direction::S));    // return to A; current=1, A does not move
+        m.observe(3, "C", Some(Direction::N));    // N of A: (0,-1) occupied -> shift-beyond
+        assert_eq!(m.graph.room(1).unwrap().pos, Some((0, 0)), "A must stay at origin");
+        assert_eq!(m.graph.room(3).unwrap().pos, Some((0, -1)), "newcomer C truthfully north of A");
+        assert_eq!(m.graph.room(2).unwrap().pos, Some((0, -2)), "blocker B shifted beyond, not the newcomer");
+        // no overlap
+        let cells: Vec<_> = m.graph.rooms().filter_map(|r| r.pos).collect();
+        let set: std::collections::BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len());
+    }
 }
