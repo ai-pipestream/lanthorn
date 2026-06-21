@@ -15,7 +15,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
 
 use mapper::direction::Direction;
 use mapper::graph::MapGraph;
@@ -49,46 +48,6 @@ fn dir_str(d: Direction) -> &'static str {
     }
 }
 
-/// Map a NESW connectivity bitmask (N=1, E=2, S=4, W=8) to a box-drawing glyph.
-fn mask_glyph(mask: u8) -> char {
-    match mask {
-        1 | 4 | 5 => '│',
-        2 | 8 | 10 => '─',
-        3 => '└',
-        6 => '┌',
-        12 => '┐',
-        9 => '┘',
-        7 => '├',
-        14 => '┬',
-        13 => '┤',
-        11 => '┴',
-        15 => '┼',
-        _ => '·', // isolated path cell (no orthogonal path neighbour)
-    }
-}
-
-/// True if `(x, y)` in `buf` is a cleanly-routed connector cell (Cyan/Magenta ribbon
-/// background — also covers embedded arrowheads, which carry the same background).
-fn is_path(buf: &Buffer, x: i32, y: i32, area: Rect) -> bool {
-    if x < 0 || y < 0 || x >= area.width as i32 || y >= area.height as i32 {
-        return false;
-    }
-    buf.cell((x as u16, y as u16))
-        .map(|c| c.bg == Color::Cyan || c.bg == Color::Magenta)
-        .unwrap_or(false)
-}
-
-/// True if `(x, y)` is an UNROUTED connector cell (DarkGray ribbon — an edge that had
-/// no clean route). These render as a distinct `▒` trail so they're visible and
-/// annotatable instead of silently missing from the dump.
-fn is_unrouted(buf: &Buffer, x: i32, y: i32, area: Rect) -> bool {
-    if x < 0 || y < 0 || x >= area.width as i32 || y >= area.height as i32 {
-        return false;
-    }
-    buf.cell((x as u16, y as u16))
-        .map(|c| c.bg == Color::DarkGray)
-        .unwrap_or(false)
-}
 
 /// Render the map to a line-art ASCII string (rooms as boxes, connectors as
 /// `─│┼` lines, exits as arrowheads).
@@ -116,26 +75,13 @@ fn ascii_map(graph: &MapGraph) -> String {
     let mut buf = Buffer::empty(area);
     render_map(&rm, &state, area, &mut buf);
 
-    // Serialize: real symbols pass through; blank ribbon cells become line-art.
+    // Serialize: copy each cell's symbol directly (blank → space).
     let mut lines: Vec<String> = Vec::with_capacity(area_h as usize);
     for y in 0..area_h {
         let mut line = String::new();
         for x in 0..area_w {
             let sym = buf.cell((x as u16, y as u16)).map(|c| c.symbol()).unwrap_or(" ");
-            if sym != " " {
-                line.push_str(sym);
-            } else if is_path(&buf, x, y, area) {
-                let mut mask = 0u8;
-                if is_path(&buf, x, y - 1, area) { mask |= 1; }
-                if is_path(&buf, x + 1, y, area) { mask |= 2; }
-                if is_path(&buf, x, y + 1, area) { mask |= 4; }
-                if is_path(&buf, x - 1, y, area) { mask |= 8; }
-                line.push(mask_glyph(mask));
-            } else if is_unrouted(&buf, x, y, area) {
-                line.push('▒'); // unrouted edge (shown grey in the app)
-            } else {
-                line.push(' ');
-            }
+            line.push_str(if sym.is_empty() { " " } else { sym });
         }
         lines.push(line.trim_end().to_string());
     }
@@ -184,7 +130,7 @@ pub fn render_dump(graph: &MapGraph) -> String {
         out.push_str(&format!("EDGE {} {} {}{}\n", c.origin, dir_str(c.dir), c.dest, dist));
     }
 
-    out.push_str("#\n# === MAP (#id = room, lines = connectors, ▶◀▲▼ = exits, ▒ = unrouted) ===\n");
+    out.push_str("#\n# === MAP (#id = room, lines = connectors, ▶◀▲▼ = exits) ===\n");
     out.push_str(&ascii_map(graph));
     out.push_str("\n#\n# Annotate problems below — lines starting with # are comments:\n#\n");
 
@@ -238,17 +184,13 @@ mod tests {
     }
 
     #[test]
-    fn unrouted_cell_serializes_to_block_glyph() {
-        // An unrouted edge renders as a DarkGray ribbon in the app; the dump must show it
-        // as `▒` (not blank), so it isn't silently missing. `is_path` (clean) excludes it.
-        let area = Rect::new(0, 0, 3, 1);
-        let mut buf = Buffer::empty(area);
-        buf.cell_mut((1, 0)).unwrap().set_bg(Color::DarkGray);
-        assert!(is_unrouted(&buf, 1, 0, area), "DarkGray cell is unrouted");
-        assert!(!is_path(&buf, 1, 0, area), "DarkGray is not a clean (Cyan/Magenta) path");
-        // The MAP legend advertises the glyph.
+    fn dump_copies_glyphs_directly_no_ribbon_mask() {
         let mut m = Mapper::default();
         m.observe(1, "A", None);
-        assert!(render_dump(&m.graph).contains("▒ = unrouted"), "legend must document ▒");
+        m.observe(2, "B", Some(Direction::E));
+        let dump = render_dump(&m.graph);
+        // A connector line-art glyph appears, and the legend no longer advertises ▒.
+        assert!(dump.contains('─') || dump.contains('│'), "line-art connector expected:\n{dump}");
+        assert!(!dump.contains("▒ = unrouted"), "unrouted concept removed from legend");
     }
 }
