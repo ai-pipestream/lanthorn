@@ -28,57 +28,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use crate::direction::grid_offset;
 use crate::graph::{Connection, MapGraph, RoomId};
 
-mod vpsc;
-mod constraints;
-mod stress;
-mod routability;
+mod sort;
 mod incremental;
 pub use incremental::place_incremental;
-
-/// Separation gap and ideal edge length (in grid cells).
-const GAP: f64 = 1.0;
-/// Fixed SMACOF iterations (determinism + bounded cost).
-const ITERS: usize = 60;
-/// Above this node count, skip the O(ITERS·n²) solve and use the seed grid.
-const MAX_NODES: usize = 400;
-
-// ── pair_offset ───────────────────────────────────────────────────────────────
-
-/// Compute the combined grid offset of room `b` relative to room `a`, using the
-/// directed edges between them.
-///
-/// - Let `fwd_off` = `grid_offset(dir)` for any edge `a → dir → b` (compass only).
-/// - Let `rev_off` = `grid_offset(dir)` for any edge `b → dir → a` (compass only).
-/// - If both exist: `combined = fwd_off - rev_off`, each axis clamped to [-1, 1].
-///   (e.g. A→N→B: (0,-1); B→W→A: (-1,0); combined=(0,-1)-(-1,0)=(1,-1) → NE)
-///   (e.g. A→N→B / B→S→A: (0,-1)-(0,1)=(0,-2) → clamp (0,-1) = one step N)
-/// - If only `fwd_off`: `fwd_off`.
-/// - If only `rev_off`: `(-rev_off.0, -rev_off.1)` (b is opposite of rev from a).
-/// - If neither is a compass direction: `None`.
-pub fn pair_offset(graph: &MapGraph, a: RoomId, b: RoomId) -> Option<(i32, i32)> {
-    let fwd_off = graph
-        .connections()
-        .iter()
-        .find(|c| c.origin == a && c.dest == b)
-        .and_then(|c| grid_offset(c.dir));
-
-    let rev_off = graph
-        .connections()
-        .iter()
-        .find(|c| c.origin == b && c.dest == a)
-        .and_then(|c| grid_offset(c.dir));
-
-    match (fwd_off, rev_off) {
-        (Some(f), Some(r)) => {
-            let dx = (f.0 - r.0).clamp(-1, 1);
-            let dy = (f.1 - r.1).clamp(-1, 1);
-            Some((dx, dy))
-        }
-        (Some(f), None) => Some(f),
-        (None, Some(r)) => Some((-r.0, -r.1)),
-        (None, None) => None,
-    }
-}
 
 // ── LayoutMode ────────────────────────────────────────────────────────────────
 
@@ -185,7 +137,7 @@ fn axis_sign_ok(actual: i32, expected: i32) -> bool {
 
 /// Connected components over the undirected projection of the graph. Each
 /// component is sorted ascending; components are returned in ascending-root order.
-fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<RoomId>> {
+pub(crate) fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<RoomId>> {
     let mut adjacency: BTreeMap<RoomId, Vec<RoomId>> = BTreeMap::new();
     for &id in ids {
         adjacency.entry(id).or_default();
@@ -225,72 +177,6 @@ fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<RoomId>> {
     components
 }
 
-/// The greedy grid placement (former `relayout_auto` body) as a pure function:
-/// BFS from each component's lowest-id root, placing neighbours at `pair_offset`
-/// deltas with spiral collision avoidance. No graph mutation; used only to seed
-/// the stress solver and as the large-graph fallback.
-fn seed_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
-    let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
-    ids.sort_unstable();
-    let mut pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
-    if ids.is_empty() {
-        return pos;
-    }
-    let components = connected_components(graph, &ids);
-    let mut occupied: BTreeSet<(i32, i32)> = BTreeSet::new();
-
-    for component in &components {
-        let root = *component.iter().min().unwrap();
-        let anchor = nearest_free_cell(&occupied, (0, 0));
-        pos.insert(root, anchor);
-        occupied.insert(anchor);
-
-        let mut bfs: VecDeque<RoomId> = VecDeque::new();
-        let mut bfs_visited: BTreeSet<RoomId> = BTreeSet::new();
-        bfs.push_back(root);
-        bfs_visited.insert(root);
-
-        while let Some(placed_id) = bfs.pop_front() {
-            let placed_pos = *pos.get(&placed_id).unwrap();
-            let incident: Vec<Connection> = graph
-                .connections()
-                .iter()
-                .filter(|c| c.origin == placed_id || c.dest == placed_id)
-                .cloned()
-                .collect();
-            let compass_first: Vec<&Connection> = incident
-                .iter()
-                .filter(|c| grid_offset(c.dir).is_some())
-                .chain(incident.iter().filter(|c| grid_offset(c.dir).is_none()))
-                .collect();
-
-            for conn in compass_first {
-                let neighbor_id = if conn.origin == placed_id { conn.dest } else { conn.origin };
-                if bfs_visited.contains(&neighbor_id) || !component.contains(&neighbor_id) {
-                    continue;
-                }
-                bfs_visited.insert(neighbor_id);
-                let desired = if conn.origin == placed_id {
-                    match pair_offset(graph, placed_id, neighbor_id) {
-                        Some(delta) => (placed_pos.0 + delta.0, placed_pos.1 + delta.1),
-                        None => placed_pos,
-                    }
-                } else {
-                    match pair_offset(graph, neighbor_id, placed_id) {
-                        Some(delta) => (placed_pos.0 - delta.0, placed_pos.1 - delta.1),
-                        None => placed_pos,
-                    }
-                };
-                let cell = nearest_free_cell(&occupied, desired);
-                pos.insert(neighbor_id, cell);
-                occupied.insert(cell);
-                bfs.push_back(neighbor_id);
-            }
-        }
-    }
-    pos
-}
-
 /// Set the `distorted` flag on every connection: a compass edge is distorted if
 /// its connection index is in `dropped`, or its final grid geometry violates its
 /// direction. Non-compass edges are never distorted.
@@ -308,107 +194,19 @@ pub(crate) fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
 
 /// Re-derive all room positions from scratch on every call.
 ///
-/// Uses constrained stress majorization (SMACOF + VPSC) per connected component,
-/// snaps to grid, packs components left-to-right, resolves residual overlaps,
-/// and anchors the lowest-id room at (0,0). Falls back to the seed grid for
-/// graphs above MAX_NODES rooms.
+/// Uses per-axis longest-path layering from compass edges, packs components
+/// left-to-right, resolves residual overlaps, and anchors the lowest-id room
+/// at (0,0).
 pub fn relayout_auto(graph: &mut MapGraph) {
-    let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
-    ids.sort_unstable();
+    let ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
     if ids.is_empty() {
         return;
     }
-    clear_all_positions(graph, &ids);
-
-    let seed = seed_layout(graph);
-
-    // Large-graph fallback: keep the deterministic seed grid.
-    if ids.len() > MAX_NODES {
-        for &id in &ids {
-            if let Some(&p) = seed.get(&id) {
-                graph.set_pos(id, p);
-            }
-        }
-        mark_distorted(graph, &BTreeSet::new());
-        return;
-    }
-
-    let components = connected_components(graph, &ids);
-    let mut dropped_all: BTreeSet<usize> = BTreeSet::new();
-    let mut final_pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
-    let mut occupied: BTreeSet<(i32, i32)> = BTreeSet::new();
-    let mut pack_x: i32 = 0; // left edge for the next component
-
-    for comp in &components {
-        let n = comp.len();
-        let index: std::collections::HashMap<RoomId, usize> =
-            comp.iter().enumerate().map(|(i, &id)| (id, i)).collect();
-
-        // Local undirected adjacency for BFS distances.
-        let mut adj = vec![Vec::new(); n];
-        for c in graph.connections() {
-            if let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) {
-                adj[a].push(b);
-                adj[b].push(a);
-            }
-        }
-        let dist = stress::all_pairs_dist(n, &adj);
-        let ac = constraints::build_axis_constraints(graph, comp, GAP);
-        dropped_all.extend(ac.dropped.iter().copied());
-
-        let seed_local: Vec<(f64, f64)> = comp
-            .iter()
-            .map(|&id| {
-                let p = seed.get(&id).copied().unwrap_or((0, 0));
-                (p.0 as f64, p.1 as f64)
-            })
-            .collect();
-
-        let cont = stress::stress_layout(n, &dist, &ac.x, &ac.y, &seed_local, ITERS);
-        let mut snapped: Vec<(i32, i32)> =
-            cont.iter().map(|&(x, y)| (x.round() as i32, y.round() as i32)).collect();
-
-        // Pack this component to the right of the previous, top-aligned.
-        let min_x = snapped.iter().map(|p| p.0).min().unwrap();
-        let min_y = snapped.iter().map(|p| p.1).min().unwrap();
-        for p in &mut snapped {
-            p.0 += pack_x - min_x;
-            p.1 -= min_y;
-        }
-
-        // Resolve residual same-cell collisions in ascending room-id order.
-        let mut max_x_used = pack_x;
-        for (i, &id) in comp.iter().enumerate() {
-            let cell = nearest_free_cell(&occupied, snapped[i]);
-            occupied.insert(cell);
-            final_pos.insert(id, cell);
-            max_x_used = max_x_used.max(cell.0);
-        }
-        pack_x = max_x_used + 2; // 1-cell gap between components
-    }
-
-    // Open routing channels: shift rooms so every drawn edge has a clean lane.
-    routability::repair_routability(graph, &mut final_pos);
-
-    // Anchor the lowest-id room at (0,0) for a stable reference.
-    if let Some(&(ax, ay)) = final_pos.get(&ids[0]) {
-        for p in final_pos.values_mut() {
-            p.0 -= ax;
-            p.1 -= ay;
-        }
-    }
-
-    for (&id, &p) in &final_pos {
+    let pos = sort::sort_layout(graph);
+    for (&id, &p) in &pos {
         graph.set_pos(id, p);
     }
-    mark_distorted(graph, &dropped_all);
-}
-
-/// Clear the `pos` of every room in `ids`.
-fn clear_all_positions(graph: &mut MapGraph, ids: &[RoomId]) {
-    for &id in ids {
-        graph.clear_pos(id);
-    }
+    mark_distorted(graph, &BTreeSet::new());
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -673,46 +471,6 @@ mod tests {
         let p1 = g.room(1).unwrap().pos.unwrap();
         let p2 = g.room(2).unwrap().pos.unwrap();
         assert!(p2.1 < p1.1, "room 2 (north of 1) must be above it: {p2:?} vs {p1:?}");
-    }
-
-    #[test]
-    fn repair_opens_channel_for_a129_corner() {
-        // The exact #25/#74/#76 failure: three mutually inconsistent compass hints.
-        // After relayout, every compass edge must be routable, and 25->W->76 must
-        // become a clean (non-distorted) west shot once #25 shifts off #74's row.
-        use crate::direction::Direction;
-        let mut g = crate::graph::MapGraph::new();
-        for (id, name) in [(25, "Canyon View"), (74, "Clearing"), (76, "Forest")] {
-            g.upsert_room(id, name.into());
-        }
-        g.add_edge(74, Direction::E, 25);
-        g.add_edge(74, Direction::S, 76);
-        g.add_edge(25, Direction::W, 76);
-        relayout_auto(&mut g);
-
-        // Build the occupancy + bbox the way repair does, then assert all 3 edges route.
-        let pos: std::collections::BTreeMap<RoomId, (i32, i32)> =
-            g.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
-        let occ: std::collections::BTreeMap<(i32, i32), RoomId> =
-            pos.iter().map(|(&id, &c)| (c, id)).collect();
-        let xs: Vec<i32> = pos.values().map(|p| p.0).collect();
-        let ys: Vec<i32> = pos.values().map(|p| p.1).collect();
-        let bb = (
-            xs.iter().min().unwrap() - super::routability::BBOX_MARGIN,
-            ys.iter().min().unwrap() - super::routability::BBOX_MARGIN,
-            xs.iter().max().unwrap() + super::routability::BBOX_MARGIN,
-            ys.iter().max().unwrap() + super::routability::BBOX_MARGIN,
-        );
-        for c in g.connections() {
-            assert!(
-                super::routability::edge_routable(pos[&c.origin], pos[&c.dest], c.dir, &occ, bb),
-                "edge {}-{:?}->{} must be routable after repair; positions {pos:?}",
-                c.origin, c.dir, c.dest
-            );
-        }
-        // 25->76 is now geometrically truthful → not distorted.
-        let e = g.connections().iter().find(|c| c.origin == 25 && c.dest == 76).unwrap();
-        assert!(!e.distorted, "25->W->76 should be a clean west shot after repair; pos {pos:?}");
     }
 
     #[test]

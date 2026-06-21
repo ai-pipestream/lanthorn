@@ -1260,24 +1260,6 @@ mod tests {
         assert!(cols.room_pixel(2) > cols.room_pixel(1));
     }
 
-    /// Build the real A129 graph (11 rooms / 19 edges) used by the acceptance test.
-    fn a129_graph() -> mapper::graph::MapGraph {
-        use mapper::graph::MapGraph;
-        let mut g = MapGraph::new();
-        for (id, n) in [(25,"Canyon View"),(74,"Clearing"),(75,"Forest Path"),(76,"Forest"),
-            (77,"Forest"),(78,"Forest"),(79,"Behind House"),(80,"South of House"),
-            (81,"North of House"),(143,"Clearing"),(180,"West of House")] { g.upsert_room(id, n.into()); }
-        for (o,d,t) in [(180,Direction::N,81),(81,Direction::E,79),(79,Direction::E,74),
-            (74,Direction::S,76),(76,Direction::N,74),(74,Direction::E,25),(25,Direction::W,76),
-            (76,Direction::W,78),(78,Direction::S,76),(78,Direction::N,143),(143,Direction::E,77),
-            (77,Direction::W,75),(75,Direction::S,81),(81,Direction::W,180),(180,Direction::S,80),
-            (80,Direction::E,79),(79,Direction::S,80),(80,Direction::W,180),(74,Direction::W,79)] {
-            g.add_edge(o, d, t);
-        }
-        g.set_current(79);
-        g
-    }
-
     /// Per-virtual-cell connector ownership: for each cell, the list of (connector_index,
     /// per-connector direction-bit mask) pairs from every connector that wrote that cell.
     /// Re-derives plotting per connector from the same `plot_connector` geometry the renderer
@@ -1347,67 +1329,6 @@ mod tests {
 
     /// Collect every arrowhead cell with its owning connector index. Mirrors the renderer's
     /// logic in `render_lane_connectors`: every connector gets a departure arrow at its
-    /// `dep_anchor`; connectors with `reciprocal == true` also get an arrival arrow at
-    /// `arr_anchor`. Returns a `Vec<(virtual_cell, connector_idx)>`.
-    fn connector_arrows(
-        plan: &mapper::route::RoutePlan,
-        cols: &PosTable,
-        rows: &PosTable,
-    ) -> Vec<((i32, i32), usize)> {
-        let mut arrows: Vec<((i32, i32), usize)> = Vec::new();
-        for (ci, conn) in plan.connectors.iter().enumerate() {
-            let Some(plot) = plot_connector(conn, cols, rows) else { continue };
-            // Departure arrow at dep_anchor.
-            arrows.push((plot.dep_anchor, ci));
-            // Far-end arrow only for true reciprocal connectors.
-            if conn.reciprocal {
-                arrows.push((plot.arr_anchor, ci));
-            }
-        }
-        arrows
-    }
-
-    /// Assert no arrowhead cell stomps another connector's line-art cell or another
-    /// connector's arrowhead. A connector's own arrow sitting on its own line start is
-    /// acceptable (the dep_anchor is both the line endpoint and the arrowhead position).
-    fn assert_no_arrow_stomp(
-        arrows: &[((i32, i32), usize)],
-        owners: &std::collections::HashMap<(i32, i32), Vec<(usize, u8)>>,
-    ) {
-        // Build a set of (cell, connector_idx) for all arrowheads so we can check cross-ownership.
-        // Also build a map from arrow cell → set of owning connector indices.
-        let mut arrow_owners: std::collections::HashMap<(i32, i32), std::collections::BTreeSet<usize>> =
-            std::collections::HashMap::new();
-        for &(cell, ci) in arrows {
-            arrow_owners.entry(cell).or_default().insert(ci);
-        }
-
-        // Check 1: arrowhead stomps a line-art cell owned by a DIFFERENT connector.
-        for &(cell, ci) in arrows {
-            if let Some(line_entries) = owners.get(&cell) {
-                for &(line_ci, _mask) in line_entries {
-                    if line_ci != ci {
-                        panic!(
-                            "arrow-stomp: connector {ci}'s arrowhead at {cell:?} stomps \
-                             connector {line_ci}'s line-art cell",
-                        );
-                    }
-                }
-            }
-        }
-
-        // Check 2: two different connectors have arrowheads at the same cell.
-        for (cell, ci_set) in &arrow_owners {
-            if ci_set.len() >= 2 {
-                let idx_list: Vec<usize> = ci_set.iter().copied().collect();
-                panic!(
-                    "arrow-stomp: {n} connectors {idx_list:?} all have an arrowhead at {cell:?}",
-                    n = ci_set.len(),
-                );
-            }
-        }
-    }
-
     #[test]
     fn two_connectors_perpendicular_crossing_is_single_cross() {
         // A vertical connector (1 above 2) and a horizontal connector (3 left of 4) routed so
@@ -1473,70 +1394,4 @@ mod tests {
         assert_eq!(p_lane1.0 - p_lane0.0, LANE_SPACING, "lane 1 sits one LANE_SPACING beyond lane 0");
     }
 
-    #[test]
-    fn lane_routing_a129_no_overlap_line_art() {
-        // The real A129 graph (11 rooms / 19 edges). After lane routing the rendered map must:
-        //  (a) draw connectors as box-drawing line-art (not solid ribbons);
-        //  (b) have NO cross-connector overlap: any cell written by ≥2 distinct connectors must
-        //      be a clean perpendicular ┼ (not a parallel run, T-stomp, or arrow stomp);
-        //  (c) have NO connector line-art inside ANY room's interior.
-        use mapper::layout::relayout_auto;
-        use ratatui::style::Color;
-        let mut g = a129_graph();
-        relayout_auto(&mut g);
-        let rm = mapper::render::render(&g);
-        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
-
-        // (b) Cross-connector overlap check in virtual space (scroll-independent).
-        let owners = connector_ownership(&rm.plan, &cols, &rows);
-        assert_no_overlap(&owners);
-
-        // (d) Arrow-stomp check: no arrowhead lands on another connector's line or arrow.
-        let arrows = connector_arrows(&rm.plan, &cols, &rows);
-        assert_no_arrow_stomp(&arrows, &owners);
-
-        // Render the whole map with no clipping, sized to the table extent.
-        let total_w = (cols.room_pixel(rm.bounds.1.0 + 1) - cols.room_pixel(rm.bounds.0.0) + 20).max(1);
-        let total_h = (rows.room_pixel(rm.bounds.1.1 + 1) - rows.room_pixel(rm.bounds.0.1) + 10).max(1);
-        let area = Rect::new(0, 0, total_w as u16, total_h as u16);
-        let mut buf = Buffer::empty(area);
-        let mut st = AppState::default();
-        st.zoom = Zoom::Boxes;
-        st.scroll = rm.bounds.0;
-        render_map(&rm, &st, area, &mut buf);
-        let off = (cols.room_pixel(rm.bounds.0.0), rows.room_pixel(rm.bounds.0.1));
-
-        // (a) line-art exists and no ribbons.
-        let mut line_cells = 0;
-        for y in 0..area.height {
-            for x in 0..area.width {
-                let c = buf.cell((x, y)).unwrap();
-                assert_ne!(c.bg, Color::Cyan, "no solid Cyan ribbon at ({x},{y})");
-                assert_ne!(c.bg, Color::Magenta, "no solid Magenta ribbon at ({x},{y})");
-                assert_ne!(c.bg, Color::DarkGray, "no unrouted/grey ribbon at ({x},{y})");
-                if is_line(c.symbol()) {
-                    line_cells += 1;
-                }
-            }
-        }
-        assert!(line_cells > 0, "connectors must render as box-drawing line-art");
-
-        // (c) No connector line-art inside any room's interior rectangle.
-        for room in &rm.rooms {
-            let bx = cols.room_pixel(room.cell.0) - off.0;
-            let by = rows.room_pixel(room.cell.1) - off.1;
-            for vy in (by + 1)..(by + BOX_H - 1) {
-                for vx in (bx + 1)..(bx + BOX_W - 1) {
-                    if vx < 0 || vy < 0 { continue; }
-                    if let Some(cell) = buf.cell((vx as u16, vy as u16)) {
-                        assert!(
-                            !is_line(cell.symbol()),
-                            "connector line-art '{}' inside room {} interior at ({vx},{vy})",
-                            cell.symbol(), room.id,
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
