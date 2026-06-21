@@ -80,6 +80,11 @@ pub fn edge_routable(
 /// so the loop terminates well before this on real maps.
 const MAX_REPAIR_PASSES: usize = 30;
 
+/// Candidate moves reach any free cell within this Chebyshev radius, so the climb can
+/// cross a routability valley (a one-cell step that worsens the primary term) to reach
+/// a strictly-better cell beyond it.
+const MOVE_RADIUS: i32 = 3;
+
 fn occupied_map(pos: &BTreeMap<RoomId, (i32, i32)>) -> BTreeMap<(i32, i32), RoomId> {
     pos.iter().map(|(&id, &c)| (c, id)).collect()
 }
@@ -188,10 +193,12 @@ fn conflict_rooms(graph: &MapGraph, pos: &BTreeMap<RoomId, (i32, i32)>) -> BTree
     rooms
 }
 
-/// Greedily shift rooms into free grid cells until the number of un-routable drawn
-/// edges can no longer be reduced. Score is lexicographic `(unroutable, displacement)`;
+/// Greedily shift rooms (into free cells, within a small radius) until neither the
+/// number of un-routable drawn edges nor the per-room same-octant conflict count can
+/// be reduced. Score is lexicographic `(unroutable, side_conflicts, displacement)`;
 /// only strictly-improving moves are accepted, so the search is deterministic and
-/// terminates. Drawn edges are compass edges (the only ones rendered as paths).
+/// terminates. Multi-cell moves let the climb cross a routability valley (e.g. #25
+/// (0,0)→(0,2) past the blocked (0,1)).
 pub fn repair_routability(graph: &MapGraph, pos: &mut BTreeMap<RoomId, (i32, i32)>) {
     let drawn: Vec<(RoomId, RoomId, Direction)> = graph
         .connections()
@@ -204,34 +211,47 @@ pub fn repair_routability(graph: &MapGraph, pos: &mut BTreeMap<RoomId, (i32, i32
     }
     let stress = pos.clone();
 
+    let score = |p: &BTreeMap<RoomId, (i32, i32)>| -> (usize, usize, i64) {
+        (unroutable_count(p, &drawn), side_conflicts(graph, p), displacement(p, &stress))
+    };
+
     for _ in 0..MAX_REPAIR_PASSES {
-        let base = (unroutable_count(pos, &drawn), displacement(pos, &stress));
-        if base.0 == 0 {
-            break;
-        }
+        let base = score(pos);
+
+        // Candidate rooms: endpoints of un-routable edges ∪ rooms in a same-octant conflict.
         let occ_now = occupied_map(pos);
         let bb = bbox_of(pos);
-        // (room to move, target cell, score)
-        type BestMove = Option<(RoomId, (i32, i32), (usize, i64))>;
-        let mut best: BestMove = None;
-
+        let mut cands: BTreeSet<RoomId> = BTreeSet::new();
         for &(o, d, dir) in &drawn {
-            // Only try to fix edges that are currently un-routable.
-            if edge_routable(pos[&o], pos[&d], dir, &occ_now, bb) {
-                continue;
+            if !edge_routable(pos[&o], pos[&d], dir, &occ_now, bb) {
+                cands.insert(o);
+                cands.insert(d);
             }
-            for cand in [o, d] {
-                let from = pos[&cand];
-                for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+        }
+        cands.extend(conflict_rooms(graph, pos));
+        if cands.is_empty() {
+            break; // 0 unroutable AND 0 conflicts
+        }
+
+        // (room, target cell, score)
+        type BestMove = Option<(RoomId, (i32, i32), (usize, usize, i64))>;
+        let mut best: BestMove = None;
+        for &room in &cands {
+            let from = pos[&room];
+            for dx in -MOVE_RADIUS..=MOVE_RADIUS {
+                for dy in -MOVE_RADIUS..=MOVE_RADIUS {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
                     let to = (from.0 + dx, from.1 + dy);
                     if pos.values().any(|&p| p == to) {
                         continue; // occupied → would overlap
                     }
                     let mut trial = pos.clone();
-                    trial.insert(cand, to);
-                    let s = (unroutable_count(&trial, &drawn), displacement(&trial, &stress));
+                    trial.insert(room, to);
+                    let s = score(&trial);
                     if s < base && best.as_ref().is_none_or(|&(_, _, bs)| s < bs) {
-                        best = Some((cand, to, s));
+                        best = Some((room, to, s));
                     }
                 }
             }
@@ -358,6 +378,45 @@ mod tests {
             [(25u16, (0, 2)), (74, (-1, 1)), (76, (-1, 2))].into_iter().collect();
         assert_eq!(side_conflicts(&g, &spread), 0, "#74 is NW, #76 is W → no shared octant");
         assert!(conflict_rooms(&g, &spread).is_empty());
+    }
+
+    #[test]
+    fn repair_removes_same_octant_crossing_pressure() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        // The A129 corner after Milestone-5 routability repair: 0 unroutable, but #25's
+        // two neighbours (#74, #76) both sit SW → 1 conflict. The crossing-aware repair
+        // must drop conflicts to 0 by moving #25 down off row 0 (verified empirically:
+        // (0,2)/(0,3)/(1,2) all render 0 crossings), without re-introducing an
+        // unroutable edge or a room overlap.
+        let mut g = MapGraph::new();
+        for id in [25u16, 74, 76] { g.upsert_room(id, "r".into()); }
+        g.add_edge(74, Direction::E, 25);
+        g.add_edge(74, Direction::S, 76);
+        g.add_edge(25, Direction::W, 76);
+
+        let mut pos: BTreeMap<RoomId, (i32, i32)> =
+            [(25u16, (0, 0)), (74, (-1, 1)), (76, (-1, 2))].into_iter().collect();
+        assert_eq!(side_conflicts(&g, &pos), 1, "precondition: the corner has a same-octant conflict");
+
+        repair_routability(&g, &mut pos);
+
+        assert_eq!(side_conflicts(&g, &pos), 0, "repair must remove the conflict; got {pos:?}");
+        // Still routable, still no overlap.
+        let occ: BTreeMap<(i32, i32), RoomId> = pos.iter().map(|(&id, &c)| (c, id)).collect();
+        let xs: Vec<i32> = pos.values().map(|p| p.0).collect();
+        let ys: Vec<i32> = pos.values().map(|p| p.1).collect();
+        let bb = (
+            xs.iter().min().unwrap() - BBOX_MARGIN, ys.iter().min().unwrap() - BBOX_MARGIN,
+            xs.iter().max().unwrap() + BBOX_MARGIN, ys.iter().max().unwrap() + BBOX_MARGIN,
+        );
+        for c in g.connections() {
+            assert!(edge_routable(pos[&c.origin], pos[&c.dest], c.dir, &occ, bb),
+                "edge {}->{} must stay routable; {pos:?}", c.origin, c.dest);
+        }
+        let cells: BTreeSet<_> = pos.values().collect();
+        assert_eq!(cells.len(), pos.len(), "no overlap");
+        assert!(pos[&25].1 >= 2, "#25 must move down off row 0; got {:?}", pos[&25]);
     }
 
     #[test]
