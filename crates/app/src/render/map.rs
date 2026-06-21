@@ -276,26 +276,6 @@ fn route_ortho(
     astar(paths)
 }
 
-/// Pick the side of `dest_rect` to connect an undiscovered (non-reciprocal) arrival to:
-/// the geometrically nearest side to `dep` that is NOT already `occupied` by one of the
-/// destination's departures or another arrival. Falls back to the nearest side if every
-/// side is occupied. This keeps an arriving line off the centre anchor that a departure
-/// arrow (or another arrival) already uses, so they don't collide.
-fn nearest_free_side(dest_rect: VRect, dep: (i32, i32), occupied: &[Side]) -> Side {
-    let mut sides = [Side::Top, Side::Bottom, Side::Left, Side::Right];
-    sides.sort_by_key(|&s| {
-        let a = side_anchor(dest_rect, s);
-        let dx = a.0 - dep.0;
-        let dy = a.1 - dep.1;
-        dx * dx + dy * dy
-    });
-    sides
-        .iter()
-        .find(|s| !occupied.contains(s))
-        .copied()
-        .unwrap_or(sides[0])
-}
-
 /// Anchor point on `side` of `rect` for a NON-reciprocal arrival, offset from the side's
 /// centre by `index` slots. The centre of every side is reserved for departures (whose
 /// outgoing arrow sits there), so an arriving line that isn't a verified reciprocal must
@@ -330,6 +310,44 @@ fn arrival_anchor(rect: VRect, side: Side, index: i32) -> (i32, i32) {
             (x, rect.bottom())
         }
     }
+}
+
+/// All off-centre arrival anchor candidates on every side of `rect` (the `arrival_anchor`
+/// slots `0..4` per side: ±¼ and ±½ of the side, clamped to the edge), deduplicated.
+fn arrival_candidates(rect: VRect) -> Vec<(i32, i32)> {
+    let mut v = Vec::new();
+    for side in [Side::Top, Side::Bottom, Side::Left, Side::Right] {
+        for idx in 0..4 {
+            v.push(arrival_anchor(rect, side, idx));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The closest off-centre arrival location on `rect` to `dep` that isn't already in `used`.
+///
+/// A non-reciprocal arrival lands at the nearest non-centre perimeter slot — it may share
+/// a side with a departure (whose arrow sits at that side's centre) as long as it takes a
+/// distinct off-centre cell. Picking by nearest *location* (not nearest free *side*) means
+/// the arrival uses the side actually facing the origin even when a departure already sits
+/// there, instead of being bumped to a far side. Falls back to the overall-closest slot if
+/// every candidate is taken.
+fn closest_free_arrival(rect: VRect, dep: (i32, i32), used: &[(i32, i32)]) -> (i32, i32) {
+    let dist2 = |c: (i32, i32)| {
+        let dx = c.0 - dep.0;
+        let dy = c.1 - dep.1;
+        dx * dx + dy * dy
+    };
+    let cands = arrival_candidates(rect);
+    cands
+        .iter()
+        .copied()
+        .filter(|c| !used.contains(c))
+        .min_by_key(|&c| dist2(c))
+        .or_else(|| cands.iter().copied().min_by_key(|&c| dist2(c)))
+        .unwrap_or((rect.x - 1, rect.y + rect.h / 2))
 }
 
 /// Walk from `from` to `to` one step at a time (orthogonal), appending each cell.
@@ -506,20 +524,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let mut drawn: std::collections::HashSet<(RoomId, RoomId)> =
         std::collections::HashSet::new();
 
-    // The sides each room uses for its OUTGOING compass edges (departure arrows sit there).
-    // A non-reciprocal arrival avoids these sides so it doesn't land on a departure anchor.
-    let mut dep_sides: std::collections::HashMap<RoomId, Vec<Side>> =
-        std::collections::HashMap::new();
-    for e in &rm.edges {
-        if e.is_stub {
-            continue;
-        }
-        if let Some(s) = side_for(e.dir) {
-            dep_sides.entry(e.origin).or_default().push(s);
-        }
-    }
-    // Sides already claimed by arrivals into each room (so two arrivals don't collide).
-    let mut used_arr: std::collections::HashMap<RoomId, Vec<Side>> =
+    // Locations already claimed by non-reciprocal arrivals into each room (so two arrivals
+    // don't land on the same cell).
+    let mut used_arr: std::collections::HashMap<RoomId, Vec<(i32, i32)>> =
         std::collections::HashMap::new();
 
     for edge in &rm.edges {
@@ -555,21 +562,14 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             // Confirmed reciprocal: both ends are departures, so arrive at the matched
             // side's centre (one shared, centred path with an arrow at each end).
             Some(s) => side_anchor(dest_rect, s),
-            // Non-reciprocal: connect to the nearest side of dest not already used by a
-            // departure or a prior arrival, off-centre so the side's centre stays reserved
-            // for departures (and the arrival reads as an arrival, not an exit).
+            // Non-reciprocal: connect to the closest off-centre location on dest (the side
+            // actually facing the origin, even if a departure sits at that side's centre),
+            // avoiding any cell a prior arrival already took.
             None => {
-                let mut occupied = dep_sides.get(&edge.dest).cloned().unwrap_or_default();
-                if let Some(u) = used_arr.get(&edge.dest) {
-                    occupied.extend(u.iter().copied());
-                }
-                let s = nearest_free_side(dest_rect, dep, &occupied);
-                let idx = used_arr
-                    .get(&edge.dest)
-                    .map(|u| u.iter().filter(|&&x| x == s).count() as i32)
-                    .unwrap_or(0);
-                used_arr.entry(edge.dest).or_default().push(s);
-                arrival_anchor(dest_rect, s, idx)
+                let used = used_arr.entry(edge.dest).or_default();
+                let arr = closest_free_arrival(dest_rect, dep, used);
+                used.push(arr);
+                arr
             }
         };
 
@@ -1404,22 +1404,27 @@ mod tests {
     }
 
     #[test]
-    fn arrival_avoids_occupied_side() {
-        // A non-reciprocal arrival must not land on a side the destination already uses
-        // for a departure (or another arrival) — that's the "two paths on one arrow" bug.
+    fn arrival_uses_closest_side_even_with_departure_there() {
+        // A non-reciprocal arrival from due west must land on the WEST side (the side
+        // facing the origin) at an off-centre cell — NOT be bumped to a far side just
+        // because a departure occupies that side's centre.
         let dest = VRect { x: 0, y: 0, w: 21, h: 11 };
-        let dep = (-10, 5); // due west of dest → nearest side is Left
+        let dep = (-20, 5); // due west of dest
+        let arr = closest_free_arrival(dest, dep, &[]);
+        assert_eq!(arr.0, dest.x - 1, "arrival must be on the WEST side (closest to dep); got {arr:?}");
+        assert_ne!(arr.1, dest.y + dest.h / 2, "arrival must be off-centre");
+    }
 
-        // Nothing occupied → the geometrically nearest side (Left).
-        assert_eq!(nearest_free_side(dest, dep, &[]), Side::Left);
-
-        // Left occupied (a departure sits there) → must pick a different side.
-        let s = nearest_free_side(dest, dep, &[Side::Left]);
-        assert_ne!(s, Side::Left, "arrival must avoid the occupied departure side; got {s:?}");
-
-        // Left + the next-nearest also occupied → still avoids both.
-        let s2 = nearest_free_side(dest, dep, &[Side::Left, s]);
-        assert!(s2 != Side::Left && s2 != s, "arrival must avoid all occupied sides; got {s2:?}");
+    #[test]
+    fn arrivals_pick_distinct_closest_locations() {
+        // Two arrivals from the same direction must take different cells, both still on the
+        // closest (west) side.
+        let dest = VRect { x: 0, y: 0, w: 21, h: 11 };
+        let dep = (-20, 5);
+        let a0 = closest_free_arrival(dest, dep, &[]);
+        let a1 = closest_free_arrival(dest, dep, &[a0]);
+        assert_ne!(a0, a1, "second arrival must avoid the first's cell");
+        assert_eq!(a1.0, dest.x - 1, "second arrival still prefers the closest (west) side");
     }
 
     #[test]
