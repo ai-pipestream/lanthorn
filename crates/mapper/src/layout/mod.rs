@@ -32,6 +32,8 @@ mod vpsc;
 mod constraints;
 mod stress;
 mod routability;
+mod incremental;
+pub use incremental::place_incremental;
 
 /// Separation gap and ideal edge length (in grid cells).
 const GAP: f64 = 1.0;
