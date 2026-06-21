@@ -135,4 +135,21 @@ mod tests {
         let p2 = g.room(2).unwrap().pos.unwrap();
         assert_ne!(p2, (0, 0), "must not land on prev");
     }
+
+    #[test]
+    fn shift_beyond_multi_blocker_column_no_overlap() {
+        // prev at (0,0); two blockers stacked north at (0,-1) and (0,-2).
+        let mut g = g_with(1, (0, 0));
+        g.upsert_room(8, "b1".into());
+        g.set_pos(8, (0, -1));
+        g.upsert_room(9, "b2".into());
+        g.set_pos(9, (0, -2));
+        g.upsert_room(2, "n".into());
+        place_incremental(&mut g, 1, 2, Direction::N);
+        // New room lands at (0,-1); both blockers shifted further north; no overlap.
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)));
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: std::collections::BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no overlap with stacked blockers");
+    }
 }
