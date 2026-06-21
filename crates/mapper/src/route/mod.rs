@@ -86,9 +86,28 @@ fn snap_to_lattice(p: (i32, i32), toward: (i32, i32)) -> (i32, i32) {
     (p.0 + sx, p.1 + sy)
 }
 
+/// L-orientation of a connector's gap-lattice route: which leg comes first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Orient { HorizontalFirst, VerticalFirst }
+
 /// Build the doubled-coord polyline for one connector: centre → exit stub → lattice →
-/// horizontal run → vertical run → lattice → entry stub → centre.
+/// horizontal run → vertical run → lattice → entry stub → centre. Horizontal-first by
+/// default; see `build_points_orient` to choose the other L.
 fn build_points(a_cell: (i32, i32), exit: Side, b_cell: (i32, i32), entry: Side) -> Vec<(i32, i32)> {
+    build_points_orient(a_cell, exit, b_cell, entry, Orient::HorizontalFirst)
+}
+
+/// Like `build_points` but lets the caller pick the L orientation. Both orientations keep
+/// the gap-lattice invariant (long runs on odd coords, never through a room) and the
+/// `ea==eb` adjacent-straight short-circuit. Horizontal-first corners at `(gb.x, ga.y)`;
+/// vertical-first corners at `(ga.x, gb.y)`.
+fn build_points_orient(
+    a_cell: (i32, i32),
+    exit: Side,
+    b_cell: (i32, i32),
+    entry: Side,
+    orient: Orient,
+) -> Vec<(i32, i32)> {
     let ca = cell_to_doubled(a_cell);
     let cb = cell_to_doubled(b_cell);
     let ea = exit_point(a_cell, exit);
@@ -102,8 +121,12 @@ fn build_points(a_cell: (i32, i32), exit: Side, b_cell: (i32, i32), entry: Side)
     }
     let ga = snap_to_lattice(ea, cb); // first all-odd point
     let gb = snap_to_lattice(eb, ca); // last all-odd point
-    // L on the gap lattice: ga → corner(gb.x, ga.y) → gb (horizontal then vertical).
-    let corner = (gb.0, ga.1);
+    // L on the gap lattice. Horizontal-first: ga → (gb.x, ga.y) → gb. Vertical-first:
+    // ga → (ga.x, gb.y) → gb. Both stay on the all-odd lattice (ga, gb both all-odd).
+    let corner = match orient {
+        Orient::HorizontalFirst => (gb.0, ga.1),
+        Orient::VerticalFirst => (ga.0, gb.1),
+    };
     let mut pts = vec![ca, ea, ga];
     if corner != ga { pts.push(corner); }
     if gb != corner { pts.push(gb); }
@@ -134,10 +157,216 @@ fn merge_collinear(pts: &mut Vec<(i32, i32)>) {
     }
 }
 
+/// Count how many times polyline `a` crosses polyline `b`: a lattice cell where a HORIZONTAL
+/// run of one polyline passes through the INTERIOR of a VERTICAL run of the other (or vice
+/// versa). The crossing cell must be the strict interior of the run it cuts ACROSS — so a
+/// connector's turning corner landing mid-span of another connector's straight run counts (it
+/// renders as a `┼`), while two connectors merely touching corner-to-corner (each at its own
+/// run end) does not. Room-exit stubs are already excluded by `long_runs`. This is the metric
+/// the greedy router minimizes.
+fn count_crossings(a: &[(i32, i32)], b: &[(i32, i32)]) -> usize {
+    // A horizontal run (covering x∈[hs,he] at y=hy) cuts ACROSS a vertical run (at x=vx,
+    // covering y∈[vs,ve]) when the horizontal run reaches x=vx (closed) AND hy is in the
+    // STRICT interior of the vertical run's y-extent (the vertical run passes straight
+    // through the crossing cell). Counting it for the run that passes straight through means
+    // corner-on-interior crossings are caught without double-counting the symmetric case.
+    fn hv_cross(h: &[(Channel, i32, i32)], v: &[(Channel, i32, i32)]) -> usize {
+        let mut n = 0;
+        for &(hc, hs, he) in h {
+            let Channel::H(r) = hc else { continue };
+            let hy = 2 * r + 1;
+            for &(vc, vs, ve) in v {
+                let Channel::V(c) = vc else { continue };
+                let vx = 2 * c + 1;
+                // horizontal reaches vx (closed) and cuts the vertical run's interior in y.
+                if hs <= vx && vx <= he && vs < hy && hy < ve { n += 1; }
+            }
+        }
+        n
+    }
+    let ra = long_runs(a);
+    let rb = long_runs(b);
+    hv_cross(&ra, &rb) + hv_cross(&rb, &ra)
+}
+
+/// True if polylines `a` and `b` share a PARALLEL collinear overlap that the lane system
+/// cannot separate into a clean crossing: two runs on the SAME channel (same H-line or same
+/// V-line) whose extents overlap by more than a single shared turning corner. Such an
+/// overlap renders as a line-on-line stomp (the renderer's no-overlap gate rejects it), so a
+/// greedy candidate that introduces one is disqualified.
+fn has_parallel_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
+    let ra = long_runs(a);
+    let rb = long_runs(b);
+    for &(ca, sa, ea) in &ra {
+        for &(cb, sb, eb) in &rb {
+            if ca == cb {
+                // overlap length of the two closed extents on the shared channel line
+                let lo = sa.max(sb);
+                let hi = ea.min(eb);
+                if hi - lo >= 1 { return true; } // >1 cell of shared collinear run
+            }
+        }
+    }
+    false
+}
+
+/// The candidate entry sides for a NON-reciprocal connector from `a` to `b`: the
+/// geometric entry side plus the next-nearest side that still faces the origin, in a
+/// deterministic order. The geometric side is always first (the default), so when no
+/// alternative reduces crossings the chosen route is unchanged.
+fn entry_side_alternatives(a_cell: (i32, i32), b_cell: (i32, i32)) -> Vec<Side> {
+    let primary = entry_side(a_cell, b_cell);
+    let dx = a_cell.0 - b_cell.0;
+    let dy = a_cell.1 - b_cell.1;
+    // The secondary side is the dominant-of-the-other-axis side that still faces the
+    // origin. Only offer it when the origin is genuinely off-axis on that axis.
+    let secondary = if dx.abs() >= dy.abs() {
+        if dy > 0 { Some(Side::Bottom) } else if dy < 0 { Some(Side::Top) } else { None }
+    } else if dx > 0 { Some(Side::Right) } else if dx < 0 { Some(Side::Left) } else { None };
+    let mut out = vec![primary];
+    if let Some(s) = secondary { if s != primary { out.push(s); } }
+    out
+}
+
 /// Route every drawn (compass) edge into a connector polyline. True reciprocal pairs
 /// (`a→dir→b` + `b→opposite(dir)→a`) collapse to one connector; which member is kept
 /// depends on insertion order in `connections()` (the first-seen direction is drawn).
 pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
+    // Build the connectors two ways and keep the one with fewer total crossings:
+    //   - `default`: every connector on its canonical horizontal-first / geometric-entry route;
+    //   - `greedy`: each connector picks, sequentially, the candidate route that crosses the
+    //     fewest ALREADY-placed connectors.
+    // Greedy is a local heuristic and can occasionally do worse than the canonical layout on
+    // a given graph; keeping the better of the two guarantees crossing reduction is never a
+    // regression. Both are deterministic, so the tiebreak (prefer `default` on an exact tie)
+    // keeps the whole routine deterministic.
+    let default = route_topology_with(graph, false);
+    // Accept the greedy reroute only if it BOTH lowers the render-faithful crossing total AND
+    // introduces NO new parallel line-on-line overlap pair beyond those already present (and
+    // handled cleanly) in the canonical `default` layout. The default is the long-standing
+    // overlap-free render, so any overlap it already contains is renderer-safe; greedy must
+    // not add a new one. Otherwise we keep `default`. This makes crossing reduction a strict,
+    // never-regressing improvement and keeps the renderer's no-overlap gate green.
+    let greedy = route_topology_with(graph, true);
+    if total_crossings(&greedy) < total_crossings(&default)
+        && !greedy_adds_overlap(&default, &greedy)
+    {
+        greedy
+    } else {
+        default
+    }
+}
+
+/// A dirty shared cell: the lattice cell plus the sorted identities of the connectors that
+/// collide there, used to compare overlaps across two candidate layouts.
+type DirtyCell = ((i32, i32), Vec<(RoomId, RoomId)>);
+
+/// Every lattice cell shared by ≥2 connectors that is NOT a clean perpendicular crossing
+/// (a single horizontal pass-through + a single vertical pass-through). The full polyline
+/// trace is walked, so room-exit stubs and turning corners are included — exactly the cells
+/// where a parallel run, corner-on-corner, T-stomp, or ≥3-way share would render as an
+/// illegal overlap. Returned keyed by the involved connectors' `(origin,dest)` identities so
+/// the two layouts can be compared connector-for-connector.
+fn dirty_shared_cells(conns: &[RoutedConnector]) -> std::collections::BTreeSet<DirtyCell> {
+    use std::collections::{BTreeSet, HashMap};
+    const N: u8 = 1; const S: u8 = 2; const E: u8 = 4; const W: u8 = 8;
+    let mut cells: HashMap<(i32, i32), HashMap<usize, u8>> = HashMap::new();
+    for (ci, c) in conns.iter().enumerate() {
+        for w in c.points.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let dx = (b.0 - a.0).signum();
+            let dy = (b.1 - a.1).signum();
+            let bit = if dx > 0 { E } else if dx < 0 { W } else if dy > 0 { S } else { N };
+            let mut cur = a;
+            loop {
+                *cells.entry(cur).or_default().entry(ci).or_insert(0) |= bit;
+                if cur == b { break; }
+                cur = (cur.0 + dx, cur.1 + dy);
+            }
+        }
+    }
+    let mut dirty = BTreeSet::new();
+    let (horiz, vert) = (E | W, N | S);
+    for (cell, per_conn) in &cells {
+        if per_conn.len() < 2 { continue; }
+        let masks: Vec<u8> = per_conn.values().copied().collect();
+        // A clean perpendicular crossing: exactly two connectors, one straight-horizontal and
+        // one straight-vertical.
+        let clean_cross = per_conn.len() == 2
+            && ((masks[0] == horiz && masks[1] == vert) || (masks[0] == vert && masks[1] == horiz));
+        // A pure-parallel overlap: every contributor is the SAME single straight orientation
+        // (all horizontal or all vertical, none turning here). The lane system separates these
+        // onto distinct pixel lines, so they are NOT a render overlap.
+        let all_h = masks.iter().all(|&m| m == E || m == W || m == horiz);
+        let all_v = masks.iter().all(|&m| m == N || m == S || m == vert);
+        let parallel_lane_separable = all_h || all_v;
+        if !clean_cross && !parallel_lane_separable {
+            let mut ids: Vec<(RoomId, RoomId)> =
+                per_conn.keys().map(|&ci| (conns[ci].origin, conns[ci].dest)).collect();
+            ids.sort();
+            dirty.insert((*cell, ids));
+        }
+    }
+    dirty
+}
+
+/// True if `greedy` introduces a dirty (non-clean-crossing) shared cell that the canonical
+/// `default` layout does not already contain. The default is the long-standing overlap-free
+/// render, so any dirty share it already has is renderer-safe; greedy must not add a new one.
+/// Compared by `(cell, involved-connector-identities)` so a pre-existing safe share is not
+/// counted against greedy.
+fn greedy_adds_overlap(default: &[RoutedConnector], greedy: &[RoutedConnector]) -> bool {
+    let base = dirty_shared_cells(default);
+    dirty_shared_cells(greedy).iter().any(|d| !base.contains(d))
+}
+
+/// Render-faithful total crossing count for a set of connectors: lanes are assigned exactly
+/// as the renderer does, then a `┼` is counted wherever a horizontal run of one connector and
+/// a vertical run of a DIFFERENT connector meet at a lattice cell (closed extents — corners
+/// included), since after lane offsetting two parallel runs sit on distinct pixel lines and a
+/// perpendicular crosser cuts each. This mirrors the renderer's per-cell `┼` detection, so
+/// minimizing it tracks the visible crossing count rather than a raw-lattice proxy.
+fn total_crossings(conns: &[RoutedConnector]) -> usize {
+    // (connector idx, channel, start, end) for every long run, with a stable run id.
+    let mut runs: Vec<(usize, Channel, i32, i32)> = Vec::new(); // (run id, channel, s, e)
+    let mut owner: Vec<usize> = Vec::new(); // run id → connector idx
+    for (ci, c) in conns.iter().enumerate() {
+        for (ch, s, e) in long_runs(&c.points) {
+            runs.push((owner.len(), ch, s, e));
+            owner.push(ci);
+        }
+    }
+    let (lane_of, _counts) = assign_lanes(&runs);
+    // Split runs into horizontals and verticals, carrying connector idx and lane.
+    let mut horiz: Vec<(usize, u16, i32, i32, i32)> = Vec::new(); // (conn, lane, y, xs, xe)
+    let mut vert: Vec<(usize, u16, i32, i32, i32)> = Vec::new(); // (conn, lane, x, ys, ye)
+    for &(id, ch, s, e) in &runs {
+        let lane = lane_of[&id];
+        match ch {
+            Channel::H(r) => horiz.push((owner[id], lane, 2 * r + 1, s, e)),
+            Channel::V(c) => vert.push((owner[id], lane, 2 * c + 1, s, e)),
+        }
+    }
+    let mut n = 0;
+    for &(hc, _hl, hy, hxs, hxe) in &horiz {
+        for &(vc, _vl, vx, vys, vye) in &vert {
+            if hc == vc { continue; } // a connector never crosses itself
+            // Closed-extent perpendicular meeting: the horizontal spans vx and the vertical
+            // spans hy. Distinct connectors meeting here render as a single ┼.
+            if hxs <= vx && vx <= hxe && vys <= hy && hy <= vye {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Route every drawn (compass) edge. When `greedy` is false, each connector takes its
+/// canonical route (horizontal-first L, geometric entry side). When true, each connector is
+/// routed sequentially and picks — among its candidate routes (both L orientations, plus the
+/// alternative facing entry side for non-reciprocal connectors) — the one that crosses the
+/// fewest already-placed connectors, with a deterministic integer tiebreak.
+fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     use crate::direction::opposite;
     // Draw every compass edge on its OWN exit side, EXCEPT collapse a TRUE reciprocal pair
     // (a→dir→b together with b→opposite(dir)→a) into a single connector drawn once (the
@@ -150,7 +379,7 @@ pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
         .filter(|c| grid_offset(c.dir).is_some())
         .collect();
     let mut drawn: std::collections::BTreeSet<(RoomId, RoomId)> = std::collections::BTreeSet::new();
-    let mut out = Vec::new();
+    let mut out: Vec<RoutedConnector> = Vec::new();
     for c in &compass {
         let has_reciprocal = compass
             .iter()
@@ -161,14 +390,65 @@ pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue; };
         let Some(exit) = side_for(c.dir) else { continue; };
-        let entry = entry_side(a, b);
+
+        // Generate candidate routes. The exit side is fixed by the edge's compass direction;
+        // we vary the L orientation and (for non-reciprocal connectors, in greedy mode only)
+        // the destination entry side among the sides still facing the origin. Candidate order
+        // is fixed and integer-tiebroken, so the choice is deterministic.
+        let entry_choices: Vec<Side> = if greedy && !has_reciprocal {
+            entry_side_alternatives(a, b)
+        } else {
+            vec![entry_side(a, b)]
+        };
+        let orients: &[Orient] = if greedy {
+            &[Orient::HorizontalFirst, Orient::VerticalFirst]
+        } else {
+            &[Orient::HorizontalFirst]
+        };
+        // (rank, entry, points): `rank` bakes the deterministic preference — earlier entry
+        // choices (geometric first) and HorizontalFirst orientation are preferred on ties.
+        type Candidate = (usize, Side, Vec<(i32, i32)>);
+        let mut candidates: Vec<Candidate> = Vec::new();
+        for (ei, &entry) in entry_choices.iter().enumerate() {
+            for (oi, &orient) in orients.iter().enumerate() {
+                // Default mode emits the canonical horizontal-first route via `build_points`;
+                // greedy mode also probes the vertical-first alternative.
+                let pts = match orient {
+                    Orient::HorizontalFirst => build_points(a, exit, b, entry),
+                    Orient::VerticalFirst => build_points_orient(a, exit, b, entry, orient),
+                };
+                candidates.push((ei * 2 + oi, entry, pts));
+            }
+        }
+        // Pick the candidate with the fewest crossings against already-placed connectors;
+        // ties break by the preference rank, then by the points (fully deterministic).
+        let chosen = candidates
+            .into_iter()
+            .map(|(rank, entry, pts)| {
+                // Disqualify candidates that introduce a parallel line-on-line overlap the
+                // lane system can't resolve (renderer rejects these): make it the PRIMARY key
+                // so an overlap-free route always wins. Among overlap-free candidates, minimize
+                // the crossings this candidate adds against the already-placed connectors; ties
+                // break by preference rank (geometric entry, horizontal-first), then the points.
+                let overlaps = out.iter().filter(|o| has_parallel_overlap(&pts, &o.points)).count();
+                let crosses: usize = out.iter().map(|o| count_crossings(&pts, &o.points)).sum();
+                (overlaps, crosses, rank, entry, pts)
+            })
+            .min_by(|x, y| {
+                x.0.cmp(&y.0)
+                    .then(x.1.cmp(&y.1))
+                    .then(x.2.cmp(&y.2))
+                    .then(x.4.cmp(&y.4))
+            })
+            .expect("at least one candidate route");
+
         out.push(RoutedConnector {
             origin: c.origin,
             dest: c.dest,
             distorted: c.distorted,
             exit,
-            entry,
-            points: build_points(a, exit, b, entry),
+            entry: chosen.3,
+            points: chosen.4,
             segs: Vec::new(),
             exit_slot: 0,
             entry_slot: 0,
@@ -566,6 +846,71 @@ mod tests {
         let conns = route_topology(&g);
         assert_eq!(conns.len(), 1, "true opposite pair collapses to one connector");
         assert!(conns[0].reciprocal, "collapsed true-opposite connector must have reciprocal == true");
+    }
+
+    #[test]
+    fn orientation_choice_reduces_crossings() {
+        // Connector A is a short horizontal run H(0) on y=1 spanning x∈[1,3].
+        let a = build_points((0, 0), Side::Right, (2, 0), Side::Left);
+        // Connector B goes from (4,-2) to (0,2). The two L orientations route differently:
+        //  - HORIZONTAL-FIRST drops its vertical leg at x=1, INSIDE A's x-span → crosses A.
+        //  - VERTICAL-FIRST drops its vertical leg at x=7, OUTSIDE A's x-span → no crossing.
+        let hf = build_points_orient((4, -2), Side::Left, (0, 2), Side::Top, Orient::HorizontalFirst);
+        let vf = build_points_orient((4, -2), Side::Left, (0, 2), Side::Top, Orient::VerticalFirst);
+        assert_eq!(count_crossings(&a, &hf), 1, "horizontal-first must cross A once");
+        assert_eq!(count_crossings(&a, &vf), 0, "vertical-first must avoid A");
+        // The greedy chooser, presented both orientations against the already-placed A, must
+        // pick the non-crossing (vertical-first) route.
+        let pick_hf = count_crossings(&a, &hf);
+        let pick_vf = count_crossings(&a, &vf);
+        assert!(pick_vf < pick_hf, "greedy should prefer the lower-crossing orientation");
+    }
+
+    #[test]
+    fn greedy_picks_non_crossing_route_end_to_end() {
+        // Two connectors whose default (horizontal-first) routes cross, but where rerouting
+        // the second connector vertical-first removes the crossing cleanly. `route_topology`
+        // must choose the lower-crossing, overlap-free route set.
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        // A: 1 -E-> 2, a short horizontal pair.
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0));
+        g.add_edge(1, Direction::E, 2);
+        // B: 3 -W-> 4 from the upper-right down to the left, off-axis so its L can flip.
+        g.set_pos(3, (4, -2));
+        g.set_pos(4, (0, 2));
+        g.add_edge(3, Direction::W, 4);
+        let crossings = |conns: &[RoutedConnector]| {
+            let mut n = 0;
+            for i in 0..conns.len() { for j in (i + 1)..conns.len() {
+                n += count_crossings(&conns[i].points, &conns[j].points);
+            } }
+            n
+        };
+        // The canonical (non-greedy) routing DOES cross here…
+        let default = route_topology_with(&g, false);
+        assert!(crossings(&default) > 0, "this graph's default routing must cross (test is meaningful)");
+        // …and `route_topology` (greedy + best-of) must pick the crossing-free route set.
+        let chosen = route_topology(&g);
+        assert_eq!(crossings(&chosen), 0, "route_topology must pick the crossing-free route set");
+    }
+
+    #[test]
+    fn greedy_routing_is_deterministic() {
+        // The same graph that triggers a greedy reroute must produce an identical RoutePlan
+        // every time (fixed candidate order, integer tiebreaks, no RNG).
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0));
+        g.set_pos(3, (4, -2));
+        g.set_pos(4, (0, 2));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(3, Direction::W, 4);
+        let a = format!("{:?}", route_lanes(&g));
+        let b = format!("{:?}", route_lanes(&g));
+        assert_eq!(a, b, "greedy routing must be deterministic");
     }
 
     #[test]
