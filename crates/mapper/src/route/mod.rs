@@ -127,11 +127,150 @@ pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
     out
 }
 
+/// Extract the long runs of a doubled-coord polyline as (channel, start, end) with
+/// start<=end, skipping the room-cell endpoints and zero-length steps. A horizontal run
+/// (constant odd y) → `H((y-1)/2)`; a vertical run (constant odd x) → `V((x-1)/2)`.
+fn long_runs(points: &[(i32, i32)]) -> Vec<(Channel, i32, i32)> {
+    let mut runs = Vec::new();
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a.1 == b.1 && a.1 % 2 != 0 && a.0 != b.0 {
+            // horizontal run on channel H[(y-1)/2]
+            let (s, e) = (a.0.min(b.0), a.0.max(b.0));
+            runs.push((Channel::H((a.1 - 1).div_euclid(2)), s, e));
+        } else if a.0 == b.0 && a.0 % 2 != 0 && a.1 != b.1 {
+            let (s, e) = (a.1.min(b.1), a.1.max(b.1));
+            runs.push((Channel::V((a.0 - 1).div_euclid(2)), s, e));
+        }
+        // steps touching even coords are the stubs (room↔lattice); they carry no lane.
+    }
+    runs
+}
+
+/// Left-edge interval colouring per channel. Returns, for each input run, the lane it was
+/// assigned, plus the per-channel lane count. Runs are processed in a deterministic order
+/// (by channel, then start, then end) so assignment is stable.
+fn assign_lanes(
+    runs: &[(usize, Channel, i32, i32)], // (connector-run id, channel, start, end)
+) -> (std::collections::HashMap<usize, u16>, BTreeMap<Channel, u16>) {
+    use std::collections::HashMap;
+    // bucket by channel
+    let mut by_ch: BTreeMap<Channel, Vec<(usize, i32, i32)>> = BTreeMap::new();
+    for &(id, ch, s, e) in runs {
+        by_ch.entry(ch).or_default().push((id, s, e));
+    }
+    let mut lane_of: HashMap<usize, u16> = HashMap::new();
+    let mut counts: BTreeMap<Channel, u16> = BTreeMap::new();
+    for (ch, mut items) in by_ch {
+        items.sort_by_key(|&(_, s, e)| (s, e));
+        // lane_end[l] = current right edge occupied on lane l (exclusive comparison).
+        let mut lane_end: Vec<i32> = Vec::new();
+        for (id, s, e) in items {
+            // first lane whose last extent ends strictly before s
+            let lane = match lane_end.iter().position(|&end| end < s) {
+                Some(l) => { lane_end[l] = e; l }
+                None => { lane_end.push(e); lane_end.len() - 1 }
+            };
+            lane_of.insert(id, lane as u16);
+        }
+        counts.insert(ch, lane_end.len() as u16);
+    }
+    (lane_of, counts)
+}
+
+/// Full logical route: topology + lane assignment.
+pub fn route_lanes(graph: &MapGraph) -> RoutePlan {
+    let mut connectors = route_topology(graph);
+
+    // Flatten every connector's long runs into a global list with stable ids.
+    let mut runs: Vec<(usize, Channel, i32, i32)> = Vec::new();
+    let mut owner: Vec<(usize, Channel, i32, i32)> = Vec::new(); // (connector idx, channel, s, e)
+    for (ci, c) in connectors.iter().enumerate() {
+        for (ch, s, e) in long_runs(&c.points) {
+            let id = runs.len();
+            runs.push((id, ch, s, e));
+            owner.push((ci, ch, s, e));
+        }
+    }
+    let (lane_of, counts) = assign_lanes(&runs);
+
+    // Attach lanes back onto each connector.
+    for (id, (ci, ch, s, e)) in owner.into_iter().enumerate() {
+        let lane = lane_of[&id];
+        connectors[ci].segs.push(LaneSeg { channel: ch, lane, start: s, end: e });
+    }
+
+    let mut h_lanes = BTreeMap::new();
+    let mut v_lanes = BTreeMap::new();
+    for (ch, n) in counts {
+        match ch {
+            Channel::H(r) => { h_lanes.insert(r, n); }
+            Channel::V(c) => { v_lanes.insert(c, n); }
+        }
+    }
+    RoutePlan { connectors, h_lanes, v_lanes }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::direction::Direction;
     use crate::graph::MapGraph;
+
+    #[test]
+    fn segments_sharing_a_lane_never_overlap() {
+        // Build a small congested graph and assert the core invariant across all channels.
+        let mut g = MapGraph::new();
+        for id in 1..=4 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); g.set_pos(2, (3, 0)); g.set_pos(3, (0, 1)); g.set_pos(4, (3, 1));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(3, Direction::E, 4); // a second horizontal run in a nearby channel
+        g.add_edge(1, Direction::S, 3);
+        let plan = route_lanes(&g);
+        // Group segs by (channel, lane); within a group, extents must be pairwise disjoint.
+        use std::collections::BTreeMap;
+        let mut by_lane: BTreeMap<(Channel, u16), Vec<(i32, i32)>> = BTreeMap::new();
+        for c in &plan.connectors {
+            for s in &c.segs {
+                by_lane.entry((s.channel, s.lane)).or_default().push((s.start, s.end));
+            }
+        }
+        for ((ch, lane), mut ivs) in by_lane {
+            ivs.sort();
+            for w in ivs.windows(2) {
+                assert!(w[0].1 < w[1].0,
+                    "overlap in {ch:?} lane {lane}: {:?} and {:?}", w[0], w[1]);
+            }
+        }
+    }
+
+    #[test]
+    fn two_overlapping_runs_get_two_lanes() {
+        // Two connectors whose horizontal runs share a channel and overlap in extent must
+        // land on different lanes → that channel reports lane_count 2.
+        let mut g = MapGraph::new();
+        for id in 1..=4 { g.upsert_room(id, "r".into()); }
+        // 1->2 and 3->4 both run horizontally across the same row band, overlapping in x.
+        g.set_pos(1, (0, 0)); g.set_pos(2, (4, 0));
+        g.set_pos(3, (1, 0)); g.set_pos(4, (3, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(3, Direction::E, 4);
+        let plan = route_lanes(&g);
+        let max_h = plan.h_lanes.values().copied().max().unwrap_or(0);
+        assert!(max_h >= 2, "two overlapping horizontal runs need ≥2 lanes; got {max_h}");
+    }
+
+    #[test]
+    fn route_lanes_is_deterministic() {
+        let mut g = MapGraph::new();
+        for id in 1..=3 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); g.set_pos(2, (2, 0)); g.set_pos(3, (0, 2));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(1, Direction::S, 3);
+        let a = format!("{:?}", route_lanes(&g));
+        let b = format!("{:?}", route_lanes(&g));
+        assert_eq!(a, b);
+    }
 
     /// Expand a doubled-coord polyline into the doubled cells it passes through.
     fn trace_cells(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
