@@ -125,6 +125,69 @@ fn displacement(
         .sum()
 }
 
+/// Compass octant of a direction vector: (sign(dx), sign(dy)), each in {-1,0,1}.
+/// Two neighbours of a room sharing an octant fan the same way → crossing pressure.
+fn octant(dx: i32, dy: i32) -> (i8, i8) {
+    (dx.signum() as i8, dy.signum() as i8)
+}
+
+/// Distinct neighbour rooms of `r` via DRAWN (compass) edges, either direction.
+/// Reciprocal pairs collapse naturally — a neighbour is listed once.
+fn neighbours(graph: &MapGraph, r: RoomId) -> BTreeSet<RoomId> {
+    let mut ns = BTreeSet::new();
+    for c in graph.connections() {
+        if grid_offset(c.dir).is_none() {
+            continue;
+        }
+        if c.origin == r {
+            ns.insert(c.dest);
+        } else if c.dest == r {
+            ns.insert(c.origin);
+        }
+    }
+    ns
+}
+
+/// Total per-room same-octant neighbour conflicts: for each placed room, each
+/// unordered pair of its placed neighbours that share an octant relative to it.
+fn side_conflicts(graph: &MapGraph, pos: &BTreeMap<RoomId, (i32, i32)>) -> usize {
+    let mut total = 0;
+    for (&r, &rp) in pos {
+        let ns: Vec<RoomId> = neighbours(graph, r).into_iter().filter(|n| pos.contains_key(n)).collect();
+        for i in 0..ns.len() {
+            for j in (i + 1)..ns.len() {
+                let a = pos[&ns[i]];
+                let b = pos[&ns[j]];
+                if octant(a.0 - rp.0, a.1 - rp.1) == octant(b.0 - rp.0, b.1 - rp.1) {
+                    total += 1;
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Rooms involved in any same-octant conflict: the room itself plus the two
+/// neighbours of each conflicting pair (the set the repair is allowed to move).
+fn conflict_rooms(graph: &MapGraph, pos: &BTreeMap<RoomId, (i32, i32)>) -> BTreeSet<RoomId> {
+    let mut rooms = BTreeSet::new();
+    for (&r, &rp) in pos {
+        let ns: Vec<RoomId> = neighbours(graph, r).into_iter().filter(|n| pos.contains_key(n)).collect();
+        for i in 0..ns.len() {
+            for j in (i + 1)..ns.len() {
+                let a = pos[&ns[i]];
+                let b = pos[&ns[j]];
+                if octant(a.0 - rp.0, a.1 - rp.1) == octant(b.0 - rp.0, b.1 - rp.1) {
+                    rooms.insert(r);
+                    rooms.insert(ns[i]);
+                    rooms.insert(ns[j]);
+                }
+            }
+        }
+    }
+    rooms
+}
+
 /// Greedily shift rooms into free grid cells until the number of un-routable drawn
 /// edges can no longer be reduced. Score is lexicographic `(unroutable, displacement)`;
 /// only strictly-improving moves are accepted, so the search is deterministic and
@@ -263,5 +326,52 @@ mod tests {
         assert!(all_routable(&pos), "repair must open a channel for every edge; got {pos:?}");
         let cells: std::collections::BTreeSet<_> = pos.values().collect();
         assert_eq!(cells.len(), pos.len(), "repair must not overlap rooms");
+    }
+
+    #[test]
+    fn octant_is_sign_pair() {
+        assert_eq!(octant(-1, 2), (-1, 1));
+        assert_eq!(octant(-1, 0), (-1, 0));
+        assert_eq!(octant(3, -4), (1, -1));
+        assert_eq!(octant(0, 0), (0, 0));
+    }
+
+    #[test]
+    fn side_conflicts_counts_same_octant_neighbour_pairs() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        // #25 connects to #74 and #76 (drawn compass edges). At (0,0) both neighbours
+        // are SW (same octant) → 1 conflict. Move #25 to (0,2): #74 is NW, #76 is W
+        // (different octants) → 0 conflicts.
+        let mut g = MapGraph::new();
+        for id in [25u16, 74, 76] { g.upsert_room(id, "r".into()); }
+        g.add_edge(74, Direction::E, 25);
+        g.add_edge(74, Direction::S, 76);
+        g.add_edge(25, Direction::W, 76);
+
+        let crammed: BTreeMap<RoomId, (i32, i32)> =
+            [(25u16, (0, 0)), (74, (-1, 1)), (76, (-1, 2))].into_iter().collect();
+        assert_eq!(side_conflicts(&g, &crammed), 1, "both #25 neighbours are SW");
+        assert!(conflict_rooms(&g, &crammed).contains(&25), "the conflicted room is flagged");
+
+        let spread: BTreeMap<RoomId, (i32, i32)> =
+            [(25u16, (0, 2)), (74, (-1, 1)), (76, (-1, 2))].into_iter().collect();
+        assert_eq!(side_conflicts(&g, &spread), 0, "#74 is NW, #76 is W → no shared octant");
+        assert!(conflict_rooms(&g, &spread).is_empty());
+    }
+
+    #[test]
+    fn reciprocal_pair_is_one_neighbour_no_self_conflict() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        // A reciprocal pair a<->b must contribute ONE neighbour each way, never a
+        // self-conflict (a room with a single neighbour has no pair).
+        let mut g = MapGraph::new();
+        for id in [1u16, 2] { g.upsert_room(id, "r".into()); }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1); // reciprocal
+        let pos: BTreeMap<RoomId, (i32, i32)> = [(1u16, (0, 1)), (2, (0, 0))].into_iter().collect();
+        assert_eq!(neighbours(&g, 1), [2u16].into_iter().collect());
+        assert_eq!(side_conflicts(&g, &pos), 0, "one neighbour each → no pair → no conflict");
     }
 }
