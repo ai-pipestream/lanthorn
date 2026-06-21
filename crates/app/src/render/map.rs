@@ -1244,48 +1244,136 @@ mod tests {
         g
     }
 
-    /// Per-virtual-cell connector ownership: which connector indices wrote each cell and the
-    /// OR of the direction-bit masks they contributed. Re-derives plotting per connector from
-    /// the same `plot_connector` geometry the renderer uses, so a cell shared by ≥2 distinct
-    /// connectors is a genuine overlap unless it is a clean perpendicular `┼`.
+    /// Per-virtual-cell connector ownership: for each cell, the list of (connector_index,
+    /// per-connector direction-bit mask) pairs from every connector that wrote that cell.
+    /// Re-derives plotting per connector from the same `plot_connector` geometry the renderer
+    /// uses, so a cell shared by ≥2 distinct connectors is detectable with full per-connector
+    /// mask information (not just the OR, which masks corner-on-corner collisions).
     fn connector_ownership(
         plan: &mapper::route::RoutePlan,
         cols: &PosTable,
         rows: &PosTable,
-    ) -> std::collections::HashMap<(i32, i32), (std::collections::BTreeSet<usize>, u8)> {
-        let mut owners: std::collections::HashMap<(i32, i32), (std::collections::BTreeSet<usize>, u8)> =
+    ) -> std::collections::HashMap<(i32, i32), Vec<(usize, u8)>> {
+        let mut owners: std::collections::HashMap<(i32, i32), Vec<(usize, u8)>> =
             std::collections::HashMap::new();
         for (ci, conn) in plan.connectors.iter().enumerate() {
             if let Some(plot) = plot_connector(conn, cols, rows) {
                 for (c, mask) in &plot.cells {
-                    let e = owners.entry(*c).or_default();
-                    e.0.insert(ci);
-                    e.1 |= *mask;
+                    owners.entry(*c).or_default().push((ci, *mask));
                 }
             }
         }
         owners
     }
 
-    /// Assert no virtual cell is written by ≥2 distinct connectors unless the combined mask is
-    /// exactly a clean perpendicular `┼` (all four direction bits). Returns the number of clean
-    /// `┼` crossings seen (so tests can also assert a crossing exists).
+    /// Assert no virtual cell is written by ≥2 distinct connectors unless it is a TRUE
+    /// perpendicular crossing: exactly 2 connectors, one contributing exactly E|W (horizontal
+    /// straight) and the other exactly N|S (vertical straight). Corner-on-corner collisions
+    /// (e.g. ┌ + ┘ or └ + ┐, which OR to all-four bits but are not traceable) and any cell
+    /// with ≥3 connectors are rejected. Returns the number of clean ┼ crossings seen.
     fn assert_no_overlap(
-        owners: &std::collections::HashMap<(i32, i32), (std::collections::BTreeSet<usize>, u8)>,
+        owners: &std::collections::HashMap<(i32, i32), Vec<(usize, u8)>>,
     ) -> usize {
-        let all = DIR_N | DIR_E | DIR_S | DIR_W;
+        let ew = DIR_E | DIR_W;
+        let ns = DIR_N | DIR_S;
         let mut crossings = 0;
-        for (cell, (conns, mask)) in owners {
-            if conns.len() >= 2 {
+        for (cell, entries) in owners {
+            // Deduplicate by connector index (a connector may contribute the same cell twice
+            // due to run deduplication; OR their masks together per connector).
+            let mut per_conn: std::collections::BTreeMap<usize, u8> = std::collections::BTreeMap::new();
+            for &(ci, mask) in entries {
+                *per_conn.entry(ci).or_insert(0) |= mask;
+            }
+            if per_conn.len() >= 2 {
+                let idx_list: Vec<usize> = per_conn.keys().copied().collect();
+                let masks: Vec<u8> = per_conn.values().copied().collect();
                 assert_eq!(
-                    *mask, all,
-                    "cell {cell:?} shared by connectors {conns:?} is not a clean ┼ crossing \
-                     (mask={mask:#06b}) — connectors overlap or run alongside",
+                    per_conn.len(), 2,
+                    "cell {cell:?} shared by {n} connectors {idx_list:?} (masks={masks:?}) — \
+                     only 2-connector perpendicular crossings are legal",
+                    n = per_conn.len(),
+                );
+                // True perpendicular crossing: one connector carries E|W, the other N|S.
+                // Sorted so the comparison is order-independent.
+                let mut sorted_masks = masks.clone();
+                sorted_masks.sort_unstable();
+                let mut expected = [ns, ew];
+                expected.sort_unstable();
+                assert_eq!(
+                    sorted_masks, expected,
+                    "cell {cell:?} shared by connectors {idx_list:?} with masks {masks:?} is not \
+                     a clean ┼ crossing — each contributor must be exactly E|W ({ew:#04b}) or \
+                     N|S ({ns:#04b}); corner-on-corner turns are rejected",
                 );
                 crossings += 1;
             }
         }
         crossings
+    }
+
+    /// Collect every arrowhead cell with its owning connector index. Mirrors the renderer's
+    /// logic in `render_lane_connectors`: every connector gets a departure arrow at its
+    /// `dep_anchor`; connectors whose (origin, dest) pair appears in `reciprocal` also get an
+    /// arrival arrow at `arr_anchor`. Returns a `Vec<(virtual_cell, connector_idx)>`.
+    fn connector_arrows(
+        plan: &mapper::route::RoutePlan,
+        cols: &PosTable,
+        rows: &PosTable,
+        reciprocal: &std::collections::HashSet<(mapper::graph::RoomId, mapper::graph::RoomId)>,
+    ) -> Vec<((i32, i32), usize)> {
+        let mut arrows: Vec<((i32, i32), usize)> = Vec::new();
+        for (ci, conn) in plan.connectors.iter().enumerate() {
+            let Some(plot) = plot_connector(conn, cols, rows) else { continue };
+            // Departure arrow at dep_anchor.
+            arrows.push((plot.dep_anchor, ci));
+            // Reciprocal far-end arrow at arr_anchor (same logic as renderer).
+            let key = (conn.origin.min(conn.dest), conn.origin.max(conn.dest));
+            if reciprocal.contains(&key) {
+                arrows.push((plot.arr_anchor, ci));
+            }
+        }
+        arrows
+    }
+
+    /// Assert no arrowhead cell stomps another connector's line-art cell or another
+    /// connector's arrowhead. A connector's own arrow sitting on its own line start is
+    /// acceptable (the dep_anchor is both the line endpoint and the arrowhead position).
+    fn assert_no_arrow_stomp(
+        arrows: &[((i32, i32), usize)],
+        owners: &std::collections::HashMap<(i32, i32), Vec<(usize, u8)>>,
+    ) {
+        // Build a set of (cell, connector_idx) for all arrowheads so we can check cross-ownership.
+        // Also build a map from arrow cell → set of owning connector indices.
+        let mut arrow_owners: std::collections::HashMap<(i32, i32), std::collections::BTreeSet<usize>> =
+            std::collections::HashMap::new();
+        for &(cell, ci) in arrows {
+            arrow_owners.entry(cell).or_default().insert(ci);
+        }
+
+        // Check 1: arrowhead stomps a line-art cell owned by a DIFFERENT connector.
+        for &(cell, ci) in arrows {
+            if let Some(line_entries) = owners.get(&cell) {
+                for &(line_ci, _mask) in line_entries {
+                    if line_ci != ci {
+                        panic!(
+                            "arrow-stomp: connector {ci}'s arrowhead at {cell:?} stomps \
+                             connector {line_ci}'s line-art cell",
+                        );
+                    }
+                }
+            }
+        }
+
+        // Check 2: two different connectors have arrowheads at the same cell.
+        for (cell, ci_set) in &arrow_owners {
+            if ci_set.len() >= 2 {
+                let idx_list: Vec<usize> = ci_set.iter().copied().collect();
+                panic!(
+                    "arrow-stomp: {n} connectors {idx_list:?} all have an arrowhead at {cell:?}",
+                    n = ci_set.len(),
+                );
+            }
+        }
     }
 
     #[test]
@@ -1308,7 +1396,12 @@ mod tests {
         assert_eq!(crossings, 1, "the two perpendicular connectors must cross at exactly one ┼");
 
         // The rendered glyph at the crossing is ┼.
-        let cross_cell = owners.iter().find(|(_, (c, _))| c.len() >= 2).map(|(k, _)| *k).unwrap();
+        let cross_cell = owners.iter()
+            .find(|(_, entries)| {
+                let unique: std::collections::BTreeSet<usize> = entries.iter().map(|&(ci, _)| ci).collect();
+                unique.len() >= 2
+            })
+            .map(|(k, _)| *k).unwrap();
         let area = Rect::new(0, 0, 160, 80);
         let mut buf = Buffer::empty(area);
         let mut st = AppState::default();
@@ -1365,6 +1458,17 @@ mod tests {
         // (b) Cross-connector overlap check in virtual space (scroll-independent).
         let owners = connector_ownership(&rm.plan, &cols, &rows);
         assert_no_overlap(&owners);
+
+        // (d) Arrow-stomp check: no arrowhead lands on another connector's line or arrow.
+        // Derive the reciprocal set the same way the renderer does (from rm.edges).
+        let reciprocal: std::collections::HashSet<(mapper::graph::RoomId, mapper::graph::RoomId)> = rm
+            .edges
+            .iter()
+            .filter(|e| !e.is_stub && e.arrival_dir.is_some())
+            .map(|e| (e.origin.min(e.dest), e.origin.max(e.dest)))
+            .collect();
+        let arrows = connector_arrows(&rm.plan, &cols, &rows, &reciprocal);
+        assert_no_arrow_stomp(&arrows, &owners);
 
         // Render the whole map with no clipping, sized to the table extent.
         let total_w = (cols.room_pixel(rm.bounds.1.0 + 1) - cols.room_pixel(rm.bounds.0.0) + 20).max(1);
