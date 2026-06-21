@@ -134,15 +134,25 @@ fn merge_collinear(pts: &mut Vec<(i32, i32)>) {
 /// Route every drawn (compass) edge into a connector polyline. Reciprocal pairs collapse
 /// to one (keep the lower-origin-id direction).
 pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
-    let mut seen: std::collections::BTreeSet<(RoomId, RoomId)> = std::collections::BTreeSet::new();
+    use crate::direction::opposite;
+    // Draw every compass edge on its OWN exit side, EXCEPT collapse a TRUE reciprocal pair
+    // (a→dir→b together with b→opposite(dir)→a) into a single connector drawn once (the
+    // renderer puts an arrow at each end). Edges that merely share a room-pair but are not
+    // true opposites (e.g. 239→N→77 and 239→S→77, or 79→S→80 alongside 80→E→79) are each
+    // drawn separately, so every distinct direction is visible.
+    let compass: Vec<&crate::graph::Connection> = graph
+        .connections()
+        .iter()
+        .filter(|c| grid_offset(c.dir).is_some())
+        .collect();
+    let mut drawn: std::collections::BTreeSet<(RoomId, RoomId)> = std::collections::BTreeSet::new();
     let mut out = Vec::new();
-    for c in graph.connections() {
-        if grid_offset(c.dir).is_none() {
-            continue; // stub, not routed
-        }
-        let key = (c.origin.min(c.dest), c.origin.max(c.dest));
-        if !seen.insert(key) {
-            continue; // reciprocal partner already routed
+    for c in &compass {
+        let has_reciprocal = compass
+            .iter()
+            .any(|p| p.origin == c.dest && p.dest == c.origin && p.dir == opposite(c.dir));
+        if has_reciprocal && drawn.contains(&(c.dest, c.origin)) {
+            continue; // the reciprocal partner already drew this pair
         }
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue; };
@@ -159,6 +169,7 @@ pub fn route_topology(graph: &MapGraph) -> Vec<RoutedConnector> {
             exit_slot: 0,
             entry_slot: 0,
         });
+        drawn.insert((c.origin, c.dest));
     }
     out
 }
@@ -221,6 +232,12 @@ fn assign_lanes(
 /// Each connector has an exit endpoint at `(origin, exit)` and an entry endpoint at
 /// `(dest, entry)`. Endpoints are grouped by `(room, side)` and assigned 0,1,2,… in a
 /// deterministic order (by room, side, then connector index) so rendering is stable.
+/// True if a doubled-coord polyline is a single straight segment (all points share one axis),
+/// i.e. the connector runs straight through with no turn.
+fn is_collinear(points: &[(i32, i32)]) -> bool {
+    points.iter().all(|p| p.0 == points[0].0) || points.iter().all(|p| p.1 == points[0].1)
+}
+
 fn assign_side_slots(connectors: &mut [RoutedConnector]) {
     // Collect every endpoint as (room, side, is_exit, connector index).
     let mut endpoints: Vec<(RoomId, Side, bool, usize)> = Vec::new();
@@ -228,14 +245,23 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
         endpoints.push((c.origin, c.exit, true, ci));
         endpoints.push((c.dest, c.entry, false, ci));
     }
-    // Group by (room, side); assign slots in connector-index order within each group.
-    let mut by_side: BTreeMap<(RoomId, Side), Vec<(bool, usize)>> = BTreeMap::new();
+    // Group by (room, side); assign slots within each group. A connector that runs STRAIGHT
+    // through this side (a collinear polyline — its other end is axis-aligned with this room)
+    // is given slot 0 (the side centre) ahead of weaving connectors, so it stays on a clean
+    // straight line and the weaving ones take the offset cells. This keeps the renderer's
+    // perpendicular stubs from forcing a straight connector to jog across a weaving one's
+    // corner. Ties break by (connector index, is_exit) for determinism.
+    // Endpoint within a (room, side) group: (straight-through?, is_exit, connector index).
+    type Endpoint = (bool, bool, usize);
+    let mut by_side: BTreeMap<(RoomId, Side), Vec<Endpoint>> = BTreeMap::new();
     for (room, side, is_exit, ci) in endpoints {
-        by_side.entry((room, side)).or_default().push((is_exit, ci));
+        let straight = is_collinear(&connectors[ci].points);
+        by_side.entry((room, side)).or_default().push((straight, is_exit, ci));
     }
     for (_key, mut members) in by_side {
-        members.sort_by_key(|&(is_exit, ci)| (ci, is_exit));
-        for (slot, (is_exit, ci)) in members.into_iter().enumerate() {
+        // `straight` first (false sorts before true, so negate via Reverse).
+        members.sort_by_key(|&(straight, is_exit, ci)| (std::cmp::Reverse(straight), ci, is_exit));
+        for (slot, (_straight, is_exit, ci)) in members.into_iter().enumerate() {
             if is_exit {
                 connectors[ci].exit_slot = slot as u16;
             } else {

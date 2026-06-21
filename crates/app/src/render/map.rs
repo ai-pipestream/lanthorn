@@ -304,6 +304,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     }
 
     // ── 2. Boxes zoom: draw line-art connectors along their assigned lanes ────
+    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
         // Reciprocal connections (a reverse edge exists) get a far-end arrow too. The
         // reverse-edge signal lives on `RoutedEdge::arrival_dir`.
@@ -313,7 +314,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
             .filter(|e| !e.is_stub && e.arrival_dir.is_some())
             .map(|e| (e.origin.min(e.dest), e.origin.max(e.dest)))
             .collect();
-        render_lane_connectors(&rm.plan, cols, rows, &reciprocal, (off_x, off_y), area, buf);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, &reciprocal, (off_x, off_y), area, buf);
     }
 
     // Stub edges (translate + clip).
@@ -323,11 +324,15 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         }
     }
 
-    // ── 3. Draw rooms on top (translate + clip) ──────────────────────────────
+    // ── 3. Draw rooms on top of the line-art (translate + clip) ───────────────
     for room in &rm.rooms {
         let (vx, vy) = room_virtual(room.cell);
         draw_room(room, state, zoom, vx + off_x, vy + off_y, area, buf);
     }
+
+    // ── 4. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
+    //       border it sits on (replacing the box-edge glyph, pointing outward).
+    draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf);
 }
 
 // ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
@@ -445,19 +450,21 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
     let dep_anchor = box_edge_anchor(cols, rows, origin_cell, conn.exit, conn.exit_slot);
     let arr_anchor = box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot);
 
-    // The anchor may be displaced along the box edge by its slot, so the bridge to the
-    // first/last interior point is built as an orthogonal L: step perpendicular to the side
-    // first (out of the box into the channel), then along the edge to the interior point.
+    // The arrow anchor sits ON the box border. Each connector leaves the box straight out at 90°
+    // (a perpendicular stub on the anchor's own row/col), then steps along the edge into the
+    // first/last interior channel point. Distinct slots give distinct border cells; the straight
+    // connector on each side keeps slot 0 (centre), so a displaced connector crosses it as a
+    // single clean ┼ instead of a corner stomp.
     let first_interior = pix[1];
     let last_interior = pix[pix.len() - 2];
-    let dep_turn = bridge_turn(dep_anchor, first_interior, conn.exit);
-    let arr_turn = bridge_turn(arr_anchor, last_interior, conn.entry);
+    let dep_bridge = attach_bridge(dep_anchor, first_interior, conn.exit);
+    let arr_bridge = attach_bridge(arr_anchor, last_interior, conn.entry);
 
-    let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len() + 2);
+    let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len() + 6);
     inner_v.push(dep_anchor);
-    if let Some(t) = dep_turn { inner_v.push(t); }
+    inner_v.extend_from_slice(&dep_bridge);
     inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
-    if let Some(t) = arr_turn { inner_v.push(t); }
+    for &p in arr_bridge.iter().rev() { inner_v.push(p); }
     inner_v.push(arr_anchor);
     inner_v.dedup();
     let inner = &inner_v[..];
@@ -519,7 +526,10 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
     Some(ConnectorPlot { cells, dep_anchor, arr_anchor })
 }
 
-/// Draw every plan connector as box-drawing line-art along its lanes.
+/// Draw every plan connector as box-drawing line-art along its lanes, and RETURN the departure
+/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted)`. The arrowheads
+/// are NOT drawn here: each sits ON a room's border cell, so the caller draws them AFTER the
+/// rooms (which render on top of the line-art) so the arrow replaces the box-border glyph.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -528,7 +538,7 @@ fn render_lane_connectors(
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
-) {
+) -> Vec<((i32, i32), &'static str, bool)> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -536,7 +546,8 @@ fn render_lane_connectors(
     // idempotent and harmless.
     let mut cells: std::collections::HashMap<(i32, i32), u8> =
         std::collections::HashMap::new();
-    // Arrowheads: (virtual pixel, glyph, distorted). Drawn last so they sit on top.
+    // Arrowheads: (virtual pixel, glyph, distorted). Returned for the caller to draw on top
+    // of the rooms (the arrow embeds in the room border).
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
 
     for conn in plan.connectors.iter() {
@@ -564,8 +575,18 @@ fn render_lane_connectors(
             arrowheads.push((plot.arr_anchor, arrow_for_departure(conn.entry), conn.distorted));
         }
     }
+    arrowheads
+}
 
-    for ((vx, vy), glyph, distorted) in arrowheads {
+/// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
+fn draw_connector_arrows(
+    arrowheads: &[((i32, i32), &'static str, bool)],
+    offset: (i32, i32),
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let (off_x, off_y) = offset;
+    for &((vx, vy), glyph, distorted) in arrowheads {
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
             let color = if distorted { Color::Magenta } else { Color::Cyan };
@@ -576,23 +597,6 @@ fn render_lane_connectors(
     }
 }
 
-/// Orthogonal L turn-point bridging a slot-displaced anchor to its first/last interior
-/// channel point. The stub leaves the box perpendicular to `side` first, then runs along
-/// the edge to meet the interior point — so the two legs are each single-axis. Returns
-/// `None` when anchor and interior already share the perpendicular coordinate (no turn).
-fn bridge_turn(anchor: (i32, i32), interior: (i32, i32), side: Side) -> Option<(i32, i32)> {
-    let turn = match side {
-        // Vertical sides: leave horizontally (to interior.x at anchor.y), then go vertical.
-        Side::Right | Side::Left => (interior.0, anchor.1),
-        // Horizontal sides: leave vertically (to interior.y at anchor.x), then go horizontal.
-        Side::Top | Side::Bottom => (anchor.0, interior.1),
-    };
-    if turn == anchor || turn == interior {
-        None
-    } else {
-        Some(turn)
-    }
-}
 
 /// Map a per-(room, side) slot index to a signed offset ALONG the box edge so multiple
 /// connectors on one side anchor on distinct cells. Slot 0 stays on the side centre;
@@ -604,24 +608,54 @@ fn slot_offset(slot: u16, max: i32) -> i32 {
     signed.clamp(-max, max)
 }
 
-/// The virtual-pixel "doorway" cell just outside the box at logical `cell` on `side`,
-/// displaced ALONG the box edge by this connector's per-(room, side) `slot`. The connector
-/// line is anchored here so it touches the box rather than stopping a lane-width away inside
-/// the gutter, and two connectors sharing a side land on distinct cells.
+/// The virtual-pixel cell ON the box border at logical `cell` on `side`, displaced ALONG the
+/// box edge by this connector's per-(room, side) `slot`. This is the cell where the outgoing
+/// arrowhead is drawn — it REPLACES the box-border glyph (a `│` on a vertical side, a `─` on
+/// a horizontal side), so the arrow reads as embedded in the room outline. The connector line
+/// then continues perpendicular OUT from this cell (see [`attach_bridge`]).
+///
+/// Slots map to distinct INTERIOR rows/cols along the side (never the corners), so two
+/// connectors sharing a side land on distinct border cells.
 fn box_edge_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), side: Side, slot: u16) -> (i32, i32) {
     let bx = cols.room_pixel(cell.0);
     let by = rows.room_pixel(cell.1);
     let cx = bx + BOX_W / 2;
     let cy = by + BOX_H / 2;
     // Along a vertical side (Left/Right) the edge runs in y; offset rows, clamped so the
-    // anchor stays on the box's height. Along a horizontal side (Top/Bottom) offset cols.
+    // anchor stays on the box's interior rows (off the corners). Along a horizontal side
+    // (Top/Bottom) offset cols likewise.
     let v_max = BOX_H / 2 - 1; // keep off the corners
     let h_max = BOX_W / 2 - 1;
     match side {
-        Side::Right => (bx + BOX_W, cy + slot_offset(slot, v_max)),
-        Side::Left => (bx - 1, cy + slot_offset(slot, v_max)),
-        Side::Bottom => (cx + slot_offset(slot, h_max), by + BOX_H),
-        Side::Top => (cx + slot_offset(slot, h_max), by - 1),
+        Side::Right => (bx + BOX_W - 1, cy + slot_offset(slot, v_max)),
+        Side::Left => (bx, cy + slot_offset(slot, v_max)),
+        Side::Bottom => (cx + slot_offset(slot, h_max), by + BOX_H - 1),
+        Side::Top => (cx + slot_offset(slot, h_max), by),
+    }
+}
+
+/// Build the orthogonal bridge from a border `anchor` out to its first/last `interior` channel
+/// point, returning the single intermediate turn point (anchor and interior are NOT included),
+/// or empty when they already line up.
+///
+/// The connector leaves the box PERPENDICULAR to `side` (a straight stub at 90°), running in the
+/// ANCHOR's own column/row all the way out to the interior's perpendicular level, then steps
+/// ALONG the edge into the interior. Keeping the perpendicular leg on the anchor's own
+/// column/row (not the interior's) means the only along-edge move happens AT the interior — so
+/// where a slot-displaced connector must cross a straight connector sitting on the side centre,
+/// it crosses that centre line as a single straight pass, yielding a clean ┼ rather than a
+/// corner-on-corner stomp.
+fn attach_bridge(anchor: (i32, i32), interior: (i32, i32), side: Side) -> Vec<(i32, i32)> {
+    let turn = match side {
+        // Perpendicular axis = x: run in x at the anchor's row out to interior.x, then step in y.
+        Side::Right | Side::Left => (interior.0, anchor.1),
+        // Perpendicular axis = y: run in y at the anchor's column out to interior.y, then step x.
+        Side::Top | Side::Bottom => (anchor.0, interior.1),
+    };
+    if turn == anchor || turn == interior {
+        Vec::new()
+    } else {
+        vec![turn]
     }
 }
 
@@ -1090,8 +1124,10 @@ mod tests {
 
     #[test]
     fn arrowhead_at_departure_side() {
-        // room1(0,0) →E→ room2(1,0): a filled ▶ arrowhead marks the outgoing east
-        // departure at room1's right anchor (11,2), drawn as fg Cyan (no bg ribbon).
+        // room1(0,0) →E→ room2(1,0): a filled ▶ arrowhead marks the outgoing east departure
+        // EMBEDDED IN room1's right border. The box is 11 wide at x=0, so the right border is
+        // column 10; the vertical-centre row is 2. The arrow replaces that border │ at (10,2),
+        // drawn fg Cyan (no bg ribbon). The line then continues perpendicular out (col 11+).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "R1".into());
@@ -1105,8 +1141,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        let cell = buf.cell((11, 2)).expect("arrow cell must exist");
-        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ at room1's right anchor");
+        let cell = buf.cell((10, 2)).expect("arrow cell must exist");
+        assert_eq!(cell.symbol(), "▶", "outgoing east arrow ▶ embedded in room1's right border");
         assert_eq!(cell.fg, Color::Cyan, "arrowhead fg should be Cyan; got {:?}", cell.fg);
         assert_ne!(cell.bg, Color::Cyan, "arrowhead must not sit on a solid ribbon");
         // No hollow arrowhead is ever drawn.
