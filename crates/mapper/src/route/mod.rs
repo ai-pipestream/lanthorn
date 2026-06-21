@@ -245,6 +245,32 @@ mod tests {
     }
 
     #[test]
+    fn assign_lanes_shares_a_lane_only_for_disjoint_runs() {
+        // Three runs in ONE channel H(0): two disjoint ([0,2],[4,6]) may share lane 0;
+        // one overlapping both ([1,5]) must take a new lane. Directly exercises the
+        // core invariant (a graph-level test can't force a shared lane reliably).
+        let ch = Channel::H(0);
+        let runs = vec![(0usize, ch, 0, 2), (1usize, ch, 4, 6), (2usize, ch, 1, 5)];
+        let (lane_of, counts) = assign_lanes(&runs);
+        assert_eq!(lane_of[&0], 0, "first run → lane 0");
+        assert_eq!(lane_of[&1], 0, "disjoint run shares lane 0");
+        assert_eq!(lane_of[&2], 1, "overlapping run gets a new lane");
+        assert_eq!(counts[&ch], 2, "channel needs 2 lanes");
+        // Invariant: any two runs sharing a lane have disjoint extents.
+        let mut by_lane: std::collections::BTreeMap<u16, Vec<(i32, i32)>> =
+            std::collections::BTreeMap::new();
+        for &(id, _, s, e) in &runs {
+            by_lane.entry(lane_of[&id]).or_default().push((s, e));
+        }
+        for (_lane, mut ivs) in by_lane {
+            ivs.sort();
+            for w in ivs.windows(2) {
+                assert!(w[0].1 < w[1].0, "same-lane runs must be disjoint: {:?} {:?}", w[0], w[1]);
+            }
+        }
+    }
+
+    #[test]
     fn two_overlapping_runs_get_two_lanes() {
         // Two connectors whose horizontal runs share a channel and overlap in extent must
         // land on different lanes → that channel reports lane_count 2.
