@@ -264,6 +264,18 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         let mut snapped: Vec<(i32, i32)> =
             cont.iter().map(|&(x, y)| (x.round() as i32, y.round() as i32)).collect();
 
+        // Align cardinal-edge free axes. The stress solve satisfies separation (B is
+        // east of A) but leaves an E/W chain's rooms on slightly different rows (and
+        // N/S chains on different columns). Pull each room that is free on the
+        // perpendicular axis onto its anchor's row/column, so cardinal edges render
+        // crisp — the same alignment the sort fallback applies.
+        let mut axs: Vec<i32> = snapped.iter().map(|p| p.0).collect();
+        let mut ays: Vec<i32> = snapped.iter().map(|p| p.1).collect();
+        sort::align_free_axes(graph, &index, &mut axs, &mut ays);
+        for (i, p) in snapped.iter_mut().enumerate() {
+            *p = (axs[i], ays[i]);
+        }
+
         // Pack this component to the right of the previous, top-aligned.
         let min_x = snapped.iter().map(|p| p.0).min().unwrap();
         let min_y = snapped.iter().map(|p| p.1).min().unwrap();
@@ -637,6 +649,27 @@ mod tests {
         let cells: Vec<_> = g_cons.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "no room overlap under the constraint engine");
+    }
+
+
+
+    #[test]
+    fn constraint_engine_aligns_cardinal_chains() {
+        // The alignment pass on the stress output straightens E/W chains whose ends are
+        // free on the row axis (here 25→E→26 and 79→W→203 land on one row) and cuts total
+        // distortion below the un-aligned constraint baseline (30 on this graph).
+        //
+        // It cannot straighten every cardinal edge on this map: some rooms are pulled by
+        // CONFLICTING constraints (e.g. #25 wants both #74's and #76's row, but 74 S 76
+        // forces those apart) or bumped off-row by a genuine cell collision (#193 vs #180).
+        // Those residuals are inherent to a non-Euclidean graph, not an alignment failure.
+        let mut g = a129_house_graph();
+        relayout_auto(&mut g);
+        let e = |o, d| g.connections().iter().find(|c| c.origin == o && c.dest == d).unwrap();
+        assert!(!e(25, 26).distorted, "25→E→26 aligns onto one row");
+        assert!(!e(79, 203).distorted, "79→W→203 aligns onto one row");
+        let distorted = g.connections().iter().filter(|c| c.distorted).count();
+        assert!(distorted <= 28, "alignment cuts distortion below the un-aligned baseline; got {distorted}");
     }
 
     #[test]

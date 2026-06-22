@@ -81,7 +81,7 @@ const ALIGN_PASSES: usize = 4;
 /// Y-free node with ≥1 E/W neighbour takes the lower-median of those neighbours' Y.
 /// Symmetric for X with N/S edges. Only free nodes move, so no same-axis ordering
 /// is violated. Deterministic: dense-index order, integer lower-median, fixed passes.
-fn align_free_axes(
+pub(crate) fn align_free_axes(
     graph: &MapGraph,
     index: &BTreeMap<RoomId, usize>,
     xs: &mut [i32],
