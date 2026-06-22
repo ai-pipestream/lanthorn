@@ -48,6 +48,9 @@ A diagonal edge's departure/arrival glyph is a **diagonal arrow that replaces th
 - The connector **attaches at that corner cell** and routes orthogonally through the lane system to the destination (no true diagonal line — big boxes + gutters make a clean diagonal impossible and it would cut through routing channels). The corner is a new exit/arrival anchor in addition to the four side-centers.
 - Both ends of a reciprocal diagonal pair get the corner arrow (departure on origin, arrival on dest).
 - The corner glyph is only replaced when a diagonal edge actually attaches there; otherwise the box keeps its normal corner.
+- Diagonal corner arrows are connector arrows, so (like `▶◀▲▼`) they show in normal view and are hidden under `Ctrl+P` (portal view).
+
+> **Deferred — true diagonal `╱`/`╲` lines:** rendering actual diagonal connector lines (and squaring the box spacing for them) was discussed and parked. The orthogonal lane router can't model diagonal runs without a new collision/clipping system, and the box stride isn't square. We first ship the corner arrows with orthogonal routing and evaluate the look before deciding whether diagonal lines are worth that cost.
 
 ### Components touched
 - `mapper/route` (or `router.rs`): a diagonal exit/entry resolves to a *corner* anchor, not a side-center. The lane route starts/ends at the corner cell.
