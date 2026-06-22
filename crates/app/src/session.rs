@@ -118,10 +118,15 @@ impl GameSession {
 /// Pure bridge: observe the new location (if any) into the mapper.
 ///
 /// Calls `mapper.observe(snap.number, &snap.name, parse_direction(command))`.
+/// In Auto mode, runs a light overlap cleanup (radius 2, max 20 passes) after each
+/// observation so the live map never shows an illegal connector overlap.
 /// No-op when `result.location` is `None`.
 pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
     if let Some(snap) = &result.location {
         mapper.observe(snap.number, &snap.name, parse_direction(command));
+        if mapper.mode == mapper::layout::LayoutMode::Auto {
+            crate::render::map::cleanup_overlaps(&mut mapper.graph, 2, 20);
+        }
     }
 }
 
@@ -242,6 +247,58 @@ mod tests {
             info: None,
         };
         assert!(r.info.is_none());
+    }
+
+    // ── Task-5 overlap cleanup tests ──────────────────────────────────────────
+
+    /// Helper: build a TurnResult with a location (mirrors the pattern used above).
+    fn turn(number: u16, name: &str) -> TurnResult {
+        TurnResult {
+            transcript: String::new(),
+            location: Some(ObjectSnapshot { number, parent: 0, name: name.into() }),
+            quit: false,
+            info: None,
+        }
+    }
+
+    #[test]
+    fn auto_mode_cleanup_keeps_map_free_of_illegal_overlaps() {
+        // Drive a small loop (E, N, W, S toward start) that — under incremental
+        // placement — can produce a routing overlap.  After the sequence,
+        // render_overlap_stats must report zero illegal overlaps.
+        let mut m = Mapper::default(); // Auto mode by default
+
+        apply_turn(&mut m, "look",  &turn(1, "Start"));
+        apply_turn(&mut m, "east",  &turn(2, "East Room"));
+        apply_turn(&mut m, "north", &turn(3, "North East Room"));
+        apply_turn(&mut m, "west",  &turn(4, "North Room"));
+        apply_turn(&mut m, "south", &turn(1, "Start")); // back to start — closes the loop
+
+        let (illegal, _) = crate::render::map::render_overlap_stats(&m.graph);
+        assert_eq!(illegal, 0, "Auto mode cleanup must leave zero illegal overlaps");
+    }
+
+    #[test]
+    fn manual_mode_does_not_move_previously_placed_rooms() {
+        use mapper::layout::LayoutMode;
+
+        let mut m = Mapper::default();
+        // Place two rooms in Auto mode so they get positions.
+        apply_turn(&mut m, "look",  &turn(1, "Hall"));
+        apply_turn(&mut m, "north", &turn(2, "Attic"));
+
+        // Record positions before switching to Manual.
+        let pos1_before = m.graph.room(1).unwrap().pos;
+        let pos2_before = m.graph.room(2).unwrap().pos;
+
+        // Switch to Manual: cleanup must NOT run on subsequent apply_turn calls.
+        m.set_mode(LayoutMode::Manual);
+
+        // Observe a new room; this must not move the already-placed rooms.
+        apply_turn(&mut m, "east", &turn(3, "East Room"));
+
+        assert_eq!(m.graph.room(1).unwrap().pos, pos1_before, "room 1 must not move in Manual mode");
+        assert_eq!(m.graph.room(2).unwrap().pos, pos2_before, "room 2 must not move in Manual mode");
     }
 
     // ── czech.z5 smoke test ───────────────────────────────────────────────────

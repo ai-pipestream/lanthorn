@@ -840,7 +840,6 @@ use super::{put_char, put_str};
 /// everything else (≥3 connectors, corner-on-corner, parallel run-alongside) is illegal.
 /// Returns (illegal_count, clean_crossing_count). Counts are order-independent, so the
 /// internal HashMap accumulation is deterministic in its RESULT.
-#[allow(dead_code)]
 pub(crate) fn overlap_stats(
     plan: &mapper::route::RoutePlan, cols: &PosTable, rows: &PosTable,
 ) -> (usize, usize) {
@@ -874,8 +873,7 @@ pub(crate) fn overlap_stats(
 }
 
 /// Render `graph` and return its (illegal_overlaps, crossings).
-#[allow(dead_code)]
-fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, usize) {
+pub(crate) fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, usize) {
     let rm = mapper::render::render(graph);
     let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
     overlap_stats(&rm.plan, &cols, &rows)
@@ -884,7 +882,6 @@ fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, usize) {
 /// Nudge rooms (bounded Chebyshev `radius`, ≤ `max_passes` passes) until the rendered
 /// plan has zero illegal overlaps, secondarily fewer crossings. Deterministic, no overlap,
 /// integer cells. Existing position is restored on every rejected trial.
-#[allow(dead_code)]
 pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32, max_passes: usize) {
     // Gather move candidates in fixed order: increasing Chebyshev distance, then (dy, dx).
     let moves: Vec<(i32, i32)> = {
