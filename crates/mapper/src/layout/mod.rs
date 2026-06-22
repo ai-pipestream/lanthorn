@@ -1,27 +1,25 @@
-//! Auto layout engine: full re-derivation of all room positions from directed-edge constraints.
+//! Logical room layout for the automapper (VM- and pixel-agnostic).
 //!
-//! # Algorithm (`relayout_auto`)
+//! Two regimes produce room grid positions; both keep rooms on integer cells and
+//! never overlap:
 //!
-//! Each call re-computes ALL room positions from scratch:
+//! 1. **Incremental placement** (the per-turn path, in `incremental.rs`).
+//!    `place_incremental` places ONE newly discovered room relative to the previous
+//!    room: a planar compass move offsets by `grid_offset(dir)` and, on collision,
+//!    shifts the rooms beyond the insertion point ("shift-beyond"); portal/unknown
+//!    moves use `nearest_free_cell`. Existing rooms otherwise never move, so the map
+//!    is stable turn-to-turn. `Mapper::observe` drives this.
 //!
-//! 1. Clear every room's `pos` (set to None).
-//! 2. Identify connected components (treating directed edges as undirected).
-//!    For each component, anchor the lowest-id room as the root:
-//!    - First component's root → (0,0).
-//!    - Subsequent components' roots → nearest free cell to (0,0) to avoid overlap.
-//! 3. BFS from each root in deterministic order (rooms processed by ascending id;
-//!    incident edges sorted by connection index for stability).
-//!    - Compass edge (origin, dir, dest) where `grid_offset(dir)` = Some(delta):
-//!      forward (placed==origin): dest_pos = origin_pos + delta.
-//!      backward (placed==dest):  origin_pos = dest_pos - delta.
-//!    - Non-compass (Up/Down/In/Out/Unknown): place neighbor at `nearest_free_cell`.
-//!    - Desired cell occupied → `nearest_free_cell` (spiral), no overlap.
-//! 4. Post-placement distortion sweep: compass edges whose final geometry doesn't
-//!    match their offset → `distorted = true`; non-compass edges → `distorted = false`.
+//! 2. **Re-tidy "sort"** (`relayout_auto`, on demand — not per turn). Re-derives all
+//!    positions via per-axis longest-path layering of the compass edges (`sort.rs`):
+//!    east/west edges order the x-axis, north/south the y-axis, diagonals both;
+//!    cycle-closing constraints are dropped (and flagged distorted). Components are
+//!    packed left-to-right, residual collisions resolved with `nearest_free_cell`,
+//!    and the lowest-id room anchored at (0,0).
 //!
-//! The root of each component stays at its anchor, giving a stable reference point
-//! so the map doesn't translate wholesale when new edges are discovered. Interior
-//! rooms re-derive their positions on every call, so new constraints take effect.
+//! After either regime, `mark_distorted` flags every compass edge whose final grid
+//! geometry contradicts its direction. (Connector routing and any render-aware
+//! overlap cleanup live in the `app` crate, not here.)
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -94,7 +92,7 @@ pub fn nearest_free_cell(occupied: &BTreeSet<(i32, i32)>, from: (i32, i32)) -> (
 ///   - Uses a sign-based check: satisfied iff each non-zero axis of `delta` agrees in SIGN
 ///     with the corresponding axis of `pos(dest) - pos(origin)`, and each zero axis of `delta`
 ///     is also zero in the actual offset.
-///   - Rationale: when both directed edges of a connection are known, `pair_offset` may place
+///   - Rationale: when both directed edges of a connection are known, the layout may place
 ///     a room at a combined diagonal (e.g. northeast) that doesn't exactly match `grid_offset`
 ///     (e.g. one step north). The sign-based check treats such placements as "satisfied" as long
 ///     as the directional sense is correct (e.g. a North edge is satisfied whenever dest is
