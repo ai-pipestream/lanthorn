@@ -2064,6 +2064,37 @@ mod tests {
     }
 
     #[test]
+    fn reciprocal_diagonal_draws_corner_arrow_at_both_ends() {
+        // 1 →SW→ 2 and 2 →NE→ 1 (true reciprocal): ↙ at room 1's bottom-left corner and
+        // ↗ at room 2's top-right corner (the far end uses the back-edge direction).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 1)); // SW of room 1
+        g.add_edge(1, Direction::SW, 2);
+        g.add_edge(2, Direction::NE, 1); // reciprocal
+        let rm = render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let off = (cols.room_pixel(rm.bounds.0 .0), rows.room_pixel(rm.bounds.0 .1));
+        let sym = |x: i32, y: i32| buf.cell((x as u16, y as u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        // Origin (room 1): SW → bottom-left corner.
+        let bx1 = cols.room_pixel(1) - off.0;
+        let by1 = rows.room_pixel(0) - off.1;
+        assert_eq!(sym(bx1, by1 + BOX_H - 1), "↙", "origin SW corner arrow");
+        // Far end (room 2): NE back-edge → top-right corner.
+        let bx2 = cols.room_pixel(0) - off.0;
+        let by2 = rows.room_pixel(1) - off.1;
+        assert_eq!(sym(bx2 + BOX_W - 1, by2), "↗", "far-end NE corner arrow");
+    }
+
+    #[test]
     fn portal_view_suppresses_connector_arrows() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
