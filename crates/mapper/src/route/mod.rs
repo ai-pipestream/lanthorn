@@ -4,8 +4,8 @@
 //! lane counts that the renderer turns into gap widths.
 
 use std::collections::BTreeMap;
-use crate::direction::grid_offset;
-use crate::graph::{MapGraph, RoomId};
+use crate::direction::{grid_offset, opposite};
+use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{side_for, Side};
 
 /// A routing channel: `H(r)` is the horizontal gap below room-row `r` (line y=2r+1);
@@ -523,14 +523,23 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             consumed.insert(ci);
             continue;
         }
-        // Pair with the first UNCONSUMED reverse edge (b→a) between the same rooms, if any.
-        // Exactly one pairing collapses; further edges between the pair draw on their own.
+        // Pair with an UNCONSUMED reverse edge (b→a) between the same rooms, if any. PREFER the
+        // geometric reciprocal — the reverse edge whose direction is the exact compass-opposite of
+        // this edge — so the trunk keeps its natural straight / single-L shape and its junction lands
+        // at the doorway between the rooms. Pairing with an arbitrary reverse edge would force the
+        // trunk to enter the far room from that edge's side, bending it up-and-over and leaving the
+        // remaining same-pair edges as degenerate merge stubs (their junction ends up on the wrong
+        // side, collapsing the stub to a zero-width line). Fall back to the first unconsumed reverse
+        // edge when no exact opposite exists. Exactly one pairing collapses; further edges between
+        // the pair draw on their own (as merge stubs).
+        let is_back = |pi: usize, p: &Connection| {
+            pi != ci && !consumed.contains(&pi) && p.origin == c.dest && p.dest == c.origin
+        };
         let back_idx = compass
             .iter()
             .enumerate()
-            .find(|&(pi, p)| {
-                pi != ci && !consumed.contains(&pi) && p.origin == c.dest && p.dest == c.origin
-            })
+            .find(|&(pi, p)| is_back(pi, p) && p.dir == opposite(c.dir))
+            .or_else(|| compass.iter().enumerate().find(|&(pi, p)| is_back(pi, p)))
             .map(|(pi, _)| pi);
         let back = back_idx.map(|pi| compass[pi]);
         let has_reciprocal = back.is_some();
@@ -872,6 +881,34 @@ mod tests {
         let a = format!("{:?}", route_lanes(&g));
         let b = format!("{:?}", route_lanes(&g));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn reciprocal_pairs_with_geometric_opposite_keeping_merge_stubs_intact() {
+        // Adjacent #77/#239 with a reciprocal E/W edge plus extra N and S edges, where the geometric
+        // opposite (W) of the forward E edge is added LAST. The reciprocal must pair E with W (not the
+        // first reverse edge N), so the trunk stays straight and the N/S edges become real C-shaped
+        // merge stubs. Pairing with N would bend the trunk up-and-over and collapse the S/W stubs to
+        // degenerate zero-width lines — the "missing southern path" bug.
+        let mut g = MapGraph::new();
+        g.upsert_room(77, "f".into());
+        g.upsert_room(239, "g".into());
+        g.set_pos(77, (0, 0));
+        g.set_pos(239, (1, 0)); // adjacent
+        g.add_edge(77, Direction::E, 239);
+        g.add_edge(239, Direction::N, 77);
+        g.add_edge(239, Direction::S, 77);
+        g.add_edge(239, Direction::W, 77); // opposite of E, added last on purpose
+        let plan = route_lanes(&g);
+        let trunk = plan.connectors.iter().find(|c| !c.merge).expect("a trunk connector");
+        assert!(is_collinear(&trunk.points), "trunk must stay a straight E/W line: {:?}", trunk.points);
+        let stubs: Vec<_> = plan.connectors.iter().filter(|c| c.merge).collect();
+        assert_eq!(stubs.len(), 2, "the two extra edges become merge stubs");
+        for s in &stubs {
+            assert!(s.points.len() >= 4,
+                "{:?} stub must keep its C-path, not collapse to a degenerate line: {:?}",
+                s.exit_dir, s.points);
+        }
     }
 
     #[test]

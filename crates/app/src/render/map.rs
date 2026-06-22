@@ -1877,6 +1877,39 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_merge_renders_both_stub_lines_regardless_of_edge_order() {
+        // Regression: #77 and #239 are ADJACENT (align=row) with a reciprocal E/W trunk plus extra
+        // N and S edges. When the reverse edges are added so the geometric opposite (W) is NOT first,
+        // the reciprocal pairing must still pick W so the trunk stays straight — otherwise the trunk
+        // bends up-and-over and the S/W stubs collapse to degenerate zero-width lines (the "missing
+        // southern path" bug). Both stub T-junctions and both south/north connecting lines must draw.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(77, "Forest".into());
+        g.upsert_room(239, "Forest".into());
+        g.set_pos(77, (0, 0));
+        g.set_pos(239, (1, 0)); // adjacent, no gap
+        g.add_edge(77, Direction::E, 239);
+        g.add_edge(239, Direction::N, 77);
+        g.add_edge(239, Direction::S, 77);
+        g.add_edge(239, Direction::W, 77); // the geometric opposite, added LAST on purpose
+        let rm = mapper::render::render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let count = |sym: &str| buf.content.iter().filter(|c| c.symbol() == sym).count();
+        assert!(count("▲") >= 1, "239's N exit arrow ▲ present");
+        assert!(count("▼") >= 1, "239's S exit arrow ▼ present");
+        // Two distinct T-junctions where the N and S stubs join the straight trunk (┴ above, ┬ below).
+        assert!(count("┴") >= 1 && count("┬") >= 1, "both N (┴) and S (┬) stubs join the trunk");
+        // The southern stub's connecting line actually reaches below the boxes (└…┘ turn corners),
+        // proving the S path is drawn and not collapsed to the bare arrow.
+        assert!(count("└") >= 1 && count("┘") >= 1, "the south stub routes a visible line below #239");
+    }
+
+    #[test]
     fn multi_edge_merge_one_trunk_arrows_and_tjunction() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
