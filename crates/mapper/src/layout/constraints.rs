@@ -179,4 +179,28 @@ mod tests {
         let ac = build_axis_constraints(&g, &[1, 2], 1.0);
         assert!(ac.x.is_empty() && ac.y.is_empty() && ac.dropped.is_empty());
     }
+
+    #[test]
+    fn reciprocal_ew_pair_emits_y_equality() {
+        // Reciprocal E/W: room 1 says "2 is east of me", room 2 says "1 is west of me".
+        // build_axis_constraints must emit TWO gap-0 Y constraints (the equality pair)
+        // in addition to the directional X constraint. Without the chain-equality block
+        // (detect_chains / add_equality), ac.y would be empty and this test fails RED.
+        let mut g = two_rooms();
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let ac = build_axis_constraints(&g, &[1, 2], 1.0);
+
+        // The directional edges produce X constraints only; Y must come from the equality block.
+        let y_zeros: Vec<_> = ac.y.iter().filter(|c| c.gap == 0.0).collect();
+        assert!(
+            y_zeros.len() >= 2,
+            "expected >=2 gap-0 Y constraints from chain equality, got {}",
+            y_zeros.len()
+        );
+        let has_01 = ac.y.iter().any(|c| c.left == 0 && c.right == 1 && c.gap == 0.0);
+        let has_10 = ac.y.iter().any(|c| c.left == 1 && c.right == 0 && c.gap == 0.0);
+        assert!(has_01, "missing Y equality leg (0,1,0.0)");
+        assert!(has_10, "missing Y equality leg (1,0,0.0)");
+    }
 }
