@@ -38,6 +38,11 @@ pub struct RoutedConnector {
     /// true when this connector represents a collapsed true-opposite pair
     /// `a→dir→b` + `b→opposite(dir)→a`; the renderer draws a far-end arrow only for these.
     pub reciprocal: bool,
+    /// The origin edge's compass direction (so the renderer can pick a diagonal corner).
+    pub exit_dir: crate::direction::Direction,
+    /// The paired back-edge's compass direction, set only when a bidirectional pairing
+    /// collapsed into this connector (used for the far-end diagonal corner). `None` otherwise.
+    pub entry_dir: Option<crate::direction::Direction>,
 }
 
 /// The logical route plan: connectors plus per-channel lane counts.
@@ -487,6 +492,8 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                     exit_slot: 0,
                     entry_slot: 0,
                     reciprocal: has_reciprocal,
+                    exit_dir: c.dir,
+                    entry_dir: back.map(|bk| bk.dir),
                 });
                 consumed.insert(ci);
                 if let Some(pi) = back_idx {
@@ -562,6 +569,8 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             exit_slot: 0,
             entry_slot: 0,
             reciprocal: has_reciprocal,
+            exit_dir: c.dir,
+            entry_dir: back.map(|bk| bk.dir),
         });
         consumed.insert(ci);
         if let Some(pi) = back_idx {
@@ -1120,6 +1129,40 @@ mod tests {
         g.set_pos(2, (1, 0));
         g.add_edge(1, Direction::Up, 2); // non-compass stub
         assert!(route_topology(&g).is_empty(), "non-compass edges are not routed");
+    }
+
+    #[test]
+    fn connector_carries_diagonal_exit_dir() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 1)); // SW of room 1
+        g.add_edge(1, Direction::SW, 2);
+        let conns = route_topology(&g);
+        let c = conns.iter().find(|c| c.origin == 1 && c.dest == 2).unwrap();
+        assert_eq!(c.exit_dir, Direction::SW);
+        assert_eq!(c.entry_dir, None, "one-way edge has no back-edge dir");
+    }
+
+    #[test]
+    fn reciprocal_diagonal_carries_both_dirs() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 1));
+        g.add_edge(1, Direction::SW, 2);
+        g.add_edge(2, Direction::NE, 1); // true reciprocal
+        let conns = route_topology(&g);
+        assert_eq!(conns.len(), 1, "reciprocal diagonal collapses to one connector");
+        let c = &conns[0];
+        assert!(c.reciprocal);
+        let dirs = [c.exit_dir, c.entry_dir.expect("reciprocal carries entry_dir")];
+        assert!(
+            dirs.contains(&Direction::SW) && dirs.contains(&Direction::NE),
+            "both diagonal directions carried: {dirs:?}"
+        );
     }
 }
 

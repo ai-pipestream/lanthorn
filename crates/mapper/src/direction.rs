@@ -43,6 +43,11 @@ pub fn parse_direction(cmd: &str) -> Option<Direction> {
     }
 }
 
+/// True for the four intercardinal directions (NE/NW/SE/SW).
+pub fn is_diagonal(d: Direction) -> bool {
+    matches!(d, Direction::NE | Direction::NW | Direction::SE | Direction::SW)
+}
+
 pub fn grid_offset(d: Direction) -> Option<(i32, i32)> {
     match d {
         Direction::N => Some((0, -1)),
@@ -100,5 +105,16 @@ mod tests {
         assert_eq!(opposite(Direction::N), Direction::S);
         assert_eq!(opposite(Direction::NE), Direction::SW);
         assert_eq!(opposite(Direction::In), Direction::Out);
+    }
+
+    #[test]
+    fn is_diagonal_only_for_intercardinals() {
+        assert!(is_diagonal(Direction::NE));
+        assert!(is_diagonal(Direction::NW));
+        assert!(is_diagonal(Direction::SE));
+        assert!(is_diagonal(Direction::SW));
+        assert!(!is_diagonal(Direction::N));
+        assert!(!is_diagonal(Direction::E));
+        assert!(!is_diagonal(Direction::Up));
     }
 }
