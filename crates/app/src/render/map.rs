@@ -28,6 +28,7 @@ use mapper::graph::RoomId;
 use mapper::render::{RenderMap, RenderRoom};
 use mapper::route::RoutePlan;
 use mapper::router::{RoutedEdge, Side};
+use mapper::direction::Direction;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -666,6 +667,44 @@ fn dir_bit(from: (i32, i32), to: (i32, i32)) -> u8 {
         DIR_E
     } else {
         DIR_W
+    }
+}
+
+// ── Portal badges ─────────────────────────────────────────────────────────────
+
+/// Portal direction glyphs. Named so a font that renders a variant better is a one-line swap.
+const PORTAL_UP: &str = "↑";
+const PORTAL_DOWN: &str = "↓";
+const PORTAL_IN: &str = "⊙";
+const PORTAL_OUT: &str = "⊗";
+const PORTAL_UNKNOWN: &str = "?";
+
+/// Max width (cells) of a portal badge in the right gutter, before truncation.
+const PORTAL_BADGE_W: usize = 8;
+
+/// Glyph for a non-planar (portal) direction. Shared by the map badge and the dump legend.
+pub(crate) fn portal_glyph(dir: Direction) -> &'static str {
+    match dir {
+        Direction::Up => PORTAL_UP,
+        Direction::Down => PORTAL_DOWN,
+        Direction::In => PORTAL_IN,
+        Direction::Out => PORTAL_OUT,
+        _ => PORTAL_UNKNOWN,
+    }
+}
+
+/// On-map badge text for a portal: glyph + a space + the truncated target name, clipped to
+/// `PORTAL_BADGE_W` chars. Unknown portals have no target semantics → just the `?` glyph.
+fn portal_badge_text(dir: Direction, dest_label: Option<&str>) -> String {
+    if matches!(dir, Direction::Unknown) {
+        return PORTAL_UNKNOWN.to_string();
+    }
+    let glyph = portal_glyph(dir);
+    match dest_label {
+        Some(name) if !name.is_empty() => {
+            format!("{glyph} {name}").chars().take(PORTAL_BADGE_W).collect()
+        }
+        _ => glyph.to_string(),
     }
 }
 
@@ -1649,6 +1688,34 @@ mod tests {
             b.cell((x, y)).map(|c| c.symbol() == "R").unwrap_or(false)));
         assert!(!has_r(&off));
         assert!(has_r(&on), "row-chain code R appears when overlay on");
+    }
+
+    #[test]
+    fn portal_glyphs_map_directions() {
+        assert_eq!(portal_glyph(Direction::Up), "↑");
+        assert_eq!(portal_glyph(Direction::Down), "↓");
+        assert_eq!(portal_glyph(Direction::In), "⊙");
+        assert_eq!(portal_glyph(Direction::Out), "⊗");
+        assert_eq!(portal_glyph(Direction::Unknown), "?");
+    }
+
+    #[test]
+    fn portal_badge_truncates_to_gutter_width() {
+        // glyph + space + name, capped at PORTAL_BADGE_W (8) chars.
+        let b = portal_badge_text(Direction::Up, Some("South of House"));
+        assert_eq!(b.chars().count(), 8, "badge clipped to gutter width");
+        assert!(b.starts_with("↑ "), "glyph then space then name: {b}");
+    }
+
+    #[test]
+    fn portal_badge_short_name_not_padded() {
+        assert_eq!(portal_badge_text(Direction::Down, Some("Attic")), "↓ Attic");
+    }
+
+    #[test]
+    fn portal_badge_unknown_is_just_glyph() {
+        // Unknown has no target semantics → bare "?" even with a dest.
+        assert_eq!(portal_badge_text(Direction::Unknown, Some("West of House")), "?");
     }
 
 }
