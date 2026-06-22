@@ -367,29 +367,36 @@ fn total_crossings(conns: &[RoutedConnector]) -> usize {
 /// alternative facing entry side for non-reciprocal connectors) — the one that crosses the
 /// fewest already-placed connectors, with a deterministic integer tiebreak.
 fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
-    // Draw every compass edge on its OWN exit side, collapsing ANY bidirectional pair
-    // (a→b together with b→a, regardless of the two directions) into a single connector
-    // drawn once: the renderer puts an arrow at each end, each pointing out that end's own
-    // compass side. An exact-opposite pair is the straight-line special case. Edges with no
-    // reverse partner stay single one-arrow connectors.
+    // Draw every compass edge on its OWN exit side, collapsing ONE bidirectional pairing
+    // (a→b together with a single b→a, regardless of the two directions) into a single
+    // connector: the renderer puts an arrow at each end, each pointing out that end's own
+    // compass side. An exact-opposite pair is the straight-line special case. ADDITIONAL
+    // edges between the same room pair (e.g. a third direction, 239→S→77 alongside
+    // 77→E→239 and 239→N→77) stay separate, so every distinct direction remains visible.
     let compass: Vec<&crate::graph::Connection> = graph
         .connections()
         .iter()
         .filter(|c| grid_offset(c.dir).is_some())
         .collect();
-    let mut drawn: std::collections::BTreeSet<(RoomId, RoomId)> = std::collections::BTreeSet::new();
+    // Edge indices already drawn — either as their own connector or consumed as the
+    // back-edge of an earlier bidirectional pairing.
+    let mut consumed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let mut out: Vec<RoutedConnector> = Vec::new();
-    for c in &compass {
-        // A reverse edge between the same room pair (any direction) makes this connector
-        // bidirectional; the first-seen edge of the pair draws it once.
-        let back = compass
-            .iter()
-            .find(|p| p.origin == c.dest && p.dest == c.origin)
-            .copied();
-        let has_reciprocal = back.is_some();
-        if has_reciprocal && drawn.contains(&(c.dest, c.origin)) {
-            continue; // the reciprocal partner already drew this pair
+    for (ci, c) in compass.iter().enumerate() {
+        if consumed.contains(&ci) {
+            continue; // already drawn as an earlier pair's back-edge
         }
+        // Pair with the first UNCONSUMED reverse edge (b→a) between the same rooms, if any.
+        // Exactly one pairing collapses; further edges between the pair draw on their own.
+        let back_idx = compass
+            .iter()
+            .enumerate()
+            .find(|&(pi, p)| {
+                pi != ci && !consumed.contains(&pi) && p.origin == c.dest && p.dest == c.origin
+            })
+            .map(|(pi, _)| pi);
+        let back = back_idx.map(|pi| compass[pi]);
+        let has_reciprocal = back.is_some();
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue; };
         let Some(exit) = side_for(c.dir) else { continue; };
@@ -461,7 +468,10 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             entry_slot: 0,
             reciprocal: has_reciprocal,
         });
-        drawn.insert((c.origin, c.dest));
+        consumed.insert(ci);
+        if let Some(pi) = back_idx {
+            consumed.insert(pi); // the paired back-edge is now drawn too
+        }
     }
     out
 }
@@ -843,6 +853,28 @@ mod tests {
         let conns = route_topology(&g);
         assert_eq!(conns.len(), 1, "true opposite pair collapses to one connector");
         assert!(conns[0].reciprocal, "collapsed true-opposite connector must have reciprocal == true");
+    }
+
+    /// Regression (A129 #239↔#77): three edges between one pair — `1→E→2`, `2→N→1`,
+    /// `2→S→1`. Exactly ONE pairing collapses (1↔2); the extra `2→S→1` must still be
+    /// drawn as its own connector, not dropped because the room-pair was already seen.
+    #[test]
+    fn third_edge_between_pair_is_not_dropped() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -2));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::N, 1);
+        g.add_edge(2, Direction::S, 1);
+        let conns = route_topology(&g);
+        assert_eq!(conns.len(), 2, "one pairing collapses, the third edge stays; got {}", conns.len());
+        assert_eq!(conns.iter().filter(|c| c.reciprocal).count(), 1, "exactly one reciprocal pairing");
+        let s = conns.iter().find(|c| {
+            c.origin == 2 && c.dest == 1 && c.exit == side_for(Direction::S).unwrap()
+        });
+        assert!(s.is_some(), "the third edge (2→S→1) must still be drawn, not dropped");
     }
 
     #[test]
