@@ -799,7 +799,7 @@ fn draw_box_room(
     }
     put_char(buf, sx + w - 1, sy, tr, style, area);
 
-    // Inner rows (h=4 → rows 1 and 2 are interior)
+    // Inner rows (h=5 → rows 1, 2, 3 are interior: 1=label, 2=#id, 3=blank/align-overlay)
     for dy in 1..h - 1 {
         put_char(buf, sx, sy + dy, vert, style, area);
         // Fill interior with spaces (for background/style)
