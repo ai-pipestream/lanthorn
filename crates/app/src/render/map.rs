@@ -350,6 +350,10 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf);
     }
 
+    if boxes {
+        draw_portal_connectors(rm, &placed, off_x, off_y, area, buf);
+    }
+
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
     for room in &rm.rooms {
         let (vx, vy) = room_virtual(room.cell);
@@ -761,6 +765,80 @@ fn draw_stub(
     let lx = origin_rect.right() + off_x;
     let ly = origin_rect.y + off_y;
     put_str(buf, lx, ly, label, CONNECTOR_STYLE, area);
+}
+
+/// Dotted-line glyphs for Up/Down portal connectors.
+const DOTTED_V: char = '┊';
+const DOTTED_H: char = '┄';
+
+/// Draw dotted connectors for Up/Down portals whose pair is NOT already joined by a compass
+/// connector. Up leaves the origin's north side, Down the south side, routing (vertical-first L)
+/// to the placed target, clipped out of every room's box interior. A reciprocal Up/Down pair is
+/// drawn once (from the Up side). No arrowhead — the `↑`/`↓` icon already marks the direction.
+fn draw_portal_connectors(
+    rm: &RenderMap,
+    placed: &std::collections::HashMap<RoomId, VRect>,
+    off_x: i32,
+    off_y: i32,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let style = Style::new().fg(Color::Cyan);
+    let interiors: Vec<VRect> = placed.values().copied().collect();
+    let in_interior = |x: i32, y: i32| {
+        interiors
+            .iter()
+            .any(|r| x > r.x && x < r.x + BOX_W - 1 && y > r.y && y < r.y + BOX_H - 1)
+    };
+
+    for edge in &rm.edges {
+        if !edge.is_stub {
+            continue;
+        }
+        let up = match edge.dir {
+            Direction::Up => true,
+            Direction::Down => false,
+            _ => continue, // In/Out/Unknown get no dotted line
+        };
+        // A reciprocal Up/Down pair is drawn once, from the Up side: skip the Down edge when a
+        // matching Up edge (dest→Up→origin) exists.
+        if !up
+            && rm
+                .edges
+                .iter()
+                .any(|e| e.dir == Direction::Up && e.origin == edge.dest && e.dest == edge.origin)
+        {
+            continue;
+        }
+        // Skip when a compass connector already joins the pair (either direction).
+        let joined = rm.edges.iter().any(|e| {
+            !e.is_stub
+                && ((e.origin == edge.origin && e.dest == edge.dest)
+                    || (e.origin == edge.dest && e.dest == edge.origin))
+        });
+        if joined {
+            continue;
+        }
+        let (Some(&o), Some(&t)) = (placed.get(&edge.origin), placed.get(&edge.dest)) else {
+            continue;
+        };
+        let ocx = o.x + BOX_W / 2;
+        let start_y = if up { o.y - 1 } else { o.y + BOX_H };
+        let tcx = t.x + BOX_W / 2;
+        let tcy = t.y + BOX_H / 2;
+        // Vertical-first L: down/up the origin's centre column to the target's mid-row, then
+        // across to the target's centre column. Clipped out of room interiors.
+        for y in start_y.min(tcy)..=start_y.max(tcy) {
+            if !in_interior(ocx, y) {
+                put_char(buf, ocx + off_x, y + off_y, DOTTED_V, style, area);
+            }
+        }
+        for x in ocx.min(tcx)..=ocx.max(tcx) {
+            if !in_interior(x, tcy) {
+                put_char(buf, x + off_x, tcy + off_y, DOTTED_H, style, area);
+            }
+        }
+    }
 }
 
 /// In-room icon slot for a portal direction: 0 = row 1 (Up), 1 = row 2 (mid: In/Out/Unknown),
@@ -2114,6 +2192,45 @@ mod tests {
         };
         assert!(count_arrows(false) > 0, "normal view draws connector arrowheads");
         assert_eq!(count_arrows(true), 0, "portal view suppresses connector arrowheads");
+    }
+
+    #[test]
+    fn up_portal_draws_dotted_connector_when_no_compass_edge() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 1));
+        g.set_pos(2, (0, 0)); // NW of room 1
+        g.add_edge(1, Direction::Up, 2);
+        let rm = render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
+        assert!(has_dotted, "an Up portal with no compass edge draws a dotted connector");
+    }
+
+    #[test]
+    fn up_portal_no_dotted_connector_when_compass_edge_joins_pair() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 1));
+        g.set_pos(2, (1, 0)); // due north of room 1
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(1, Direction::N, 2); // a compass connector already joins the pair
+        let rm = render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
+        assert!(!has_dotted, "no dotted line when a compass edge already joins the pair");
     }
 
 }
