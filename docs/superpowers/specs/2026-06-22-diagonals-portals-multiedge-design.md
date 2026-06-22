@@ -138,7 +138,17 @@ destination, and the **destination names float outside** the box:
 ### Current behavior
 `route_topology_with` collapses exactly ONE reciprocal pair between a room pair into a single connector; every *additional* edge between the same pair (e.g. `239→N→77`, `239→S→77` alongside the `77↔239` E/W pair) draws as its own full connector → the three-line tangle between #239 and #77.
 
-### Design
+> **Scope decision (chosen — full T-junction merge):** built incrementally with the no-overlap /
+> determinism invariant tests as guardrails after each step. The merge stub is a connector that
+> routes from its box-edge exit and **ends on the trunk** at a junction point (`trunk.points[len-2]`,
+> near the destination), rendering a T-junction. This touches the lane router's internals across both
+> crates — the stub ends mid-gutter (not at a box, so `plot_connector` needs a branch) and the
+> junction cell is shared by the stub and the trunk (so the no-overlap gate in *both* mapper
+> `dirty_shared_cells` and app `overlap_stats` must exempt **same-pair** merge junctions). An
+> "end-at-junction" stub (rather than overlaying the trunk) is used to avoid the lane system splitting
+> a merged line back into two parallel lanes.
+
+### Design (full T-junction merge)
 For every group of edges connecting the same **unordered room pair `{A,B}`**, draw **one trunk** between the two rooms and **merge the extra edges' connector lines into it** instead of drawing an independent line per edge:
 
 ```
