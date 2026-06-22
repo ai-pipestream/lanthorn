@@ -41,6 +41,9 @@ pub enum Action {
     ToggleFocus,
     /// Cycle the UI layout (Split → TranscriptFull → MapFull → Split).
     CycleLayout,
+    /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
+    /// No-op in Manual mode (positions are user-controlled and frozen).
+    Retidy,
     /// Zoom the map in (more detail).
     ZoomIn,
     /// Zoom the map out (less detail).
@@ -214,6 +217,7 @@ fn map_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Char('c') if plain!() => Action::Recenter,
         KeyCode::Char('n') if plain!() => Action::SelectNext,
         KeyCode::Char('N') if shift => Action::SelectPrev,
+        KeyCode::Char('R') if shift => Action::Retidy,
         KeyCode::Char('r') if plain!() => Action::RenameRoom,
         KeyCode::Char('o') if plain!() => Action::EditNotes,
         KeyCode::Char('d') if plain!() => Action::DeleteSelectedConnection,
@@ -289,6 +293,17 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::Recenter => apply_recenter(state, mapper),
         Action::SelectNext => select_adjacent(state, mapper, 1),
         Action::SelectPrev => select_adjacent(state, mapper, -1),
+
+        // Re-tidy: re-derive the clean Auto layout (longest-path sort), then nudge
+        // rooms so the lane router has no illegal overlaps. Honours compass ordering
+        // the greedy per-turn placement can't (e.g. a room east of another via the
+        // direction hints). No-op in Manual mode — those positions are user-owned.
+        Action::Retidy => {
+            if mapper.mode == mapper::layout::LayoutMode::Auto {
+                mapper::layout::relayout_auto(&mut mapper.graph);
+                crate::render::map::cleanup_overlaps(&mut mapper.graph, 3, 40);
+            }
+        }
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
@@ -645,6 +660,45 @@ mod tests {
 
         apply_action(Action::SelectPrev, &mut s, &mut m);
         assert_eq!(s.selected_room, Some(1));
+    }
+
+    #[test]
+    fn shift_r_in_map_focus_is_retidy() {
+        let mut s = AppState::default();
+        s.toggle_focus(); // → Map
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
+        // plain 'r' is still RenameRoom (no clash with the new shift binding).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
+    }
+
+    #[test]
+    fn retidy_rederives_clean_layout_in_auto() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(mapper::direction::Direction::E)); // hint: 2 east of 1
+        // Scramble so 2 sits WEST of 1, contradicting the hint (mimics greedy drift).
+        m.graph.set_pos(1, (5, 5));
+        m.graph.set_pos(2, (0, 0));
+        apply_action(Action::Retidy, &mut s, &mut m);
+        let p1 = m.graph.room(1).unwrap().pos.unwrap();
+        let p2 = m.graph.room(2).unwrap().pos.unwrap();
+        assert!(p2.0 > p1.0, "after retidy room 2 must be east of room 1: {p2:?} vs {p1:?}");
+    }
+
+    #[test]
+    fn retidy_is_noop_in_manual() {
+        use mapper::layout::LayoutMode;
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(mapper::direction::Direction::E));
+        m.set_mode(LayoutMode::Manual);
+        m.graph.set_pos(1, (5, 5));
+        m.graph.set_pos(2, (0, 0)); // deliberately contradicts the hint
+        apply_action(Action::Retidy, &mut s, &mut m);
+        assert_eq!(m.graph.room(1).unwrap().pos, Some((5, 5)), "Manual: retidy must not move rooms");
+        assert_eq!(m.graph.room(2).unwrap().pos, Some((0, 0)));
     }
 
     #[test]
