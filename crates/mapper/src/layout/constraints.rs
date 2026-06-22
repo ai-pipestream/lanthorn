@@ -203,4 +203,19 @@ mod tests {
         assert!(has_01, "missing Y equality leg (0,1,0.0)");
         assert!(has_10, "missing Y equality leg (1,0,0.0)");
     }
+
+    #[test]
+    fn reciprocal_ns_pair_emits_x_equality() {
+        // Reciprocal N/S: the column-sharing analogue of the E/W test above. The equality
+        // must land on X (shared column). Without the chain-equality block ac.x would hold
+        // only the directional gap-1 constraints, so this fails RED.
+        let mut g = two_rooms();
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        let ac = build_axis_constraints(&g, &[1, 2], 1.0);
+        let has_01 = ac.x.iter().any(|c| c.left == 0 && c.right == 1 && c.gap == 0.0);
+        let has_10 = ac.x.iter().any(|c| c.left == 1 && c.right == 0 && c.gap == 0.0);
+        assert!(has_01, "missing X equality leg (0,1,0.0)");
+        assert!(has_10, "missing X equality leg (1,0,0.0)");
+    }
 }
