@@ -855,6 +855,8 @@ pub(crate) fn overlap_stats(
     }
     let ew = DIR_E | DIR_W;
     let ns = DIR_N | DIR_S;
+    let mut expected = [ns, ew];
+    expected.sort_unstable();
     let (mut illegal, mut crossings) = (0usize, 0usize);
     for per_conn in owners.values() {
         if per_conn.len() < 2 {
@@ -862,8 +864,6 @@ pub(crate) fn overlap_stats(
         }
         let mut masks: Vec<u8> = per_conn.values().copied().collect();
         masks.sort_unstable();
-        let mut expected = [ns, ew];
-        expected.sort_unstable();
         if per_conn.len() == 2 && masks == expected {
             crossings += 1;
         } else {
@@ -907,11 +907,12 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
         }
 
         // Collect placed rooms in ascending id order.
-        let room_ids: Vec<mapper::graph::RoomId> = graph
+        let mut room_ids: Vec<mapper::graph::RoomId> = graph
             .rooms()
             .filter(|r| r.pos.is_some())
             .map(|r| r.id)
             .collect();
+        room_ids.sort_unstable(); // explicit ascending order; do not rely on rooms() internal order
 
         let mut improved = false;
         'room_loop: for &id in &room_ids {
