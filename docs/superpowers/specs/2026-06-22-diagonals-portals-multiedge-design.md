@@ -117,7 +117,7 @@ destination, and the **destination names float outside** the box:
 - **Layer-ready:** icons + `dest_label` identify each target room (id resolvable, name shown).
 
 #### Up/Down spatial default + dotted connector
-- **Default placement (fallback):** at discovery, an **Up** target defaults to **NW** of its origin and a **Down** target to **SW** (`place_incremental`'s non-planar branch). Fallback only — a target already positioned by a compass edge is never moved. In/Out/Unknown keep the nearest-free-cell placement.
+- **Default placement:** at discovery, an **Up** target is placed **directly north** of its origin and a **Down** target **directly south** — treated as a cardinal move, so an occupant of the target cell is **pushed aside** (shift-beyond), exactly like a real N/S move. An already-placed target is never moved (the early-return guard). In/Out/Unknown keep the nearest-free-cell placement. (The dotted connector then runs straight up/down between the pair.)
 - **Dotted connector:** when no compass connector already joins the pair, draw a dotted line for the Up/Down link — leaving the origin's **north** side (Up) or **south** side (Down) and routing to the target. The `↑`/`↓` icons stay (the icon always marks the direction; the dotted line adds the spatial link). A reciprocal Up/Down pair is drawn once (from the up side). The dotted line carries no arrowhead and is drawn in both views (it is a line, not an arrowhead).
 
 ### Components touched

@@ -21,7 +21,15 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
         None => return, // caller guarantees prev is placed; defensive no-op
     };
 
-    match grid_offset(dir) {
+    // Up/Down are placed as cardinal moves — directly north / south — so an occupant of the
+    // target cell is pushed aside (shift-beyond), exactly like a real N/S move. Other non-planar
+    // directions (In/Out/Unknown) have no spatial offset.
+    let delta = grid_offset(dir).or(match dir {
+        Direction::Up => Some((0, -1)),  // directly north
+        Direction::Down => Some((0, 1)), // directly south
+        _ => None,
+    });
+    match delta {
         Some(delta) => {
             let ideal = (prev_pos.0 + delta.0, prev_pos.1 + delta.1);
             let occupied = occupied_cells(graph);
@@ -42,16 +50,9 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
             }
         }
         None => {
-            // Up/Down get a default diagonal home (NW / SW); other non-planar directions
-            // (In/Out/Unknown) take the nearest free cell near prev. Either way this is a
-            // fallback — the early return above already left any placed target untouched.
-            let ideal = match dir {
-                Direction::Up => (prev_pos.0 - 1, prev_pos.1 - 1),   // NW
-                Direction::Down => (prev_pos.0 - 1, prev_pos.1 + 1), // SW
-                _ => prev_pos,
-            };
+            // In/Out/Unknown: nearest free cell starting from prev.
             let occ = occupied_cells(graph);
-            let cell = nearest_free_cell(&occ, ideal);
+            let cell = nearest_free_cell(&occ, prev_pos);
             graph.set_pos(dest, cell);
         }
     }
@@ -161,19 +162,35 @@ mod tests {
     }
 
     #[test]
-    fn up_room_defaults_north_west() {
+    fn up_room_defaults_directly_north() {
         let mut g = g_with(1, (0, 0));
         g.upsert_room(2, "attic".into());
         place_incremental(&mut g, 1, 2, Direction::Up);
-        assert_eq!(g.room(2).unwrap().pos, Some((-1, -1)), "Up target defaults NW of origin");
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)), "Up target placed directly north");
     }
 
     #[test]
-    fn down_room_defaults_south_west() {
+    fn down_room_defaults_directly_south() {
         let mut g = g_with(1, (0, 0));
         g.upsert_room(2, "cellar".into());
         place_incremental(&mut g, 1, 2, Direction::Down);
-        assert_eq!(g.room(2).unwrap().pos, Some((-1, 1)), "Down target defaults SW of origin");
+        assert_eq!(g.room(2).unwrap().pos, Some((0, 1)), "Down target placed directly south");
+    }
+
+    #[test]
+    fn up_room_pushes_blocker_north() {
+        // prev at (0,0); a blocker already sits directly north at (0,-1).
+        let mut g = g_with(1, (0, 0));
+        g.upsert_room(9, "blocker".into());
+        g.set_pos(9, (0, -1));
+        g.upsert_room(2, "attic".into());
+        place_incremental(&mut g, 1, 2, Direction::Up);
+        // The Up room lands truthfully directly north; the blocker is shifted further north.
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)), "Up room placed directly north");
+        assert_eq!(g.room(9).unwrap().pos, Some((0, -2)), "blocker pushed beyond");
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: std::collections::BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no overlap after push");
     }
 
     #[test]
