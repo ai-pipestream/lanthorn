@@ -24,6 +24,8 @@ pub struct RenderRoom {
     pub has_notes: bool,
     /// True when this room is the current room.
     pub is_current: bool,
+    /// Compact chain-membership code, e.g. `"R0"`, `"C1"`, `"R0 C1"`, or `""`.
+    pub align_code: String,
 }
 
 /// The complete zoom-independent render description of the map.
@@ -40,17 +42,27 @@ pub struct RenderMap {
 /// Build a `RenderMap` from `graph`.
 pub fn render(graph: &MapGraph) -> RenderMap {
     let current = graph.current();
+    let chains = crate::layout::detect_chains(graph);
 
     let rooms: Vec<RenderRoom> = graph
         .rooms()
         .filter_map(|room| {
             let cell = room.pos?; // skip unplaced rooms
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(id) = chains.ew.get(&room.id) {
+                parts.push(format!("R{id}"));
+            }
+            if let Some(id) = chains.ns.get(&room.id) {
+                parts.push(format!("C{id}"));
+            }
+            let align_code = parts.join(" ");
             Some(RenderRoom {
                 id: room.id,
                 label: room.label().to_string(),
                 cell,
                 has_notes: !room.notes.is_empty(),
                 is_current: Some(room.id) == current,
+                align_code,
             })
         })
         .collect();

@@ -80,6 +80,9 @@ pub struct AppState {
     /// Active text-entry prompt, if any.  While set, key events are routed to
     /// the prompt buffer instead of the normal map or game bindings.
     pub prompt: Option<Prompt>,
+    /// When true, draw each chained room's alignment code (`R{id}` / `C{id}`) in
+    /// its box interior (Boxes zoom only).  Toggled by `Ctrl+A`.
+    pub show_alignment: bool,
 }
 
 impl Default for AppState {
@@ -95,6 +98,7 @@ impl Default for AppState {
             input: String::new(),
             status: String::new(),
             prompt: None,
+            show_alignment: false,
         }
     }
 }

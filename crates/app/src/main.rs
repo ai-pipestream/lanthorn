@@ -144,7 +144,7 @@ fn draw_frame(
         } else {
             match state.focus {
                 Focus::Game => {
-                    "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+Q: quit".to_string()
+                    "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
                     "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/N: select | r/o/d/e: edit | Ctrl+Q: quit".to_string()

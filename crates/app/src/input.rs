@@ -77,6 +77,8 @@ pub enum Action {
     ExportDot,
     /// Caller: write an annotatable text/ASCII map dump.
     ExportDump,
+    /// Toggle the in-box alignment code overlay (Ctrl+A).
+    ToggleAlignment,
     /// Caller: exit the application.
     Quit,
     /// No binding found — no-op.
@@ -122,6 +124,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('d') => Action::ExportDump,
             KeyCode::Char('l') => Action::CycleLayout,
             KeyCode::Char('t') => Action::Retidy,
+            KeyCode::Char('a') => Action::ToggleAlignment,
             _ => Action::None,
         };
     }
@@ -317,6 +320,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 crate::render::map::cleanup_overlaps(&mut mapper.graph, 3, 40);
             }
         }
+
+        Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
@@ -797,5 +802,18 @@ mod tests {
         s.push_input_char('o');
         let a = key_to_action(&s, key(KeyCode::Enter));
         assert!(matches!(a, Action::SubmitCommand(ref c) if c == "go"));
+    }
+
+    #[test]
+    fn ctrl_a_toggles_alignment_overlay() {
+        let s = AppState::default();
+        assert!(!s.show_alignment, "off by default");
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::ToggleAlignment));
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        apply_action(Action::ToggleAlignment, &mut s, &mut m);
+        assert!(s.show_alignment, "toggled on");
+        apply_action(Action::ToggleAlignment, &mut s, &mut m);
+        assert!(!s.show_alignment, "toggled off");
     }
 }

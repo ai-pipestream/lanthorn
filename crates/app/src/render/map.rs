@@ -319,7 +319,14 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // ── 3. Draw rooms on top of the line-art (translate + clip) ───────────────
     for room in &rm.rooms {
         let (vx, vy) = room_virtual(room.cell);
-        draw_room(room, state, zoom, vx + off_x, vy + off_y, area, buf);
+        let sx = vx + off_x;
+        let sy = vy + off_y;
+        draw_room(room, state, zoom, sx, sy, area, buf);
+        // Alignment overlay: Boxes zoom only, when enabled and the room is in a chain.
+        if boxes && state.show_alignment && !room.align_code.is_empty() {
+            let code: String = room.align_code.chars().take(9).collect();
+            put_str(buf, sx + 1, sy + 3, &code, room_style(room, state), area);
+        }
     }
 
     // ── 4. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -1573,6 +1580,37 @@ mod tests {
             p_lane0.0,
         );
         assert_eq!(p_lane1.0 - p_lane0.0, LANE_SPACING, "lane 1 sits one LANE_SPACING beyond lane 0");
+    }
+
+    #[test]
+    fn alignment_overlay_off_by_default_then_shows_code() {
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1); // reciprocal → row chain
+        relayout_auto(&mut g);
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 160, 60);
+        let render_buf = |show: bool| {
+            let mut st = AppState::default();
+            st.zoom = Zoom::Boxes;
+            st.scroll = rm.bounds.0;
+            st.show_alignment = show;
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &st, area, &mut buf);
+            buf
+        };
+        let off = render_buf(false);
+        let on = render_buf(true);
+        assert_ne!(format!("{off:?}"), format!("{on:?}"), "overlay changes the buffer when on");
+        // an 'R' appears somewhere only when on
+        let has_r = |b: &Buffer| (0..area.width).any(|x| (0..area.height).any(|y|
+            b.cell((x, y)).map(|c| c.symbol() == "R").unwrap_or(false)));
+        assert!(!has_r(&off));
+        assert!(has_r(&on), "row-chain code R appears when overlay on");
     }
 
 }
