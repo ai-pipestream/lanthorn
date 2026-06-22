@@ -242,9 +242,15 @@ fn axis_side_respected(actual: i32, expected: i32) -> bool {
     }
 }
 
-/// Count how many of room `id`'s compass edges (to already-placed component neighbours)
+/// Weighted count of room `id`'s compass edges (to already-placed component neighbours) that
 /// keep `id` on the correct SIDE of the neighbour if `id` sat at `cell` (see
-/// `axis_side_respected`). Higher = fewer directional hints trampled.
+/// `axis_side_respected`). A RECIPROCAL connection — one with a compass edge back from the
+/// neighbour to `id` — counts double: a bidirectional link is a far stronger spatial hint than
+/// a one-way exit, so the layout should sacrifice a one-way hint before a reciprocal one (e.g.
+/// keep #180's reciprocal N/S links to #81/#80 even if its one-way `180→W→78` must give).
+/// Higher = fewer (and weaker) directional hints trampled.
+const RECIPROCAL_WEIGHT: usize = 2;
+
 fn edges_respected_at(
     graph: &MapGraph,
     index: &BTreeMap<RoomId, usize>,
@@ -271,10 +277,89 @@ fn edges_respected_at(
             (cell.0 - op.0, cell.1 - op.1)
         };
         if axis_side_respected(actual.0, delta.0) && axis_side_respected(actual.1, delta.1) {
-            sat += 1;
+            // Reciprocal (bidirectional) links weigh more than one-way exits.
+            let reciprocal = graph
+                .connections()
+                .iter()
+                .any(|r| r.origin == other && r.dest == id && grid_offset(r.dir).is_some());
+            sat += if reciprocal { RECIPROCAL_WEIGHT } else { 1 };
         }
     }
     sat
+}
+
+/// A chain's occupied line: `horizontal` true for an E/W chain (`line` = shared row y,
+/// `lo..=hi` = member x-extent), false for an N/S chain (`line` = shared column x, `lo..=hi`
+/// = member y-extent).
+struct ChainSpan {
+    horizontal: bool,
+    line: i32,
+    lo: i32,
+    hi: i32,
+}
+
+/// Relocate every FOREIGN room that lies strictly between a chain's extreme members on the
+/// chain line (the shared row for an E/W chain, shared column for an N/S chain). Chain
+/// MEMBERS are never moved — moving them would collapse their own diagonals to non-chain
+/// neighbours. An ejected room may exit either ALONG the line (past the member span) or OFF
+/// the line entirely; the destination is the free, no-longer-between cell that respects the
+/// most of the ejected room's own (reciprocal-weighted) compass edges, then nearest, then
+/// west/north.
+fn eject_interlopers(
+    snapped: &mut [(i32, i32)],
+    member_idxs: &[usize],
+    span: ChainSpan,
+    comp: &[RoomId],
+    index: &BTreeMap<RoomId, usize>,
+    graph: &MapGraph,
+) {
+    let ChainSpan { horizontal, line, lo, hi } = span;
+    // A cell is "between" iff it is ON the chain line and strictly inside the member span.
+    let between = |c: (i32, i32)| -> bool {
+        let (perp, par) = if horizontal { (c.1, c.0) } else { (c.0, c.1) };
+        perp == line && par > lo && par < hi
+    };
+    loop {
+        let victim = (0..snapped.len())
+            .find(|&q| !member_idxs.contains(&q) && between(snapped[q]));
+        let Some(q) = victim else { break };
+        let from = snapped[q];
+        let occ: BTreeSet<(i32, i32)> =
+            (0..snapped.len()).filter(|&k| k != q).map(|k| snapped[k]).collect();
+        let id = comp[q];
+        let par = if horizontal { from.0 } else { from.1 };
+        // Candidate exits: ALONG the line just past each member end, and OFF the line at the
+        // room's current parallel coordinate. Both kinds leave the "between" zone.
+        let mut cands: Vec<(i32, i32)> = Vec::new();
+        for d in 1..=MAX_BUMP_SPAN {
+            if horizontal {
+                cands.push((lo - d, line)); // along row, west of the span
+                cands.push((hi + d, line)); // along row, east of the span
+                cands.push((par, line - d)); // off row, north
+                cands.push((par, line + d)); // off row, south
+            } else {
+                cands.push((line, lo - d)); // along column, north of the span
+                cands.push((line, hi + d)); // along column, south of the span
+                cands.push((line - d, par)); // off column, west
+                cands.push((line + d, par)); // off column, east
+            }
+        }
+        let dest = cands
+            .into_iter()
+            .filter(|&c| !occ.contains(&c) && !between(c))
+            .min_by_key(|&c| {
+                // Most hints respected first; then nearest; then west, then north (deterministic).
+                let manh = (c.0 - from.0).abs() + (c.1 - from.1).abs();
+                (
+                    std::cmp::Reverse(edges_respected_at(graph, index, snapped, id, c)),
+                    manh,
+                    c.0,
+                    c.1,
+                )
+            })
+            .unwrap_or_else(|| nearest_free_cell(&occ, from));
+        snapped[q] = dest;
+    }
 }
 
 fn contiguify(
@@ -284,71 +369,29 @@ fn contiguify(
     snapped: &mut [(i32, i32)],
     graph: &MapGraph,
 ) {
-    // E/W chains → consecutive x on a shared row; N/S chains → consecutive y on a shared column.
-    // bump_foreign: relocate every non-chain room off `target`. The room is pushed ALONG the
-    // chain's axis — for an E/W chain along the row (its y kept), for an N/S chain along the
-    // column (its x kept) — to the nearest free cell off the member span. Keeping the
-    // perpendicular coordinate preserves the bumped room's perpendicular hints by construction
-    // (e.g. #180 stays between #81 above and #80 below, only shifting west off the chain).
-    // Among equidistant cells the one respecting more of the room's own compass edges wins
-    // (picks the better side). `target` is held occupied so a bumped room cannot return to it,
-    // which also guarantees the loop terminates. If the whole row/column is saturated within
-    // MAX_BUMP_SPAN, fall back to a perpendicular spiral.
-    let bump_foreign = |snapped: &mut Vec<(i32, i32)>, target: (i32, i32), chain_idxs: &[usize], horizontal: bool| {
-        loop {
-            let j = (0..snapped.len()).find(|&q| !chain_idxs.contains(&q) && snapped[q] == target);
-            let Some(j) = j else { break };
-            let mut occ: BTreeSet<(i32, i32)> =
-                (0..snapped.len()).filter(|&q| q != j).map(|q| snapped[q]).collect();
-            occ.insert(target);
-            let id = comp[j];
-            let mut chosen = None;
-            for d in 1..=MAX_BUMP_SPAN {
-                let cands = if horizontal {
-                    [(target.0 - d, target.1), (target.0 + d, target.1)]
-                } else {
-                    [(target.0, target.1 - d), (target.0, target.1 + d)]
-                };
-                let free: Vec<(i32, i32)> = cands.into_iter().filter(|c| !occ.contains(c)).collect();
-                if let Some(&best) = free.iter().max_by_key(|&&c| {
-                    // Better side first (more of the room's compass hints respected), then the
-                    // lower (x, y) for determinism (prefers west, then north, on a tie).
-                    (edges_respected_at(graph, index, snapped, id, c), -c.0, -c.1)
-                }) {
-                    chosen = Some(best);
-                    break;
-                }
-            }
-            let hint = if horizontal { (target.0, target.1 + 1) } else { (target.0 + 1, target.1) };
-            snapped[j] = chosen.unwrap_or_else(|| nearest_free_cell(&occ, hint));
-        }
-    };
+    // Eject foreign interlopers from between chain members; never move members (see
+    // `eject_interlopers`). Chains may legitimately keep gaps between members — only a foreign
+    // room sitting *between* them is a problem (it would interleave the chain visually).
     let mut snapped_v: Vec<(i32, i32)> = snapped.to_vec();
     for members in &chains.ew_members {
-        let mut idxs: Vec<usize> = members.iter().filter_map(|id| index.get(id).copied()).collect();
+        let idxs: Vec<usize> = members.iter().filter_map(|id| index.get(id).copied()).collect();
         if idxs.len() < 2 { continue; }
-        let y = snapped_v[idxs[0]].1;
-        if !idxs.iter().all(|&i| snapped_v[i].1 == y) { continue; } // dropped equality → skip
-        idxs.sort_by_key(|&i| (snapped_v[i].0, i));
-        let x0 = snapped_v[idxs[0]].0;
-        for (k, &i) in idxs.iter().enumerate() {
-            let target = (x0 + k as i32, y);
-            bump_foreign(&mut snapped_v, target, &idxs, true); // E/W chain → bump along the row
-            snapped_v[i] = target;
-        }
+        let line = snapped_v[idxs[0]].1; // shared row
+        if !idxs.iter().all(|&i| snapped_v[i].1 == line) { continue; } // dropped equality → skip
+        let lo = idxs.iter().map(|&i| snapped_v[i].0).min().unwrap();
+        let hi = idxs.iter().map(|&i| snapped_v[i].0).max().unwrap();
+        let span = ChainSpan { horizontal: true, line, lo, hi };
+        eject_interlopers(&mut snapped_v, &idxs, span, comp, index, graph);
     }
     for members in &chains.ns_members {
-        let mut idxs: Vec<usize> = members.iter().filter_map(|id| index.get(id).copied()).collect();
+        let idxs: Vec<usize> = members.iter().filter_map(|id| index.get(id).copied()).collect();
         if idxs.len() < 2 { continue; }
-        let x = snapped_v[idxs[0]].0;
-        if !idxs.iter().all(|&i| snapped_v[i].0 == x) { continue; }
-        idxs.sort_by_key(|&i| (snapped_v[i].1, i));
-        let y0 = snapped_v[idxs[0]].1;
-        for (k, &i) in idxs.iter().enumerate() {
-            let target = (x, y0 + k as i32);
-            bump_foreign(&mut snapped_v, target, &idxs, false); // N/S chain → bump along the column
-            snapped_v[i] = target;
-        }
+        let line = snapped_v[idxs[0]].0; // shared column
+        if !idxs.iter().all(|&i| snapped_v[i].0 == line) { continue; }
+        let lo = idxs.iter().map(|&i| snapped_v[i].1).min().unwrap();
+        let hi = idxs.iter().map(|&i| snapped_v[i].1).max().unwrap();
+        let span = ChainSpan { horizontal: false, line, lo, hi };
+        eject_interlopers(&mut snapped_v, &idxs, span, comp, index, graph);
     }
     snapped.copy_from_slice(&snapped_v);
 }
@@ -804,21 +847,27 @@ mod tests {
 
     #[test]
     fn a129_perpendicular_bidirectional_hint_preserved() {
-        // #180 and #80 are connected both ways but via PERPENDICULAR directions:
-        // 180→S→80 (80 below 180) and 80→W→180 (180 west of 80 ⇒ 80 east of 180) ⇒ 80 is
-        // SOUTHEAST of 180. The VPSC solve places it correctly; the contiguity pass must NOT
-        // trample it when it bumps #180 off the [74,79,193,203] chain row. Direction-aware
-        // bump keeps #180 north of #80.
+        // Perpendicular bidirectional pairs imply DIAGONAL placements that the contiguity pass
+        // must not collapse:
+        //   180→S→80 + 80→W→180  ⇒ 80 SOUTHEAST of 180
+        //   180→N→81             ⇒ 81 north of 180
+        //   79→N→81 + 81→E→79    ⇒ 81 NORTHWEST of 79
+        //   79→S→80 + 80→E→79    ⇒ 80 SOUTHWEST of 79
+        // VPSC places all of these correctly; eject-only contiguity must leave members put so
+        // the diagonals survive.
         let mut g = a129_house_graph();
         relayout_auto(&mut g);
-        let p80 = g.room(80).unwrap().pos.unwrap();
-        let p180 = g.room(180).unwrap().pos.unwrap();
-        let p81 = g.room(81).unwrap().pos.unwrap();
-        // 80 is SOUTHEAST of 180 (180→S→80 and 80→W→180).
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        let (p79, p80, p81, p180) = (p(79), p(80), p(81), p(180));
+        // 80 SOUTHEAST of 180; 81 NORTH of 180.
         assert!(p80.1 > p180.1, "80 must stay SOUTH of 180: 80={p80:?} 180={p180:?}");
         assert!(p80.0 > p180.0, "80 must stay EAST of 180: 80={p80:?} 180={p180:?}");
-        // 81 is NORTH of 180 (180→N→81) — the bump must not shove 180 up level with 81.
         assert!(p81.1 < p180.1, "81 must stay NORTH of 180: 81={p81:?} 180={p180:?}");
+        // 81 NORTHWEST of 79; 80 SOUTHWEST of 79 (the west component must not collapse).
+        assert!(p81.0 < p79.0, "81 must stay WEST of 79: 81={p81:?} 79={p79:?}");
+        assert!(p81.1 < p79.1, "81 must stay NORTH of 79: 81={p81:?} 79={p79:?}");
+        assert!(p80.0 < p79.0, "80 must stay WEST of 79: 80={p80:?} 79={p79:?}");
+        assert!(p80.1 > p79.1, "80 must stay SOUTH of 79: 80={p80:?} 79={p79:?}");
         // No room overlap.
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
@@ -928,8 +977,10 @@ mod tests {
     }
 
     #[test]
-    fn bidirectional_chain_is_contiguous_no_interleave() {
-        // 79↔203↔193 (E/W chain) plus a foreign room 180 with no edge to the chain.
+    fn bidirectional_chain_no_foreign_interleave() {
+        // 79↔203↔193 (E/W chain) plus a foreign room 180 with no chain edge. Members share a
+        // row; no foreign room may sit between them on it (members may have gaps — eject-only
+        // never moves members, only ejects interlopers).
         let mut g = crate::graph::MapGraph::new();
         for id in [79u16, 180, 193, 203] { g.upsert_room(id, "r".into()); }
         for (o, d, dst) in [
@@ -942,14 +993,12 @@ mod tests {
         relayout_auto(&mut g);
         let p = |id| g.room(id).unwrap().pos.unwrap();
         let (a, b, c) = (p(193), p(203), p(79));
-        // All three on one row, consecutive in x.
+        // All three on one row.
         assert_eq!(a.1, b.1);
         assert_eq!(b.1, c.1);
         let mut xs = [a.0, b.0, c.0];
         xs.sort_unstable();
-        assert_eq!(xs[1] - xs[0], 1, "chain members consecutive");
-        assert_eq!(xs[2] - xs[1], 1, "chain members consecutive");
-        // 180 is NOT between two consecutive chain members on that row.
+        // 180 is NOT between the chain's extreme members on that row.
         let p180 = p(180);
         let between = p180.1 == a.1 && p180.0 > xs[0] && p180.0 < xs[2];
         assert!(!between, "foreign room must not interleave the chain: 180={p180:?}, chain xs={xs:?}");
@@ -960,11 +1009,13 @@ mod tests {
     }
 
     #[test]
-    fn a129_chain_is_contiguous_no_foreign_interleave() {
+    fn a129_chain_no_foreign_interleave() {
         // The full A129 house graph contains the E/W chain 79↔203↔193.
-        // Without the contiguify pass, room #180 (which is connected but not part of the
-        // chain) gets interleaved between #193 and #203 on their shared row — the original
-        // bug. This test fails RED when contiguify is a no-op and GREEN when it runs.
+        // Without the eject pass, room #180 (connected but not part of the chain) gets
+        // interleaved between #193 and #203 on their shared row — the original bug. This test
+        // fails RED when the eject pass is a no-op and GREEN when it runs. (Members may have
+        // gaps; eject-only never moves them, so we assert "no foreign room BETWEEN", not
+        // "consecutive".)
         let mut g = a129_house_graph();
         relayout_auto(&mut g);
         let p = |id: u16| g.room(id).unwrap().pos.unwrap();
@@ -972,11 +1023,8 @@ mod tests {
         // All three chain members share one row.
         assert_eq!(p193.1, p203.1, "193 and 203 must share a row: {p193:?} {p203:?}");
         assert_eq!(p203.1, p79.1, "203 and 79 must share a row: {p203:?} {p79:?}");
-        // Their x-coords must be consecutive (gap of exactly 1 each step).
         let mut xs = [p193.0, p203.0, p79.0];
         xs.sort_unstable();
-        assert_eq!(xs[1] - xs[0], 1, "chain not consecutive: xs={xs:?}");
-        assert_eq!(xs[2] - xs[1], 1, "chain not consecutive: xs={xs:?}");
         let chain_row = p193.1;
         let xs_min = xs[0];
         let xs_max = xs[2];
