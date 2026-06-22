@@ -307,10 +307,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SelectNext => select_adjacent(state, mapper, 1),
         Action::SelectPrev => select_adjacent(state, mapper, -1),
 
-        // Re-tidy: re-derive the clean Auto layout (longest-path sort), then nudge
-        // rooms so the lane router has no illegal overlaps. Honours compass ordering
-        // the greedy per-turn placement can't (e.g. a room east of another via the
-        // direction hints). No-op in Manual mode — those positions are user-owned.
+        // Re-tidy: re-derive the clean Auto layout (constrained stress majorization,
+        // or the longest-path sort for very large maps), then nudge rooms so the lane
+        // router has no illegal overlaps. Honours compass ordering the greedy per-turn
+        // placement can't. No-op in Manual mode — those positions are user-owned.
         Action::Retidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
                 mapper::layout::relayout_auto(&mut mapper.graph);
