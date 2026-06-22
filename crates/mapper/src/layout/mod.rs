@@ -401,7 +401,19 @@ fn eject_interlopers(
                     c.1,
                 )
             })
-            .unwrap_or_else(|| nearest_free_cell(&occ, from));
+            .unwrap_or_else(|| {
+                // Fallback (every along/off-line candidate occupied): spiral to the nearest free
+                // cell, but treat the whole between-zone as occupied so the victim cannot land
+                // back inside it — otherwise it would be re-selected next iteration (a loop).
+                let mut occ2 = occ.clone();
+                if horizontal {
+                    for x in (lo + 1)..hi { occ2.insert((x, line)); }
+                } else {
+                    for y in (lo + 1)..hi { occ2.insert((line, y)); }
+                }
+                nearest_free_cell(&occ2, from)
+            });
+        debug_assert!(!between(dest), "ejected room must leave the between-zone");
         snapped[q] = dest;
     }
 }
