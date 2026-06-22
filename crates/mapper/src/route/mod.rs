@@ -367,12 +367,11 @@ fn total_crossings(conns: &[RoutedConnector]) -> usize {
 /// alternative facing entry side for non-reciprocal connectors) — the one that crosses the
 /// fewest already-placed connectors, with a deterministic integer tiebreak.
 fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
-    use crate::direction::opposite;
-    // Draw every compass edge on its OWN exit side, EXCEPT collapse a TRUE reciprocal pair
-    // (a→dir→b together with b→opposite(dir)→a) into a single connector drawn once (the
-    // renderer puts an arrow at each end). Edges that merely share a room-pair but are not
-    // true opposites (e.g. 239→N→77 and 239→S→77, or 79→S→80 alongside 80→E→79) are each
-    // drawn separately, so every distinct direction is visible.
+    // Draw every compass edge on its OWN exit side, collapsing ANY bidirectional pair
+    // (a→b together with b→a, regardless of the two directions) into a single connector
+    // drawn once: the renderer puts an arrow at each end, each pointing out that end's own
+    // compass side. An exact-opposite pair is the straight-line special case. Edges with no
+    // reverse partner stay single one-arrow connectors.
     let compass: Vec<&crate::graph::Connection> = graph
         .connections()
         .iter()
@@ -381,9 +380,13 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     let mut drawn: std::collections::BTreeSet<(RoomId, RoomId)> = std::collections::BTreeSet::new();
     let mut out: Vec<RoutedConnector> = Vec::new();
     for c in &compass {
-        let has_reciprocal = compass
+        // A reverse edge between the same room pair (any direction) makes this connector
+        // bidirectional; the first-seen edge of the pair draws it once.
+        let back = compass
             .iter()
-            .any(|p| p.origin == c.dest && p.dest == c.origin && p.dir == opposite(c.dir));
+            .find(|p| p.origin == c.dest && p.dest == c.origin)
+            .copied();
+        let has_reciprocal = back.is_some();
         if has_reciprocal && drawn.contains(&(c.dest, c.origin)) {
             continue; // the reciprocal partner already drew this pair
         }
@@ -395,10 +398,14 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // we vary the L orientation and (for non-reciprocal connectors, in greedy mode only)
         // the destination entry side among the sides still facing the origin. Candidate order
         // is fixed and integer-tiebroken, so the choice is deterministic.
-        let entry_choices: Vec<Side> = if greedy && !has_reciprocal {
-            entry_side_alternatives(a, b)
-        } else {
-            vec![entry_side(a, b)]
+        // A bidirectional connector enters the far room on the side ITS OWN back-edge departs,
+        // so the far-end arrow points out the true compass direction (an exact-opposite pair
+        // resolves to the opposite side = a straight reciprocal). Non-bidirectional connectors
+        // use the geometric entry side (greedy mode probes facing alternatives).
+        let entry_choices: Vec<Side> = match back.and_then(|bk| side_for(bk.dir)) {
+            Some(s) => vec![s],
+            None if greedy => entry_side_alternatives(a, b),
+            None => vec![entry_side(a, b)],
         };
         let orients: &[Orient] = if greedy {
             &[Orient::HorizontalFirst, Orient::VerticalFirst]
@@ -803,33 +810,23 @@ mod tests {
         assert_eq!(route_topology(&g).len(), 1, "reciprocal pair → one connector");
     }
 
-    /// Regression: non-opposite back edges must NOT set `reciprocal`.
-    ///
-    /// Graph: 1→N→2, 1→S→2, 2→E→1 — none of these pairs are true opposites
-    /// (N↔S is opposite, but 2→E→1 is not the opposite of 1→N→2 or 1→S→2).
-    /// All three edges have shared room-pair partners, but none should be collapsed.
-    /// Every connector must have `reciprocal == false` so no far-end arrow is drawn.
+    /// A bidirectional pair joined by NON-opposite directions collapses to ONE connector,
+    /// each end's arrow on its own compass side: `1→N→2` + `2→E→1` → one reciprocal
+    /// connector exiting room 1 on its north side and entering room 2 on its east side.
     #[test]
-    fn non_opposite_back_edges_are_not_reciprocal() {
+    fn non_opposite_bidirectional_pair_collapses() {
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
         g.set_pos(1, (0, 0));
         g.set_pos(2, (0, -2));
         g.add_edge(1, Direction::N, 2); // 1→N→2
-        g.add_edge(1, Direction::S, 2); // 1→S→2  (same pair, not an opposite-direction match for either)
-        g.add_edge(2, Direction::E, 1); // 2→E→1  (reverse room-pair, not opposite of N or S)
+        g.add_edge(2, Direction::E, 1); // 2→E→1  (bidirectional, non-opposite)
         let conns = route_topology(&g);
-        // All three edges share room-pairs but NONE are true opposite pairs — each must be drawn
-        // separately (no collapse), and none must have reciprocal == true.
-        assert_eq!(conns.len(), 3, "no pair collapses — all three drawn; got {}", conns.len());
-        for c in &conns {
-            assert!(
-                !c.reciprocal,
-                "connector {}→{}({:?}) wrongly marked reciprocal; only true opposite pairs collapse",
-                c.origin, c.dest, c.exit,
-            );
-        }
+        assert_eq!(conns.len(), 1, "bidirectional pair collapses to one connector; got {}", conns.len());
+        assert!(conns[0].reciprocal, "collapsed bidirectional connector must be reciprocal");
+        assert_eq!(conns[0].exit, side_for(Direction::N).unwrap(), "exits room 1 on its north side");
+        assert_eq!(conns[0].entry, side_for(Direction::E).unwrap(), "enters room 2 on its east side");
     }
 
     /// Regression: a true opposite pair `1→N→2` + `2→S→1` collapses to exactly ONE
