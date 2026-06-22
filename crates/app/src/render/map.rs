@@ -325,11 +325,6 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         let sx = vx + off_x;
         let sy = vy + off_y;
         draw_room(room, state, zoom, sx, sy, area, buf);
-        // Alignment overlay: Boxes zoom only, when enabled and the room is in a chain.
-        if boxes && state.show_alignment && !room.align_code.is_empty() {
-            let code: String = room.align_code.chars().take(9).collect();
-            put_str(buf, sx + 1, sy + 3, &code, room_style(room, state), area);
-        }
     }
 
     // Portal-icon overlay (Boxes zoom): directional icons on the right interior column.
@@ -833,7 +828,7 @@ fn draw_room(
             draw_compact_room(room, sx, sy, base_style, area, buf);
         }
         Zoom::Boxes => {
-            draw_box_room(room, sx, sy, base_style, area, buf);
+            draw_box_room(room, sx, sy, base_style, state.show_alignment, area, buf);
         }
     }
 }
@@ -882,13 +877,48 @@ fn draw_compact_room(
     put_char(buf, sx + bw - 1, sy + bh - 1, br, style, area);
 }
 
+/// Word-wrap `s` into up to two lines no wider than `width` (break on spaces; a single
+/// over-long word, or overflow past two lines, is truncated to `width`).
+fn wrap_two(s: &str, width: usize) -> [String; 2] {
+    let mut lines = [String::new(), String::new()];
+    let mut idx = 0;
+    for word in s.split_whitespace() {
+        if idx >= 2 {
+            break;
+        }
+        if lines[idx].is_empty() {
+            lines[idx] = word.chars().take(width).collect();
+        } else if lines[idx].chars().count() + 1 + word.chars().count() <= width {
+            lines[idx].push(' ');
+            lines[idx].push_str(word);
+        } else {
+            idx += 1;
+            if idx < 2 {
+                lines[idx] = word.chars().take(width).collect();
+            }
+        }
+    }
+    lines
+}
+
+/// Center `s` within `width` columns (truncated to `width` if longer).
+fn center(s: &str, width: usize) -> String {
+    let len = s.chars().count();
+    if len >= width {
+        return s.chars().take(width).collect();
+    }
+    let pad = width - len;
+    let left = pad / 2;
+    format!("{}{}{}", " ".repeat(left), s, " ".repeat(pad - left))
+}
+
 /// Draw a boxes (19×11 step) room: bordered box 11 wide × 5 tall.
 ///
 /// Layout (11 cols × 5 rows, within a 19×11 step):
 ///   Row 0: ╭─────────╮  (or ┏━━━━━━━━━┓ for current room)
-///   Row 1: │label...●│  (label up to 9 chars, ● if notes)
-///   Row 2: │#id      │  (unique room id)
-///   Row 3: │         │
+///   Row 1: │  name   │  (first word-wrap line, centered)
+///   Row 2: │  name2  │  (second word-wrap line, centered)
+///   Row 3: │  #id    │  (unique room id, centered; align code appended when enabled)
 ///   Row 4: ╰─────────╯
 ///   Gutter: cols 11-18 (right), rows 5-10 (bottom)
 ///
@@ -900,6 +930,7 @@ fn draw_box_room(
     sx: i32,
     sy: i32,
     style: Style,
+    show_alignment: bool,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -930,17 +961,19 @@ fn draw_box_room(
         put_char(buf, sx + w - 1, sy + dy, vert, style, area);
     }
 
-    // Label on row 1 (first inner row), up to w-2 chars.
-    let label_width = (w - 2) as usize;
-    let label: String = room.label.chars().take(label_width).collect();
-    put_str(buf, sx + 1, sy + 1, &label, style, area);
+    // Room name word-wrapped + centered across the first two interior rows.
+    let iw = (w - 2) as usize; // interior width (9)
+    let name_lines = wrap_two(&room.label, iw);
+    put_str(buf, sx + 1, sy + 1, &center(&name_lines[0], iw), style, area);
+    put_str(buf, sx + 1, sy + 2, &center(&name_lines[1], iw), style, area);
 
-    // Unique room id (object number) on row 2, so rooms can be referenced. Only when
-    // the box is tall enough that row 2 is interior (Boxes zoom).
-    if h > 3 {
-        let id_str: String = format!("#{}", room.id).chars().take(label_width).collect();
-        put_str(buf, sx + 1, sy + 2, &id_str, style, area);
+    // Row 3: #id (centered), with alignment diagnostics appended when enabled.
+    let mut row3 = format!("#{}", room.id);
+    if show_alignment && !room.align_code.is_empty() {
+        row3.push(' ');
+        row3.push_str(&room.align_code);
     }
+    put_str(buf, sx + 1, sy + 3, &center(&row3, iw), style, area);
 
     // Notes marker ● in top-right inner corner (row 1, col w-2).
     if room.has_notes {
@@ -1305,11 +1338,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
 
-        // The unique id "#7" is drawn on row 2 (under the label) at cols 1..3.
-        let row2: String = (1u16..=3)
-            .map(|x| buf.cell((x, 2)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+        // The unique id "#7" is drawn centered on row 3 (moved off row 2).
+        let row3: String = (1u16..=9)
+            .map(|x| buf.cell((x, 3)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
-        assert!(row2.contains("#7"), "row 2 should show the room id '#7'; got '{row2}'");
+        assert!(row3.contains("#7"), "row 3 should show the room id '#7'; got '{row3}'");
     }
 
     // connector_has_corner_glyph: removed — called build_connector_mask which is gone;
@@ -1739,6 +1772,31 @@ mod tests {
             p_lane0.0,
         );
         assert_eq!(p_lane1.0 - p_lane0.0, LANE_SPACING, "lane 1 sits one LANE_SPACING beyond lane 0");
+    }
+
+    #[test]
+    fn box_name_wraps_centered_and_id_on_row3() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(7, "Rocky Ledge".into());
+        g.set_pos(7, (0, 0));
+        let rm = render(&g);
+        let state = AppState::default(); // Boxes, align off
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let row = |y: u16| -> String {
+            (0..11u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default()).collect()
+        };
+        // Name word-wraps across rows 1 and 2.
+        assert!(row(1).contains("Rocky"), "row 1 has the first word: '{}'", row(1));
+        assert!(row(2).contains("Ledge"), "row 2 has the second word: '{}'", row(2));
+        // #id is on row 3 (moved off row 2).
+        assert!(row(3).contains("#7"), "row 3 shows the id: '{}'", row(3));
+        assert!(!row(2).contains("#7"), "id is no longer on row 2: '{}'", row(2));
+        // Centered: a leading pad space after the left border on the name + id rows.
+        assert!(row(1).starts_with("│ "), "name centered (leading pad): '{}'", row(1));
+        assert!(row(3).starts_with("│ "), "id centered (leading pad): '{}'", row(3));
     }
 
     #[test]
