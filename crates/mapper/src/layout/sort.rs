@@ -303,14 +303,15 @@ mod tests {
             (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
             (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
         ] { g.add_edge(o, d, dst); }
-        crate::layout::relayout_auto(&mut g);
+        let pos = sort_layout(&g);
+        for (&id, &p) in &pos {
+            g.set_pos(id, p);
+        }
+        crate::layout::mark_distorted(&mut g, &std::collections::BTreeSet::new());
         let y = |id| g.room(id).unwrap().pos.unwrap().1;
-        // With the constraint engine, y-free rooms (only E/W edges) are positioned by stress
-        // minimization rather than the alignment pass. The bound is relaxed from 1 to 3; the
-        // regression being guarded against (sort-only: ~4-row drift) is still caught.
-        assert!((y(203) - y(79)).abs() <= 3,
+        assert!((y(203) - y(79)).abs() <= 1,
             "Kitchen must sit near Behind House's row: 203 y={}, 79 y={}", y(203), y(79));
-        assert!((y(193) - y(79)).abs() <= 3,
+        assert!((y(193) - y(79)).abs() <= 1,
             "Living Room must sit near Behind House's row: 193 y={}, 79 y={}", y(193), y(79));
     }
 
@@ -334,19 +335,15 @@ mod tests {
             (80, Direction::E, 79), (79, Direction::S, 80), (79, Direction::N, 81),
             (81, Direction::E, 79), (80, Direction::S, 76),
         ] { g.add_edge(o, d, dst); }
-        crate::layout::relayout_auto(&mut g);
-        // With the constraint engine, pure E/W edges are enforced via x-constraints (so the
-        // east room is always east), but y-alignment is determined by stress minimization rather
-        // than the sort's alignment pass. The distorted check requires same-row, which the
-        // constraint engine cannot guarantee for y-unconstrained rooms. Convert to the directional
-        // component: the east room must be east of the origin (x-direction only).
-        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
-        assert!(p(25).0 > p(74).0, "room 25 must be east of room 74 (x-direction)");
-        assert!(p(75).0 > p(78).0, "room 75 must be east of room 78 (x-direction)");
-        // The constraint engine's global solve should keep aggregate distortion reasonable.
-        // (Sort+alignment achieved 19; constraint engine's global solve produces a different
-        // but bounded count — 25 catches major regressions without tying to the old engine.)
+        let pos = sort_layout(&g);
+        for (&id, &p) in &pos {
+            g.set_pos(id, p);
+        }
+        crate::layout::mark_distorted(&mut g, &std::collections::BTreeSet::new());
+        let e = |o, d| g.connections().iter().find(|c| c.origin == o && c.dest == d).unwrap();
+        assert!(!e(74, 25).distorted, "74→E→25 must be straight after row alignment");
+        assert!(!e(78, 75).distorted, "78→E→75 must be straight after row alignment");
         let distorted = g.connections().iter().filter(|c| c.distorted).count();
-        assert!(distorted <= 25, "constraint engine must keep total distortion bounded; got {distorted}");
+        assert!(distorted <= 19, "alignment must not increase total distortion; got {distorted}");
     }
 }

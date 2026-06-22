@@ -10,12 +10,14 @@
 //!    moves use `nearest_free_cell`. Existing rooms otherwise never move, so the map
 //!    is stable turn-to-turn. `Mapper::observe` drives this.
 //!
-//! 2. **Re-tidy "sort"** (`relayout_auto`, on demand — not per turn). Re-derives all
-//!    positions via per-axis longest-path layering of the compass edges (`sort.rs`):
-//!    east/west edges order the x-axis, north/south the y-axis, diagonals both;
-//!    cycle-closing constraints are dropped (and flagged distorted). Components are
-//!    packed left-to-right, residual collisions resolved with `nearest_free_cell`,
-//!    and the lowest-id room anchored at (0,0).
+//! 2. **Constrained stress majorization** (`relayout_auto`, on demand — not per turn).
+//!    For graphs with ≤ `MAX_NODES` rooms, re-derives all positions via SMACOF stress
+//!    minimization with VPSC separation constraints (`stress.rs`, `vpsc.rs`,
+//!    `constraints.rs`), seeded from the longest-path sort (`sort.rs`). Cycle-closing
+//!    compass constraints are dropped (and the affected edges flagged distorted).
+//!    For graphs above `MAX_NODES`, falls back to the **longest-path sort** directly.
+//!    In both cases, components are packed left-to-right, residual collisions resolved
+//!    with `nearest_free_cell`, and the lowest-id room anchored at (0,0).
 //!
 //! After either regime, `mark_distorted` flags every compass edge whose final grid
 //! geometry contradicts its direction. (Connector routing and any render-aware
@@ -593,5 +595,74 @@ mod tests {
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "no overlap");
         assert!(g.connections().iter().any(|c| c.distorted), "one mutual-S edge stays distorted");
+    }
+
+    fn a129_house_graph() -> crate::graph::MapGraph {
+        let mut g = crate::graph::MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        use Direction::*;
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+        ] { g.add_edge(o, d, dst); }
+        g
+    }
+
+    #[test]
+    fn constraint_engine_beats_sort_distortion_on_a129() {
+        // Distortion under the longest-path sort fallback (sort_layout + mark_distorted).
+        let mut g_sort = a129_house_graph();
+        let pos = sort::sort_layout(&g_sort);
+        for (&id, &p) in &pos { g_sort.set_pos(id, p); }
+        mark_distorted(&mut g_sort, &BTreeSet::new());
+        let sort_distorted = g_sort.connections().iter().filter(|c| c.distorted).count();
+
+        // Distortion under the constraint engine (the default relayout_auto).
+        let mut g_cons = a129_house_graph();
+        relayout_auto(&mut g_cons);
+        let cons_distorted = g_cons.connections().iter().filter(|c| c.distorted).count();
+
+        assert!(
+            cons_distorted < sort_distorted,
+            "constraint engine must reduce distortion vs sort: constraint={cons_distorted}, sort={sort_distorted}",
+        );
+        // And it must not overlap rooms.
+        let cells: Vec<_> = g_cons.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no room overlap under the constraint engine");
+    }
+
+    #[test]
+    fn relayout_is_deterministic_under_constraint_engine() {
+        let mut a = a129_house_graph();
+        let mut b = a129_house_graph();
+        relayout_auto(&mut a);
+        relayout_auto(&mut b);
+        let pa: Vec<_> = a.rooms().map(|r| (r.id, r.pos)).collect();
+        let pb: Vec<_> = b.rooms().map(|r| (r.id, r.pos)).collect();
+        assert_eq!(pa, pb, "constraint engine must be deterministic");
+    }
+
+    #[test]
+    fn large_graph_uses_sort_fallback_without_overlap() {
+        // A chain longer than MAX_NODES forces the fallback path; it must still place
+        // every room with no overlap (and not run the O(n²) solve).
+        let mut g = crate::graph::MapGraph::new();
+        let count = (super::MAX_NODES + 5) as u16;
+        for id in 1..=count { g.upsert_room(id, "r".into()); }
+        for id in 1..count { g.add_edge(id, Direction::E, id + 1); }
+        relayout_auto(&mut g);
+        let placed = g.rooms().filter(|r| r.pos.is_some()).count();
+        assert_eq!(placed, count as usize, "every room placed via fallback");
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no overlap in the fallback layout");
     }
 }
