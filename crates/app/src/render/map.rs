@@ -487,34 +487,43 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
     // the line visibly touches both rooms even when the channel is wider than the lane it
     // runs in, and two connectors sharing a side land on distinct cells.
     let origin_cell = (conn.points[0].0.div_euclid(2), conn.points[0].1.div_euclid(2));
-    let last = conn.points[conn.points.len() - 1];
-    let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
     let dep_anchor = if mapper::direction::is_diagonal(conn.exit_dir) {
         corner_anchor(cols, rows, origin_cell, conn.exit_dir)
     } else {
         box_edge_anchor(cols, rows, origin_cell, conn.exit, conn.exit_slot)
     };
-    let arr_anchor = match conn.entry_dir {
-        Some(d) if mapper::direction::is_diagonal(d) => corner_anchor(cols, rows, dest_cell, d),
-        _ => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
-    };
 
-    // The arrow anchor sits ON the box border. Each connector leaves the box straight out at 90°
-    // (a perpendicular stub on the anchor's own row/col), then steps along the edge into the
-    // first/last interior channel point. Distinct slots give distinct border cells; the straight
-    // connector on each side keeps slot 0 (centre), so a displaced connector crosses it as a
-    // single clean ┼ instead of a corner stomp.
+    // The connector leaves the box straight out at 90° (a perpendicular stub on the anchor's own
+    // row/col), then steps along the edge into the first interior channel point. Distinct slots
+    // give distinct border cells; the straight connector on each side keeps slot 0 (centre), so a
+    // displaced connector crosses it as a single clean ┼ instead of a corner stomp.
     let first_interior = pix[1];
-    let last_interior = pix[pix.len() - 2];
     let dep_bridge = attach_bridge(dep_anchor, first_interior, conn.exit);
-    let arr_bridge = attach_bridge(arr_anchor, last_interior, conn.entry);
 
     let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len() + 6);
     inner_v.push(dep_anchor);
     inner_v.extend_from_slice(&dep_bridge);
-    inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
-    for &p in arr_bridge.iter().rev() { inner_v.push(p); }
-    inner_v.push(arr_anchor);
+    let arr_anchor = if conn.merge {
+        // A merge stub ENDS ON the trunk at the junction (`pix.last()`), not at a destination box —
+        // no arrival anchor or bridge; the line simply reaches the junction (a T-junction).
+        inner_v.extend_from_slice(&pix[1..]);
+        *pix.last().unwrap()
+    } else {
+        let last = conn.points[conn.points.len() - 1];
+        let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
+        let aa = match conn.entry_dir {
+            Some(d) if mapper::direction::is_diagonal(d) => corner_anchor(cols, rows, dest_cell, d),
+            _ => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
+        };
+        let last_interior = pix[pix.len() - 2];
+        let arr_bridge = attach_bridge(aa, last_interior, conn.entry);
+        inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
+        for &p in arr_bridge.iter().rev() {
+            inner_v.push(p);
+        }
+        inner_v.push(aa);
+        aa
+    };
     inner_v.dedup();
     let inner = &inner_v[..];
     if inner.is_empty() {
@@ -1164,6 +1173,19 @@ pub(crate) fn overlap_stats(
     let (mut illegal, mut crossings) = (0usize, 0usize);
     for per_conn in owners.values() {
         if per_conn.len() < 2 {
+            continue;
+        }
+        // Merge junction: every connector meeting at this cell belongs to the SAME unordered room
+        // pair (a trunk plus its merge stubs joining it). That is a legal T-junction, not an overlap.
+        let same_pair = {
+            let mut pairs = per_conn.keys().map(|&ci| {
+                let c = &plan.connectors[ci];
+                (c.origin.min(c.dest), c.origin.max(c.dest))
+            });
+            let first = pairs.next().unwrap();
+            pairs.all(|p| p == first)
+        };
+        if same_pair {
             continue;
         }
         let mut masks: Vec<u8> = per_conn.values().copied().collect();
@@ -1823,6 +1845,36 @@ mod tests {
             buf.cell((sx as u16, sy as u16)).unwrap().symbol(), "┼",
             "the crossing cell must render as ┼",
         );
+    }
+
+    #[test]
+    fn multi_edge_merge_one_trunk_arrows_and_tjunction() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(77, "F".into());
+        g.upsert_room(239, "G".into());
+        g.set_pos(77, (0, 0));
+        g.set_pos(239, (2, 0)); // east of 77, a gap of one cell
+        g.add_edge(77, Direction::E, 239);
+        g.add_edge(239, Direction::W, 77); // reciprocal trunk
+        g.add_edge(239, Direction::N, 77);
+        g.add_edge(239, Direction::S, 77);
+        // The merge junction (trunk + its stubs) is exempted → no illegal overlaps.
+        let (illegal, _) = render_overlap_stats(&g);
+        assert_eq!(illegal, 0, "a same-pair merge junction must not count as an illegal overlap");
+        // Render: #239 still shows its N (▲) and S (▼) box-edge exit arrows, and a T-junction
+        // glyph appears where the stubs join the trunk.
+        let rm = mapper::render::render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let count = |sym: &str| buf.content.iter().filter(|c| c.symbol() == sym).count();
+        assert!(count("▲") >= 1, "239's N exit arrow ▲ present");
+        assert!(count("▼") >= 1, "239's S exit arrow ▼ present");
+        let tjuncts: usize = ["├", "┤", "┬", "┴", "┼"].iter().map(|s| count(s)).sum();
+        assert!(tjuncts >= 1, "a T-junction glyph where the merge stubs join the trunk");
     }
 
     #[test]
