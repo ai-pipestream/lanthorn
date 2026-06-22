@@ -477,7 +477,10 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
         .iter()
         .map(|&p| lane_pixel(p, cols, rows, &conn.segs))
         .collect();
-    if pix.len() < 3 {
+    // A merge stub may legitimately collapse to just centre→junction (2 points) — it still must
+    // render its box-edge exit arrow and a short line to the junction. Every other connector needs
+    // centre + interior + centre (3 points).
+    if pix.len() < if conn.merge { 2 } else { 3 } {
         return None;
     }
 
@@ -1845,6 +1848,32 @@ mod tests {
             buf.cell((sx as u16, sy as u16)).unwrap().symbol(), "┼",
             "the crossing cell must render as ┼",
         );
+    }
+
+    #[test]
+    fn merge_stub_keeps_exit_arrow_when_polyline_collapses() {
+        // Vertical N/S reciprocal trunk (A above B) plus an extra A→E→B edge: the E stub's
+        // polyline can collapse to 2 points, but it must STILL render A's east exit arrow ▶
+        // (regression: the < 3 guard dropped the whole connector, arrow included).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 2)); // B directly south of A
+        g.add_edge(1, Direction::S, 2);
+        g.add_edge(2, Direction::N, 1); // vertical trunk
+        g.add_edge(1, Direction::E, 2); // extra same-pair edge → merge stub
+        let (illegal, _) = render_overlap_stats(&g);
+        assert_eq!(illegal, 0, "no illegal overlap");
+        let rm = mapper::render::render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let right = buf.content.iter().filter(|c| c.symbol() == "▶").count();
+        assert!(right >= 1, "the extra E edge's box-edge exit arrow ▶ must still render");
     }
 
     #[test]
