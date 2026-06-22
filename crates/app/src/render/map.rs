@@ -312,14 +312,14 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         }
     }
 
-    // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes (on top of
-    //       any portal badges they cross).
+    // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
+    //       the rooms drawn below them in step 2.
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
         arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf);
     }
 
-    // ── 3. Draw rooms on top of the line-art (translate + clip) ───────────────
+    // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
     for room in &rm.rooms {
         let (vx, vy) = room_virtual(room.cell);
         let sx = vx + off_x;
@@ -339,7 +339,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         draw_portal_icons(rm, &placed, state, state.show_portal_labels, off_x, off_y, area, buf);
     }
 
-    // ── 4. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
+    // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
     //       border it sits on (replacing the box-edge glyph, pointing outward).
     draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf);
 }
@@ -739,6 +739,10 @@ fn mid_precedence(dir: Direction) -> u8 {
     }
 }
 
+/// One room's portal icon choices: three slots (Up / Mid / Down), each holding an optional
+/// `(glyph, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
+type PortalSlots<'a> = [Option<(&'a str, Option<&'a str>)>; 3];
+
 /// Draw in-room portal indicators at Boxes zoom as a post-room overlay (so icons sit on top of
 /// the box interior). Each room's portal (stub) edges map to a right-interior-column slot:
 /// Up→row 1, In/Out/Unknown→row 2 (middle, by `mid_precedence`), Down→row 3. Default = the
@@ -758,7 +762,7 @@ fn draw_portal_icons(
 ) {
     use std::collections::HashMap;
     // Per room, the chosen (glyph, dest_label) for each of the 3 slots; mid slot by precedence.
-    let mut chosen: HashMap<RoomId, [Option<(&str, Option<&str>)>; 3]> = HashMap::new();
+    let mut chosen: HashMap<RoomId, PortalSlots<'_>> = HashMap::new();
     let mut mid_rank: HashMap<RoomId, u8> = HashMap::new();
     for edge in &rm.edges {
         if !edge.is_stub {
@@ -780,7 +784,7 @@ fn draw_portal_icons(
         }
     }
 
-    let icon_col = (BOX_W - 2) as i32; // far-right interior column
+    let icon_col = BOX_W - 2; // far-right interior column
     for room in &rm.rooms {
         let Some(slots) = chosen.get(&room.id) else { continue };
         let Some(&rect) = placed.get(&room.id) else { continue };
@@ -1800,6 +1804,31 @@ mod tests {
         assert_eq!(sym(9, 1), "↑", "up icon in upper-right interior (row 1)");
         assert_eq!(sym(9, 2), "⊙", "in icon in middle-right interior (row 2)");
         assert_eq!(sym(9, 3), "↓", "down icon in lower-right interior (row 3)");
+    }
+
+    #[test]
+    fn portal_mid_slot_in_beats_out() {
+        // Room 1 has BOTH an In portal (→ room 2) and an Out portal (→ room 3).
+        // The mid-slot precedence rule is In ▸ Out ▸ Unknown, so the middle-right interior
+        // cell (col 9, row 2 of a box at screen (0,0)) must show ⊙ (In), not ⊗ (Out).
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Inner".into());
+        g.upsert_room(3, "Outer".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0)); // placed so route_all processes this edge
+        g.set_pos(3, (2, 0)); // placed so route_all processes this edge
+        g.add_edge(1, Direction::In, 2);
+        g.add_edge(1, Direction::Out, 3);
+        let rm = render(&g);
+        let state = AppState::default(); // Boxes zoom, scroll (0,0), labels off
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        // col 9 = BOX_W - 2 = 11 - 2 = 9; row 2 = mid slot
+        assert_eq!(sym(9, 2), "⊙", "In beats Out in mid slot: expected ⊙, got '{}'", sym(9, 2));
     }
 
     #[test]
