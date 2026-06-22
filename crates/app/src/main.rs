@@ -8,7 +8,7 @@ use mapper::mapper::Mapper;
 use mapper::render::render as render_map_data;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
@@ -84,36 +84,46 @@ fn draw_frame(
         let main_area = vert[0];
         let help_row = vert[1];
 
+        // Focus indicator: the pane receiving keys gets a bright bold border and a ▸
+        // marker in its title; the other pane keeps the default border.
+        let focused_border = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let pane = |title: &str, focused: bool| {
+            let block = Block::default().borders(Borders::ALL);
+            if focused {
+                block.title(format!("\u{25b8} {title}")).border_style(focused_border)
+            } else {
+                block.title(title.to_string())
+            }
+        };
+
         match state.layout {
             Layout::TranscriptFull => {
-                // Change 1: bordered block wrapping transcript pane.
-                let block = Block::default().borders(Borders::ALL).title("Story");
+                let block = pane("Story", state.focus == Focus::Game);
                 let inner = block.inner(main_area);
                 block.render(main_area, buf);
                 render_transcript(&session.machine, state, inner, buf);
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                // Change 1: bordered block wrapping map pane.
-                let block = Block::default().borders(Borders::ALL).title("Map");
+                let block = pane("Map", state.focus == Focus::Map);
                 let inner = block.inner(main_area);
                 block.render(main_area, buf);
                 render_map(&rm, state, inner, buf);
                 map_area = inner; // use inner for recenter math
             }
             Layout::Split => {
-                // Change 1: Split 50/50 horizontally with bordered blocks (no divider column).
+                // Split 50/50 horizontally with bordered blocks (no divider column).
                 let chunks = RatatuiLayout::default()
                     .direction(LayoutDir::Horizontal)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
 
-                let transcript_block = Block::default().borders(Borders::ALL).title("Story");
+                let transcript_block = pane("Story", state.focus == Focus::Game);
                 let transcript_inner = transcript_block.inner(chunks[0]);
                 transcript_block.render(chunks[0], buf);
                 render_transcript(&session.machine, state, transcript_inner, buf);
 
-                let map_block = Block::default().borders(Borders::ALL).title("Map");
+                let map_block = pane("Map", state.focus == Focus::Map);
                 let map_inner = map_block.inner(chunks[1]);
                 map_block.render(chunks[1], buf);
                 render_map(&rm, state, map_inner, buf);
