@@ -224,6 +224,55 @@ pub(crate) fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<
     components
 }
 
+fn contiguify(chains: &Chains, _comp: &[RoomId], index: &BTreeMap<RoomId, usize>, snapped: &mut [(i32, i32)]) {
+    // E/W chains → consecutive x on a shared row; N/S chains → consecutive y on a shared column.
+    // bump_foreign: relocate ALL non-chain rooms at `target`, leaving the cell free for the member.
+    // `target` is included in the occupied set so bumped rooms cannot return to it.
+    let bump_foreign = |snapped: &mut Vec<(i32, i32)>, target: (i32, i32), chain_idxs: &[usize], hint: (i32, i32)| {
+        loop {
+            let j = (0..snapped.len()).find(|&q| !chain_idxs.contains(&q) && snapped[q] == target);
+            match j {
+                None => break,
+                Some(j) => {
+                    // Include `target` in occupied so j cannot be sent back there.
+                    let mut occ: BTreeSet<(i32, i32)> =
+                        (0..snapped.len()).filter(|&q| q != j).map(|q| snapped[q]).collect();
+                    occ.insert(target);
+                    snapped[j] = nearest_free_cell(&occ, hint);
+                }
+            }
+        }
+    };
+    let mut snapped_v: Vec<(i32, i32)> = snapped.to_vec();
+    for members in &chains.ew_members {
+        let mut idxs: Vec<usize> = members.iter().filter_map(|id| index.get(id).copied()).collect();
+        if idxs.len() < 2 { continue; }
+        let y = snapped_v[idxs[0]].1;
+        if !idxs.iter().all(|&i| snapped_v[i].1 == y) { continue; } // dropped equality → skip
+        idxs.sort_by_key(|&i| (snapped_v[i].0, i));
+        let x0 = snapped_v[idxs[0]].0;
+        for (k, &i) in idxs.iter().enumerate() {
+            let target = (x0 + k as i32, y);
+            bump_foreign(&mut snapped_v, target, &idxs, (target.0, target.1 + 1));
+            snapped_v[i] = target;
+        }
+    }
+    for members in &chains.ns_members {
+        let mut idxs: Vec<usize> = members.iter().filter_map(|id| index.get(id).copied()).collect();
+        if idxs.len() < 2 { continue; }
+        let x = snapped_v[idxs[0]].0;
+        if !idxs.iter().all(|&i| snapped_v[i].0 == x) { continue; }
+        idxs.sort_by_key(|&i| (snapped_v[i].1, i));
+        let y0 = snapped_v[idxs[0]].1;
+        for (k, &i) in idxs.iter().enumerate() {
+            let target = (x, y0 + k as i32);
+            bump_foreign(&mut snapped_v, target, &idxs, (target.0 + 1, target.1));
+            snapped_v[i] = target;
+        }
+    }
+    snapped.copy_from_slice(&snapped_v);
+}
+
 /// Set the `distorted` flag on every connection: a compass edge is distorted if
 /// its connection index is in `dropped`, or its final grid geometry violates its
 /// direction. Non-compass edges are never distorted.
@@ -266,6 +315,7 @@ pub fn relayout_auto(graph: &mut MapGraph) {
     // Seed from the longest-path sort (deterministic, roughly compass-ordered).
     let seed = sort::sort_layout(graph);
 
+    let chains_for_comp = detect_chains(graph);
     let components = connected_components(graph, &ids);
     let mut dropped_all: BTreeSet<usize> = BTreeSet::new();
     let mut final_pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
@@ -313,6 +363,8 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         for (i, p) in snapped.iter_mut().enumerate() {
             *p = (axs[i], ays[i]);
         }
+
+        contiguify(&chains_for_comp, comp, &index, &mut snapped);
 
         // Pack this component to the right of the previous, top-aligned.
         let min_x = snapped.iter().map(|p| p.0).min().unwrap();
@@ -770,6 +822,38 @@ mod tests {
         let y3 = g.room(3).unwrap().pos.unwrap().1;
         assert_eq!(y1, y2, "rooms 1 and 2 share a row");
         assert_eq!(y2, y3, "rooms 2 and 3 share a row");
+    }
+
+    #[test]
+    fn bidirectional_chain_is_contiguous_no_interleave() {
+        // 79↔203↔193 (E/W chain) plus a foreign room 180 with no edge to the chain.
+        let mut g = crate::graph::MapGraph::new();
+        for id in [79u16, 180, 193, 203] { g.upsert_room(id, "r".into()); }
+        for (o, d, dst) in [
+            (79, Direction::W, 203), (203, Direction::E, 79),
+            (203, Direction::W, 193), (193, Direction::E, 203),
+        ] { g.add_edge(o, d, dst); }
+        // 180 connected loosely so it shares the component but has no chain edge.
+        g.add_edge(180, Direction::S, 79);
+        g.add_edge(79, Direction::N, 180);
+        relayout_auto(&mut g);
+        let p = |id| g.room(id).unwrap().pos.unwrap();
+        let (a, b, c) = (p(193), p(203), p(79));
+        // All three on one row, consecutive in x.
+        assert_eq!(a.1, b.1);
+        assert_eq!(b.1, c.1);
+        let mut xs = [a.0, b.0, c.0];
+        xs.sort_unstable();
+        assert_eq!(xs[1] - xs[0], 1, "chain members consecutive");
+        assert_eq!(xs[2] - xs[1], 1, "chain members consecutive");
+        // 180 is NOT between two consecutive chain members on that row.
+        let p180 = p(180);
+        let between = p180.1 == a.1 && p180.0 > xs[0] && p180.0 < xs[2];
+        assert!(!between, "foreign room must not interleave the chain: 180={p180:?}, chain xs={xs:?}");
+        // no overlap
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len());
     }
 
     #[test]
