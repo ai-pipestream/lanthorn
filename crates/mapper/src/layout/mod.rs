@@ -857,6 +857,44 @@ mod tests {
     }
 
     #[test]
+    fn a129_chain_is_contiguous_no_foreign_interleave() {
+        // The full A129 house graph contains the E/W chain 79↔203↔193.
+        // Without the contiguify pass, room #180 (which is connected but not part of the
+        // chain) gets interleaved between #193 and #203 on their shared row — the original
+        // bug. This test fails RED when contiguify is a no-op and GREEN when it runs.
+        let mut g = a129_house_graph();
+        relayout_auto(&mut g);
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        let (p193, p203, p79) = (p(193), p(203), p(79));
+        // All three chain members share one row.
+        assert_eq!(p193.1, p203.1, "193 and 203 must share a row: {p193:?} {p203:?}");
+        assert_eq!(p203.1, p79.1, "203 and 79 must share a row: {p203:?} {p79:?}");
+        // Their x-coords must be consecutive (gap of exactly 1 each step).
+        let mut xs = [p193.0, p203.0, p79.0];
+        xs.sort_unstable();
+        assert_eq!(xs[1] - xs[0], 1, "chain not consecutive: xs={xs:?}");
+        assert_eq!(xs[2] - xs[1], 1, "chain not consecutive: xs={xs:?}");
+        let chain_row = p193.1;
+        let xs_min = xs[0];
+        let xs_max = xs[2];
+        // No foreign room sits on the chain row strictly between the chain's min and max x.
+        let chain_ids: std::collections::BTreeSet<u16> = [193, 203, 79].into();
+        for r in g.rooms() {
+            if chain_ids.contains(&r.id) { continue; }
+            let pos = r.pos.unwrap();
+            assert!(
+                !(pos.1 == chain_row && pos.0 > xs_min && pos.0 < xs_max),
+                "foreign room {} interleaves the chain on row {chain_row}: pos={pos:?}, chain xs={xs:?}",
+                r.id,
+            );
+        }
+        // No two rooms overlap.
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "room positions must be unique");
+    }
+
+    #[test]
     fn large_graph_uses_sort_fallback_without_overlap() {
         // A chain longer than MAX_NODES forces the fallback path; it must still place
         // every room with no overlap (and not run the O(n²) solve).
