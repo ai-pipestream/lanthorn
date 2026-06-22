@@ -176,6 +176,37 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
 }
 
 
+/// Diagonal arrow glyphs (swappable named constants; e.g. to `◥◤◣◢`).
+const DIAG_NE: &str = "↗";
+const DIAG_NW: &str = "↖";
+const DIAG_SE: &str = "↘";
+const DIAG_SW: &str = "↙";
+
+/// Arrow glyph for a diagonal departure/arrival (caller guards with `is_diagonal`).
+fn diagonal_arrow(dir: Direction) -> &'static str {
+    match dir {
+        Direction::NE => DIAG_NE,
+        Direction::NW => DIAG_NW,
+        Direction::SE => DIAG_SE,
+        Direction::SW => DIAG_SW,
+        _ => DIAG_NE, // unreachable when guarded by is_diagonal
+    }
+}
+
+/// The box-corner cell (virtual pixels) for a diagonal direction: NE→top-right, NW→top-left,
+/// SE→bottom-right, SW→bottom-left.
+fn corner_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), dir: Direction) -> (i32, i32) {
+    let bx = cols.room_pixel(cell.0);
+    let by = rows.room_pixel(cell.1);
+    match dir {
+        Direction::NE => (bx + BOX_W - 1, by),
+        Direction::NW => (bx, by),
+        Direction::SE => (bx + BOX_W - 1, by + BOX_H - 1),
+        Direction::SW => (bx, by + BOX_H - 1),
+        _ => (bx + BOX_W / 2, by), // unreachable when guarded by is_diagonal
+    }
+}
+
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
 ///
 /// Arrows signify the outgoing direction only — the departure direction is always
@@ -454,8 +485,15 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
     let origin_cell = (conn.points[0].0.div_euclid(2), conn.points[0].1.div_euclid(2));
     let last = conn.points[conn.points.len() - 1];
     let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
-    let dep_anchor = box_edge_anchor(cols, rows, origin_cell, conn.exit, conn.exit_slot);
-    let arr_anchor = box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot);
+    let dep_anchor = if mapper::direction::is_diagonal(conn.exit_dir) {
+        corner_anchor(cols, rows, origin_cell, conn.exit_dir)
+    } else {
+        box_edge_anchor(cols, rows, origin_cell, conn.exit, conn.exit_slot)
+    };
+    let arr_anchor = match conn.entry_dir {
+        Some(d) if mapper::direction::is_diagonal(d) => corner_anchor(cols, rows, dest_cell, d),
+        _ => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
+    };
 
     // The arrow anchor sits ON the box border. Each connector leaves the box straight out at 90°
     // (a perpendicular stub on the anchor's own row/col), then steps along the edge into the
@@ -573,11 +611,19 @@ fn render_lane_connectors(
             }
         }
 
-        // Arrowhead at the origin departure anchor, pointing out along the exit side.
-        arrowheads.push((plot.dep_anchor, arrow_for_departure(conn.exit), conn.distorted));
+        let dep_glyph = if mapper::direction::is_diagonal(conn.exit_dir) {
+            diagonal_arrow(conn.exit_dir)
+        } else {
+            arrow_for_departure(conn.exit)
+        };
+        arrowheads.push((plot.dep_anchor, dep_glyph, conn.distorted));
         // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
         if conn.reciprocal {
-            arrowheads.push((plot.arr_anchor, arrow_for_departure(conn.entry), conn.distorted));
+            let arr_glyph = match conn.entry_dir {
+                Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d),
+                _ => arrow_for_departure(conn.entry),
+            };
+            arrowheads.push((plot.arr_anchor, arr_glyph, conn.distorted));
         }
     }
     arrowheads
@@ -1988,6 +2034,33 @@ mod tests {
         // No destination name to the right of the box on that row.
         let right: String = ((BOX_W as u16)..40).map(|x| sym(x, 2)).collect();
         assert!(!right.contains("West"), "unknown portal shows no destination name; got '{right}'");
+    }
+
+    #[test]
+    fn diagonal_edge_draws_corner_arrow() {
+        // 1 →SW→ 2 (room 2 south-west of room 1): ↙ replaces room 1's bottom-left corner.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 1)); // SW of room 1
+        g.add_edge(1, Direction::SW, 2);
+        let rm = render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let off = (cols.room_pixel(rm.bounds.0 .0), rows.room_pixel(rm.bounds.0 .1));
+        let bx = cols.room_pixel(1) - off.0; // room 1 at col 1
+        let by = rows.room_pixel(0) - off.1; // room 1 at row 0
+        let sym = buf
+            .cell((bx as u16, (by + BOX_H - 1) as u16))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(sym, "↙", "SW edge draws ↙ at room 1's bottom-left corner");
     }
 
     #[test]
