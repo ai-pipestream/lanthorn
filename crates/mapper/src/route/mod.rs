@@ -43,6 +43,10 @@ pub struct RoutedConnector {
     /// The paired back-edge's compass direction, set only when a bidirectional pairing
     /// collapsed into this connector (used for the far-end diagonal corner). `None` otherwise.
     pub entry_dir: Option<crate::direction::Direction>,
+    /// True for a multi-edge MERGE STUB: an extra edge between an already-connected pair whose
+    /// polyline routes from its box-edge exit and ENDS on the trunk (a T-junction) instead of
+    /// drawing its own line to the destination. The renderer draws only its departure arrow.
+    pub merge: bool,
 }
 
 /// The logical route plan: connectors plus per-channel lane counts.
@@ -145,6 +149,35 @@ fn build_points_orient(
     // as a diagonal. Collapse them so each straight run is one segment.
     merge_collinear(&mut pts);
     pts
+}
+
+/// Build a multi-edge MERGE STUB polyline (doubled coords): from origin `a`'s `exit` side, route
+/// orthogonally to the trunk's junction point (`trunk[len-2]`, the last point before the trunk's
+/// destination centre) and END there, so the stub terminates ON the trunk as a T-junction rather
+/// than drawing its own line to the destination. Returns `centre → exit-stub → [corner] → junction`.
+fn merge_stub_points(a: (i32, i32), exit: Side, trunk: &[(i32, i32)]) -> Option<Vec<(i32, i32)>> {
+    if trunk.len() < 2 {
+        return None;
+    }
+    let junction = trunk[trunk.len() - 2];
+    let ca = cell_to_doubled(a);
+    let ea = exit_point(a, exit);
+    // Horizontal-first L: move in x to the junction's column at the exit-stub's row, then in y.
+    // The corner lands in a gutter (away from the origin box) for the cardinal exit sides.
+    let corner = (junction.0, ea.1);
+    let mut pts = vec![ca, ea];
+    if corner != ea && corner != junction {
+        pts.push(corner);
+    }
+    if *pts.last().unwrap() != junction {
+        pts.push(junction);
+    }
+    pts.dedup();
+    merge_collinear(&mut pts);
+    if pts.len() < 2 {
+        return None;
+    }
+    Some(pts)
 }
 
 /// The room cells a straight axis-aligned segment from `p` to `q` passes through (inclusive).
@@ -454,9 +487,41 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     let occupied: std::collections::BTreeSet<(i32, i32)> =
         graph.rooms().filter_map(|r| r.pos).collect();
     let mut out: Vec<RoutedConnector> = Vec::new();
+    // The trunk polyline for each unordered room pair, recorded when its connector is built.
+    // A later edge between the same pair becomes a MERGE STUB that joins this trunk.
+    let mut trunk_points: BTreeMap<(RoomId, RoomId), Vec<(i32, i32)>> = BTreeMap::new();
     for (ci, c) in compass.iter().enumerate() {
         if consumed.contains(&ci) {
             continue; // already drawn as an earlier pair's back-edge
+        }
+        let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
+        // Extra edge between an already-connected pair → merge stub: route from this edge's exit
+        // side to a junction on the trunk and end there (a T-junction). Only the box-edge
+        // departure arrow is drawn; no independent line reaches the destination.
+        if let Some(trunk) = trunk_points.get(&pair) {
+            if let (Some(a), Some(exit)) =
+                (graph.room(c.origin).and_then(|r| r.pos), side_for(c.dir))
+            {
+                if let Some(pts) = merge_stub_points(a, exit, trunk) {
+                    out.push(RoutedConnector {
+                        origin: c.origin,
+                        dest: c.dest,
+                        distorted: c.distorted,
+                        exit,
+                        entry: exit, // unused — no arrival is drawn for a merge stub
+                        points: pts,
+                        segs: Vec::new(),
+                        exit_slot: 0,
+                        entry_slot: 0,
+                        reciprocal: false,
+                        exit_dir: c.dir,
+                        entry_dir: None,
+                        merge: true,
+                    });
+                }
+            }
+            consumed.insert(ci);
+            continue;
         }
         // Pair with the first UNCONSUMED reverse edge (b→a) between the same rooms, if any.
         // Exactly one pairing collapses; further edges between the pair draw on their own.
@@ -494,7 +559,9 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                     reciprocal: has_reciprocal,
                     exit_dir: c.dir,
                     entry_dir: back.map(|bk| bk.dir),
+                    merge: false,
                 });
+                trunk_points.insert(pair, out.last().unwrap().points.clone());
                 consumed.insert(ci);
                 if let Some(pi) = back_idx {
                     consumed.insert(pi);
@@ -571,7 +638,9 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             reciprocal: has_reciprocal,
             exit_dir: c.dir,
             entry_dir: back.map(|bk| bk.dir),
+            merge: false,
         });
+        trunk_points.insert(pair, out.last().unwrap().points.clone());
         consumed.insert(ci);
         if let Some(pi) = back_idx {
             consumed.insert(pi); // the paired back-edge is now drawn too
@@ -649,7 +718,11 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
     let mut endpoints: Vec<(RoomId, Side, bool, usize)> = Vec::new();
     for (ci, c) in connectors.iter().enumerate() {
         endpoints.push((c.origin, c.exit, true, ci));
-        endpoints.push((c.dest, c.entry, false, ci));
+        // A merge stub ends on the trunk (not at the destination box), so it has no arrival
+        // endpoint to slot.
+        if !c.merge {
+            endpoints.push((c.dest, c.entry, false, ci));
+        }
     }
     // Group by (room, side); assign slots within each group. A connector that runs STRAIGHT
     // through this side (a collinear polyline — its other end is axis-aligned with this room)
@@ -1118,6 +1191,34 @@ mod tests {
         let a = format!("{:?}", route_lanes(&g));
         let b = format!("{:?}", route_lanes(&g));
         assert_eq!(a, b, "greedy routing must be deterministic");
+    }
+
+    #[test]
+    fn extra_same_pair_edges_become_merge_stubs() {
+        // 77↔239 E/W reciprocal trunk, plus 239→N→77 and 239→S→77 (the A129 tangle).
+        let mut g = MapGraph::new();
+        g.upsert_room(77, "a".into());
+        g.upsert_room(239, "b".into());
+        g.set_pos(77, (0, 0));
+        g.set_pos(239, (2, 0)); // east of 77, a gap of one cell
+        g.add_edge(77, Direction::E, 239);
+        g.add_edge(239, Direction::W, 77); // reciprocal → the trunk
+        g.add_edge(239, Direction::N, 77);
+        g.add_edge(239, Direction::S, 77);
+        let conns = route_topology(&g);
+        let trunks: Vec<_> = conns.iter().filter(|c| !c.merge).collect();
+        let stubs: Vec<_> = conns.iter().filter(|c| c.merge).collect();
+        assert_eq!(trunks.len(), 1, "one trunk for the pair; got {}", trunks.len());
+        assert_eq!(stubs.len(), 2, "the two extra edges are merge stubs; got {}", stubs.len());
+        // Each stub carries its own box-edge exit direction (N / S).
+        assert!(stubs.iter().any(|c| c.exit == side_for(Direction::N).unwrap()), "N stub");
+        assert!(stubs.iter().any(|c| c.exit == side_for(Direction::S).unwrap()), "S stub");
+        // Each stub ENDS on the trunk (its last point is one of the trunk's points).
+        let trunk_pts = &trunks[0].points;
+        for s in &stubs {
+            let last = *s.points.last().unwrap();
+            assert!(trunk_pts.contains(&last), "merge stub must end on the trunk: {last:?} not in {trunk_pts:?}");
+        }
     }
 
     #[test]
