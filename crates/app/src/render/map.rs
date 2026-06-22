@@ -831,6 +831,121 @@ fn draw_box_room(
 
 use super::{put_char, put_str};
 
+// ── Router-measured overlap cleanup ───────────────────────────────────────────
+
+/// Count illegal connector overlaps and clean ┼ crossings in a rendered plan.
+/// For each virtual cell, OR each connector's mask bits (a connector may write a cell
+/// twice). A cell written by ≥2 DISTINCT connectors is a clean crossing ONLY if exactly
+/// 2 connectors share it, one contributing exactly E|W and the other exactly N|S;
+/// everything else (≥3 connectors, corner-on-corner, parallel run-alongside) is illegal.
+/// Returns (illegal_count, clean_crossing_count). Counts are order-independent, so the
+/// internal HashMap accumulation is deterministic in its RESULT.
+#[allow(dead_code)]
+pub(crate) fn overlap_stats(
+    plan: &mapper::route::RoutePlan, cols: &PosTable, rows: &PosTable,
+) -> (usize, usize) {
+    use std::collections::{BTreeMap, HashMap};
+    let mut owners: HashMap<(i32, i32), BTreeMap<usize, u8>> = HashMap::new();
+    for (ci, conn) in plan.connectors.iter().enumerate() {
+        if let Some(plot) = plot_connector(conn, cols, rows) {
+            for (c, mask) in &plot.cells {
+                *owners.entry(*c).or_default().entry(ci).or_insert(0) |= *mask;
+            }
+        }
+    }
+    let ew = DIR_E | DIR_W;
+    let ns = DIR_N | DIR_S;
+    let (mut illegal, mut crossings) = (0usize, 0usize);
+    for per_conn in owners.values() {
+        if per_conn.len() < 2 {
+            continue;
+        }
+        let mut masks: Vec<u8> = per_conn.values().copied().collect();
+        masks.sort_unstable();
+        let mut expected = [ns, ew];
+        expected.sort_unstable();
+        if per_conn.len() == 2 && masks == expected {
+            crossings += 1;
+        } else {
+            illegal += 1;
+        }
+    }
+    (illegal, crossings)
+}
+
+/// Render `graph` and return its (illegal_overlaps, crossings).
+#[allow(dead_code)]
+fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, usize) {
+    let rm = mapper::render::render(graph);
+    let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+    overlap_stats(&rm.plan, &cols, &rows)
+}
+
+/// Nudge rooms (bounded Chebyshev `radius`, ≤ `max_passes` passes) until the rendered
+/// plan has zero illegal overlaps, secondarily fewer crossings. Deterministic, no overlap,
+/// integer cells. Existing position is restored on every rejected trial.
+#[allow(dead_code)]
+pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32, max_passes: usize) {
+    // Gather move candidates in fixed order: increasing Chebyshev distance, then (dy, dx).
+    let moves: Vec<(i32, i32)> = {
+        let mut v = Vec::new();
+        for dist in 1..=radius {
+            let mut candidates: Vec<(i32, i32)> = (-dist..=dist)
+                .flat_map(|dy| (-dist..=dist).map(move |dx| (dy, dx)))
+                .filter(|&(dy, dx)| dy.abs().max(dx.abs()) == dist)
+                .collect();
+            candidates.sort_unstable();
+            v.extend(candidates);
+        }
+        v
+    };
+
+    for _ in 0..max_passes {
+        let base = render_overlap_stats(graph);
+        if base.0 == 0 {
+            break;
+        }
+
+        // Collect placed rooms in ascending id order.
+        let room_ids: Vec<mapper::graph::RoomId> = graph
+            .rooms()
+            .filter(|r| r.pos.is_some())
+            .map(|r| r.id)
+            .collect();
+
+        let mut improved = false;
+        'room_loop: for &id in &room_ids {
+            let orig = match graph.room(id).and_then(|r| r.pos) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            for &(dy, dx) in &moves {
+                let trial = (orig.0 + dx, orig.1 + dy);
+
+                // Skip if another room occupies this cell.
+                let occupied = graph.rooms().any(|r| r.id != id && r.pos == Some(trial));
+                if occupied {
+                    continue;
+                }
+
+                graph.set_pos(id, trial);
+                let s = render_overlap_stats(graph);
+                if (s.0, s.1) < (base.0, base.1) {
+                    improved = true;
+                    break 'room_loop;
+                }
+                // Restore original position.
+                graph.set_pos(id, orig);
+            }
+        }
+
+        if !improved {
+            break;
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1367,6 +1482,107 @@ mod tests {
             buf.cell((sx as u16, sy as u16)).unwrap().symbol(), "┼",
             "the crossing cell must render as ┼",
         );
+    }
+
+    #[test]
+    fn a129_no_overlap_under_sort_layout() {
+        // Crown-jewel guarantee: the lane router produces NO illegal connector overlaps on the
+        // real A129 graph (only clean ┼ perpendicular crossings) under the new sort layout.
+        // assert_no_overlap panics on any illegal share; reaching the end means the guarantee holds.
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        let mut g = MapGraph::new();
+        for (id, name) in [
+            (74, "Clearing"), (75, "Forest Path"), (77, "Forest"), (78, "Forest"),
+            (79, "Behind House"), (80, "South of House"), (81, "North of House"),
+            (143, "Clearing"), (180, "West of House"), (239, "Forest"),
+        ] {
+            g.upsert_room(id, name.into());
+        }
+        for (o, d, dst) in [
+            (180, Direction::N, 81), (81, Direction::W, 180), (180, Direction::S, 80),
+            (80, Direction::E, 79), (79, Direction::N, 81), (81, Direction::E, 79),
+            (79, Direction::S, 80), (80, Direction::W, 180), (180, Direction::W, 78),
+            (78, Direction::N, 143), (143, Direction::S, 75), (75, Direction::N, 143),
+            (143, Direction::W, 78), (143, Direction::E, 77), (77, Direction::S, 74),
+            (74, Direction::N, 77), (77, Direction::E, 239), (239, Direction::N, 77),
+            (239, Direction::S, 77),
+        ] {
+            g.add_edge(o, d, dst);
+        }
+        relayout_auto(&mut g);
+        let rm = mapper::render::render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let owners = connector_ownership(&rm.plan, &cols, &rows);
+        let _crossings = assert_no_overlap(&owners);
+    }
+
+    #[test]
+    fn overlap_stats_clean_pair_is_zero() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let (illegal, _) = render_overlap_stats(&g);
+        assert_eq!(illegal, 0);
+    }
+
+    #[test]
+    fn cleanup_clears_a129_illegal_overlaps() {
+        // The real A129 graph: pure sort layout leaves an illegal corner overlap; the
+        // router-measured cleanup must move rooms until zero illegal overlaps remain.
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        let mut g = MapGraph::new();
+        for (id, name) in [
+            (74, "Clearing"), (75, "Forest Path"), (77, "Forest"), (78, "Forest"),
+            (79, "Behind House"), (80, "South of House"), (81, "North of House"),
+            (143, "Clearing"), (180, "West of House"), (239, "Forest"),
+        ] { g.upsert_room(id, name.into()); }
+        for (o, d, dst) in [
+            (180, Direction::N, 81), (81, Direction::W, 180), (180, Direction::S, 80),
+            (80, Direction::E, 79), (79, Direction::N, 81), (81, Direction::E, 79),
+            (79, Direction::S, 80), (80, Direction::W, 180), (180, Direction::W, 78),
+            (78, Direction::N, 143), (143, Direction::S, 75), (75, Direction::N, 143),
+            (143, Direction::W, 78), (143, Direction::E, 77), (77, Direction::S, 74),
+            (74, Direction::N, 77), (77, Direction::E, 239), (239, Direction::N, 77),
+            (239, Direction::S, 77),
+        ] { g.add_edge(o, d, dst); }
+        relayout_auto(&mut g);
+        cleanup_overlaps(&mut g, 3, 40);
+        let (illegal, _) = render_overlap_stats(&g);
+        assert_eq!(illegal, 0, "cleanup must clear all illegal overlaps on A129");
+        // rooms still distinct cells
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: std::collections::BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no room overlap after cleanup");
+    }
+
+    #[test]
+    fn cleanup_is_deterministic() {
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        let build = || {
+            let mut g = MapGraph::new();
+            for id in [1u16, 2, 3, 4, 5] { g.upsert_room(id, "r".into()); }
+            g.add_edge(1, Direction::E, 2);
+            g.add_edge(2, Direction::N, 3);
+            g.add_edge(3, Direction::W, 4);
+            g.add_edge(4, Direction::S, 5);
+            g.add_edge(5, Direction::E, 1);
+            relayout_auto(&mut g);
+            g
+        };
+        let mut g1 = build();
+        let mut g2 = build();
+        cleanup_overlaps(&mut g1, 3, 40);
+        cleanup_overlaps(&mut g2, 3, 40);
+        let p1: Vec<_> = g1.rooms().map(|r| (r.id, r.pos)).collect();
+        let p2: Vec<_> = g2.rooms().map(|r| (r.id, r.pos)).collect();
+        assert_eq!(p1, p2, "cleanup must be deterministic");
     }
 
     #[test]
