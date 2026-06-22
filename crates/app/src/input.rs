@@ -79,6 +79,8 @@ pub enum Action {
     ExportDump,
     /// Toggle the in-box alignment code overlay (Ctrl+A).
     ToggleAlignment,
+    /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
+    TogglePortalLabels,
     /// Caller: exit the application.
     Quit,
     /// No binding found — no-op.
@@ -125,6 +127,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('l') => Action::CycleLayout,
             KeyCode::Char('t') => Action::Retidy,
             KeyCode::Char('a') => Action::ToggleAlignment,
+            KeyCode::Char('p') => Action::TogglePortalLabels,
             _ => Action::None,
         };
     }
@@ -322,6 +325,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
+        Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
@@ -815,5 +819,21 @@ mod tests {
         assert!(s.show_alignment, "toggled on");
         apply_action(Action::ToggleAlignment, &mut s, &mut m);
         assert!(!s.show_alignment, "toggled off");
+    }
+
+    #[test]
+    fn ctrl_p_toggles_portal_labels() {
+        let s = AppState::default();
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('p'))),
+            Action::TogglePortalLabels
+        ));
+        let mut s = AppState::default();
+        let mut m = mapper::mapper::Mapper::default();
+        assert!(!s.show_portal_labels, "default off");
+        apply_action(Action::TogglePortalLabels, &mut s, &mut m);
+        assert!(s.show_portal_labels, "Ctrl+P turns labels on");
+        apply_action(Action::TogglePortalLabels, &mut s, &mut m);
+        assert!(!s.show_portal_labels, "Ctrl+P toggles back off");
     }
 }

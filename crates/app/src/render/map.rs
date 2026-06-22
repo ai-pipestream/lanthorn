@@ -336,7 +336,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // Drawn after the rooms so icons sit on the box interior. (Task 2 turns the `false`
     // into `state.show_portal_labels` to render destination names.)
     if boxes {
-        draw_portal_icons(rm, &placed, state, false, off_x, off_y, area, buf);
+        draw_portal_icons(rm, &placed, state, state.show_portal_labels, off_x, off_y, area, buf);
     }
 
     // ── 4. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -1820,6 +1820,33 @@ mod tests {
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
         assert_eq!(sym(9, 1), "↑", "up icon claims the upper-right corner");
         assert_eq!(sym(8, 1), "●", "notes marker shifts one cell left of the up icon");
+    }
+
+    #[test]
+    fn portal_labels_show_destination_when_toggled() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Attic".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        let rm = render(&g);
+        let area = Rect::new(0, 0, 80, 40);
+        let row1 = |show: bool| -> String {
+            let mut state = AppState::default();
+            state.show_portal_labels = show;
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &state, area, &mut buf);
+            (1u16..=9)
+                .map(|x| buf.cell((x, 1)).map(|c| c.symbol().to_string()).unwrap_or_default())
+                .collect()
+        };
+        let on = row1(true);
+        let off = row1(false);
+        assert!(on.contains("Attic"), "toggled on: up-portal destination on row 1; got '{on}'");
+        assert!(on.ends_with("↑"), "icon stays pinned at the far-right cell; got '{on}'");
+        assert!(!off.contains("Attic"), "toggled off: no destination name; got '{off}'");
     }
 
 }

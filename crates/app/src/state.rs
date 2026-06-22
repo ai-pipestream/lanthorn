@@ -83,6 +83,9 @@ pub struct AppState {
     /// When true, draw each chained room's alignment code (`R{id}` / `C{id}`) in
     /// its box interior (Boxes zoom only).  Toggled by `Ctrl+A`.
     pub show_alignment: bool,
+    /// When true, portal icons additionally show their destination room name (Boxes zoom only).
+    /// Toggled by `Ctrl+P`.
+    pub show_portal_labels: bool,
 }
 
 impl Default for AppState {
@@ -99,6 +102,7 @@ impl Default for AppState {
             status: String::new(),
             prompt: None,
             show_alignment: false,
+            show_portal_labels: false,
         }
     }
 }
