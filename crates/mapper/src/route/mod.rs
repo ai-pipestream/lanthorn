@@ -142,42 +142,67 @@ fn build_points_orient(
     pts
 }
 
-/// If `a` and `b` sit on the same room row/column, the edge's exit faces straight toward `b`,
-/// and EVERY intervening room cell is empty, return the direct doubled-coord polyline (running
-/// along the room row/column, no channel dip) plus the facing entry side. The run is on even
-/// coords so it carries no lane — exactly like the adjacent `ea==eb` short-circuit, just across
-/// an empty gap. Returns None when a dip is required (rooms not aligned, gap occupied, or the
-/// exit doesn't face the other room).
-fn straight_shot(
+/// The room cells a straight axis-aligned segment from `p` to `q` passes through (inclusive).
+fn line_cells(p: (i32, i32), q: (i32, i32)) -> Vec<(i32, i32)> {
+    let dx = (q.0 - p.0).signum();
+    let dy = (q.1 - p.1).signum();
+    let mut v = vec![p];
+    let mut c = p;
+    while c != q {
+        c = (c.0 + dx, c.1 + dy);
+        v.push(c);
+    }
+    v
+}
+
+/// Try to route `a → b` as a DIRECT path along the room grid (no channel dip): leave `a` on its
+/// `exit` side, run straight to the single turning corner, then straight to `b`. The exit side
+/// fixes the first leg's axis (East/West → run horizontally to b's column then turn; North/South
+/// → run vertically to b's row then turn), so the corner is determined. Returns the doubled-coord
+/// polyline (on even, room-grid coords — carries no lane) plus the entry side, but ONLY when the
+/// exit faces toward `b` and EVERY cell both legs pass through (besides `a`/`b`) is empty.
+/// Returns None when the path is blocked or the exit points away from `b` — then the caller dips
+/// into the lane channels. Subsumes the straight (zero-turn) case when `b` is on `a`'s row/column.
+fn direct_route(
     a: (i32, i32),
     exit: Side,
     b: (i32, i32),
     occupied: &std::collections::BTreeSet<(i32, i32)>,
 ) -> Option<(Side, Vec<(i32, i32)>)> {
-    let (entry, clear) = match exit {
-        Side::Right if a.1 == b.1 && b.0 > a.0 => {
-            (Side::Left, ((a.0 + 1)..b.0).all(|x| !occupied.contains(&(x, a.1))))
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    // `corner` is where the path turns; `entry` is the side of `b` it arrives on.
+    let (corner, entry) = match exit {
+        Side::Right => {
+            if b.0 <= a.0 { return None; } // exit east but b not east → would route backwards
+            ((b.0, a.1), match b.1.cmp(&a.1) { Greater => Side::Top, Less => Side::Bottom, Equal => Side::Left })
         }
-        Side::Left if a.1 == b.1 && b.0 < a.0 => {
-            (Side::Right, ((b.0 + 1)..a.0).all(|x| !occupied.contains(&(x, a.1))))
+        Side::Left => {
+            if b.0 >= a.0 { return None; }
+            ((b.0, a.1), match b.1.cmp(&a.1) { Greater => Side::Top, Less => Side::Bottom, Equal => Side::Right })
         }
-        Side::Bottom if a.0 == b.0 && b.1 > a.1 => {
-            (Side::Top, ((a.1 + 1)..b.1).all(|y| !occupied.contains(&(a.0, y))))
+        Side::Bottom => {
+            if b.1 <= a.1 { return None; }
+            ((a.0, b.1), match b.0.cmp(&a.0) { Greater => Side::Left, Less => Side::Right, Equal => Side::Top })
         }
-        Side::Top if a.0 == b.0 && b.1 < a.1 => {
-            (Side::Bottom, ((b.1 + 1)..a.1).all(|y| !occupied.contains(&(a.0, y))))
+        Side::Top => {
+            if b.1 >= a.1 { return None; }
+            ((a.0, b.1), match b.0.cmp(&a.0) { Greater => Side::Left, Less => Side::Right, Equal => Side::Bottom })
         }
-        _ => return None,
     };
-    if !clear {
+    // Every cell on both legs except the endpoints must be empty.
+    let blocked = line_cells(a, corner)
+        .into_iter()
+        .chain(line_cells(corner, b))
+        .any(|c| c != a && c != b && occupied.contains(&c));
+    if blocked {
         return None;
     }
-    let mut pts = vec![
-        cell_to_doubled(a),
-        exit_point(a, exit),
-        exit_point(b, entry),
-        cell_to_doubled(b),
-    ];
+    let mut pts = vec![cell_to_doubled(a), exit_point(a, exit)];
+    if corner != b {
+        pts.push(cell_to_doubled(corner)); // the single turn; absent when b is aligned (straight)
+    }
+    pts.push(exit_point(b, entry));
+    pts.push(cell_to_doubled(b));
     pts.dedup(); // adjacent rooms collapse the two stub points into one shared doorway
     Some((entry, pts))
 }
@@ -443,13 +468,13 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue; };
         let Some(exit) = side_for(c.dir) else { continue; };
 
-        // Direct shot: if `a` and `b` are aligned with an empty gap between them, draw a
-        // straight connector along the room row/column instead of dipping into a channel. Only
-        // when the facing entry side is consistent with what this connector must use — for a
-        // reciprocal pair the far arrow must point out the back-edge's side; for a one-way edge
-        // the geometric facing side is already what it would pick.
+        // Direct route: if the path from `a` to `b` is clear along the room grid, draw it as a
+        // straight line / single-corner L instead of dipping into channels — fewer turns, no
+        // weaving around empty cells. Only when the resulting entry side is consistent with what
+        // this connector must use — for a reciprocal pair the far arrow must point out the
+        // back-edge's side; for a one-way edge any facing side is fine.
         let required_entry = back.and_then(|bk| side_for(bk.dir));
-        if let Some((sentry, pts)) = straight_shot(a, exit, b, &occupied) {
+        if let Some((sentry, pts)) = direct_route(a, exit, b, &occupied) {
             if required_entry.is_none_or(|req| req == sentry) {
                 out.push(RoutedConnector {
                     origin: c.origin,
@@ -797,6 +822,45 @@ mod tests {
         assert!(!is_collinear(&conn.points), "occupied gap must dip into a channel: {:?}", conn.points);
     }
 
+    /// Count direction changes (turns) in a doubled-coord polyline.
+    fn turn_count(pts: &[(i32, i32)]) -> usize {
+        pts.windows(3)
+            .filter(|w| {
+                let d1 = ((w[1].0 - w[0].0).signum(), (w[1].1 - w[0].1).signum());
+                let d2 = ((w[2].0 - w[1].0).signum(), (w[2].1 - w[1].1).signum());
+                d1 != d2
+            })
+            .count()
+    }
+
+    #[test]
+    fn diagonal_clear_path_routes_single_corner() {
+        // Room 2 is east AND south of room 1 with all intervening cells empty: the connector
+        // turns exactly ONCE (a clean L straight along the room grid), not weaving through
+        // channels with extra dips.
+        let mut g = MapGraph::new();
+        for id in 1..=2 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); g.set_pos(2, (3, 2)); // SE of 1, clear path
+        g.add_edge(1, Direction::E, 2); // one-way; exits Right, then turns south to 2
+        let plan = route_lanes(&g);
+        let conn = &plan.connectors[0];
+        assert_eq!(turn_count(&conn.points), 1, "clear diagonal path = single corner: {:?}", conn.points);
+    }
+
+    #[test]
+    fn diagonal_blocked_path_dips_more() {
+        // Same diagonal, but a room blocks the clean L's corner row: the connector cannot take
+        // the single-corner direct route and must weave (more than one turn).
+        let mut g = MapGraph::new();
+        for id in 1..=3 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); g.set_pos(2, (3, 2));
+        g.set_pos(3, (2, 0)); // sits on the direct L's first leg (row 0)
+        g.add_edge(1, Direction::E, 2);
+        let plan = route_lanes(&g);
+        let conn = plan.connectors.iter().find(|c| c.origin == 1 && c.dest == 2).unwrap();
+        assert!(turn_count(&conn.points) >= 2, "blocked path must weave: {:?}", conn.points);
+    }
+
     /// Expand a doubled-coord polyline into the doubled cells it passes through.
     fn trace_cells(points: &[(i32, i32)]) -> Vec<(i32, i32)> {
         let mut out = Vec::new();
@@ -898,9 +962,9 @@ mod tests {
         for id in [1, 2, 3] { g.upsert_room(id, "r".into()); }
         g.set_pos(1, (0, 0));
         g.set_pos(2, (2, 0));
-        g.set_pos(3, (2, 1));
+        g.set_pos(3, (4, 0)); // east of 1, beyond 2: its direct west path to 1 is blocked by 2
         g.add_edge(1, Direction::E, 2); // exits room 1 on its Right
-        g.add_edge(3, Direction::W, 1); // enters room 1 from the right (entry Right on room 1)
+        g.add_edge(3, Direction::W, 1); // blocked by room 2 → dips, entering room 1 from the right
         let plan = route_lanes(&g);
         let mut slots = Vec::new();
         for c in &plan.connectors {
