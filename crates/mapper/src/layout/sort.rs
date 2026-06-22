@@ -67,6 +67,71 @@ fn reaches(adj: &[Vec<usize>], from: usize, target: usize) -> bool {
     false
 }
 
+/// Number of alignment passes (a free node may follow another free neighbour).
+const ALIGN_PASSES: usize = 4;
+
+/// Pull rooms that are FREE on one axis onto the (lower-)median coordinate their
+/// perpendicular-aligning neighbours imply, so single-axis edges stay straight.
+///
+/// The longest-path layering orders each axis independently, so an edge that
+/// constrains only one axis (e.g. a due-east edge → x only) lets its endpoints
+/// drift apart on the other axis and renders diagonal/distorted. Here, for the Y
+/// axis, E/W edges (`dx != 0 && dy == 0`) want their endpoints on the SAME row; a
+/// node is "Y-free" iff no incident compass edge constrains its Y (`dy != 0`). Each
+/// Y-free node with ≥1 E/W neighbour takes the lower-median of those neighbours' Y.
+/// Symmetric for X with N/S edges. Only free nodes move, so no same-axis ordering
+/// is violated. Deterministic: dense-index order, integer lower-median, fixed passes.
+fn align_free_axes(
+    graph: &MapGraph,
+    index: &BTreeMap<RoomId, usize>,
+    xs: &mut [i32],
+    ys: &mut [i32],
+) {
+    let n = xs.len();
+    let mut x_constrained = vec![false; n];
+    let mut y_constrained = vec![false; n];
+    let mut ew: Vec<Vec<usize>> = vec![Vec::new(); n]; // E/W neighbours → align Y
+    let mut ns: Vec<Vec<usize>> = vec![Vec::new(); n]; // N/S neighbours → align X
+    for c in graph.connections() {
+        let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) else {
+            continue;
+        };
+        if let Some((dx, dy)) = grid_offset(c.dir) {
+            if dx != 0 {
+                x_constrained[a] = true;
+                x_constrained[b] = true;
+            }
+            if dy != 0 {
+                y_constrained[a] = true;
+                y_constrained[b] = true;
+            }
+            if dx != 0 && dy == 0 {
+                ew[a].push(b);
+                ew[b].push(a);
+            }
+            if dy != 0 && dx == 0 {
+                ns[a].push(b);
+                ns[b].push(a);
+            }
+        }
+    }
+    let median = |coords: &[i32], neigh: &[usize]| -> i32 {
+        let mut vals: Vec<i32> = neigh.iter().map(|&u| coords[u]).collect();
+        vals.sort_unstable();
+        vals[(vals.len() - 1) / 2]
+    };
+    for _ in 0..ALIGN_PASSES {
+        for v in 0..n {
+            if !y_constrained[v] && !ew[v].is_empty() {
+                ys[v] = median(ys, &ew[v]);
+            }
+            if !x_constrained[v] && !ns[v].is_empty() {
+                xs[v] = median(xs, &ns[v]);
+            }
+        }
+    }
+}
+
 /// Full per-component layering, packing, overlap resolution, and origin anchor.
 pub(crate) fn sort_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
     let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
@@ -95,8 +160,10 @@ pub(crate) fn sort_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
                 if dy > 0 { ye.push((a, b)); } else if dy < 0 { ye.push((b, a)); }
             }
         }
-        let xs = layer_axis(n, &xe);
-        let ys = layer_axis(n, &ye);
+        let mut xs = layer_axis(n, &xe);
+        let mut ys = layer_axis(n, &ye);
+        // Straighten single-axis edges: pull free-axis rooms onto their neighbours.
+        align_free_axes(graph, &index, &mut xs, &mut ys);
 
         // Normalise this component to its own origin, then pack to the right.
         let min_x = *xs.iter().min().unwrap();
@@ -167,5 +234,71 @@ mod tests {
         g.add_edge(1, Direction::E, 2);
         let pos = sort_layout(&g);
         assert_eq!(pos[&1], (0, 0));
+    }
+
+    #[test]
+    fn align_pulls_free_row_onto_east_neighbour() {
+        // 3 fixes 1's row (1 south of 3); 2 is due-east of 1 with no N/S edge.
+        // After sort, 2 must share 1's row so 1→E→2 is straight (same y).
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.add_edge(3, Direction::S, 1); // 1 is south of 3 → fixes y[1]
+        g.add_edge(1, Direction::E, 2); // 2 due east of 1, no vertical constraint
+        let pos = sort_layout(&g);
+        assert_eq!(pos[&1].1, pos[&2].1, "due-east neighbour aligns onto the same row");
+        assert!(pos[&2].0 > pos[&1].0, "and stays east");
+    }
+
+    #[test]
+    fn align_keeps_no_overlap_and_is_deterministic() {
+        let build = || {
+            let mut g = MapGraph::new();
+            for id in 1u16..=5 { g.upsert_room(id, "r".into()); }
+            g.add_edge(1, Direction::E, 2);
+            g.add_edge(2, Direction::E, 3);
+            g.add_edge(1, Direction::S, 4);
+            g.add_edge(4, Direction::E, 5);
+            g
+        };
+        let p1 = sort_layout(&build());
+        let p2 = sort_layout(&build());
+        assert_eq!(p1, p2, "deterministic");
+        let cells: Vec<_> = p1.values().collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len(), "no overlap");
+    }
+
+    #[test]
+    fn a129_alignment_straightens_pendant_edges() {
+        let mut g = MapGraph::new();
+        for (id, name) in [
+            (25, "Canyon View"), (26, "Rocky Ledge"), (74, "Clearing"), (75, "Forest Path"),
+            (76, "Forest"), (77, "Forest"), (78, "Forest"), (79, "Behind House"),
+            (80, "South of House"), (81, "North of House"), (143, "Clearing"),
+            (180, "West of House"), (239, "Forest"),
+        ] { g.upsert_room(id, name.into()); }
+        for (o, d, dst) in [
+            (180, Direction::N, 81), (81, Direction::W, 180), (180, Direction::W, 78),
+            (78, Direction::N, 143), (143, Direction::E, 77), (77, Direction::S, 74),
+            (74, Direction::S, 76), (76, Direction::W, 78), (143, Direction::W, 78),
+            (78, Direction::S, 76), (76, Direction::N, 74), (74, Direction::E, 25),
+            (25, Direction::W, 76), (74, Direction::W, 79), (79, Direction::E, 74),
+            (25, Direction::E, 26), (78, Direction::E, 75), (77, Direction::E, 239),
+            (239, Direction::N, 77), (180, Direction::S, 80), (80, Direction::W, 180),
+            (80, Direction::E, 79), (79, Direction::S, 80), (79, Direction::N, 81),
+            (81, Direction::E, 79), (80, Direction::S, 76),
+        ] { g.add_edge(o, d, dst); }
+        crate::layout::relayout_auto(&mut g);
+        // The diagnosed pendant edges (a room free on the perpendicular axis joined to a
+        // constrained neighbour by a single-axis edge) must now be straight. Both were
+        // distorted before this alignment pass. The densely-connected house core
+        // (79/80/81/180/76, constrained on BOTH axes) stays distorted — that is inherent
+        // to independent-axis layering and is the job of the deferred constraint solver.
+        let e = |o, d| g.connections().iter().find(|c| c.origin == o && c.dest == d).unwrap();
+        assert!(!e(74, 25).distorted, "74→E→25 must be straight after row alignment");
+        assert!(!e(78, 75).distorted, "78→E→75 must be straight after row alignment");
+        // No regression in aggregate distortion (alignment never makes the whole worse).
+        let distorted = g.connections().iter().filter(|c| c.distorted).count();
+        assert!(distorted <= 19, "alignment must not increase total distortion; got {distorted}");
     }
 }
