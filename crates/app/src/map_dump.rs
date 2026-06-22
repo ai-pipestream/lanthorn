@@ -16,8 +16,9 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use mapper::direction::Direction;
+use mapper::direction::{grid_offset, Direction};
 use mapper::graph::MapGraph;
+use mapper::layout::detect_chains;
 use mapper::render::render;
 
 use crate::render::map::{boxes_axes, render_map};
@@ -121,6 +122,7 @@ pub fn render_dump(graph: &MapGraph) -> String {
         return out;
     }
 
+    let chains = detect_chains(graph);
     out.push_str("# === ROOMS (id  name  pos  notes) ===\n");
     for r in &rooms {
         let pos = r.pos.map(|(x, y)| format!("{x},{y}")).unwrap_or_else(|| "?".into());
@@ -129,7 +131,39 @@ pub fn render_dump(graph: &MapGraph) -> String {
         } else {
             format!("  notes={:?}", r.notes)
         };
-        out.push_str(&format!("ROOM {} {:?} pos={}{}\n", r.id, r.label(), pos, notes));
+
+        // Build align= annotation.
+        let mut align_parts: Vec<String> = Vec::new();
+        if let Some(&cid) = chains.ew.get(&r.id) {
+            let members: Vec<String> = chains.ew_members[cid].iter().map(|id| id.to_string()).collect();
+            align_parts.push(format!("row[{}]", members.join(",")));
+        }
+        if let Some(&cid) = chains.ns.get(&r.id) {
+            let members: Vec<String> = chains.ns_members[cid].iter().map(|id| id.to_string()).collect();
+            align_parts.push(format!("col[{}]", members.join(",")));
+        }
+        let align = if align_parts.is_empty() {
+            "none".to_string()
+        } else {
+            align_parts.join(" ")
+        };
+
+        // Build dropped= annotation (outgoing distorted compass edges).
+        let dropped: Vec<String> = conns
+            .iter()
+            .filter(|c| c.origin == r.id && c.distorted && grid_offset(c.dir).is_some())
+            .map(|c| format!("{}→{}→{}", c.origin, dir_str(c.dir), c.dest))
+            .collect();
+        let dropped_str = if dropped.is_empty() {
+            String::new()
+        } else {
+            format!(" dropped=[{}]", dropped.join(", "))
+        };
+
+        out.push_str(&format!(
+            "ROOM {} {:?} pos={}{} align={}{}\n",
+            r.id, r.label(), pos, notes, align, dropped_str
+        ));
     }
 
     out.push_str("#\n# === EDGES (origin DIR dest) ===\n");
@@ -200,6 +234,26 @@ mod tests {
         // A connector line-art glyph appears, and the legend no longer advertises ▒.
         assert!(dump.contains('─') || dump.contains('│'), "line-art connector expected:\n{dump}");
         assert!(!dump.contains("▒ = unrouted"), "unrouted concept removed from legend");
+    }
+
+    #[test]
+    fn dump_legend_shows_alignment_rules() {
+        use mapper::direction::Direction;
+        let mut m = mapper::mapper::Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        // make it a reciprocal E/W pair so a chain forms
+        m.graph.add_edge(2, Direction::W, 1);
+        let dump = render_dump(&m.graph);
+        assert!(dump.contains("align=row[1,2]"), "reciprocal pair annotated as a row chain:\n{dump}");
+    }
+
+    #[test]
+    fn dump_legend_marks_ungrouped_room() {
+        let mut m = mapper::mapper::Mapper::default();
+        m.observe(1, "A", None);
+        let dump = render_dump(&m.graph);
+        assert!(dump.contains("align=none"), "lone room shows align=none:\n{dump}");
     }
 
     /// Regression: the dump buffer must NOT truncate when a channel carries many lanes.
