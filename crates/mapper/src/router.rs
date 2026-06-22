@@ -149,6 +149,10 @@ pub struct RoutedEdge {
     ///
     /// Stubs (is_stub = true) always have `arrival_dir = None`.
     pub arrival_dir: Option<Direction>,
+    /// Stubs only: the display name of the target room (`dest`), resolved from the graph so
+    /// the renderer can label the badge without re-resolving it (and so the target may live
+    /// off the current layer in future). `None` for routed compass edges.
+    pub dest_label: Option<String>,
 }
 
 // ── route_all ─────────────────────────────────────────────────────────────────
@@ -196,6 +200,7 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
                 is_stub: true,
                 label,
                 arrival_dir: None,
+                dest_label: graph.room(conn.dest).map(|r| r.label().to_string()),
             });
             continue;
         }
@@ -237,6 +242,7 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
             is_stub: false,
             label: None,
             arrival_dir,
+            dest_label: None,
         });
 
         emitted.insert((conn.origin, conn.dir, conn.dest));
@@ -579,5 +585,33 @@ mod tests {
             Some(Direction::S),
             "arrival_dir for the surviving A→N→B edge should be Some(S) (the discovered reverse)"
         );
+    }
+
+    #[test]
+    fn stub_edge_carries_dest_label() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cellar".into());
+        g.upsert_room(2, "Attic".into());
+        g.add_edge(1, Direction::Up, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1 && e.is_stub).unwrap();
+        assert_eq!(
+            e.dest_label.as_deref(),
+            Some("Attic"),
+            "a portal stub must carry its target room's name"
+        );
+    }
+
+    #[test]
+    fn compass_edge_has_no_dest_label() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        relayout_auto(&mut g);
+        let edges = route_all(&g);
+        let e = edges.iter().find(|e| e.origin == 1 && !e.is_stub).unwrap();
+        assert_eq!(e.dest_label, None, "routed compass edges carry no dest_label");
     }
 }
