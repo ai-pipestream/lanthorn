@@ -336,7 +336,10 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
     //       border it sits on (replacing the box-edge glyph, pointing outward).
-    draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf);
+    // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
+    if !state.show_portal_labels {
+        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf);
+    }
 }
 
 // ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
@@ -779,27 +782,44 @@ fn draw_portal_icons(
         }
     }
 
-    let icon_col = BOX_W - 2; // far-right interior column
+    let icon_col = BOX_W - 2; // far-right interior column (normal view)
     for room in &rm.rooms {
         let Some(slots) = chosen.get(&room.id) else { continue };
         let Some(&rect) = placed.get(&room.id) else { continue };
         let style = room_style(room, state);
-        for (slot, cell) in slots.iter().enumerate() {
-            let Some((glyph, label)) = cell else { continue };
-            let row = rect.y + 1 + slot as i32;
-            // Unknown portals have no target semantics → only the "?" glyph, never a
-            // destination name (avoids the misleading "West of ?").
-            if show_labels && *glyph != PORTAL_UNKNOWN {
+        let (bx, by) = (rect.x, rect.y);
+        if show_labels {
+            // Portal view: icons move onto the border; destination names float OUTSIDE the box.
+            if let Some((glyph, label)) = slots[0] {
+                put_str(buf, bx + BOX_W / 2 + off_x, by + off_y, glyph, style, area); // top border
                 if let Some(name) = label {
-                    let n: String = name.chars().take(7).collect();
-                    let text = format!("{n:>7} {glyph}");
-                    put_str(buf, rect.x + 1 + off_x, row + off_y, &text, style, area);
-                    continue;
+                    put_str(buf, bx + off_x, by - 1 + off_y, name, style, area); // above
                 }
             }
-            put_str(buf, rect.x + icon_col + off_x, row + off_y, glyph, style, area);
-            if slot == 0 && room.has_notes {
-                put_char(buf, rect.x + icon_col - 1 + off_x, row + off_y, '●', style, area);
+            if let Some((glyph, label)) = slots[2] {
+                put_str(buf, bx + BOX_W / 2 + off_x, by + BOX_H - 1 + off_y, glyph, style, area); // bottom border
+                if let Some(name) = label {
+                    put_str(buf, bx + off_x, by + BOX_H + off_y, name, style, area); // below
+                }
+            }
+            if let Some((glyph, label)) = slots[1] {
+                put_str(buf, bx + BOX_W - 1 + off_x, by + 2 + off_y, glyph, style, area); // right border
+                // Unknown has no target semantics → glyph only, no floating name.
+                if glyph != PORTAL_UNKNOWN {
+                    if let Some(name) = label {
+                        put_str(buf, bx + BOX_W + off_x, by + 2 + off_y, name, style, area); // right
+                    }
+                }
+            }
+        } else {
+            // Normal view: directional icons in the interior right column.
+            for (slot, cell) in slots.iter().enumerate() {
+                let Some((glyph, _label)) = cell else { continue };
+                let row = by + 1 + slot as i32;
+                put_str(buf, bx + icon_col + off_x, row + off_y, glyph, style, area);
+                if slot == 0 && room.has_notes {
+                    put_char(buf, bx + icon_col - 1 + off_x, row + off_y, '●', style, area);
+                }
             }
         }
     }
@@ -1912,37 +1932,43 @@ mod tests {
     }
 
     #[test]
-    fn portal_labels_show_destination_when_toggled() {
+    fn portal_view_moves_icons_to_border_and_floats_destinations() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
-        g.upsert_room(1, "Hall".into());
-        g.upsert_room(2, "Attic".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, -1));
+        g.upsert_room(1, "Mid".into());    // portal owner
+        g.upsert_room(2, "Attic".into());  // up target
+        g.upsert_room(3, "Cellar".into()); // down target
+        g.set_pos(1, (0, 1));
+        g.set_pos(2, (0, 0));
+        g.set_pos(3, (0, 2));
         g.add_edge(1, Direction::Up, 2);
+        g.add_edge(1, Direction::Down, 3);
         let rm = render(&g);
-        let area = Rect::new(0, 0, 80, 40);
-        let row1 = |show: bool| -> String {
-            let mut state = AppState::default();
-            state.show_portal_labels = show;
-            let mut buf = Buffer::empty(area);
-            render_map(&rm, &state, area, &mut buf);
-            (1u16..=9)
-                .map(|x| buf.cell((x, 1)).map(|c| c.symbol().to_string()).unwrap_or_default())
-                .collect()
-        };
-        let on = row1(true);
-        let off = row1(false);
-        assert!(on.contains("Attic"), "toggled on: up-portal destination on row 1; got '{on}'");
-        assert!(on.ends_with("↑"), "icon stays pinned at the far-right cell; got '{on}'");
-        assert!(!off.contains("Attic"), "toggled off: no destination name; got '{off}'");
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let mut st = AppState::default();
+        st.show_portal_labels = true;
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let off = (cols.room_pixel(rm.bounds.0 .0), rows.room_pixel(rm.bounds.0 .1));
+        let bx = cols.room_pixel(0) - off.0;
+        let by = rows.room_pixel(1) - off.1;
+        let sym = |x: i32, y: i32| buf.cell((x as u16, y as u16)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        // Icons sit on the border (top/bottom centre), not the interior right column.
+        assert_eq!(sym(bx + BOX_W / 2, by), "↑", "up icon on the top border centre");
+        assert_eq!(sym(bx + BOX_W / 2, by + BOX_H - 1), "↓", "down icon on the bottom border centre");
+        // Destinations float above / below the box.
+        let above: String = (0..area.width).map(|x| sym(x as i32, by - 1)).collect();
+        let below: String = (0..area.width).map(|x| sym(x as i32, by + BOX_H)).collect();
+        assert!(above.contains("Attic"), "up destination floats above; got '{above}'");
+        assert!(below.contains("Cellar"), "down destination floats below; got '{below}'");
+        // The interior right-column icon is gone in portal view.
+        assert_ne!(sym(bx + BOX_W - 2, by + 1), "↑", "icons leave the interior in portal view");
     }
 
     #[test]
-    fn unknown_portal_shows_no_destination_name() {
-        // Unknown-direction portals have no target semantics: even with labels toggled ON the
-        // mid slot shows only the "?" glyph, never a destination name. Regression: an Unknown
-        // edge to "West of House" rendered the misleading "West of ?".
+    fn unknown_portal_in_portal_view_is_border_glyph_no_name() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
@@ -1957,9 +1983,33 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-        assert_eq!(sym(9, 2), "?", "Unknown portal shows just the ? glyph in the mid slot");
-        let row2: String = (1u16..=9).map(|x| sym(x, 2)).collect();
-        assert!(!row2.contains("West"), "Unknown portal must not show a destination name; got '{row2}'");
+        // ? sits on the RIGHT border (col BOX_W-1) at the middle row (row 2). Box is at (0,0).
+        assert_eq!(sym((BOX_W - 1) as u16, 2), "?", "unknown portal shows ? on the right border");
+        // No destination name to the right of the box on that row.
+        let right: String = ((BOX_W as u16)..40).map(|x| sym(x, 2)).collect();
+        assert!(!right.contains("West"), "unknown portal shows no destination name; got '{right}'");
+    }
+
+    #[test]
+    fn portal_view_suppresses_connector_arrows() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = render(&g);
+        let area = Rect::new(0, 0, 80, 30);
+        let count_arrows = |show: bool| -> usize {
+            let mut st = AppState::default();
+            st.show_portal_labels = show;
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &st, area, &mut buf);
+            buf.content.iter().filter(|c| matches!(c.symbol(), "▶" | "◀" | "▲" | "▼")).count()
+        };
+        assert!(count_arrows(false) > 0, "normal view draws connector arrowheads");
+        assert_eq!(count_arrows(true), 0, "portal view suppresses connector arrowheads");
     }
 
 }
