@@ -121,6 +121,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('g') => Action::ExportDot,
             KeyCode::Char('d') => Action::ExportDump,
             KeyCode::Char('l') => Action::CycleLayout,
+            KeyCode::Char('t') => Action::Retidy,
             _ => Action::None,
         };
     }
@@ -165,7 +166,19 @@ fn prompt_key_to_action(key: KeyEvent) -> Action {
 // ── Internal: game focus ──────────────────────────────────────────────────────
 
 fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
+    let shift = key.modifiers == KeyModifiers::SHIFT;
     match key.code {
+        // Map navigation is available WITHOUT leaving the story line: Shift+Arrows
+        // pan, and the non-typeable Home / PageUp / PageDown centre and zoom. None of
+        // these clash with typing a command (arrows/Home/PageX aren't printable, and
+        // Shift+Arrow is distinct from a Shift+letter capital).
+        KeyCode::Left if shift => Action::Pan(-1, 0),
+        KeyCode::Right if shift => Action::Pan(1, 0),
+        KeyCode::Up if shift => Action::Pan(0, -1),
+        KeyCode::Down if shift => Action::Pan(0, 1),
+        KeyCode::Home => Action::Recenter,
+        KeyCode::PageUp => Action::ZoomIn,
+        KeyCode::PageDown => Action::ZoomOut,
         // Enter submits the current input buffer content as the command.
         KeyCode::Enter => Action::SubmitCommand(state.input.clone()),
         KeyCode::Backspace => Action::Backspace,
@@ -492,6 +505,21 @@ mod tests {
         }
         let a = key_to_action(&s, key(KeyCode::Enter));
         assert!(matches!(a, Action::SubmitCommand(ref c) if c == "north"));
+    }
+
+    #[test]
+    fn game_focus_has_map_shortcuts() {
+        let s = AppState::default(); // Game focus (story line)
+        // Map navigation works without leaving the story line.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Home)), Action::Recenter));
+        assert!(matches!(key_to_action(&s, key(KeyCode::PageUp)), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, key(KeyCode::PageDown)), Action::ZoomOut));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy));
+        // Typing still reaches the command line (plain and shifted/capital letters).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::InputChar('N')));
     }
 
     #[test]
