@@ -55,31 +55,44 @@ A diagonal edge's departure/arrival glyph is a **diagonal arrow that replaces th
 
 ---
 
-## Feature 2 — Portal badges
+## Feature 2 — Portal icons + destination toggle
+
+> **Design history:** a first pass rendered portals as glyph+name *badges in the right gutter*
+> (commits `02d8e33`..`8b8db8b`). The gutter is too narrow for names, so the rendering was
+> revised to **in-room directional icons** plus a **hotkey-toggled destination overlay**. The
+> mapper `dest_label` field, the `portal_glyph` constants, and the dump PORTALS legend from that
+> pass are kept; only the on-map rendering changes.
 
 ### Current behavior
-`route_all` emits `is_stub` edges for Up/Down/In/Out/Unknown with a one-letter `label` (`U`/`D`/`IN`/`OUT`/`?`); `draw_stub` writes just that letter in the box's top-right gutter. No target identity.
+`route_all` emits `is_stub` edges for Up/Down/In/Out/Unknown, each carrying its target room name in `dest_label` (Some for stubs). Portals currently render as stacked glyph+name badges in the right gutter — names overflow the narrow gutter.
 
 ### Design
-Render each portal as a **badge** beside the room box:
+Render portals as **directional icons inside the room box** at Boxes zoom, on the box's right
+interior column. Default = icons only; a hotkey toggles the destination names.
 
 ```
-╭─────────╮ ↑ Attic        ↑ up-portal → #201 "Attic"
-│#203     │ ↓ S of House   (stacks downward for multiple)
-│         │
-╰─────────╯
+default (icons only):     Ctrl+P (destinations):
+╭─────────╮               ╭─────────╮
+│Behind H↑│               │  Attic ↑│   row 1 (Up)   — name replaces the room label
+│#79      │               │#79      │   row 2 (mid)  — kept (no mid portal here)
+│        ↓│               │S of Ho ↓│   row 3 (Down) — name replaces the blank row
+╰─────────╯               ╰─────────╯
 ```
 
-- **Glyph + target room name.** Direction glyphs: `↑` Up, `↓` Down, `⊙` In, `⊗` Out (named constants, swappable). Unknown (`?`) stays as today's `?` (it has no target semantics).
-- **Name truncated to the available gutter width** on the map; the dump legend shows the full `<glyph> #<id> <name>` for each portal.
-- **Stacking:** multiple portals on one room stack on successive gutter rows beneath the first.
-- **Placement:** the right gutter, top-aligned with the box (as the current stub does). Placement avoids overwriting routed connector cells where possible; if a portal badge and a connector would collide, the connector wins (the badge is informational) — verified by the existing buffer-level overlap accounting.
-- **Layer-ready:** the badge identifies the *target room* (id + name), which is exactly what a future "jump to the layer containing #201" affordance needs. Nothing in this design assumes single-layer beyond rendering on the current layer.
+- **Icon slots (right interior column, `col = BOX_W-2`):** `↑` Up → row 1; `⊙` In / `⊗` Out → row 2 (middle); `↓` Down → row 3. Glyphs are named, swappable constants (`portal_glyph`, already defined). The icon is drawn only for the directions a room actually has.
+- **Unknown (`?`)** has no spatial direction → it shares the **middle** slot (row 2). When a room has more than one of In/Out/Unknown, the middle cell shows one by precedence **In ▸ Out ▸ Unknown**; the dump still lists every portal. Likewise if a room has multiple portals in one slot, the icon marks the slot and the dump carries the full set.
+- **Destination toggle — `Ctrl+P` (`show_portal_labels`, default off):** when on, each portal with an icon shows its **destination room name right-aligned beside its icon on that icon's row**, replacing that row's normal content (row 1 room label, row 2 `#id`, row 3 blank). The icon stays pinned at the far-right interior cell. Names are truncated to the interior width on the map; the **full untruncated name is always in the Ctrl+D dump**. Wiring mirrors the existing `Ctrl+A` alignment toggle exactly.
+- **Notes marker `●`** currently occupies the upper-right interior cell — the new `↑` slot. Rule: a room **with** an up-portal gives that corner to `↑` and shifts `●` one interior cell left (room label truncates to fit); a room **without** an up-portal keeps `●` where it is.
+- **Boxes zoom only.** Compact keeps its existing bare-label `draw_stub`; Overview is unchanged.
+- **Layer-ready:** icons + `dest_label` identify each target room (id resolvable, name shown), which is exactly what a future "jump to the layer containing the target" affordance needs.
 
 ### Components touched
-- `mapper`: portal stub edges already carry direction + endpoints; expose the target room id so the renderer can resolve the name (the graph has it).
-- `app/render/map.rs` `draw_stub`: render glyph + truncated target name, stack multiple, clip to area.
-- `app/map_dump.rs`: portal legend lines show `<glyph> #<id> <name>` per portal.
+- `mapper`: unchanged — `dest_label` (Some target name for stubs) already lands on stub edges.
+- `app/state.rs`: add `show_portal_labels: bool` (default false), mirroring `show_alignment`.
+- `app/input.rs`: add `Action::TogglePortalLabels`, map `Ctrl+P` to it, flip the flag in `apply_action`.
+- `app/render/map.rs`: a new post-room overlay draws the directional icons (always) and, when `show_portal_labels`, the right-aligned destination names; handles the `●` shift; the prior gutter-badge rendering (`draw_portal_badge` + its loop) is removed.
+- `app/main.rs`: help bar gains `Ctrl+P: portals`.
+- `app/map_dump.rs`: unchanged — the PORTALS legend already shows full `glyph #id name`.
 
 ---
 
@@ -123,11 +136,11 @@ Group drawn edges by unordered room pair `{A,B}`. Within the group, the existing
 mapper:
   route_topology  ── per pair: 1 trunk + secondary exit stubs joining it (Feature 3)
                   ── diagonal edges resolve to a CORNER anchor (Feature 1)
-  route_all       ── portal stubs already carry dir+endpoints; expose target id (Feature 2)
+  route_all       ── portal stubs carry dir + dest_label (target name) (Feature 2, done)
 app/render/map.rs:
   draw_room       ── diagonal arrow replaces the corner glyph (Feature 1)
   render lanes    ── trunk + T-junction joins; no arrowhead on secondary stubs (Feature 3)
-  draw_stub       ── portal badge = glyph + truncated target name, stacked (Feature 2)
+  portal overlay  ── in-room directional icons; Ctrl+P shows destination names (Feature 2)
 app/map_dump.rs   ── portal legend: glyph + #id + name (Feature 2); every edge still listed (Feature 3)
 ```
 
@@ -137,17 +150,17 @@ All three are **Boxes-zoom only**. The no-overlap guarantee (mapper structural +
 
 `mapper`:
 - Diagonal edge → exit/entry anchor is the correct box corner; reciprocal diagonal arrows at both corners.
-- Portal stub exposes target room id.
+- Portal stub carries the target room name (`dest_label`). (done)
 - Multi-edge group → one trunk + N−1 secondary stubs that terminate on the trunk; no independent duplicate connector to the destination; no-overlap + determinism preserved.
 
 `app`:
 - Diagonal departure/arrival draws the diagonal arrow glyph at the correct corner; box outline otherwise intact; OFF for non-diagonal edges (byte-identical).
-- Portal badge renders glyph + truncated name on the map; full `#id name` in the dump; multiple portals stack; never breaks the box outline.
+- Portal directional icons render in the correct in-room slots (↑ row 1, ⊙/⊗/? row 2, ↓ row 3); `Ctrl+P` reveals right-aligned destination names on those rows; full `#id name` in the dump; the `●` notes marker shifts left when an up-portal claims the corner; box outline otherwise intact; OFF byte-identical except the icons.
 - Multi-edge: the A129 #239↔#77 group renders as a single trunk with the N/S/W exits merging (no three-line tangle); destination has one arrival; box-edge arrows present for each direction; no rendered overlap.
 
 ## Risks
 
 - **Corner anchors** add a new attachment point to the lane router; must integrate with slot assignment and the no-overlap gate (corner cell shared by two edges of the box).
 - **Multi-edge join** is the most involved change — a secondary stub joining a trunk mid-span is a T-junction that must not be miscounted as an illegal overlap by the render gate; the merge point selection must be deterministic.
-- **Portal badge vs connector collision** in a dense gutter — badges yield to connectors; verify the buffer-level overlap accounting treats badges correctly (informational, not a routed line).
+- **Portal icons vs box content** — icons sit on the right interior column (a known fixed cell), drawn as a post-room overlay; the only contention is the `●` notes marker (resolved by the left-shift rule). The destination-name overlay overwrites interior cells on portal rows only when `Ctrl+P` is on.
 - Glyph rendering depends on the terminal font; all new glyphs are named constants with easy fallbacks.
