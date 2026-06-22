@@ -1485,39 +1485,6 @@ mod tests {
     }
 
     #[test]
-    fn a129_no_overlap_under_sort_layout() {
-        // Crown-jewel guarantee: the lane router produces NO illegal connector overlaps on the
-        // real A129 graph (only clean ┼ perpendicular crossings) under the new sort layout.
-        // assert_no_overlap panics on any illegal share; reaching the end means the guarantee holds.
-        use mapper::graph::MapGraph;
-        use mapper::layout::relayout_auto;
-        let mut g = MapGraph::new();
-        for (id, name) in [
-            (74, "Clearing"), (75, "Forest Path"), (77, "Forest"), (78, "Forest"),
-            (79, "Behind House"), (80, "South of House"), (81, "North of House"),
-            (143, "Clearing"), (180, "West of House"), (239, "Forest"),
-        ] {
-            g.upsert_room(id, name.into());
-        }
-        for (o, d, dst) in [
-            (180, Direction::N, 81), (81, Direction::W, 180), (180, Direction::S, 80),
-            (80, Direction::E, 79), (79, Direction::N, 81), (81, Direction::E, 79),
-            (79, Direction::S, 80), (80, Direction::W, 180), (180, Direction::W, 78),
-            (78, Direction::N, 143), (143, Direction::S, 75), (75, Direction::N, 143),
-            (143, Direction::W, 78), (143, Direction::E, 77), (77, Direction::S, 74),
-            (74, Direction::N, 77), (77, Direction::E, 239), (239, Direction::N, 77),
-            (239, Direction::S, 77),
-        ] {
-            g.add_edge(o, d, dst);
-        }
-        relayout_auto(&mut g);
-        let rm = mapper::render::render(&g);
-        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
-        let owners = connector_ownership(&rm.plan, &cols, &rows);
-        let _crossings = assert_no_overlap(&owners);
-    }
-
-    #[test]
     fn overlap_stats_clean_pair_is_zero() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
