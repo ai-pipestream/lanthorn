@@ -28,7 +28,17 @@ use crate::graph::{Connection, MapGraph, RoomId};
 
 mod sort;
 mod incremental;
+mod vpsc;
+mod constraints;
+mod stress;
 pub use incremental::place_incremental;
+
+/// Separation gap and ideal edge length (in grid cells).
+const GAP: f64 = 1.0;
+/// Fixed SMACOF iterations (determinism + bounded cost).
+const ITERS: usize = 60;
+/// Above this room count, skip the O(ITERS·n²) solve and use the longest-path sort.
+const MAX_NODES: usize = 400;
 
 // ── LayoutMode ────────────────────────────────────────────────────────────────
 
@@ -192,19 +202,97 @@ pub(crate) fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
 
 /// Re-derive all room positions from scratch on every call.
 ///
-/// Uses per-axis longest-path layering from compass edges, packs components
-/// left-to-right, resolves residual overlaps, and anchors the lowest-id room
-/// at (0,0).
+/// For graphs with ≤ MAX_NODES rooms, uses constrained stress-majorization
+/// (SMACOF + VPSC) seeded from the longest-path sort. For larger graphs,
+/// falls back to the longest-path sort directly. Components are packed
+/// left-to-right, residual overlaps resolved, and the lowest-id room
+/// anchored at (0,0).
 pub fn relayout_auto(graph: &mut MapGraph) {
-    let ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
+    let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
+    ids.sort_unstable();
     if ids.is_empty() {
         return;
     }
-    let pos = sort::sort_layout(graph);
-    for (&id, &p) in &pos {
+
+    // Large graphs: skip the O(ITERS·n²) solve and use the longest-path sort.
+    if ids.len() > MAX_NODES {
+        let pos = sort::sort_layout(graph);
+        for (&id, &p) in &pos {
+            graph.set_pos(id, p);
+        }
+        mark_distorted(graph, &BTreeSet::new());
+        return;
+    }
+
+    // Seed from the longest-path sort (deterministic, roughly compass-ordered).
+    let seed = sort::sort_layout(graph);
+
+    let components = connected_components(graph, &ids);
+    let mut dropped_all: BTreeSet<usize> = BTreeSet::new();
+    let mut final_pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    let mut occupied: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let mut pack_x: i32 = 0;
+
+    for comp in &components {
+        let n = comp.len();
+        let index: BTreeMap<RoomId, usize> =
+            comp.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+
+        // Local undirected adjacency for BFS distances.
+        let mut adj = vec![Vec::new(); n];
+        for c in graph.connections() {
+            if let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) {
+                adj[a].push(b);
+                adj[b].push(a);
+            }
+        }
+        let dist = stress::all_pairs_dist(n, &adj);
+        let ac = constraints::build_axis_constraints(graph, comp, GAP);
+        dropped_all.extend(ac.dropped.iter().copied());
+
+        let seed_local: Vec<(f64, f64)> = comp
+            .iter()
+            .map(|&id| {
+                let p = seed.get(&id).copied().unwrap_or((0, 0));
+                (p.0 as f64, p.1 as f64)
+            })
+            .collect();
+
+        let cont = stress::stress_layout(n, &dist, &ac.x, &ac.y, &seed_local, ITERS);
+        let mut snapped: Vec<(i32, i32)> =
+            cont.iter().map(|&(x, y)| (x.round() as i32, y.round() as i32)).collect();
+
+        // Pack this component to the right of the previous, top-aligned.
+        let min_x = snapped.iter().map(|p| p.0).min().unwrap();
+        let min_y = snapped.iter().map(|p| p.1).min().unwrap();
+        for p in &mut snapped {
+            p.0 += pack_x - min_x;
+            p.1 -= min_y;
+        }
+
+        // Resolve residual same-cell collisions in ascending room-id order.
+        let mut max_x_used = pack_x;
+        for (i, &id) in comp.iter().enumerate() {
+            let cell = nearest_free_cell(&occupied, snapped[i]);
+            occupied.insert(cell);
+            final_pos.insert(id, cell);
+            max_x_used = max_x_used.max(cell.0);
+        }
+        pack_x = max_x_used + 2; // 1-cell gap between components
+    }
+
+    // Anchor the lowest-id room at (0,0) for a stable reference.
+    if let Some(&(ax, ay)) = final_pos.get(&ids[0]) {
+        for p in final_pos.values_mut() {
+            p.0 -= ax;
+            p.1 -= ay;
+        }
+    }
+
+    for (&id, &p) in &final_pos {
         graph.set_pos(id, p);
     }
-    mark_distorted(graph, &BTreeSet::new());
+    mark_distorted(graph, &dropped_all);
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -469,6 +557,25 @@ mod tests {
         let p1 = g.room(1).unwrap().pos.unwrap();
         let p2 = g.room(2).unwrap().pos.unwrap();
         assert!(p2.1 < p1.1, "room 2 (north of 1) must be above it: {p2:?} vs {p1:?}");
+    }
+
+    #[test]
+    fn constraint_engine_places_reciprocal_due_north() {
+        // Reciprocal N/S pair → B due north of A (same column), via the constraint engine.
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        relayout_auto(&mut g);
+        let pa = g.room(1).unwrap().pos.unwrap();
+        let pb = g.room(2).unwrap().pos.unwrap();
+        assert!(pb.1 < pa.1, "B must be north of A: {pb:?} vs {pa:?}");
+        assert_eq!(pb.0, pa.0, "no E/W constraint → B stays in A's column");
+        // no overlap
+        let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
+        let set: BTreeSet<_> = cells.iter().collect();
+        assert_eq!(cells.len(), set.len());
     }
 
     #[test]
