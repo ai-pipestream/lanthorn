@@ -115,6 +115,13 @@ fn align_free_axes(
             }
         }
     }
+    // Dedup neighbour lists (each edge pushed both directions can duplicate a node).
+    for v in 0..n {
+        ew[v].sort_unstable();
+        ew[v].dedup();
+        ns[v].sort_unstable();
+        ns[v].dedup();
+    }
     let median = |coords: &[i32], neigh: &[usize]| -> i32 {
         let mut vals: Vec<i32> = neigh.iter().map(|&u| coords[u]).collect();
         vals.sort_unstable();
@@ -122,11 +129,19 @@ fn align_free_axes(
     };
     for _ in 0..ALIGN_PASSES {
         for v in 0..n {
+            // Prefer CONSTRAINED neighbours (anchors) as the alignment target, so a free
+            // chain inherits a real anchor's coordinate instead of drifting with its free
+            // neighbours (which would otherwise out-vote a lone anchor). Fall back to all
+            // neighbours when none is constrained — free chains then propagate over passes.
             if !y_constrained[v] && !ew[v].is_empty() {
-                ys[v] = median(ys, &ew[v]);
+                let anchors: Vec<usize> =
+                    ew[v].iter().copied().filter(|&u| y_constrained[u]).collect();
+                ys[v] = median(ys, if anchors.is_empty() { &ew[v] } else { &anchors });
             }
             if !x_constrained[v] && !ns[v].is_empty() {
-                xs[v] = median(xs, &ns[v]);
+                let anchors: Vec<usize> =
+                    ns[v].iter().copied().filter(|&u| x_constrained[u]).collect();
+                xs[v] = median(xs, if anchors.is_empty() { &ns[v] } else { &anchors });
             }
         }
     }
@@ -266,6 +281,34 @@ mod tests {
         let cells: Vec<_> = p1.values().collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "no overlap");
+    }
+
+    #[test]
+    fn free_interior_chain_aligns_to_anchor_row() {
+        // #203 (Kitchen) and #193 (Living Room) connect to the house ONLY via E/W edges
+        // (79→W→203, 203→W→193), so they are Y-free and must align onto #79's row rather
+        // than drifting far above it. Regression: before anchor-preferring alignment they
+        // landed ~4 rows up (#203 at y=-2 vs #79 at y=2).
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        use Direction::*;
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+        ] { g.add_edge(o, d, dst); }
+        crate::layout::relayout_auto(&mut g);
+        let y = |id| g.room(id).unwrap().pos.unwrap().1;
+        assert!((y(203) - y(79)).abs() <= 1,
+            "Kitchen must sit on/near Behind House's row: 203 y={}, 79 y={}", y(203), y(79));
+        assert!((y(193) - y(79)).abs() <= 1,
+            "Living Room must sit on/near Behind House's row: 193 y={}, 79 y={}", y(193), y(79));
     }
 
     #[test]
