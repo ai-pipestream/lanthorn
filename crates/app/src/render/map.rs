@@ -910,43 +910,47 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
             break;
         }
 
-        // Collect placed rooms in ascending id order.
-        let mut room_ids: Vec<mapper::graph::RoomId> = graph
+        let room_ids: Vec<mapper::graph::RoomId> = graph
             .rooms()
             .filter(|r| r.pos.is_some())
             .map(|r| r.id)
             .collect();
-        room_ids.sort_unstable(); // explicit ascending order; do not rely on rooms() internal order
 
-        let mut improved = false;
-        'room_loop: for &id in &room_ids {
-            let orig = match graph.room(id).and_then(|r| r.pos) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            for &(dy, dx) in &moves {
+        // Pick the single GLOBALLY best move this pass. Key (minimized):
+        //   (resulting overlaps, hints the moved room loses, resulting crossings,
+        //    that room's compass degree, id, move index)
+        // Overlaps first guarantees progress; among equal overlap-reducers a HINT-NEUTRAL nudge
+        // on any room (and a low-constraint / leaf room) beats knocking an aligned room — e.g.
+        // a chain member or #25 — off its row. `broken` is `score_orig - score_trial` so any
+        // lost directional hint (one-way or reciprocal) is dispreferred.
+        type Key = (usize, usize, usize, usize, mapper::graph::RoomId, usize);
+        let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
+        for &id in &room_ids {
+            let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
+            let score_orig = mapper::layout::room_side_score(graph, id);
+            let degree = mapper::layout::room_compass_degree(graph, id);
+            for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
                 let trial = (orig.0 + dx, orig.1 + dy);
-
-                // Skip if another room occupies this cell.
-                let occupied = graph.rooms().any(|r| r.id != id && r.pos == Some(trial));
-                if occupied {
+                if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
                     continue;
                 }
-
                 graph.set_pos(id, trial);
                 let s = render_overlap_stats(graph);
+                let score_trial = mapper::layout::room_side_score(graph, id);
+                graph.set_pos(id, orig); // restore; the winner is committed after the scan
                 if (s.0, s.1) < (base.0, base.1) {
-                    improved = true;
-                    break 'room_loop;
+                    let broken = score_orig.saturating_sub(score_trial);
+                    let key: Key = (s.0, broken, s.1, degree, id, move_idx);
+                    if best.as_ref().is_none_or(|(bk, _, _)| key < *bk) {
+                        best = Some((key, id, trial));
+                    }
                 }
-                // Restore original position.
-                graph.set_pos(id, orig);
             }
         }
 
-        if !improved {
-            break;
+        match best {
+            Some((_, id, trial)) => graph.set_pos(id, trial),
+            None => break,
         }
     }
 }
@@ -961,6 +965,40 @@ mod tests {
     use mapper::render::render;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn cleanup_clears_overlaps_without_knocking_aligned_rooms_off_row() {
+        // The A129 house: relayout aligns 74→25→26 on one row, but the rendered plan has
+        // illegal overlaps so cleanup_overlaps must nudge SOMETHING. A hint-aware cleanup clears
+        // the overlaps by moving a low-cost room (one whose hints are already distorted) instead
+        // of knocking the aligned 74/25/26 run off its row.
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16, 26, 27, 74, 75, 76, 77, 78, 79, 80, 81, 136, 143, 180, 193, 201, 203, 239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180, N, 81), (81, W, 180), (180, W, 78), (78, N, 143), (143, E, 77), (77, S, 74), (74, S, 76),
+            (76, W, 78), (143, W, 78), (78, S, 76), (76, N, 74), (74, E, 25), (25, W, 76), (74, W, 79), (79, E, 74),
+            (25, E, 26), (26, Up, 25), (78, E, 75), (77, E, 239), (239, N, 77), (77, Unknown, 180), (180, S, 80),
+            (80, W, 180), (80, E, 79), (79, S, 80), (79, N, 81), (81, E, 79), (80, S, 76), (76, Unknown, 180),
+            (79, Unknown, 180), (75, S, 81), (75, W, 78), (75, E, 77), (239, S, 77), (77, W, 75), (75, N, 143),
+            (143, S, 75), (26, Down, 27), (27, N, 136), (136, SW, 27), (27, Up, 26), (26, Unknown, 180),
+            (79, W, 203), (203, W, 193), (193, E, 203), (203, E, 79), (203, Up, 201), (201, Down, 203),
+        ] {
+            g.add_edge(o, d, dst);
+        }
+        mapper::layout::relayout_auto(&mut g);
+        cleanup_overlaps(&mut g, 3, 40);
+        // Overlaps cleared.
+        assert_eq!(render_overlap_stats(&g).0, 0, "cleanup must clear all illegal overlaps");
+        // The 74→E→25→E→26 run stays on one row.
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(p(74).1, p(25).1, "74 and 25 must stay on one row: 74={:?} 25={:?}", p(74), p(25));
+        assert_eq!(p(25).1, p(26).1, "25 and 26 must stay on one row: 25={:?} 26={:?}", p(25), p(26));
+        assert!(p(25).0 > p(74).0 && p(26).0 > p(25).0, "row order 74<25<26 in x");
+    }
 
     #[test]
     fn cell_to_screen_respects_scroll_and_offarea() {
