@@ -224,14 +224,28 @@ pub(crate) fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<
     components
 }
 
-/// Largest Chebyshev radius searched for a direction-aware bump cell before falling
-/// back to a plain spiral. Maps are small (≤ a few hundred rooms), so this stays cheap.
-const MAX_BUMP_R: i32 = 6;
+/// Largest distance searched along a chain's axis for a bump cell before falling back to a
+/// perpendicular spiral. Maps are small (≤ a few hundred rooms), so this stays cheap.
+const MAX_BUMP_SPAN: i32 = 16;
+
+/// True iff `actual` is on the correct SIDE of `expected`. Unlike `axis_sign_ok` (which
+/// demands `actual == 0` when `expected == 0`, i.e. exact cardinal alignment), a zero
+/// `expected` imposes NO constraint here. Used to score where to relocate a bumped room:
+/// we want to keep it on the right side of each neighbour, not perfectly axis-aligned
+/// (which is usually impossible for a many-edged room and is the layout's general
+/// distortion, not the bump's concern).
+fn axis_side_respected(actual: i32, expected: i32) -> bool {
+    match expected.cmp(&0) {
+        std::cmp::Ordering::Equal => true, // no preference on this axis
+        std::cmp::Ordering::Greater => actual > 0,
+        std::cmp::Ordering::Less => actual < 0,
+    }
+}
 
 /// Count how many of room `id`'s compass edges (to already-placed component neighbours)
-/// would be satisfied if `id` sat at `cell`. Uses the same per-axis sign test as
-/// `edge_is_satisfied`, so the score agrees with what the `distorted` flag will report.
-fn edges_satisfied_at(
+/// keep `id` on the correct SIDE of the neighbour if `id` sat at `cell` (see
+/// `axis_side_respected`). Higher = fewer directional hints trampled.
+fn edges_respected_at(
     graph: &MapGraph,
     index: &BTreeMap<RoomId, usize>,
     snapped: &[(i32, i32)],
@@ -256,7 +270,7 @@ fn edges_satisfied_at(
         } else {
             (cell.0 - op.0, cell.1 - op.1)
         };
-        if axis_sign_ok(actual.0, delta.0) && axis_sign_ok(actual.1, delta.1) {
+        if axis_side_respected(actual.0, delta.0) && axis_side_respected(actual.1, delta.1) {
             sat += 1;
         }
     }
@@ -271,12 +285,16 @@ fn contiguify(
     graph: &MapGraph,
 ) {
     // E/W chains → consecutive x on a shared row; N/S chains → consecutive y on a shared column.
-    // bump_foreign: relocate ALL non-chain rooms off `target`, leaving the cell free for the member.
-    // Each bumped room goes to the nearest free cell that preserves the MOST of its OWN compass
-    // edges (direction-aware) — so bumping a foreign room off a chain row does not trample a
-    // satisfied perpendicular hint (e.g. #180→S→#80). `target` is held occupied so a bumped room
-    // can never return to it, which also guarantees the loop terminates.
-    let bump_foreign = |snapped: &mut Vec<(i32, i32)>, target: (i32, i32), chain_idxs: &[usize]| {
+    // bump_foreign: relocate every non-chain room off `target`. The room is pushed ALONG the
+    // chain's axis — for an E/W chain along the row (its y kept), for an N/S chain along the
+    // column (its x kept) — to the nearest free cell off the member span. Keeping the
+    // perpendicular coordinate preserves the bumped room's perpendicular hints by construction
+    // (e.g. #180 stays between #81 above and #80 below, only shifting west off the chain).
+    // Among equidistant cells the one respecting more of the room's own compass edges wins
+    // (picks the better side). `target` is held occupied so a bumped room cannot return to it,
+    // which also guarantees the loop terminates. If the whole row/column is saturated within
+    // MAX_BUMP_SPAN, fall back to a perpendicular spiral.
+    let bump_foreign = |snapped: &mut Vec<(i32, i32)>, target: (i32, i32), chain_idxs: &[usize], horizontal: bool| {
         loop {
             let j = (0..snapped.len()).find(|&q| !chain_idxs.contains(&q) && snapped[q] == target);
             let Some(j) = j else { break };
@@ -284,31 +302,25 @@ fn contiguify(
                 (0..snapped.len()).filter(|&q| q != j).map(|q| snapped[q]).collect();
             occ.insert(target);
             let id = comp[j];
-            // Search rings of increasing Chebyshev radius; within the nearest ring that has any
-            // free cell, pick the one preserving the most of `id`'s edges, tie-broken by (y, x).
             let mut chosen = None;
-            for r in 1..=MAX_BUMP_R {
-                let mut ring: Vec<(i32, i32)> = Vec::new();
-                for dy in -r..=r {
-                    for dx in -r..=r {
-                        if dx.abs().max(dy.abs()) != r {
-                            continue;
-                        }
-                        let cand = (target.0 + dx, target.1 + dy);
-                        if !occ.contains(&cand) {
-                            ring.push(cand);
-                        }
-                    }
-                }
-                if let Some(&best) = ring.iter().max_by_key(|&&cand| {
-                    // max edges satisfied; tie-break toward the smaller (y, x) for determinism.
-                    (edges_satisfied_at(graph, index, snapped, id, cand), -cand.1, -cand.0)
+            for d in 1..=MAX_BUMP_SPAN {
+                let cands = if horizontal {
+                    [(target.0 - d, target.1), (target.0 + d, target.1)]
+                } else {
+                    [(target.0, target.1 - d), (target.0, target.1 + d)]
+                };
+                let free: Vec<(i32, i32)> = cands.into_iter().filter(|c| !occ.contains(c)).collect();
+                if let Some(&best) = free.iter().max_by_key(|&&c| {
+                    // Better side first (more of the room's compass hints respected), then the
+                    // lower (x, y) for determinism (prefers west, then north, on a tie).
+                    (edges_respected_at(graph, index, snapped, id, c), -c.0, -c.1)
                 }) {
                     chosen = Some(best);
                     break;
                 }
             }
-            snapped[j] = chosen.unwrap_or_else(|| nearest_free_cell(&occ, (target.0, target.1 + 1)));
+            let hint = if horizontal { (target.0, target.1 + 1) } else { (target.0 + 1, target.1) };
+            snapped[j] = chosen.unwrap_or_else(|| nearest_free_cell(&occ, hint));
         }
     };
     let mut snapped_v: Vec<(i32, i32)> = snapped.to_vec();
@@ -321,7 +333,7 @@ fn contiguify(
         let x0 = snapped_v[idxs[0]].0;
         for (k, &i) in idxs.iter().enumerate() {
             let target = (x0 + k as i32, y);
-            bump_foreign(&mut snapped_v, target, &idxs);
+            bump_foreign(&mut snapped_v, target, &idxs, true); // E/W chain → bump along the row
             snapped_v[i] = target;
         }
     }
@@ -334,7 +346,7 @@ fn contiguify(
         let y0 = snapped_v[idxs[0]].1;
         for (k, &i) in idxs.iter().enumerate() {
             let target = (x, y0 + k as i32);
-            bump_foreign(&mut snapped_v, target, &idxs);
+            bump_foreign(&mut snapped_v, target, &idxs, false); // N/S chain → bump along the column
             snapped_v[i] = target;
         }
     }
@@ -801,8 +813,12 @@ mod tests {
         relayout_auto(&mut g);
         let p80 = g.room(80).unwrap().pos.unwrap();
         let p180 = g.room(180).unwrap().pos.unwrap();
+        let p81 = g.room(81).unwrap().pos.unwrap();
+        // 80 is SOUTHEAST of 180 (180→S→80 and 80→W→180).
         assert!(p80.1 > p180.1, "80 must stay SOUTH of 180: 80={p80:?} 180={p180:?}");
         assert!(p80.0 > p180.0, "80 must stay EAST of 180: 80={p80:?} 180={p180:?}");
+        // 81 is NORTH of 180 (180→N→81) — the bump must not shove 180 up level with 81.
+        assert!(p81.1 < p180.1, "81 must stay NORTH of 180: 81={p81:?} 180={p180:?}");
         // No room overlap.
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
