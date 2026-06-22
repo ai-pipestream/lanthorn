@@ -304,17 +304,28 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         placed.insert(room.id, VRect { x: vx, y: vy, w: bw as i32 });
     }
 
-    // ── 2. Boxes zoom: draw line-art connectors along their assigned lanes ────
+    // ── 2. Stub/portal edges. At Boxes zoom render a stacked glyph+name badge in the
+    //       right gutter; multiple portals on one room stack down successive rows. Drawn
+    //       BEFORE the connectors so a routed line overwrites a colliding badge cell.
+    //       Compact zoom keeps its existing bare-label `draw_stub`.
+    let mut portal_stack: std::collections::HashMap<RoomId, u16> = std::collections::HashMap::new();
+    for edge in &rm.edges {
+        if edge.is_stub {
+            if boxes {
+                let stack = portal_stack.entry(edge.origin).or_insert(0);
+                draw_portal_badge(edge, &placed, *stack, off_x, off_y, area, buf);
+                *stack += 1;
+            } else {
+                draw_stub(edge, &placed, off_x, off_y, area, buf);
+            }
+        }
+    }
+
+    // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes (on top of
+    //       any portal badges they cross).
     let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
         arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf);
-    }
-
-    // Stub edges (translate + clip).
-    for edge in &rm.edges {
-        if edge.is_stub {
-            draw_stub(edge, &placed, off_x, off_y, area, buf);
-        }
     }
 
     // ── 3. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -706,6 +717,28 @@ fn portal_badge_text(dir: Direction, dest_label: Option<&str>) -> String {
         }
         _ => glyph.to_string(),
     }
+}
+
+/// Draw a portal badge (glyph + truncated target name) in the right gutter at Boxes zoom.
+/// `stack` is the badge's row offset below the box top, so multiple portals on one room
+/// stack down successive gutter rows. Drawn BEFORE the lane connectors so a routed line
+/// overwrites a colliding badge cell (the badge is informational and yields).
+fn draw_portal_badge(
+    edge: &RoutedEdge,
+    placed: &std::collections::HashMap<RoomId, VRect>,
+    stack: u16,
+    off_x: i32,
+    off_y: i32,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let Some(&origin_rect) = placed.get(&edge.origin) else {
+        return;
+    };
+    let badge = portal_badge_text(edge.dir, edge.dest_label.as_deref());
+    let lx = origin_rect.right() + off_x;
+    let ly = origin_rect.y + off_y + stack as i32;
+    put_str(buf, lx, ly, &badge, CONNECTOR_STYLE, area);
 }
 
 /// Draw a stub connector label in the top-right gutter cell outside the origin box.
@@ -1716,6 +1749,39 @@ mod tests {
     fn portal_badge_unknown_is_just_glyph() {
         // Unknown has no target semantics → bare "?" even with a dest.
         assert_eq!(portal_badge_text(Direction::Unknown, Some("West of House")), "?");
+    }
+
+    #[test]
+    fn portal_badges_render_glyph_name_and_stack() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Attic".into());
+        g.upsert_room(3, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1)); // placed targets (route_all skips unplaced dests)
+        g.set_pos(3, (0, 1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(1, Direction::Down, 3);
+        let rm = render(&g);
+        let state = AppState::default(); // Boxes zoom, scroll (0,0): room 1's gutter is on-screen
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let find = |sym: &str| -> Option<(u16, u16)> {
+            (0..area.height)
+                .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+                .find(|&(x, y)| buf.cell((x, y)).map(|c| c.symbol() == sym).unwrap_or(false))
+        };
+        let up = find("↑").expect("an up-portal badge must render");
+        let down = find("↓").expect("a down-portal badge must render");
+        // Stacked on successive rows in the same gutter column.
+        assert_eq!(up.0, down.0, "stacked portals share the gutter column");
+        assert_ne!(up.1, down.1, "stacked portals occupy different rows");
+        // The target name follows the glyph and a space: badge "↑ Attic" → 'A' at glyph_col+2.
+        let name_start = buf.cell((up.0 + 2, up.1)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(name_start, "A", "target name 'Attic' follows the glyph; got '{name_start}'");
     }
 
 }
