@@ -42,9 +42,16 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
             }
         }
         None => {
-            // Portal / unknown: nearest free cell starting from prev.
+            // Up/Down get a default diagonal home (NW / SW); other non-planar directions
+            // (In/Out/Unknown) take the nearest free cell near prev. Either way this is a
+            // fallback — the early return above already left any placed target untouched.
+            let ideal = match dir {
+                Direction::Up => (prev_pos.0 - 1, prev_pos.1 - 1),   // NW
+                Direction::Down => (prev_pos.0 - 1, prev_pos.1 + 1), // SW
+                _ => prev_pos,
+            };
             let occ = occupied_cells(graph);
-            let cell = nearest_free_cell(&occ, prev_pos);
+            let cell = nearest_free_cell(&occ, ideal);
             graph.set_pos(dest, cell);
         }
     }
@@ -151,5 +158,30 @@ mod tests {
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: std::collections::BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "no overlap with stacked blockers");
+    }
+
+    #[test]
+    fn up_room_defaults_north_west() {
+        let mut g = g_with(1, (0, 0));
+        g.upsert_room(2, "attic".into());
+        place_incremental(&mut g, 1, 2, Direction::Up);
+        assert_eq!(g.room(2).unwrap().pos, Some((-1, -1)), "Up target defaults NW of origin");
+    }
+
+    #[test]
+    fn down_room_defaults_south_west() {
+        let mut g = g_with(1, (0, 0));
+        g.upsert_room(2, "cellar".into());
+        place_incremental(&mut g, 1, 2, Direction::Down);
+        assert_eq!(g.room(2).unwrap().pos, Some((-1, 1)), "Down target defaults SW of origin");
+    }
+
+    #[test]
+    fn up_room_already_placed_is_not_moved() {
+        let mut g = g_with(1, (0, 0));
+        g.upsert_room(2, "attic".into());
+        g.set_pos(2, (5, 5));
+        place_incremental(&mut g, 1, 2, Direction::Up);
+        assert_eq!(g.room(2).unwrap().pos, Some((5, 5)), "fallback only — placed target untouched");
     }
 }
