@@ -51,6 +51,34 @@ pub fn build_axis_constraints(graph: &MapGraph, ids: &[RoomId], gap: f64) -> Axi
     let mut y_adj = vec![Vec::new(); n];
     let mut dropped = BTreeSet::new();
 
+    // Chain equalities: reciprocal E/W chains share a row (equality on Y); reciprocal N/S
+    // chains share a column (equality on X). Equality coord[a]==coord[b] is BOTH a≤b and
+    // b≤a with gap 0 — block-merge collapses them to one coordinate when either is violated.
+    // Both legs are added UNCONDITIONALLY: a gap-0 two-leg cycle is always feasible. They go
+    // into *_adj so a later DIRECTIONAL constraint contradicting the equality is the one
+    // creates_cycle drops (→ distorted). Added before the directional loop.
+    let chains = super::chains::detect_chains(graph);
+    fn add_equality(a: usize, b: usize, adj: &mut [Vec<usize>], out: &mut Vec<Constraint>) {
+        adj[a].push(b);
+        adj[b].push(a);
+        out.push(Constraint { left: a, right: b, gap: 0.0 });
+        out.push(Constraint { left: b, right: a, gap: 0.0 });
+    }
+    for members in &chains.ew_members {
+        for w in members.windows(2) {
+            if let (Some(&a), Some(&b)) = (index.get(&w[0]), index.get(&w[1])) {
+                add_equality(a, b, &mut y_adj, &mut y); // E/W chain → equal Y
+            }
+        }
+    }
+    for members in &chains.ns_members {
+        for w in members.windows(2) {
+            if let (Some(&a), Some(&b)) = (index.get(&w[0]), index.get(&w[1])) {
+                add_equality(a, b, &mut x_adj, &mut x); // N/S chain → equal X
+            }
+        }
+    }
+
     for (ci, conn) in graph.connections().iter().enumerate() {
         let (Some(&o), Some(&d)) = (index.get(&conn.origin), index.get(&conn.dest)) else {
             continue;

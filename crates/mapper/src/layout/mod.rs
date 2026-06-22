@@ -727,6 +727,52 @@ mod tests {
     }
 
     #[test]
+    fn reciprocal_ew_pair_shares_a_row() {
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1); // reciprocal E/W → same row
+        relayout_auto(&mut g);
+        let p1 = g.room(1).unwrap().pos.unwrap();
+        let p2 = g.room(2).unwrap().pos.unwrap();
+        assert_eq!(p1.1, p2.1, "reciprocal E/W pair must share a row: {p1:?} {p2:?}");
+        assert!(p2.0 > p1.0, "and 2 is east of 1");
+    }
+
+    #[test]
+    fn reciprocal_ns_pair_shares_a_column() {
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1); // reciprocal N/S → same column
+        relayout_auto(&mut g);
+        let p1 = g.room(1).unwrap().pos.unwrap();
+        let p2 = g.room(2).unwrap().pos.unwrap();
+        assert_eq!(p1.0, p2.0, "reciprocal N/S pair must share a column");
+        assert!(p2.1 < p1.1, "and 2 is north of 1");
+    }
+
+    #[test]
+    fn three_room_ew_chain_all_share_one_row() {
+        // 1↔2↔3 reciprocal E/W chain → all three on EXACTLY one row. A single ≤ (gap 0)
+        // would let the row drift across three rooms; both-leg equality pins them equal.
+        let mut g = crate::graph::MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        for (o, d, dst) in [
+            (1, Direction::E, 2), (2, Direction::W, 1),
+            (2, Direction::E, 3), (3, Direction::W, 2),
+        ] { g.add_edge(o, d, dst); }
+        relayout_auto(&mut g);
+        let y1 = g.room(1).unwrap().pos.unwrap().1;
+        let y2 = g.room(2).unwrap().pos.unwrap().1;
+        let y3 = g.room(3).unwrap().pos.unwrap().1;
+        assert_eq!(y1, y2, "rooms 1 and 2 share a row");
+        assert_eq!(y2, y3, "rooms 2 and 3 share a row");
+    }
+
+    #[test]
     fn large_graph_uses_sort_fallback_without_overlap() {
         // A chain longer than MAX_NODES forces the fallback path; it must still place
         // every room with no overlap (and not run the O(n²) solve).
