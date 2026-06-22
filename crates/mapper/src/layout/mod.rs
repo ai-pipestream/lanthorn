@@ -34,7 +34,9 @@ mod incremental;
 mod vpsc;
 mod constraints;
 mod stress;
+mod chains;
 pub use incremental::place_incremental;
+pub use chains::{detect_chains, Chains};
 
 /// Separation gap and ideal edge length (in grid cells).
 const GAP: f64 = 1.0;
