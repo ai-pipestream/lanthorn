@@ -231,10 +231,12 @@ git commit -m "feat(mapper): detect bidirectional cardinal chains (E/W rows, N/S
 - Test: `crates/mapper/src/layout/constraints.rs` `#[cfg(test)]` and an integration test in `mod.rs`.
 
 **Interfaces:**
-- Consumes: `super::chains::detect_chains` (Task 1), the existing `creates_cycle`, `vpsc::Constraint`.
-- Produces: `build_axis_constraints` keeps its signature `(graph, ids, gap) -> AxisConstraints` but now also emits, for chain members within `ids`, **Y-equality** for E/W chains and **X-equality** for N/S chains (each equality = two `gap=0` separations, cycle-checked).
+- Consumes: `super::chains::detect_chains` (Task 1), `vpsc::Constraint`, and the existing `*_adj` precedence graphs that the directional loop guards with `creates_cycle`.
+- Produces: `build_axis_constraints` keeps its signature `(graph, ids, gap) -> AxisConstraints` but now also emits, for chain members within `ids`, **Y-equality** for E/W chains and **X-equality** for N/S chains — each equality = two `gap=0` separations (`a≤b` AND `b≤a`).
 
-**Algorithm:** equality `coord[a] == coord[b]` is two constraints `a≤b` and `b≤a` (gap 0). Add equalities for each adjacent pair of a chain's members (sorted), on the perpendicular axis: E/W chain → equality on **Y**; N/S chain → equality on **X**. Run each through the SAME `creates_cycle` guard already used for directional constraints (so a contradictory equality is dropped). Equalities are added **before** the directional loop so a chain row/column is established first.
+**Algorithm:** equality `coord[a] == coord[b]` is expressed to VPSC as **both** `a≤b` and `b≤a` with `gap=0`. `solve_axis` (Dwyer block-merge) merges two variables into one block only when a constraint is *violated*; a lone `a≤b` is satisfied whenever `a`'s desired ≤ `b`'s, so it does NOT force an equal coordinate. **Both legs are required** — whichever is violated triggers the merge, collapsing them to one block (offset diff = gap = 0). Add equalities for each adjacent pair of a chain's members (sorted), on the perpendicular axis: E/W chain → equality on **Y**; N/S chain → equality on **X**.
+
+**Both legs are added UNCONDITIONALLY** (no `creates_cycle` guard on an equality's own two legs). A gap-0 two-leg cycle is always feasible — block-merge collapses it to equal positions; it can never make VPSC infeasible (only positive-gap cycles can). The legs ARE pushed into the axis's `*_adj` precedence graph, and equalities are added **BEFORE** the directional loop. This is the conflict handling: a later *directional* constraint that contradicts an established equality (e.g. a chain-mate forced strictly above/below on the equalized axis) will close a positive cycle through the equality's back-edge, so `creates_cycle` drops that **directional** connection and records it in `dropped` → `distorted`. (So the spec's "contradiction → distorted" holds, but the dropped party is the conflicting directional edge, not the equality — equalities, being gap-0, are never the infeasible party and are never dropped.)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -267,11 +269,29 @@ git commit -m "feat(mapper): detect bidirectional cardinal chains (E/W rows, N/S
         assert_eq!(p1.0, p2.0, "reciprocal N/S pair must share a column");
         assert!(p2.1 < p1.1, "and 2 is north of 1");
     }
+
+    #[test]
+    fn three_room_ew_chain_all_share_one_row() {
+        // 1↔2↔3 reciprocal E/W chain → all three on EXACTLY one row. A single ≤ (gap 0)
+        // would let the row drift across three rooms; both-leg equality pins them equal.
+        let mut g = crate::graph::MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        for (o, d, dst) in [
+            (1, Direction::E, 2), (2, Direction::W, 1),
+            (2, Direction::E, 3), (3, Direction::W, 2),
+        ] { g.add_edge(o, d, dst); }
+        relayout_auto(&mut g);
+        let y1 = g.room(1).unwrap().pos.unwrap().1;
+        let y2 = g.room(2).unwrap().pos.unwrap().1;
+        let y3 = g.room(3).unwrap().pos.unwrap().1;
+        assert_eq!(y1, y2, "rooms 1 and 2 share a row");
+        assert_eq!(y2, y3, "rooms 2 and 3 share a row");
+    }
 ```
 
 - [ ] **Step 2: Run to confirm failure**
 
-Run: `cargo test -p mapper reciprocal_ew_pair_shares_a_row reciprocal_ns_pair_shares_a_column 2>&1 | tail -15`
+Run: `cargo test -p mapper reciprocal_ew_pair_shares_a_row reciprocal_ns_pair_shares_a_column three_room_ew_chain_all_share_one_row 2>&1 | tail -15`
 Expected: FAIL — without equality, stress need not place them on the exact same row/column.
 
 - [ ] **Step 3: Add chain equalities in `build_axis_constraints`**
@@ -282,22 +302,18 @@ directional loop, insert:
 
 ```rust
     // Chain equalities: reciprocal E/W chains share a row (equality on Y); reciprocal N/S
-    // chains share a column (equality on X). Equality coord[a]==coord[b] = a≤b and b≤a
-    // (gap 0). Cycle-closing equalities are skipped (graceful conflict handling).
+    // chains share a column (equality on X). Equality coord[a]==coord[b] is BOTH a≤b and
+    // b≤a with gap 0 — block-merge collapses them to one coordinate when either is violated.
+    // Both legs are added UNCONDITIONALLY: a gap-0 two-leg cycle is always feasible. They go
+    // into *_adj so a later DIRECTIONAL constraint contradicting the equality is the one
+    // creates_cycle drops (→ distorted). Added before the directional loop.
     let chains = super::chains::detect_chains(graph);
-    let mut add_equality = |left: usize, right: usize,
-                            adj: &mut Vec<Vec<usize>>, out: &mut Vec<Constraint>| {
-        // a ≤ b
-        if !creates_cycle(adj, left, right) {
-            adj[left].push(right);
-            out.push(Constraint { left, right, gap: 0.0 });
-        }
-        // b ≤ a
-        if !creates_cycle(adj, right, left) {
-            adj[right].push(left);
-            out.push(Constraint { left: right, right: left, gap: 0.0 });
-        }
-    };
+    fn add_equality(a: usize, b: usize, adj: &mut [Vec<usize>], out: &mut Vec<Constraint>) {
+        adj[a].push(b);
+        adj[b].push(a);
+        out.push(Constraint { left: a, right: b, gap: 0.0 });
+        out.push(Constraint { left: b, right: a, gap: 0.0 });
+    }
     for members in &chains.ew_members {
         for w in members.windows(2) {
             if let (Some(&a), Some(&b)) = (index.get(&w[0]), index.get(&w[1])) {
@@ -314,7 +330,7 @@ directional loop, insert:
     }
 ```
 
-(`index`, `x_adj`, `y_adj`, `x`, `y` are the locals already declared in `build_axis_constraints`. The closure borrows them per call; if the borrow checker objects to the `&mut` closure capturing, inline the two `add_equality` bodies instead of using a closure.)
+(`index`, `x_adj`, `y_adj`, `x`, `y` are the locals already declared in `build_axis_constraints`. `add_equality` is a plain `fn` — it takes its `adj`/`out` by `&mut` parameter so there is no closure-capture borrow conflict. `index` is a `HashMap<RoomId, usize>` here; lookup-only use is deterministic.)
 
 - [ ] **Step 4: Run to confirm pass + full suite**
 
@@ -607,7 +623,7 @@ git commit -m "feat(app): Ctrl+A toggles in-box alignment codes (R/C chain ids)"
 
 **Spec coverage:**
 - ✅ Chain detection (Task 1) — `detect_chains`, deterministic, reciprocal-only.
-- ✅ Alignment via equality constraints (Task 2) — E/W→row, N/S→column, cycle-dropped → distorted.
+- ✅ Alignment via equality constraints (Task 2) — E/W→row, N/S→column; both gap-0 legs (block-merge equality); contradicting directional dropped → distorted.
 - ✅ Contiguity via compaction + foreign bump (Task 3) — consecutive cells, `place_preserving_alignment`/`nearest_free_cell` keep no-overlap.
 - ✅ Conflict handling — `creates_cycle` guard on equalities (Task 2), members-share-axis check skips dropped equalities (Task 3).
 - ✅ Rules display: dump legend `align=`/`dropped=` (Task 4); in-box `R/C` code + `Ctrl+A` toggle, byte-identical when off (Task 5).
