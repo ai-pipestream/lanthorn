@@ -16,8 +16,9 @@
 //!    `constraints.rs`), seeded from the longest-path sort (`sort.rs`). Cycle-closing
 //!    compass constraints are dropped (and the affected edges flagged distorted).
 //!    For graphs above `MAX_NODES`, falls back to the **longest-path sort** directly.
-//!    In both cases, components are packed left-to-right, residual collisions resolved
-//!    with `nearest_free_cell`, and the lowest-id room anchored at (0,0).
+//!    In both cases, components are packed left-to-right and the lowest-id room anchored
+//!    at (0,0); residual collisions are resolved on the grid, keeping an aligned room on
+//!    its row/column where possible (`place_preserving_alignment`) before spiralling.
 //!
 //! After either regime, `mark_distorted` flags every compass edge whose final grid
 //! geometry contradicts its direction. (Connector routing and any render-aware
@@ -96,6 +97,40 @@ pub fn nearest_free_cell(occupied: &BTreeSet<(i32, i32)>, from: (i32, i32)) -> (
         }
     }
     unreachable!("infinite grid always has a free cell")
+}
+
+/// Resolve a collision while preserving an aligned axis. When the room is free on Y
+/// (its row is meaningful) but constrained on X, search ALONG X keeping the row; when
+/// free on X but constrained on Y, search along Y keeping the column. Otherwise (free on
+/// both — e.g. portal-only — or neither) fall back to the spiral `nearest_free_cell`.
+/// This keeps an aligned cardinal chain on one row/column under collision resolution.
+fn place_preserving_alignment(
+    occupied: &BTreeSet<(i32, i32)>,
+    from: (i32, i32),
+    row_aligned: bool,
+    col_aligned: bool,
+) -> (i32, i32) {
+    if !occupied.contains(&from) {
+        return from;
+    }
+    if row_aligned && !col_aligned {
+        for d in 1.. {
+            for cand in [(from.0 - d, from.1), (from.0 + d, from.1)] {
+                if !occupied.contains(&cand) {
+                    return cand;
+                }
+            }
+        }
+    } else if col_aligned && !row_aligned {
+        for d in 1.. {
+            for cand in [(from.0, from.1 - d), (from.0, from.1 + d)] {
+                if !occupied.contains(&cand) {
+                    return cand;
+                }
+            }
+        }
+    }
+    nearest_free_cell(occupied, from)
 }
 
 /// Returns true iff the connection's geometry is satisfied by the current room positions.
@@ -271,7 +306,8 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         // crisp — the same alignment the sort fallback applies.
         let mut axs: Vec<i32> = snapped.iter().map(|p| p.0).collect();
         let mut ays: Vec<i32> = snapped.iter().map(|p| p.1).collect();
-        sort::align_free_axes(graph, &index, &mut axs, &mut ays);
+        let (x_constrained, y_constrained) =
+            sort::align_free_axes(graph, &index, &mut axs, &mut ays);
         for (i, p) in snapped.iter_mut().enumerate() {
             *p = (axs[i], ays[i]);
         }
@@ -284,10 +320,15 @@ pub fn relayout_auto(graph: &mut MapGraph) {
             p.1 -= min_y;
         }
 
-        // Resolve residual same-cell collisions in ascending room-id order.
+        // Resolve residual same-cell collisions in ascending room-id order. Keep an
+        // axis-aligned room on its row/column (shift ALONG the aligned axis) instead of
+        // spiraling off it, so collision resolution doesn't re-distort an aligned chain
+        // (e.g. #193 bumped off #203's row by #180).
         let mut max_x_used = pack_x;
         for (i, &id) in comp.iter().enumerate() {
-            let cell = nearest_free_cell(&occupied, snapped[i]);
+            let row_aligned = !y_constrained[i];
+            let col_aligned = !x_constrained[i];
+            let cell = place_preserving_alignment(&occupied, snapped[i], row_aligned, col_aligned);
             occupied.insert(cell);
             final_pos.insert(id, cell);
             max_x_used = max_x_used.max(cell.0);
@@ -651,25 +692,25 @@ mod tests {
         assert_eq!(cells.len(), set.len(), "no room overlap under the constraint engine");
     }
 
-
-
     #[test]
     fn constraint_engine_aligns_cardinal_chains() {
-        // The alignment pass on the stress output straightens E/W chains whose ends are
-        // free on the row axis (here 25→E→26 and 79→W→203 land on one row) and cuts total
-        // distortion below the un-aligned constraint baseline (30 on this graph).
+        // The alignment pass straightens E/W chains whose ends are free on the row axis
+        // (25→E→26, 79→W→203), and the axis-preserving collision resolver keeps an aligned
+        // room on its row even when its cell is taken — so 203→W→193 stays clean (#193
+        // shifts ALONG #203's row past #180 instead of bumping off it). Total distortion
+        // falls to 26 (from 30 un-aligned).
         //
-        // It cannot straighten every cardinal edge on this map: some rooms are pulled by
-        // CONFLICTING constraints (e.g. #25 wants both #74's and #76's row, but 74 S 76
-        // forces those apart) or bumped off-row by a genuine cell collision (#193 vs #180).
-        // Those residuals are inherent to a non-Euclidean graph, not an alignment failure.
+        // It still cannot straighten every cardinal edge: a room pulled by CONFLICTING
+        // constraints (e.g. #25 wants both #74's and #76's row, but 74 S 76 forces those
+        // apart) must distort one of them — inherent to a non-Euclidean graph.
         let mut g = a129_house_graph();
         relayout_auto(&mut g);
         let e = |o, d| g.connections().iter().find(|c| c.origin == o && c.dest == d).unwrap();
         assert!(!e(25, 26).distorted, "25→E→26 aligns onto one row");
         assert!(!e(79, 203).distorted, "79→W→203 aligns onto one row");
+        assert!(!e(203, 193).distorted, "203→W→193: #193 holds #203's row (collision shifts along it)");
         let distorted = g.connections().iter().filter(|c| c.distorted).count();
-        assert!(distorted <= 28, "alignment cuts distortion below the un-aligned baseline; got {distorted}");
+        assert!(distorted <= 26, "alignment + axis-preserving collision cut distortion to 26; got {distorted}");
     }
 
     #[test]

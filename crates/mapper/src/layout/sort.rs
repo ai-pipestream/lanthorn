@@ -81,12 +81,15 @@ const ALIGN_PASSES: usize = 4;
 /// Y-free node with ≥1 E/W neighbour takes the lower-median of those neighbours' Y.
 /// Symmetric for X with N/S edges. Only free nodes move, so no same-axis ordering
 /// is violated. Deterministic: dense-index order, integer lower-median, fixed passes.
+/// Returns `(x_constrained, y_constrained)` per dense index: whether each room has any
+/// compass edge fixing its x / y. A room "free" on an axis was placed there by this pass
+/// (or by stress), so callers can keep it on that row/column during collision resolution.
 pub(crate) fn align_free_axes(
     graph: &MapGraph,
     index: &BTreeMap<RoomId, usize>,
     xs: &mut [i32],
     ys: &mut [i32],
-) {
+) -> (Vec<bool>, Vec<bool>) {
     let n = xs.len();
     let mut x_constrained = vec![false; n];
     let mut y_constrained = vec![false; n];
@@ -145,6 +148,7 @@ pub(crate) fn align_free_axes(
             }
         }
     }
+    (x_constrained, y_constrained)
 }
 
 /// Full per-component layering, packing, overlap resolution, and origin anchor.
