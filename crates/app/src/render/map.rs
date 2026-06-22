@@ -327,9 +327,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         draw_room(room, state, zoom, sx, sy, area, buf);
     }
 
-    // Portal-icon overlay (Boxes zoom): directional icons on the right interior column.
-    // Drawn after the rooms so icons sit on the box interior. (Task 2 turns the `false`
-    // into `state.show_portal_labels` to render destination names.)
+    // Portal-icon overlay (Boxes zoom), drawn after the rooms so icons sit on the box. In
+    // normal view the icons go on the interior right column; in portal view (show_portal_labels)
+    // they move onto the border and the destination names float outside the box.
     if boxes {
         draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
     }
@@ -971,7 +971,7 @@ fn draw_box_room(
     }
     put_char(buf, sx + w - 1, sy, tr, style, area);
 
-    // Inner rows (h=5 → rows 1, 2, 3 are interior: 1=label, 2=#id, 3=blank/align-overlay)
+    // Inner rows (h=5 → rows 1, 2, 3 are interior: 1=name wrap, 2=name wrap, 3=#id + align)
     for dy in 1..h - 1 {
         put_char(buf, sx, sy + dy, vert, style, area);
         // Fill interior with spaces (for background/style)
