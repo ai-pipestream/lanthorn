@@ -116,6 +116,10 @@ destination, and the **destination names float outside** the box:
 - **Boxes zoom only.** Compact keeps its existing bare-label `draw_stub`; Overview is unchanged.
 - **Layer-ready:** icons + `dest_label` identify each target room (id resolvable, name shown).
 
+#### Up/Down spatial default + dotted connector
+- **Default placement (fallback):** at discovery, an **Up** target defaults to **NW** of its origin and a **Down** target to **SW** (`place_incremental`'s non-planar branch). Fallback only — a target already positioned by a compass edge is never moved. In/Out/Unknown keep the nearest-free-cell placement.
+- **Dotted connector:** when no compass connector already joins the pair, draw a dotted line for the Up/Down link — leaving the origin's **north** side (Up) or **south** side (Down) and routing to the target. The `↑`/`↓` icons stay (the icon always marks the direction; the dotted line adds the spatial link). A reciprocal Up/Down pair is drawn once (from the up side). The dotted line carries no arrowhead and is drawn in both views (it is a line, not an arrowhead).
+
 ### Components touched
 - `mapper`: unchanged — `dest_label` (Some target name for stubs) already lands on stub edges. (done)
 - `app/state.rs`: `show_portal_labels: bool` (default false), mirroring `show_alignment`. (done)
