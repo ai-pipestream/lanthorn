@@ -336,7 +336,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // Drawn after the rooms so icons sit on the box interior. (Task 2 turns the `false`
     // into `state.show_portal_labels` to render destination names.)
     if boxes {
-        draw_portal_icons(rm, &placed, state, state.show_portal_labels, off_x, off_y, area, buf);
+        draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
     }
 
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -755,12 +755,12 @@ fn draw_portal_icons(
     placed: &std::collections::HashMap<RoomId, VRect>,
     state: &AppState,
     show_labels: bool,
-    off_x: i32,
-    off_y: i32,
+    offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
 ) {
     use std::collections::HashMap;
+    let (off_x, off_y) = offset;
     // Per room, the chosen (glyph, dest_label) for each of the 3 slots; mid slot by precedence.
     let mut chosen: HashMap<RoomId, PortalSlots<'_>> = HashMap::new();
     let mut mid_rank: HashMap<RoomId, u8> = HashMap::new();
@@ -792,7 +792,9 @@ fn draw_portal_icons(
         for (slot, cell) in slots.iter().enumerate() {
             let Some((glyph, label)) = cell else { continue };
             let row = rect.y + 1 + slot as i32;
-            if show_labels {
+            // Unknown portals have no target semantics → only the "?" glyph, never a
+            // destination name (avoids the misleading "West of ?").
+            if show_labels && *glyph != PORTAL_UNKNOWN {
                 if let Some(name) = label {
                     let n: String = name.chars().take(7).collect();
                     let text = format!("{n:>7} {glyph}");
@@ -1876,6 +1878,30 @@ mod tests {
         assert!(on.contains("Attic"), "toggled on: up-portal destination on row 1; got '{on}'");
         assert!(on.ends_with("↑"), "icon stays pinned at the far-right cell; got '{on}'");
         assert!(!off.contains("Attic"), "toggled off: no destination name; got '{off}'");
+    }
+
+    #[test]
+    fn unknown_portal_shows_no_destination_name() {
+        // Unknown-direction portals have no target semantics: even with labels toggled ON the
+        // mid slot shows only the "?" glyph, never a destination name. Regression: an Unknown
+        // edge to "West of House" rendered the misleading "West of ?".
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "West of House".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Unknown, 2);
+        let rm = render(&g);
+        let mut state = AppState::default();
+        state.show_portal_labels = true;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
+        assert_eq!(sym(9, 2), "?", "Unknown portal shows just the ? glyph in the mid slot");
+        let row2: String = (1u16..=9).map(|x| sym(x, 2)).collect();
+        assert!(!row2.contains("West"), "Unknown portal must not show a destination name; got '{row2}'");
     }
 
 }
