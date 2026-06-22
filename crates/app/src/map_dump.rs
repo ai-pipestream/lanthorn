@@ -21,7 +21,7 @@ use mapper::graph::MapGraph;
 use mapper::layout::detect_chains;
 use mapper::render::render;
 
-use crate::render::map::{boxes_axes, render_map};
+use crate::render::map::{boxes_axes, portal_glyph, render_map};
 use crate::state::{AppState, Zoom};
 
 /// Max dump buffer dimension (cells) to bound memory on very large maps.
@@ -172,6 +172,22 @@ pub fn render_dump(graph: &MapGraph) -> String {
         out.push_str(&format!("EDGE {} {} {}{}\n", c.origin, dir_str(c.dir), c.dest, dist));
     }
 
+    let portals: Vec<String> = conns
+        .iter()
+        .filter(|c| grid_offset(c.dir).is_none())
+        .map(|c| {
+            let name = graph.room(c.dest).map(|r| r.label().to_string()).unwrap_or_default();
+            format!("PORTAL {} {} #{} {}", c.origin, portal_glyph(c.dir), c.dest, name)
+        })
+        .collect();
+    if !portals.is_empty() {
+        out.push_str("#\n# === PORTALS (origin glyph #target name) ===\n");
+        for line in &portals {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+
     out.push_str("#\n# === MAP (#id = room, lines = connectors, ▶◀▲▼ = exits) ===\n");
     out.push_str(&ascii_map(graph));
     out.push_str("\n#\n# Annotate problems below — lines starting with # are comments:\n#\n");
@@ -302,6 +318,19 @@ mod tests {
         assert!(
             right_corners >= 6,
             "expected ≥6 right-border corners (one per room), got {right_corners}; dump may be clipped:\n{dump}",
+        );
+    }
+
+    #[test]
+    fn dump_portal_legend_shows_glyph_id_name() {
+        let mut m = Mapper::default();
+        m.observe(1, "Cellar", None);
+        m.observe(2, "Attic", Some(Direction::Up)); // edge 1 →Up→ 2, both placed
+        let dump = render_dump(&m.graph);
+        assert!(dump.contains("# === PORTALS"), "portal legend section present:\n{dump}");
+        assert!(
+            dump.contains("PORTAL 1 ↑ #2 Attic"),
+            "portal line shows origin, glyph, target id and full name:\n{dump}"
         );
     }
 }
