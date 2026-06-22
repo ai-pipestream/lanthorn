@@ -21,12 +21,14 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
         None => return, // caller guarantees prev is placed; defensive no-op
     };
 
-    // Up/Down are placed as cardinal moves — directly north / south — so an occupant of the
-    // target cell is pushed aside (shift-beyond), exactly like a real N/S move. Other non-planar
-    // directions (In/Out/Unknown) have no spatial offset.
+    // Up/Down are a soft directional HINT: a newly discovered up/down room prefers the cell
+    // directly north / south, but it yields (nearest free cell) instead of pushing rooms aside,
+    // and never overrides a compass placement. Other non-planar directions (In/Out/Unknown) have
+    // no spatial offset.
+    let updown = matches!(dir, Direction::Up | Direction::Down);
     let delta = grid_offset(dir).or(match dir {
-        Direction::Up => Some((0, -1)),  // directly north
-        Direction::Down => Some((0, 1)), // directly south
+        Direction::Up => Some((0, -1)),  // hint: directly north
+        Direction::Down => Some((0, 1)), // hint: directly south
         _ => None,
     });
     match delta {
@@ -37,9 +39,10 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
                 graph.set_pos(dest, ideal);
                 return;
             }
-            // Occupied. Cardinal → shift-beyond opens the ideal cell.
+            // Occupied. A real cardinal compass move shifts rooms beyond aside to open the ideal
+            // cell; an up/down hint (or a diagonal) instead yields to the nearest free cell.
             let is_cardinal = (delta.0 == 0) ^ (delta.1 == 0);
-            if is_cardinal {
+            if is_cardinal && !updown {
                 shift_beyond(graph, ideal, delta);
                 graph.set_pos(dest, ideal);
             } else {
@@ -178,19 +181,22 @@ mod tests {
     }
 
     #[test]
-    fn up_room_pushes_blocker_north() {
-        // prev at (0,0); a blocker already sits directly north at (0,-1).
+    fn up_room_yields_to_blocker_without_pushing() {
+        // prev at (0,0); a blocker already sits directly north at (0,-1). An up/down HINT must
+        // YIELD to the nearest free cell, never push the blocker aside (that is the absolute
+        // cardinal behavior, which up/down no longer use).
         let mut g = g_with(1, (0, 0));
         g.upsert_room(9, "blocker".into());
         g.set_pos(9, (0, -1));
         g.upsert_room(2, "attic".into());
         place_incremental(&mut g, 1, 2, Direction::Up);
-        // The Up room lands truthfully directly north; the blocker is shifted further north.
-        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)), "Up room placed directly north");
-        assert_eq!(g.room(9).unwrap().pos, Some((0, -2)), "blocker pushed beyond");
+        assert_eq!(g.room(9).unwrap().pos, Some((0, -1)), "blocker is NOT pushed (hint yields)");
+        let p2 = g.room(2).unwrap().pos.unwrap();
+        assert_ne!(p2, (0, -1), "up room takes a different (nearest free) cell");
+        assert_ne!(p2, (0, 0), "up room is not on prev");
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: std::collections::BTreeSet<_> = cells.iter().collect();
-        assert_eq!(cells.len(), set.len(), "no overlap after push");
+        assert_eq!(cells.len(), set.len(), "no overlap");
     }
 
     #[test]
