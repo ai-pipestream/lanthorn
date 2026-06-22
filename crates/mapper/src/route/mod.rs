@@ -142,6 +142,46 @@ fn build_points_orient(
     pts
 }
 
+/// If `a` and `b` sit on the same room row/column, the edge's exit faces straight toward `b`,
+/// and EVERY intervening room cell is empty, return the direct doubled-coord polyline (running
+/// along the room row/column, no channel dip) plus the facing entry side. The run is on even
+/// coords so it carries no lane — exactly like the adjacent `ea==eb` short-circuit, just across
+/// an empty gap. Returns None when a dip is required (rooms not aligned, gap occupied, or the
+/// exit doesn't face the other room).
+fn straight_shot(
+    a: (i32, i32),
+    exit: Side,
+    b: (i32, i32),
+    occupied: &std::collections::BTreeSet<(i32, i32)>,
+) -> Option<(Side, Vec<(i32, i32)>)> {
+    let (entry, clear) = match exit {
+        Side::Right if a.1 == b.1 && b.0 > a.0 => {
+            (Side::Left, ((a.0 + 1)..b.0).all(|x| !occupied.contains(&(x, a.1))))
+        }
+        Side::Left if a.1 == b.1 && b.0 < a.0 => {
+            (Side::Right, ((b.0 + 1)..a.0).all(|x| !occupied.contains(&(x, a.1))))
+        }
+        Side::Bottom if a.0 == b.0 && b.1 > a.1 => {
+            (Side::Top, ((a.1 + 1)..b.1).all(|y| !occupied.contains(&(a.0, y))))
+        }
+        Side::Top if a.0 == b.0 && b.1 < a.1 => {
+            (Side::Bottom, ((b.1 + 1)..a.1).all(|y| !occupied.contains(&(a.0, y))))
+        }
+        _ => return None,
+    };
+    if !clear {
+        return None;
+    }
+    let mut pts = vec![
+        cell_to_doubled(a),
+        exit_point(a, exit),
+        exit_point(b, entry),
+        cell_to_doubled(b),
+    ];
+    pts.dedup(); // adjacent rooms collapse the two stub points into one shared doorway
+    Some((entry, pts))
+}
+
 /// Remove interior points that lie on the straight line between their neighbours (same x
 /// or same y on both sides), so each maximal straight run is a single polyline segment.
 fn merge_collinear(pts: &mut Vec<(i32, i32)>) {
@@ -381,6 +421,8 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     // Edge indices already drawn — either as their own connector or consumed as the
     // back-edge of an earlier bidirectional pairing.
     let mut consumed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let occupied: std::collections::BTreeSet<(i32, i32)> =
+        graph.rooms().filter_map(|r| r.pos).collect();
     let mut out: Vec<RoutedConnector> = Vec::new();
     for (ci, c) in compass.iter().enumerate() {
         if consumed.contains(&ci) {
@@ -400,6 +442,34 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue; };
         let Some(exit) = side_for(c.dir) else { continue; };
+
+        // Direct shot: if `a` and `b` are aligned with an empty gap between them, draw a
+        // straight connector along the room row/column instead of dipping into a channel. Only
+        // when the facing entry side is consistent with what this connector must use — for a
+        // reciprocal pair the far arrow must point out the back-edge's side; for a one-way edge
+        // the geometric facing side is already what it would pick.
+        let required_entry = back.and_then(|bk| side_for(bk.dir));
+        if let Some((sentry, pts)) = straight_shot(a, exit, b, &occupied) {
+            if required_entry.is_none_or(|req| req == sentry) {
+                out.push(RoutedConnector {
+                    origin: c.origin,
+                    dest: c.dest,
+                    distorted: c.distorted,
+                    exit,
+                    entry: sentry,
+                    points: pts,
+                    segs: Vec::new(),
+                    exit_slot: 0,
+                    entry_slot: 0,
+                    reciprocal: has_reciprocal,
+                });
+                consumed.insert(ci);
+                if let Some(pi) = back_idx {
+                    consumed.insert(pi);
+                }
+                continue;
+            }
+        }
 
         // Generate candidate routes. The exit side is fixed by the edge's compass direction;
         // we vary the L orientation and (for non-reciprocal connectors, in greedy mode only)
@@ -671,10 +741,13 @@ mod tests {
         // Two connectors whose horizontal runs share a channel and overlap in extent must
         // land on different lanes → that channel reports lane_count 2.
         let mut g = MapGraph::new();
-        for id in 1..=4 { g.upsert_room(id, "r".into()); }
+        for id in 1..=5 { g.upsert_room(id, "r".into()); }
         // 1->2 and 3->4 both run horizontally across the same row band, overlapping in x.
+        // Room 5 fills the one cell between 3 and 4 so NEITHER pair can take the direct
+        // straight-shot (empty-gap) route — both must dip into the H channel and share it.
         g.set_pos(1, (0, 0)); g.set_pos(2, (4, 0));
         g.set_pos(3, (1, 0)); g.set_pos(4, (3, 0));
+        g.set_pos(5, (2, 0));
         g.add_edge(1, Direction::E, 2);
         g.add_edge(3, Direction::E, 4);
         let plan = route_lanes(&g);
@@ -692,6 +765,36 @@ mod tests {
         let a = format!("{:?}", route_lanes(&g));
         let b = format!("{:?}", route_lanes(&g));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn same_row_empty_gap_routes_straight() {
+        // Two rooms on one row with an empty cell between them: the connector runs STRAIGHT
+        // along the room row (no channel dip) — its polyline is collinear and carries no lane.
+        let mut g = MapGraph::new();
+        for id in 1..=2 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); g.set_pos(2, (2, 0)); // gap at (1,0) is empty
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let plan = route_lanes(&g);
+        assert_eq!(plan.connectors.len(), 1, "reciprocal pair collapses to one connector");
+        let conn = &plan.connectors[0];
+        assert!(is_collinear(&conn.points), "straight shot must be collinear: {:?}", conn.points);
+        assert!(conn.segs.is_empty(), "straight shot carries no lane segments");
+    }
+
+    #[test]
+    fn same_row_occupied_gap_dips() {
+        // Same two rooms, but a third room fills the gap: the connector cannot run straight
+        // through an occupied cell, so it dips into a channel — its polyline turns.
+        let mut g = MapGraph::new();
+        for id in 1..=3 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); g.set_pos(2, (2, 0)); g.set_pos(3, (1, 0)); // gap occupied
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let plan = route_lanes(&g);
+        let conn = plan.connectors.iter().find(|c| c.origin == 1 && c.dest == 2).unwrap();
+        assert!(!is_collinear(&conn.points), "occupied gap must dip into a channel: {:?}", conn.points);
     }
 
     /// Expand a doubled-coord polyline into the doubled cells it passes through.
@@ -901,10 +1004,12 @@ mod tests {
         // the second connector vertical-first removes the crossing cleanly. `route_topology`
         // must choose the lower-crossing, overlap-free route set.
         let mut g = MapGraph::new();
-        for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
-        // A: 1 -E-> 2, a short horizontal pair.
+        for id in [1, 2, 3, 4, 5] { g.upsert_room(id, "r".into()); }
+        // A: 1 -E-> 2, a short horizontal pair. Room 5 fills the cell between them so A must
+        // DIP into a channel (no direct straight-shot), keeping its run crossable by B.
         g.set_pos(1, (0, 0));
         g.set_pos(2, (2, 0));
+        g.set_pos(5, (1, 0));
         g.add_edge(1, Direction::E, 2);
         // B: 3 -W-> 4 from the upper-right down to the left, off-axis so its L can flip.
         g.set_pos(3, (4, -2));
