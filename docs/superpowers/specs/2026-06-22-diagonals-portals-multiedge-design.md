@@ -67,30 +67,59 @@ A diagonal edge's departure/arrival glyph is a **diagonal arrow that replaces th
 `route_all` emits `is_stub` edges for Up/Down/In/Out/Unknown, each carrying its target room name in `dest_label` (Some for stubs). Portals currently render as stacked glyph+name badges in the right gutter — names overflow the narrow gutter.
 
 ### Design
-Render portals as **directional icons inside the room box** at Boxes zoom, on the box's right
-interior column. Default = icons only; a hotkey toggles the destination names.
+Two views, toggled by `Ctrl+P` (`show_portal_labels`, default off). Boxes zoom only.
+
+**Box interior (BOTH views), centered:** the room **name word-wraps across interior rows 1–2**,
+each line **centered** in the 9-col interior; **row 3 is `#id`**, centered, with the **alignment
+diagnostics appended after it** (shown when `Ctrl+A` is on). Centering uses the full interior
+width; the right-edge portal icons (normal view) overlay on top, so only a name line that fills
+all 9 columns loses its last char under an icon (rare; short names unaffected).
 
 ```
-default (icons only):     Ctrl+P (destinations):
-╭─────────╮               ╭─────────╮
-│Behind H↑│               │  Attic ↑│   row 1 (Up)   — name replaces the room label
-│#79      │               │#79      │   row 2 (mid)  — kept (no mid portal here)
-│        ↓│               │S of Ho ↓│   row 3 (Down) — name replaces the blank row
-╰─────────╯               ╰─────────╯
+no portals:      with portals:    Ctrl+A (align):
+╭─────────╮      ╭─────────╮       ╭─────────╮
+│  Rocky  │      │  Rocky ↑│       │  Rocky ↑│
+│  Ledge  │      │  Ledge ?│       │  Ledge ?│
+│   #26   │      │   #26  ↓│       │ #26 R3 ↓│
+╰─────────╯      ╰─────────╯       ╰─────────╯
 ```
 
-- **Icon slots (right interior column, `col = BOX_W-2`):** `↑` Up → row 1; `⊙` In / `⊗` Out → row 2 (middle); `↓` Down → row 3. Glyphs are named, swappable constants (`portal_glyph`, already defined). The icon is drawn only for the directions a room actually has.
-- **Unknown (`?`)** has no spatial direction → it shares the **middle** slot (row 2). When a room has more than one of In/Out/Unknown, the middle cell shows one by precedence **In ▸ Out ▸ Unknown**; the dump still lists every portal. Likewise if a room has multiple portals in one slot, the icon marks the slot and the dump carries the full set. **Unknown has no target semantics** — even with `Ctrl+P` on it shows only the `?` glyph, never a destination name (a name would read as the misleading "West of ?").
-- **Destination toggle — `Ctrl+P` (`show_portal_labels`, default off):** when on, each portal with an icon shows its **destination room name right-aligned beside its icon on that icon's row**, replacing that row's normal content (row 1 room label, row 2 `#id`, row 3 blank). The icon stays pinned at the far-right interior cell. Names are truncated to the interior width on the map; the **full untruncated name is always in the Ctrl+D dump**. Wiring mirrors the existing `Ctrl+A` alignment toggle exactly.
-- **Notes marker `●`** currently occupies the upper-right interior cell — the new `↑` slot. Rule: a room **with** an up-portal gives that corner to `↑` and shifts `●` one interior cell left (room label truncates to fit); a room **without** an up-portal keeps `●` where it is.
+**Normal view (`Ctrl+P` off):** portal icons sit in the **interior right column**
+(`col = BOX_W-2`): `↑` Up → row 1; `⊙` In / `⊗` Out / `?` Unknown → row 2 (middle); `↓` Down →
+row 3. Connector arrowheads (`▶◀▲▼`) draw on the border as usual. No destination text.
+
+**Portal view (`Ctrl+P` on):** the icons **move onto the border** on the side matching their
+destination, and the **destination names float outside** the box:
+- `↑` Up → top border; destination name **above** the box.
+- `↓` Down → bottom border; destination name **below** the box.
+- `⊙`/`⊗`/`?` mid → right border (middle row), the **In ▸ Out ▸ Unknown** precedence winner (the dump lists any others); In/Out destination name to the **right**.
+- **Connector arrowheads are NOT drawn** in portal view (only portal icons sit on the border); the connector *lines* still draw and may be overwritten by the floating destination text — that overwrite is acceptable.
+- Destination names are **untruncated** (overflow/overwrite of neighbours and paths allowed).
+
+```
+ Canyon View
+╭────↑────╮
+│  Rocky  │
+│  Ledge  ?
+│   #26   │
+╰────↓────╯
+ Canyon Bottom
+```
+
+- **Glyphs** are named, swappable constants (`portal_glyph`). An icon is drawn only for the directions a room actually has.
+- **Mid precedence** when a room has more than one of In/Out/Unknown (lower wins): **In ▸ Out ▸ Unknown**; the dump lists every portal.
+- **Unknown (`?`) has no target semantics** — it never shows a destination name in either view (only the `?` glyph; a name would read as the misleading "West of ?").
+- **Notes marker `●`** (normal view): a room **with** an up-portal gives the upper-right interior cell to `↑` and shifts `●` one cell left; a room **without** an up-portal keeps `●` there.
 - **Boxes zoom only.** Compact keeps its existing bare-label `draw_stub`; Overview is unchanged.
-- **Layer-ready:** icons + `dest_label` identify each target room (id resolvable, name shown), which is exactly what a future "jump to the layer containing the target" affordance needs.
+- **Layer-ready:** icons + `dest_label` identify each target room (id resolvable, name shown).
 
 ### Components touched
-- `mapper`: unchanged — `dest_label` (Some target name for stubs) already lands on stub edges.
-- `app/state.rs`: add `show_portal_labels: bool` (default false), mirroring `show_alignment`.
-- `app/input.rs`: add `Action::TogglePortalLabels`, map `Ctrl+P` to it, flip the flag in `apply_action`.
-- `app/render/map.rs`: a new post-room overlay draws the directional icons (always) and, when `show_portal_labels`, the right-aligned destination names; handles the `●` shift; the prior gutter-badge rendering (`draw_portal_badge` + its loop) is removed.
+- `mapper`: unchanged — `dest_label` (Some target name for stubs) already lands on stub edges. (done)
+- `app/state.rs`: `show_portal_labels: bool` (default false), mirroring `show_alignment`. (done)
+- `app/input.rs`: `Action::TogglePortalLabels`, `Ctrl+P` mapping, flag flip in `apply_action`. (done)
+- `app/render/map.rs` `draw_box_room`: word-wrap + center the name on rows 1–2; move `#id` to row 3, centered, with the align diagnostics appended (the `Ctrl+A` overlay writes after `#id` on row 3, not row 3 from col 1).
+- `app/render/map.rs` portal overlay (`draw_portal_icons`): normal view draws interior right-column icons (+ `●` shift); portal view draws border icons (top/bottom/right) and the floating destination names outside the box; the right-aligned-beside-icon labels of the prior pass are replaced by the float-outside placement.
+- `app/render/map.rs` `render_map`: suppress connector arrowheads (`draw_connector_arrows`) when `show_portal_labels` is on.
 - `app/main.rs`: help bar gains `Ctrl+P: portals`.
 - `app/map_dump.rs`: unchanged — the PORTALS legend already shows full `glyph #id name`.
 
