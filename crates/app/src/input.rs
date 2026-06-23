@@ -93,6 +93,10 @@ pub enum Action {
     Quit,
     /// Cycle the viewed layer by `delta` steps over the sorted non-empty layer list (clamped at ends).
     CycleLayer(i32),
+    /// Peel the selected (or current) room's region into a new child layer.
+    PeelLayer,
+    /// Merge the active layer into its parent layer.
+    MergeLayer,
     /// No binding found — no-op.
     None,
 }
@@ -259,6 +263,8 @@ fn map_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Char('c') if plain!() => Action::Recenter,
         KeyCode::Char('n') if plain!() => Action::SelectNext,
         KeyCode::Char('N') if shift => Action::SelectPrev,
+        KeyCode::Char('P') if shift => Action::PeelLayer,
+        KeyCode::Char('M') if shift => Action::MergeLayer,
         KeyCode::Char('R') if shift => Action::Retidy,
         KeyCode::Char(']') if plain!() => Action::CycleLayer(1),
         KeyCode::Char('[') if plain!() => Action::CycleLayer(-1),
@@ -385,6 +391,19 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::Recenter => apply_recenter(state, mapper),
         Action::SelectNext => select_adjacent(state, mapper, 1),
         Action::SelectPrev => select_adjacent(state, mapper, -1),
+
+        Action::PeelLayer => {
+            if let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) {
+                if let Some(new) = mapper::layer::peel_region(&mut mapper.graph, room) {
+                    state.set_viewed_layer(Some(new));
+                }
+            }
+        }
+        Action::MergeLayer => {
+            let active = state.active_layer(&mapper.graph);
+            mapper::layer::merge_layer(&mut mapper.graph, active); // merges into parent (Task 10)
+            state.set_viewed_layer(None);
+        }
 
         // Re-tidy: re-derive the clean Auto layout (constrained stress majorization,
         // or the longest-path sort for very large maps), then nudge rooms so the lane
@@ -1028,6 +1047,14 @@ mod tests {
         s.focus = Focus::Map;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CycleLayer(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CycleLayer(-1)));
+    }
+
+    #[test]
+    fn shift_p_peels_and_shift_m_merges_in_map_focus() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
     }
 
     #[test]
