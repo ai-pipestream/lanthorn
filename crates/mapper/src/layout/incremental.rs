@@ -8,7 +8,7 @@
 use crate::direction::{grid_offset, Direction};
 use crate::graph::{MapGraph, RoomId};
 
-use super::{nearest_free_cell, occupied_cells};
+use super::{nearest_free_cell, occupied_cells_in_layer};
 
 /// Place `dest` relative to `prev` via `dir`. See module/interface docs.
 pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: Direction) {
@@ -20,6 +20,10 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
         Some(p) => p,
         None => return, // caller guarantees prev is placed; defensive no-op
     };
+
+    // Derive the layer from the previous room and assign the new room to it.
+    let layer = graph.layer_of(prev);
+    graph.set_room_layer(dest, layer);
 
     // Up/Down are a soft directional HINT: a newly discovered up/down room prefers the cell
     // directly north / south, but it yields (nearest free cell) instead of pushing rooms aside,
@@ -34,7 +38,7 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
     match delta {
         Some(delta) => {
             let ideal = (prev_pos.0 + delta.0, prev_pos.1 + delta.1);
-            let occupied = occupied_cells(graph);
+            let occupied = occupied_cells_in_layer(graph, layer);
             if !occupied.contains(&ideal) {
                 graph.set_pos(dest, ideal);
                 return;
@@ -43,18 +47,18 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
             // cell; an up/down hint (or a diagonal) instead yields to the nearest free cell.
             let is_cardinal = (delta.0 == 0) ^ (delta.1 == 0);
             if is_cardinal && !updown {
-                shift_beyond(graph, ideal, delta);
+                shift_beyond(graph, ideal, delta, layer);
                 graph.set_pos(dest, ideal);
             } else {
                 // Diagonal fallback: nearest free cell from the ideal.
-                let occ = occupied_cells(graph);
+                let occ = occupied_cells_in_layer(graph, layer);
                 let cell = nearest_free_cell(&occ, ideal);
                 graph.set_pos(dest, cell);
             }
         }
         None => {
             // In/Out/Unknown: nearest free cell starting from prev.
-            let occ = occupied_cells(graph);
+            let occ = occupied_cells_in_layer(graph, layer);
             let cell = nearest_free_cell(&occ, prev_pos);
             graph.set_pos(dest, cell);
         }
@@ -63,8 +67,9 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
 
 /// Translate every placed room at or beyond `ideal` along the `step` axis by
 /// one `step`, opening `ideal`. `step` must be a cardinal unit vector.
-fn shift_beyond(graph: &mut MapGraph, ideal: (i32, i32), step: (i32, i32)) {
-    let ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
+/// Only moves rooms in the given `layer`.
+fn shift_beyond(graph: &mut MapGraph, ideal: (i32, i32), step: (i32, i32), layer: crate::layer::LayerId) {
+    let ids: Vec<RoomId> = graph.rooms().filter(|r| r.layer == layer).map(|r| r.id).collect();
     for id in ids {
         if let Some(pos) = graph.room(id).and_then(|r| r.pos) {
             let beyond = match step {
@@ -206,5 +211,36 @@ mod tests {
         g.set_pos(2, (5, 5));
         place_incremental(&mut g, 1, 2, Direction::Up);
         assert_eq!(g.room(2).unwrap().pos, Some((5, 5)), "fallback only — placed target untouched");
+    }
+
+    #[test]
+    fn new_room_inherits_prev_layer() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        let l = g.new_layer(Some(0), "B".into());
+        g.set_room_layer(1, l);
+        g.upsert_room(2, "C".into());
+        place_incremental(&mut g, 1, 2, Direction::E);
+        assert_eq!(g.layer_of(2), l, "new room joins the previous room's layer");
+    }
+
+    #[test]
+    fn shift_beyond_does_not_move_other_layers() {
+        // Two layers share cells. Placing/shifting in layer 0 must not move the layer-1 room.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        g.upsert_room(2, "B".into());
+        g.set_pos(2, (1, 0)); // east of 1, same cell-line, layer 0
+        g.add_edge(1, Direction::E, 2);
+        let l = g.new_layer(Some(0), "Other".into());
+        g.upsert_room(9, "X".into());
+        g.set_room_layer(9, l);
+        g.set_pos(9, (1, 0)); // SAME cell as room 2, but different layer
+        // Insert a new room east of 1: forces a shift-beyond of room 2 within layer 0.
+        g.upsert_room(3, "New".into());
+        place_incremental(&mut g, 1, 3, Direction::E);
+        assert_eq!(g.room(9).unwrap().pos, Some((1, 0)), "other-layer room must not move");
     }
 }

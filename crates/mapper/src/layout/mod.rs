@@ -61,6 +61,11 @@ pub fn occupied_cells(graph: &MapGraph) -> BTreeSet<(i32, i32)> {
     graph.rooms().filter_map(|r| r.pos).collect()
 }
 
+/// Occupied grid cells among rooms in `layer` only.
+pub fn occupied_cells_in_layer(graph: &MapGraph, layer: crate::layer::LayerId) -> BTreeSet<(i32, i32)> {
+    graph.rooms().filter(|r| r.layer == layer).filter_map(|r| r.pos).collect()
+}
+
 /// Spiral-search outward from `from` and return the first cell not in `occupied`.
 /// Returns `from` itself if it is free.
 pub fn nearest_free_cell(occupied: &BTreeSet<(i32, i32)>, from: (i32, i32)) -> (i32, i32) {
