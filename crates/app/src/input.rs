@@ -324,8 +324,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected
                 // across a one-way edge), without re-introducing overlaps.
                 crate::render::map::repair_directional_hints(&mut mapper.graph, 3, 40);
-                // Stack Up/Down rooms directly above/below their partner when it breaks no chain.
+                // Stack Up/Down rooms on the correct side of their partner (north for Up, south for
+                // Down), accepting a temporary overlap where the area is dense.
                 crate::render::map::stack_updown_rooms(&mut mapper.graph);
+                // Clear any overlap the stacking introduced by moving OTHER rooms — the cleanup is
+                // direction-aware, so it won't drag the Up/Down room back to the wrong side.
+                crate::render::map::cleanup_overlaps(&mut mapper.graph, 3, 40);
                 // Collapse any fully-empty rows/columns the shuffling left behind.
                 crate::render::map::compact_empty_lines(&mut mapper.graph);
             }

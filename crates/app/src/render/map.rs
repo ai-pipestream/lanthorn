@@ -1243,6 +1243,43 @@ pub(crate) fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, u
     overlap_stats(&rm.plan, &cols, &rows)
 }
 
+/// True unless moving room `id` to `cell` would flip a CURRENTLY-SATISFIED Up/Down relationship to
+/// the wrong side — an Up room must stay north of its partner, a Down room south. Lets overlap
+/// cleanup avoid sacrificing a stacked portal room's side to clear an overlap (other rooms can move
+/// instead). Only currently-correct edges are protected; an already-violated one imposes nothing.
+fn move_keeps_updown_sides(
+    graph: &mapper::graph::MapGraph,
+    id: mapper::graph::RoomId,
+    cell: (i32, i32),
+) -> bool {
+    use mapper::direction::Direction;
+    for c in graph.connections() {
+        let req = match c.dir {
+            Direction::Up => -1,  // dest north of origin (dest.y - origin.y < 0)
+            Direction::Down => 1, // dest south of origin
+            _ => continue,
+        };
+        if c.origin != id && c.dest != id {
+            continue;
+        }
+        let (Some(o0), Some(d0)) = (
+            graph.room(c.origin).and_then(|r| r.pos),
+            graph.room(c.dest).and_then(|r| r.pos),
+        ) else {
+            continue;
+        };
+        if (d0.1 - o0.1).signum() != req {
+            continue; // not currently on the correct side — nothing to protect
+        }
+        let o = if c.origin == id { cell } else { o0 };
+        let d = if c.dest == id { cell } else { d0 };
+        if (d.1 - o.1).signum() != req {
+            return false; // the move would flip a satisfied side
+        }
+    }
+    true
+}
+
 /// Nudge rooms (bounded Chebyshev `radius`, ≤ `max_passes` passes) until the rendered
 /// plan has zero illegal overlaps, secondarily fewer crossings. Deterministic, no overlap,
 /// integer cells. Existing position is restored on every rejected trial.
@@ -1291,6 +1328,12 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
             for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
                 let trial = (orig.0 + dx, orig.1 + dy);
                 if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
+                    continue;
+                }
+                // Never clear an overlap by flipping a satisfied Up/Down room to the wrong side of
+                // its partner — that is what used to drag a yielded Attic back south. Fix overlaps
+                // by moving other rooms instead.
+                if !move_keeps_updown_sides(graph, id, trial) {
                     continue;
                 }
                 graph.set_pos(id, trial);
@@ -1513,15 +1556,37 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
         cands.sort_unstable_by_key(|&(x, y)| {
             ((x - center.0).abs() + (y - center.1).abs(), (x - center.0).abs(), x, y)
         });
+        // Seat the room on its correct side. Prefer the nearest cell that adds no overlap (and never
+        // breaks a side hint or chain alignment). If none is overlap-free — the area above/below the
+        // partner is dense — take the cell that minimises overlaps, accepting a temporary overlap:
+        // the direction-aware cleanup that follows clears it by moving OTHER rooms (it may not move
+        // this room back to the wrong side), so the room ends up on the correct side, overlap-free.
+        let mut committed = false;
+        let mut forced: Option<((usize, i32), (i32, i32))> = None;
         for c in cands {
             graph.set_pos(dest, c);
-            if render_overlap_stats(graph).0 <= base_ov
-                && mapper::layout::directional_hint_score(graph) >= base_side
-                && exact_alignment_count(graph) >= base_align
-            {
-                break; // committed at the nearest acceptable on-side cell
+            let ov = render_overlap_stats(graph).0;
+            let side_ok = mapper::layout::directional_hint_score(graph) >= base_side;
+            let align_ok = exact_alignment_count(graph) >= base_align;
+            graph.set_pos(dest, dp0);
+            if !side_ok || !align_ok {
+                continue;
             }
-            graph.set_pos(dest, dp0); // not acceptable -- restore and keep searching
+            if ov <= base_ov {
+                graph.set_pos(dest, c);
+                committed = true;
+                break; // nearest overlap-free cell on the correct side
+            }
+            let dist = (c.0 - center.0).abs() + (c.1 - center.1).abs();
+            let key = (ov, dist);
+            if forced.is_none_or(|(bk, _)| key < bk) {
+                forced = Some((key, c));
+            }
+        }
+        if !committed {
+            if let Some((_, c)) = forced {
+                graph.set_pos(dest, c);
+            }
         }
     }
 }
@@ -2482,6 +2547,58 @@ mod tests {
         assert_eq!(g.room(3).unwrap().pos, Some((0, -2)), "C shifted up");
         assert_eq!(g.room(4).unwrap().pos, Some((1, -2)), "D shifted up WITH C — row stays intact");
         assert_eq!(g.room(3).unwrap().pos.unwrap().1, g.room(4).unwrap().pos.unwrap().1, "C,D one row");
+    }
+
+    #[test]
+    fn cleanup_guard_will_not_flip_a_satisfied_updown_side() {
+        // 2 is up from 1, currently north of it (satisfied). The guard must forbid moving 2 south of
+        // 1 (or moving 1 north of 2), while allowing other north cells.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "p".into());
+        g.upsert_room(2, "u".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1)); // 2 north of 1
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+        assert!(!move_keeps_updown_sides(&g, 2, (0, 1)), "must forbid moving the up room SOUTH");
+        assert!(!move_keeps_updown_sides(&g, 1, (0, -5)), "must forbid moving the partner NORTH of it");
+        assert!(move_keeps_updown_sides(&g, 2, (3, -2)), "another north cell for the up room is fine");
+    }
+
+    #[test]
+    fn retidy_seats_up_room_north_with_no_overlap_on_a129() {
+        // The full Retidy sequence on A129: the Attic (#201, up from Kitchen #203) can't sit
+        // overlap-free directly above Kitchen, but it must still end up NORTH of it with zero
+        // overlaps — the direction-aware cleanup clears the residual by moving other rooms, not by
+        // dragging the Attic back south. Down rooms stay south; prior wins (78<180, 76 under 74) hold.
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,88,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, t) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),(76,W,78),
+            (143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),(25,E,26),(26,Up,25),
+            (78,E,75),(77,E,239),(239,N,77),(180,S,80),(80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),
+            (80,S,76),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),(143,S,75),(26,Down,27),
+            (27,N,136),(136,SW,27),(27,Up,26),(79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),
+            (201,Down,203),(239,W,77),(81,N,75),(25,Down,26),(75,Up,88),(88,Down,75),
+        ] { g.add_edge(o, d, t); }
+        mapper::layout::relayout_auto(&mut g);
+        cleanup_overlaps(&mut g, 3, 40);
+        repair_directional_hints(&mut g, 3, 40);
+        stack_updown_rooms(&mut g);
+        cleanup_overlaps(&mut g, 3, 40);
+        compact_empty_lines(&mut g);
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(render_overlap_stats(&g).0, 0, "no illegal overlaps");
+        assert!(p(201).1 < p(203).1, "Attic ends up NORTH of Kitchen: 201={:?} 203={:?}", p(201), p(203));
+        assert!(p(88).1 < p(75).1, "Up a Tree ends up north of Forest Path");
+        assert!(p(27).1 > p(26).1, "Canyon Bottom (down) stays south of Rocky Ledge");
+        assert!(p(78).0 < p(180).0, "78 stays west of 180");
+        assert_eq!(p(74).0, p(76).0, "76 stays under 74");
     }
 
     #[test]
