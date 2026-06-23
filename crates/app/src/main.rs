@@ -74,7 +74,11 @@ fn draw_frame(
     terminal.draw(|f| {
         let full = f.area();
         let buf = f.buffer_mut();
-        let rm = render_map_data(&mapper.graph);
+        // During tidy-animation playback the map shows the current captured stage, not the live graph.
+        let rm = match &state.tidy_anim {
+            Some(anim) => render_map_data(&anim.current().graph),
+            None => render_map_data(&mapper.graph),
+        };
 
         // ── Change 2: reserve bottom 1 row for help bar ───────────────────────
         let vert = RatatuiLayout::default()
@@ -133,7 +137,18 @@ fn draw_frame(
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = Style::default().add_modifier(Modifier::REVERSED);
-        let help_text = if let Some(prompt) = &state.prompt {
+        let help_text = if let Some(anim) = &state.tidy_anim {
+            // Playback status: stage progress + the transport controls.
+            let f = anim.current();
+            format!(
+                "Tidy [{}/{}] {}{} | \u{2190}\u{2192}: step | Space: {} | Esc: exit",
+                anim.idx + 1,
+                anim.frames.len(),
+                f.label,
+                if anim.playing { " \u{25b6}" } else { "" },
+                if anim.playing { "pause" } else { "play" },
+            )
+        } else if let Some(prompt) = &state.prompt {
             // Show prompt label with instructions when a prompt is active.
             let label = match &prompt.kind {
                 PromptKind::RenameRoom(_) => "Rename",
@@ -144,7 +159,7 @@ fn draw_frame(
         } else {
             match state.focus {
                 Focus::Game => {
-                    "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+P: portals | Ctrl+Q: quit".to_string()
+                    "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Ctrl+Y: animate | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+P: portals | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
                     "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/N: select | r/o/d/e: edit | Ctrl+Q: quit".to_string()
@@ -330,6 +345,11 @@ fn main() {
         };
 
         if !event_ready {
+            // No key this tick — advance the tidy animation if one is playing. The next loop
+            // iteration redraws, so an advanced frame appears without waiting for input.
+            if let Some(anim) = &mut state.tidy_anim {
+                anim.tick(Duration::from_millis(700));
+            }
             continue;
         }
 

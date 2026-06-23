@@ -44,6 +44,14 @@ pub enum Action {
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
     /// No-op in Manual mode (positions are user-controlled and frozen).
     Retidy,
+    /// Run the tidy pipeline and start animated playback of its stages (Auto only).
+    AnimateTidy,
+    /// Step the tidy animation by N frames (negative = back); pauses playback.
+    AnimStep(i32),
+    /// Toggle the tidy animation between playing and paused.
+    AnimTogglePlay,
+    /// Exit tidy-animation playback back to the live map.
+    AnimExit,
     /// Zoom the map in (more detail).
     ZoomIn,
     /// Zoom the map out (less detail).
@@ -116,6 +124,18 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return prompt_key_to_action(key);
     }
 
+    // 2b. Tidy-animation sub-mode: playback owns the arrows (step), Space (play/pause)
+    //     and Esc (exit); every other key is absorbed so the modal view is not disturbed.
+    if state.tidy_anim.is_some() {
+        return match key.code {
+            KeyCode::Left => Action::AnimStep(-1),
+            KeyCode::Right => Action::AnimStep(1),
+            KeyCode::Char(' ') => Action::AnimTogglePlay,
+            KeyCode::Esc | KeyCode::Enter => Action::AnimExit,
+            _ => Action::None,
+        };
+    }
+
     // 3. Remaining global shortcuts (only reached when no prompt is active).
     if ctrl {
         return match key.code {
@@ -126,6 +146,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('d') => Action::ExportDump,
             KeyCode::Char('l') => Action::CycleLayout,
             KeyCode::Char('t') => Action::Retidy,
+            KeyCode::Char('y') => Action::AnimateTidy,
             KeyCode::Char('a') => Action::ToggleAlignment,
             KeyCode::Char('p') => Action::TogglePortalLabels,
             _ => Action::None,
@@ -248,6 +269,43 @@ fn map_key_to_action(key: KeyEvent) -> Action {
     }
 }
 
+// ── Tidy pipeline ─────────────────────────────────────────────────────────────
+
+/// Run the auto-tidy pipeline in place, returning a labelled snapshot of the graph after each
+/// stage (frame 0 is the pre-tidy state). The graph is left in the final tidied layout, so the
+/// instant `Retidy` and the animated path land on identical results. Caller must be in Auto mode.
+pub(crate) fn run_tidy_pipeline(graph: &mut mapper::graph::MapGraph) -> Vec<crate::state::TidyFrame> {
+    use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints, stack_updown_rooms};
+    use crate::state::TidyFrame;
+
+    let mut frames = vec![TidyFrame { label: "before".into(), graph: graph.clone() }];
+    let snap = |graph: &mapper::graph::MapGraph, label: &str, frames: &mut Vec<TidyFrame>| {
+        frames.push(TidyFrame { label: label.into(), graph: graph.clone() });
+    };
+
+    mapper::layout::relayout_auto(graph);
+    snap(graph, "relayout", &mut frames);
+    cleanup_overlaps(graph, 3, 40);
+    snap(graph, "cleanup overlaps", &mut frames);
+    // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected across a one-way
+    // edge), without re-introducing overlaps.
+    repair_directional_hints(graph, 3, 40);
+    snap(graph, "repair hints", &mut frames);
+    // Stack Up/Down rooms on the correct side of their partner (north for Up, south for Down),
+    // accepting a temporary overlap where the area is dense.
+    stack_updown_rooms(graph);
+    snap(graph, "stack up/down", &mut frames);
+    // Clear any overlap the stacking introduced by moving OTHER rooms — the cleanup is
+    // direction-aware, so it won't drag the Up/Down room back to the wrong side.
+    cleanup_overlaps(graph, 3, 40);
+    snap(graph, "cleanup overlaps", &mut frames);
+    // Collapse any fully-empty rows/columns the shuffling left behind.
+    compact_empty_lines(graph);
+    snap(graph, "compact", &mut frames);
+
+    frames
+}
+
 // ── apply_action ──────────────────────────────────────────────────────────────
 
 /// Apply a view or light-correction action to `state` and/or `mapper`.
@@ -319,21 +377,30 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // placement can't. No-op in Manual mode — those positions are user-owned.
         Action::Retidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
-                mapper::layout::relayout_auto(&mut mapper.graph);
-                crate::render::map::cleanup_overlaps(&mut mapper.graph, 3, 40);
-                // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected
-                // across a one-way edge), without re-introducing overlaps.
-                crate::render::map::repair_directional_hints(&mut mapper.graph, 3, 40);
-                // Stack Up/Down rooms on the correct side of their partner (north for Up, south for
-                // Down), accepting a temporary overlap where the area is dense.
-                crate::render::map::stack_updown_rooms(&mut mapper.graph);
-                // Clear any overlap the stacking introduced by moving OTHER rooms — the cleanup is
-                // direction-aware, so it won't drag the Up/Down room back to the wrong side.
-                crate::render::map::cleanup_overlaps(&mut mapper.graph, 3, 40);
-                // Collapse any fully-empty rows/columns the shuffling left behind.
-                crate::render::map::compact_empty_lines(&mut mapper.graph);
+                run_tidy_pipeline(&mut mapper.graph);
             }
         }
+
+        Action::AnimateTidy => {
+            if mapper.mode == mapper::layout::LayoutMode::Auto {
+                let frames = run_tidy_pipeline(&mut mapper.graph);
+                state.tidy_anim = Some(crate::state::TidyAnim::new(frames));
+            }
+        }
+
+        Action::AnimStep(d) => {
+            if let Some(anim) = &mut state.tidy_anim {
+                anim.step(d as isize);
+            }
+        }
+
+        Action::AnimTogglePlay => {
+            if let Some(anim) = &mut state.tidy_anim {
+                anim.toggle_play();
+            }
+        }
+
+        Action::AnimExit => state.tidy_anim = None,
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
@@ -747,6 +814,83 @@ mod tests {
         apply_action(Action::Retidy, &mut s, &mut m);
         assert_eq!(m.graph.room(1).unwrap().pos, Some((5, 5)), "Manual: retidy must not move rooms");
         assert_eq!(m.graph.room(2).unwrap().pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn animate_tidy_captures_frames_and_lands_on_instant_retidy() {
+        use mapper::direction::Direction::E;
+        // Two mappers with identical scrambled input: one animated, one instant-tidied.
+        let mut build = || {
+            let mut m = Mapper::default();
+            m.observe(1, "A", None);
+            m.observe(2, "B", Some(E));
+            m.observe(3, "C", Some(E));
+            m.graph.set_pos(1, (5, 5));
+            m.graph.set_pos(2, (0, 0));
+            m.graph.set_pos(3, (2, 9));
+            m
+        };
+        let (mut s_anim, mut m_anim) = (AppState::default(), build());
+        let (mut s_inst, mut m_inst) = (AppState::default(), build());
+        apply_action(Action::AnimateTidy, &mut s_anim, &mut m_anim);
+        apply_action(Action::Retidy, &mut s_inst, &mut m_inst);
+
+        let anim = s_anim.tidy_anim.expect("animation populated");
+        assert_eq!(anim.frames.len(), 7, "before + 6 stages");
+        assert_eq!(anim.idx, 0, "starts on the first frame");
+        // Final frame and the live graph match the instant-tidy result room-for-room.
+        for id in [1u16, 2, 3] {
+            let inst = m_inst.graph.room(id).unwrap().pos;
+            assert_eq!(anim.frames.last().unwrap().graph.room(id).unwrap().pos, inst);
+            assert_eq!(m_anim.graph.room(id).unwrap().pos, inst);
+        }
+    }
+
+    #[test]
+    fn animate_tidy_is_noop_in_manual() {
+        use mapper::layout::LayoutMode;
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.set_mode(LayoutMode::Manual);
+        apply_action(Action::AnimateTidy, &mut s, &mut m);
+        assert!(s.tidy_anim.is_none(), "Manual: no animation started");
+    }
+
+    #[test]
+    fn anim_submode_routes_transport_keys_and_exits() {
+        use crate::state::{TidyAnim, TidyFrame};
+        let mut s = AppState::default();
+        s.focus = crate::state::Focus::Map;
+        // No animation: arrows pan as usual (not stepping).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(..)));
+        // Animation active: arrows step, Space toggles, Esc exits.
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new() };
+        s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(' '))), Action::AnimTogglePlay));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
+        // Exit clears playback.
+        apply_action(Action::AnimExit, &mut s, &mut Mapper::default());
+        assert!(s.tidy_anim.is_none());
+    }
+
+    #[test]
+    fn anim_step_clamps_pauses_and_holds_at_end() {
+        use crate::state::{TidyAnim, TidyFrame};
+        use std::time::Duration;
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new() };
+        let mut a = TidyAnim::new(vec![frame("a"), frame("b"), frame("c")]);
+        assert!(a.playing && a.idx == 0);
+        a.step(-1); // clamps at 0, and a manual step pauses
+        assert_eq!(a.idx, 0);
+        assert!(!a.playing, "manual step pauses playback");
+        a.step(5); // clamps to last frame
+        assert_eq!(a.idx, 2);
+        // A paused, end-of-range animation never advances on tick.
+        assert!(!a.tick(Duration::from_millis(0)));
+        assert_eq!(a.idx, 2);
     }
 
     #[test]

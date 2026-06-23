@@ -30,7 +30,7 @@ pub struct Connection {
     pub distorted: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MapGraph {
     rooms: BTreeMap<RoomId, Room>,
     conns: Vec<Connection>,

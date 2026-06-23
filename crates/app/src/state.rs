@@ -1,5 +1,73 @@
+use std::time::{Duration, Instant};
+
 use mapper::direction::Direction;
-use mapper::graph::RoomId;
+use mapper::graph::{MapGraph, RoomId};
+
+// ── Tidy animation ────────────────────────────────────────────────────────────
+
+/// One captured stage of the tidy pipeline, held for playback. `graph` is a clone
+/// of the layout as it stood after the named stage ran.
+#[derive(Debug, Clone)]
+pub struct TidyFrame {
+    pub label: String,
+    pub graph: MapGraph,
+}
+
+/// Transient playback state for the tidy animation. While this is `Some`, the map
+/// pane renders the current frame's graph instead of the live one. Playback holds
+/// on the final frame; `Esc` clears it back to the live map.
+#[derive(Debug)]
+pub struct TidyAnim {
+    pub frames: Vec<TidyFrame>,
+    pub idx: usize,
+    pub playing: bool,
+    last_advance: Instant,
+}
+
+impl TidyAnim {
+    pub fn new(frames: Vec<TidyFrame>) -> Self {
+        Self { frames, idx: 0, playing: true, last_advance: Instant::now() }
+    }
+
+    pub fn current(&self) -> &TidyFrame {
+        &self.frames[self.idx]
+    }
+
+    fn at_end(&self) -> bool {
+        self.idx + 1 >= self.frames.len()
+    }
+
+    /// Step `delta` frames (clamped to range) and pause — manual control overrides playback.
+    pub fn step(&mut self, delta: isize) {
+        let last = self.frames.len().saturating_sub(1) as isize;
+        self.idx = (self.idx as isize + delta).clamp(0, last) as usize;
+        self.playing = false;
+    }
+
+    /// Toggle play/pause; resuming restarts the dwell clock so the current frame holds full time.
+    pub fn toggle_play(&mut self) {
+        self.playing = !self.playing;
+        self.last_advance = Instant::now();
+    }
+
+    /// Advance one frame if playing and `dwell` has elapsed since the last advance. Stops (holds)
+    /// at the final frame. Returns true if the frame index changed.
+    pub fn tick(&mut self, dwell: Duration) -> bool {
+        if !self.playing || self.at_end() {
+            self.playing = false;
+            return false;
+        }
+        if self.last_advance.elapsed() < dwell {
+            return false;
+        }
+        self.idx += 1;
+        self.last_advance = Instant::now();
+        if self.at_end() {
+            self.playing = false;
+        }
+        true
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -86,6 +154,9 @@ pub struct AppState {
     /// When true, portal icons additionally show their destination room name (Boxes zoom only).
     /// Toggled by `Ctrl+P`.
     pub show_portal_labels: bool,
+    /// Active tidy-animation playback, if any. While `Some`, the map renders the current
+    /// captured stage instead of the live graph. Started by `Ctrl+Y`, cleared by `Esc`.
+    pub tidy_anim: Option<TidyAnim>,
 }
 
 impl Default for AppState {
@@ -103,6 +174,7 @@ impl Default for AppState {
             prompt: None,
             show_alignment: false,
             show_portal_labels: false,
+            tidy_anim: None,
         }
     }
 }
