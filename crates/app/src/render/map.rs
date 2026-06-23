@@ -1437,8 +1437,11 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
 /// on the ideal side, then closed under (a) E/W row-chain membership — a vertical shift would split a
 /// row otherwise, so the whole row comes along — and (b) whatever sits in a shifting room's path. A
 /// candidate commits only when no two rooms collide, no illegal overlap is added, and neither the
-/// global side-hint nor the exact (chain) alignment score drops; otherwise it yields (full revert).
-/// Runs before compaction so the cell `dest` vacated can be collapsed away.
+/// global side-hint nor the exact (chain) alignment score drops.
+///
+/// When a clean stack isn't possible, it still yields the room to the expected SIDE — an Up room
+/// north of its partner, a Down room south — by relocating it (alone) to the nearest free, overlap-
+/// and hint-safe cell on that side. Runs before compaction so vacated cells can be collapsed away.
 pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
     use mapper::direction::Direction;
     use mapper::graph::RoomId;
@@ -1513,10 +1516,56 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
             && render_overlap_stats(graph).0 <= base_ov
             && mapper::layout::directional_hint_score(graph) >= base_side
             && exact_alignment_count(graph) >= base_align;
-        if !ok {
-            for (&id, &p) in &pos {
-                graph.set_pos(id, p);
+        if ok {
+            continue; // stacked directly above/below the partner
+        }
+        // Revert the coordinated shift.
+        for (&id, &p) in &pos {
+            graph.set_pos(id, p);
+        }
+
+        // Yield, but at least keep the room on the expected SIDE: an Up room north of its partner,
+        // a Down room south. If it is already on that side, leave it; otherwise relocate it (alone)
+        // to the nearest free cell on the correct side that adds no overlap and breaks no hint.
+        let Some(dp0) = graph.room(dest).and_then(|r| r.pos) else { continue };
+        let on_side = |c: (i32, i32)| if dy < 0 { c.1 < op.1 } else { c.1 > op.1 };
+        if on_side(dp0) {
+            continue;
+        }
+        let occupied: BTreeSet<(i32, i32)> = pos
+            .iter()
+            .filter(|&(&id, _)| id != dest)
+            .map(|(_, &p)| p)
+            .collect();
+        let base_ov = render_overlap_stats(graph).0;
+        let base_side = mapper::layout::directional_hint_score(graph);
+        let base_align = exact_alignment_count(graph);
+        const YIELD_RADIUS: i32 = 10;
+        let mut cands: Vec<(i32, i32)> = Vec::new();
+        for ddy in -YIELD_RADIUS..=YIELD_RADIUS {
+            for ddx in -YIELD_RADIUS..=YIELD_RADIUS {
+                let c = (ideal.0 + ddx, ideal.1 + ddy);
+                if on_side(c) && !occupied.contains(&c) {
+                    cands.push(c);
+                }
             }
+        }
+        // Nearest to the ideal cell first; ties by column nearness then coord (deterministic).
+        cands.sort_unstable_by_key(|&(x, y)| {
+            ((x - ideal.0).abs() + (y - ideal.1).abs(), (x - ideal.0).abs(), x, y)
+        });
+        for c in cands {
+            graph.set_pos(dest, c);
+            // Same guards as a stack: no new overlap, no side-hint loss, and no exact-alignment loss
+            // — the last stops a relocation from knocking an ANCHORED partner (a chain member) off
+            // its row/column. A free-floating portal leaf has no exact edges to lose, so it moves.
+            if render_overlap_stats(graph).0 <= base_ov
+                && mapper::layout::directional_hint_score(graph) >= base_side
+                && exact_alignment_count(graph) >= base_align
+            {
+                break; // committed at the nearest acceptable on-side cell
+            }
+            graph.set_pos(dest, dp0); // not acceptable — restore and keep searching
         }
     }
 }
@@ -2340,22 +2389,44 @@ mod tests {
     }
 
     #[test]
-    fn stack_updown_yields_when_no_chain_safe_shift_exists() {
-        // A (down) at (0,0); B (up) below at (0,2). The ideal cell (0,-1) is held by C, which has a
-        // ONE-WAY exact E edge to F (not a chain, so F is not swept into the shift). Pushing C up
-        // would break C->E->F's exactness with nothing to fix it, so the stacker yields.
+    fn stack_updown_yields_up_room_northward_when_cannot_stack() {
+        // A (down) at (0,0); B (up) parked SOUTH at (0,2). The ideal cell (0,-1) is held by C, which
+        // has a ONE-WAY exact E edge to F — pushing C up would break C->E->F with nothing to fix it,
+        // so no clean stack exists. The stacker must NOT push C, and must yield B to the NORTH side
+        // of A (an Up room belongs north of its partner) rather than leaving it parked south.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
         g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, 2));
+        g.set_pos(2, (0, 2));   // B starts SOUTH of A (wrong side)
         g.set_pos(3, (0, -1));  // C
         g.set_pos(4, (1, -1));  // F, east of C — exact, but one-way (no reciprocal → not a chain)
         g.add_edge(1, Direction::Up, 2);
         g.add_edge(3, Direction::E, 4); // one-way only
         stack_updown_rooms(&mut g);
         assert_eq!(g.room(3).unwrap().pos, Some((0, -1)), "C is NOT pushed (would break C->E->F)");
-        assert_ne!(g.room(2).unwrap().pos, Some((0, -1)), "B did not steal C's cell");
+        assert!(g.room(2).unwrap().pos.unwrap().1 < g.room(1).unwrap().pos.unwrap().1,
+            "B (up room) yielded to the NORTH side of A: B={:?} A={:?}",
+            g.room(2).unwrap().pos, g.room(1).unwrap().pos);
+    }
+
+    #[test]
+    fn stack_updown_yields_down_room_southward() {
+        // A (up partner) at (0,0); B is DOWN from A and parked NORTH at (0,-3) (wrong side) with the
+        // ideal cell (0,1) blocked by a chain that can't move. B must yield to the SOUTH of A.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -3));  // B (down room) parked NORTH (wrong side)
+        g.set_pos(3, (0, 1));   // C blocks the ideal cell below A
+        g.set_pos(4, (1, 1));   // F east of C, one-way exact → C can't be pushed
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(3, Direction::E, 4);
+        stack_updown_rooms(&mut g);
+        assert!(g.room(2).unwrap().pos.unwrap().1 > g.room(1).unwrap().pos.unwrap().1,
+            "B (down room) yielded to the SOUTH side of A: B={:?} A={:?}",
+            g.room(2).unwrap().pos, g.room(1).unwrap().pos);
     }
 
     #[test]
