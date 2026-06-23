@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::direction::grid_offset;
+use crate::direction::{grid_offset, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 
 mod sort;
@@ -190,6 +190,12 @@ pub(crate) fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<
         adjacency.entry(id).or_default();
     }
     for conn in graph.connections() {
+        // Unknown-direction edges (e.g. a death/respawn transition the game gave no direction for)
+        // are non-spatial: they must not group rooms into a component they have no real position
+        // relation to.
+        if conn.dir == Direction::Unknown {
+            continue;
+        }
         adjacency.entry(conn.origin).or_default().push(conn.dest);
         adjacency.entry(conn.dest).or_default().push(conn.origin);
     }
@@ -564,9 +570,14 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         let index: BTreeMap<RoomId, usize> =
             comp.iter().enumerate().map(|(i, &id)| (id, i)).collect();
 
-        // Local undirected adjacency for BFS distances.
+        // Local undirected adjacency for BFS distances. Unknown-direction edges are non-spatial and
+        // excluded, so they exert no graph-distance pull in the stress solve (the real compass/
+        // up-down structure decides positions).
         let mut adj = vec![Vec::new(); n];
         for c in graph.connections() {
+            if c.dir == Direction::Unknown {
+                continue;
+            }
             if let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) {
                 adj[a].push(b);
                 adj[b].push(a);
@@ -652,6 +663,47 @@ mod tests {
     #[test]
     fn layout_mode_default_is_auto() {
         assert_eq!(LayoutMode::default(), LayoutMode::Auto);
+    }
+
+    #[test]
+    fn unknown_edges_are_non_spatial_for_components() {
+        // An Unknown-direction edge (e.g. a death/respawn transition) must not group two rooms into
+        // one layout component or pull them together; a real compass edge does.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.add_edge(1, Direction::Unknown, 2);
+        assert_eq!(connected_components(&g, &[1, 2]).len(), 2, "Unknown edge does not connect a component");
+
+        let mut h = MapGraph::new();
+        h.upsert_room(1, "a".into());
+        h.upsert_room(2, "b".into());
+        h.add_edge(1, Direction::E, 2);
+        assert_eq!(connected_components(&h, &[1, 2]).len(), 1, "a compass edge does connect a component");
+    }
+
+    #[test]
+    fn unknown_edge_does_not_change_relayout() {
+        // A phantom 1<->3 Unknown edge (alongside the real 1-E-2-E-3 chain) must not pull on the
+        // stress solve: relayout is identical whether or not the Unknown edge is present.
+        let build = |unknown: bool| {
+            let mut g = MapGraph::new();
+            for id in [1u16, 2, 3] {
+                g.upsert_room(id, "r".into());
+            }
+            g.add_edge(1, Direction::E, 2);
+            g.add_edge(2, Direction::E, 3);
+            if unknown {
+                g.add_edge(1, Direction::Unknown, 3);
+            }
+            g
+        };
+        let (mut a, mut b) = (build(true), build(false));
+        relayout_auto(&mut a);
+        relayout_auto(&mut b);
+        let pa: Vec<_> = a.rooms().map(|r| (r.id, r.pos)).collect();
+        let pb: Vec<_> = b.rooms().map(|r| (r.id, r.pos)).collect();
+        assert_eq!(pa, pb, "an Unknown edge must not change the relayout");
     }
 
     #[test]
