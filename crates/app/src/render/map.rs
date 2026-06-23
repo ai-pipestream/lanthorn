@@ -1443,11 +1443,12 @@ pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radi
 /// only thing a tighter layout can disturb is connector routing, so if the result raises illegal
 /// overlaps the whole compaction is reverted (cosmetic tightening is never worth a new overlap).
 pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
-    let before = render_overlap_stats(graph).0;
-    let snapshot: Vec<(mapper::graph::RoomId, (i32, i32))> =
-        graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
-
     for is_x in [true, false] {
+        // Collapse the lowest collapsible empty interior line, repeat. A line whose collapse would
+        // add an illegal overlap is a gutter a connector needs (e.g. the column a long direct route
+        // runs up) — leave it and move past it (`floor`), rather than reverting the whole pass and
+        // keeping lines that WOULD have collapsed cleanly.
+        let mut floor = i32::MIN;
         loop {
             let coords: std::collections::BTreeSet<i32> = graph
                 .rooms()
@@ -1456,24 +1457,26 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
             let (Some(&min), Some(&max)) = (coords.iter().next(), coords.iter().next_back()) else {
                 break;
             };
-            // Lowest empty interior line (strictly between the extremes); none → axis is dense.
-            let Some(empty) = ((min + 1)..max).find(|c| !coords.contains(c)) else {
+            // Lowest empty interior line above the gutter floor; none → axis is compacted.
+            let Some(empty) = ((min + 1)..max).find(|c| !coords.contains(c) && *c > floor) else {
                 break;
             };
             let rooms: Vec<(mapper::graph::RoomId, (i32, i32))> =
                 graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
-            for (id, p) in rooms {
+            let before = render_overlap_stats(graph).0;
+            for &(id, p) in &rooms {
                 let c = if is_x { p.0 } else { p.1 };
                 if c > empty {
                     graph.set_pos(id, if is_x { (p.0 - 1, p.1) } else { (p.0, p.1 - 1) });
                 }
             }
-        }
-    }
-
-    if render_overlap_stats(graph).0 > before {
-        for (id, p) in snapshot {
-            graph.set_pos(id, p);
+            if render_overlap_stats(graph).0 > before {
+                // Gutter: undo this collapse and skip it (and everything below) on the next pass.
+                for (id, p) in rooms {
+                    graph.set_pos(id, p);
+                }
+                floor = empty;
+            }
         }
     }
 }
@@ -2475,10 +2478,11 @@ mod tests {
 
     #[test]
     fn repair_puts_78_west_of_180_after_retidy() {
-        // The full Retidy flow (relayout -> cleanup_overlaps -> repair_directional_hints) on A129.
-        // The stress solver places 78 west of 180, but contiguity ejection shoves 180 across 78;
-        // the directional repair pass must recover 180->W->78 (78 ends up west of 180) without
-        // re-introducing overlaps or knocking 76 off 74's column.
+        // The full Retidy flow (relayout -> cleanup_overlaps -> repair_directional_hints) on A129
+        // must leave 78 west of 180 (the 180->W->78 hint), with no illegal overlaps and 76 still on
+        // 74's column. With the length-priority router, cleanup_overlaps now settles this ordering
+        // directly; repair_directional_hints stays in the flow as the safety net that recovers the
+        // hint on inputs where a post-solve stage sacrifices it.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -2497,11 +2501,10 @@ mod tests {
         ] { g.add_edge(o, d, dst); }
         mapper::layout::relayout_auto(&mut g);
         cleanup_overlaps(&mut g, 3, 40);
-        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
-        assert!(p(&g,78).0 > p(&g,180).0, "precondition: contiguity left 78 EAST of 180 (the bug)");
         repair_directional_hints(&mut g, 3, 40);
+        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
         assert!(p(&g,78).0 < p(&g,180).0,
-            "repair must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
+            "retidy must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
         assert_eq!(render_overlap_stats(&g).0, 0, "repair must not introduce illegal overlaps");
         assert_eq!(p(&g,74).0, p(&g,76).0, "repair must not knock 76 off 74's column");
     }
@@ -2785,12 +2788,33 @@ mod tests {
         assert!(p(&g,78).0 < p(&g,180).0, "78 stays west of 180 through compaction");
         assert_eq!(p(&g,74).0, p(&g,76).0, "76 stays under 74 through compaction");
         assert_eq!(render_overlap_stats(&g).0, 0, "compaction keeps overlaps clear");
+        // Compaction must leave only GUTTER lines — an empty interior column/row remains only when
+        // collapsing it would create an illegal overlap (e.g. the column a long direct route runs up).
+        // Any empty interior line that could still collapse cleanly is a compaction miss.
+        let collapsible = |g: &MapGraph, is_x: bool, line: i32| -> bool {
+            let mut t = g.clone();
+            let before = render_overlap_stats(&t).0;
+            let rooms: Vec<_> = t.rooms().map(|r| (r.id, r.pos.unwrap())).collect();
+            for (id, pos) in rooms {
+                let c = if is_x { pos.0 } else { pos.1 };
+                if c > line {
+                    t.set_pos(id, if is_x { (pos.0 - 1, pos.1) } else { (pos.0, pos.1 - 1) });
+                }
+            }
+            render_overlap_stats(&t).0 <= before
+        };
         let xs: std::collections::BTreeSet<i32> = g.rooms().map(|r| r.pos.unwrap().0).collect();
         let ys: std::collections::BTreeSet<i32> = g.rooms().map(|r| r.pos.unwrap().1).collect();
-        assert!((*xs.iter().next().unwrap()..*xs.iter().next_back().unwrap()).all(|x| xs.contains(&x)),
-            "no empty interior column remains: {xs:?}");
-        assert!((*ys.iter().next().unwrap()..*ys.iter().next_back().unwrap()).all(|y| ys.contains(&y)),
-            "no empty interior row remains: {ys:?}");
+        for (is_x, set) in [(true, &xs), (false, &ys)] {
+            let (min, max) = (*set.iter().next().unwrap(), *set.iter().next_back().unwrap());
+            for line in (min + 1)..max {
+                if !set.contains(&line) {
+                    assert!(!collapsible(&g, is_x, line),
+                        "empty interior {} {line} should have compacted (its collapse adds no overlap)",
+                        if is_x { "column" } else { "row" });
+                }
+            }
+        }
     }
 
     #[test]

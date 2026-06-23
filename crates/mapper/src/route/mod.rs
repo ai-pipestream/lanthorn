@@ -333,9 +333,15 @@ fn all_runs(points: &[(i32, i32)]) -> Vec<(bool, i32, i32, i32)> {
 /// — a line-on-line stomp the renderer can't separate. Sees room-line runs too (see `all_runs`), so
 /// it catches two DIRECT routes hugging the same room row/column, which `has_parallel_overlap` (which
 /// only inspects laneable channel runs) misses.
+///
+/// Only each route's INTERIOR is compared — the first and last segment are the room-exit doorway
+/// stubs. Two connectors entering the same room legitimately share its doorway (rendered as parallel
+/// arrows out one box side), so that shared stub must not read as a stomp.
 fn polylines_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
-    for &(ah, al, a_s, a_e) in &all_runs(a) {
-        for &(bh, bl, b_s, b_e) in &all_runs(b) {
+    let ai: &[(i32, i32)] = if a.len() > 2 { &a[1..a.len() - 1] } else { &[] };
+    let bi: &[(i32, i32)] = if b.len() > 2 { &b[1..b.len() - 1] } else { &[] };
+    for &(ah, al, a_s, a_e) in &all_runs(ai) {
+        for &(bh, bl, b_s, b_e) in &all_runs(bi) {
             if ah == bh && al == bl && a_s.max(b_s) < a_e.min(b_e) {
                 return true; // >1 cell of shared collinear run on the same line
             }
@@ -495,6 +501,77 @@ fn total_crossings(conns: &[RoutedConnector]) -> usize {
     n
 }
 
+/// The unconsumed reverse edge (b→a) paired with edge `ci`, preferring the exact compass-opposite
+/// so the trunk keeps its natural straight / single-L shape, falling back to the first reverse edge.
+fn back_edge_idx(
+    compass: &[&Connection],
+    ci: usize,
+    c: &Connection,
+    consumed: &std::collections::BTreeSet<usize>,
+) -> Option<usize> {
+    let is_back = |pi: usize, p: &Connection| {
+        pi != ci && !consumed.contains(&pi) && p.origin == c.dest && p.dest == c.origin
+    };
+    compass
+        .iter()
+        .enumerate()
+        .find(|&(pi, p)| is_back(pi, p) && p.dir == opposite(c.dir))
+        .or_else(|| compass.iter().enumerate().find(|&(pi, p)| is_back(pi, p)))
+        .map(|(pi, _)| pi)
+}
+
+/// Manhattan length of a polyline in doubled coords — used to rank competing direct routes.
+fn path_len(pts: &[(i32, i32)]) -> i32 {
+    pts.windows(2).map(|w| (w[0].0 - w[1].0).abs() + (w[0].1 - w[1].1).abs()).sum()
+}
+
+/// Decide which connectors may keep a straight DIRECT route when several would collide on the same
+/// room line. Two direct routes on one room line cannot be separated (a direct route carries no
+/// lane), so at most one survives; the LONGER one wins (its detour through channels would be the
+/// ugliest) and the shorter ones are returned as "losers" that must weave instead. Without this the
+/// outcome is order-dependent — whichever edge is listed first keeps the line — which can force a
+/// long path to weave around a short one (e.g. 76↔78 weaving aside for the short 180↔78).
+fn direct_route_losers(
+    compass: &[&Connection],
+    graph: &MapGraph,
+    occupied: &std::collections::BTreeSet<(i32, i32)>,
+) -> std::collections::BTreeSet<usize> {
+    // One representative per room pair — the first listed edge, matching where the main loop attempts
+    // the pair's direct route (reverse/extra edges are consumed or become merge stubs there).
+    let mut seen_pairs: std::collections::BTreeSet<(RoomId, RoomId)> = std::collections::BTreeSet::new();
+    let empty = std::collections::BTreeSet::new();
+    let mut cands: Vec<(usize, Vec<(i32, i32)>)> = Vec::new();
+    for (ci, c) in compass.iter().enumerate() {
+        let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
+        if !seen_pairs.insert(pair) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
+                                  graph.room(c.dest).and_then(|r| r.pos)) else { continue };
+        let Some(exit) = side_for(c.dir) else { continue };
+        let required_entry =
+            back_edge_idx(compass, ci, c, &empty).and_then(|pi| side_for(compass[pi].dir));
+        if let Some((sentry, pts)) = direct_route(a, exit, b, occupied) {
+            if required_entry.is_none_or(|req| req == sentry) {
+                cands.push((ci, pts));
+            }
+        }
+    }
+    // Longest first (index breaks ties deterministically); a candidate that collides with an already
+    // accepted winner becomes a loser.
+    cands.sort_by(|x, y| path_len(&y.1).cmp(&path_len(&x.1)).then(x.0.cmp(&y.0)));
+    let mut accepted: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut losers = std::collections::BTreeSet::new();
+    for (ci, pts) in cands {
+        if accepted.iter().any(|w| polylines_overlap(&pts, w)) {
+            losers.insert(ci);
+        } else {
+            accepted.push(pts);
+        }
+    }
+    losers
+}
+
 /// Route every drawn (compass) edge. When `greedy` is false, each connector takes its
 /// canonical route (horizontal-first L, geometric entry side). When true, each connector is
 /// routed sequentially and picks — among its candidate routes (both L orientations, plus the
@@ -517,6 +594,9 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     let mut consumed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
     let occupied: std::collections::BTreeSet<(i32, i32)> =
         graph.rooms().filter_map(|r| r.pos).collect();
+    // Resolve direct-route line collisions up front so the LONGER connector keeps the straight line
+    // and shorter rivals weave — independent of edge listing order.
+    let direct_losers = direct_route_losers(&compass, graph, &occupied);
     let mut out: Vec<RoutedConnector> = Vec::new();
     // The trunk polyline for each unordered room pair, recorded when its connector is built.
     // A later edge between the same pair becomes a MERGE STUB that joins this trunk.
@@ -563,15 +643,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // side, collapsing the stub to a zero-width line). Fall back to the first unconsumed reverse
         // edge when no exact opposite exists. Exactly one pairing collapses; further edges between
         // the pair draw on their own (as merge stubs).
-        let is_back = |pi: usize, p: &Connection| {
-            pi != ci && !consumed.contains(&pi) && p.origin == c.dest && p.dest == c.origin
-        };
-        let back_idx = compass
-            .iter()
-            .enumerate()
-            .find(|&(pi, p)| is_back(pi, p) && p.dir == opposite(c.dir))
-            .or_else(|| compass.iter().enumerate().find(|&(pi, p)| is_back(pi, p)))
-            .map(|(pi, _)| pi);
+        let back_idx = back_edge_idx(&compass, ci, c, &consumed);
         let back = back_idx.map(|pi| compass[pi]);
         let has_reciprocal = back.is_some();
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
@@ -587,8 +659,12 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // no lane, so two on one line cannot be separated; the dipped channel route below can).
         let required_entry = back.and_then(|bk| side_for(bk.dir));
         if let Some((sentry, pts)) = direct_route(a, exit, b, &occupied) {
+            // Reject if this straight run stomps an already-placed connector, or if the pre-pass
+            // ruled this the shorter rival on a contested room line (so it weaves and the longer
+            // connector keeps the line).
             let stomps_existing = out.iter().any(|o| polylines_overlap(&pts, &o.points));
-            if required_entry.is_none_or(|req| req == sentry) && !stomps_existing {
+            let is_loser = direct_losers.contains(&ci);
+            if required_entry.is_none_or(|req| req == sentry) && !stomps_existing && !is_loser {
                 out.push(RoutedConnector {
                     origin: c.origin,
                     dest: c.dest,
@@ -907,16 +983,18 @@ mod tests {
 
     #[test]
     fn polylines_overlap_sees_room_line_stomp() {
-        // Two routes hugging the SAME room column (even x=-14), overlapping in y.
-        let a = vec![(-4, 4), (-14, 4), (-14, -8)];
-        let b = vec![(-12, 0), (-14, 0), (-14, -8)];
-        assert!(polylines_overlap(&a, &b), "two routes on room column -14 overlap");
-        // Routed one column over (odd channel x=-13): no shared line.
-        let c = vec![(-12, 0), (-13, 0), (-13, -8)];
-        assert!(!polylines_overlap(&a, &c), "different columns do not overlap");
-        // Touching at a single corner cell is not an overlap.
-        let d = vec![(-14, -8), (-14, -9), (-2, -9)];
-        assert!(!polylines_overlap(&a, &d), "sharing only the end cell is not a stomp");
+        // Full routes (room-centre endpoints first/last) both running up room column x=-14 into the
+        // room at (-14,-8): their INTERIORS overlap on the column for many cells.
+        let a = vec![(-2, 6), (-3, 6), (-14, 6), (-14, -7), (-14, -8)];
+        let b = vec![(-10, 2), (-11, 2), (-14, 2), (-14, -7), (-14, -8)];
+        assert!(polylines_overlap(&a, &b), "two routes up room column -14 overlap on the interior");
+        // The second route reaches the room one channel over (x=-13) and only joins the column for the
+        // final doorway stub — interiors share no line, so it is NOT a stomp.
+        let c = vec![(-10, 2), (-13, 2), (-13, -7), (-14, -7), (-14, -8)];
+        assert!(!polylines_overlap(&a, &c), "sharing only the doorway stub is not a stomp");
+        // Different column entirely: no shared line.
+        let d = vec![(-10, 2), (-11, 2), (-12, 2), (-12, -7), (-12, -8)];
+        assert!(!polylines_overlap(&a, &d), "different columns do not overlap");
     }
 
     #[test]
@@ -943,6 +1021,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn longer_direct_route_keeps_the_contested_line() {
+        // A (far) and B (near) both enter T from the south up T's column and cannot both run straight
+        // up it. The LONGER connector (A) must keep the direct line; the shorter (B) weaves. Without
+        // length priority the outcome is edge-order dependent and the long path can be the one to weave.
+        let mut g = MapGraph::new();
+        for id in 1..=3 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); // T
+        g.set_pos(2, (3, 4)); // A (far)
+        g.set_pos(3, (1, 2)); // B (near)
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(3, Direction::W, 1);
+        let routed = route_topology(&g);
+        // T's column is the contested room line (doubled x=0). The winner runs straight up it; the
+        // loser yields it and routes up an adjacent channel instead.
+        let runs = |o: u16, d: u16| {
+            let c = routed.iter().find(|c| c.origin == o && c.dest == d).unwrap();
+            all_runs(if c.points.len() > 2 { &c.points[1..c.points.len() - 1] } else { &[] })
+        };
+        let on_column_0 = |rs: &[(bool, i32, i32, i32)]| rs.iter().any(|&(h, l, _, _)| !h && l == 0);
+        assert!(on_column_0(&runs(2, 1)), "A (longer) keeps the straight run up T's column");
+        assert!(!on_column_0(&runs(3, 1)), "B (shorter) yields the column, routing alongside it");
     }
 
     #[test]
@@ -1377,4 +1479,3 @@ mod tests {
         );
     }
 }
-
