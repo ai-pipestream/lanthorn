@@ -321,6 +321,41 @@ pub fn room_side_score(graph: &MapGraph, id: RoomId) -> usize {
     sat
 }
 
+/// Like [`room_side_score`] but STRICT: a cardinal edge counts only when its CROSS axis is exactly
+/// aligned (column-exact for N/S, row-exact for E/W) — i.e. the edge is [`edge_is_satisfied`], not
+/// merely on the right side. Reciprocal-chain edges weigh more. Overlap cleanup uses this to avoid
+/// knocking a room off an exact row/column it shares with a neighbour: `room_side_score`, being
+/// side-only (`axis_side_respected` ignores the cross axis), treats "below-and-west of X" as just as
+/// good as "exactly below X", so it cannot protect a column/row chain when relocating a room.
+pub fn room_alignment_score(graph: &MapGraph, id: RoomId) -> usize {
+    let Some(p) = graph.room(id).and_then(|r| r.pos) else { return 0 };
+    let mut sat = 0;
+    for c in graph.connections() {
+        let (other, is_origin) = if c.origin == id {
+            (c.dest, true)
+        } else if c.dest == id {
+            (c.origin, false)
+        } else {
+            continue;
+        };
+        let Some(delta) = grid_offset(c.dir) else { continue };
+        let Some(op) = graph.room(other).and_then(|r| r.pos) else { continue };
+        let actual = if is_origin {
+            (op.0 - p.0, op.1 - p.1)
+        } else {
+            (p.0 - op.0, p.1 - op.1)
+        };
+        if axis_sign_ok(actual.0, delta.0) && axis_sign_ok(actual.1, delta.1) {
+            let reciprocal = graph
+                .connections()
+                .iter()
+                .any(|r| r.origin == other && r.dest == id && grid_offset(r.dir).is_some());
+            sat += if reciprocal { RECIPROCAL_WEIGHT } else { 1 };
+        }
+    }
+    sat
+}
+
 /// Number of room `id`'s compass (grid-offset) edges — its directional-constraint count.
 /// A room with FEWER compass edges (e.g. a portal-only or leaf room) is a safer room to nudge
 /// when resolving a rendered overlap, since moving it disturbs fewer directional hints.

@@ -1240,17 +1240,19 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
             .collect();
 
         // Pick the single GLOBALLY best move this pass. Key (minimized):
-        //   (resulting overlaps, hints the moved room loses, resulting crossings,
-        //    that room's compass degree, id, move index)
-        // Overlaps first guarantees progress; among equal overlap-reducers a HINT-NEUTRAL nudge
-        // on any room (and a low-constraint / leaf room) beats knocking an aligned room — e.g.
-        // a chain member or #25 — off its row. `broken` is `score_orig - score_trial` so any
-        // lost directional hint (one-way or reciprocal) is dispreferred.
-        type Key = (usize, usize, usize, usize, mapper::graph::RoomId, usize);
+        //   (resulting overlaps, exact-alignment the moved room loses, side-hints the moved room
+        //    loses, resulting crossings, that room's compass degree, id, move index)
+        // Overlaps first guarantees progress. Then `align_broken` — exact row/column alignment the
+        // moved room would lose (reciprocal-chain-weighted): this protects a 2-room column/row chain
+        // that the side-only `broken` cannot see, since `room_side_score` scores "below-and-west of
+        // X" the same as "exactly below X". Then `broken` (side hints), crossings, and a low-degree /
+        // low-id room as the final hint-neutral tiebreak.
+        type Key = (usize, usize, usize, usize, usize, mapper::graph::RoomId, usize);
         let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
         for &id in &room_ids {
             let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
             let score_orig = mapper::layout::room_side_score(graph, id);
+            let align_orig = mapper::layout::room_alignment_score(graph, id);
             let degree = mapper::layout::room_compass_degree(graph, id);
             for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
                 let trial = (orig.0 + dx, orig.1 + dy);
@@ -1260,10 +1262,12 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
                 graph.set_pos(id, trial);
                 let s = render_overlap_stats(graph);
                 let score_trial = mapper::layout::room_side_score(graph, id);
+                let align_trial = mapper::layout::room_alignment_score(graph, id);
                 graph.set_pos(id, orig); // restore; the winner is committed after the scan
                 if (s.0, s.1) < (base.0, base.1) {
+                    let align_broken = align_orig.saturating_sub(align_trial);
                     let broken = score_orig.saturating_sub(score_trial);
-                    let key: Key = (s.0, broken, s.1, degree, id, move_idx);
+                    let key: Key = (s.0, align_broken, broken, s.1, degree, id, move_idx);
                     if best.as_ref().is_none_or(|(bk, _, _)| key < *bk) {
                         best = Some((key, id, trial));
                     }
@@ -1950,6 +1954,38 @@ mod tests {
         g.add_edge(1, Direction::E, 2);
         let (illegal, _) = render_overlap_stats(&g);
         assert_eq!(illegal, 0);
+    }
+
+    #[test]
+    fn cleanup_keeps_two_room_column_chain_aligned() {
+        // Regression: relayout aligns the reciprocal N/S chain 74<->76 into one column (76 directly
+        // below 74). The rendered plan has one illegal overlap, so cleanup_overlaps must nudge
+        // SOMETHING — but it must NOT knock #76 off #74's column to do it (the "76 not below 74"
+        // bug). The side-only hint score saw that move as free; the exact-alignment term forbids it.
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+            (239,W,77),(81,N,75),(25,Down,26),
+        ] { g.add_edge(o, d, dst); }
+        mapper::layout::relayout_auto(&mut g);
+        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(p(&g,74).0, p(&g,76).0, "precondition: relayout column-aligns 74 and 76");
+        cleanup_overlaps(&mut g, 3, 40);
+        assert_eq!(render_overlap_stats(&g).0, 0, "cleanup still clears all illegal overlaps");
+        assert_eq!(p(&g,74).0, p(&g,76).0,
+            "76 must stay directly below 74 after cleanup: 74={:?} 76={:?}", p(&g,74), p(&g,76));
+        assert!(p(&g,76).1 > p(&g,74).1, "76 stays south of 74");
     }
 
     #[test]
