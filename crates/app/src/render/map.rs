@@ -1461,149 +1461,37 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
 
     for (origin, dest, dy) in updown {
         let Some(op) = graph.room(origin).and_then(|r| r.pos) else { continue };
-        let ideal = (op.0, op.1 + dy);
-        if graph.room(dest).and_then(|r| r.pos) == Some(ideal) {
-            continue; // already stacked
+        // Preferred target is directly in the portal direction; if that cell can't be opened, the two
+        // diagonal-adjacent cells (NW/NE for Up, SW/SE for Down) still seat the room beside its
+        // partner rather than flinging it across the map.
+        let targets = [
+            (op.0, op.1 + dy),     // directly N (Up) / S (Down)
+            (op.0 - 1, op.1 + dy), // NW / SW
+            (op.0 + 1, op.1 + dy), // NE / SE
+        ];
+        // Try directly N/S first, then the diagonals; the first that opens (or where the room
+        // already sits) wins. try_stack_dest_at no-ops when dest is already at that cell, so a
+        // diagonally-placed room still gets a chance to move to the preferred directly-in-line cell.
+        if targets
+            .iter()
+            .any(|&t| try_stack_dest_at(graph, dest, origin, t, dy, &chains))
+        {
+            continue; // seated at the first openable adjacent cell
         }
+
+        // None of the adjacent cells could be opened — yield, but keep the room on the expected SIDE
+        // (Up -> north, Down -> south) at the nearest free, overlap- and hint-safe cell. If it is
+        // already on that side, leave it.
+        let center = targets[0];
         let pos: BTreeMap<RoomId, (i32, i32)> =
             graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
-        let at = |cell: (i32, i32)| pos.iter().find(|&(_, &p)| p == cell).map(|(&id, _)| id);
-
-        // Seed: the ideal column's occupants on the ideal side. Then close the set so chains move
-        // whole: add every E/W row-chain mate of a shifted room, and whatever sits directly in a
-        // shifting room's path (keeping the translation collision-free).
-        let mut s: BTreeSet<RoomId> = pos
-            .iter()
-            .filter(|&(&id, &p)| {
-                id != dest && p.0 == ideal.0 && if dy < 0 { p.1 <= ideal.1 } else { p.1 >= ideal.1 }
-            })
-            .map(|(&id, _)| id)
-            .collect();
-        let mut work: Vec<RoomId> = s.iter().copied().collect();
-        while let Some(r) = work.pop() {
-            if let Some(&cid) = chains.ew.get(&r) {
-                for &m in &chains.ew_members[cid] {
-                    if m != dest && s.insert(m) {
-                        work.push(m);
-                    }
-                }
-            }
-            let rp = pos[&r];
-            if let Some(q) = at((rp.0, rp.1 + dy)) {
-                if q != dest && s.insert(q) {
-                    work.push(q);
-                }
-            }
-        }
-        // Can't proceed if the closure swept in `dest` itself or the partner it stacks on.
-        if s.contains(&dest) || s.contains(&origin) {
-            continue;
-        }
-
-        let base_ov = render_overlap_stats(graph).0;
-        let base_side = mapper::layout::directional_hint_score(graph);
-        let base_align = exact_alignment_count(graph);
-
-        for &id in &s {
-            let p = pos[&id];
-            graph.set_pos(id, (p.0, p.1 + dy));
-        }
-        graph.set_pos(dest, ideal);
-
-        let cells: Vec<(i32, i32)> = graph.rooms().filter_map(|r| r.pos).collect();
-        let distinct = cells.iter().collect::<BTreeSet<_>>().len() == cells.len();
-        let ok = distinct
-            && render_overlap_stats(graph).0 <= base_ov
-            && mapper::layout::directional_hint_score(graph) >= base_side
-            && exact_alignment_count(graph) >= base_align;
-        if ok {
-            continue; // stacked directly above/below the partner
-        }
-        // Revert the coordinated shift.
-        for (&id, &p) in &pos {
-            graph.set_pos(id, p);
-        }
-
-        // Cluster-drag: the ideal cell may be free yet placing `dest` there alone breaks one of its
-        // OWN compass edges — e.g. a diagonal to a leaf room that shares the partner's column. Move
-        // `dest` together with its movable, unanchored compass-edge cluster by the same delta, so
-        // those edges are preserved (translated whole) and the room can still sit directly in line.
-        if at(ideal).is_none() {
-            let delta = (ideal.0 - pos[&dest].0, ideal.1 - pos[&dest].1);
-            const CLUSTER_LIMIT: usize = 4;
-            let mut cluster: BTreeSet<RoomId> = BTreeSet::new();
-            cluster.insert(dest);
-            let mut wl = vec![dest];
-            let mut bail = false;
-            while let Some(r) = wl.pop() {
-                for c in graph.connections() {
-                    if mapper::direction::grid_offset(c.dir).is_none() {
-                        continue; // only true compass edges anchor a relative position
-                    }
-                    let other = if c.origin == r {
-                        c.dest
-                    } else if c.dest == r {
-                        c.origin
-                    } else {
-                        continue;
-                    };
-                    if cluster.insert(other) {
-                        // Stop if the cluster would pull in the partner, an anchored chain member,
-                        // or grow too large — those can't be freely translated.
-                        if other == origin
-                            || cluster.len() > CLUSTER_LIMIT
-                            || chains.ew.contains_key(&other)
-                            || chains.ns.contains_key(&other)
-                        {
-                            bail = true;
-                        }
-                        wl.push(other);
-                    }
-                }
-                if bail {
-                    break;
-                }
-            }
-            let targets: Vec<(RoomId, (i32, i32))> = cluster
-                .iter()
-                .map(|&id| (id, (pos[&id].0 + delta.0, pos[&id].1 + delta.1)))
-                .collect();
-            // Every destination cell must be empty or vacated by another cluster member.
-            let collide = targets.iter().any(|&(_, np)| {
-                pos.iter().any(|(&oid, &op)| !cluster.contains(&oid) && op == np)
-            });
-            if !bail && cluster.len() > 1 && !collide {
-                for &(id, np) in &targets {
-                    graph.set_pos(id, np);
-                }
-                let cells: Vec<(i32, i32)> = graph.rooms().filter_map(|r| r.pos).collect();
-                let distinct = cells.iter().collect::<BTreeSet<_>>().len() == cells.len();
-                if distinct
-                    && render_overlap_stats(graph).0 <= base_ov
-                    && mapper::layout::directional_hint_score(graph) >= base_side
-                    && exact_alignment_count(graph) >= base_align
-                {
-                    continue; // stacked by dragging the cluster into line
-                }
-                for (&id, &p) in &pos {
-                    graph.set_pos(id, p); // revert
-                }
-            }
-        }
-
-        // Yield, but at least keep the room on the expected SIDE: an Up room north of its partner,
-        // a Down room south. If it is already on that side, leave it; otherwise relocate it (alone)
-        // to the nearest free cell on the correct side that adds no overlap and breaks no hint.
         let Some(dp0) = graph.room(dest).and_then(|r| r.pos) else { continue };
         let on_side = |c: (i32, i32)| if dy < 0 { c.1 < op.1 } else { c.1 > op.1 };
         if on_side(dp0) {
             continue;
         }
-        let occupied: BTreeSet<(i32, i32)> = pos
-            .iter()
-            .filter(|&(&id, _)| id != dest)
-            .map(|(_, &p)| p)
-            .collect();
+        let occupied: BTreeSet<(i32, i32)> =
+            pos.iter().filter(|&(&id, _)| id != dest).map(|(_, &p)| p).collect();
         let base_ov = render_overlap_stats(graph).0;
         let base_side = mapper::layout::directional_hint_score(graph);
         let base_align = exact_alignment_count(graph);
@@ -1611,32 +1499,168 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
         let mut cands: Vec<(i32, i32)> = Vec::new();
         for ddy in -YIELD_RADIUS..=YIELD_RADIUS {
             for ddx in -YIELD_RADIUS..=YIELD_RADIUS {
-                let c = (ideal.0 + ddx, ideal.1 + ddy);
+                let c = (center.0 + ddx, center.1 + ddy);
                 if on_side(c) && !occupied.contains(&c) {
                     cands.push(c);
                 }
             }
         }
-        // Nearest to the ideal cell first; ties by column nearness then coord (deterministic).
         cands.sort_unstable_by_key(|&(x, y)| {
-            ((x - ideal.0).abs() + (y - ideal.1).abs(), (x - ideal.0).abs(), x, y)
+            ((x - center.0).abs() + (y - center.1).abs(), (x - center.0).abs(), x, y)
         });
         for c in cands {
             graph.set_pos(dest, c);
-            // Same guards as a stack: no new overlap, no side-hint loss, and no exact-alignment loss
-            // — the last stops a relocation from knocking an ANCHORED partner (a chain member) off
-            // its row/column. A free-floating portal leaf has no exact edges to lose, so it moves.
             if render_overlap_stats(graph).0 <= base_ov
                 && mapper::layout::directional_hint_score(graph) >= base_side
                 && exact_alignment_count(graph) >= base_align
             {
                 break; // committed at the nearest acceptable on-side cell
             }
-            graph.set_pos(dest, dp0); // not acceptable — restore and keep searching
+            graph.set_pos(dest, dp0); // not acceptable -- restore and keep searching
         }
     }
 }
 
+/// Try to seat `dest` at `ideal` (a cell adjacent to its Up/Down `origin` partner) without breaking
+/// a chain: first by shifting `ideal`'s column out to open it (chains travel whole), then -- if
+/// `ideal` is free but a lone move would break `dest`'s own compass edges -- by cluster-dragging
+/// `dest` with its movable, unanchored compass-edge cluster. Commits and returns true on success;
+/// otherwise leaves the graph unchanged and returns false. `dy` is the portal direction (-1 Up /
+/// +1 Down). Guards: no collision, no new illegal overlap, no side-hint loss, no exact-align loss.
+fn try_stack_dest_at(
+    graph: &mut mapper::graph::MapGraph,
+    dest: mapper::graph::RoomId,
+    origin: mapper::graph::RoomId,
+    ideal: (i32, i32),
+    dy: i32,
+    chains: &mapper::layout::Chains,
+) -> bool {
+    use mapper::graph::RoomId;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let pos: BTreeMap<RoomId, (i32, i32)> =
+        graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+    if pos.get(&dest) == Some(&ideal) {
+        return true; // already seated at this cell — nothing to do
+    }
+    let at = |cell: (i32, i32)| pos.iter().find(|&(_, &p)| p == cell).map(|(&id, _)| id);
+    let base_ov = render_overlap_stats(graph).0;
+    let base_side = mapper::layout::directional_hint_score(graph);
+    let base_align = exact_alignment_count(graph);
+    let guarded = |g: &mapper::graph::MapGraph| {
+        let cells: Vec<(i32, i32)> = g.rooms().filter_map(|r| r.pos).collect();
+        let distinct = cells.iter().collect::<BTreeSet<_>>().len() == cells.len();
+        distinct
+            && render_overlap_stats(g).0 <= base_ov
+            && mapper::layout::directional_hint_score(g) >= base_side
+            && exact_alignment_count(g) >= base_align
+    };
+
+    // 1) Place `dest` at `ideal`. If the cell is occupied, first open it by shifting its column out,
+    // closing the set so chains move whole (E/W row-chain mates of a shifted room, plus whatever
+    // sits directly in a shifting room's path). If the cell is already free, no shift is needed —
+    // the seed stays empty and we just drop `dest` in.
+    let mut s: BTreeSet<RoomId> = if at(ideal).is_some() {
+        pos.iter()
+            .filter(|&(&id, &p)| {
+                id != dest && p.0 == ideal.0 && if dy < 0 { p.1 <= ideal.1 } else { p.1 >= ideal.1 }
+            })
+            .map(|(&id, _)| id)
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let mut work: Vec<RoomId> = s.iter().copied().collect();
+    while let Some(r) = work.pop() {
+        if let Some(&cid) = chains.ew.get(&r) {
+            for &m in &chains.ew_members[cid] {
+                if m != dest && s.insert(m) {
+                    work.push(m);
+                }
+            }
+        }
+        let rp = pos[&r];
+        if let Some(q) = at((rp.0, rp.1 + dy)) {
+            if q != dest && s.insert(q) {
+                work.push(q);
+            }
+        }
+    }
+    // Skip the shift only when the closure swept in `dest` or the partner -- still try cluster-drag.
+    if !s.contains(&dest) && !s.contains(&origin) {
+        for &id in &s {
+            let p = pos[&id];
+            graph.set_pos(id, (p.0, p.1 + dy));
+        }
+        graph.set_pos(dest, ideal);
+        if guarded(graph) {
+            return true;
+        }
+        for (&id, &p) in &pos {
+            graph.set_pos(id, p);
+        }
+    }
+
+    // 2) Cluster-drag: `ideal` is free, but a lone move would break dest's own compass edges. Move
+    // `dest` with its movable, unanchored compass-edge cluster by the same delta, preserving them.
+    if at(ideal).is_none() {
+        let delta = (ideal.0 - pos[&dest].0, ideal.1 - pos[&dest].1);
+        const CLUSTER_LIMIT: usize = 4;
+        let mut cluster: BTreeSet<RoomId> = BTreeSet::new();
+        cluster.insert(dest);
+        let mut wl = vec![dest];
+        let mut bail = false;
+        while let Some(r) = wl.pop() {
+            for c in graph.connections() {
+                if mapper::direction::grid_offset(c.dir).is_none() {
+                    continue; // only true compass edges anchor a relative position
+                }
+                let other = if c.origin == r {
+                    c.dest
+                } else if c.dest == r {
+                    c.origin
+                } else {
+                    continue;
+                };
+                if cluster.insert(other) {
+                    // Stop if the cluster would pull in the partner, an anchored chain member, or
+                    // grow too large -- those can't be freely translated.
+                    if other == origin
+                        || cluster.len() > CLUSTER_LIMIT
+                        || chains.ew.contains_key(&other)
+                        || chains.ns.contains_key(&other)
+                    {
+                        bail = true;
+                    }
+                    wl.push(other);
+                }
+            }
+            if bail {
+                break;
+            }
+        }
+        let drag: Vec<(RoomId, (i32, i32))> = cluster
+            .iter()
+            .map(|&id| (id, (pos[&id].0 + delta.0, pos[&id].1 + delta.1)))
+            .collect();
+        let collide = drag
+            .iter()
+            .any(|&(_, np)| pos.iter().any(|(&oid, &op)| !cluster.contains(&oid) && op == np));
+        if !bail && cluster.len() > 1 && !collide {
+            for &(id, np) in &drag {
+                graph.set_pos(id, np);
+            }
+            if guarded(graph) {
+                return true;
+            }
+            for (&id, &p) in &pos {
+                graph.set_pos(id, p);
+            }
+        }
+    }
+
+    false
+}
 /// Total compass connections whose geometry is EXACTLY satisfied (axis-aligned) — the chain-health
 /// metric the Up/Down stacker must not reduce. Up/Down/Unknown edges are always "satisfied" (no
 /// grid offset), so they contribute a constant and do not affect before/after deltas.
@@ -2453,6 +2477,30 @@ mod tests {
         assert_eq!(g.room(3).unwrap().pos, Some((0, -2)), "C shifted up");
         assert_eq!(g.room(4).unwrap().pos, Some((1, -2)), "D shifted up WITH C — row stays intact");
         assert_eq!(g.room(3).unwrap().pos.unwrap().1, g.room(4).unwrap().pos.unwrap().1, "C,D one row");
+    }
+
+    #[test]
+    fn stack_updown_uses_diagonal_when_directly_in_line_is_blocked() {
+        // P (up partner) at (0,0). Directly north (0,-1) is X, which has a one-way exact E edge to Z
+        // — shifting X up would break X->E->Z, so the directly-north cell can't be opened. NW (-1,-1)
+        // is free, so the up room U seats there (diagonally adjacent) instead of yielding far away.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));   // P (partner)
+        g.set_pos(2, (0, -1));  // X blocks directly-north
+        g.set_pos(3, (1, -1));  // Z east of X (one-way exact → X can't shift up)
+        g.set_pos(4, (0, 2));   // U (up room) parked far south
+        g.add_edge(1, Direction::Up, 4);
+        g.add_edge(4, Direction::Down, 1);
+        g.add_edge(2, Direction::E, 3); // one-way
+        stack_updown_rooms(&mut g);
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(p(2), (0, -1), "X (blocker) not pushed");
+        assert!(p(4).1 < p(1).1, "U is north of P: U={:?} P={:?}", p(4), p(1));
+        assert!((p(4).0 - p(1).0).abs() <= 1 && (p(4).1 - p(1).1).abs() <= 1,
+            "U lands diagonally adjacent to P: U={:?} P={:?}", p(4), p(1));
+        assert_ne!(p(4), (0, -1), "U did not steal X's cell");
     }
 
     #[test]
