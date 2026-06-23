@@ -283,7 +283,7 @@ fn build_path(
 }
 
 /// Short label string for a stub direction.
-fn stub_label(dir: Direction) -> &'static str {
+pub(crate) fn stub_label(dir: Direction) -> &'static str {
     match dir {
         Direction::Up => "U",
         Direction::Down => "D",
