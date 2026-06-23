@@ -1129,6 +1129,8 @@ fn draw_compact_room(
 
     let (tl, tr, bl, br, h, v) = if is_current {
         ('┏', '┓', '┗', '┛', '━', '┃')
+    } else if room.has_layer_portal {
+        ('╔', '╗', '╚', '╝', '═', '║')
     } else {
         ('╭', '╮', '╰', '╯', '─', '│')
     };
@@ -1216,8 +1218,12 @@ fn draw_box_room(
     let (w, h) = (w as i32, h as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
+    // Box outline: heavy for the current room, double-line for a room with a portal to
+    // another layer (so cross-layer exits read at a glance), rounded otherwise.
     let (tl, tr, bl, br, horiz, vert) = if is_current {
         ('┏', '┓', '┗', '┛', '━', '┃')
+    } else if room.has_layer_portal {
+        ('╔', '╗', '╚', '╝', '═', '║')
     } else {
         ('╭', '╮', '╰', '╯', '─', '│')
     };
@@ -3374,4 +3380,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn layer_portal_room_gets_double_line_outline() {
+        // A room with an outgoing portal to another layer renders with a double-line box
+        // outline (╔═╗ … ║) instead of the rounded one, so cross-layer exits read at a glance.
+        use mapper::graph::MapGraph;
+        use mapper::layer::{peel_region, MAIN_LAYER};
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1));
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        peel_region(&mut g, 2).expect("peel cellar into its own layer");
+        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
+        assert!(
+            rm.rooms.iter().find(|r| r.id == 1).unwrap().has_layer_portal,
+            "Hall owns the outgoing cross-layer portal"
+        );
+        let mut st = AppState::default(); // Boxes zoom
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let all_text: String = buf.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            all_text.contains('╔') && all_text.contains('║'),
+            "the layer-portal room must render with a double-line outline"
+        );
+    }
 }

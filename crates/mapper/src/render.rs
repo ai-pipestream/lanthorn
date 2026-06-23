@@ -27,6 +27,9 @@ pub struct RenderRoom {
     pub is_current: bool,
     /// Compact chain-membership code, e.g. `"R0"`, `"C1"`, `"R0 C1"`, or `""`.
     pub align_code: String,
+    /// True when this room owns an outgoing portal to another layer (set by `render_layer`).
+    /// The renderer draws such rooms with a distinct box outline.
+    pub has_layer_portal: bool,
 }
 
 /// The complete zoom-independent render description of the map.
@@ -64,6 +67,7 @@ pub fn render(graph: &MapGraph) -> RenderMap {
                 has_notes: !room.notes.is_empty(),
                 is_current: Some(room.id) == current,
                 align_code,
+                has_layer_portal: false,
             })
         })
         .collect();
@@ -90,7 +94,14 @@ pub fn render(graph: &MapGraph) -> RenderMap {
 pub fn render_layer(graph: &MapGraph, layer: LayerId) -> RenderMap {
     let sub = graph.layer_subgraph(layer);
     let mut rm = render(&sub);
-    rm.edges.extend(crate::layer::interlayer_badges(graph, layer));
+    let badges = crate::layer::interlayer_badges(graph, layer);
+    // Flag rooms that own an outgoing cross-layer portal so the renderer can mark them
+    // with a distinct box outline.
+    let portal_rooms: std::collections::BTreeSet<RoomId> = badges.iter().map(|e| e.origin).collect();
+    for r in &mut rm.rooms {
+        r.has_layer_portal = portal_rooms.contains(&r.id);
+    }
+    rm.edges.extend(badges);
     rm
 }
 
@@ -99,6 +110,26 @@ mod tests {
     use super::*;
     use crate::mapper::Mapper;
     use crate::direction::Direction;
+
+    #[test]
+    fn render_layer_flags_rooms_with_outgoing_cross_layer_portal() {
+        use crate::layer::{peel_region, MAIN_LAYER};
+        let mut g = crate::graph::MapGraph::new();
+        for (id, n) in [(1, "Hall"), (2, "Cellar")] {
+            g.upsert_room(id, n.into());
+        }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1));
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        peel_region(&mut g, 2).expect("peel cellar");
+        let rm = render_layer(&g, MAIN_LAYER);
+        let hall = rm.rooms.iter().find(|r| r.id == 1).unwrap();
+        assert!(hall.has_layer_portal, "Hall has an outgoing portal to the cellar layer");
+        // The all-layers render never flags (no per-layer context).
+        let plain = render(&g);
+        assert!(plain.rooms.iter().all(|r| !r.has_layer_portal));
+    }
 
     #[test]
     fn render_marks_current_and_notes_and_bounds() {
