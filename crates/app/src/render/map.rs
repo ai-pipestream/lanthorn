@@ -783,10 +783,13 @@ fn draw_stub(
 const DOTTED_V: char = '┊';
 const DOTTED_H: char = '┄';
 
-/// Draw dotted connectors for Up/Down portals whose pair is NOT already joined by a compass
-/// connector. Up leaves the origin's north side, Down the south side, routing (vertical-first L)
-/// to the placed target, clipped out of every room's box interior. A reciprocal Up/Down pair is
-/// drawn once (from the Up side). No arrowhead — the `↑`/`↓` icon already marks the direction.
+/// Draw Up/Down portal links that no compass connector already covers. When the two rooms are
+/// directly grid-adjacent in the portal direction (a clean stack), draw one short dotted connector
+/// between them. When the portal room was YIELDED far from its partner, a full connecting line would
+/// run across the map and overwrite the paths in between — so instead draw a short dotted stub plus
+/// the `↑`/`↓` glyph on EACH room's border: the start room points out in the portal direction, the
+/// end room points back. Stubs are drawn before the rooms, so any stub cell that falls under an
+/// adjacent box is harmlessly covered. A reciprocal Up/Down pair is handled once, from the Up side.
 fn draw_portal_connectors(
     rm: &RenderMap,
     placed: &std::collections::HashMap<RoomId, VRect>,
@@ -802,6 +805,8 @@ fn draw_portal_connectors(
             .iter()
             .any(|r| x > r.x && x < r.x + BOX_W - 1 && y > r.y && y < r.y + BOX_H - 1)
     };
+    let cell: std::collections::HashMap<RoomId, (i32, i32)> =
+        rm.rooms.iter().map(|r| (r.id, r.cell)).collect();
 
     for edge in &rm.edges {
         if !edge.is_stub {
@@ -812,7 +817,7 @@ fn draw_portal_connectors(
             Direction::Down => false,
             _ => continue, // In/Out/Unknown get no dotted line
         };
-        // A reciprocal Up/Down pair is drawn once, from the Up side: skip the Down edge when a
+        // A reciprocal Up/Down pair is handled once, from the Up side: skip the Down edge when a
         // matching Up edge (dest→Up→origin) exists.
         if !up
             && rm
@@ -834,23 +839,47 @@ fn draw_portal_connectors(
         let (Some(&o), Some(&t)) = (placed.get(&edge.origin), placed.get(&edge.dest)) else {
             continue;
         };
-        let ocx = o.x + BOX_W / 2;
-        let start_y = if up { o.y - 1 } else { o.y + BOX_H };
-        let tcx = t.x + BOX_W / 2;
-        let tcy = t.y + BOX_H / 2;
-        // Vertical-first L: down/up the origin's centre column to the target's mid-row, then
-        // across to the target's centre column. Clipped out of room interiors.
-        for y in start_y.min(tcy)..=start_y.max(tcy) {
-            if !in_interior(ocx, y) {
-                put_char(buf, ocx + off_x, y + off_y, DOTTED_V, style, area);
+        let (Some(&oc), Some(&dc)) = (cell.get(&edge.origin), cell.get(&edge.dest)) else {
+            continue;
+        };
+        let dy = if up { -1 } else { 1 };
+        if dc == (oc.0, oc.1 + dy) {
+            // Cleanly stacked: one short dotted connector. Vertical-first L from the origin border
+            // to the target's mid-row, clipped out of room interiors.
+            let ocx = o.x + BOX_W / 2;
+            let start_y = if up { o.y - 1 } else { o.y + BOX_H };
+            let tcx = t.x + BOX_W / 2;
+            let tcy = t.y + BOX_H / 2;
+            for y in start_y.min(tcy)..=start_y.max(tcy) {
+                if !in_interior(ocx, y) {
+                    put_char(buf, ocx + off_x, y + off_y, DOTTED_V, style, area);
+                }
             }
-        }
-        for x in ocx.min(tcx)..=ocx.max(tcx) {
-            if !in_interior(x, tcy) {
-                put_char(buf, x + off_x, tcy + off_y, DOTTED_H, style, area);
+            for x in ocx.min(tcx)..=ocx.max(tcx) {
+                if !in_interior(x, tcy) {
+                    put_char(buf, x + off_x, tcy + off_y, DOTTED_H, style, area);
+                }
             }
+        } else {
+            // Yielded: a stub + glyph on each room instead of a long, path-stomping line. The start
+            // room points out in the portal direction; the end room points back the opposite way.
+            portal_stub(buf, o, up, off_x, off_y, area, style);
+            portal_stub(buf, t, !up, off_x, off_y, area, style);
         }
     }
+}
+
+/// Draw a one-cell dotted stub plus the `↑`/`↓` glyph just outside a room box — above it (`up`) or
+/// below — marking a yielded Up/Down portal without drawing a full connecting line.
+fn portal_stub(buf: &mut Buffer, b: VRect, up: bool, off_x: i32, off_y: i32, area: Rect, style: Style) {
+    let cx = b.x + BOX_W / 2 + off_x;
+    let (dot_y, tip_y, glyph) = if up {
+        (b.y - 1, b.y - 2, PORTAL_UP)
+    } else {
+        (b.y + BOX_H, b.y + BOX_H + 1, PORTAL_DOWN)
+    };
+    put_char(buf, cx, dot_y + off_y, DOTTED_V, style, area);
+    put_str(buf, cx, tip_y + off_y, glyph, style, area);
 }
 
 /// In-room icon slot for a portal direction: 0 = row 1 (Up), 1 = row 2 (mid: In/Out/Unknown),
@@ -2240,6 +2269,34 @@ mod tests {
             "repair must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
         assert_eq!(render_overlap_stats(&g).0, 0, "repair must not introduce illegal overlaps");
         assert_eq!(p(&g,74).0, p(&g,76).0, "repair must not knock 76 off 74's column");
+    }
+
+    #[test]
+    fn yielded_portal_draws_stubs_not_a_long_line() {
+        // Up/Down pair placed far apart (yielded). Instead of a long dotted L that overwrites the
+        // paths in between, each room gets a short dotted stub + ↑/↓ glyph: no horizontal dotted run
+        // and only a couple of vertical dotted cells, not a spanning line.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (3, 2)); // far from (0,-1) — yielded, not stacked
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+        let rm = render(&g);
+        let mut st = AppState::default();
+        st.zoom = Zoom::Boxes;
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let count = |s: &str| buf.content.iter().filter(|c| c.symbol() == s).count();
+        assert_eq!(count("┄"), 0, "no horizontal dotted run — the long L-line is gone");
+        assert!(count("┊") <= 4, "only short vertical stubs, not a spanning line: {}", count("┊"));
+        assert!(count("┊") >= 1, "each yielded room gets a dotted stub");
+        assert!(count("↑") >= 1, "up glyph present on a stub/icon");
+        assert!(count("↓") >= 1, "down glyph present on a stub/icon");
     }
 
     #[test]
