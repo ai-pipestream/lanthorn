@@ -264,6 +264,7 @@ fn map_key_to_action(key: KeyEvent) -> Action {
 
         KeyCode::Char('c') if plain!() => Action::Recenter,
         KeyCode::Char('n') if plain!() => Action::SelectNext,
+        KeyCode::Char('p') if plain!() => Action::SelectPrev,
         KeyCode::Char('N') if shift => Action::RenameLayer,
         KeyCode::Char('P') if shift => Action::PeelLayer,
         KeyCode::Char('M') if shift => Action::MergeLayer,
@@ -768,6 +769,7 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus();
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
     }
 
     #[test]

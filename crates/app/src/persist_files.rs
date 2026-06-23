@@ -76,6 +76,7 @@ mod tests {
         use mapper::direction::Direction;
         let mut dir = std::env::temp_dir();
         dir.push(format!("babelmap-layers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ZCODE-1-x-0.map.json");
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
