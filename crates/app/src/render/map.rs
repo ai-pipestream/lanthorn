@@ -870,9 +870,10 @@ fn draw_portal_connectors(
 }
 
 /// Draw a one-cell dotted stub plus the `↑`/`↓` glyph just outside a room box — above it (`up`) or
-/// below — marking a yielded Up/Down portal without drawing a full connecting line.
+/// below — marking a yielded Up/Down portal without drawing a full connecting line. The stub sits on
+/// the box's right column (`BOX_W - 2`), aligned with the in-room `↑`/`↓` portal icons.
 fn portal_stub(buf: &mut Buffer, b: VRect, up: bool, off_x: i32, off_y: i32, area: Rect, style: Style) {
-    let cx = b.x + BOX_W / 2 + off_x;
+    let cx = b.x + BOX_W - 2 + off_x;
     let (dot_y, tip_y, glyph) = if up {
         (b.y - 1, b.y - 2, PORTAL_UP)
     } else {
