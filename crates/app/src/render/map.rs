@@ -1352,6 +1352,51 @@ pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radi
     }
 }
 
+/// Collapse the fully-empty interior rows and columns the tidy passes leave behind (e.g. a gap
+/// opened when `repair_directional_hints` pushes a room out), shifting rooms together so the map
+/// carries no wasted gap line. Runs last in the Retidy flow.
+///
+/// A collapse moves every room BEYOND the empty line one cell toward it, leaving the rest put. That
+/// translates one half-plane uniformly, so every room keeps its relative order on both axes — all
+/// directional and exact-alignment relationships survive — and no two rooms can share a cell. The
+/// only thing a tighter layout can disturb is connector routing, so if the result raises illegal
+/// overlaps the whole compaction is reverted (cosmetic tightening is never worth a new overlap).
+pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
+    let before = render_overlap_stats(graph).0;
+    let snapshot: Vec<(mapper::graph::RoomId, (i32, i32))> =
+        graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+
+    for is_x in [true, false] {
+        loop {
+            let coords: std::collections::BTreeSet<i32> = graph
+                .rooms()
+                .filter_map(|r| r.pos.map(|p| if is_x { p.0 } else { p.1 }))
+                .collect();
+            let (Some(&min), Some(&max)) = (coords.iter().next(), coords.iter().next_back()) else {
+                break;
+            };
+            // Lowest empty interior line (strictly between the extremes); none → axis is dense.
+            let Some(empty) = ((min + 1)..max).find(|c| !coords.contains(c)) else {
+                break;
+            };
+            let rooms: Vec<(mapper::graph::RoomId, (i32, i32))> =
+                graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+            for (id, p) in rooms {
+                let c = if is_x { p.0 } else { p.1 };
+                if c > empty {
+                    graph.set_pos(id, if is_x { (p.0 - 1, p.1) } else { (p.0, p.1 - 1) });
+                }
+            }
+        }
+    }
+
+    if render_overlap_stats(graph).0 > before {
+        for (id, p) in snapshot {
+            graph.set_pos(id, p);
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2089,6 +2134,64 @@ mod tests {
             "repair must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
         assert_eq!(render_overlap_stats(&g).0, 0, "repair must not introduce illegal overlaps");
         assert_eq!(p(&g,74).0, p(&g,76).0, "repair must not knock 76 off 74's column");
+    }
+
+    #[test]
+    fn compact_collapses_empty_interior_column_and_row() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0)); // empty column at x=1
+        g.set_pos(3, (0, 2)); // empty row at y=1
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(1, Direction::S, 3);
+        compact_empty_lines(&mut g);
+        // Column 1 and row 1 collapse: 2 moves to (1,0), 3 moves to (0,1). Order preserved.
+        assert_eq!(g.room(1).unwrap().pos, Some((0, 0)));
+        assert_eq!(g.room(2).unwrap().pos, Some((1, 0)), "empty column collapsed");
+        assert_eq!(g.room(3).unwrap().pos, Some((0, 1)), "empty row collapsed");
+        // No empty interior line remains.
+        let xs: std::collections::BTreeSet<i32> = g.rooms().map(|r| r.pos.unwrap().0).collect();
+        let ys: std::collections::BTreeSet<i32> = g.rooms().map(|r| r.pos.unwrap().1).collect();
+        assert!((*xs.iter().next().unwrap()..*xs.iter().next_back().unwrap()).all(|x| xs.contains(&x)));
+        assert!((*ys.iter().next().unwrap()..*ys.iter().next_back().unwrap()).all(|y| ys.contains(&y)));
+    }
+
+    #[test]
+    fn compact_preserves_directional_order_no_overlap() {
+        // Full A129 Retidy flow plus compaction: 78 stays west of 180, 76 stays under 74, overlaps
+        // stay clear, and no fully-empty interior column/row is left behind.
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+            (239,W,77),(81,N,75),(25,Down,26),
+        ] { g.add_edge(o, d, dst); }
+        mapper::layout::relayout_auto(&mut g);
+        cleanup_overlaps(&mut g, 3, 40);
+        repair_directional_hints(&mut g, 3, 40);
+        compact_empty_lines(&mut g);
+        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        assert!(p(&g,78).0 < p(&g,180).0, "78 stays west of 180 through compaction");
+        assert_eq!(p(&g,74).0, p(&g,76).0, "76 stays under 74 through compaction");
+        assert_eq!(render_overlap_stats(&g).0, 0, "compaction keeps overlaps clear");
+        let xs: std::collections::BTreeSet<i32> = g.rooms().map(|r| r.pos.unwrap().0).collect();
+        let ys: std::collections::BTreeSet<i32> = g.rooms().map(|r| r.pos.unwrap().1).collect();
+        assert!((*xs.iter().next().unwrap()..*xs.iter().next_back().unwrap()).all(|x| xs.contains(&x)),
+            "no empty interior column remains: {xs:?}");
+        assert!((*ys.iter().next().unwrap()..*ys.iter().next_back().unwrap()).all(|y| ys.contains(&y)),
+            "no empty interior row remains: {ys:?}");
     }
 
     #[test]
