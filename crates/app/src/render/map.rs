@@ -3326,4 +3326,52 @@ mod tests {
         assert!(!has_dotted, "no dotted line when a compass edge already joins the pair");
     }
 
+    #[test]
+    fn interlayer_badge_dest_label_appears_in_portal_view() {
+        // Build a two-layer graph: Hall (1) and Study (2) on MAIN_LAYER, linked by a Down
+        // portal from Hall to Cellar (3). Cellar + Wine (4) are peeled into a new layer.
+        // Rendering MAIN_LAYER in portal view must show the destination layer name ("Cellar")
+        // floating beside Hall's box — confirming inter-layer stubs render their dest_label.
+        use mapper::graph::MapGraph;
+        use mapper::layer::{peel_region, MAIN_LAYER};
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Study".into());
+        g.upsert_room(3, "Cellar".into());
+        g.upsert_room(4, "Wine".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.set_pos(3, (0, 1));
+        g.set_pos(4, (1, 1));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(1, Direction::Down, 3);
+        g.add_edge(3, Direction::Up, 1);
+        g.add_edge(3, Direction::E, 4);
+        g.add_edge(4, Direction::W, 3);
+        peel_region(&mut g, 3).expect("cellar + wine must peel into a new layer");
+        // render_layer builds the MAIN_LAYER sub-graph and appends inter-layer badge stubs.
+        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
+        // At least one inter-layer badge stub with a dest_label must be present.
+        assert!(
+            rm.edges.iter().any(|e| e.is_stub && e.dest_label.as_deref().is_some()),
+            "render_layer must include inter-layer badge stubs with dest_label"
+        );
+        let mut st = AppState::default();
+        st.show_portal_labels = true; // portal view floats destination names outside boxes
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        // The dest_label is "<room> · <layer>": e.g. "Cellar · Cellar". The layer name
+        // assigned by peel_region is the first-room label. Assert that "Cellar" appears
+        // somewhere in the buffer (both the room name and layer name contain it).
+        let all_text: String = buf.content.iter().map(|c| c.symbol()).collect();
+        assert!(
+            all_text.contains("Cellar"),
+            "inter-layer badge dest_label must appear in portal view; buffer text: '{}'",
+            all_text.chars().filter(|c| !c.is_whitespace()).collect::<String>()
+        );
+    }
+
 }
