@@ -18,7 +18,7 @@ use app::map_dump::render_dump;
 use app::ifid::{compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
 use app::persist_files::{load_map, restore_game, save_game, save_map};
-use app::render::map::render_map;
+use app::render::map::render_map_layered;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
@@ -112,7 +112,7 @@ fn draw_frame(
                 let block = pane("Map", state.focus == Focus::Map);
                 let inner = block.inner(main_area);
                 block.render(main_area, buf);
-                render_map(&rm, state, inner, buf);
+                render_map_layered(&rm, &mapper.graph, state, inner, buf);
                 map_area = inner; // use inner for recenter math
             }
             Layout::Split => {
@@ -130,7 +130,7 @@ fn draw_frame(
                 let map_block = pane("Map", state.focus == Focus::Map);
                 let map_inner = map_block.inner(chunks[1]);
                 map_block.render(chunks[1], buf);
-                render_map(&rm, state, map_inner, buf);
+                render_map_layered(&rm, &mapper.graph, state, map_inner, buf);
                 map_area = map_inner; // use inner for recenter math
             }
         }
@@ -400,6 +400,9 @@ fn main() {
                 }
 
                 apply_turn(&mut mapper, &cmd, &result);
+
+                // Clear any manual layer browse override so the view follows the player.
+                state.set_viewed_layer(None);
 
                 // Select and recenter on the current room.
                 if let Some(snap) = &result.location {

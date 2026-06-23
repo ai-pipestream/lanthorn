@@ -377,6 +377,94 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     }
 }
 
+// ── Layer tab strip ───────────────────────────────────────────────────────────
+
+/// Draw a one-row layer tab strip at the top of `area` and return the remaining body area.
+///
+/// Draws nothing (returns `area` unchanged) when:
+/// - fewer than 2 non-empty layers exist (single-layer maps are visually unchanged), or
+/// - zoom is `Overview`.
+///
+/// Each non-empty layer is rendered as `name(count)` with a space separator.  The active
+/// layer is highlighted with reverse-video.  All drawing is clipped to the strip row.
+pub fn draw_layer_strip(
+    graph: &mapper::graph::MapGraph,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Rect {
+    use crate::render::draw_str_clipped;
+
+    // Skip in Overview zoom.
+    if matches!(state.zoom, crate::state::Zoom::Overview) {
+        return area;
+    }
+    if area.height == 0 {
+        return area;
+    }
+
+    // Collect non-empty layers in sorted order.
+    let mut layers: Vec<_> = graph.layers().keys().copied()
+        .filter(|&l| !graph.rooms_in_layer(l).is_empty())
+        .collect();
+    layers.sort_unstable();
+
+    // Only draw when there are 2+ non-empty layers.
+    if layers.len() < 2 {
+        return area;
+    }
+
+    let active = state.active_layer(graph);
+    let strip_y = area.y;
+    let strip_area = Rect { x: area.x, y: strip_y, width: area.width, height: 1 };
+
+    // Clear the strip row first.
+    let normal_style = Style::new();
+    for x in area.x..area.right() {
+        if let Some(cell) = buf.cell_mut((x, strip_y)) {
+            cell.set_symbol(" ").set_style(normal_style);
+        }
+    }
+
+    let active_style = Style::new().add_modifier(Modifier::REVERSED);
+    let mut x = area.x;
+    for layer_id in &layers {
+        let name = graph.layer_name(*layer_id);
+        let count = graph.rooms_in_layer(*layer_id).len();
+        let label = format!(" {}({}) ", name, count);
+        let style = if *layer_id == active { active_style } else { normal_style };
+        // Clip label to available width.
+        let remaining = area.right().saturating_sub(x);
+        if remaining == 0 {
+            break;
+        }
+        draw_str_clipped(buf, x, strip_y, &label, style, strip_area);
+        x = x.saturating_add(label.chars().count() as u16);
+    }
+
+    // Return the area below the strip.
+    if area.height <= 1 {
+        Rect { x: area.x, y: area.y, width: area.width, height: 0 }
+    } else {
+        Rect { x: area.x, y: area.y + 1, width: area.width, height: area.height - 1 }
+    }
+}
+
+/// Variant of [`render_map`] that also draws the layer tab strip when multiple layers exist.
+///
+/// Production callers (`main.rs`, `map_dump.rs`) should use this function.
+/// Tests that call [`render_map`] directly are unaffected.
+pub fn render_map_layered(
+    rm: &RenderMap,
+    graph: &mapper::graph::MapGraph,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let body_area = draw_layer_strip(graph, state, area, buf);
+    render_map(rm, state, body_area, buf);
+}
+
 // ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
 
 /// Direction bits a connector enters/leaves a cell on. Two perpendicular bits → a turn;

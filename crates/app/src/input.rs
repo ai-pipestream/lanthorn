@@ -91,6 +91,8 @@ pub enum Action {
     TogglePortalLabels,
     /// Caller: exit the application.
     Quit,
+    /// Cycle the viewed layer by `delta` steps over the sorted non-empty layer list (clamped at ends).
+    CycleLayer(i32),
     /// No binding found — no-op.
     None,
 }
@@ -258,6 +260,8 @@ fn map_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Char('n') if plain!() => Action::SelectNext,
         KeyCode::Char('N') if shift => Action::SelectPrev,
         KeyCode::Char('R') if shift => Action::Retidy,
+        KeyCode::Char(']') if plain!() => Action::CycleLayer(1),
+        KeyCode::Char('[') if plain!() => Action::CycleLayer(-1),
         KeyCode::Char('r') if plain!() => Action::RenameRoom,
         KeyCode::Char('o') if plain!() => Action::EditNotes,
         KeyCode::Char('d') if plain!() => Action::DeleteSelectedConnection,
@@ -414,6 +418,19 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::AnimExit => state.tidy_anim = None,
+
+        Action::CycleLayer(delta) => {
+            let mut ids: Vec<_> = mapper.graph.layers().keys().copied()
+                .filter(|&l| !mapper.graph.rooms_in_layer(l).is_empty())
+                .collect();
+            ids.sort_unstable();
+            if !ids.is_empty() {
+                let cur = state.active_layer(&mapper.graph);
+                let i = ids.iter().position(|&l| l == cur).unwrap_or(0) as i32;
+                let j = (i + delta).clamp(0, ids.len() as i32 - 1) as usize;
+                state.set_viewed_layer(Some(ids[j]));
+            }
+        }
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
@@ -1003,6 +1020,14 @@ mod tests {
         assert!(s.show_portal_labels, "Ctrl+P turns labels on");
         apply_action(Action::TogglePortalLabels, &mut s, &mut m);
         assert!(!s.show_portal_labels, "Ctrl+P toggles back off");
+    }
+
+    #[test]
+    fn bracket_keys_cycle_layer_in_map_focus() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CycleLayer(1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CycleLayer(-1)));
     }
 
     #[test]
