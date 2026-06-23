@@ -323,10 +323,26 @@ pub(crate) fn run_tidy_pipeline(
 
     // Write the tidied positions back into the live graph for this layer's rooms.
     for id in graph.rooms_in_layer(layer) {
+        // pos is always Some after relayout_auto; the guard is defensive.
         if let Some(p) = sub.room(id).and_then(|r| r.pos) {
             graph.set_pos(id, p);
         }
     }
+
+    // relayout_auto set distorted flags on sub for this layer's geometry; copy them
+    // back so the live map's distortion coloring is fresh (positions alone are not enough).
+    let n = graph.connections().len();
+    for idx in 0..n {
+        let c = graph.connections()[idx].clone();
+        if graph.layer_of(c.origin) == layer && graph.layer_of(c.dest) == layer {
+            if let Some(sc) = sub.connections().iter()
+                .find(|s| s.origin == c.origin && s.dir == c.dir && s.dest == c.dest)
+            {
+                graph.set_conn_distorted(idx, sc.distorted);
+            }
+        }
+    }
+
     frames
 }
 
@@ -1072,6 +1088,46 @@ mod tests {
         s.focus = Focus::Map;
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
+    }
+
+    #[test]
+    fn retidy_refreshes_distorted_flags_after_layer_scoped_tidy() {
+        // Regression: run_tidy_pipeline was writing back ONLY positions from the sub-graph,
+        // discarding the freshly-computed distorted flags. This test fails RED before the fix
+        // (the forced-true flag on a satisfied edge stays true) and GREEN after.
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        use mapper::layout::edge_is_satisfied;
+
+        // Build a small acyclic single-layer compass graph: 1 -E-> 2 -E-> 3 with
+        // reciprocal W edges so all compass edges are satisfiable.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(2, Direction::E, 3);
+        g.add_edge(3, Direction::W, 2);
+
+        // Force a WRONG distorted flag on index 0 (edge 1→E→2).
+        // After tidy this edge will be satisfied, so the correct flag is false.
+        // Before the fix the stale true remains; after the fix it is corrected to false.
+        g.set_conn_distorted(0, true);
+
+        run_tidy_pipeline(&mut g, mapper::layer::MAIN_LAYER);
+
+        // After tidy every compass connection's distorted flag must match the geometry.
+        for conn in g.connections() {
+            if mapper::direction::grid_offset(conn.dir).is_some() {
+                let expected = !edge_is_satisfied(&g, conn);
+                assert_eq!(
+                    conn.distorted, expected,
+                    "distorted flag stale on edge {:?}: got {} want {}",
+                    conn, conn.distorted, expected,
+                );
+            }
+        }
     }
 
     #[test]

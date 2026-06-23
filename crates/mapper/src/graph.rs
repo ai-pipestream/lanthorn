@@ -138,7 +138,7 @@ impl MapGraph {
                     label_override: None,
                     notes: String::new(),
                     pos: None,
-                    layer: 0,
+                    layer: MAIN_LAYER,
                 });
             }
         }
