@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use crate::graph::{Connection, MapGraph, Room, RoomId};
+use crate::layer::{LayerId, LayerMeta};
 use crate::layout::LayoutMode;
 use crate::mapper::Mapper;
 
@@ -9,6 +11,10 @@ pub struct PersistState {
     pub rooms: Vec<Room>,
     pub connections: Vec<Connection>,
     pub current: Option<RoomId>,
+    #[serde(default)]
+    pub layers: BTreeMap<LayerId, LayerMeta>,
+    #[serde(default)]
+    pub next_layer_id: LayerId,
 }
 
 pub fn to_json(mapper: &Mapper) -> String {
@@ -18,13 +24,17 @@ pub fn to_json(mapper: &Mapper) -> String {
         rooms: mapper.graph.rooms().cloned().collect(),
         connections: mapper.graph.connections().to_vec(),
         current: mapper.graph.current(),
+        layers: mapper.graph.layers().clone(),
+        next_layer_id: mapper.graph.next_layer_id(),
     };
     serde_json::to_string_pretty(&state).expect("PersistState is always serializable")
 }
 
 pub fn from_json(s: &str) -> Result<Mapper, serde_json::Error> {
     let state: PersistState = serde_json::from_str(s)?;
-    let graph = MapGraph::from_parts(state.rooms, state.connections, state.current);
+    let graph = MapGraph::from_parts(
+        state.rooms, state.connections, state.current, state.layers, state.next_layer_id,
+    );
     Ok(Mapper { graph, mode: state.mode })
 }
 
@@ -34,6 +44,31 @@ mod tests {
     use crate::mapper::Mapper;
     use crate::direction::Direction;
     use crate::layout::LayoutMode;
+
+    #[test]
+    fn round_trips_layers() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let l = m.graph.new_layer(Some(0), "Basement".into());
+        m.graph.set_room_layer(2, l);
+        let json = to_json(&m);
+        let m2 = from_json(&json).unwrap();
+        assert_eq!(m2.graph.layer_of(2), l);
+        assert_eq!(m2.graph.layer_name(l), "Basement");
+        assert_eq!(m2.graph.next_layer_id(), m.graph.next_layer_id());
+    }
+
+    #[test]
+    fn legacy_save_without_layers_loads_as_main() {
+        // A v1 save predating layers: no `layer` on rooms, no `layers`/`next_layer_id`.
+        let json = r#"{"version":1,"mode":"Auto",
+            "rooms":[{"id":1,"name":"A","label_override":null,"notes":"","pos":[0,0]}],
+            "connections":[],"current":1}"#;
+        let m = from_json(json).unwrap();
+        assert_eq!(m.graph.layer_of(1), 0);
+        assert_eq!(m.graph.layer_name(0), "Main");
+    }
 
     #[test]
     fn round_trips_full_state() {
