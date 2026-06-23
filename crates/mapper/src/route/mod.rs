@@ -4,7 +4,7 @@
 //! lane counts that the renderer turns into gap widths.
 
 use std::collections::BTreeMap;
-use crate::direction::{grid_offset, opposite};
+use crate::direction::{grid_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{side_for, Side};
 
@@ -350,6 +350,27 @@ fn polylines_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
     false
 }
 
+/// The destination side a ONE-WAY connector arrives on, fixed by its compass direction so the
+/// arrow lands on the matching side regardless of the rooms' exact offset. A cardinal enters the
+/// side opposite the one it left — it reads as travelling straight through (N enters from the
+/// south, S from the north, E from the west, W from the east). A diagonal enters a chosen cardinal
+/// side: NW→N, NE→E, SE→S, SW→W. Non-planar directions (already filtered from `compass`) → None.
+fn oneway_entry_side(dir: Direction) -> Option<Side> {
+    Some(match dir {
+        Direction::N => Side::Bottom,
+        Direction::S => Side::Top,
+        Direction::E => Side::Left,
+        Direction::W => Side::Right,
+        Direction::NW => Side::Top,
+        Direction::NE => Side::Right,
+        Direction::SE => Side::Bottom,
+        Direction::SW => Side::Left,
+        Direction::Up | Direction::Down | Direction::In | Direction::Out | Direction::Unknown => {
+            return None
+        }
+    })
+}
+
 /// The candidate entry sides for a NON-reciprocal connector from `a` to `b`: the
 /// geometric entry side plus the next-nearest side that still faces the origin, in a
 /// deterministic order. The geometric side is always first (the default), so when no
@@ -652,12 +673,18 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
 
         // Direct route: if the path from `a` to `b` is clear along the room grid, draw it as a
         // straight line / single-corner L instead of dipping into channels — fewer turns, no
-        // weaving around empty cells. Only when the resulting entry side is consistent with what
-        // this connector must use — for a reciprocal pair the far arrow must point out the
-        // back-edge's side; for a one-way edge any facing side is fine — AND the straight run does
-        // not stomp an already-routed connector that hugs the same room line (a direct route carries
-        // no lane, so two on one line cannot be separated; the dipped channel route below can).
+        // weaving around empty cells. A direct route keeps its natural clean entry: only a reciprocal
+        // pair constrains it (the far arrow must point out the back-edge's side). A one-way edge does
+        // NOT force the ruled side onto a clean direct route — for an aligned room the natural entry
+        // already matches the rule, and for an offset room forcing it would wrap the connector around
+        // the box. The ruled side applies to the dipped channel route below. Also reject a direct run
+        // that stomps an already-routed connector on a shared room line (it carries no lane).
         let required_entry = back.and_then(|bk| side_for(bk.dir));
+        // The destination side a one-way edge prefers when it must dip into the channels.
+        let ruled_entry = match back {
+            Some(bk) => side_for(bk.dir),
+            None => oneway_entry_side(c.dir),
+        };
         if let Some((sentry, pts)) = direct_route(a, exit, b, &occupied) {
             // Reject if this straight run stomps an already-placed connector, or if the pre-pass
             // ruled this the shorter rival on a contested room line (so it weaves and the longer
@@ -693,12 +720,26 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // we vary the L orientation and (for non-reciprocal connectors, in greedy mode only)
         // the destination entry side among the sides still facing the origin. Candidate order
         // is fixed and integer-tiebroken, so the choice is deterministic.
-        // A bidirectional connector enters the far room on the side ITS OWN back-edge departs,
-        // so the far-end arrow points out the true compass direction (an exact-opposite pair
-        // resolves to the opposite side = a straight reciprocal). Non-bidirectional connectors
-        // use the geometric entry side (greedy mode probes facing alternatives).
-        let entry_choices: Vec<Side> = match back.and_then(|bk| side_for(bk.dir)) {
-            Some(s) => vec![s],
+        // A bidirectional connector enters the far room on the side ITS OWN back-edge departs, so
+        // the far-end arrow points out the true compass direction (an exact-opposite pair resolves
+        // to the opposite side = a straight reciprocal). A one-way connector enters on the side
+        // fixed by its own direction (`oneway_entry_side`). Either way the entry side is determined,
+        // so greedy only varies the L orientation; the `entry_side` fallbacks cover the (filtered)
+        // non-planar case for safety.
+        let entry_choices: Vec<Side> = match ruled_entry {
+            // Reciprocal pairs are fixed to the back-edge side. A one-way edge prefers its ruled
+            // side first, but keeps the geometric facing sides as fallbacks so the greedy can still
+            // dodge a stomp when the ruled side is blocked (rather than forcing an illegal overlap).
+            Some(s) if back.is_some() => vec![s],
+            Some(s) => {
+                let mut v = vec![s];
+                for alt in entry_side_alternatives(a, b) {
+                    if !v.contains(&alt) {
+                        v.push(alt);
+                    }
+                }
+                v
+            }
             None if greedy => entry_side_alternatives(a, b),
             None => vec![entry_side(a, b)],
         };
@@ -1126,6 +1167,39 @@ mod tests {
                 d1 != d2
             })
             .count()
+    }
+
+    #[test]
+    fn oneway_entry_side_follows_the_compass_rule() {
+        use Direction::*;
+        // Cardinals enter the side opposite the travel direction (straight through).
+        assert_eq!(oneway_entry_side(N), Some(Side::Bottom));
+        assert_eq!(oneway_entry_side(S), Some(Side::Top));
+        assert_eq!(oneway_entry_side(E), Some(Side::Left));
+        assert_eq!(oneway_entry_side(W), Some(Side::Right));
+        // Diagonals: NW->N, NE->E, SE->S, SW->W.
+        assert_eq!(oneway_entry_side(NW), Some(Side::Top));
+        assert_eq!(oneway_entry_side(NE), Some(Side::Right));
+        assert_eq!(oneway_entry_side(SE), Some(Side::Bottom));
+        assert_eq!(oneway_entry_side(SW), Some(Side::Left));
+        // Non-planar directions have no side.
+        assert_eq!(oneway_entry_side(Up), None);
+    }
+
+    #[test]
+    fn oneway_cardinal_enters_the_matching_side() {
+        // A one-way S edge into an aligned room enters from the north (Top); an E edge from the west.
+        let mut g = MapGraph::new();
+        for id in 1..=3 { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 3)); // due south of 1
+        g.set_pos(3, (3, 0)); // due east of 1
+        g.add_edge(1, Direction::S, 2);
+        g.add_edge(1, Direction::E, 3);
+        let plan = route_lanes(&g);
+        let entry = |o: u16, d: u16| plan.connectors.iter().find(|c| c.origin == o && c.dest == d).unwrap().entry;
+        assert_eq!(entry(1, 2), Side::Top, "S edge enters destination's north side");
+        assert_eq!(entry(1, 3), Side::Left, "E edge enters destination's west side");
     }
 
     #[test]
