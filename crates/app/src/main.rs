@@ -451,6 +451,7 @@ fn main() {
                                 info: None,
                             };
                             apply_turn(&mut mapper, "", &restore_result);
+                            state.set_viewed_layer(None);
                             state.select_room(Some(rid));
                             if let Some(room) = mapper.graph.room(rid) {
                                 if let Some(pos) = room.pos {
