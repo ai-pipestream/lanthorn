@@ -207,6 +207,30 @@ impl MapGraph {
         self.conns.len() < before
     }
 
+    /// A sub-graph containing only `layer`'s rooms and the connections whose BOTH
+    /// endpoints are in `layer`. Positions are preserved; `current` carries over only
+    /// if the current room is in `layer`. Layer metadata is not copied (not needed for routing).
+    pub fn layer_subgraph(&self, layer: LayerId) -> MapGraph {
+        let in_layer: std::collections::BTreeSet<RoomId> =
+            self.rooms.values().filter(|r| r.layer == layer).map(|r| r.id).collect();
+        let rooms: BTreeMap<RoomId, Room> = self
+            .rooms
+            .values()
+            .filter(|r| in_layer.contains(&r.id))
+            .map(|r| (r.id, r.clone()))
+            .collect();
+        let conns: Vec<Connection> = self
+            .conns
+            .iter()
+            .filter(|c| in_layer.contains(&c.origin) && in_layer.contains(&c.dest))
+            .cloned()
+            .collect();
+        let current = self.current.filter(|id| in_layer.contains(id));
+        let mut layers = BTreeMap::new();
+        layers.insert(MAIN_LAYER, LayerMeta::main());
+        MapGraph { rooms, conns, current, layers, next_layer_id: 1 }
+    }
+
     /// Change the direction of the edge keyed (origin, old) to (origin, new).
     /// If an edge with key (origin, new) already exists, refuses and returns false.
     /// Returns true if the relabel happened.

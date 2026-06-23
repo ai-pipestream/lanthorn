@@ -21,3 +21,11 @@ impl LayerMeta {
         LayerMeta { name: "Main".to_string(), parent: None }
     }
 }
+
+use crate::graph::MapGraph;
+use crate::router::RoutedEdge;
+
+/// Portal-badge edges for connections leaving `layer` to another layer. Empty in Phase 1.
+pub fn interlayer_badges(_graph: &MapGraph, _layer: LayerId) -> Vec<RoutedEdge> {
+    Vec::new()
+}

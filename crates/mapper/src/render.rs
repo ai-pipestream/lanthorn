@@ -10,6 +10,7 @@
 /// in `edges` only if their partner room is also placed; however, `route_all` already skips
 /// connections where either endpoint is unplaced.
 use crate::graph::{MapGraph, RoomId};
+use crate::layer::LayerId;
 use crate::route::{route_lanes, RoutePlan};
 use crate::router::{route_all, RoutedEdge};
 
@@ -83,6 +84,16 @@ pub fn render(graph: &MapGraph) -> RenderMap {
     RenderMap { rooms, edges, bounds, plan }
 }
 
+/// Build a `RenderMap` for a single layer. Rooms and grid connectors come from the
+/// layer's sub-graph (so the existing routers are reused unchanged). Inter-layer edges
+/// (Phase 2) are appended by `interlayer_badges`, which is empty while there is one layer.
+pub fn render_layer(graph: &MapGraph, layer: LayerId) -> RenderMap {
+    let sub = graph.layer_subgraph(layer);
+    let mut rm = render(&sub);
+    rm.edges.extend(crate::layer::interlayer_badges(graph, layer));
+    rm
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +155,29 @@ mod tests {
         g.set_pos(1, (3, -2));
         let rm = render(&g);
         assert_eq!(rm.bounds, ((3, -2), (3, -2)));
+    }
+
+    #[test]
+    fn render_layer_matches_render_for_single_layer() {
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        let all = render(&m.graph);
+        let only = render_layer(&m.graph, 0);
+        assert_eq!(only.rooms.len(), all.rooms.len());
+        assert_eq!(only.bounds, all.bounds);
+        assert_eq!(only.edges.len(), all.edges.len());
+    }
+
+    #[test]
+    fn render_layer_shows_only_its_layer() {
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        let l = m.graph.new_layer(Some(0), "Other".into());
+        m.graph.set_room_layer(2, l);
+        let main = render_layer(&m.graph, 0);
+        assert!(main.rooms.iter().any(|r| r.id == 1));
+        assert!(!main.rooms.iter().any(|r| r.id == 2), "room 2 lives in another layer");
     }
 }
