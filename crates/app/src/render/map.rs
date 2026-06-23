@@ -1524,6 +1524,73 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
             graph.set_pos(id, p);
         }
 
+        // Cluster-drag: the ideal cell may be free yet placing `dest` there alone breaks one of its
+        // OWN compass edges — e.g. a diagonal to a leaf room that shares the partner's column. Move
+        // `dest` together with its movable, unanchored compass-edge cluster by the same delta, so
+        // those edges are preserved (translated whole) and the room can still sit directly in line.
+        if at(ideal).is_none() {
+            let delta = (ideal.0 - pos[&dest].0, ideal.1 - pos[&dest].1);
+            const CLUSTER_LIMIT: usize = 4;
+            let mut cluster: BTreeSet<RoomId> = BTreeSet::new();
+            cluster.insert(dest);
+            let mut wl = vec![dest];
+            let mut bail = false;
+            while let Some(r) = wl.pop() {
+                for c in graph.connections() {
+                    if mapper::direction::grid_offset(c.dir).is_none() {
+                        continue; // only true compass edges anchor a relative position
+                    }
+                    let other = if c.origin == r {
+                        c.dest
+                    } else if c.dest == r {
+                        c.origin
+                    } else {
+                        continue;
+                    };
+                    if cluster.insert(other) {
+                        // Stop if the cluster would pull in the partner, an anchored chain member,
+                        // or grow too large — those can't be freely translated.
+                        if other == origin
+                            || cluster.len() > CLUSTER_LIMIT
+                            || chains.ew.contains_key(&other)
+                            || chains.ns.contains_key(&other)
+                        {
+                            bail = true;
+                        }
+                        wl.push(other);
+                    }
+                }
+                if bail {
+                    break;
+                }
+            }
+            let targets: Vec<(RoomId, (i32, i32))> = cluster
+                .iter()
+                .map(|&id| (id, (pos[&id].0 + delta.0, pos[&id].1 + delta.1)))
+                .collect();
+            // Every destination cell must be empty or vacated by another cluster member.
+            let collide = targets.iter().any(|&(_, np)| {
+                pos.iter().any(|(&oid, &op)| !cluster.contains(&oid) && op == np)
+            });
+            if !bail && cluster.len() > 1 && !collide {
+                for &(id, np) in &targets {
+                    graph.set_pos(id, np);
+                }
+                let cells: Vec<(i32, i32)> = graph.rooms().filter_map(|r| r.pos).collect();
+                let distinct = cells.iter().collect::<BTreeSet<_>>().len() == cells.len();
+                if distinct
+                    && render_overlap_stats(graph).0 <= base_ov
+                    && mapper::layout::directional_hint_score(graph) >= base_side
+                    && exact_alignment_count(graph) >= base_align
+                {
+                    continue; // stacked by dragging the cluster into line
+                }
+                for (&id, &p) in &pos {
+                    graph.set_pos(id, p); // revert
+                }
+            }
+        }
+
         // Yield, but at least keep the room on the expected SIDE: an Up room north of its partner,
         // a Down room south. If it is already on that side, leave it; otherwise relocate it (alone)
         // to the nearest free cell on the correct side that adds no overlap and breaks no hint.
@@ -2386,6 +2453,28 @@ mod tests {
         assert_eq!(g.room(3).unwrap().pos, Some((0, -2)), "C shifted up");
         assert_eq!(g.room(4).unwrap().pos, Some((1, -2)), "D shifted up WITH C — row stays intact");
         assert_eq!(g.room(3).unwrap().pos.unwrap().1, g.room(4).unwrap().pos.unwrap().1, "C,D one row");
+    }
+
+    #[test]
+    fn stack_updown_cluster_drag_moves_leaf_partner_to_stack_in_line() {
+        // A (up partner) at (0,0). B is DOWN from A, so it should sit at (0,1). But B is tied to a
+        // leaf C by a diagonal (B is SW of C), and C shares A's column (x=0) — so B directly below A
+        // would be due-south of C, breaking the SW. The cluster-drag moves {B,C} east together: B
+        // lands directly below A and B stays SW of C.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));   // A
+        g.set_pos(2, (-1, 1));  // B (down room): south of A but one west, to stay SW of C
+        g.set_pos(3, (0, -2));  // C (leaf), same column as A
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        g.add_edge(3, Direction::SW, 2); // B is SW of C
+        stack_updown_rooms(&mut g);
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(p(2), (0, 1), "B stacked directly below A");
+        assert!(p(2).0 < p(3).0 && p(2).1 > p(3).1, "B stays SW of C: B={:?} C={:?}", p(2), p(3));
+        assert_eq!(p(3), (1, -2), "leaf C dragged east to keep the SW link");
     }
 
     #[test]
