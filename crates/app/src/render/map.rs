@@ -845,10 +845,11 @@ fn draw_portal_connectors(
         let dy = if up { -1 } else { 1 };
         if dc == (oc.0, oc.1 + dy) {
             // Cleanly stacked: one short dotted connector. Vertical-first L from the origin border
-            // to the target's mid-row, clipped out of room interiors.
-            let ocx = o.x + BOX_W / 2;
+            // to the target's mid-row, clipped out of room interiors. Drawn on the right column
+            // (BOX_W - 2), aligned with the in-room up/down portal arrow icons.
+            let ocx = o.x + BOX_W - 2;
             let start_y = if up { o.y - 1 } else { o.y + BOX_H };
-            let tcx = t.x + BOX_W / 2;
+            let tcx = t.x + BOX_W - 2;
             let tcy = t.y + BOX_H / 2;
             for y in start_y.min(tcy)..=start_y.max(tcy) {
                 if !in_interior(ocx, y) {
