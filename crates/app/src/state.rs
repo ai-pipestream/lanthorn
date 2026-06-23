@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
+use mapper::layer::LayerId;
 
 // ── Tidy animation ────────────────────────────────────────────────────────────
 
@@ -157,6 +158,8 @@ pub struct AppState {
     /// Active tidy-animation playback, if any. While `Some`, the map renders the current
     /// captured stage instead of the live graph. Started by `Ctrl+Y`, cleared by `Esc`.
     pub tidy_anim: Option<TidyAnim>,
+    /// Explicit layer override for the map view. `None` means follow the current room's layer.
+    pub viewed_layer: Option<LayerId>,
 }
 
 impl Default for AppState {
@@ -175,11 +178,29 @@ impl Default for AppState {
             show_alignment: false,
             show_portal_labels: false,
             tidy_anim: None,
+            viewed_layer: None,
         }
     }
 }
 
 impl AppState {
+    /// Set the explicit layer override. `None` means follow the current room's layer.
+    pub fn set_viewed_layer(&mut self, layer: Option<LayerId>) {
+        self.viewed_layer = layer;
+    }
+
+    /// Return the layer to render the map with.
+    /// Priority: `viewed_layer` (if set and still present), else the current room's layer, else `MAIN_LAYER`.
+    pub fn active_layer(&self, graph: &MapGraph) -> LayerId {
+        use mapper::layer::MAIN_LAYER;
+        if let Some(l) = self.viewed_layer {
+            if graph.layers().contains_key(&l) {
+                return l;
+            }
+        }
+        graph.current().map(|id| graph.layer_of(id)).unwrap_or(MAIN_LAYER)
+    }
+
     /// Toggle focus between Game and Map panes.
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
@@ -329,5 +350,20 @@ mod tests {
         assert_eq!(s.selected_room, Some(42));
         s.select_room(None);
         assert_eq!(s.selected_room, None);
+    }
+
+    #[test]
+    fn active_layer_follows_current_then_view_override() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_current(1);
+        let l = g.new_layer(Some(0), "B".into());
+        let mut s = AppState::default();
+        assert_eq!(s.active_layer(&g), 0, "defaults to current room's layer");
+        s.set_viewed_layer(Some(l));
+        assert_eq!(s.active_layer(&g), l, "explicit view wins");
+        s.set_viewed_layer(Some(999)); // stale id (no such layer)
+        assert_eq!(s.active_layer(&g), 0, "stale view falls back to current room's layer");
     }
 }

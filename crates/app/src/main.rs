@@ -5,7 +5,7 @@ use crossterm::event::{poll, read, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use mapper::mapper::Mapper;
-use mapper::render::render as render_map_data;
+use mapper::render::{render as render_map_data, render_layer};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -76,8 +76,8 @@ fn draw_frame(
         let buf = f.buffer_mut();
         // During tidy-animation playback the map shows the current captured stage, not the live graph.
         let rm = match &state.tidy_anim {
-            Some(anim) => render_map_data(&anim.current().graph),
-            None => render_map_data(&mapper.graph),
+            Some(anim) => render_layer(&anim.current().graph, state.active_layer(&anim.current().graph)),
+            None => render_layer(&mapper.graph, state.active_layer(&mapper.graph)),
         };
 
         // ── Change 2: reserve bottom 1 row for help bar ───────────────────────
