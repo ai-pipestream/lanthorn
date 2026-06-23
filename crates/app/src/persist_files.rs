@@ -72,6 +72,24 @@ mod tests {
     }
 
     #[test]
+    fn save_load_round_trips_layers_and_names() {
+        use mapper::direction::Direction;
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("babelmap-layers-{}", std::process::id()));
+        let path = dir.join("ZCODE-1-x-0.map.json");
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let l = mapper::layer::peel_region(&mut m.graph, 2).expect("peel");
+        m.graph.set_layer_name(l, "Basement".into());
+        save_map(&path, &m).unwrap();
+        let loaded = load_map(&path).expect("loads");
+        assert_eq!(loaded.graph.layer_of(2), l);
+        assert_eq!(loaded.graph.layer_name(l), "Basement");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn game_save_restore_round_trips_with_czech() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../zvm/tests/fixtures/czech.z5");

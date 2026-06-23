@@ -66,6 +66,8 @@ pub enum Action {
     SelectPrev,
     /// Begin a rename-room prompt for the selected room.
     RenameRoom,
+    /// Begin a rename-layer prompt for the active layer.
+    RenameLayer,
     /// Begin an edit-notes prompt for the selected room.
     EditNotes,
     /// Delete the first outgoing connection of the selected room.
@@ -262,7 +264,7 @@ fn map_key_to_action(key: KeyEvent) -> Action {
 
         KeyCode::Char('c') if plain!() => Action::Recenter,
         KeyCode::Char('n') if plain!() => Action::SelectNext,
-        KeyCode::Char('N') if shift => Action::SelectPrev,
+        KeyCode::Char('N') if shift => Action::RenameLayer,
         KeyCode::Char('P') if shift => Action::PeelLayer,
         KeyCode::Char('M') if shift => Action::MergeLayer,
         KeyCode::Char('R') if shift => Action::Retidy,
@@ -462,6 +464,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 });
             }
         }
+        Action::RenameLayer => {
+            let layer = state.active_layer(&mapper.graph);
+            let current_name = mapper.graph.layer_name(layer).to_owned();
+            state.prompt = Some(Prompt {
+                kind: PromptKind::RenameLayer(layer),
+                buffer: current_name,
+            });
+        }
         Action::EditNotes => {
             if let Some(id) = state.selected_room {
                 state.prompt = Some(Prompt {
@@ -539,6 +549,9 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) {
             if let Some(new_dir) = mapper::direction::parse_direction(&prompt.buffer) {
                 mapper.relabel_edge(id, old_dir, new_dir);
             }
+        }
+        PromptKind::RenameLayer(id) => {
+            mapper.graph.set_layer_name(id, prompt.buffer);
         }
     }
 }
@@ -755,11 +768,13 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus();
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
-        // 'N' is Shift+n; crossterm sends Char('N') with SHIFT modifier
-        assert!(matches!(
-            key_to_action(&s, shift(KeyCode::Char('N'))),
-            Action::SelectPrev
-        ));
+    }
+
+    #[test]
+    fn shift_n_starts_layer_rename_in_map_focus() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::RenameLayer));
     }
 
     #[test]

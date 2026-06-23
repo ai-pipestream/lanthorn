@@ -154,6 +154,7 @@ fn draw_frame(
                 PromptKind::RenameRoom(_) => "Rename",
                 PromptKind::EditNotes(_) => "Notes",
                 PromptKind::RelabelEdge(_, _) => "Direction",
+                PromptKind::RenameLayer(_) => "Layer name",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
@@ -162,7 +163,7 @@ fn draw_frame(
                     "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Ctrl+Y: animate | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+P: portals | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
-                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/N: select | r/o/d/e: edit | Ctrl+Q: quit".to_string()
+                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n: select | N: rename layer | r/o/d/e: edit | Ctrl+Q: quit".to_string()
                 }
             }
         };
@@ -183,6 +184,7 @@ fn draw_frame(
                     PromptKind::RenameRoom(_) => "Rename: ",
                     PromptKind::EditNotes(_) => "Notes:  ",
                     PromptKind::RelabelEdge(_, _) => "Dir:    ",
+                    PromptKind::RenameLayer(_) => "Layer:  ",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
                 let overlay_style = Style::default().add_modifier(Modifier::REVERSED);

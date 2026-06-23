@@ -87,6 +87,8 @@ pub enum PromptKind {
     EditNotes(RoomId),
     /// Relabel the edge that exits `RoomId` in the given direction.
     RelabelEdge(RoomId, Direction),
+    /// Rename the layer with the given id.
+    RenameLayer(LayerId),
 }
 
 /// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
