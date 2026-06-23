@@ -1513,6 +1513,24 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
 
     for (origin, dest, dy) in updown {
         let Some(op) = graph.room(origin).and_then(|r| r.pos) else { continue };
+        // Skip a room that currently sits axis-aligned on a drawn CARDINAL edge: a portal stack must
+        // not pull it off a real compass neighbor it lines up with. Canyon View lines up due east of
+        // Clearing via `74 E 25` (same row), so stacking it above its Up-partner #26 would break that
+        // alignment. Cardinal edges that are not currently straight (e.g. an N edge whose partner is
+        // off-column) and diagonal/portal edges do not anchor — those rooms still seat by their
+        // partner (e.g. Canyon Bottom, whose N edge to End of Rainbow is not straight).
+        if let Some(dp) = graph.room(dest).and_then(|r| r.pos) {
+            let anchored = graph.connections().iter().any(|c| {
+                let other =
+                    if c.origin == dest { c.dest } else if c.dest == dest { c.origin } else { return false };
+                let Some(off) = mapper::direction::grid_offset(c.dir) else { return false };
+                let Some(np) = graph.room(other).and_then(|r| r.pos) else { return false };
+                (off.0 == 0 && off.1 != 0 && dp.0 == np.0) || (off.1 == 0 && off.0 != 0 && dp.1 == np.1)
+            });
+            if anchored {
+                continue;
+            }
+        }
         // Preferred target is directly in the portal direction; if that cell can't be opened, the two
         // diagonal-adjacent cells (NW/NE for Up, SW/SE for Down) still seat the room beside its
         // partner rather than flinging it across the map.
@@ -2655,6 +2673,25 @@ mod tests {
         assert_eq!(p(2), (0, 1), "B stacked directly below A");
         assert!(p(2).0 < p(3).0 && p(2).1 > p(3).1, "B stays SW of C: B={:?} C={:?}", p(2), p(3));
         assert_eq!(p(3), (1, -2), "leaf C dragged east to keep the SW link");
+    }
+
+    #[test]
+    fn stack_skips_room_aligned_on_a_cardinal_edge() {
+        // C sits due east of A (a straight `E` edge, the `74 E 25` pattern) and is ALSO the Up-partner
+        // of B. The cardinal alignment must win: C keeps A's row instead of being stacked above B.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0)); // A
+        g.set_pos(2, (0, 3)); // B (portal partner, well south)
+        g.set_pos(3, (1, 0)); // C: directly east of A, same row
+        g.add_edge(1, Direction::E, 3); // C is east of A (straight cardinal edge)
+        g.add_edge(2, Direction::Up, 3); // C is B's Up-partner -> a stack target
+        g.add_edge(3, Direction::Down, 2);
+        stack_updown_rooms(&mut g);
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(p(3).1, p(1).1, "C stays on A's row: cardinal E edge outranks the portal stack");
+        assert!(p(3).0 > p(1).0, "C stays east of A: C={:?} A={:?}", p(3), p(1));
     }
 
     #[test]
