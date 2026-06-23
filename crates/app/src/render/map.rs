@@ -1282,6 +1282,76 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
     }
 }
 
+/// Nudge rooms to satisfy currently-VIOLATED directional hints — e.g. a one-way `W` edge whose dest
+/// ended up east of its origin because a post-solve stage (contiguity ejection, collision spiral)
+/// moved a room across it. Sibling to [`cleanup_overlaps`]; runs after it in the Retidy flow.
+///
+/// Greedy and bounded, like cleanup, but it OPTIMIZES `directional_hint_score` instead of overlaps:
+/// each pass commits the single room move that most increases the total satisfied-hint count while
+/// (a) not introducing any illegal connector overlap and (b) not breaking any exact row/column
+/// alignment the moved room currently holds (`room_alignment_score`, so it never undoes the chain
+/// alignment relayout/cleanup established). Only strict improvements are taken, so it converges.
+pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radius: i32, max_passes: usize) {
+    let moves: Vec<(i32, i32)> = {
+        let mut v = Vec::new();
+        for dist in 1..=radius {
+            let mut candidates: Vec<(i32, i32)> = (-dist..=dist)
+                .flat_map(|dy| (-dist..=dist).map(move |dx| (dy, dx)))
+                .filter(|&(dy, dx)| dy.abs().max(dx.abs()) == dist)
+                .collect();
+            candidates.sort_unstable();
+            v.extend(candidates);
+        }
+        v
+    };
+
+    for _ in 0..max_passes {
+        let base = render_overlap_stats(graph); // (illegal overlaps, crossings)
+        let base_score = mapper::layout::directional_hint_score(graph);
+
+        let room_ids: Vec<mapper::graph::RoomId> =
+            graph.rooms().filter(|r| r.pos.is_some()).map(|r| r.id).collect();
+
+        // Pick the single GLOBALLY best move this pass. Key (minimized):
+        //   (Reverse(hint gain), resulting overlaps, resulting crossings, moved room's degree,
+        //    id, move index)
+        // Highest hint gain first; among equal gains, the move that leaves the fewest overlaps /
+        // crossings and disturbs the lowest-degree room. A candidate is eligible only when it
+        // STRICTLY raises the hint score, never raises illegal overlaps, and never lowers the moved
+        // room's exact-alignment score (so it cannot knock a column/row chain apart).
+        type Key = (std::cmp::Reverse<usize>, usize, usize, usize, mapper::graph::RoomId, usize);
+        let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
+        for &id in &room_ids {
+            let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
+            let align_orig = mapper::layout::room_alignment_score(graph, id);
+            let degree = mapper::layout::room_compass_degree(graph, id);
+            for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
+                let trial = (orig.0 + dx, orig.1 + dy);
+                if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
+                    continue;
+                }
+                graph.set_pos(id, trial);
+                let s = render_overlap_stats(graph);
+                let score = mapper::layout::directional_hint_score(graph);
+                let align_trial = mapper::layout::room_alignment_score(graph, id);
+                graph.set_pos(id, orig); // restore; the winner is committed after the scan
+                if score > base_score && s.0 <= base.0 && align_trial >= align_orig {
+                    let gain = score - base_score;
+                    let key: Key = (std::cmp::Reverse(gain), s.0, s.1, degree, id, move_idx);
+                    if best.as_ref().is_none_or(|(bk, _, _)| key < *bk) {
+                        best = Some((key, id, trial));
+                    }
+                }
+            }
+        }
+
+        match best {
+            Some((_, id, trial)) => graph.set_pos(id, trial),
+            None => break,
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1986,6 +2056,63 @@ mod tests {
         assert_eq!(p(&g,74).0, p(&g,76).0,
             "76 must stay directly below 74 after cleanup: 74={:?} 76={:?}", p(&g,74), p(&g,76));
         assert!(p(&g,76).1 > p(&g,74).1, "76 stays south of 74");
+    }
+
+    #[test]
+    fn repair_puts_78_west_of_180_after_retidy() {
+        // The full Retidy flow (relayout -> cleanup_overlaps -> repair_directional_hints) on A129.
+        // The stress solver places 78 west of 180, but contiguity ejection shoves 180 across 78;
+        // the directional repair pass must recover 180->W->78 (78 ends up west of 180) without
+        // re-introducing overlaps or knocking 76 off 74's column.
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+            (239,W,77),(81,N,75),(25,Down,26),
+        ] { g.add_edge(o, d, dst); }
+        mapper::layout::relayout_auto(&mut g);
+        cleanup_overlaps(&mut g, 3, 40);
+        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        assert!(p(&g,78).0 > p(&g,180).0, "precondition: contiguity left 78 EAST of 180 (the bug)");
+        repair_directional_hints(&mut g, 3, 40);
+        assert!(p(&g,78).0 < p(&g,180).0,
+            "repair must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
+        assert_eq!(render_overlap_stats(&g).0, 0, "repair must not introduce illegal overlaps");
+        assert_eq!(p(&g,74).0, p(&g,76).0, "repair must not knock 76 off 74's column");
+    }
+
+    #[test]
+    fn repair_directional_hints_is_deterministic() {
+        use mapper::graph::MapGraph;
+        use mapper::layout::relayout_auto;
+        let build = || {
+            let mut g = MapGraph::new();
+            for id in [1u16, 2, 3, 4, 5] { g.upsert_room(id, "r".into()); }
+            g.add_edge(1, Direction::E, 2);
+            g.add_edge(2, Direction::N, 3);
+            g.add_edge(3, Direction::W, 4);
+            g.add_edge(4, Direction::S, 5);
+            g.add_edge(5, Direction::E, 1);
+            relayout_auto(&mut g);
+            g
+        };
+        let mut g1 = build();
+        let mut g2 = build();
+        repair_directional_hints(&mut g1, 3, 40);
+        repair_directional_hints(&mut g2, 3, 40);
+        let p1: Vec<_> = g1.rooms().map(|r| (r.id, r.pos)).collect();
+        let p2: Vec<_> = g2.rooms().map(|r| (r.id, r.pos)).collect();
+        assert_eq!(p1, p2, "repair must be deterministic");
     }
 
     #[test]

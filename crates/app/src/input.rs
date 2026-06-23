@@ -321,6 +321,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
                 mapper::layout::relayout_auto(&mut mapper.graph);
                 crate::render::map::cleanup_overlaps(&mut mapper.graph, 3, 40);
+                // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected
+                // across a one-way edge), without re-introducing overlaps.
+                crate::render::map::repair_directional_hints(&mut mapper.graph, 3, 40);
             }
         }
 

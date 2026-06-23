@@ -356,6 +356,29 @@ pub fn room_alignment_score(graph: &MapGraph, id: RoomId) -> usize {
     sat
 }
 
+/// Total directional-hint satisfaction across the whole map: the count of compass connections whose
+/// dest sits on the correct SIDE of its origin (side-only, like `room_side_score` — the cross axis
+/// is free). Each DIRECTED connection counts once, so a reciprocal pair contributes 2, naturally
+/// weighting bidirectional links above one-way exits without a separate weight. The directional
+/// repair pass maximizes this (subject to not adding illegal overlaps).
+pub fn directional_hint_score(graph: &MapGraph) -> usize {
+    graph
+        .connections()
+        .iter()
+        .filter(|c| {
+            let Some(delta) = grid_offset(c.dir) else { return false };
+            let (Some(op), Some(dp)) = (
+                graph.room(c.origin).and_then(|r| r.pos),
+                graph.room(c.dest).and_then(|r| r.pos),
+            ) else {
+                return false;
+            };
+            let actual = (dp.0 - op.0, dp.1 - op.1);
+            axis_side_respected(actual.0, delta.0) && axis_side_respected(actual.1, delta.1)
+        })
+        .count()
+}
+
 /// Number of room `id`'s compass (grid-offset) edges — its directional-constraint count.
 /// A room with FEWER compass edges (e.g. a portal-only or leaf room) is a safer room to nudge
 /// when resolving a rendered overlap, since moving it disturbs fewer directional hints.
@@ -629,6 +652,21 @@ mod tests {
     #[test]
     fn layout_mode_default_is_auto() {
         assert_eq!(LayoutMode::default(), LayoutMode::Auto);
+    }
+
+    #[test]
+    fn directional_hint_score_counts_satisfied_sides_with_reciprocal_weight() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0)); // 2 east of 1
+        g.add_edge(1, Direction::E, 2); // satisfied (2 is east)
+        g.add_edge(2, Direction::W, 1); // satisfied (1 is west) — reciprocal, so both count
+        assert_eq!(directional_hint_score(&g), 2, "reciprocal E/W pair: both directed edges satisfied");
+        // Flip 2 to the wrong side: both directed edges now violated.
+        g.set_pos(2, (-1, 0));
+        assert_eq!(directional_hint_score(&g), 0, "2 west of 1 violates both E and W edges");
     }
 
     #[test]
