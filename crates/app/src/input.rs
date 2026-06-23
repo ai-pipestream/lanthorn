@@ -271,38 +271,49 @@ fn map_key_to_action(key: KeyEvent) -> Action {
 
 // ── Tidy pipeline ─────────────────────────────────────────────────────────────
 
-/// Run the auto-tidy pipeline in place, returning a labelled snapshot of the graph after each
-/// stage (frame 0 is the pre-tidy state). The graph is left in the final tidied layout, so the
-/// instant `Retidy` and the animated path land on identical results. Caller must be in Auto mode.
-pub(crate) fn run_tidy_pipeline(graph: &mut mapper::graph::MapGraph) -> Vec<crate::state::TidyFrame> {
+/// Run the auto-tidy pipeline on the given `layer`, returning a labelled snapshot of the
+/// sub-graph after each stage (frame 0 is the pre-tidy state). The tidied positions are written
+/// back into `graph` for every room in `layer`; all other rooms are untouched. Caller must be in
+/// Auto mode.
+pub(crate) fn run_tidy_pipeline(
+    graph: &mut mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) -> Vec<crate::state::TidyFrame> {
     use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints, stack_updown_rooms};
     use crate::state::TidyFrame;
 
-    let mut frames = vec![TidyFrame { label: "before".into(), graph: graph.clone() }];
-    let snap = |graph: &mapper::graph::MapGraph, label: &str, frames: &mut Vec<TidyFrame>| {
-        frames.push(TidyFrame { label: label.into(), graph: graph.clone() });
+    let mut sub = graph.layer_subgraph(layer);
+    let mut frames = vec![TidyFrame { label: "before".into(), graph: sub.clone() }];
+    let snap = |g: &mapper::graph::MapGraph, label: &str, frames: &mut Vec<TidyFrame>| {
+        frames.push(TidyFrame { label: label.into(), graph: g.clone() });
     };
 
-    mapper::layout::relayout_auto(graph);
-    snap(graph, "relayout", &mut frames);
-    cleanup_overlaps(graph, 3, 40);
-    snap(graph, "cleanup overlaps", &mut frames);
+    mapper::layout::relayout_auto(&mut sub);
+    snap(&sub, "relayout", &mut frames);
+    cleanup_overlaps(&mut sub, 3, 40);
+    snap(&sub, "cleanup overlaps", &mut frames);
     // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected across a one-way
     // edge), without re-introducing overlaps.
-    repair_directional_hints(graph, 3, 40);
-    snap(graph, "repair hints", &mut frames);
+    repair_directional_hints(&mut sub, 3, 40);
+    snap(&sub, "repair hints", &mut frames);
     // Stack Up/Down rooms on the correct side of their partner (north for Up, south for Down),
     // accepting a temporary overlap where the area is dense.
-    stack_updown_rooms(graph);
-    snap(graph, "stack up/down", &mut frames);
+    stack_updown_rooms(&mut sub);
+    snap(&sub, "stack up/down", &mut frames);
     // Clear any overlap the stacking introduced by moving OTHER rooms — the cleanup is
     // direction-aware, so it won't drag the Up/Down room back to the wrong side.
-    cleanup_overlaps(graph, 3, 40);
-    snap(graph, "cleanup overlaps", &mut frames);
+    cleanup_overlaps(&mut sub, 3, 40);
+    snap(&sub, "cleanup overlaps", &mut frames);
     // Collapse any fully-empty rows/columns the shuffling left behind.
-    compact_empty_lines(graph);
-    snap(graph, "compact", &mut frames);
+    compact_empty_lines(&mut sub);
+    snap(&sub, "compact", &mut frames);
 
+    // Write the tidied positions back into the live graph for this layer's rooms.
+    for id in graph.rooms_in_layer(layer) {
+        if let Some(p) = sub.room(id).and_then(|r| r.pos) {
+            graph.set_pos(id, p);
+        }
+    }
     frames
 }
 
@@ -377,13 +388,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // placement can't. No-op in Manual mode — those positions are user-owned.
         Action::Retidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
-                run_tidy_pipeline(&mut mapper.graph);
+                let layer = state.active_layer(&mapper.graph);
+                run_tidy_pipeline(&mut mapper.graph, layer);
             }
         }
 
         Action::AnimateTidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
-                let frames = run_tidy_pipeline(&mut mapper.graph);
+                let layer = state.active_layer(&mapper.graph);
+                let frames = run_tidy_pipeline(&mut mapper.graph, layer);
                 state.tidy_anim = Some(crate::state::TidyAnim::new(frames));
             }
         }
@@ -990,5 +1003,25 @@ mod tests {
         assert!(s.show_portal_labels, "Ctrl+P turns labels on");
         apply_action(Action::TogglePortalLabels, &mut s, &mut m);
         assert!(!s.show_portal_labels, "Ctrl+P toggles back off");
+    }
+
+    #[test]
+    fn retidy_only_moves_the_active_layer() {
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        // Layer 0: a 3-room tangle that relayout will move.
+        g.upsert_room(1, "A".into()); g.set_pos(1, (0, 0));
+        g.upsert_room(2, "B".into()); g.set_pos(2, (5, 5));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        // Layer 1: a room with a fixed position that must NOT move.
+        let l = g.new_layer(Some(0), "Other".into());
+        g.upsert_room(9, "X".into()); g.set_room_layer(9, l); g.set_pos(9, (3, 3));
+        let _frames = run_tidy_pipeline(&mut g, l); // tidy the OTHER layer
+        assert_eq!(g.room(1).unwrap().pos, Some((0, 0)), "layer-0 room 1 untouched");
+        assert_eq!(g.room(2).unwrap().pos, Some((5, 5)), "layer-0 room 2 untouched");
+        // Room 9 is the only room in layer l → relayout anchors it at the origin.
+        assert_eq!(g.room(9).unwrap().pos, Some((0, 0)), "lone room in tidied layer is anchored");
     }
 }
