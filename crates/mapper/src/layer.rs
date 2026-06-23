@@ -79,6 +79,20 @@ pub fn is_interlayer(graph: &MapGraph, conn: &Connection) -> bool {
     graph.layer_of(conn.origin) != graph.layer_of(conn.dest)
 }
 
+/// Fold every room in `layer` into its parent (or `MAIN_LAYER` if it has none) and drop
+/// the layer's metadata. Returns the target layer. No-op (returns `MAIN_LAYER`) for `MAIN_LAYER`.
+pub fn merge_layer(graph: &mut MapGraph, layer: LayerId) -> LayerId {
+    if layer == MAIN_LAYER {
+        return MAIN_LAYER;
+    }
+    let target = graph.layers().get(&layer).and_then(|m| m.parent).unwrap_or(MAIN_LAYER);
+    for id in graph.rooms_in_layer(layer) {
+        graph.set_room_layer(id, target);
+    }
+    graph.remove_layer(layer);
+    target
+}
+
 /// One portal badge per connection that crosses out of `layer`. Anchored at the
 /// in-layer endpoint; carries the destination room name and destination layer name.
 pub fn interlayer_badges(graph: &MapGraph, layer: LayerId) -> Vec<RoutedEdge> {
@@ -190,5 +204,23 @@ mod tests {
         // "<dest room> · <dest layer>". Assert the shape, not a brittle literal.
         assert!(up.iter().all(|e| e.dest_label.as_deref().is_some_and(|s| s.contains(" · "))));
         assert!(up.iter().any(|e| e.dest_label.as_deref() == Some("CellarN · CellarN")));
+    }
+
+    #[test]
+    fn merge_layer_folds_into_parent_and_removes_meta() {
+        let mut g = two_floors();
+        let l = peel_region(&mut g, 3).unwrap(); // parent = MAIN_LAYER
+        let target = merge_layer(&mut g, l);
+        assert_eq!(target, MAIN_LAYER);
+        assert_eq!(g.layer_of(3), MAIN_LAYER);
+        assert_eq!(g.layer_of(4), MAIN_LAYER);
+        assert!(!g.layers().contains_key(&l), "merged layer's metadata is removed");
+    }
+
+    #[test]
+    fn merge_main_is_noop() {
+        let mut g = two_floors();
+        assert_eq!(merge_layer(&mut g, MAIN_LAYER), MAIN_LAYER);
+        assert!(g.layers().contains_key(&MAIN_LAYER));
     }
 }
