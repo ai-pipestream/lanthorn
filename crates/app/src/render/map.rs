@@ -1397,17 +1397,25 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
     }
 }
 
-/// Stack Up/Down rooms directly above/below their partner when it is safe. `grid_offset` returns
-/// None for Up/Down, so the solver gives them no vertical preference — they drift to wherever there
-/// is room. For each Up edge (`origin -Up-> dest`, so `dest` is up = directly NORTH of `origin`) and
-/// each Down edge (`dest` directly SOUTH), if `dest` is not already at the ideal cell, open it by
-/// shifting the occupant and everything beyond it in that column one step further out, then place
-/// `dest` there. Commit only when the result adds no illegal overlap and lowers neither the global
-/// side-hint score nor the global exact (chain) alignment — otherwise revert, leaving the solver's
-/// placement (yield). Runs before compaction so the cell `dest` vacated can be collapsed away.
+/// Stack Up/Down rooms directly above/below their partner when it can be done without breaking a
+/// chain. `grid_offset` returns None for Up/Down, so the solver gives those rooms no vertical
+/// preference — they drift to wherever there is room. For each Up edge (`origin -Up-> dest`, so
+/// `dest` is up = directly NORTH of `origin`) and each Down edge (`dest` directly SOUTH), if `dest`
+/// is not already at the ideal cell, translate a closed set of rooms one step out to open it, then
+/// place `dest` there.
+///
+/// The set is a TRANSITIVE closure so chains travel intact: seeded with the ideal column's occupants
+/// on the ideal side, then closed under (a) E/W row-chain membership — a vertical shift would split a
+/// row otherwise, so the whole row comes along — and (b) whatever sits in a shifting room's path. A
+/// candidate commits only when no two rooms collide, no illegal overlap is added, and neither the
+/// global side-hint nor the exact (chain) alignment score drops; otherwise it yields (full revert).
+/// Runs before compaction so the cell `dest` vacated can be collapsed away.
 pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
     use mapper::direction::Direction;
-    let updown: Vec<(mapper::graph::RoomId, mapper::graph::RoomId, i32)> = graph
+    use mapper::graph::RoomId;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let updown: Vec<(RoomId, RoomId, i32)> = graph
         .connections()
         .iter()
         .filter_map(|c| match c.dir {
@@ -1416,40 +1424,68 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
             _ => None,
         })
         .collect();
+    // Chains are topological (edge-derived), so identical for every candidate — compute once.
+    let chains = mapper::layout::detect_chains(graph);
+
     for (origin, dest, dy) in updown {
         let Some(op) = graph.room(origin).and_then(|r| r.pos) else { continue };
         let ideal = (op.0, op.1 + dy);
         if graph.room(dest).and_then(|r| r.pos) == Some(ideal) {
             continue; // already stacked
         }
-        let snapshot: Vec<(mapper::graph::RoomId, (i32, i32))> =
+        let pos: BTreeMap<RoomId, (i32, i32)> =
             graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+        let at = |cell: (i32, i32)| pos.iter().find(|&(_, &p)| p == cell).map(|(&id, _)| id);
+
+        // Seed: the ideal column's occupants on the ideal side. Then close the set so chains move
+        // whole: add every E/W row-chain mate of a shifted room, and whatever sits directly in a
+        // shifting room's path (keeping the translation collision-free).
+        let mut s: BTreeSet<RoomId> = pos
+            .iter()
+            .filter(|&(&id, &p)| {
+                id != dest && p.0 == ideal.0 && if dy < 0 { p.1 <= ideal.1 } else { p.1 >= ideal.1 }
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        let mut work: Vec<RoomId> = s.iter().copied().collect();
+        while let Some(r) = work.pop() {
+            if let Some(&cid) = chains.ew.get(&r) {
+                for &m in &chains.ew_members[cid] {
+                    if m != dest && s.insert(m) {
+                        work.push(m);
+                    }
+                }
+            }
+            let rp = pos[&r];
+            if let Some(q) = at((rp.0, rp.1 + dy)) {
+                if q != dest && s.insert(q) {
+                    work.push(q);
+                }
+            }
+        }
+        // Can't proceed if the closure swept in `dest` itself or the partner it stacks on.
+        if s.contains(&dest) || s.contains(&origin) {
+            continue;
+        }
+
         let base_ov = render_overlap_stats(graph).0;
         let base_side = mapper::layout::directional_hint_score(graph);
         let base_align = exact_alignment_count(graph);
 
-        // Shift every room in the ideal column on the ideal side (excluding `dest`, which sits
-        // elsewhere) one step further out, opening `ideal`; then drop `dest` in. Shifting a whole
-        // column segment uniformly keeps it collision-free and preserves its column chain.
-        let shifted: Vec<(mapper::graph::RoomId, (i32, i32))> = graph
-            .rooms()
-            .filter_map(|r| r.pos.map(|p| (r.id, p)))
-            .filter(|&(id, p)| {
-                id != dest
-                    && p.0 == ideal.0
-                    && if dy < 0 { p.1 <= ideal.1 } else { p.1 >= ideal.1 }
-            })
-            .collect();
-        for (id, p) in shifted {
+        for &id in &s {
+            let p = pos[&id];
             graph.set_pos(id, (p.0, p.1 + dy));
         }
         graph.set_pos(dest, ideal);
 
-        let ok = render_overlap_stats(graph).0 <= base_ov
+        let cells: Vec<(i32, i32)> = graph.rooms().filter_map(|r| r.pos).collect();
+        let distinct = cells.iter().collect::<BTreeSet<_>>().len() == cells.len();
+        let ok = distinct
+            && render_overlap_stats(graph).0 <= base_ov
             && mapper::layout::directional_hint_score(graph) >= base_side
             && exact_alignment_count(graph) >= base_align;
         if !ok {
-            for (id, p) in snapshot {
+            for (&id, &p) in &pos {
                 graph.set_pos(id, p);
             }
         }
@@ -2225,22 +2261,43 @@ mod tests {
     }
 
     #[test]
-    fn stack_updown_yields_when_push_would_break_a_chain() {
-        // A (down) at (0,0); B (up) below at (0,2). The ideal cell (0,-1) is held by C, which is in
-        // a reciprocal E/W chain with D (same row). Pushing C up would pull it off D's row, so the
-        // stacker must YIELD: C stays, B is not stacked.
+    fn stack_updown_shifts_whole_row_chain_together() {
+        // A (down) at (0,0); B (up) below at (0,2). The ideal cell (0,-1) is held by C, which is in a
+        // reciprocal E/W chain with D (same row). The coordinated shift moves C AND D up together so
+        // the row stays intact, opening (0,-1) for B.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
         g.set_pos(1, (0, 0));
         g.set_pos(2, (0, 2));
         g.set_pos(3, (0, -1));  // C in ideal cell
-        g.set_pos(4, (1, -1));  // D, east of C on the same row
+        g.set_pos(4, (1, -1));  // D, east of C on the same row (chain mate)
         g.add_edge(1, Direction::Up, 2);
-        g.add_edge(3, Direction::E, 4); // reciprocal E/W chain C<->D pins C's row
-        g.add_edge(4, Direction::W, 3);
+        g.add_edge(3, Direction::E, 4);
+        g.add_edge(4, Direction::W, 3); // reciprocal E/W chain C<->D
         stack_updown_rooms(&mut g);
-        assert_eq!(g.room(3).unwrap().pos, Some((0, -1)), "chain member C is NOT pushed");
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)), "B stacked directly above A");
+        assert_eq!(g.room(3).unwrap().pos, Some((0, -2)), "C shifted up");
+        assert_eq!(g.room(4).unwrap().pos, Some((1, -2)), "D shifted up WITH C — row stays intact");
+        assert_eq!(g.room(3).unwrap().pos.unwrap().1, g.room(4).unwrap().pos.unwrap().1, "C,D one row");
+    }
+
+    #[test]
+    fn stack_updown_yields_when_no_chain_safe_shift_exists() {
+        // A (down) at (0,0); B (up) below at (0,2). The ideal cell (0,-1) is held by C, which has a
+        // ONE-WAY exact E edge to F (not a chain, so F is not swept into the shift). Pushing C up
+        // would break C->E->F's exactness with nothing to fix it, so the stacker yields.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 2));
+        g.set_pos(3, (0, -1));  // C
+        g.set_pos(4, (1, -1));  // F, east of C — exact, but one-way (no reciprocal → not a chain)
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(3, Direction::E, 4); // one-way only
+        stack_updown_rooms(&mut g);
+        assert_eq!(g.room(3).unwrap().pos, Some((0, -1)), "C is NOT pushed (would break C->E->F)");
         assert_ne!(g.room(2).unwrap().pos, Some((0, -1)), "B did not steal C's cell");
     }
 
