@@ -313,6 +313,37 @@ fn has_parallel_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
     false
 }
 
+/// Every straight collinear run of a polyline as `(is_horizontal, line, start, end)`, over ALL grid
+/// lines — room rows/columns (even coords) AND channels (odd). Unlike `long_runs` (channels only),
+/// this also sees DIRECT routes, which run on room grid lines and carry no lane.
+fn all_runs(points: &[(i32, i32)]) -> Vec<(bool, i32, i32, i32)> {
+    let mut runs = Vec::new();
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if a.1 == b.1 && a.0 != b.0 {
+            runs.push((true, a.1, a.0.min(b.0), a.0.max(b.0)));
+        } else if a.0 == b.0 && a.1 != b.1 {
+            runs.push((false, a.0, a.1.min(b.1), a.1.max(b.1)));
+        }
+    }
+    runs
+}
+
+/// True if two polylines share a parallel collinear run of more than one cell on the same grid line
+/// — a line-on-line stomp the renderer can't separate. Sees room-line runs too (see `all_runs`), so
+/// it catches two DIRECT routes hugging the same room row/column, which `has_parallel_overlap` (which
+/// only inspects laneable channel runs) misses.
+fn polylines_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
+    for &(ah, al, a_s, a_e) in &all_runs(a) {
+        for &(bh, bl, b_s, b_e) in &all_runs(b) {
+            if ah == bh && al == bl && a_s.max(b_s) < a_e.min(b_e) {
+                return true; // >1 cell of shared collinear run on the same line
+            }
+        }
+    }
+    false
+}
+
 /// The candidate entry sides for a NON-reciprocal connector from `a` to `b`: the
 /// geometric entry side plus the next-nearest side that still faces the origin, in a
 /// deterministic order. The geometric side is always first (the default), so when no
@@ -551,10 +582,13 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // straight line / single-corner L instead of dipping into channels — fewer turns, no
         // weaving around empty cells. Only when the resulting entry side is consistent with what
         // this connector must use — for a reciprocal pair the far arrow must point out the
-        // back-edge's side; for a one-way edge any facing side is fine.
+        // back-edge's side; for a one-way edge any facing side is fine — AND the straight run does
+        // not stomp an already-routed connector that hugs the same room line (a direct route carries
+        // no lane, so two on one line cannot be separated; the dipped channel route below can).
         let required_entry = back.and_then(|bk| side_for(bk.dir));
         if let Some((sentry, pts)) = direct_route(a, exit, b, &occupied) {
-            if required_entry.is_none_or(|req| req == sentry) {
+            let stomps_existing = out.iter().any(|o| polylines_overlap(&pts, &o.points));
+            if required_entry.is_none_or(|req| req == sentry) && !stomps_existing {
                 out.push(RoutedConnector {
                     origin: c.origin,
                     dest: c.dest,
@@ -869,6 +903,46 @@ mod tests {
         let plan = route_lanes(&g);
         let max_h = plan.h_lanes.values().copied().max().unwrap_or(0);
         assert!(max_h >= 2, "two overlapping horizontal runs need ≥2 lanes; got {max_h}");
+    }
+
+    #[test]
+    fn polylines_overlap_sees_room_line_stomp() {
+        // Two routes hugging the SAME room column (even x=-14), overlapping in y.
+        let a = vec![(-4, 4), (-14, 4), (-14, -8)];
+        let b = vec![(-12, 0), (-14, 0), (-14, -8)];
+        assert!(polylines_overlap(&a, &b), "two routes on room column -14 overlap");
+        // Routed one column over (odd channel x=-13): no shared line.
+        let c = vec![(-12, 0), (-13, 0), (-13, -8)];
+        assert!(!polylines_overlap(&a, &c), "different columns do not overlap");
+        // Touching at a single corner cell is not an overlap.
+        let d = vec![(-14, -8), (-14, -9), (-2, -9)];
+        assert!(!polylines_overlap(&a, &d), "sharing only the end cell is not a stomp");
+    }
+
+    #[test]
+    fn two_direct_routes_to_one_room_do_not_stomp() {
+        // A and B both lie east of X and would each direct-route west then up X's column, stomping.
+        // The router must reject the second straight route and dip it into a lane instead, so no two
+        // connectors share a parallel room-line run.
+        let mut g = MapGraph::new();
+        for id in 1..=3 {
+            g.upsert_room(id, "r".into());
+        }
+        g.set_pos(1, (0, 0)); // X
+        g.set_pos(2, (5, 3)); // A
+        g.set_pos(3, (5, 1)); // B
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(3, Direction::W, 1);
+        let plan = route_lanes(&g);
+        for i in 0..plan.connectors.len() {
+            for j in (i + 1)..plan.connectors.len() {
+                assert!(
+                    !polylines_overlap(&plan.connectors[i].points, &plan.connectors[j].points),
+                    "connectors {i} and {j} stomp on a shared line: {:?} {:?}",
+                    plan.connectors[i].points, plan.connectors[j].points
+                );
+            }
+        }
     }
 
     #[test]
