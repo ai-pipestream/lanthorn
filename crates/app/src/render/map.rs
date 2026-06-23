@@ -1243,10 +1243,12 @@ pub(crate) fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, u
     overlap_stats(&rm.plan, &cols, &rows)
 }
 
-/// True unless moving room `id` to `cell` would flip a CURRENTLY-SATISFIED Up/Down relationship to
-/// the wrong side — an Up room must stay north of its partner, a Down room south. Lets overlap
-/// cleanup avoid sacrificing a stacked portal room's side to clear an overlap (other rooms can move
-/// instead). Only currently-correct edges are protected; an already-violated one imposes nothing.
+/// True unless moving room `id` to `cell` would disturb a well-placed Up/Down relationship: an Up
+/// room must stay north of its partner (a Down room south), and a room currently stacked in its
+/// partner's COLUMN must stay in that column. This stops overlap cleanup from sacrificing a stacked
+/// portal room — flipping its side OR dragging it off-column — to clear an overlap; other rooms can
+/// move instead. Only currently-good relationships are protected; an already-broken one imposes
+/// nothing.
 fn move_keeps_updown_sides(
     graph: &mapper::graph::MapGraph,
     id: mapper::graph::RoomId,
@@ -1268,13 +1270,15 @@ fn move_keeps_updown_sides(
         ) else {
             continue;
         };
-        if (d0.1 - o0.1).signum() != req {
-            continue; // not currently on the correct side — nothing to protect
-        }
         let o = if c.origin == id { cell } else { o0 };
         let d = if c.dest == id { cell } else { d0 };
-        if (d.1 - o.1).signum() != req {
-            return false; // the move would flip a satisfied side
+        // Side: a currently-correct side must stay correct.
+        if (d0.1 - o0.1).signum() == req && (d.1 - o.1).signum() != req {
+            return false;
+        }
+        // Column: a room currently stacked in its partner's column must stay in it.
+        if d0.0 == o0.0 && d.0 != o.0 {
+            return false;
         }
     }
     true
@@ -1556,37 +1560,40 @@ pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
         cands.sort_unstable_by_key(|&(x, y)| {
             ((x - center.0).abs() + (y - center.1).abs(), (x - center.0).abs(), x, y)
         });
-        // Seat the room on its correct side. Prefer the nearest cell that adds no overlap (and never
-        // breaks a side hint or chain alignment). If none is overlap-free — the area above/below the
-        // partner is dense — take the cell that minimises overlaps, accepting a temporary overlap:
-        // the direction-aware cleanup that follows clears it by moving OTHER rooms (it may not move
-        // this room back to the wrong side), so the room ends up on the correct side, overlap-free.
+        // First choice: the nearest cell on the correct side that adds no overlap (and breaks no
+        // side hint or chain alignment) — a clean local placement.
         let mut committed = false;
-        let mut forced: Option<((usize, i32), (i32, i32))> = None;
         for c in cands {
             graph.set_pos(dest, c);
             let ov = render_overlap_stats(graph).0;
             let side_ok = mapper::layout::directional_hint_score(graph) >= base_side;
             let align_ok = exact_alignment_count(graph) >= base_align;
             graph.set_pos(dest, dp0);
-            if !side_ok || !align_ok {
-                continue;
-            }
-            if ov <= base_ov {
+            if side_ok && align_ok && ov <= base_ov {
                 graph.set_pos(dest, c);
                 committed = true;
                 break; // nearest overlap-free cell on the correct side
             }
-            let dist = (c.0 - center.0).abs() + (c.1 - center.1).abs();
-            let key = (ov, dist);
-            if forced.is_none_or(|(bk, _)| key < bk) {
-                forced = Some((key, c));
-            }
         }
         if !committed {
-            if let Some((_, c)) = forced {
-                graph.set_pos(dest, c);
+            // No clean cell — BAND SHIFT: open the cell directly in line with the partner by
+            // translating everything beyond it (in the portal direction) one step out, then seat
+            // `dest` there. This pushes the partner's whole upper/lower band aside (e.g. North of
+            // House and everything above it), so the room sits directly above/below its partner. The
+            // shift creates transient overlaps; the direction-aware cleanup that follows clears them
+            // by moving other rooms, and cannot drag `dest` off the column it now shares.
+            let ideal = center;
+            let band: Vec<(RoomId, (i32, i32))> = pos
+                .iter()
+                .filter(|&(&id, &p)| {
+                    id != dest && if dy < 0 { p.1 <= ideal.1 } else { p.1 >= ideal.1 }
+                })
+                .map(|(&id, &p)| (id, p))
+                .collect();
+            for (id, p) in &band {
+                graph.set_pos(*id, (p.0, p.1 + dy));
             }
+            graph.set_pos(dest, ideal);
         }
     }
 }
@@ -2550,20 +2557,22 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_guard_will_not_flip_a_satisfied_updown_side() {
-        // 2 is up from 1, currently north of it (satisfied). The guard must forbid moving 2 south of
-        // 1 (or moving 1 north of 2), while allowing other north cells.
+    fn cleanup_guard_protects_a_stacked_updown_room() {
+        // 2 is up from 1 and stacked directly in its column (both x=0), north of it. The guard must
+        // forbid moving 2 south of 1, moving 1 north of 2, and dragging 2 off 1's column — while
+        // still allowing 2 to move vertically within the column (staying north).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "p".into());
         g.upsert_room(2, "u".into());
         g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, -1)); // 2 north of 1
+        g.set_pos(2, (0, -1)); // 2 north of 1, same column
         g.add_edge(1, Direction::Up, 2);
         g.add_edge(2, Direction::Down, 1);
         assert!(!move_keeps_updown_sides(&g, 2, (0, 1)), "must forbid moving the up room SOUTH");
         assert!(!move_keeps_updown_sides(&g, 1, (0, -5)), "must forbid moving the partner NORTH of it");
-        assert!(move_keeps_updown_sides(&g, 2, (3, -2)), "another north cell for the up room is fine");
+        assert!(!move_keeps_updown_sides(&g, 2, (3, -2)), "must forbid dragging it off the column");
+        assert!(move_keeps_updown_sides(&g, 2, (0, -3)), "moving it up within the column is fine");
     }
 
     #[test]
@@ -2594,9 +2603,10 @@ mod tests {
         compact_empty_lines(&mut g);
         let p = |id: u16| g.room(id).unwrap().pos.unwrap();
         assert_eq!(render_overlap_stats(&g).0, 0, "no illegal overlaps");
-        assert!(p(201).1 < p(203).1, "Attic ends up NORTH of Kitchen: 201={:?} 203={:?}", p(201), p(203));
+        assert_eq!(p(201), (p(203).0, p(203).1 - 1), "Attic ends up DIRECTLY above Kitchen (band shift)");
         assert!(p(88).1 < p(75).1, "Up a Tree ends up north of Forest Path");
         assert!(p(27).1 > p(26).1, "Canyon Bottom (down) stays south of Rocky Ledge");
+        assert_eq!(p(27).0, p(26).0, "Canyon Bottom stays in Rocky Ledge's column (not dragged off)");
         assert!(p(78).0 < p(180).0, "78 stays west of 180");
         assert_eq!(p(74).0, p(76).0, "76 stays under 74");
     }
