@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::direction::Direction;
+use crate::layer::{LayerId, LayerMeta, MAIN_LAYER};
 
 pub type RoomId = u16;
 
@@ -11,6 +12,8 @@ pub struct Room {
     pub label_override: Option<String>,
     pub notes: String,
     pub pos: Option<(i32, i32)>,
+    #[serde(default)]
+    pub layer: crate::layer::LayerId,
 }
 
 impl Room {
@@ -30,11 +33,21 @@ pub struct Connection {
     pub distorted: bool,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct MapGraph {
     rooms: BTreeMap<RoomId, Room>,
     conns: Vec<Connection>,
     current: Option<RoomId>,
+    layers: BTreeMap<LayerId, LayerMeta>,
+    next_layer_id: LayerId,
+}
+
+impl Default for MapGraph {
+    fn default() -> Self {
+        let mut layers = BTreeMap::new();
+        layers.insert(MAIN_LAYER, LayerMeta::main());
+        Self { rooms: BTreeMap::new(), conns: Vec::new(), current: None, layers, next_layer_id: 1 }
+    }
 }
 
 impl MapGraph {
@@ -47,9 +60,16 @@ impl MapGraph {
         rooms: Vec<Room>,
         connections: Vec<Connection>,
         current: Option<RoomId>,
+        layers: BTreeMap<LayerId, LayerMeta>,
+        next_layer_id: LayerId,
     ) -> Self {
         let rooms = rooms.into_iter().map(|r| (r.id, r)).collect();
-        Self { rooms, conns: connections, current }
+        let mut layers = layers;
+        if layers.is_empty() {
+            layers.insert(MAIN_LAYER, LayerMeta::main());
+        }
+        let next_layer_id = next_layer_id.max(1);
+        Self { rooms, conns: connections, current, layers, next_layer_id }
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
@@ -68,6 +88,43 @@ impl MapGraph {
         self.current
     }
 
+    pub fn layer_of(&self, id: RoomId) -> LayerId {
+        self.rooms.get(&id).map(|r| r.layer).unwrap_or(MAIN_LAYER)
+    }
+
+    pub fn set_room_layer(&mut self, id: RoomId, layer: LayerId) {
+        if let Some(r) = self.rooms.get_mut(&id) { r.layer = layer; }
+    }
+
+    pub fn rooms_in_layer(&self, layer: LayerId) -> Vec<RoomId> {
+        let mut v: Vec<RoomId> = self.rooms.values().filter(|r| r.layer == layer).map(|r| r.id).collect();
+        v.sort();
+        v
+    }
+
+    pub fn layers(&self) -> &BTreeMap<LayerId, LayerMeta> { &self.layers }
+
+    pub fn layer_name(&self, layer: LayerId) -> &str {
+        self.layers.get(&layer).map(|m| m.name.as_str()).unwrap_or("")
+    }
+
+    pub fn set_layer_name(&mut self, layer: LayerId, name: String) {
+        if let Some(m) = self.layers.get_mut(&layer) { m.name = name; }
+    }
+
+    pub fn new_layer(&mut self, parent: Option<LayerId>, name: String) -> LayerId {
+        let id = self.next_layer_id;
+        self.next_layer_id += 1;
+        self.layers.insert(id, LayerMeta { name, parent });
+        id
+    }
+
+    pub fn remove_layer(&mut self, layer: LayerId) {
+        if layer != MAIN_LAYER { self.layers.remove(&layer); }
+    }
+
+    pub fn next_layer_id(&self) -> LayerId { self.next_layer_id }
+
     pub fn upsert_room(&mut self, id: RoomId, name: String) -> &mut Room {
         use std::collections::btree_map::Entry;
         match self.rooms.entry(id) {
@@ -81,6 +138,7 @@ impl MapGraph {
                     label_override: None,
                     notes: String::new(),
                     pos: None,
+                    layer: 0,
                 });
             }
         }
@@ -170,6 +228,32 @@ impl MapGraph {
 mod tests {
     use super::*;
     use crate::direction::Direction;
+
+    #[test]
+    fn rooms_default_to_main_layer_and_can_move() {
+        use crate::layer::MAIN_LAYER;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        assert_eq!(g.layer_of(1), MAIN_LAYER);
+        assert_eq!(g.layer_name(MAIN_LAYER), "Main");
+        let l = g.new_layer(Some(MAIN_LAYER), "Basement".into());
+        g.set_room_layer(2, l);
+        assert_eq!(g.layer_of(2), l);
+        assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1]);
+        assert_eq!(g.rooms_in_layer(l), vec![2]);
+        assert_eq!(g.layer_name(l), "Basement");
+    }
+
+    #[test]
+    fn new_layer_ids_are_unique_and_main_cannot_be_removed() {
+        let mut g = MapGraph::new();
+        let a = g.new_layer(None, "A".into());
+        let b = g.new_layer(None, "B".into());
+        assert_ne!(a, b);
+        g.remove_layer(crate::layer::MAIN_LAYER); // no-op
+        assert_eq!(g.layer_name(crate::layer::MAIN_LAYER), "Main");
+    }
 
     #[test]
     fn distinct_ids_same_name_are_distinct_rooms() {
