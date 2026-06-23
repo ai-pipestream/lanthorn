@@ -933,6 +933,9 @@ fn draw_portal_icons(
         if !edge.is_stub {
             continue;
         }
+        if edge.dir == Direction::Unknown {
+            continue; // Unknown edges are non-spatial (e.g. death/respawn) — show no portal icon
+        }
         let Some(slot) = portal_slot(edge.dir) else { continue };
         let glyph = portal_glyph(edge.dir);
         let label = edge.dest_label.as_deref();
@@ -2904,7 +2907,9 @@ mod tests {
     }
 
     #[test]
-    fn unknown_portal_in_portal_view_is_border_glyph_no_name() {
+    fn unknown_portal_draws_no_icon_or_name() {
+        // An Unknown-direction edge is non-spatial (e.g. a death/respawn the game gave no direction
+        // for), so it draws no portal icon and no destination name in either view.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
@@ -2918,10 +2923,10 @@ mod tests {
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
+        let count = |s: &str| buf.content.iter().filter(|c| c.symbol() == s).count();
+        assert_eq!(count("?"), 0, "an Unknown portal draws no ? icon");
+        // No destination name to the right of room 1's box (row 2, the portal-label region).
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-        // ? sits on the RIGHT border (col BOX_W-1) at the middle row (row 2). Box is at (0,0).
-        assert_eq!(sym((BOX_W - 1) as u16, 2), "?", "unknown portal shows ? on the right border");
-        // No destination name to the right of the box on that row.
         let right: String = ((BOX_W as u16)..40).map(|x| sym(x, 2)).collect();
         assert!(!right.contains("West"), "unknown portal shows no destination name; got '{right}'");
     }
