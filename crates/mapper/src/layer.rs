@@ -93,22 +93,18 @@ pub fn merge_layer(graph: &mut MapGraph, layer: LayerId) -> LayerId {
     target
 }
 
-/// One portal badge per connection that crosses out of `layer`. Anchored at the
-/// in-layer endpoint; carries the destination room name and destination layer name.
+/// One portal badge per connection that LEAVES `layer` — i.e. whose ORIGIN is in
+/// `layer` and dest is elsewhere. Anchored at the origin; carries the destination room
+/// name and destination layer name. Emitting only outgoing edges means a reciprocal
+/// up/down pair (`A↓B` + `B↑A`) shows a single down glyph on A and a single up glyph on
+/// B, instead of both glyphs on both rooms.
 pub fn interlayer_badges(graph: &MapGraph, layer: LayerId) -> Vec<RoutedEdge> {
     let mut out = Vec::new();
     for c in graph.connections() {
-        if !is_interlayer(graph, c) {
+        if !is_interlayer(graph, c) || graph.layer_of(c.origin) != layer {
             continue;
         }
-        // Determine the in-layer endpoint and the remote endpoint.
-        let (here, there, dir) = if graph.layer_of(c.origin) == layer {
-            (c.origin, c.dest, c.dir)
-        } else if graph.layer_of(c.dest) == layer {
-            (c.dest, c.origin, c.dir)
-        } else {
-            continue;
-        };
+        let (here, there, dir) = (c.origin, c.dest, c.dir);
         let Some(here_pos) = graph.room(here).and_then(|r| r.pos) else { continue };
         let fine = fine_cell(here_pos);
         let dest_layer = graph.layer_of(there);
@@ -178,6 +174,26 @@ mod tests {
         g.add_edge(1, Direction::E, 2);
         g.add_edge(2, Direction::W, 1);
         assert_eq!(peel_region(&mut g, 1), None, "region is the whole layer → no-op");
+    }
+
+    #[test]
+    fn reciprocal_crossing_shows_one_glyph_per_side() {
+        // A reciprocal 1↓3 / 3↑1 across a peeled boundary must NOT draw both glyphs on
+        // both rooms: the upper room shows only its down exit, the lower only its up exit.
+        let mut g = two_floors();
+        g.set_pos(1, (0, 0));
+        g.set_pos(3, (0, 0));
+        let l = peel_region(&mut g, 3).expect("peel cellar");
+
+        let up = interlayer_badges(&g, MAIN_LAYER);
+        assert_eq!(up.len(), 1, "Hall side shows exactly one crossing badge");
+        assert_eq!(up[0].origin, 1);
+        assert_eq!(up[0].dir, Direction::Down, "Hall shows its DOWN exit to the cellar");
+
+        let down = interlayer_badges(&g, l);
+        assert_eq!(down.len(), 1, "Cellar side shows exactly one crossing badge");
+        assert_eq!(down[0].origin, 3);
+        assert_eq!(down[0].dir, Direction::Up, "Cellar shows its UP exit to the hall");
     }
 
     #[test]

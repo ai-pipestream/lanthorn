@@ -163,7 +163,7 @@ fn draw_frame(
                     "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Ctrl+Y: animate | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+P: portals | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
-                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/p: select | N: rename layer | r/o/d/e: edit | Ctrl+Q: quit".to_string()
+                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | +/-: zoom | c: center | n/p: select | [/]: layer | P/M/N: peel/merge/name | r/o/d/e: edit | Ctrl+Q: quit".to_string()
                 }
             }
         };
