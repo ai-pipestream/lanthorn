@@ -324,6 +324,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected
                 // across a one-way edge), without re-introducing overlaps.
                 crate::render::map::repair_directional_hints(&mut mapper.graph, 3, 40);
+                // Stack Up/Down rooms directly above/below their partner when it breaks no chain.
+                crate::render::map::stack_updown_rooms(&mut mapper.graph);
                 // Collapse any fully-empty rows/columns the shuffling left behind.
                 crate::render::map::compact_empty_lines(&mut mapper.graph);
             }

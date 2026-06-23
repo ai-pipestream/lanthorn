@@ -1397,6 +1397,76 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
     }
 }
 
+/// Stack Up/Down rooms directly above/below their partner when it is safe. `grid_offset` returns
+/// None for Up/Down, so the solver gives them no vertical preference — they drift to wherever there
+/// is room. For each Up edge (`origin -Up-> dest`, so `dest` is up = directly NORTH of `origin`) and
+/// each Down edge (`dest` directly SOUTH), if `dest` is not already at the ideal cell, open it by
+/// shifting the occupant and everything beyond it in that column one step further out, then place
+/// `dest` there. Commit only when the result adds no illegal overlap and lowers neither the global
+/// side-hint score nor the global exact (chain) alignment — otherwise revert, leaving the solver's
+/// placement (yield). Runs before compaction so the cell `dest` vacated can be collapsed away.
+pub(crate) fn stack_updown_rooms(graph: &mut mapper::graph::MapGraph) {
+    use mapper::direction::Direction;
+    let updown: Vec<(mapper::graph::RoomId, mapper::graph::RoomId, i32)> = graph
+        .connections()
+        .iter()
+        .filter_map(|c| match c.dir {
+            Direction::Up => Some((c.origin, c.dest, -1)),
+            Direction::Down => Some((c.origin, c.dest, 1)),
+            _ => None,
+        })
+        .collect();
+    for (origin, dest, dy) in updown {
+        let Some(op) = graph.room(origin).and_then(|r| r.pos) else { continue };
+        let ideal = (op.0, op.1 + dy);
+        if graph.room(dest).and_then(|r| r.pos) == Some(ideal) {
+            continue; // already stacked
+        }
+        let snapshot: Vec<(mapper::graph::RoomId, (i32, i32))> =
+            graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+        let base_ov = render_overlap_stats(graph).0;
+        let base_side = mapper::layout::directional_hint_score(graph);
+        let base_align = exact_alignment_count(graph);
+
+        // Shift every room in the ideal column on the ideal side (excluding `dest`, which sits
+        // elsewhere) one step further out, opening `ideal`; then drop `dest` in. Shifting a whole
+        // column segment uniformly keeps it collision-free and preserves its column chain.
+        let shifted: Vec<(mapper::graph::RoomId, (i32, i32))> = graph
+            .rooms()
+            .filter_map(|r| r.pos.map(|p| (r.id, p)))
+            .filter(|&(id, p)| {
+                id != dest
+                    && p.0 == ideal.0
+                    && if dy < 0 { p.1 <= ideal.1 } else { p.1 >= ideal.1 }
+            })
+            .collect();
+        for (id, p) in shifted {
+            graph.set_pos(id, (p.0, p.1 + dy));
+        }
+        graph.set_pos(dest, ideal);
+
+        let ok = render_overlap_stats(graph).0 <= base_ov
+            && mapper::layout::directional_hint_score(graph) >= base_side
+            && exact_alignment_count(graph) >= base_align;
+        if !ok {
+            for (id, p) in snapshot {
+                graph.set_pos(id, p);
+            }
+        }
+    }
+}
+
+/// Total compass connections whose geometry is EXACTLY satisfied (axis-aligned) — the chain-health
+/// metric the Up/Down stacker must not reduce. Up/Down/Unknown edges are always "satisfied" (no
+/// grid offset), so they contribute a constant and do not affect before/after deltas.
+fn exact_alignment_count(graph: &mapper::graph::MapGraph) -> usize {
+    graph
+        .connections()
+        .iter()
+        .filter(|c| mapper::layout::edge_is_satisfied(graph, c))
+        .count()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2134,6 +2204,44 @@ mod tests {
             "repair must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
         assert_eq!(render_overlap_stats(&g).0, 0, "repair must not introduce illegal overlaps");
         assert_eq!(p(&g,74).0, p(&g,76).0, "repair must not knock 76 off 74's column");
+    }
+
+    #[test]
+    fn stack_updown_pushes_free_occupant_to_place_up_room_above_partner() {
+        // A (down) at (0,0); its up-room B is parked below at (0,2); a constraint-free room X sits
+        // in the ideal cell (0,-1). The stacker pushes X up and puts B directly above A.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));   // A (down partner)
+        g.set_pos(2, (0, 2));   // B (up room) parked below
+        g.set_pos(3, (0, -1));  // X occupies the ideal cell, no compass edges
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+        stack_updown_rooms(&mut g);
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)), "B stacked directly above A");
+        assert_eq!(g.room(3).unwrap().pos, Some((0, -2)), "free occupant X pushed one further up");
+        assert_eq!(g.room(1).unwrap().pos, Some((0, 0)), "A (the partner) does not move");
+    }
+
+    #[test]
+    fn stack_updown_yields_when_push_would_break_a_chain() {
+        // A (down) at (0,0); B (up) below at (0,2). The ideal cell (0,-1) is held by C, which is in
+        // a reciprocal E/W chain with D (same row). Pushing C up would pull it off D's row, so the
+        // stacker must YIELD: C stays, B is not stacked.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 2));
+        g.set_pos(3, (0, -1));  // C in ideal cell
+        g.set_pos(4, (1, -1));  // D, east of C on the same row
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(3, Direction::E, 4); // reciprocal E/W chain C<->D pins C's row
+        g.add_edge(4, Direction::W, 3);
+        stack_updown_rooms(&mut g);
+        assert_eq!(g.room(3).unwrap().pos, Some((0, -1)), "chain member C is NOT pushed");
+        assert_ne!(g.room(2).unwrap().pos, Some((0, -1)), "B did not steal C's cell");
     }
 
     #[test]
