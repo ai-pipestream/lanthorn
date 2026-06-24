@@ -1497,7 +1497,15 @@ fn move_keeps_updown_sides(
 /// plan has zero illegal overlaps, secondarily fewer crossings. Deterministic, no overlap,
 /// integer cells. Existing position is restored on every rejected trial.
 pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32, max_passes: usize) {
-    // Gather move candidates in fixed order: increasing Chebyshev distance, then (dy, dx).
+    cleanup_overlaps_observed(graph, radius, max_passes, None);
+}
+
+pub(crate) fn cleanup_overlaps_observed(
+    graph: &mut mapper::graph::MapGraph,
+    radius: i32,
+    max_passes: usize,
+    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+) {
     let moves: Vec<(i32, i32)> = {
         let mut v = Vec::new();
         for dist in 1..=radius {
@@ -1511,6 +1519,8 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
         v
     };
 
+    let mut stats = mapper::layout::TidyStats::default();
+
     for _ in 0..max_passes {
         let base = render_overlap_stats(graph);
         if base.0 == 0 {
@@ -1523,14 +1533,6 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
             .map(|r| r.id)
             .collect();
 
-        // Pick the single GLOBALLY best move this pass. Key (minimized):
-        //   (resulting overlaps, exact-alignment the moved room loses, side-hints the moved room
-        //    loses, resulting crossings, that room's compass degree, id, move index)
-        // Overlaps first guarantees progress. Then `align_broken` — exact row/column alignment the
-        // moved room would lose (reciprocal-chain-weighted): this protects a 2-room column/row chain
-        // that the side-only `broken` cannot see, since `room_side_score` scores "below-and-west of
-        // X" the same as "exactly below X". Then `broken` (side hints), crossings, and a low-degree /
-        // low-id room as the final hint-neutral tiebreak.
         type Key = (usize, usize, usize, usize, usize, mapper::graph::RoomId, usize);
         let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
         for &id in &room_ids {
@@ -1543,9 +1545,6 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
                 if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
                     continue;
                 }
-                // Never clear an overlap by flipping a satisfied Up/Down room to the wrong side of
-                // its partner — that is what used to drag a yielded Attic back south. Fix overlaps
-                // by moving other rooms instead.
                 if !move_keeps_updown_sides(graph, id, trial) {
                     continue;
                 }
@@ -1553,11 +1552,7 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
                 let s = render_overlap_stats(graph);
                 let score_trial = mapper::layout::room_side_score(graph, id);
                 let align_trial = mapper::layout::room_alignment_score(graph, id);
-                graph.set_pos(id, orig); // restore; the winner is committed after the scan
-                // Never clear a render overlap by making the moved room's OWN compass placement
-                // worse. relayout already satisfied these hints (e.g. #180 NW of #80, SW of #81);
-                // trading that correct placement for one fewer render overlap reads as a layout
-                // bug. Resolve the overlap by moving a different (or hint-neutral) room instead.
+                graph.set_pos(id, orig);
                 if score_trial < score_orig {
                     continue;
                 }
@@ -1573,7 +1568,19 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
         }
 
         match best {
-            Some((_, id, trial)) => graph.set_pos(id, trial),
+            Some((_, id, trial)) => {
+                let orig = graph.room(id).and_then(|r| r.pos).unwrap_or(trial);
+                graph.set_pos(id, trial);
+                if let Some(ref mut cb) = obs {
+                    stats.overlaps_resolved += 1;
+                    let name = graph.room(id).map(|r| r.name.as_str()).unwrap_or("?").to_owned();
+                    let desc = format!(
+                        "Overlap cleanup: moved room {} ({}) from {:?} to {:?} to clear overlap.",
+                        id, name, orig, trial
+                    );
+                    cb(graph, "cleanup_overlaps", &desc, &stats);
+                }
+            }
             None => break,
         }
     }
@@ -1589,6 +1596,15 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
 /// alignment the moved room currently holds (`room_alignment_score`, so it never undoes the chain
 /// alignment relayout/cleanup established). Only strict improvements are taken, so it converges.
 pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radius: i32, max_passes: usize) {
+    repair_directional_hints_observed(graph, radius, max_passes, None);
+}
+
+pub(crate) fn repair_directional_hints_observed(
+    graph: &mut mapper::graph::MapGraph,
+    radius: i32,
+    max_passes: usize,
+    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+) {
     let moves: Vec<(i32, i32)> = {
         let mut v = Vec::new();
         for dist in 1..=radius {
@@ -1602,20 +1618,15 @@ pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radi
         v
     };
 
+    let mut stats = mapper::layout::TidyStats::default();
+
     for _ in 0..max_passes {
-        let base = render_overlap_stats(graph); // (illegal overlaps, crossings)
+        let base = render_overlap_stats(graph);
         let base_score = mapper::layout::directional_hint_score(graph);
 
         let room_ids: Vec<mapper::graph::RoomId> =
             graph.rooms().filter(|r| r.pos.is_some()).map(|r| r.id).collect();
 
-        // Pick the single GLOBALLY best move this pass. Key (minimized):
-        //   (Reverse(hint gain), resulting overlaps, resulting crossings, moved room's degree,
-        //    id, move index)
-        // Highest hint gain first; among equal gains, the move that leaves the fewest overlaps /
-        // crossings and disturbs the lowest-degree room. A candidate is eligible only when it
-        // STRICTLY raises the hint score, never raises illegal overlaps, and never lowers the moved
-        // room's exact-alignment score (so it cannot knock a column/row chain apart).
         type Key = (std::cmp::Reverse<usize>, usize, usize, usize, mapper::graph::RoomId, usize);
         let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
         for &id in &room_ids {
@@ -1631,7 +1642,7 @@ pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radi
                 let s = render_overlap_stats(graph);
                 let score = mapper::layout::directional_hint_score(graph);
                 let align_trial = mapper::layout::room_alignment_score(graph, id);
-                graph.set_pos(id, orig); // restore; the winner is committed after the scan
+                graph.set_pos(id, orig);
                 if score > base_score && s.0 <= base.0 && align_trial >= align_orig {
                     let gain = score - base_score;
                     let key: Key = (std::cmp::Reverse(gain), s.0, s.1, degree, id, move_idx);
@@ -1643,7 +1654,19 @@ pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radi
         }
 
         match best {
-            Some((_, id, trial)) => graph.set_pos(id, trial),
+            Some((_, id, trial)) => {
+                let orig = graph.room(id).and_then(|r| r.pos).unwrap_or(trial);
+                graph.set_pos(id, trial);
+                if let Some(ref mut cb) = obs {
+                    stats.hints_repaired += 1;
+                    let name = graph.room(id).map(|r| r.name.as_str()).unwrap_or("?").to_owned();
+                    let desc = format!(
+                        "Repair hint: moved room {} ({}) from {:?} to {:?} to restore directional edge.",
+                        id, name, orig, trial
+                    );
+                    cb(graph, "repair_hints", &desc, &stats);
+                }
+            }
             None => break,
         }
     }
@@ -1659,11 +1682,16 @@ pub(crate) fn repair_directional_hints(graph: &mut mapper::graph::MapGraph, radi
 /// only thing a tighter layout can disturb is connector routing, so if the result raises illegal
 /// overlaps the whole compaction is reverted (cosmetic tightening is never worth a new overlap).
 pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
+    compact_empty_lines_observed(graph, None);
+}
+
+pub(crate) fn compact_empty_lines_observed(
+    graph: &mut mapper::graph::MapGraph,
+    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+) {
+    let stats = mapper::layout::TidyStats::default();
+
     for is_x in [true, false] {
-        // Collapse the lowest collapsible empty interior line, repeat. A line whose collapse would
-        // add an illegal overlap is a gutter a connector needs (e.g. the column a long direct route
-        // runs up) — leave it and move past it (`floor`), rather than reverting the whole pass and
-        // keeping lines that WOULD have collapsed cleanly.
         let mut floor = i32::MIN;
         loop {
             let coords: std::collections::BTreeSet<i32> = graph
@@ -1673,7 +1701,6 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
             let (Some(&min), Some(&max)) = (coords.iter().next(), coords.iter().next_back()) else {
                 break;
             };
-            // Lowest empty interior line above the gutter floor; none → axis is compacted.
             let Some(empty) = ((min + 1)..max).find(|c| !coords.contains(c) && *c > floor) else {
                 break;
             };
@@ -1687,11 +1714,19 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
                 }
             }
             if render_overlap_stats(graph).0 > before {
-                // Gutter: undo this collapse and skip it (and everything below) on the next pass.
                 for (id, p) in rooms {
                     graph.set_pos(id, p);
                 }
                 floor = empty;
+            } else {
+                if let Some(ref mut cb) = obs {
+                    let axis = if is_x { "column" } else { "row" };
+                    let desc = format!(
+                        "Compact: collapsed empty {} at coordinate {}.",
+                        axis, empty
+                    );
+                    cb(graph, "compact", &desc, &stats);
+                }
             }
         }
     }
@@ -1984,6 +2019,33 @@ fn exact_alignment_count(graph: &mapper::graph::MapGraph) -> usize {
         .iter()
         .filter(|c| mapper::layout::edge_is_satisfied(graph, c))
         .count()
+}
+
+pub(crate) fn stack_updown_rooms_observed(
+    graph: &mut mapper::graph::MapGraph,
+    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+) {
+    let pos_before: std::collections::HashMap<mapper::graph::RoomId, (i32, i32)> =
+        graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+    stack_updown_rooms(graph);
+    let pos_after: std::collections::HashMap<mapper::graph::RoomId, (i32, i32)> =
+        graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
+
+    let moved_count: usize = pos_before
+        .iter()
+        .filter(|(id, &before)| pos_after.get(id).copied() != Some(before))
+        .count();
+
+    if moved_count > 0 {
+        if let Some(ref mut cb) = obs {
+            let stats = mapper::layout::TidyStats::default();
+            let desc = format!(
+                "Stack up/down: repositioned {} room(s) to be north/south of their Up/Down partners.",
+                moved_count
+            );
+            cb(graph, "stack_updown", &desc, &stats);
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
