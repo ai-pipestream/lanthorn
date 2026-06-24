@@ -703,6 +703,123 @@ impl KeyMap {
     }
 }
 
+// ── HotkeyLayout ──────────────────────────────────────────────────────────────
+
+/// Default snake_case names for the direct (always-available) command set.
+const DEFAULT_DIRECT_NAMES: &[&str] = &[
+    "quit",
+    "save_game",
+    "restore_game",
+    "pan_left",
+    "pan_right",
+    "pan_up",
+    "pan_down",
+    "zoom_in",
+    "zoom_out",
+    "select_next",
+    "select_prev",
+    "recenter",
+];
+
+/// Default groups for the hotkey dialog (title, command snake_case names).
+const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
+    ("Layout", &["retidy", "animate_tidy", "cycle_layout"]),
+    ("Layers", &["peel_layer", "merge_layer", "cycle_layer_next", "cycle_layer_prev", "rename_layer"]),
+    ("Edit", &["rename_room", "edit_notes", "delete_selected_connection", "relabel_selected_edge"]),
+    ("Files", &["open_saves", "export_svg", "export_dot", "export_dump"]),
+    ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery"]),
+];
+
+/// Runtime layout for the hotkey dialog.
+///
+/// Controls which key opens the dialog (`prefix`), which commands are always
+/// reachable without the dialog (`direct`), and how commands are grouped inside
+/// the dialog (`groups`).
+pub struct HotkeyLayout {
+    /// The key that opens (and closes) the dialog.
+    pub prefix: KeySpec,
+    /// Commands that are always available without opening the dialog.
+    pub direct: std::collections::HashSet<Command>,
+    /// Groups of commands shown in the dialog: (group title, commands).
+    pub groups: Vec<(String, Vec<Command>)>,
+}
+
+impl HotkeyLayout {
+    /// Build the built-in default layout.
+    pub fn default() -> HotkeyLayout {
+        let prefix: KeySpec = "ctrl+k".parse().expect("ctrl+k must parse");
+
+        let direct = DEFAULT_DIRECT_NAMES
+            .iter()
+            .filter_map(|name| Command::from_name(name))
+            .collect();
+
+        let groups = DEFAULT_GROUPS
+            .iter()
+            .map(|(title, names)| {
+                let cmds = names
+                    .iter()
+                    .filter_map(|name| Command::from_name(name))
+                    .collect();
+                (title.to_string(), cmds)
+            })
+            .collect();
+
+        HotkeyLayout { prefix, direct, groups }
+    }
+
+    /// Resolve a `HotkeyLayout` from config, producing warnings for unknown command names.
+    ///
+    /// Fields that are `None` in the config use the built-in defaults.
+    pub fn resolve(cfg: &crate::config::HotkeysConfig) -> (HotkeyLayout, Vec<String>) {
+        let mut layout = HotkeyLayout::default();
+        let mut warnings: Vec<String> = Vec::new();
+
+        // Override prefix if specified.
+        if let Some(prefix_str) = &cfg.prefix {
+            match prefix_str.parse::<KeySpec>() {
+                Ok(spec) => layout.prefix = spec,
+                Err(e) => warnings.push(format!("hotkeys: prefix '{}': {e}; using default", prefix_str)),
+            }
+        }
+
+        // Override direct set if specified.
+        if let Some(direct_names) = &cfg.direct {
+            let mut direct_set = std::collections::HashSet::new();
+            for name in direct_names {
+                match Command::from_name(name) {
+                    Some(cmd) => { direct_set.insert(cmd); }
+                    None => warnings.push(format!("hotkeys: direct: unknown command '{name}'; skipped")),
+                }
+            }
+            layout.direct = direct_set;
+        }
+
+        // Override groups if any are specified.
+        if !cfg.group.is_empty() {
+            let mut groups = Vec::new();
+            for g in &cfg.group {
+                let mut cmds = Vec::new();
+                for name in &g.commands {
+                    match Command::from_name(name) {
+                        Some(cmd) => cmds.push(cmd),
+                        None => warnings.push(format!("hotkeys: group '{}': unknown command '{name}'; dropped", g.title)),
+                    }
+                }
+                groups.push((g.title.clone(), cmds));
+            }
+            layout.groups = groups;
+        }
+
+        (layout, warnings)
+    }
+
+    /// Check whether a command is in the direct (always-available) set.
+    pub fn is_direct(&self, cmd: Command) -> bool {
+        self.direct.contains(&cmd)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -770,5 +887,59 @@ mod tests {
             Some(Command::SelectNext)
         );
         assert!(!warns2.is_empty());
+    }
+
+    // ── HotkeyLayout tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn hotkey_layout_default_direct_and_indirect() {
+        let layout = HotkeyLayout::default();
+        // Direct commands
+        assert!(layout.is_direct(Command::Recenter), "Recenter should be direct");
+        assert!(layout.is_direct(Command::Quit), "Quit should be direct");
+        // Non-direct (dialog-only) commands
+        assert!(!layout.is_direct(Command::Retidy), "Retidy should NOT be direct");
+        assert!(!layout.is_direct(Command::OpenGallery), "OpenGallery should NOT be direct");
+        // Groups
+        assert_eq!(layout.groups.len(), 5, "default layout should have 5 groups");
+        assert_eq!(layout.groups[0].0, "Layout", "first group title should be Layout");
+    }
+
+    #[test]
+    fn hotkey_layout_resolve_custom_direct_and_unknown_name() {
+        use crate::config::{HotkeysConfig, HotkeyGroupConfig};
+        let cfg = HotkeysConfig {
+            prefix: None,
+            direct: Some(vec!["save_game".into(), "quit".into(), "not_a_command".into()]),
+            group: vec![HotkeyGroupConfig { title: "T".into(), commands: vec!["retidy".into()] }],
+        };
+        let (layout, warnings) = HotkeyLayout::resolve(&cfg);
+        // Specified direct commands are direct
+        assert!(layout.is_direct(Command::SaveGame), "SaveGame should be direct");
+        assert!(layout.is_direct(Command::Quit), "Quit should be direct");
+        // Recenter is NOT in custom direct list
+        assert!(!layout.is_direct(Command::Recenter), "Recenter should NOT be direct with custom list");
+        // Unknown command produces a warning
+        assert!(!warnings.is_empty(), "unknown command in direct should produce warning");
+        assert!(warnings.iter().any(|w| w.contains("not_a_command")), "warning should mention not_a_command");
+    }
+
+    #[test]
+    fn hotkey_layout_resolve_unknown_group_command_dropped() {
+        use crate::config::{HotkeysConfig, HotkeyGroupConfig};
+        let cfg = HotkeysConfig {
+            prefix: None,
+            direct: None,
+            group: vec![HotkeyGroupConfig {
+                title: "MyGroup".into(),
+                commands: vec!["retidy".into(), "totally_fake_cmd".into()],
+            }],
+        };
+        let (layout, warnings) = HotkeyLayout::resolve(&cfg);
+        assert_eq!(layout.groups.len(), 1);
+        assert_eq!(layout.groups[0].1.len(), 1, "unknown command should be dropped from group");
+        assert_eq!(layout.groups[0].1[0], Command::Retidy);
+        assert!(!warnings.is_empty(), "unknown group command should produce warning");
+        assert!(warnings.iter().any(|w| w.contains("totally_fake_cmd")));
     }
 }

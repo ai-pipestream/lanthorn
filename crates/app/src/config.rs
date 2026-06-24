@@ -77,6 +77,30 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 }
 
+// ── Hotkeys config ────────────────────────────────────────────────────────────
+
+/// One group of commands shown together in the hotkey dialog.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct HotkeyGroupConfig {
+    pub title: String,
+    pub commands: Vec<String>,
+}
+
+/// The [hotkeys] section of config.toml.
+/// `prefix` overrides the dialog-open key (default: Ctrl+K).
+/// `direct` overrides which commands are always available (bypass dialog).
+/// `group` overrides the command groups shown in the dialog.
+#[derive(Debug, Default, Deserialize, Clone)]
+pub struct HotkeysConfig {
+    /// Override the dialog-prefix key spec string (e.g. "ctrl+k").
+    pub prefix: Option<String>,
+    /// Override the set of always-available commands (by snake_case name).
+    pub direct: Option<Vec<String>>,
+    /// Override the command groups in the dialog.
+    #[serde(default)]
+    pub group: Vec<HotkeyGroupConfig>,
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 fn default_user_dir() -> PathBuf {
@@ -103,6 +127,9 @@ pub struct Config {
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
+    /// Hotkey dialog configuration: prefix key, direct commands, dialog groups.
+    #[serde(default)]
+    pub hotkeys: HotkeysConfig,
 }
 
 impl Default for Config {
@@ -112,6 +139,7 @@ impl Default for Config {
             use_default_map: false,
             symbols: SymbolConfig::default(),
             keymap: KeymapConfig::default(),
+            hotkeys: HotkeysConfig::default(),
         }
     }
 }
@@ -144,6 +172,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.use_default_map = from_file.use_default_map;
             cfg.symbols = from_file.symbols;
             cfg.keymap = from_file.keymap;
+            cfg.hotkeys = from_file.hotkeys;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
