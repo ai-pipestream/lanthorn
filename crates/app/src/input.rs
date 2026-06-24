@@ -1920,4 +1920,105 @@ mod tests {
         apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
         assert_eq!(s.saves.as_ref().unwrap().selected, 1, "should wrap to last");
     }
+
+    // ── Hotkey dialog dispatch tests ──────────────────────────────────────────
+
+    #[test]
+    fn dialog_closed_dialog_only_cmd_returns_none() {
+        // In map focus with dialog closed, a dialog-only command returns None.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        // Retidy is bound to Shift+R in Map context but is NOT direct.
+        assert!(matches!(
+            key_to_action(&s, shift(KeyCode::Char('R'))),
+            Action::None
+        ));
+        // ToggleInspector ('i') is also dialog-only.
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Char('i'))),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn dialog_closed_direct_cmd_still_works() {
+        // In map focus with dialog closed, direct commands still work.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        // SelectNext ('n') is in the direct set.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
+        // PanLeft ('h') is in the direct set.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
+        // Recenter ('c') is in the direct set.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
+    }
+
+    #[test]
+    fn prefix_opens_hotkey_dialog_action() {
+        // Ctrl+K in any non-dialog state → OpenHotkeyDialog.
+        let s = AppState::default(); // game focus
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::OpenHotkeyDialog
+        ));
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::OpenHotkeyDialog
+        ));
+    }
+
+    #[test]
+    fn prefix_closes_hotkey_dialog_action() {
+        // Ctrl+K when dialog is open → CloseHotkeyDialog.
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::CloseHotkeyDialog
+        ));
+    }
+
+    #[test]
+    fn q_closes_hotkey_dialog_action() {
+        // 'q' with no modifiers when dialog is open → CloseHotkeyDialog.
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Char('q'))),
+            Action::CloseHotkeyDialog
+        ));
+    }
+
+    #[test]
+    fn dialog_open_dialog_only_cmd_fires() {
+        // When dialog is open, Shift+R in map focus fires Retidy.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        s.hotkey_dialog = true;
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
+        // ToggleInspector fires too.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
+    }
+
+    #[test]
+    fn apply_open_hotkey_dialog_sets_flag() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        assert!(!s.hotkey_dialog);
+        apply_action(Action::OpenHotkeyDialog, &mut s, &mut m);
+        assert!(s.hotkey_dialog);
+        apply_action(Action::CloseHotkeyDialog, &mut s, &mut m);
+        assert!(!s.hotkey_dialog);
+    }
+
+    #[test]
+    fn open_saves_clears_hotkey_dialog() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.hotkey_dialog = true;
+        apply_action(Action::OpenSaves, &mut s, &mut m);
+        assert!(!s.hotkey_dialog, "OpenSaves should clear the hotkey dialog");
+    }
 }
