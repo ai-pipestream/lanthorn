@@ -523,6 +523,43 @@ fn contiguify(
     snapped.copy_from_slice(&snapped_v);
 }
 
+// ── Observer types ────────────────────────────────────────────────────────────
+
+/// Cumulative statistics reported to a [`TidyObserver`] at each layout stage.
+///
+/// Counts are cumulative from the start of `relayout_auto_observed`:
+/// - `rooms_moved`: rooms displaced from their snapped cell during collision
+///   resolution (pack + collision-resolve stage). A room that lands exactly on
+///   its snapped cell is not counted.
+/// - `overlaps_resolved`: reserved for the app-side cleanup passes; always 0
+///   inside `relayout_auto_observed`.
+/// - `constraints_dropped`: axis-separation constraints that had to be dropped
+///   because they would have introduced a cycle in the precedence graph (cycle-
+///   closing compass edges). One dropped constraint per affected connection index,
+///   accumulated across all components before the SMACOF stage.
+/// - `hints_repaired`: reserved for the app-side repair pass; always 0 here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TidyStats {
+    pub rooms_moved: u32,
+    pub overlaps_resolved: u32,
+    pub constraints_dropped: u32,
+    pub hints_repaired: u32,
+}
+
+/// Observer callback for [`relayout_auto_observed`].
+///
+/// Called after each internal layout stage with:
+/// - the CURRENT graph (positions reflect the stage just completed),
+/// - a short `label` (e.g. `"seed"`),
+/// - a one-line `description` of the algorithm,
+/// - cumulative [`TidyStats`] since the start of the call.
+///
+/// The `None` path in `relayout_auto_observed` is allocation-free; the observer
+/// is only constructed and called when the caller opts in.
+pub type TidyObserver<'a> = &'a mut dyn FnMut(&MapGraph, &str, &str, &TidyStats);
+
+// ── Distortion marker ─────────────────────────────────────────────────────────
+
 /// Set the `distorted` flag on every connection: a compass edge is distorted if
 /// its connection index is in `dropped`, or its final grid geometry violates its
 /// direction. Non-compass edges are never distorted.
@@ -540,17 +577,48 @@ pub(crate) fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
 
 /// Re-derive all room positions from scratch on every call.
 ///
+/// Delegates to [`relayout_auto_observed`] with no observer. The graph result
+/// is identical to calling `relayout_auto_observed(graph, None)`.
+///
 /// For graphs with ≤ MAX_NODES rooms, uses constrained stress-majorization
 /// (SMACOF + VPSC) seeded from the longest-path sort. For larger graphs,
 /// falls back to the longest-path sort directly. Components are packed
 /// left-to-right, residual overlaps resolved, and the lowest-id room
 /// anchored at (0,0).
 pub fn relayout_auto(graph: &mut MapGraph) {
+    relayout_auto_observed(graph, None);
+}
+
+/// Re-derive all room positions from scratch, optionally notifying an observer
+/// after each internal stage.
+///
+/// When `obs` is `None` this is exactly `relayout_auto` — zero overhead, same
+/// final graph state. When `obs` is `Some`, the callback is invoked after each
+/// of the 5 layout stages with the current (partial) graph state, a short label,
+/// a one-line description, and cumulative [`TidyStats`].
+///
+/// The 5 stages emitted (in order):
+/// 1. `"seed"` — Longest-path layering: integer coords per axis from compass edges.
+/// 2. `"stress"` — Stress majorization: places rooms by graph-theoretic distance
+///    under VPSC compass-separation constraints.
+/// 3. `"align"` — Align free axes: pull single-axis-free rooms onto their
+///    neighbour's row/column so cardinal edges render straight.
+/// 4. `"contiguify"` — Contiguity: eject foreign rooms interleaved within a
+///    chain's span.
+/// 5. `"pack"` — Pack components left-to-right; resolve residual same-cell
+///    collisions, keeping aligned rooms on their line.
+///
+/// Intermediate graph positions are written before each observer call so the
+/// observer sees a faithful snapshot. The final positions after stage 5 are
+/// identical to those produced by `relayout_auto` with no observer.
+pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver<'_>>) {
     let mut ids: Vec<RoomId> = graph.rooms().map(|r| r.id).collect();
     ids.sort_unstable();
     if ids.is_empty() {
         return;
     }
+
+    let mut stats = TidyStats::default();
 
     // Large graphs: skip the O(ITERS·n²) solve and use the longest-path sort.
     if ids.len() > MAX_NODES {
@@ -559,11 +627,28 @@ pub fn relayout_auto(graph: &mut MapGraph) {
             graph.set_pos(id, p);
         }
         mark_distorted(graph, &BTreeSet::new());
+        if let Some(ref mut cb) = obs {
+            cb(graph, "seed",
+               "Longest-path layering: integer coords per axis from compass edges.",
+               &stats);
+        }
         return;
     }
 
-    // Seed from the longest-path sort (deterministic, roughly compass-ordered).
+    // Stage 1: seed from the longest-path sort (deterministic, roughly compass-ordered).
     let seed = sort::sort_layout(graph);
+
+    // Apply seed positions to the graph for the stage-1 snapshot.
+    if obs.is_some() {
+        for (&id, &p) in &seed {
+            graph.set_pos(id, p);
+        }
+    }
+    if let Some(ref mut cb) = obs {
+        cb(graph, "seed",
+           "Longest-path layering: integer coords per axis from compass edges.",
+           &stats);
+    }
 
     let chains_for_comp = detect_chains(graph);
     let components = connected_components(graph, &ids);
@@ -571,6 +656,17 @@ pub fn relayout_auto(graph: &mut MapGraph) {
     let mut final_pos: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
     let mut occupied: BTreeSet<(i32, i32)> = BTreeSet::new();
     let mut pack_x: i32 = 0;
+
+    // Per-component intermediate snapshots for stages 2–4 accumulate into these
+    // component-indexed vectors so we can apply them all at once for the snapshot.
+    // We store: snapped_after_stress, snapped_after_align, snapped_after_contiguify.
+    // Format: BTreeMap<RoomId, (i32,i32)> per stage.
+    let mut snap_stress: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    let mut snap_align: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    let mut snap_contiguify: BTreeMap<RoomId, (i32, i32)> = BTreeMap::new();
+    // x_constrained/y_constrained are needed for the pack stage; accumulate per-comp.
+    let mut x_constrained_all: BTreeMap<RoomId, bool> = BTreeMap::new();
+    let mut y_constrained_all: BTreeMap<RoomId, bool> = BTreeMap::new();
 
     for comp in &components {
         let n = comp.len();
@@ -606,6 +702,12 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         let mut snapped: Vec<(i32, i32)> =
             cont.iter().map(|&(x, y)| (x.round() as i32, y.round() as i32)).collect();
 
+        if obs.is_some() {
+            for (i, &id) in comp.iter().enumerate() {
+                snap_stress.insert(id, snapped[i]);
+            }
+        }
+
         // Align cardinal-edge free axes. The stress solve satisfies separation (B is
         // east of A) but leaves an E/W chain's rooms on slightly different rows (and
         // N/S chains on different columns). Pull each room that is free on the
@@ -619,7 +721,26 @@ pub fn relayout_auto(graph: &mut MapGraph) {
             *p = (axs[i], ays[i]);
         }
 
+        if obs.is_some() {
+            for (i, &id) in comp.iter().enumerate() {
+                snap_align.insert(id, snapped[i]);
+                x_constrained_all.insert(id, x_constrained[i]);
+                y_constrained_all.insert(id, y_constrained[i]);
+            }
+        } else {
+            for (i, &id) in comp.iter().enumerate() {
+                x_constrained_all.insert(id, x_constrained[i]);
+                y_constrained_all.insert(id, y_constrained[i]);
+            }
+        }
+
         contiguify(&chains_for_comp, comp, &index, &mut snapped, graph);
+
+        if obs.is_some() {
+            for (i, &id) in comp.iter().enumerate() {
+                snap_contiguify.insert(id, snapped[i]);
+            }
+        }
 
         // Pack this component to the right of the previous, top-aligned.
         let min_x = snapped.iter().map(|p| p.0).min().unwrap();
@@ -637,12 +758,49 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         for (i, &id) in comp.iter().enumerate() {
             let row_aligned = !y_constrained[i];
             let col_aligned = !x_constrained[i];
+            let before = snapped[i];
             let cell = place_preserving_alignment(&occupied, snapped[i], row_aligned, col_aligned);
+            if cell != before {
+                stats.rooms_moved += 1;
+            }
             occupied.insert(cell);
             final_pos.insert(id, cell);
             max_x_used = max_x_used.max(cell.0);
         }
         pack_x = max_x_used + 2; // 1-cell gap between components
+    }
+
+    // Stage 2 observer snapshot: stress positions (unnormalized — no pack/anchor yet).
+    if obs.is_some() {
+        stats.constraints_dropped = dropped_all.len() as u32;
+        for (&id, &p) in &snap_stress {
+            graph.set_pos(id, p);
+        }
+        if let Some(ref mut cb) = obs {
+            cb(graph, "stress",
+               "Stress majorization: places rooms by graph-theoretic distance under VPSC compass-separation constraints.",
+               &stats);
+        }
+        // Stage 3: axis-align snapshot.
+        for (&id, &p) in &snap_align {
+            graph.set_pos(id, p);
+        }
+        if let Some(ref mut cb) = obs {
+            cb(graph, "align",
+               "Align free axes: pull single-axis-free rooms onto their neighbour's row/column so cardinal edges render straight.",
+               &stats);
+        }
+        // Stage 4: contiguify snapshot.
+        for (&id, &p) in &snap_contiguify {
+            graph.set_pos(id, p);
+        }
+        if let Some(ref mut cb) = obs {
+            cb(graph, "contiguify",
+               "Contiguity: eject foreign rooms interleaved within a chain's span.",
+               &stats);
+        }
+    } else {
+        stats.constraints_dropped = dropped_all.len() as u32;
     }
 
     // Anchor the lowest-id room at (0,0) for a stable reference.
@@ -657,6 +815,13 @@ pub fn relayout_auto(graph: &mut MapGraph) {
         graph.set_pos(id, p);
     }
     mark_distorted(graph, &dropped_all);
+
+    // Stage 5: pack + collision-resolve — the final graph state.
+    if let Some(ref mut cb) = obs {
+        cb(graph, "pack",
+           "Pack components left-to-right; resolve residual same-cell collisions, keeping aligned rooms on their line.",
+           &stats);
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1270,5 +1435,84 @@ mod tests {
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len(), "no overlap in the fallback layout");
+    }
+
+    /// Observer emits the 5 stage labels in order on a small graph.
+    #[test]
+    fn observed_emits_five_stage_labels_in_order() {
+        // A small 4-room graph with reciprocal edges to exercise all stages.
+        let mut g = crate::graph::MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        g.add_edge(2, Direction::E, 3);
+        g.add_edge(3, Direction::W, 2);
+        g.add_edge(3, Direction::S, 4);
+
+        let mut labels: Vec<String> = Vec::new();
+        relayout_auto_observed(&mut g, Some(&mut |_graph, label, _desc, _stats| {
+            labels.push(label.to_owned());
+        }));
+
+        assert_eq!(
+            labels,
+            ["seed", "stress", "align", "contiguify", "pack"],
+            "observer must receive the 5 stage labels in order: got {labels:?}",
+        );
+    }
+
+    /// relayout_auto_observed with an observer produces the same final positions
+    /// as relayout_auto (no observer) on the same graph.
+    #[test]
+    fn observed_result_equals_plain_relayout() {
+        // Use the A129 house graph — a moderately complex real-world topology.
+        let mut plain = a129_house_graph();
+        relayout_auto(&mut plain);
+        let plain_positions: Vec<(u16, Option<(i32, i32)>)> =
+            plain.rooms().map(|r| (r.id, r.pos)).collect();
+        let plain_distorted: Vec<bool> =
+            plain.connections().iter().map(|c| c.distorted).collect();
+
+        let mut observed_g = a129_house_graph();
+        let mut call_count = 0u32;
+        relayout_auto_observed(&mut observed_g, Some(&mut |_graph, _label, _desc, _stats| {
+            call_count += 1;
+        }));
+        let obs_positions: Vec<(u16, Option<(i32, i32)>)> =
+            observed_g.rooms().map(|r| (r.id, r.pos)).collect();
+        let obs_distorted: Vec<bool> =
+            observed_g.connections().iter().map(|c| c.distorted).collect();
+
+        assert_eq!(call_count, 5, "observer called once per stage");
+        assert_eq!(
+            plain_positions, obs_positions,
+            "observed relayout must produce the same room positions as plain relayout",
+        );
+        assert_eq!(
+            plain_distorted, obs_distorted,
+            "observed relayout must produce the same distorted flags as plain relayout",
+        );
+    }
+
+    /// Observer stats: constraints_dropped is populated correctly after the stress stage.
+    #[test]
+    fn observed_stats_constraints_dropped_reflects_cycle_closing_edges() {
+        // A 3-room northward cycle: 1-N-2-N-3-N-1. Two of the three N constraints can be
+        // satisfied; the third closes a cycle and must be dropped (constraints_dropped >= 1).
+        let mut g = crate::graph::MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::N, 3);
+        g.add_edge(3, Direction::N, 1);
+
+        let mut dropped_at_stress: Option<u32> = None;
+        relayout_auto_observed(&mut g, Some(&mut |_graph, label, _desc, stats| {
+            if label == "stress" {
+                dropped_at_stress = Some(stats.constraints_dropped);
+            }
+        }));
+
+        let dropped = dropped_at_stress.expect("stress stage must fire");
+        assert!(dropped >= 1, "at least one cycle-closing constraint must be dropped; got {dropped}");
     }
 }
