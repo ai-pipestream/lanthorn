@@ -169,6 +169,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             KeyCode::Char('y') => Action::AnimateTidy,
             KeyCode::Char('a') => Action::ToggleAlignment,
             KeyCode::Char('p') => Action::TogglePortalLabels,
+            // Nudge the selected room (moved off Shift+Arrows so those pan everywhere).
+            KeyCode::Left => Action::NudgeSelected(-1, 0),
+            KeyCode::Right => Action::NudgeSelected(1, 0),
+            KeyCode::Up => Action::NudgeSelected(0, -1),
+            KeyCode::Down => Action::NudgeSelected(0, 1),
             _ => Action::None,
         };
     }
@@ -251,11 +256,12 @@ fn map_key_to_action(key: KeyEvent) -> Action {
     }
 
     match key.code {
-        // Shift+Arrows → NudgeSelected
-        KeyCode::Left if shift => Action::NudgeSelected(-1, 0),
-        KeyCode::Right if shift => Action::NudgeSelected(1, 0),
-        KeyCode::Up if shift => Action::NudgeSelected(0, -1),
-        KeyCode::Down if shift => Action::NudgeSelected(0, 1),
+        // Shift+Arrows → pan (consistent with game focus and animation playback).
+        // Nudging the selected room moved to Ctrl+Arrows (handled globally).
+        KeyCode::Left if shift => Action::Pan(-1, 0),
+        KeyCode::Right if shift => Action::Pan(1, 0),
+        KeyCode::Up if shift => Action::Pan(0, -1),
+        KeyCode::Down if shift => Action::Pan(0, 1),
 
         // Arrows → Pan
         KeyCode::Left if plain!() => Action::Pan(-1, 0),
@@ -804,25 +810,17 @@ mod tests {
     }
 
     #[test]
-    fn map_focus_shift_arrows_nudge() {
+    fn shift_arrows_pan_and_ctrl_arrows_nudge_in_map_focus() {
         let mut s = AppState::default();
-        s.toggle_focus();
-        assert!(matches!(
-            key_to_action(&s, shift(KeyCode::Left)),
-            Action::NudgeSelected(-1, 0)
-        ));
-        assert!(matches!(
-            key_to_action(&s, shift(KeyCode::Right)),
-            Action::NudgeSelected(1, 0)
-        ));
-        assert!(matches!(
-            key_to_action(&s, shift(KeyCode::Up)),
-            Action::NudgeSelected(0, -1)
-        ));
-        assert!(matches!(
-            key_to_action(&s, shift(KeyCode::Down)),
-            Action::NudgeSelected(0, 1)
-        ));
+        s.toggle_focus(); // map focus
+        // Shift+Arrows pan (consistent with game focus and animation playback).
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
+        // Nudging the selected room relocated to Ctrl+Arrows (handled globally).
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::NudgeSelected(1, 0)));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::NudgeSelected(0, -1)));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::NudgeSelected(0, 1)));
     }
 
     #[test]
