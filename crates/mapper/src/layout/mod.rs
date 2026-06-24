@@ -411,13 +411,13 @@ struct ChainSpan {
     hi: i32,
 }
 
-/// Relocate every FOREIGN room that lies strictly between a chain's extreme members on the
-/// chain line (the shared row for an E/W chain, shared column for an N/S chain). Chain
-/// MEMBERS are never moved — moving them would collapse their own diagonals to non-chain
-/// neighbours. An ejected room may exit either ALONG the line (past the member span) or OFF
-/// the line entirely; the destination is the free, no-longer-between cell that respects the
-/// most of the ejected room's own (reciprocal-weighted) compass edges, then nearest, then
-/// west/north.
+/// Relocate every FOREIGN room that lies within a chain's member span on the chain line (the
+/// shared row for an E/W chain, shared column for an N/S chain) — including a room that rounds
+/// onto an ENDPOINT member's own cell. Chain MEMBERS are never moved — moving them would
+/// collapse their own diagonals to non-chain neighbours. An ejected room may exit either ALONG
+/// the line (past the member span) or OFF the line entirely; the destination is the free,
+/// off-span cell that respects the most of the ejected room's own (reciprocal-weighted) compass
+/// edges, then nearest, then west/north.
 fn eject_interlopers(
     snapped: &mut [(i32, i32)],
     member_idxs: &[usize],
@@ -427,10 +427,12 @@ fn eject_interlopers(
     graph: &MapGraph,
 ) {
     let ChainSpan { horizontal, line, lo, hi } = span;
-    // A cell is "between" iff it is ON the chain line and strictly inside the member span.
+    // A cell is "on the span" iff it is ON the chain line and within the member extent,
+    // endpoints INCLUDED: a foreign room that rounds onto an endpoint member's cell is an
+    // overlap the later collision pass would resolve by shoving the member off its chain.
     let between = |c: (i32, i32)| -> bool {
         let (perp, par) = if horizontal { (c.1, c.0) } else { (c.0, c.1) };
-        perp == line && par > lo && par < hi
+        perp == line && par >= lo && par <= hi
     };
     loop {
         let victim = (0..snapped.len())
@@ -1192,6 +1194,29 @@ mod tests {
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len());
+    }
+
+    #[test]
+    fn a129_peeled_keeps_living_room_next_to_kitchen() {
+        // Real-save regression. With #27's planar region ({27,136}) peeled into its own layer,
+        // layer 0 holds the E/W chain 193(Living Room)→203(Kitchen)→79(Behind House). The
+        // contiguity pass lays them out adjacent, but #180 (West of House) rounds onto the SAME
+        // cell as the chain's WEST endpoint #193. The strict between-test (par > lo) let #180
+        // survive eject, and the collision pass then bumped #193 one cell further west — wedging
+        // #180 between Living Room and Kitchen. Ejecting interlopers coincident with an endpoint
+        // keeps 193 directly west-adjacent to 203.
+        let mut g = a129_house_graph();
+        crate::layer::peel_region(&mut g, 27).expect("27's region peels into a new layer");
+        let mut sub = g.layer_subgraph(crate::layer::MAIN_LAYER);
+        relayout_auto(&mut sub);
+        let p = |id: u16| sub.room(id).unwrap().pos.unwrap();
+        let (p193, p203) = (p(193), p(203));
+        assert_eq!(p193.1, p203.1, "193 and 203 must share a row: 193={p193:?} 203={p203:?}");
+        assert_eq!(
+            p203.0 - p193.0,
+            1,
+            "Living Room (193) must sit directly west-adjacent to Kitchen (203): 193={p193:?} 203={p203:?}",
+        );
     }
 
     #[test]
