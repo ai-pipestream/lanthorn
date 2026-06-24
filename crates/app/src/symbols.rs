@@ -135,6 +135,11 @@ impl Default for SymbolSet {
 // ── Presets ───────────────────────────────────────────────────────────────────
 
 impl BoxStyle {
+    /// All known preset names for BoxStyle, in display order.
+    pub fn preset_names() -> &'static [&'static str] {
+        &["rounded", "thick", "double", "ascii", "borderless"]
+    }
+
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
@@ -156,6 +161,11 @@ impl BoxStyle {
 }
 
 impl Arrows {
+    /// All known preset names for Arrows, in display order.
+    pub fn preset_names() -> &'static [&'static str] {
+        &["filled", "line", "nerdfont"]
+    }
+
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
@@ -187,6 +197,11 @@ impl Arrows {
 }
 
 impl PathGlyphs {
+    /// All known preset names for PathGlyphs, in display order.
+    pub fn preset_names() -> &'static [&'static str] {
+        &["light", "heavy", "dotted"]
+    }
+
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
@@ -215,6 +230,11 @@ impl PathGlyphs {
 }
 
 impl PortalGlyphs {
+    /// All known preset names for PortalGlyphs, in display order.
+    pub fn preset_names() -> &'static [&'static str] {
+        &["ascii", "nerdfont"]
+    }
+
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
@@ -280,6 +300,19 @@ impl SymbolSet {
         }
 
         s
+    }
+
+    /// Build a `SymbolSet` from four named presets (box, arrow, portal, path).
+    /// Unknown preset names fall back to the category default (same as `resolve`).
+    pub fn from_preset_names(box_: &str, arrow: &str, portal: &str, path: &str) -> SymbolSet {
+        let cfg = crate::config::SymbolConfig {
+            box_style: box_.to_owned(),
+            arrow_set: arrow.to_owned(),
+            portal_icons: portal.to_owned(),
+            path_style: path.to_owned(),
+            overrides: std::collections::BTreeMap::new(),
+        };
+        SymbolSet::resolve(&cfg)
     }
 }
 
@@ -432,5 +465,28 @@ mod tests {
         let s = SymbolSet::resolve(&cfg);
         assert_eq!(s.arrows.north, SymbolSet::default().arrows.north); // unchanged
         assert_eq!(s.arrows.south, SymbolSet::default().arrows.south);
+    }
+
+    #[test]
+    fn preset_names_cover_all_known_presets() {
+        assert!(BoxStyle::preset_names().contains(&"ascii"));
+        assert!(BoxStyle::preset_names().contains(&"rounded"));
+        assert!(Arrows::preset_names().contains(&"filled"));
+        assert!(PathGlyphs::preset_names().contains(&"light"));
+        assert!(PortalGlyphs::preset_names().contains(&"ascii"));
+    }
+
+    #[test]
+    fn from_preset_names_matches_resolve() {
+        let cfg = crate::config::SymbolConfig {
+            box_style: "ascii".into(),
+            arrow_set: "filled".into(),
+            portal_icons: "ascii".into(),
+            path_style: "light".into(),
+            overrides: std::collections::BTreeMap::new(),
+        };
+        let expected = SymbolSet::resolve(&cfg);
+        let got = SymbolSet::from_preset_names("ascii", "filled", "ascii", "light");
+        assert_eq!(got, expected);
     }
 }
