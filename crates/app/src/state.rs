@@ -162,6 +162,20 @@ pub struct AppState {
     pub tidy_anim: Option<TidyAnim>,
     /// Explicit layer override for the map view. `None` means follow the current room's layer.
     pub viewed_layer: Option<LayerId>,
+
+    // ── Autocomplete state ────────────────────────────────────────────────────
+
+    /// Cached parser-vocabulary words from the Z-machine dictionary.
+    /// Populated once by the run loop after session creation via
+    /// `zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem)`.
+    /// If empty, autocomplete draws only from room-description words.
+    pub dict_words: Vec<String>,
+    /// Current list of completion candidates, recomputed whenever `input` changes
+    /// while in Game focus. Empty means no suggestions are shown.
+    pub suggestions: Vec<String>,
+    /// Index into `suggestions` of the currently-highlighted candidate.
+    /// `Tab` advances this (cycling); typing resets it to 0.
+    pub suggestion_idx: usize,
 }
 
 impl Default for AppState {
@@ -181,6 +195,9 @@ impl Default for AppState {
             show_portal_labels: false,
             tidy_anim: None,
             viewed_layer: None,
+            dict_words: Vec::new(),
+            suggestions: Vec::new(),
+            suggestion_idx: 0,
         }
     }
 }
@@ -277,9 +294,27 @@ impl AppState {
         self.input.pop();
     }
 
-    /// Return the current input line and clear it.
+    /// Return the current input line and clear it. Also clears autocomplete state.
     pub fn take_input(&mut self) -> String {
+        self.suggestions.clear();
+        self.suggestion_idx = 0;
         std::mem::take(&mut self.input)
+    }
+
+    /// Clear the current autocomplete suggestions.
+    pub fn clear_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.suggestion_idx = 0;
+    }
+
+    /// Return the partial word the player is currently typing (the last
+    /// whitespace-delimited token in `input`).
+    pub fn current_partial(&self) -> &str {
+        // Find the last space; if none, the whole input is the partial word.
+        match self.input.rfind(' ') {
+            Some(pos) => &self.input[pos + 1..],
+            None => &self.input,
+        }
     }
 }
 
