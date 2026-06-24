@@ -155,6 +155,32 @@ impl TidyAnim {
     }
 }
 
+// ── Background tidy job ───────────────────────────────────────────────────────
+
+/// An in-flight background tidy job. The worker thread runs the relayout on a
+/// clone of the graph and returns the tidied clone. The run loop polls
+/// `handle.is_finished()` each iteration and joins when done.
+pub struct TidyJob {
+    /// Worker thread handle. Returns the tidied graph clone on success.
+    pub handle: std::thread::JoinHandle<mapper::graph::MapGraph>,
+    /// The layer being tidied.
+    pub layer: mapper::layer::LayerId,
+    /// Graph generation recorded at spawn time. Used to detect stale results.
+    pub gen: u64,
+    /// Instant the job was spawned. Used to compute the pulse phase for the border color.
+    pub started: std::time::Instant,
+}
+
+impl std::fmt::Debug for TidyJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TidyJob")
+            .field("layer", &self.layer)
+            .field("gen", &self.gen)
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
+}
+
 // ── Saves manager state ───────────────────────────────────────────────────────
 
 /// Transient state for the saves-manager modal.
@@ -426,6 +452,12 @@ pub struct AppState {
     /// Active tidy-animation playback, if any. While `Some`, the map renders the current
     /// captured stage instead of the live graph. Started by `Ctrl+Y`, cleared by `Esc`.
     pub tidy_anim: Option<TidyAnim>,
+    /// In-flight background tidy job, if any. The worker runs the relayout on a clone
+    /// of the graph and returns the tidied clone. Driven by the run loop (spawn, poll, apply).
+    pub tidy_job: Option<TidyJob>,
+    /// Monotonically increasing generation counter. Bumped each time the real graph is mutated
+    /// by an applied turn. Used to detect stale tidy results (job's gen vs current gen).
+    pub graph_gen: u64,
     /// Explicit layer override for the map view. `None` means follow the current room's layer.
     pub viewed_layer: Option<LayerId>,
     /// When true, draw the per-room diagnostics inspector overlay over the map pane.
@@ -535,6 +567,8 @@ impl Default for AppState {
             show_alignment: false,
             show_portal_labels: false,
             tidy_anim: None,
+            tidy_job: None,
+            graph_gen: 0,
             viewed_layer: None,
             show_inspector: false,
             room_panel: None,
