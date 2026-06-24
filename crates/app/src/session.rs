@@ -90,7 +90,7 @@ impl GameSession {
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).
     pub fn take_transcript(&mut self) -> String {
-        sink_mut(&mut self.machine).take_text()
+        strip_read_prompt(&sink_mut(&mut self.machine).take_text()).to_owned()
     }
 
     /// Supply a player command, step until the next input request or Quit,
@@ -100,7 +100,8 @@ impl GameSession {
         let (quit, save_restore_failed) = run_until_input(&mut self.machine);
         self.quit = quit;
 
-        let transcript = sink_mut(&mut self.machine).take_text();
+        let raw = sink_mut(&mut self.machine).take_text();
+        let transcript = strip_read_prompt(&raw).to_owned();
         let location = current_location(&self.machine);
 
         let info = if save_restore_failed {
@@ -161,6 +162,33 @@ fn run_until_input(machine: &mut Machine) -> (bool, bool) {
             StepResult::Continue => {}
         }
     }
+}
+
+/// Strip a trailing interactive read prompt from captured Z-machine output.
+///
+/// Infocom-style games print a bare ">" (possibly preceded by whitespace or a
+/// newline, possibly followed by a space) as the last thing before issuing a
+/// read/sread opcode.  When that output is captured we want to remove it so the
+/// app's own fixed bottom input line is the only ">" the player sees.
+///
+/// The rule: trim trailing ASCII whitespace; if the result ends with ">" AND
+/// that ">" is preceded by a newline or is the only character, remove it and
+/// trim trailing whitespace again.  Any ">" that appears mid-sentence (e.g.
+/// inside a score display like "score > 10") is unaffected because it will not
+/// be the last non-whitespace character after a newline.
+pub(crate) fn strip_read_prompt(s: &str) -> &str {
+    let trimmed = s.trim_end_matches(|c: char| c == ' ' || c == '\t');
+    // After stripping trailing spaces/tabs the string may still end with "\n>"
+    // or just ">".  Check for that and strip.
+    if let Some(without_gt) = trimmed.strip_suffix('>') {
+        // Only strip if the ">" is at the start of a line (preceded by '\n')
+        // or if it's the only character remaining.
+        let preceded_by_newline = without_gt.ends_with('\n') || without_gt.is_empty();
+        if preceded_by_newline {
+            return without_gt.trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
+        }
+    }
+    trimmed
 }
 
 /// Downcast `machine.out` to `&mut CaptureSink`.
@@ -319,5 +347,63 @@ mod tests {
         // czech is an automated test suite that runs to completion (quit=true is normal).
         let transcript = session.take_transcript();
         assert!(!transcript.is_empty(), "czech should produce output before quitting");
+    }
+
+    // ── strip_read_prompt unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn strip_prompt_removes_trailing_gt_on_own_line() {
+        // Typical Infocom pattern: text followed by newline and bare ">".
+        assert_eq!(
+            strip_read_prompt("You are in a room.\n\n>"),
+            "You are in a room."
+        );
+    }
+
+    #[test]
+    fn strip_prompt_removes_trailing_gt_with_trailing_space() {
+        // Some games emit "> " (with a space after).
+        assert_eq!(
+            strip_read_prompt("You are in a room.\n> "),
+            "You are in a room."
+        );
+    }
+
+    #[test]
+    fn strip_prompt_does_not_remove_mid_text_gt() {
+        // A ">" that is NOT the last non-whitespace token on its own line must
+        // be preserved — e.g. a score comparison or a quoted string.
+        let s = "Your score is > 10.\nYou are here.";
+        assert_eq!(strip_read_prompt(s), s);
+    }
+
+    #[test]
+    fn strip_prompt_does_not_remove_gt_mid_line() {
+        // ">" at the end of the last line but inline (no preceding newline).
+        let s = "Go east, then go >";
+        assert_eq!(strip_read_prompt(s), s);
+    }
+
+    #[test]
+    fn strip_prompt_empty_input_unchanged() {
+        assert_eq!(strip_read_prompt(""), "");
+    }
+
+    #[test]
+    fn strip_prompt_sole_gt_removed() {
+        // Edge case: the entire captured block is just ">".
+        assert_eq!(strip_read_prompt(">"), "");
+    }
+
+    #[test]
+    fn strip_prompt_gt_with_only_whitespace_before() {
+        // "\n>" with no preceding text.
+        assert_eq!(strip_read_prompt("\n>"), "");
+    }
+
+    #[test]
+    fn strip_prompt_no_trailing_prompt_unchanged() {
+        let s = "You are in a maze of twisty passages, all alike.";
+        assert_eq!(strip_read_prompt(s), s);
     }
 }
