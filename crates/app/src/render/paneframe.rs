@@ -529,6 +529,35 @@ fn render_overflow(
     rects
 }
 
+// ── build_layer_segments ──────────────────────────────────────────────────────
+
+/// An owned layer-tab segment, produced by `build_layer_segments`.
+/// Unlike `InsetSegment<'a>`, this owns its text so it can be returned from a
+/// function without a lifetime tying it to a caller-supplied string buffer.
+/// Convert to `InsetSegment` via `as_inset()` when passing to `draw_top_inset`.
+pub struct LayerSegment {
+    pub text: String,
+    pub active: bool,
+}
+
+impl LayerSegment {
+    pub fn as_inset(&self) -> InsetSegment<'_> {
+        InsetSegment { text: &self.text, active: self.active }
+    }
+}
+
+/// Build one `LayerSegment` per entry in `layers`, marking the one matching
+/// `active_layer` as active.  The `text` field is the layer id as a decimal string.
+pub fn build_layer_segments(
+    layers: &[mapper::layer::LayerId],
+    active_layer: mapper::layer::LayerId,
+) -> Vec<LayerSegment> {
+    layers
+        .iter()
+        .map(|&id| LayerSegment { text: id.to_string(), active: id == active_layer })
+        .collect()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -608,6 +637,16 @@ mod tests {
         // centered: leading filler before the bracket
         assert!(row.find("ZORK I").unwrap() > 3);
         assert_eq!(rects.len(), 1);
+    }
+
+    #[test]
+    fn layer_tab_segments_mark_active() {
+        // build_layer_segments(layers, active) -> Vec<LayerSegment>
+        let segs = build_layer_segments(&[0,1,2], 1);
+        assert_eq!(segs.len(), 3);
+        assert!(segs[1].active);
+        assert!(!segs[0].active && !segs[2].active);
+        assert_eq!(segs[0].text, "0");
     }
 
     #[test]

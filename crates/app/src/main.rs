@@ -29,8 +29,10 @@ use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects};
+use app::render::paneframe::{build_layer_segments, draw_pane_frame, draw_top_inset};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
+use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
@@ -159,10 +161,15 @@ pub fn hint_line_game(keymap: &KeyMap) -> String {
 /// `map` is `Rect::default()` when the layout hides the map (TranscriptFull).
 /// `story` is `Rect::default()` when the layout hides the story (MapFull).
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
+/// `layer_tabs` pairs each visible layer tab with its hit-rect (for future click-to-switch).
 struct PaneRects {
     map: Rect,
     story: Rect,
     room_rects: Vec<(RoomId, Rect)>,
+    /// Hit-rects for each layer tab, paired with the layer id.
+    /// Populated but not yet consumed; reserved for a future click-to-switch feature.
+    #[allow(dead_code)]
+    layer_tabs: Vec<(LayerId, Rect)>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -176,6 +183,7 @@ fn draw_frame(
     let mut map_area = Rect::default();
     let mut story_area = Rect::default();
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
+    let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
 
     terminal.draw(|f| {
         let full = f.area();
@@ -216,14 +224,6 @@ fn draw_frame(
         let map_border_override: Option<ratatui::style::Color> = state.tidy_job.as_ref().map(|job| {
             pulse_border_color(job.started.elapsed())
         });
-        let map_pane = |title: &str, focused: bool| {
-            let block = pane(title, focused);
-            if let Some(pulse_color) = map_border_override {
-                block.border_style(Style::default().fg(pulse_color))
-            } else {
-                block
-            }
-        };
 
         match state.layout {
             Layout::TranscriptFull => {
@@ -235,13 +235,34 @@ fn draw_frame(
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                let block = map_pane("Map", state.focus == Focus::Map);
-                let inner = block.inner(main_area);
-                block.render(main_area, buf);
-                render_map_layered(&rm, &mapper.graph, state, inner, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), inner, buf); }
-                map_area = inner; // use inner for recenter math
+                let graph = match &state.tidy_anim {
+                    Some(anim) => &anim.current().graph,
+                    None => &mapper.graph,
+                };
+                let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
+                let active_layer = state.active_layer(graph);
+                let frame = draw_pane_frame(buf, main_area, state.colors.map_border_style, state.colors.map_border);
+                render_map_layered(&rm, &mapper.graph, state, frame.content, buf);
+                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), frame.content, buf); }
+                map_area = frame.content;
                 story_area = Rect::default();
+                // Overlay layer tabs
+                let owned_segs = build_layer_segments(&layer_ids, active_layer);
+                let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
+                let tab_rects = draw_top_inset(buf, frame.top_inset, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active);
+                layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                // Apply pulsing border color overlay when a tidy job is in flight
+                if let Some(pulse_color) = map_border_override {
+                    let pulse_style = Style::default().fg(pulse_color);
+                    for cy in main_area.y..main_area.bottom() {
+                        if let Some(c) = buf.cell_mut((main_area.x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((main_area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    }
+                    for cx in main_area.x..main_area.right() {
+                        if let Some(c) = buf.cell_mut((cx, main_area.y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, main_area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    }
+                }
             }
             Layout::Split => {
                 // Split 50/50 horizontally with bordered blocks (no divider column).
@@ -256,12 +277,35 @@ fn draw_frame(
                 render_transcript(&session.machine, state, transcript_inner, buf);
                 story_area = transcript_inner;
 
-                let map_block = map_pane("Map", state.focus == Focus::Map);
-                let map_inner = map_block.inner(chunks[1]);
-                map_block.render(chunks[1], buf);
-                render_map_layered(&rm, &mapper.graph, state, map_inner, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_inner, buf); }
-                map_area = map_inner; // use inner for recenter math
+                let map_frame = draw_pane_frame(buf, chunks[1], state.colors.map_border_style, state.colors.map_border);
+                render_map_layered(&rm, &mapper.graph, state, map_frame.content, buf);
+                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_frame.content, buf); }
+                map_area = map_frame.content;
+                // Overlay layer tabs
+                {
+                    let graph = match &state.tidy_anim {
+                        Some(anim) => &anim.current().graph,
+                        None => &mapper.graph,
+                    };
+                    let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
+                    let active_layer = state.active_layer(graph);
+                    let owned_segs = build_layer_segments(&layer_ids, active_layer);
+                    let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
+                    let tab_rects = draw_top_inset(buf, map_frame.top_inset, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active);
+                    layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                }
+                // Apply pulsing border color overlay when a tidy job is in flight
+                if let Some(pulse_color) = map_border_override {
+                    let pulse_style = Style::default().fg(pulse_color);
+                    for cy in chunks[1].y..chunks[1].bottom() {
+                        if let Some(c) = buf.cell_mut((chunks[1].x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((chunks[1].right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    }
+                    for cx in chunks[1].x..chunks[1].right() {
+                        if let Some(c) = buf.cell_mut((cx, chunks[1].y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, chunks[1].bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    }
+                }
 
                 // Map pane is NEVER dimmed (always full brightness).
                 // Story pane dims when map has focus.
@@ -411,7 +455,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -597,7 +641,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new() };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new() };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1400,6 +1444,32 @@ mod tests {
 
     use super::{dim_area, hint_line, hint_line_game};
     use app::keymap::{Context, KeyMap};
+    use app::render::paneframe::draw_pane_frame;
+
+    // ── TestBackend: map pane shows picture-frame top-left by default ──────────
+
+    /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
+    /// `map_border_style` as picture-frame, and that rendering it produces ┏ at
+    /// the top-left corner of the map pane area.
+    #[test]
+    fn map_pane_default_shows_picture_frame_corner() {
+        // Resolve the default look from DEFAULT_STYLE_TOML (same path as startup).
+        let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
+            .expect("DEFAULT_STYLE_TOML must parse");
+        let (cs, _set, _warnings) = app::style::resolve(&doc, std::path::Path::new("."));
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, cs.map_border);
+        // DEFAULT_STYLE_TOML sets map_border to picture-frame; top-left outer corner must be ┏
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "┏",
+            "default map border (from DEFAULT_STYLE_TOML) must be picture-frame (┏ at top-left)"
+        );
+        // Content area must be inset by 2 on all sides for picture-frame (20-4=16, 10-4=6)
+        assert_eq!(frame.content, Rect::new(2, 2, 16, 6));
+    }
 
     // ── hint_line ──────────────────────────────────────────────────────────────
 
