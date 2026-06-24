@@ -98,6 +98,12 @@ and unsupported; v1/v2 are not supported.)
 - **Configurable keymap** via a leader-key model: a configurable prefix
   (default `Ctrl+K`) opens a sticky **hotkey dialog** listing every command;
   any command can be made directly available or routed through the dialog.
+- **Shareable style files** — all visual settings (colors + symbols) live in a
+  standalone `style.toml`, referenced from `config.toml` by `style = "<name or
+  path>"` (the file is the base; `config.toml` sections override per-key). Colors
+  use a CSS-ish element→properties format (`fg`/`bg`/`bold`/…). Customizing in
+  the gallery or config screen writes your personal `~/.babelmap/style.toml`, and
+  the gallery can export a self-contained style file to hand to someone else.
 
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
