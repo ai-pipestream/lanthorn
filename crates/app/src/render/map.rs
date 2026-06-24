@@ -566,6 +566,10 @@ pub fn draw_layer_strip(
 ///
 /// Production callers (`main.rs`, `map_dump.rs`) should use this function.
 /// Tests that call [`render_map`] directly are unaffected.
+///
+/// The in-content strip is suppressed when `state.colors.map_border_style != BorderStyle::None`,
+/// because in that case the border carries layer tabs via `draw_top_inset` and drawing the
+/// in-content strip would produce a double indicator and consume a content row.
 pub fn render_map_layered(
     rm: &RenderMap,
     graph: &mapper::graph::MapGraph,
@@ -573,7 +577,12 @@ pub fn render_map_layered(
     area: Rect,
     buf: &mut Buffer,
 ) {
-    let body_area = draw_layer_strip(graph, state, area, buf);
+    use crate::render::paneframe::BorderStyle;
+    let body_area = if state.colors.map_border_style == BorderStyle::None {
+        draw_layer_strip(graph, state, area, buf)
+    } else {
+        area
+    };
     render_map(rm, state, body_area, buf);
 }
 
@@ -4189,5 +4198,89 @@ mod tests {
             assert_ne!(idle_cell_fg, active_cell_fg,
                 "rendered border cell fg must differ when tidy_job is active");
         }).unwrap();
+    }
+
+    // ── Fix 1: render_map_layered layer-strip suppression ─────────────────────
+
+    /// Helper: build a two-layer graph (Hall on MAIN, Cellar peeled to a second layer).
+    fn two_layer_graph() -> mapper::graph::MapGraph {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 0));
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        mapper::layer::peel_region(&mut g, 2).expect("peel cellar");
+        g
+    }
+
+    /// With a picture-frame border active (`map_border_style != None`) and 2+ layers,
+    /// `render_map_layered` must NOT draw the in-content strip (no lost content row).
+    /// The in-content strip uses REVERSED modifier on tab labels; with a border active,
+    /// no REVERSED cells should appear in the content area row 0.
+    #[test]
+    fn render_map_layered_no_in_content_strip_when_border_present() {
+        use crate::render::paneframe::BorderStyle;
+        let g = two_layer_graph();
+        let rm = mapper::render::render_layer(&g, mapper::layer::MAIN_LAYER);
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+
+        // State with a non-None border style (picture-frame).
+        let mut state = AppState::default();
+        state.colors.map_border_style = BorderStyle::PictureFrame;
+
+        render_map_layered(&rm, &g, &state, area, &mut buf);
+
+        // The strip would write REVERSED style to cells in row 0. With a border active,
+        // the strip is suppressed so no REVERSED cells appear in row 0.
+        // (render_map does not set REVERSED anywhere in the map content area.)
+        let reversed_in_row0 = (area.x..area.right())
+            .filter(|&x| {
+                buf.cell((x, area.y))
+                    .map(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            reversed_in_row0, 0,
+            "with a non-None border, the in-content layer strip must NOT be drawn (no REVERSED cells in row 0)"
+        );
+    }
+
+    /// With `map_border_style == None` and 2+ layers, `render_map_layered` MUST draw
+    /// the in-content strip (fallback indicator for the borderless case).
+    #[test]
+    fn render_map_layered_draws_in_content_strip_when_no_border() {
+        use crate::render::paneframe::BorderStyle;
+        let g = two_layer_graph();
+        let rm = mapper::render::render_layer(&g, mapper::layer::MAIN_LAYER);
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+
+        // State with None border style.
+        let mut state = AppState::default();
+        state.zoom = crate::state::Zoom::Boxes; // strip requires non-Overview
+        state.colors.map_border_style = BorderStyle::None;
+
+        render_map_layered(&rm, &g, &state, area, &mut buf);
+
+        // The strip draws REVERSED on active tab cells in row 0.
+        let reversed_in_row0 = (area.x..area.right())
+            .filter(|&x| {
+                buf.cell((x, area.y))
+                    .map(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(
+            reversed_in_row0 > 0,
+            "with BorderStyle::None, the in-content layer strip MUST be drawn (REVERSED tab cells expected in row 0)"
+        );
     }
 }

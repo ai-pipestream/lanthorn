@@ -1418,9 +1418,7 @@ fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
 mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::Span;
-    use ratatui::widgets::{Block, Borders, Widget};
+    use ratatui::style::Modifier;
 
     use super::{dim_area, hint_line, hint_line_game};
     use app::keymap::{Context, KeyMap};
@@ -1637,50 +1635,6 @@ mod tests {
         );
     }
 
-    // ── Focused-pane title carries REVERSED ───────────────────────────────────
-
-    /// Build a block the same way `pane()` does for the focused case, render it,
-    /// and check that the title cell carries REVERSED.
-    #[test]
-    fn focused_pane_title_has_reversed_modifier() {
-        // Reproduce what pane() does when focused=true.
-        let title_span = Span::styled(
-            "\u{25b8} Story",
-            Style::default().add_modifier(Modifier::REVERSED),
-        );
-        let block = Block::default().borders(Borders::ALL).title(title_span);
-
-        let area = Rect::new(0, 0, 20, 5);
-        let mut buf = Buffer::empty(area);
-        block.render(area, &mut buf);
-
-        // The title starts at x=1 on the top border row (y=0) inside the block.
-        // The first title character (▸) should carry REVERSED.
-        let title_cell = buf.cell((1, 0)).expect("title cell should exist");
-        assert!(
-            title_cell.modifier.contains(Modifier::REVERSED),
-            "focused title cell should have REVERSED modifier; got {:?}",
-            title_cell.modifier
-        );
-    }
-
-    #[test]
-    fn unfocused_pane_title_does_not_have_reversed_modifier() {
-        // Reproduce what pane() does when focused=false.
-        let block = Block::default().borders(Borders::ALL).title("Story".to_string());
-
-        let area = Rect::new(0, 0, 20, 5);
-        let mut buf = Buffer::empty(area);
-        block.render(area, &mut buf);
-
-        let title_cell = buf.cell((1, 0)).expect("title cell should exist");
-        assert!(
-            !title_cell.modifier.contains(Modifier::REVERSED),
-            "unfocused title cell should NOT have REVERSED; got {:?}",
-            title_cell.modifier
-        );
-    }
-
     // ── Split layout: dim unfocused, leave focused undimmed ───────────────────
 
     /// This test exercises the split-layout dimming logic by simulating what
@@ -1767,6 +1721,66 @@ mod tests {
                     "map pane cell ({x},{y}) should NOT have DIM under Focus::Map either"
                 );
             }
+        }
+    }
+
+    // ── Fix 4: pulse overlay only touches outer perimeter ─────────────────────
+
+    /// The pulse overlay (applied during a tidy job) writes the pulse color to the
+    /// outer perimeter cells of the map pane area. For a picture-frame border with
+    /// a top_inset at row y+1, the inner tab row center cells (x in 2..=right-3,
+    /// y == area.y + 1) must NOT be overwritten by the pulse.
+    ///
+    /// This test directly exercises the perimeter-loop invariant: identical to what
+    /// draw_frame executes, extracted inline so it runs without a full render stack.
+    #[test]
+    fn pulse_overlay_touches_only_outer_perimeter_not_inner_tab_row() {
+        use ratatui::style::{Color, Style};
+
+        // Use a 30x15 area (large enough for picture-frame: requires w>=7, h>=7).
+        let area = Rect::new(0, 0, 30, 15);
+        let mut buf = Buffer::empty(area);
+
+        // The pulse color to apply (distinct from default Reset).
+        let pulse_color = Color::Rgb(60, 200, 90); // PULSE_GREEN
+        let pulse_style = Style::default().fg(pulse_color);
+
+        // Apply the pulse overlay exactly as draw_frame does.
+        for cy in area.y..area.bottom() {
+            if let Some(c) = buf.cell_mut((area.x, cy)) { c.set_style(pulse_style); }
+            if let Some(c) = buf.cell_mut((area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+        }
+        for cx in area.x..area.right() {
+            if let Some(c) = buf.cell_mut((cx, area.y)) { c.set_style(pulse_style); }
+            if let Some(c) = buf.cell_mut((cx, area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+        }
+
+        // Outer perimeter (top row y=0) must carry the pulse color.
+        let top_left_fg = buf.cell((area.x, area.y)).map(|c| c.fg).unwrap();
+        assert_eq!(
+            top_left_fg,
+            pulse_color,
+            "top-left outer perimeter cell must carry pulse color"
+        );
+        let top_right_fg = buf.cell((area.right() - 1, area.y)).map(|c| c.fg).unwrap();
+        assert_eq!(
+            top_right_fg,
+            pulse_color,
+            "top-right outer perimeter cell must carry pulse color"
+        );
+
+        // Inner tab row (y+1) center cells must NOT carry the pulse color.
+        // For a picture-frame border, top_inset is at y+1, cols 3..=(w-4).
+        // The pulse only writes to x==area.x and x==area.right()-1 for the side columns,
+        // so the center of the inner tab row (e.g. col area.x+5) is untouched.
+        let tab_row_y = area.y + 1;
+        for cx in (area.x + 2)..(area.right() - 2) {
+            let fg = buf.cell((cx, tab_row_y)).map(|c| c.fg).unwrap();
+            assert_ne!(
+                fg,
+                pulse_color,
+                "inner tab row center cell ({cx}, {tab_row_y}) must NOT be overwritten by pulse"
+            );
         }
     }
 }

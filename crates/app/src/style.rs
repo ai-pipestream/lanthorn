@@ -1000,4 +1000,38 @@ box_style = "rounded"
         assert_eq!(set2, set);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn write_style_full_round_trips_non_none_border_styles() {
+        use crate::render::paneframe::BorderStyle;
+
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-border-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("border-full.toml");
+
+        // Build a ColorScheme with non-None border styles.
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.map_border_style   = BorderStyle::PictureFrame;
+        cs.story_border_style = BorderStyle::Double;
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+
+        assert!(
+            matches!(cs2.map_border_style, BorderStyle::PictureFrame),
+            "map_border_style must survive write_style_full -> parse -> resolve; got {:?}",
+            cs2.map_border_style
+        );
+        assert!(
+            matches!(cs2.story_border_style, BorderStyle::Double),
+            "story_border_style must survive write_style_full -> parse -> resolve; got {:?}",
+            cs2.story_border_style
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
