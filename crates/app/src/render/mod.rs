@@ -1,3 +1,4 @@
+pub mod help;
 pub mod inspector;
 pub mod map;
 pub mod transcript;

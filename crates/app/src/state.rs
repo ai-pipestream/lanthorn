@@ -165,10 +165,16 @@ pub struct AppState {
     /// When true, draw the per-room diagnostics inspector overlay over the map pane.
     /// Toggled by the `i` key in map focus.
     pub show_inspector: bool,
+    /// When true, show the full-screen help overlay. Toggled by F1 / ?.
+    pub show_help: bool,
 
     /// Resolved glyph set for the map renderer.  Defaults to today's hardcoded glyphs;
     /// overwritten at startup via `SymbolSet::resolve(&cfg.symbols)` when a config is present.
     pub symbols: crate::symbols::SymbolSet,
+
+    /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
+    /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
+    pub keymap: crate::keymap::KeyMap,
 
     // ── Autocomplete state ────────────────────────────────────────────────────
 
@@ -203,7 +209,9 @@ impl Default for AppState {
             tidy_anim: None,
             viewed_layer: None,
             show_inspector: false,
+            show_help: false,
             symbols: crate::symbols::SymbolSet::default(),
+            keymap: crate::keymap::KeyMap::default(),
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,

@@ -26,6 +26,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mapper::mapper::Mapper;
 
 use crate::complete::{room_words_from_text, suggest};
+use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, Prompt, PromptKind};
 
 // ── Action enum ───────────────────────────────────────────────────────────────
@@ -107,6 +108,8 @@ pub enum Action {
     /// typed AND suggestions are available; otherwise Tab keeps its ToggleFocus
     /// role).
     Autocomplete,
+    /// Toggle the full-screen help overlay.
+    ToggleHelp,
     /// No binding found — no-op.
     None,
 }
@@ -115,17 +118,19 @@ pub enum Action {
 
 /// Map a crossterm `KeyEvent` to an `Action` given the current `AppState`.
 ///
-/// Routing order:
-/// 1. **Quit** — Ctrl+Q / Ctrl+C → `Quit`, unconditionally (even mid-prompt).
-/// 2. **Prompt active** — all input is consumed by the prompt; Tab and other
-///    global shortcuts return `Action::None` so a prompt can never be abandoned
-///    by an accidental global key.
-/// 3. **Global** (any focus, no prompt) — Ctrl+S → SaveGame; Ctrl+R →
-///    RestoreGame; Ctrl+E → ExportSvg; Ctrl+G → ExportDot; Ctrl+L →
-///    CycleLayout; Tab → ToggleFocus.
-/// 4. **Game focus** — printable char → InputChar; Backspace → Backspace;
-///    Enter → SubmitCommand.
-/// 5. **Map focus** — navigation, zoom, select, edit bindings.
+/// Routing order (preserved from the original hardcoded dispatch):
+/// 1. **Quit** — Ctrl+Q / Ctrl+C → `Quit`, hardwired, always wins.
+/// 2. **Prompt active** — all input consumed by the prompt sub-mode; no
+///    global shortcuts escape (Tab, Ctrl+S, …) are absorbed as `None`.
+/// 3. **Tidy-anim active** — KeyMap lookup in `Context::Anim`; no fallthrough
+///    to Global.  Unmatched keys → `None`.
+/// 4. **Tab** (no modifiers) — stateful autocomplete-or-ToggleFocus special
+///    case, hardwired exactly as before.
+/// 5. **Ctrl modifier** — KeyMap lookup in `Context::Global`; unmatched → `None`.
+/// 6. **Game focus** — `game_key_to_action` (text entry, hardwired);
+///    if it returns `None`, fall through to a `Context::Global` KeyMap lookup
+///    so that non-ctrl Global bindings (e.g. F1→ToggleHelp) reach Game focus.
+/// 7. **Map focus** — KeyMap lookup in `Context::Map` (falls through to Global).
 pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -140,51 +145,16 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return prompt_key_to_action(key);
     }
 
-    // 2b. Tidy-animation sub-mode: playback owns the arrows (step), Space (play/pause)
-    //     and Esc (exit). The map stays pannable/zoomable during playback — arrows are
-    //     taken for stepping, so panning uses hjkl / Shift+arrows and zoom uses +/-.
+    // 3. Tidy-animation sub-mode: KeyMap lookup in Anim context; no fallthrough.
     if state.tidy_anim.is_some() {
-        let shift = key.modifiers == KeyModifiers::SHIFT;
-        return match key.code {
-            KeyCode::Left if shift => Action::Pan(-1, 0),
-            KeyCode::Right if shift => Action::Pan(1, 0),
-            KeyCode::Up if shift => Action::Pan(0, -1),
-            KeyCode::Down if shift => Action::Pan(0, 1),
-            KeyCode::Char('h') => Action::Pan(-1, 0),
-            KeyCode::Char('l') => Action::Pan(1, 0),
-            KeyCode::Char('k') => Action::Pan(0, -1),
-            KeyCode::Char('j') => Action::Pan(0, 1),
-            KeyCode::Char('+') | KeyCode::Char('=') => Action::ZoomIn,
-            KeyCode::Char('-') => Action::ZoomOut,
-            KeyCode::Left => Action::AnimStep(-1),
-            KeyCode::Right => Action::AnimStep(1),
-            KeyCode::Char(' ') => Action::AnimTogglePlay,
-            KeyCode::Esc | KeyCode::Enter => Action::AnimExit,
-            _ => Action::None,
+        let spec = KeySpec::from_key_event(key);
+        return match state.keymap.lookup(&spec, Context::Anim) {
+            Some(cmd) => cmd.to_action(),
+            None => Action::None,
         };
     }
 
-    // 3. Remaining global shortcuts (only reached when no prompt is active).
-    if ctrl {
-        return match key.code {
-            KeyCode::Char('s') => Action::SaveGame,
-            KeyCode::Char('r') => Action::RestoreGame,
-            KeyCode::Char('e') => Action::ExportSvg,
-            KeyCode::Char('g') => Action::ExportDot,
-            KeyCode::Char('d') => Action::ExportDump,
-            KeyCode::Char('l') => Action::CycleLayout,
-            KeyCode::Char('t') => Action::Retidy,
-            KeyCode::Char('y') => Action::AnimateTidy,
-            KeyCode::Char('a') => Action::ToggleAlignment,
-            KeyCode::Char('p') => Action::TogglePortalLabels,
-            // Nudge the selected room (moved off Shift+Arrows so those pan everywhere).
-            KeyCode::Left => Action::NudgeSelected(-1, 0),
-            KeyCode::Right => Action::NudgeSelected(1, 0),
-            KeyCode::Up => Action::NudgeSelected(0, -1),
-            KeyCode::Down => Action::NudgeSelected(0, 1),
-            _ => Action::None,
-        };
-    }
+    // 4. Tab (no modifiers): stateful autocomplete-or-ToggleFocus (hardwired).
     if key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Tab {
         // Autocomplete takes priority over focus-toggle when: game is focused,
         // the player is mid-word (non-empty partial), AND suggestions exist.
@@ -198,10 +168,39 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return Action::ToggleFocus;
     }
 
-    // 4 & 5. Per-focus routing.
+    // 5. Ctrl modifier: Global KeyMap lookup; unmatched → None.
+    if ctrl {
+        let spec = KeySpec::from_key_event(key);
+        return match state.keymap.lookup(&spec, Context::Global) {
+            Some(cmd) => cmd.to_action(),
+            None => Action::None,
+        };
+    }
+
+    // 6 & 7. Per-focus routing.
+    let spec = KeySpec::from_key_event(key);
     match state.focus {
-        Focus::Game => game_key_to_action(state, key),
-        Focus::Map => map_key_to_action(key),
+        Focus::Game => {
+            // Text entry is hardwired (printable chars, Enter, Backspace, Shift+Arrows,
+            // Home, PageUp/Down).  Non-printable / unmatched keys fall through to a
+            // Global KeyMap lookup so that e.g. F1→ToggleHelp is reachable from Game.
+            let a = game_key_to_action(state, key);
+            if a != Action::None {
+                return a;
+            }
+            // Global fallthrough for non-ctrl non-Tab non-printable keys.
+            match state.keymap.lookup(&spec, Context::Global) {
+                Some(cmd) => cmd.to_action(),
+                None => Action::None,
+            }
+        }
+        Focus::Map => {
+            // Map context falls through to Global on miss.
+            match state.keymap.lookup(&spec, Context::Map) {
+                Some(cmd) => cmd.to_action(),
+                None => Action::None,
+            }
+        }
     }
 }
 
@@ -257,63 +256,6 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
         {
             Action::InputChar(c)
         }
-        _ => Action::None,
-    }
-}
-
-// ── Internal: map focus ───────────────────────────────────────────────────────
-
-fn map_key_to_action(key: KeyEvent) -> Action {
-    let shift = key.modifiers == KeyModifiers::SHIFT;
-
-    macro_rules! plain {
-        () => {
-            key.modifiers == KeyModifiers::NONE
-        };
-    }
-
-    match key.code {
-        // Shift+Arrows → pan (consistent with game focus and animation playback).
-        // Nudging the selected room moved to Ctrl+Arrows (handled globally).
-        KeyCode::Left if shift => Action::Pan(-1, 0),
-        KeyCode::Right if shift => Action::Pan(1, 0),
-        KeyCode::Up if shift => Action::Pan(0, -1),
-        KeyCode::Down if shift => Action::Pan(0, 1),
-
-        // Arrows → Pan
-        KeyCode::Left if plain!() => Action::Pan(-1, 0),
-        KeyCode::Right if plain!() => Action::Pan(1, 0),
-        KeyCode::Up if plain!() => Action::Pan(0, -1),
-        KeyCode::Down if plain!() => Action::Pan(0, 1),
-
-        KeyCode::Char('h') if plain!() => Action::Pan(-1, 0),
-        KeyCode::Char('l') if plain!() => Action::Pan(1, 0),
-        KeyCode::Char('k') if plain!() => Action::Pan(0, -1),
-        KeyCode::Char('j') if plain!() => Action::Pan(0, 1),
-
-        KeyCode::Char('+') | KeyCode::Char('=') if plain!() => Action::ZoomIn,
-        // '+' can arrive as Shift+'=' on some terminals.
-        KeyCode::Char('+') if shift => Action::ZoomIn,
-
-        KeyCode::Char('-') if plain!() => Action::ZoomOut,
-
-        KeyCode::Char('c') if plain!() => Action::Recenter,
-        KeyCode::Char('n') if plain!() => Action::SelectNext,
-        KeyCode::Char('p') if plain!() => Action::SelectPrev,
-        KeyCode::Char('N') if shift => Action::RenameLayer,
-        KeyCode::Char('P') if shift => Action::PeelLayer,
-        KeyCode::Char('M') if shift => Action::MergeLayer,
-        KeyCode::Char('R') if shift => Action::Retidy,
-        KeyCode::Char(']') if plain!() => Action::CycleLayer(1),
-        KeyCode::Char('[') if plain!() => Action::CycleLayer(-1),
-        KeyCode::Char('r') if plain!() => Action::RenameRoom,
-        KeyCode::Char('o') if plain!() => Action::EditNotes,
-        KeyCode::Char('d') if plain!() => Action::DeleteSelectedConnection,
-        KeyCode::Char('e') if plain!() => Action::RelabelSelectedEdge,
-        KeyCode::Char('i') if plain!() => Action::ToggleInspector,
-
-        KeyCode::Esc => Action::ToggleFocus,
-
         _ => Action::None,
     }
 }
@@ -597,6 +539,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     }
                 }
             }
+        }
+
+        Action::ToggleHelp => {
+            state.show_help = !state.show_help;
         }
 
         // Caller-handled: silently ignored.
@@ -1402,5 +1348,108 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
+    }
+
+    // ── Equivalence guard for the KeyMap refactor ──────────────────────────────
+
+    /// This test encodes the CURRENT (pre-refactor) behavior of key_to_action for
+    /// a representative sample across all contexts. It must pass both before and
+    /// after the Task 4 refactor. If it fails after the refactor, the KeyMap
+    /// defaults or lookup semantics diverge from today — fix the data, not the test.
+    #[test]
+    fn key_to_action_equivalence_sample() {
+        use crate::state::{TidyAnim, TidyFrame};
+
+        // ── Game focus (default) ──────────────────────────────────────────────
+        let s = AppState::default(); // focus = Game
+        // Ctrl globals work from game focus
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::ExportSvg));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::ExportDump));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::CycleLayout));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('y'))), Action::AnimateTidy));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::ToggleAlignment));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::TogglePortalLabels));
+        // Ctrl+Arrows nudge from game focus
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::NudgeSelected(1, 0)));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::NudgeSelected(0, -1)));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::NudgeSelected(0, 1)));
+        // Tab → ToggleFocus (no input, no suggestions)
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+        // Text entry
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')));
+
+        // ── Map focus ─────────────────────────────────────────────────────────
+        let mut s = AppState::default();
+        s.toggle_focus(); // Map
+        // Plain arrows pan
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
+        // Shift arrows pan
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
+        // hjkl pan
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
+        // Zoom
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('='))), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('+'))), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
+        // Map commands
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::RenameLayer));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CycleLayer(1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CycleLayer(-1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::EditNotes));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
+        // Map falls through to Global: ctrl globals work in map focus
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
+        // Tab → ToggleFocus in map focus
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+
+        // ── Anim sub-mode ─────────────────────────────────────────────────────
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new() };
+        s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
+        // Step
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
+        // Play/pause
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(' '))), Action::AnimTogglePlay));
+        // Exit
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Enter)), Action::AnimExit));
+        // Pan in anim: Shift+arrows + hjkl
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
+        // Zoom in anim
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
+        // Anim does NOT fall through to Global: unknown key → None
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::None));
     }
 }
