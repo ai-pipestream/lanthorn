@@ -993,6 +993,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Info });
             state.selected_room = Some(id);
             state.show_inspector = false;
+            // Switch to Map focus so the selected room is rendered as selected (not dimmed).
+            state.focus = Focus::Map;
         }
 
         Action::ShowRoomDiagnostics(id) => {
@@ -1000,6 +1002,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Diagnostics });
             state.selected_room = Some(id);
             state.show_inspector = true;
+            // Switch to Map focus so the selected room is rendered as selected (not dimmed).
+            state.focus = Focus::Map;
         }
 
         Action::CloseRoomPanel => {
@@ -2595,6 +2599,27 @@ mod tests {
         assert!(s.drag.is_some());
         apply_action(Action::EndDragPan, &mut s, &mut m);
         assert!(s.drag.is_none(), "EndDragPan should clear drag state");
+    }
+
+    #[test]
+    fn show_room_info_sets_focus_to_map() {
+        // ShowRoomInfo should switch focus to Map so the room is rendered as selected.
+        let mut s = AppState::default(); // starts as Focus::Game
+        assert_eq!(s.focus, Focus::Game);
+        let mut m = Mapper::default();
+        apply_action(Action::ShowRoomInfo(1), &mut s, &mut m);
+        assert_eq!(s.focus, Focus::Map, "ShowRoomInfo must set focus to Map");
+        assert_eq!(s.selected_room, Some(1));
+    }
+
+    #[test]
+    fn show_room_diagnostics_sets_focus_to_map() {
+        // ShowRoomDiagnostics should switch focus to Map so the room renders selected.
+        let mut s = AppState::default(); // starts as Focus::Game
+        let mut m = Mapper::default();
+        apply_action(Action::ShowRoomDiagnostics(2), &mut s, &mut m);
+        assert_eq!(s.focus, Focus::Map, "ShowRoomDiagnostics must set focus to Map");
+        assert_eq!(s.selected_room, Some(2));
     }
 
     // ── should_bg_tidy ────────────────────────────────────────────────────────
