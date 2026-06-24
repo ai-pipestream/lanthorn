@@ -24,6 +24,17 @@ pub fn parse_border_style(s: &str) -> BorderStyle {
     }
 }
 
+/// Return the canonical style-file name for a [`BorderStyle`].
+pub fn border_style_name(style: BorderStyle) -> &'static str {
+    match style {
+        BorderStyle::None => "none",
+        BorderStyle::Single => "single",
+        BorderStyle::Double => "double",
+        BorderStyle::Thick => "thick",
+        BorderStyle::PictureFrame => "picture-frame",
+    }
+}
+
 // ── PaneFrame ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
