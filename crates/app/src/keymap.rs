@@ -454,6 +454,7 @@ impl std::str::FromStr for KeySpec {
 
 /// The full binding table. Each entry is `(KeySpec, Command, Context)`.
 /// Multiple specs may map to the same command (multi-bind defaults).
+#[derive(Debug)]
 pub struct KeyMap {
     pub bindings: Vec<(KeySpec, Command, Context)>,
 }

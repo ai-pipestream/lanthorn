@@ -273,6 +273,12 @@ fn main() {
 
     let mut state = AppState::default();
     state.symbols = app::symbols::SymbolSet::resolve(&cfg.symbols);
+    let (keymap, keymap_warnings) = app::keymap::KeyMap::resolve(&cfg.keymap);
+    state.keymap = keymap;
+    // Surface any keymap conflict warnings once in the transcript.
+    for w in keymap_warnings {
+        state.push_transcript(&format!("[{}]", w));
+    }
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);

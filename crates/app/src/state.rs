@@ -172,6 +172,10 @@ pub struct AppState {
     /// overwritten at startup via `SymbolSet::resolve(&cfg.symbols)` when a config is present.
     pub symbols: crate::symbols::SymbolSet,
 
+    /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
+    /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
+    pub keymap: crate::keymap::KeyMap,
+
     // ── Autocomplete state ────────────────────────────────────────────────────
 
     /// Cached parser-vocabulary words from the Z-machine dictionary.
@@ -207,6 +211,7 @@ impl Default for AppState {
             show_inspector: false,
             show_help: false,
             symbols: crate::symbols::SymbolSet::default(),
+            keymap: crate::keymap::KeyMap::default(),
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
