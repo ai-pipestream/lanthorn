@@ -2,6 +2,7 @@ pub mod gallery;
 pub mod help;
 pub mod inspector;
 pub mod map;
+pub mod saves;
 pub mod transcript;
 
 use ratatui::buffer::Buffer;
