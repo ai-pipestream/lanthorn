@@ -216,6 +216,15 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return hotkey_dialog_key_to_action(state, key);
     }
 
+    // 6.5. Room panel close: Esc or q while a panel is open.
+    // Comes after steps 2-6 (prompt/anim/gallery/saves/hotkey_dialog checks) so those
+    // modes still take priority, but before the prefix key and normal dispatch.
+    if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE {
+        if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+            return Action::CloseRoomPanel;
+        }
+    }
+
     // 7. Prefix key → open the hotkey dialog.
     let spec = KeySpec::from_key_event(key);
     if spec == state.hotkeys.prefix {
@@ -1421,6 +1430,22 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus(); // → Map
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
+    }
+
+    #[test]
+    fn esc_closes_room_panel_when_open() {
+        use crate::state::{RoomPanel, RoomPanelMode};
+        // With a room panel open, Esc and q produce CloseRoomPanel.
+        let mut s = AppState::default();
+        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
+            "Esc with room panel open must produce CloseRoomPanel");
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseRoomPanel),
+            "q with room panel open must produce CloseRoomPanel");
+        // With no room panel, Esc does NOT produce CloseRoomPanel.
+        s.room_panel = None;
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
+            "Esc with no room panel must not produce CloseRoomPanel");
     }
 
     #[test]
