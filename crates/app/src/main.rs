@@ -21,6 +21,7 @@ use app::map_dump::render_dump;
 use app::ifid::{compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
 use app::persist_files::{load_map, restore_game, save_game, save_map};
+use app::render::help::draw_help;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
 use app::render::transcript::render_transcript;
@@ -262,6 +263,11 @@ fn draw_frame(
             }
         }
         draw_str_clipped(buf, help_row.x, help_row.y, &help_text, help_style, help_row);
+
+        // ── Help overlay — full-screen, drawn last so it covers everything ────
+        if state.show_help {
+            draw_help(&state.keymap, full, buf);
+        }
 
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
         if let Some(prompt) = &state.prompt {
@@ -678,6 +684,61 @@ mod tests {
         let line = hint_line_game(&km);
         // Ctrl+S → SaveGame; label is "save"
         assert!(line.contains("Ctrl+S: save"), "expected 'Ctrl+S: save' in '{line}'");
+    }
+
+    // ── Help overlay key and action tests ─────────────────────────────────────
+
+    #[test]
+    fn f1_yields_toggle_help_in_game_focus() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use app::input::key_to_action;
+        use app::input::Action;
+        use app::state::AppState;
+        let s = AppState::default(); // game focus
+        let f1 = KeyEvent {
+            code: KeyCode::F(1),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert!(
+            matches!(key_to_action(&s, f1), Action::ToggleHelp),
+            "F1 in game focus should produce ToggleHelp"
+        );
+    }
+
+    #[test]
+    fn f1_yields_toggle_help_in_map_focus() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use app::input::key_to_action;
+        use app::input::Action;
+        use app::state::{AppState, Focus};
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        let f1 = KeyEvent {
+            code: KeyCode::F(1),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        assert!(
+            matches!(key_to_action(&s, f1), Action::ToggleHelp),
+            "F1 in map focus should produce ToggleHelp"
+        );
+    }
+
+    #[test]
+    fn apply_toggle_help_flips_show_help() {
+        use app::input::{apply_action, Action};
+        use app::state::AppState;
+        use mapper::mapper::Mapper;
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        assert!(!s.show_help, "show_help is false by default");
+        apply_action(Action::ToggleHelp, &mut s, &mut m);
+        assert!(s.show_help, "ToggleHelp flips to true");
+        apply_action(Action::ToggleHelp, &mut s, &mut m);
+        assert!(!s.show_help, "ToggleHelp flips back to false");
     }
 
     #[test]
