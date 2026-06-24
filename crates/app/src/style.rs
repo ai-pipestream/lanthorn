@@ -153,6 +153,87 @@ pub fn apply_color_decls(
     warnings
 }
 
+// ── StyleColors ───────────────────────────────────────────────────────────────
+
+/// Partial color configuration from a style file.
+///
+/// `scheme` is the optional named color scheme (e.g. `"tomorrow-night"`).
+/// `selectors` maps CSS-ish selector names to their [`Decl`] blocks.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StyleColors {
+    pub scheme: Option<String>,
+    pub selectors: BTreeMap<String, Decl>,
+}
+
+// ── StyleDoc ──────────────────────────────────────────────────────────────────
+
+/// A complete (but partial/raw) style document combining color and symbol config.
+///
+/// Every field uses `Option` or `BTreeMap` so absent fields are distinguished
+/// from explicitly set ones. [`merge`] combines two `StyleDoc`s with
+/// present-keys-only semantics.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StyleDoc {
+    pub colors: StyleColors,
+    pub symbols: StyleSymbols,
+}
+
+// ── merge ─────────────────────────────────────────────────────────────────────
+
+/// Merge two [`StyleDoc`]s with present-keys-only semantics.
+///
+/// - `colors.scheme`: `over` wins if set, otherwise `base`.
+/// - `colors.selectors`: union of keys; for a key in both, the `over` [`Decl`]
+///   is field-merged onto the `base` [`Decl`] (each `Option` field: `over.or(base)`).
+/// - `symbols` presets: `over.or(base)` per field.
+/// - `symbols.overrides`: union of keys, `over` wins per key.
+pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
+    // colors.scheme
+    let scheme = over.colors.scheme.clone().or(base.colors.scheme.clone());
+
+    // colors.selectors: base ∪ over, with field-level merge for shared keys
+    let mut selectors = base.colors.selectors.clone();
+    for (key, over_decl) in &over.colors.selectors {
+        let merged = if let Some(base_decl) = selectors.get(key) {
+            merge_decl(base_decl, over_decl)
+        } else {
+            over_decl.clone()
+        };
+        selectors.insert(key.clone(), merged);
+    }
+
+    // symbols presets: over wins if set
+    let symbols = StyleSymbols {
+        box_style: over.symbols.box_style.clone().or(base.symbols.box_style.clone()),
+        arrow_set: over.symbols.arrow_set.clone().or(base.symbols.arrow_set.clone()),
+        portal_icons: over.symbols.portal_icons.clone().or(base.symbols.portal_icons.clone()),
+        path_style: over.symbols.path_style.clone().or(base.symbols.path_style.clone()),
+        overrides: {
+            let mut ov = base.symbols.overrides.clone();
+            ov.extend(over.symbols.overrides.clone());
+            ov
+        },
+    };
+
+    StyleDoc {
+        colors: StyleColors { scheme, selectors },
+        symbols,
+    }
+}
+
+/// Field-level merge of two [`Decl`]s: for each `Option` field, `over` wins if set.
+fn merge_decl(base: &Decl, over: &Decl) -> Decl {
+    Decl {
+        fg:        over.fg.clone().or(base.fg.clone()),
+        bg:        over.bg.clone().or(base.bg.clone()),
+        bold:      over.bold.or(base.bold),
+        italic:    over.italic.or(base.italic),
+        underline: over.underline.or(base.underline),
+        dim:       over.dim.or(base.dim),
+        reversed:  over.reversed.or(base.reversed),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -207,5 +288,33 @@ mod tests {
         assert_eq!(cfg.overrides.get("arrow.north").map(String::as_str), Some("^"));
         // resolve must succeed
         let _set = crate::symbols::SymbolSet::resolve(&cfg);
+    }
+
+    #[test]
+    fn merge_override_only_affects_present_keys() {
+        let mut base = StyleDoc::default();
+        base.colors.selectors.insert("room".into(), Decl { fg: Some("white".into()), ..Default::default() });
+        base.colors.selectors.insert("connector".into(), Decl { fg: Some("cyan".into()), ..Default::default() });
+        base.symbols.box_style = Some("rounded".into());
+
+        let mut over = StyleDoc::default();
+        over.colors.selectors.insert("room".into(), Decl { fg: Some("red".into()), ..Default::default() });
+        // over does not mention connector or box_style
+
+        let m = merge(&base, &over);
+        assert_eq!(m.colors.selectors["room"].fg.as_deref(), Some("red"));   // overridden
+        assert_eq!(m.colors.selectors["connector"].fg.as_deref(), Some("cyan")); // base preserved
+        assert_eq!(m.symbols.box_style.as_deref(), Some("rounded"));          // base preserved
+    }
+
+    #[test]
+    fn merge_field_level_decl_patch() {
+        let mut base = StyleDoc::default();
+        base.colors.selectors.insert("room".into(), Decl { fg: Some("white".into()), bold: Some(true), ..Default::default() });
+        let mut over = StyleDoc::default();
+        over.colors.selectors.insert("room".into(), Decl { fg: Some("red".into()), ..Default::default() }); // only fg
+        let m = merge(&base, &over);
+        assert_eq!(m.colors.selectors["room"].fg.as_deref(), Some("red")); // over wins
+        assert_eq!(m.colors.selectors["room"].bold, Some(true));            // base bold kept
     }
 }
