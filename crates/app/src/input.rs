@@ -161,6 +161,9 @@ pub enum Action {
     GalleryCategoryPrev,
     /// Close the gallery and persist selections to config (persistence handled by main.rs).
     GalleryClose,
+    /// Export all current settings to the personal style file and repoint config
+    /// (handled by main.rs); leaves the gallery open.
+    GalleryExportStyle,
     /// Toggle the inventory strip at the bottom of the story pane.
     ToggleInventory,
     /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
@@ -560,6 +563,7 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Left => Action::GalleryCategoryPrev,
         KeyCode::Right => Action::GalleryCategoryNext,
         KeyCode::Esc | KeyCode::Enter => Action::GalleryClose,
+        KeyCode::Char('o') | KeyCode::Char('O') => Action::GalleryExportStyle,
         _ => Action::None,
     }
 }
@@ -1591,10 +1595,17 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigSave => {
             if let Some(cs) = state.config_screen.take() {
                 state.config = clone_config(&cs.working);
-                state.symbols = crate::symbols::SymbolSet::resolve(&cs.working.symbols);
-                let (colors, _) = crate::colors::ColorScheme::resolve(&cs.working.colors, &cs.working.user_dir);
+                // Re-resolve the live look through the style pipeline: style-file
+                // base ⊕ the config override sections edited on this screen.
+                let (base, _w1) =
+                    crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);
+                let over = crate::style::style_from_config(&cs.working.colors, &cs.working.symbols);
+                let (colors, set, _w2) =
+                    crate::style::resolve(&crate::style::merge(&base, &over), &cs.working.user_dir);
                 state.colors = colors;
-                // write_config is caller-handled (main.rs snapshots working before this runs).
+                state.symbols = set;
+                // The style-file write + config repoint is caller-handled
+                // (main.rs snapshots working before this runs).
             }
         }
 
@@ -1624,6 +1635,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::SavesImport
         | Action::FbEnter
         | Action::FbChooseDir
+        | Action::GalleryExportStyle
         | Action::Quit => {}
 
         Action::None => {}
@@ -1869,12 +1881,18 @@ fn config_cycle_colors_scheme(scheme: &mut Option<String>, delta: i32) {
     }
 }
 
-/// Cycle a string preset value through the preset_names() list by delta.
-fn config_cycle_preset(names: &[&str], val: &mut String, delta: i32) {
+/// Cycle an optional string preset value through the preset_names() list by delta.
+///
+/// `None` is treated as the first preset; the result is always `Some`, so an
+/// explicit gallery/config edit pins the preset in the style file.
+fn config_cycle_preset(names: &[&str], val: &mut Option<String>, delta: i32) {
     let n = names.len() as i32;
     if n == 0 { return; }
-    let pos = names.iter().position(|p| *p == val.as_str()).unwrap_or(0) as i32;
-    *val = names[((pos + delta).rem_euclid(n)) as usize].to_string();
+    let pos = val
+        .as_deref()
+        .and_then(|v| names.iter().position(|p| *p == v))
+        .unwrap_or(0) as i32;
+    *val = Some(names[((pos + delta).rem_euclid(n)) as usize].to_string());
 }
 
 /// Apply ConfigCycle to the selected row.

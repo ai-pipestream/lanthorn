@@ -29,7 +29,13 @@ pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) {
     if area.height < 3 {
         return;
     }
-    let content_area = Rect { y: area.y + 1, height: area.height - 1, ..area };
+
+    // Footer hint: the "Output all settings" export button.
+    let footer = "o: Output all settings";
+    let footer_style = Style::new().fg(Color::Yellow);
+    crate::render::draw_str_clipped(buf, area.x + 1, area.bottom() - 1, footer, footer_style, area);
+
+    let content_area = Rect { y: area.y + 1, height: area.height.saturating_sub(2), ..area };
 
     // Left pane: 20 cols for categories.
     let left_w = 20u16.min(area.width / 3);
@@ -197,6 +203,20 @@ mod tests {
             .collect();
         assert!(content.contains("Box style"), "should show category names");
         assert!(content.contains("Arrows"), "should show Arrows category");
+    }
+
+    #[test]
+    fn gallery_shows_output_all_settings_footer() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = make_state_with_gallery();
+        terminal.draw(|f| {
+            draw_gallery(&state, f.area(), f.buffer_mut());
+        }).unwrap();
+        let content: String = terminal.backend().buffer().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("Output all settings"), "should show the export footer hint");
     }
 
     #[test]
