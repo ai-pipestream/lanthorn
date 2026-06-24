@@ -1,7 +1,7 @@
 use std::io::stdout;
 use std::time::Duration;
 
-use crossterm::event::{poll, read, Event, KeyEventKind};
+use crossterm::event::{poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use mapper::mapper::Mapper;
@@ -20,25 +20,27 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
-use app::input::{apply_action, key_to_action, Action};
+use app::input::{apply_action, key_to_action, mouse_to_action, Action};
 use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
+use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::state::{AppState, Focus, Layout, PromptKind, SavesState};
+use app::state::{AppState, Focus, Layout, PromptKind, RoomPanelMode, SavesState};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
 /// Restore the terminal to cooked mode and leave the alternate screen.
 /// Called both on clean exit and from the panic hook.
+/// DisableMouseCapture MUST be issued here so both paths release the mouse.
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(stdout(), LeaveAlternateScreen);
+    let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }
 
 /// Install a panic hook that restores the terminal before printing the panic
@@ -131,15 +133,24 @@ pub fn hint_line_game(keymap: &KeyMap) -> String {
 
 // ── Draw helper ───────────────────────────────────────────────────────────────
 
-/// Render one frame.  Returns the map pane rect (INNER content area) so the event
-/// loop can use its dimensions for accurate `recenter_on` calls.
+/// Both pane inner-content rects returned by `draw_frame`.
+/// `map` is `Rect::default()` when the layout hides the map (TranscriptFull).
+/// `story` is `Rect::default()` when the layout hides the story (MapFull).
+struct PaneRects {
+    map: Rect,
+    story: Rect,
+}
+
+/// Render one frame. Returns both pane inner-content rects so the event loop
+/// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     session: &GameSession,
     mapper: &Mapper,
     state: &AppState,
-) -> std::io::Result<Rect> {
+) -> std::io::Result<PaneRects> {
     let mut map_area = Rect::default();
+    let mut story_area = Rect::default();
 
     terminal.draw(|f| {
         let full = f.area();
@@ -181,6 +192,7 @@ fn draw_frame(
                 let inner = block.inner(main_area);
                 block.render(main_area, buf);
                 render_transcript(&session.machine, state, inner, buf);
+                story_area = inner;
                 map_area = Rect::default();
             }
             Layout::MapFull => {
@@ -189,6 +201,7 @@ fn draw_frame(
                 block.render(main_area, buf);
                 render_map_layered(&rm, &mapper.graph, state, inner, buf);
                 map_area = inner; // use inner for recenter math
+                story_area = Rect::default();
             }
             Layout::Split => {
                 // Split 50/50 horizontally with bordered blocks (no divider column).
@@ -201,6 +214,7 @@ fn draw_frame(
                 let transcript_inner = transcript_block.inner(chunks[0]);
                 transcript_block.render(chunks[0], buf);
                 render_transcript(&session.machine, state, transcript_inner, buf);
+                story_area = transcript_inner;
 
                 let map_block = pane("Map", state.focus == Focus::Map);
                 let map_inner = map_block.inner(chunks[1]);
@@ -216,15 +230,28 @@ fn draw_frame(
             }
         }
 
-        // ── Inspector overlay ─────────────────────────────────────────────────
-        if state.show_inspector && map_area.height > 0 {
-            if let Some(id) = state.selected_room {
+        // ── Room panel overlay ────────────────────────────────────────────────
+        if map_area.height > 0 {
+            if let Some(panel) = state.room_panel {
                 let graph = match &state.tidy_anim {
                     Some(anim) => &anim.current().graph,
                     None => &mapper.graph,
                 };
-                if let Some(diag) = room_diagnostics(graph, id) {
-                    draw_inspector(&diag, map_area, buf);
+                match panel.mode {
+                    RoomPanelMode::Info => {
+                        let current_room = graph.current();
+                        let mem = if state.tidy_anim.is_none() {
+                            Some(&session.machine.mem)
+                        } else {
+                            None
+                        };
+                        draw_room_info(graph, mem, panel.id, current_room, map_area, buf);
+                    }
+                    RoomPanelMode::Diagnostics => {
+                        if let Some(diag) = room_diagnostics(graph, panel.id) {
+                            draw_inspector(&diag, map_area, buf);
+                        }
+                    }
                 }
             }
         }
@@ -307,7 +334,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(map_area)
+    Ok(PaneRects { map: map_area, story: story_area })
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -450,7 +477,7 @@ fn main() {
 
     // From here on, raw mode is active — MUST restore on every exit path.
 
-    if let Err(e) = execute!(stdout(), EnterAlternateScreen) {
+    if let Err(e) = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture) {
         restore_terminal();
         eprintln!("babelmap: cannot enter alternate screen: {}", e);
         std::process::exit(1);
@@ -467,16 +494,15 @@ fn main() {
 
     // ── 5. Event loop ─────────────────────────────────────────────────────────
 
-    // Track the last-known map pane size for accurate recenter_on calls.
-    // Default is used as a fallback; updated after each successful draw.
-    #[allow(unused_assignments)]
-    let mut last_map_area = Rect::default();
+    // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
+    // Defaults are used as a fallback; updated after each successful draw.
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default() };
 
     loop {
         // Draw.
         match draw_frame(&mut terminal, &session, &mapper, &state) {
-            Ok(map_area) => {
-                last_map_area = map_area;
+            Ok(panes) => {
+                last_panes = panes;
             }
             Err(e) => {
                 restore_terminal();
@@ -513,15 +539,21 @@ fn main() {
             }
         };
 
-        // Change 3: handle resize by continuing the loop so the next draw uses
-        // the updated terminal size (CrosstermBackend picks it up automatically).
-        let key_event = match event {
-            Event::Key(k) if k.kind == KeyEventKind::Press => k,
+        // Route event to an Action.
+        let action = match event {
+            Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
+            Event::Mouse(m) => {
+                // Pick the live graph for hit-testing (tidy-anim shows a frozen subgraph).
+                let graph = match &state.tidy_anim {
+                    Some(anim) => &anim.current().graph,
+                    None => &mapper.graph,
+                };
+                mouse_to_action(&state, m, last_panes.map, last_panes.story, graph)
+            }
+            // Resize: continue so the next draw uses the updated terminal size.
             Event::Resize(_, _) => continue,
             _ => continue,
         };
-
-        let action = key_to_action(&state, key_event);
 
         // Snapshot gallery config before apply_action clears it on GalleryClose.
         let gallery_cfg_on_close = if matches!(action, Action::GalleryClose) {
@@ -577,7 +609,7 @@ fn main() {
                     state.select_room(Some(rid));
                     if let Some(room) = mapper.graph.room(rid) {
                         if let Some(pos) = room.pos {
-                            let (pw, ph) = map_pane_dims(last_map_area);
+                            let (pw, ph) = map_pane_dims(last_panes.map);
                             state.recenter_on(pos, pw, ph);
                         }
                     }
@@ -647,7 +679,7 @@ fn main() {
                                     state.select_room(Some(rid));
                                     if let Some(room) = mapper.graph.room(rid) {
                                         if let Some(pos) = room.pos {
-                                            let (pw, ph) = map_pane_dims(last_map_area);
+                                            let (pw, ph) = map_pane_dims(last_panes.map);
                                             state.recenter_on(pos, pw, ph);
                                         }
                                     }
@@ -752,7 +784,7 @@ fn main() {
                                         state.select_room(Some(rid));
                                         if let Some(room) = mapper.graph.room(rid) {
                                             if let Some(pos) = room.pos {
-                                                let (pw, ph) = map_pane_dims(last_map_area);
+                                                let (pw, ph) = map_pane_dims(last_panes.map);
                                                 state.recenter_on(pos, pw, ph);
                                             }
                                         }
