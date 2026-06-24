@@ -234,6 +234,84 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
     }
 }
 
+// ── parse_style_toml ─────────────────────────────────────────────────────────
+
+/// Parse a style document from TOML text.
+///
+/// Accepts the format used by BOTH style files and `config.toml` override sections:
+/// - `[colors]` with optional `scheme` string and selector keys as inline tables
+///   (e.g. `"room:current" = { reversed = true }`).
+/// - `[symbols]` with optional preset string keys and a `[symbols.overrides]` table.
+///
+/// Unknown keys are ignored. Returns `Err(msg)` on TOML parse failure.
+pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
+    let root: toml::Value = text.parse().map_err(|e| format!("TOML parse error: {e}"))?;
+
+    let mut colors = StyleColors::default();
+    let mut symbols = StyleSymbols::default();
+
+    if let Some(toml::Value::Table(colors_table)) = root.get("colors") {
+        for (key, val) in colors_table {
+            if key == "scheme" {
+                if let Some(s) = val.as_str() {
+                    colors.scheme = Some(s.to_string());
+                }
+            } else if let toml::Value::Table(decl_table) = val {
+                // Each non-scheme key whose value is a table is a selector decl.
+                let decl = parse_decl_from_table(decl_table);
+                colors.selectors.insert(key.clone(), decl);
+            }
+            // Non-table, non-scheme keys are ignored (forward-compat).
+        }
+    }
+
+    if let Some(toml::Value::Table(sym_table)) = root.get("symbols") {
+        for (key, val) in sym_table {
+            match key.as_str() {
+                "box_style"    => symbols.box_style    = val.as_str().map(str::to_string),
+                "arrow_set"    => symbols.arrow_set    = val.as_str().map(str::to_string),
+                "portal_icons" => symbols.portal_icons = val.as_str().map(str::to_string),
+                "path_style"   => symbols.path_style   = val.as_str().map(str::to_string),
+                "overrides" => {
+                    if let toml::Value::Table(ov) = val {
+                        for (ok, ov_val) in ov {
+                            if let Some(s) = ov_val.as_str() {
+                                symbols.overrides.insert(ok.clone(), s.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {} // unknown symbol keys ignored
+            }
+        }
+    }
+
+    Ok(StyleDoc { colors, symbols })
+}
+
+/// Parse a [`Decl`] from a TOML inline table (field-by-field).
+fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
+    Decl {
+        fg:        t.get("fg").and_then(toml::Value::as_str).map(str::to_string),
+        bg:        t.get("bg").and_then(toml::Value::as_str).map(str::to_string),
+        bold:      t.get("bold").and_then(toml::Value::as_bool),
+        italic:    t.get("italic").and_then(toml::Value::as_bool),
+        underline: t.get("underline").and_then(toml::Value::as_bool),
+        dim:       t.get("dim").and_then(toml::Value::as_bool),
+        reversed:  t.get("reversed").and_then(toml::Value::as_bool),
+    }
+}
+
+// ── style_from_config ─────────────────────────────────────────────────────────
+
+/// Wrap already-parsed config-override sections into a [`StyleDoc`] for merging.
+pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleDoc {
+    StyleDoc {
+        colors: colors.clone(),
+        symbols: symbols.clone(),
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -316,5 +394,28 @@ mod tests {
         let m = merge(&base, &over);
         assert_eq!(m.colors.selectors["room"].fg.as_deref(), Some("red")); // over wins
         assert_eq!(m.colors.selectors["room"].bold, Some(true));            // base bold kept
+    }
+
+    #[test]
+    fn parse_style_toml_reads_selectors_scheme_symbols() {
+        let text = r##"
+[colors]
+scheme = "tomorrow-night"
+"room" = { fg = "white" }
+"room:current" = { reversed = true }
+"suggestion" = { fg = "#7a7a7a" }
+
+[symbols]
+box_style = "rounded"
+[symbols.overrides]
+"arrow.north" = "^"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        assert_eq!(doc.colors.scheme.as_deref(), Some("tomorrow-night"));
+        assert_eq!(doc.colors.selectors["room"].fg.as_deref(), Some("white"));
+        assert_eq!(doc.colors.selectors["room:current"].reversed, Some(true));
+        assert_eq!(doc.colors.selectors["suggestion"].fg.as_deref(), Some("#7a7a7a"));
+        assert_eq!(doc.symbols.box_style.as_deref(), Some("rounded"));
+        assert_eq!(doc.symbols.overrides["arrow.north"], "^");
     }
 }
