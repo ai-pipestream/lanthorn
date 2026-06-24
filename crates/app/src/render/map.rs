@@ -34,6 +34,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::state::{AppState, Zoom};
+use crate::symbols::{BoxStyle, SymbolSet};
 
 // ── Step sizes and box dimensions ─────────────────────────────────────────────
 
@@ -176,20 +177,14 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
 }
 
 
-/// Diagonal arrow glyphs (swappable named constants; e.g. to `◥◤◣◢`).
-const DIAG_NE: &str = "↗";
-const DIAG_NW: &str = "↖";
-const DIAG_SE: &str = "↘";
-const DIAG_SW: &str = "↙";
-
 /// Arrow glyph for a diagonal departure/arrival (caller guards with `is_diagonal`).
-fn diagonal_arrow(dir: Direction) -> &'static str {
+fn diagonal_arrow(dir: Direction, arrows: &crate::symbols::Arrows) -> char {
     match dir {
-        Direction::NE => DIAG_NE,
-        Direction::NW => DIAG_NW,
-        Direction::SE => DIAG_SE,
-        Direction::SW => DIAG_SW,
-        _ => DIAG_NE, // unreachable when guarded by is_diagonal
+        Direction::NE => arrows.ne,
+        Direction::NW => arrows.nw,
+        Direction::SE => arrows.se,
+        Direction::SW => arrows.sw,
+        _ => arrows.ne, // unreachable when guarded by is_diagonal
     }
 }
 
@@ -208,15 +203,12 @@ fn corner_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), dir: Direct
 }
 
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
-///
-/// Arrows signify the outgoing direction only — the departure direction is always
-/// known, so arrows are always filled (▶◀▲▼).
-fn arrow_for_departure(dep_side: Side) -> &'static str {
+fn arrow_for_departure(dep_side: Side, arrows: &crate::symbols::Arrows) -> char {
     match dep_side {
-        Side::Right  => "▶", // leaving east
-        Side::Left   => "◀", // leaving west
-        Side::Top    => "▲", // leaving north
-        Side::Bottom => "▼", // leaving south
+        Side::Right  => arrows.east,
+        Side::Left   => arrows.west,
+        Side::Top    => arrows.north,
+        Side::Bottom => arrows.south,
     }
 }
 
@@ -345,13 +337,13 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
     //       the rooms drawn below them in step 2.
-    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
+    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path);
     }
 
     if boxes {
-        draw_portal_connectors(rm, &placed, off_x, off_y, area, buf);
+        draw_portal_connectors(rm, &placed, off_x, off_y, area, buf, &state.symbols.portal);
     }
 
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -475,23 +467,23 @@ const DIR_S: u8 = 4;
 const DIR_W: u8 = 8;
 
 /// Box-drawing glyph for a set of direction bits.
-fn glyph_for(mask: u8) -> Option<&'static str> {
+fn glyph_for(mask: u8, path: &crate::symbols::PathGlyphs) -> Option<char> {
     Some(match mask {
-        m if m == DIR_E | DIR_W => "─",
-        m if m == DIR_N | DIR_S => "│",
-        m if m == DIR_S | DIR_E => "┌",
-        m if m == DIR_S | DIR_W => "┐",
-        m if m == DIR_N | DIR_E => "└",
-        m if m == DIR_N | DIR_W => "┘",
-        m if m == DIR_N | DIR_S | DIR_E => "├",
-        m if m == DIR_N | DIR_S | DIR_W => "┤",
-        m if m == DIR_E | DIR_W | DIR_S => "┬",
-        m if m == DIR_E | DIR_W | DIR_N => "┴",
-        m if m == DIR_N | DIR_E | DIR_S | DIR_W => "┼",
+        m if m == DIR_E | DIR_W => path.ew,
+        m if m == DIR_N | DIR_S => path.ns,
+        m if m == DIR_S | DIR_E => path.se,
+        m if m == DIR_S | DIR_W => path.sw,
+        m if m == DIR_N | DIR_E => path.ne,
+        m if m == DIR_N | DIR_W => path.nw,
+        m if m == DIR_N | DIR_S | DIR_E => path.nse,
+        m if m == DIR_N | DIR_S | DIR_W => path.nsw,
+        m if m == DIR_E | DIR_W | DIR_S => path.ews,
+        m if m == DIR_E | DIR_W | DIR_N => path.ewn,
+        m if m == DIR_N | DIR_E | DIR_S | DIR_W => path.nesw,
         // A bare stub end (single direction) — render as the matching straight glyph so
         // the line visibly reaches the box edge rather than vanishing.
-        m if m == DIR_E || m == DIR_W => "─",
-        m if m == DIR_N || m == DIR_S => "│",
+        m if m == DIR_E || m == DIR_W => path.ew,
+        m if m == DIR_N || m == DIR_S => path.ns,
         _ => return None,
     })
 }
@@ -686,7 +678,9 @@ fn render_lane_connectors(
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
-) -> Vec<((i32, i32), &'static str, bool)> {
+    arrows: &crate::symbols::Arrows,
+    path: &crate::symbols::PathGlyphs,
+) -> Vec<((i32, i32), String, bool)> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -694,9 +688,9 @@ fn render_lane_connectors(
     // idempotent and harmless.
     let mut cells: std::collections::HashMap<(i32, i32), u8> =
         std::collections::HashMap::new();
-    // Arrowheads: (virtual pixel, glyph, distorted). Returned for the caller to draw on top
-    // of the rooms (the arrow embeds in the room border).
-    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
+    // Arrowheads: (virtual pixel, glyph string, distorted). Returned for the caller to draw on
+    // top of the rooms (the arrow embeds in the room border).
+    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
 
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
@@ -709,25 +703,25 @@ fn render_lane_connectors(
             }
             let entry = cells.entry(*c).or_insert(0);
             *entry |= *mask;
-            let glyph = glyph_for(*entry).unwrap_or("·");
+            let glyph_s = glyph_for(*entry, path).unwrap_or('·').to_string();
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(glyph).set_style(Style::new().fg(color));
+                cell.set_symbol(&glyph_s).set_style(Style::new().fg(color));
             }
         }
 
-        let dep_glyph = if mapper::direction::is_diagonal(conn.exit_dir) {
-            diagonal_arrow(conn.exit_dir)
+        let dep_ch = if mapper::direction::is_diagonal(conn.exit_dir) {
+            diagonal_arrow(conn.exit_dir, arrows)
         } else {
-            arrow_for_departure(conn.exit)
+            arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_glyph, conn.distorted));
+        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted));
         // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
         if conn.reciprocal {
-            let arr_glyph = match conn.entry_dir {
-                Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d),
-                _ => arrow_for_departure(conn.entry),
+            let arr_ch = match conn.entry_dir {
+                Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
+                _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_glyph, conn.distorted));
+            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted));
         }
     }
     arrowheads
@@ -735,16 +729,17 @@ fn render_lane_connectors(
 
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
 fn draw_connector_arrows(
-    arrowheads: &[((i32, i32), &'static str, bool)],
+    arrowheads: &[((i32, i32), String, bool)],
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
 ) {
     let (off_x, off_y) = offset;
-    for &((vx, vy), glyph, distorted) in arrowheads {
+    for (pos, glyph, distorted) in arrowheads {
+        let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let color = if distorted { Color::Magenta } else { Color::Cyan };
+            let color = if *distorted { Color::Magenta } else { Color::Cyan };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(Style::new().fg(color));
             }
@@ -867,15 +862,11 @@ fn draw_stub(
     put_str(buf, lx, ly, label, CONNECTOR_STYLE, area);
 }
 
-/// Dotted-line glyphs for Up/Down portal connectors.
-const DOTTED_V: char = '┊';
-const DOTTED_H: char = '┄';
-
 /// Draw Up/Down portal links that no compass connector already covers. When the two rooms are
 /// directly grid-adjacent in the portal direction (a clean stack), draw one short dotted connector
 /// between them. When the portal room was YIELDED far from its partner, a full connecting line would
 /// run across the map and overwrite the paths in between — so instead draw a short dotted stub plus
-/// the `↑`/`↓` glyph on EACH room's border: the start room points out in the portal direction, the
+/// the up/down glyph on EACH room's border: the start room points out in the portal direction, the
 /// end room points back. Stubs are drawn before the rooms, so any stub cell that falls under an
 /// adjacent box is harmlessly covered. A reciprocal Up/Down pair is handled once, from the Up side.
 fn draw_portal_connectors(
@@ -885,6 +876,7 @@ fn draw_portal_connectors(
     off_y: i32,
     area: Rect,
     buf: &mut Buffer,
+    portal: &crate::symbols::PortalGlyphs,
 ) {
     let style = Style::new().fg(Color::Cyan);
     let interiors: Vec<VRect> = placed.values().copied().collect();
@@ -941,35 +933,46 @@ fn draw_portal_connectors(
             let tcy = t.y + BOX_H / 2;
             for y in start_y.min(tcy)..=start_y.max(tcy) {
                 if !in_interior(ocx, y) {
-                    put_char(buf, ocx + off_x, y + off_y, DOTTED_V, style, area);
+                    put_char(buf, ocx + off_x, y + off_y, portal.path, style, area);
                 }
             }
             for x in ocx.min(tcx)..=ocx.max(tcx) {
                 if !in_interior(x, tcy) {
-                    put_char(buf, x + off_x, tcy + off_y, DOTTED_H, style, area);
+                    put_char(buf, x + off_x, tcy + off_y, portal.path_h, style, area);
                 }
             }
         } else {
             // Yielded: a stub + glyph on each room instead of a long, path-stomping line. The start
             // room points out in the portal direction; the end room points back the opposite way.
-            portal_stub(buf, o, up, off_x, off_y, area, style);
-            portal_stub(buf, t, !up, off_x, off_y, area, style);
+            portal_stub(buf, o, up, off_x, off_y, area, style, portal);
+            portal_stub(buf, t, !up, off_x, off_y, area, style, portal);
         }
     }
 }
 
-/// Draw a one-cell dotted stub plus the `↑`/`↓` glyph just outside a room box — above it (`up`) or
+/// Draw a one-cell dotted stub plus the up/down glyph just outside a room box — above it (`up`) or
 /// below — marking a yielded Up/Down portal without drawing a full connecting line. The stub sits on
-/// the box's right column (`BOX_W - 2`), aligned with the in-room `↑`/`↓` portal icons.
-fn portal_stub(buf: &mut Buffer, b: VRect, up: bool, off_x: i32, off_y: i32, area: Rect, style: Style) {
+/// the box's right column (`BOX_W - 2`), aligned with the in-room portal icons.
+fn portal_stub(
+    buf: &mut Buffer,
+    b: VRect,
+    up: bool,
+    off_x: i32,
+    off_y: i32,
+    area: Rect,
+    style: Style,
+    portal: &crate::symbols::PortalGlyphs,
+) {
     let cx = b.x + BOX_W - 2 + off_x;
-    let (dot_y, tip_y, glyph) = if up {
-        (b.y - 1, b.y - 2, PORTAL_UP)
+    let (dot_y, tip_y, glyph_ch) = if up {
+        (b.y - 1, b.y - 2, portal.up)
     } else {
-        (b.y + BOX_H, b.y + BOX_H + 1, PORTAL_DOWN)
+        (b.y + BOX_H, b.y + BOX_H + 1, portal.down)
     };
-    put_char(buf, cx, dot_y + off_y, DOTTED_V, style, area);
-    put_str(buf, cx, tip_y + off_y, glyph, style, area);
+    put_char(buf, cx, dot_y + off_y, portal.path, style, area);
+    // put_str expects &str; convert char to a short string
+    let glyph_s = glyph_ch.to_string();
+    put_str(buf, cx, tip_y + off_y, &glyph_s, style, area);
 }
 
 /// In-room icon slot for a portal direction: 0 = row 1 (Up), 1 = row 2 (mid: In/Out/Unknown),
@@ -993,8 +996,8 @@ fn mid_precedence(dir: Direction) -> u8 {
 }
 
 /// One room's portal icon choices: three slots (Up / Mid / Down), each holding an optional
-/// `(glyph, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
-type PortalSlots<'a> = [Option<(&'a str, Option<&'a str>)>; 3];
+/// `(glyph_char, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
+type PortalSlots<'a> = [Option<(char, Option<&'a str>)>; 3];
 
 /// Draw in-room portal indicators at Boxes zoom as a post-room overlay (so icons sit on top of
 /// the box interior). Each room's portal (stub) edges map to a right-interior-column slot:
@@ -1014,7 +1017,20 @@ fn draw_portal_icons(
 ) {
     use std::collections::HashMap;
     let (off_x, off_y) = offset;
-    // Per room, the chosen (glyph, dest_label) for each of the 3 slots; mid slot by precedence.
+    let sym_portal = &state.symbols.portal;
+
+    // Helper: map a direction to the configured portal glyph char.
+    let dir_glyph = |dir: Direction| -> char {
+        match dir {
+            Direction::Up => sym_portal.up,
+            Direction::Down => sym_portal.down,
+            Direction::In => sym_portal.in_,
+            Direction::Out => sym_portal.out,
+            _ => sym_portal.unknown,
+        }
+    };
+
+    // Per room, the chosen (glyph_char, dest_label) for each of the 3 slots; mid slot by precedence.
     let mut chosen: HashMap<RoomId, PortalSlots<'_>> = HashMap::new();
     let mut mid_rank: HashMap<RoomId, u8> = HashMap::new();
     for edge in &rm.edges {
@@ -1025,7 +1041,7 @@ fn draw_portal_icons(
             continue; // Unknown edges are non-spatial (e.g. death/respawn) — show no portal icon
         }
         let Some(slot) = portal_slot(edge.dir) else { continue };
-        let glyph = portal_glyph(edge.dir);
+        let glyph_ch = dir_glyph(edge.dir);
         let label = edge.dest_label.as_deref();
         let slots = chosen.entry(edge.origin).or_insert([None, None, None]);
         if slot == 1 {
@@ -1033,10 +1049,10 @@ fn draw_portal_icons(
             let cur = mid_rank.entry(edge.origin).or_insert(u8::MAX);
             if rank < *cur {
                 *cur = rank;
-                slots[1] = Some((glyph, label));
+                slots[1] = Some((glyph_ch, label));
             }
         } else if slots[slot].is_none() {
-            slots[slot] = Some((glyph, label));
+            slots[slot] = Some((glyph_ch, label));
         }
     }
 
@@ -1048,22 +1064,25 @@ fn draw_portal_icons(
         let (bx, by) = (rect.x, rect.y);
         if show_labels {
             // Portal view: icons move onto the border; destination names float OUTSIDE the box.
-            if let Some((glyph, label)) = slots[0] {
-                put_str(buf, bx + BOX_W / 2 + off_x, by + off_y, glyph, style, area); // top border
+            if let Some((glyph_ch, label)) = slots[0] {
+                let gs = glyph_ch.to_string();
+                put_str(buf, bx + BOX_W / 2 + off_x, by + off_y, &gs, style, area); // top border
                 if let Some(name) = label {
                     put_str(buf, bx + off_x, by - 1 + off_y, name, style, area); // above
                 }
             }
-            if let Some((glyph, label)) = slots[2] {
-                put_str(buf, bx + BOX_W / 2 + off_x, by + BOX_H - 1 + off_y, glyph, style, area); // bottom border
+            if let Some((glyph_ch, label)) = slots[2] {
+                let gs = glyph_ch.to_string();
+                put_str(buf, bx + BOX_W / 2 + off_x, by + BOX_H - 1 + off_y, &gs, style, area); // bottom border
                 if let Some(name) = label {
                     put_str(buf, bx + off_x, by + BOX_H + off_y, name, style, area); // below
                 }
             }
-            if let Some((glyph, label)) = slots[1] {
-                put_str(buf, bx + BOX_W - 1 + off_x, by + 2 + off_y, glyph, style, area); // right border
+            if let Some((glyph_ch, label)) = slots[1] {
+                let gs = glyph_ch.to_string();
+                put_str(buf, bx + BOX_W - 1 + off_x, by + 2 + off_y, &gs, style, area); // right border
                 // Unknown has no target semantics → glyph only, no floating name.
-                if glyph != PORTAL_UNKNOWN {
+                if glyph_ch != sym_portal.unknown {
                     if let Some(name) = label {
                         put_str(buf, bx + BOX_W + off_x, by + 2 + off_y, name, style, area); // right
                     }
@@ -1072,11 +1091,12 @@ fn draw_portal_icons(
         } else {
             // Normal view: directional icons in the interior right column.
             for (slot, cell) in slots.iter().enumerate() {
-                let Some((glyph, _label)) = cell else { continue };
+                let Some((glyph_ch, _label)) = cell else { continue };
+                let gs = glyph_ch.to_string();
                 let row = by + 1 + slot as i32;
-                put_str(buf, bx + icon_col + off_x, row + off_y, glyph, style, area);
+                put_str(buf, bx + icon_col + off_x, row + off_y, &gs, style, area);
                 if slot == 0 && room.has_notes {
-                    put_char(buf, bx + icon_col - 1 + off_x, row + off_y, '●', style, area);
+                    put_char(buf, bx + icon_col - 1 + off_x, row + off_y, sym_portal.marker, style, area);
                 }
             }
         }
@@ -1084,6 +1104,21 @@ fn draw_portal_icons(
 }
 
 // ── Room drawing ──────────────────────────────────────────────────────────────
+
+/// Pick the outline `BoxStyle` for a room given its flags.
+///
+/// Precedence: current > portal > selected > normal.
+fn outline_for<'a>(
+    sym: &'a SymbolSet,
+    is_current: bool,
+    has_portal: bool,
+    selected: bool,
+) -> &'a BoxStyle {
+    if is_current { &sym.room_current }
+    else if has_portal { &sym.room_portal }
+    else if selected { &sym.room_selected }
+    else { &sym.room_normal }
+}
 
 /// Draw a room at screen top-left `(sx, sy)` (already translated from virtual space;
 /// may be partially or fully off-area — drawing is clipped per cell).
@@ -1097,16 +1132,17 @@ fn draw_room(
     buf: &mut Buffer,
 ) {
     let base_style = room_style(room, state);
+    let selected = state.selected_room == Some(room.id);
 
     match zoom {
         Zoom::Overview => {
             put_char(buf, sx, sy, '■', base_style, area);
         }
         Zoom::Compact => {
-            draw_compact_room(room, sx, sy, base_style, area, buf);
+            draw_compact_room(room, sx, sy, base_style, &state.symbols, selected, area, buf);
         }
         Zoom::Boxes => {
-            draw_box_room(room, sx, sy, base_style, state.show_alignment, area, buf);
+            draw_box_room(room, sx, sy, base_style, &state.symbols, selected, state.show_alignment, area, buf);
         }
     }
 }
@@ -1120,6 +1156,8 @@ fn draw_compact_room(
     sx: i32,
     sy: i32,
     style: Style,
+    sym: &SymbolSet,
+    selected: bool,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -1127,13 +1165,8 @@ fn draw_compact_room(
     let (bw, bh) = (bw as i32, bh as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
-    let (tl, tr, bl, br, h, v) = if is_current {
-        ('┏', '┓', '┗', '┛', '━', '┃')
-    } else if room.has_layer_portal {
-        ('╔', '╗', '╚', '╝', '═', '║')
-    } else {
-        ('╭', '╮', '╰', '╯', '─', '│')
-    };
+    let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
+    let (tl, tr, bl, br, h, v) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
     put_char(buf, sx, sy, tl, style, area);
@@ -1210,6 +1243,8 @@ fn draw_box_room(
     sx: i32,
     sy: i32,
     style: Style,
+    sym: &SymbolSet,
+    selected: bool,
     show_alignment: bool,
     area: Rect,
     buf: &mut Buffer,
@@ -1218,15 +1253,9 @@ fn draw_box_room(
     let (w, h) = (w as i32, h as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
-    // Box outline: heavy for the current room, double-line for a room with a portal to
-    // another layer (so cross-layer exits read at a glance), rounded otherwise.
-    let (tl, tr, bl, br, horiz, vert) = if is_current {
-        ('┏', '┓', '┗', '┛', '━', '┃')
-    } else if room.has_layer_portal {
-        ('╔', '╗', '╚', '╝', '═', '║')
-    } else {
-        ('╭', '╮', '╰', '╯', '─', '│')
-    };
+    // Box outline picked by precedence: current > portal > selected > normal.
+    let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
+    let (tl, tr, bl, br, horiz, vert) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
     put_char(buf, sx, sy, tl, style, area);
@@ -1259,9 +1288,9 @@ fn draw_box_room(
     }
     put_str(buf, sx + 1, sy + 3, &center(&row3, iw), style, area);
 
-    // Notes marker ● in top-right inner corner (row 1, col w-2).
+    // Notes marker in top-right inner corner (row 1, col w-2).
     if room.has_notes {
-        put_char(buf, sx + w - 2, sy + 1, '●', style, area);
+        put_char(buf, sx + w - 2, sy + 1, sym.portal.marker, style, area);
     }
 
     // Bottom border
@@ -3415,6 +3444,135 @@ mod tests {
         assert!(
             all_text.contains('╔') && all_text.contains('║'),
             "the layer-portal room must render with a double-line outline"
+        );
+    }
+
+    #[test]
+    fn path_and_portal_use_symbol_set() {
+        // Two rooms connected N-S: glyph_for should produce the NS path char at the connector.
+        // Also: a room with notes should show the portal.marker glyph.
+        use mapper::graph::MapGraph;
+        use crate::symbols::SymbolSet;
+        use crate::config::SymbolConfig;
+
+        // --- Path glyph test: two horizontally-connected rooms produce EW path segments ---
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = mapper::render::render(&g);
+
+        let mut state = AppState::default();
+        state.scroll = (0, 0);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // The EW connector between the two rooms should have '─' (light path) somewhere
+        let has_ew = buf.content.iter().any(|c| c.symbol() == "─");
+        assert!(has_ew, "default light path: EW connector must use '─'");
+
+        // With heavy preset, EW should be '━'
+        let mut cfg = SymbolConfig::default();
+        cfg.path_style = "heavy".into();
+        state.symbols = SymbolSet::resolve(&cfg);
+        let mut buf2 = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf2);
+        let has_heavy_ew = buf2.content.iter().any(|c| c.symbol() == "━");
+        assert!(has_heavy_ew, "heavy path preset: EW connector must use '━'");
+
+        // --- Portal marker test: a room with notes shows portal.marker ---
+        let mut g2 = MapGraph::new();
+        g2.upsert_room(10, "A".into());
+        g2.set_pos(10, (0, 0));
+        g2.set_notes(10, "some notes".into());
+        let rm2 = mapper::render::render(&g2);
+        state.symbols = SymbolSet::default();
+        let mut buf3 = Buffer::empty(area);
+        render_map(&rm2, &state, area, &mut buf3);
+        let has_marker = buf3.content.iter().any(|c| c.symbol() == "●");
+        assert!(has_marker, "default portal.marker '●' must appear for room with notes");
+    }
+
+    #[test]
+    fn arrow_uses_symbol_set() {
+        // room1(0,0) →E→ room2(1,0): with default symbols the departure arrow is '▶';
+        // with arrow_set = "line" it becomes '→'.
+        use mapper::graph::MapGraph;
+        use crate::symbols::SymbolSet;
+        use crate::config::SymbolConfig;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = mapper::render::render(&g);
+
+        // Default: '▶' at the departure arrow cell (10, 2)
+        let mut state = AppState::default();
+        state.scroll = (0, 0);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        assert_eq!(
+            buf.cell((10, 2)).map(|c| c.symbol()),
+            Some("▶"),
+            "default symbols: east departure arrow must be '▶'"
+        );
+
+        // Line preset: '→' at the same cell
+        let mut cfg = SymbolConfig::default();
+        cfg.arrow_set = "line".into();
+        state.symbols = SymbolSet::resolve(&cfg);
+        let mut buf2 = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf2);
+        assert_eq!(
+            buf2.cell((10, 2)).map(|c| c.symbol()),
+            Some("→"),
+            "line preset: east departure arrow must be '→'"
+        );
+    }
+
+    #[test]
+    fn room_outline_uses_symbol_set() {
+        // Default symbols: a normal (non-current, non-portal) room at cell (0,0) with
+        // scroll (0,0) and Boxes zoom renders its top-left corner as '╭'.
+        use mapper::graph::MapGraph;
+        use crate::symbols::SymbolSet;
+        use crate::config::SymbolConfig;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        // Room 1 is not current, not a portal room.
+        let rm = mapper::render::render(&g);
+
+        // --- Default symbols: expect '╭' at (0,0) ---
+        let mut state = AppState::default(); // SymbolSet::default() inside
+        state.scroll = (0, 0);
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        assert_eq!(
+            buf.cell((0, 0)).map(|c| c.symbol()),
+            Some("╭"),
+            "default symbols must render normal room top-left as rounded corner"
+        );
+
+        // --- ASCII preset: expect '+' at (0,0) ---
+        let mut cfg = SymbolConfig::default();
+        cfg.box_style = "ascii".into();
+        state.symbols = SymbolSet::resolve(&cfg);
+        let mut buf2 = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf2);
+        assert_eq!(
+            buf2.cell((0, 0)).map(|c| c.symbol()),
+            Some("+"),
+            "ascii preset must render normal room top-left as '+'"
         );
     }
 }

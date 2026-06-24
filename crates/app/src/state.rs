@@ -166,6 +166,10 @@ pub struct AppState {
     /// Toggled by the `i` key in map focus.
     pub show_inspector: bool,
 
+    /// Resolved glyph set for the map renderer.  Defaults to today's hardcoded glyphs;
+    /// overwritten at startup via `SymbolSet::resolve(&cfg.symbols)` when a config is present.
+    pub symbols: crate::symbols::SymbolSet,
+
     // ── Autocomplete state ────────────────────────────────────────────────────
 
     /// Cached parser-vocabulary words from the Z-machine dictionary.
@@ -199,6 +203,7 @@ impl Default for AppState {
             tidy_anim: None,
             viewed_layer: None,
             show_inspector: false,
+            symbols: crate::symbols::SymbolSet::default(),
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -406,5 +411,11 @@ mod tests {
         assert_eq!(s.active_layer(&g), l, "explicit view wins");
         s.set_viewed_layer(Some(999)); // stale id (no such layer)
         assert_eq!(s.active_layer(&g), 0, "stale view falls back to current room's layer");
+    }
+
+    #[test]
+    fn appstate_default_symbols_are_default_set() {
+        let st = AppState::default();
+        assert_eq!(st.symbols, crate::symbols::SymbolSet::default());
     }
 }

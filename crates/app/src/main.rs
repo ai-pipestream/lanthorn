@@ -272,6 +272,7 @@ fn main() {
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
     let mut state = AppState::default();
+    state.symbols = app::symbols::SymbolSet::resolve(&cfg.symbols);
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);

@@ -1,7 +1,48 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::Parser;
 use serde::Deserialize;
+
+// ── Symbol config ─────────────────────────────────────────────────────────────
+
+fn default_box_style() -> String { "rounded".into() }
+fn default_arrow_set() -> String { "filled".into() }
+fn default_portal_icons() -> String { "ascii".into() }
+fn default_path_style() -> String { "light".into() }
+
+/// The [symbols] section of config.toml.  All fields default to the preset
+/// names that match today's hardcoded glyphs, so an absent section is a no-op.
+#[derive(Debug, Deserialize)]
+pub struct SymbolConfig {
+    /// Room outline style preset name.
+    #[serde(default = "default_box_style")]
+    pub box_style: String,
+    /// Arrow glyph set preset name.
+    #[serde(default = "default_arrow_set")]
+    pub arrow_set: String,
+    /// Portal icon preset name.
+    #[serde(default = "default_portal_icons")]
+    pub portal_icons: String,
+    /// Path line-art preset name.
+    #[serde(default = "default_path_style")]
+    pub path_style: String,
+    /// Per-slot overrides (slot key → single-char value).
+    #[serde(default)]
+    pub overrides: BTreeMap<String, String>,
+}
+
+impl Default for SymbolConfig {
+    fn default() -> Self {
+        Self {
+            box_style: default_box_style(),
+            arrow_set: default_arrow_set(),
+            portal_icons: default_portal_icons(),
+            path_style: default_path_style(),
+            overrides: BTreeMap::new(),
+        }
+    }
+}
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
@@ -36,11 +77,14 @@ pub struct Config {
     /// Sub-directories: maps/ — where per-story map files live.
     #[serde(default = "default_user_dir")]
     pub user_dir: PathBuf,
+    /// Map symbol configuration: presets + per-glyph overrides.
+    #[serde(default)]
+    pub symbols: SymbolConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { user_dir: default_user_dir() }
+        Self { user_dir: default_user_dir(), symbols: SymbolConfig::default() }
     }
 }
 
@@ -69,6 +113,7 @@ pub fn resolve(cli: &Cli) -> Config {
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
             cfg.user_dir = from_file.user_dir;
+            cfg.symbols = from_file.symbols;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
