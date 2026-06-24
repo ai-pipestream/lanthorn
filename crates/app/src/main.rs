@@ -20,7 +20,7 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
-use app::input::{apply_action, key_to_action, mouse_to_action, Action};
+use app::input::{apply_action, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action};
 use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
@@ -501,6 +501,9 @@ fn main() {
     // Defaults are used as a fallback; updated after each successful draw.
     let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default() };
 
+    // Debounce counter for BackgroundTidy::Debounced mode.
+    let mut bg_tidy_counter: u32 = 0;
+
     loop {
         // Draw.
         match draw_frame(&mut terminal, &session, &mapper, &state) {
@@ -601,6 +604,9 @@ fn main() {
                     state.push_transcript(note);
                 }
 
+                // Capture room count before apply_turn for new-room detection.
+                let rooms_before = mapper.graph.rooms().count();
+
                 apply_turn(&mut mapper, &cmd, &result);
 
                 // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
@@ -620,6 +626,40 @@ fn main() {
                     };
                     if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta) {
                         state.push_transcript(&format!("[Auto-save failed: {}]", e));
+                    }
+                }
+
+                // Background tidy: silently re-tidy the active layer when the
+                // configured mode calls for it. Only runs in Auto layout mode.
+                if mapper.mode == mapper::layout::LayoutMode::Auto {
+                    let new_room = mapper.graph.rooms().count() > rooms_before;
+                    let active_layer = state.active_layer(&mapper.graph);
+                    let overlap = if cfg.background_tidy == app::config::BackgroundTidy::OnOverlap {
+                        // Overlap: any duplicate cell in the active layer OR any distorted edge.
+                        let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
+                        let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
+                        let has_overlap = cells.len() < total_rooms;
+                        let has_distorted = mapper.graph.connections().iter().any(|c| {
+                            c.distorted
+                                && mapper.graph.layer_of(c.origin) == active_layer
+                                && mapper.graph.layer_of(c.dest) == active_layer
+                        });
+                        has_overlap || has_distorted
+                    } else {
+                        false
+                    };
+                    if should_bg_tidy(cfg.background_tidy, new_room, overlap, &mut bg_tidy_counter) {
+                        tidy_layer_silent(&mut mapper.graph, active_layer);
+                        // Re-center on the current room if it moved off-screen.
+                        if let Some(snap) = &result.location {
+                            let rid = snap.number as mapper::graph::RoomId;
+                            if let Some(room) = mapper.graph.room(rid) {
+                                if let Some(pos) = room.pos {
+                                    let (pw, ph) = map_pane_dims(last_panes.map);
+                                    state.recenter_on(pos, pw, ph);
+                                }
+                            }
+                        }
                     }
                 }
 
