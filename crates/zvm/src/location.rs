@@ -118,7 +118,7 @@ fn max_object_number(mem: &crate::memory::Memory) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cpu::exec::Machine;
+    use crate::cpu::exec::{Machine, StepResult};
     use crate::header::tests_support::sample_story;
     use crate::memory::Memory;
 
@@ -278,10 +278,20 @@ mod tests {
             return;
         };
         let mem = Memory::new(story).unwrap();
-        let machine = Machine::new(mem);
+        let mut machine = Machine::new(mem);
+        machine.init_caps();
         // In minizork the opening location is set in global 0 before the first
-        // read instruction.  A well-formed v3 story sets global 0 before the
-        // first status-line read, so we assert Some here.
+        // read instruction.  Run until NeedLine (the first READ opcode) so that
+        // the init code has had a chance to store the starting room into global 0.
+        for _ in 0..100_000u64 {
+            match machine.step() {
+                StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart => break,
+                StepResult::NeedChar => { machine.supply_char(b'\n'); }
+                StepResult::SaveRequest => { machine.complete_save(false); }
+                StepResult::RestoreRequest => { machine.complete_restore_failure(); }
+                StepResult::Continue => {}
+            }
+        }
         let loc = current_location(&machine);
         assert!(loc.is_some(), "minizork: expected a location from global 0, got None");
     }
