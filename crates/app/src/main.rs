@@ -8,7 +8,7 @@ use mapper::mapper::Mapper;
 use mapper::render::{render as render_map_data, render_layer};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
@@ -176,7 +176,7 @@ fn draw_frame(
         // Focus indicator: the pane receiving keys gets a bright bold border and a ▸
         // marker in its title (with a reverse-video title bar); the other pane keeps
         // the default border.
-        let focused_border = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+        let focused_border = state.colors.focused_border;
         let pane = |title: &str, focused: bool| {
             let block = Block::default().borders(Borders::ALL);
             if focused {
@@ -268,7 +268,7 @@ fn draw_frame(
         }
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
-        let help_style = Style::default().add_modifier(Modifier::REVERSED);
+        let help_style = state.colors.help_bar;
         let help_text = if state.saves.is_some() {
             "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | Esc: close".to_string()
         } else if state.gallery.is_some() {
@@ -427,6 +427,11 @@ fn main() {
 
     let mut state = AppState::default();
     state.symbols = app::symbols::SymbolSet::resolve(&cfg.symbols);
+    let (colors, color_warnings) = app::colors::ColorScheme::resolve(&cfg.colors, &cfg.user_dir);
+    state.colors = colors;
+    for w in color_warnings {
+        state.push_transcript(&format!("[{}]", w));
+    }
     let (keymap, keymap_warnings) = app::keymap::KeyMap::resolve(&cfg.keymap);
     state.keymap = keymap;
     // Surface any keymap conflict warnings once in the transcript.

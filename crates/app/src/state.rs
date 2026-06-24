@@ -267,6 +267,10 @@ pub struct AppState {
     /// overwritten at startup via `SymbolSet::resolve(&cfg.symbols)` when a config is present.
     pub symbols: crate::symbols::SymbolSet,
 
+    /// Resolved color scheme.  Defaults to `ColorScheme::terminal_default()` (today's exact
+    /// ANSI colors); overwritten at startup via `ColorScheme::resolve(&cfg.colors, &cfg.user_dir)`.
+    pub colors: crate::colors::ColorScheme,
+
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
@@ -327,6 +331,7 @@ impl Default for AppState {
             drag: None,
             hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
+            colors: crate::colors::ColorScheme::terminal_default(),
             keymap: crate::keymap::KeyMap::default(),
             hotkeys: crate::keymap::HotkeyLayout::default(),
             gallery: None,
