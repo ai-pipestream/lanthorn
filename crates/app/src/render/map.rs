@@ -1439,6 +1439,13 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
                 let score_trial = mapper::layout::room_side_score(graph, id);
                 let align_trial = mapper::layout::room_alignment_score(graph, id);
                 graph.set_pos(id, orig); // restore; the winner is committed after the scan
+                // Never clear a render overlap by making the moved room's OWN compass placement
+                // worse. relayout already satisfied these hints (e.g. #180 NW of #80, SW of #81);
+                // trading that correct placement for one fewer render overlap reads as a layout
+                // bug. Resolve the overlap by moving a different (or hint-neutral) room instead.
+                if score_trial < score_orig {
+                    continue;
+                }
                 if (s.0, s.1) < (base.0, base.1) {
                     let align_broken = align_orig.saturating_sub(align_trial);
                     let broken = score_orig.saturating_sub(score_trial);

@@ -625,6 +625,39 @@ mod tests {
     use super::*;
     use crate::state::AppState;
 
+    /// Regression: re-tidy must not let `cleanup_overlaps` move a room to a cell that breaks
+    /// its own satisfied compass hints. In the A129 map, #180 must sit NW of #80 and SW of #81
+    /// (from `180 S 80`+`80 W 180` and `180 N 81`+`81 W 180`). `relayout_auto` places it there;
+    /// before the cleanup guard, the overlap pass shoved #180 into #80's column and below it.
+    #[test]
+    fn retidy_keeps_180_north_west_of_80_and_south_west_of_81() {
+        use mapper::direction::Direction::*;
+        let mut g = mapper::graph::MapGraph::new();
+        for id in [25u16, 26, 27, 74, 75, 76, 77, 78, 79, 80, 81, 88, 136, 143, 180, 193, 201, 203, 239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180, N, 81), (81, W, 180), (180, W, 78), (78, N, 143), (143, E, 77), (77, S, 74),
+            (74, S, 76), (76, W, 78), (143, W, 78), (78, S, 76), (76, N, 74), (74, E, 25),
+            (25, W, 76), (74, W, 79), (79, E, 74), (25, E, 26), (26, Up, 25), (78, E, 75),
+            (77, E, 239), (239, N, 77), (77, Unknown, 180), (180, S, 80), (80, W, 180),
+            (80, E, 79), (79, S, 80), (79, N, 81), (81, E, 79), (80, S, 76), (76, Unknown, 180),
+            (79, Unknown, 180), (75, S, 81), (75, W, 78), (75, E, 77), (239, S, 77), (77, W, 75),
+            (75, N, 143), (143, S, 75), (26, Down, 27), (27, N, 136), (136, SW, 27), (27, Up, 26),
+            (26, Unknown, 180), (79, W, 203), (203, W, 193), (193, E, 203), (203, E, 79),
+            (203, Up, 201), (201, Down, 203), (25, Unknown, 180), (239, W, 77), (81, N, 75),
+            (25, Down, 26), (75, Up, 88), (88, Down, 75), (143, Unknown, 180),
+        ] {
+            g.add_edge(o, d, dst);
+        }
+        mapper::layer::peel_region(&mut g, 27); // the user's scenario: 27/136 in their own layer
+        run_tidy_pipeline(&mut g, 0);
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        let (a, b, c) = (p(180), p(80), p(81));
+        assert!(a.0 < b.0 && a.1 < b.1, "180 {a:?} must be NW of 80 {b:?}");
+        assert!(a.0 < c.0 && a.1 > c.1, "180 {a:?} must be SW of 81 {c:?}");
+    }
+
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     /// Build a plain (no-modifier) Press KeyEvent.
