@@ -102,10 +102,10 @@ const LANE_SPACING: i32 = 2;
 /// where same-side departure/arrival anchors live.
 const LANE_BASE: i32 = 1;
 /// Minimum channel pixel size even when it carries no lanes.
-const MIN_GUTTER: i32 = 2;
+pub(crate) const MIN_GUTTER: i32 = 2;
 /// Boxes-zoom box size (matches `zoom_box_size(Zoom::Boxes)`), in cells.
-const BOX_W: i32 = 11;
-const BOX_H: i32 = 5;
+pub(crate) const BOX_W: i32 = 11;
+pub(crate) const BOX_H: i32 = 5;
 
 /// One axis of the non-uniform Boxes-zoom layout: where each room line starts (pixels)
 /// and how wide each channel after it is.

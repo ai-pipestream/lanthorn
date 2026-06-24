@@ -615,8 +615,17 @@ impl AppState {
     /// `pane_w` and `pane_h` are in terminal characters; this method converts
     /// them to map-grid cells using the current zoom step before centering,
     /// so that `scroll` stays in cell units (matching `cell_to_screen`).
+    ///
+    /// For Boxes zoom the non-uniform layout places rooms at roughly
+    /// `(BOX_W + MIN_GUTTER)` × `(BOX_H + MIN_GUTTER)` pixels per cell, which
+    /// is smaller than `zoom.steps()` (19×11). Using the actual cell footprint
+    /// keeps the target room near the pane centre rather than at the top edge.
     pub fn recenter_on(&mut self, cell: (i32, i32), pane_w: u16, pane_h: u16) {
-        let (sw, sh) = self.zoom.steps();
+        use crate::render::map::{BOX_W, BOX_H, MIN_GUTTER};
+        let (sw, sh) = match self.zoom {
+            Zoom::Boxes => (BOX_W + MIN_GUTTER, BOX_H + MIN_GUTTER), // 13 × 7
+            _ => self.zoom.steps(),
+        };
         let cells_w = (pane_w as i32 / sw).max(1);
         let cells_h = (pane_h as i32 / sh).max(1);
         self.scroll = (cell.0 - cells_w / 2, cell.1 - cells_h / 2);
@@ -725,12 +734,34 @@ mod tests {
 
     #[test]
     fn recenter_on_centers_cell() {
-        let mut s = AppState::default(); // Boxes zoom (step 18×6)
+        let mut s = AppState::default(); // Boxes zoom: effective step 13×7
         // Centering cell (5, 5) in a 20×10 character pane:
-        // cells_w = 20 / 18 = 1, cells_h = 10 / 6 = 1
+        // cells_w = 20 / 13 = 1, cells_h = 10 / 7 = 1
         // scroll = (5 - 1/2, 5 - 1/2) = (5 - 0, 5 - 0) = (5, 5)
         s.recenter_on((5, 5), 20, 10);
         assert_eq!(s.scroll, (5, 5));
+    }
+
+    #[test]
+    fn recenter_on_boxes_larger_pane() {
+        let mut s = AppState::default(); // Boxes zoom: effective step 13×7
+        // Centering cell (0, 0) in a 80×24 character pane:
+        // cells_w = 80 / 13 = 6, cells_h = 24 / 7 = 3
+        // scroll = (0 - 6/2, 0 - 3/2) = (0 - 3, 0 - 1) = (-3, -1)
+        s.recenter_on((0, 0), 80, 24);
+        assert_eq!(s.scroll, (-3, -1));
+    }
+
+    #[test]
+    fn recenter_on_compact_zoom() {
+        use crate::state::Zoom;
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact; // steps = (12, 5)
+        // Centering cell (4, 4) in a 48×20 pane:
+        // cells_w = 48 / 12 = 4, cells_h = 20 / 5 = 4
+        // scroll = (4 - 4/2, 4 - 4/2) = (4 - 2, 4 - 2) = (2, 2)
+        s.recenter_on((4, 4), 48, 20);
+        assert_eq!(s.scroll, (2, 2));
     }
 
     #[test]
