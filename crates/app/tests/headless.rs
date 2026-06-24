@@ -3,8 +3,6 @@
 //! Drives a scripted 3-room walk through state + render + export + persistence
 //! without a real TTY, using `ratatui::backend::TestBackend` buffers.
 
-use app::colors::ColorScheme;
-use app::config::ColorsConfig;
 use app::export_svg::render_svg;
 use app::persist_files::{load_map, save_map};
 use app::render::map::render_map;
@@ -207,9 +205,9 @@ fn colors_default_config_connector_is_cyan() {
 /// to the scheme's palette[6] (0x70c0ba), not Cyan.
 #[test]
 fn colors_scheme_swap_changes_connector_color() {
+    use app::style::{StyleDoc, StyleColors};
     use mapper::graph::MapGraph;
     use mapper::direction::Direction;
-    use std::collections::BTreeMap;
 
     let mut g = MapGraph::new();
     g.upsert_room(1, "A".into());
@@ -220,11 +218,9 @@ fn colors_scheme_swap_changes_connector_color() {
 
     let rm = render_map_data(&g);
 
-    let cfg = ColorsConfig {
-        scheme: Some("tomorrow-night".to_string()),
-        elements: BTreeMap::new(),
-    };
-    let (colors, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
+    let mut doc = StyleDoc::default();
+    doc.colors = StyleColors { scheme: Some("tomorrow-night".to_string()), selectors: Default::default() };
+    let (colors, _set, warnings) = app::style::resolve(&doc, std::path::Path::new("/tmp"));
     assert!(warnings.is_empty(), "tomorrow-night should resolve without warnings");
 
     let mut state = AppState::default();

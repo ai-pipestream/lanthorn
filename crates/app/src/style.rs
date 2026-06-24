@@ -385,15 +385,11 @@ pub fn resolve(
 /// (see Task 6), so this constant is the canonical baseline.
 pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
 # Empty [colors] means no scheme and no selector overrides => terminal defaults.
-# Symbol presets list the factory defaults; override any preset or individual symbol below.
+# Empty [symbols] means all presets resolve to their factory defaults via finalize_symbols.
 
 [colors]
 
 [symbols]
-box_style = "rounded"
-arrow_set = "filled"
-portal_icons = "ascii"
-path_style = "light"
 "#;
 
 // ── load_style ────────────────────────────────────────────────────────────────
@@ -492,6 +488,9 @@ pub fn personal_style_path(user_dir: &std::path::Path) -> std::path::PathBuf {
 /// - `None` (unset) → `None` in the Decl (field omitted from TOML output).
 ///
 /// Modifier encoding: each modifier flag set in `add_modifier` becomes `Some(true)`.
+///
+/// Invariant: relies on `Style::patch` only ADDING modifiers (never removing), which holds
+/// because every ColorScheme constructor carries REVERSED/BOLD modifiers on the relevant fields.
 fn style_to_decl(s: &Style) -> Decl {
     Decl {
         fg: s.fg.map(color_to_str),
