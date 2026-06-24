@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move all visual settings (colors + symbols) into a standalone, shareable style file referenced from `config.toml` by `style = "<name or path>"`, with the existing config sections kept as a backward-compatible override layer and a CSS-ish element→properties color format.
+**Goal:** Move all visual settings (colors + symbols) into a standalone, shareable style file referenced from `config.toml` by `style = "<name or path>"` (an inline include: style file = base, `config.toml`'s `[colors]`/`[symbols]` override per-key), with a CSS-ish element→properties color format.
 
 **Architecture:** A new `crates/app/src/style.rs` owns a partial/“raw” style model (`StyleDoc`), its TOML (de)serialization, pointer resolution (built-in name / file path / absent), layer merge (base ⊕ override, present-keys-only), resolution into the existing `ColorScheme`/`SymbolSet`, and format-preserving writers. `config.rs` gains an optional `style` field and stops writing `[colors]`/`[symbols]`. `main.rs` loads+merges+resolves at startup and after gallery/config saves; the gallery gains an “Output all settings” export button.
 
@@ -237,7 +237,7 @@ fn merge_field_level_decl_patch() {
 
 ---
 
-### Task 5: Parse a StyleDoc from TOML (file + config override) incl. legacy elements
+### Task 5: Parse a StyleDoc from TOML (style file + config override, same format)
 
 **Files:**
 - Modify: `crates/app/src/style.rs`
@@ -318,7 +318,7 @@ fn resolve_empty_doc_equals_terminal_default() {
 ```
 
 - [ ] **Step 2: Run, confirm fail.**
-- [ ] **Step 3: Implement `resolve`** — reuse `colors` scheme/path/built-in handling (refactor `colors.rs` to expose a helper that returns `(ColorScheme, GhosttyScheme, Vec<String>)` for a given scheme string + legacy elements, or call the existing `resolve` then re-derive the scheme; keep it DRY). Then apply decls and finalize symbols.
+- [ ] **Step 3: Implement `resolve`** — reuse `colors` scheme/path/built-in handling (refactor `colors.rs` to expose a helper that returns `(ColorScheme, GhosttyScheme, Vec<String>)` for a given scheme string, or call the existing `resolve` then re-derive the scheme; keep it DRY). Then apply decls and finalize symbols.
 - [ ] **Step 4: Run, confirm pass; build clean.**
 - [ ] **Step 5: Commit** — "feat(style): resolve StyleDoc to ColorScheme + SymbolSet".
 
@@ -369,7 +369,7 @@ fn load_style_missing_path_warns_and_falls_back() {
 **Interfaces:**
 - Consumes: `StyleDoc`; `ColorScheme`, `SymbolSet` for the full export.
 - Produces:
-  - `pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()>` — load existing file with `toml_edit` (or new doc), write `scheme`, selector inline tables, legacy elements, and `[symbols]` presets/overrides; PRESERVE any other tables/keys/comments.
+  - `pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()>` — load existing file with `toml_edit` (or new doc), write `scheme`, selector inline tables, and `[symbols]` presets/overrides; PRESERVE any other tables/keys/comments.
   - `pub fn write_style_full(path: &std::path::Path, cs: &ColorScheme, set: &SymbolSet) -> std::io::Result<()>` — write a fully-expanded, self-contained style: every selector (derived from each `ColorScheme` field via a `style_to_decl(Style) -> Decl` inverse) and every symbol preset/override currently in effect. Still preserves unknown tables.
 
 - [ ] **Step 1: Write the failing test (round-trip + preserve unknown)**
@@ -505,7 +505,7 @@ fn personal_style_path_is_user_dir_style_toml() {
 
 **Placeholder scan:** No TBD/vague steps; each code step has concrete code or a concrete test. Temp-dir setup in fs tests should follow the existing pattern in `config.rs`/`persist_files.rs` tests (noted inline as `/* temp dir */`; implementer copies the established pattern).
 
-**Type consistency:** `Decl`, `StyleColors{scheme,selectors,legacy_elements}`, `StyleSymbols{...,overrides}`, `StyleDoc{colors,symbols}`, and fn names (`decl_to_style`, `apply_color_decls`, `finalize_symbols`, `merge`, `parse_style_toml`, `style_from_config`, `resolve`, `load_style`, `write_style`, `write_style_full`, `style_to_decl`, `personal_style_path`) are used consistently across tasks.
+**Type consistency:** `Decl`, `StyleColors{scheme,selectors}`, `StyleSymbols{...,overrides}`, `StyleDoc{colors,symbols}`, and fn names (`decl_to_style`, `apply_color_decls`, `finalize_symbols`, `merge`, `parse_style_toml`, `style_from_config`, `resolve`, `load_style`, `write_style`, `write_style_full`, `style_to_decl`, `personal_style_path`) are used consistently across tasks.
 
 ## Notes for the executor
 
