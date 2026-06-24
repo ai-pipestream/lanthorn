@@ -8,7 +8,7 @@
 
 ## Goal
 
-Give each pane region a configurable border/box style + colors, plus two decorative treatments: a **picture-frame** map border (notched nested corners) and a **book-style** story border (centered adventure title inset in the top border). The map border carries a centered **layer-tab strip**; the status line and input line get optional box styling. **Every default reproduces today's look** — beautification is opt-in via `style.toml`.
+Give each pane region a configurable border/box style + colors, plus two decorative treatments: a **picture-frame** map border (notched nested corners) and a **book-style** story border (centered adventure title inset in the top border). The map border carries a centered **layer-tab strip**; the status line and input line get optional box styling. **The new chrome is the DEFAULT** — out of the box both panes render the picture-frame border, the map shows its layer tabs, and the story shows the adventure title. The previous plain/borderless look is available as an opt-OUT (`map_border`/`story_border = none`). (The status header and input line keep a plain default; their boxing is the opt-IN per #45/#46.)
 
 ## Border styles (shared set)
 
@@ -17,7 +17,7 @@ A new `BorderStyle` choice used by both panes: `none | single | double | thick |
 - `none` — no border (today's panes are borderless content with a focused-title; keep that as the default until the user opts in).
 - `picture-frame` — the composite renderer below.
 
-Selectors: `map_border`, `story_border` (each: a border-style name + a color). Default for both = today's behavior (the existing focused/unfocused pane title + `focused_border` color), i.e. effectively `none`+title until changed.
+Selectors: `map_border`, `story_border` (each: a border-style name + a color). **Default for both = `picture-frame`** (with the map's layer-tab strip and the story's adventure title inset in the top border). Setting either to `none` restores the previous borderless pane (with just the focused-title behavior) for users who want it.
 
 ### picture-frame renderer (exact)
 
@@ -81,7 +81,7 @@ The `>` prompt line gets optional box styling via an `input_line` selector (bord
 
 Add the new selectors to the fixed selector set, `DEFAULT_STYLE_TOML`, the gallery/config write paths, and `write_style_full`:
 `map_border`, `story_border`, `story_title`, `map_layer_tab`, `map_layer_tab:active`, `status_header`, `input_line`.
-Border-style choices (`map_border`/`story_border`/`status_header`/`input_line` = a style NAME) live alongside colors; a border-style value is one of `none|single|double|thick|picture-frame`. Defaults chosen so a fresh `style.toml`/no-style reproduces today's exact rendering.
+Border-style choices (`map_border`/`story_border`/`status_header`/`input_line` = a style NAME) live alongside colors; a border-style value is one of `none|single|double|thick|picture-frame`. **`DEFAULT_STYLE_TOML` sets `map_border = picture-frame` and `story_border = picture-frame`** (so the new chrome + title + tabs ship by default); `status_header`/`input_line` default to their plain (non-boxed) rendering.
 
 ## Components
 
@@ -98,7 +98,9 @@ Border-style choices (`map_border`/`story_border`/`status_header`/`input_line` =
 - top-inset: a centered title is centered within `top_inset`; an over-wide tab strip shows active±neighbors + `‹…›`; hit-rects map to the right segment.
 - title source layering: override > banner > filename (table test, incl. a banner that is all-caps title-cased, and a fallback to filename when the banner is empty).
 - status header / input line: plain (default) vs boxed; content area shrinks correctly when boxed.
-- style round-trip: the seven new selectors parse/resolve/write_style_full and appear in `DEFAULT_STYLE_TOML`; **a default (no-style) build renders byte-identically to today** (golden TestBackend snapshot of a sample frame).
+- style round-trip: the seven new selectors parse/resolve/write_style_full and appear in `DEFAULT_STYLE_TOML`.
+- **default rendering:** a default (no user style) build renders the **picture-frame** border with the story title and the map layer tabs present (TestBackend snapshot of a sample frame).
+- **opt-out:** `map_border`/`story_border = none` reproduces the previous plain/borderless pane (TestBackend snapshot).
 
 ## Out of scope / non-goals
 
@@ -113,4 +115,4 @@ Border-style choices (`map_border`/`story_border`/`status_header`/`input_line` =
 - **Picture-frame costs 2 cells of content** on each side (outer + inner); on small terminals the renderer degrades to `single`/`none` (tested) rather than clipping the map.
 - **Banner heuristic is best-effort** — when no clean title line exists it falls back to the filename; an explicit `title` override always wins.
 - **Tab overflow** with many layers is handled by active±neighbors + `‹…›`; full horizontal scrolling of tabs is out of scope.
-- **Default-look parity** is load-bearing (golden snapshot test) so beautification stays opt-in.
+- **New look is the default**, so it must render well across terminal sizes out of the box — hence the small-pane degrade-to-`single`/`none` and the overflow handling are load-bearing, not edge cases. Users who want the old plain panes set `map_border`/`story_border = none`.
