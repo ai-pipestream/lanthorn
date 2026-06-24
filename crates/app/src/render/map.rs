@@ -267,6 +267,66 @@ pub fn screen_to_cell(screen: (i32, i32), zoom: Zoom, scroll: (i32, i32), area: 
     (cx, cy)
 }
 
+/// Return the screen-space bounding `Rect` for every room in `rm`, clipped to
+/// `area`. Uses the same offset logic as `render_map` so click hit-testing is
+/// pixel-accurate at all zoom levels, including the non-uniform Boxes layout.
+///
+/// Rooms whose box falls completely outside `area` are omitted. Rooms that are
+/// only partially visible are clipped to `area`.
+pub fn room_screen_rects(
+    rm: &mapper::render::RenderMap,
+    state: &crate::state::AppState,
+    area: Rect,
+) -> Vec<(mapper::graph::RoomId, Rect)> {
+    let zoom = state.zoom;
+    let scroll = state.scroll;
+    let (bw, bh) = zoom_box_size(zoom);
+
+    let boxes = matches!(zoom, crate::state::Zoom::Boxes);
+    let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
+    let (off_x, off_y) = match &axes {
+        Some((cols, rows)) => (
+            area.x as i32 - cols.room_pixel(scroll.0),
+            area.y as i32 - rows.room_pixel(scroll.1),
+        ),
+        None => {
+            let (step_w, step_h) = zoom_steps(zoom);
+            (area.x as i32 - scroll.0 * step_w, area.y as i32 - scroll.1 * step_h)
+        }
+    };
+    let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
+        match &axes {
+            Some((cols, rows)) => (cols.room_pixel(cell.0), rows.room_pixel(cell.1)),
+            None => cell_to_virtual(cell, zoom),
+        }
+    };
+
+    let mut rects = Vec::with_capacity(rm.rooms.len());
+    for room in &rm.rooms {
+        let (vx, vy) = room_virtual(room.cell);
+        let sx = vx + off_x;
+        let sy = vy + off_y;
+        // Skip completely off-screen rooms.
+        if sx >= area.right() as i32
+            || sy >= area.bottom() as i32
+            || sx + bw as i32 <= area.x as i32
+            || sy + bh as i32 <= area.y as i32
+        {
+            continue;
+        }
+        // Clamp to area.
+        let rx = (sx.max(area.x as i32)) as u16;
+        let ry = (sy.max(area.y as i32)) as u16;
+        let rx2 = ((sx + bw as i32).min(area.right() as i32)) as u16;
+        let ry2 = ((sy + bh as i32).min(area.bottom() as i32)) as u16;
+        if rx2 <= rx || ry2 <= ry {
+            continue;
+        }
+        rects.push((room.id, Rect::new(rx, ry, rx2 - rx, ry2 - ry)));
+    }
+    rects
+}
+
 /// Return the `RoomId` of the room in `layer` at grid `cell`, or `None` if no
 /// placed room sits at exactly that cell.  Clicks in the gutter between boxes
 /// (where `pos` would fall on a non-integer part of the grid) naturally land on
@@ -3672,5 +3732,52 @@ mod tests {
         assert_eq!(room_at_cell(&g, MAIN_LAYER, (1, 0)), None);
         // (0, 1) has no room.
         assert_eq!(room_at_cell(&g, MAIN_LAYER, (0, 1)), None);
+    }
+
+    /// room_screen_rects returns non-empty rects within the area, and hit-testing
+    /// a click at each rect's centre finds the correct room.
+    #[test]
+    fn room_screen_rects_basic_hit_test() {
+        use crate::state::{AppState, Zoom};
+        use mapper::graph::MapGraph;
+        use mapper::render::render_layer;
+        use ratatui::layout::Rect;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, 0));
+        g.add_edge(1, mapper::direction::Direction::E, 2);
+
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        state.scroll = (0, 0);
+
+        let area = Rect::new(0, 0, 80, 40);
+        let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
+        let rects = room_screen_rects(&rm, &state, area);
+
+        // Both rooms must appear.
+        assert_eq!(rects.len(), 2, "both rooms must have screen rects");
+
+        // Every rect must be fully within the area.
+        for (_, r) in &rects {
+            assert!(r.x >= area.x, "rect left must be within area");
+            assert!(r.y >= area.y, "rect top must be within area");
+            assert!(r.right() <= area.right(), "rect right must be within area");
+            assert!(r.bottom() <= area.bottom(), "rect bottom must be within area");
+            assert!(r.width > 0 && r.height > 0, "rect must have positive dimensions");
+        }
+
+        // Hit-testing: a click at each rect's centre must find that room.
+        for (id, r) in &rects {
+            let cx = r.x + r.width / 2;
+            let cy = r.y + r.height / 2;
+            let hit = rects.iter()
+                .find(|(_, rect)| cx >= rect.x && cx < rect.right() && cy >= rect.y && cy < rect.bottom())
+                .map(|(rid, _)| *rid);
+            assert_eq!(hit, Some(*id), "click at centre of room {:?} rect must hit that room", id);
+        }
     }
 }

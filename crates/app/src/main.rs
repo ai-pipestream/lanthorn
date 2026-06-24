@@ -25,7 +25,8 @@ use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::inspector::{draw_inspector, room_diagnostics};
-use app::render::map::render_map_layered;
+use app::render::map::{render_map_layered, room_screen_rects};
+use mapper::graph::RoomId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
@@ -136,9 +137,11 @@ pub fn hint_line_game(keymap: &KeyMap) -> String {
 /// Both pane inner-content rects returned by `draw_frame`.
 /// `map` is `Rect::default()` when the layout hides the map (TranscriptFull).
 /// `story` is `Rect::default()` when the layout hides the story (MapFull).
+/// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
 struct PaneRects {
     map: Rect,
     story: Rect,
+    room_rects: Vec<(RoomId, Rect)>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -151,6 +154,7 @@ fn draw_frame(
 ) -> std::io::Result<PaneRects> {
     let mut map_area = Rect::default();
     let mut story_area = Rect::default();
+    let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
 
     terminal.draw(|f| {
         let full = f.area();
@@ -229,6 +233,13 @@ fn draw_frame(
                 }
             }
         }
+
+        // Compute room screen rects for accurate mouse hit-testing.
+        room_rects_out = if map_area.height > 0 {
+            room_screen_rects(&rm, state, map_area)
+        } else {
+            Vec::new()
+        };
 
         // ── Room panel overlay ────────────────────────────────────────────────
         if map_area.height > 0 {
@@ -334,7 +345,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out })
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -499,7 +510,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Defaults are used as a fallback; updated after each successful draw.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default() };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new() };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -549,12 +560,7 @@ fn main() {
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
             Event::Mouse(m) => {
-                // Pick the live graph for hit-testing (tidy-anim shows a frozen subgraph).
-                let graph = match &state.tidy_anim {
-                    Some(anim) => &anim.current().graph,
-                    None => &mapper.graph,
-                };
-                mouse_to_action(&state, m, last_panes.map, last_panes.story, graph)
+                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects)
             }
             // Resize: continue so the next draw uses the updated terminal size.
             Event::Resize(_, _) => continue,

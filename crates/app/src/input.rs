@@ -277,9 +277,21 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
 
 // ── mouse_to_action ───────────────────────────────────────────────────────────
 
+/// Find the first room whose bounding rect contains screen cell `(col, row)`.
+fn room_at_screen(
+    room_rects: &[(mapper::graph::RoomId, ratatui::layout::Rect)],
+    col: u16,
+    row: u16,
+) -> Option<mapper::graph::RoomId> {
+    room_rects
+        .iter()
+        .find(|(_, rect)| col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom())
+        .map(|(id, _)| *id)
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
-/// bounding rects of the map and story panes, and the live map graph (needed for
-/// room hit-testing on left/right clicks).
+/// bounding rects of the map and story panes, and the pre-computed room screen
+/// rects (needed for pixel-accurate room hit-testing on left/right clicks).
 ///
 /// Returns `Action::None` for events outside both panes or with no binding.
 pub fn mouse_to_action(
@@ -287,10 +299,8 @@ pub fn mouse_to_action(
     m: MouseEvent,
     map: ratatui::layout::Rect,
     story: ratatui::layout::Rect,
-    graph: &mapper::graph::MapGraph,
+    room_rects: &[(mapper::graph::RoomId, ratatui::layout::Rect)],
 ) -> Action {
-    use crate::render::map::{room_at_cell, screen_to_cell};
-
     let col = m.column;
     let row = m.row;
     let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
@@ -306,18 +316,14 @@ pub fn mouse_to_action(
     match m.kind {
         // ── Left-click in map ─────────────────────────────────────────────────
         MouseEventKind::Down(MouseButton::Left) if in_map => {
-            let cell = screen_to_cell((col as i32, row as i32), state.zoom, state.scroll, map);
-            let layer = state.active_layer(graph);
-            match room_at_cell(graph, layer, cell) {
+            match room_at_screen(room_rects, col, row) {
                 Some(id) => Action::ShowRoomInfo(id),
                 None => Action::CloseRoomPanel,
             }
         }
         // ── Right-click in map ────────────────────────────────────────────────
         MouseEventKind::Down(MouseButton::Right) if in_map => {
-            let cell = screen_to_cell((col as i32, row as i32), state.zoom, state.scroll, map);
-            let layer = state.active_layer(graph);
-            match room_at_cell(graph, layer, cell) {
+            match room_at_screen(room_rects, col, row) {
                 Some(id) => Action::ShowRoomDiagnostics(id),
                 None => Action::CloseRoomPanel,
             }
@@ -2378,11 +2384,24 @@ mod tests {
         ratatui::layout::Rect::new(80, 0, 40, 40)
     }
 
-    fn make_graph_with_room_at(id: u16, pos: (i32, i32)) -> mapper::graph::MapGraph {
-        let mut g = mapper::graph::MapGraph::new();
+    /// Build a room_rects slice for a single room at a given cell using Compact zoom.
+    fn room_rects_for_compact(id: u16, cell: (i32, i32), area: ratatui::layout::Rect) -> Vec<(mapper::graph::RoomId, ratatui::layout::Rect)> {
+        use crate::state::{AppState, Zoom};
+        use crate::render::map::room_screen_rects;
+        use mapper::graph::MapGraph;
+        use mapper::render::render_layer;
+        use mapper::layer::MAIN_LAYER;
+
+        let mut g = MapGraph::new();
         g.upsert_room(id, "Room".into());
-        g.set_pos(id, pos);
-        g
+        g.set_pos(id, cell);
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact;
+        s.scroll = (0, 0);
+
+        let rm = render_layer(&g, MAIN_LAYER);
+        room_screen_rects(&rm, &s, area)
     }
 
     #[test]
@@ -2394,11 +2413,12 @@ mod tests {
         s.zoom = Zoom::Compact; // step = (12, 5)
         s.scroll = (0, 0);
 
-        // Room 1 at cell (0,0) → screen (0,0) with Compact zoom and area at (0,0).
-        let g = make_graph_with_room_at(1, (0, 0));
+        // Room 1 at cell (0,0). Build room_rects using render pipeline.
+        let rects = room_rects_for_compact(1, (0, 0), map_rect());
 
+        // Click at (0,0) which is inside the Compact box (8x3).
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
         assert!(
             matches!(action, Action::ShowRoomInfo(1)),
             "left-down on room cell should produce ShowRoomInfo(1), got {:?}", action
@@ -2413,10 +2433,11 @@ mod tests {
         let mut s = AppState::default();
         s.zoom = Zoom::Compact;
         s.scroll = (0, 0);
-        let g = make_graph_with_room_at(2, (0, 0));
+
+        let rects = room_rects_for_compact(2, (0, 0), map_rect());
 
         let m = mouse_event(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
         assert!(
             matches!(action, Action::ShowRoomDiagnostics(2)),
             "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
@@ -2431,12 +2452,12 @@ mod tests {
         let mut s = AppState::default();
         s.zoom = Zoom::Compact; // step = (12, 5)
         s.scroll = (0, 0);
-        // Room is at cell (0,0); click at screen (1, 0) is inside cell 0 (div 12 = 0)
-        // Actually with step 12, col 1 → cell 0. Let's click at col 50 → cell 4 (no room).
-        let g = make_graph_with_room_at(1, (0, 0)); // room only at cell (0,0)
+        // Room is at cell (0,0), box is 8 wide so cols 0..8 hit the room.
+        // Click at col 50 misses the room entirely.
+        let rects = room_rects_for_compact(1, (0, 0), map_rect());
 
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
         assert!(
             matches!(action, Action::CloseRoomPanel),
             "left-down on gutter should produce CloseRoomPanel, got {:?}", action
@@ -2447,9 +2468,8 @@ mod tests {
     fn scroll_up_in_map_produces_pan_up() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
         assert!(matches!(action, Action::Pan(0, -1)), "scroll up in map without modifier -> Pan(0,-1)");
     }
 
@@ -2457,9 +2477,8 @@ mod tests {
     fn scroll_down_in_map_produces_pan_down() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         let m = mouse_event(MouseEventKind::ScrollDown, 10, 10, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
         assert!(matches!(action, Action::Pan(0, 1)), "scroll down in map without modifier -> Pan(0,1)");
     }
 
@@ -2467,9 +2486,8 @@ mod tests {
     fn scroll_up_with_shift_pans_left() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::SHIFT);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
         assert!(matches!(action, Action::Pan(-1, 0)), "scroll up + Shift -> Pan(-1,0)");
     }
 
@@ -2477,9 +2495,8 @@ mod tests {
     fn scroll_up_with_ctrl_zooms_in() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::CONTROL);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
         assert!(matches!(action, Action::ZoomIn), "scroll up + Ctrl -> ZoomIn");
     }
 
@@ -2487,14 +2504,13 @@ mod tests {
     fn scroll_in_story_produces_transcript_scroll() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         // col 85 is inside story_rect (x=80..120).
         let m_up = mouse_event(MouseEventKind::ScrollUp, 85, 5, KeyModifiers::NONE);
-        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &g);
+        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &[]);
         assert!(matches!(action_up, Action::TranscriptScroll(-1)), "scroll up in story -> TranscriptScroll(-1)");
 
         let m_dn = mouse_event(MouseEventKind::ScrollDown, 85, 5, KeyModifiers::NONE);
-        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &g);
+        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &[]);
         assert!(matches!(action_dn, Action::TranscriptScroll(1)), "scroll down in story -> TranscriptScroll(1)");
     }
 
@@ -2502,9 +2518,8 @@ mod tests {
     fn middle_down_produces_begin_drag_pan() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         let m = mouse_event(MouseEventKind::Down(MouseButton::Middle), 20, 15, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
         assert!(matches!(action, Action::BeginDragPan(20, 15)), "middle-down -> BeginDragPan");
     }
 
@@ -2512,11 +2527,10 @@ mod tests {
     fn middle_drag_and_up_produce_drag_actions() {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
-        let g = mapper::graph::MapGraph::new();
         let drag = mouse_event(MouseEventKind::Drag(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
         let up = mouse_event(MouseEventKind::Up(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
-        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &g), Action::DragPanTo(25, 18)));
-        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &g), Action::EndDragPan));
+        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &[]), Action::DragPanTo(25, 18)));
+        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &[]), Action::EndDragPan));
     }
 
     // ── Drag-pan accumulator tests ────────────────────────────────────────────
