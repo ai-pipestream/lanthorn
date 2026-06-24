@@ -1,3 +1,4 @@
+pub mod gallery;
 pub mod help;
 pub mod inspector;
 pub mod map;
