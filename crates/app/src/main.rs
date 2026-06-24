@@ -26,6 +26,7 @@ use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{render_map_layered, room_screen_rects};
+use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
@@ -204,6 +205,7 @@ fn draw_frame(
                 let inner = block.inner(main_area);
                 block.render(main_area, buf);
                 render_map_layered(&rm, &mapper.graph, state, inner, buf);
+                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), inner, buf); }
                 map_area = inner; // use inner for recenter math
                 story_area = Rect::default();
             }
@@ -224,6 +226,7 @@ fn draw_frame(
                 let map_inner = map_block.inner(chunks[1]);
                 map_block.render(chunks[1], buf);
                 render_map_layered(&rm, &mapper.graph, state, map_inner, buf);
+                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_inner, buf); }
                 map_area = map_inner; // use inner for recenter math
 
                 // Dim the unfocused pane's inner content so the eye is drawn to the active pane.

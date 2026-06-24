@@ -60,6 +60,8 @@ pub enum Action {
     AnimTogglePlay,
     /// Exit tidy-animation playback back to the live map.
     AnimExit,
+    /// Jump to the next (+1) or previous (-1) stage_start frame in the animation.
+    AnimStageJump(i32),
     /// Zoom the map in (more detail).
     ZoomIn,
     /// Zoom the map out (less detail).
@@ -198,6 +200,13 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
 
     // 3. Tidy-animation sub-mode: KeyMap lookup in Anim context; no fallthrough.
     if state.tidy_anim.is_some() {
+        if key.modifiers == KeyModifiers::CONTROL {
+            match key.code {
+                KeyCode::Left => return Action::AnimStageJump(-1),
+                KeyCode::Right => return Action::AnimStageJump(1),
+                _ => {}
+            }
+        }
         let spec = KeySpec::from_key_event(key);
         return match state.keymap.lookup(&spec, Context::Anim) {
             Some(cmd) => cmd.to_action(),
@@ -915,6 +924,24 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::AnimExit => state.tidy_anim = None,
+
+        Action::AnimStageJump(d) => {
+            if let Some(anim) = &mut state.tidy_anim {
+                let current = anim.idx;
+                let n = anim.frames.len();
+                if d > 0 {
+                    if let Some(next) = ((current + 1)..n).find(|&i| anim.frames[i].stage_start) {
+                        anim.idx = next;
+                        anim.playing = false;
+                    }
+                } else if current > 0 {
+                    if let Some(prev) = (0..current).rev().find(|&i| anim.frames[i].stage_start) {
+                        anim.idx = prev;
+                        anim.playing = false;
+                    }
+                }
+            }
+        }
 
         Action::CycleLayer(delta) => {
             let mut ids: Vec<_> = mapper.graph.layers().keys().copied()

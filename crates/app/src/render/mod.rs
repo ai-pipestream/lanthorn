@@ -4,6 +4,7 @@ pub mod inspector;
 pub mod map;
 pub mod room_info;
 pub mod saves;
+pub mod tidy_panel;
 pub mod transcript;
 
 use ratatui::buffer::Buffer;
