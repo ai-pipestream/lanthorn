@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - No `mapper`/`zvm` changes. Style is an `app`-crate concern.
-- Backward compatible: a `config.toml` with the old `[colors]`/`[symbols]` and no `style` pointer must resolve to exactly today's look.
+- No backward compatibility (app is undeployed): no legacy `elements` packed-string format, no migration — old-format `~/.babelmap` files can be deleted. An empty style (no `style` pointer, no config override) must still resolve to today's terminal-default look.
 - Fixed selector set only — no general CSS cascade/selector matching. Unknown selector ⇒ warning, ignored, never crash. Missing/garbage style path ⇒ warning, fall back to built-in `default`, never crash.
 - Writers are format-preserving (`toml_edit`) and MUST preserve unknown sections/keys (so future `[header]`/`[input]`/border keys survive a save).
 - Commit messages: NO backticks in the body; end every commit body with exactly:
@@ -195,9 +195,9 @@ fn finalize_symbols_fills_defaults_and_keeps_overrides() {
 **Interfaces:**
 - Consumes: `Decl`, `StyleSymbols` (Tasks 1, 3).
 - Produces:
-  - `pub struct StyleColors { pub scheme: Option<String>, pub selectors: BTreeMap<String, Decl>, pub legacy_elements: BTreeMap<String, String> }` (derive `Debug, Clone, Default, PartialEq`).
+  - `pub struct StyleColors { pub scheme: Option<String>, pub selectors: BTreeMap<String, Decl> }` (derive `Debug, Clone, Default, PartialEq`).
   - `pub struct StyleDoc { pub colors: StyleColors, pub symbols: StyleSymbols }` (derive `Debug, Clone, Default, PartialEq`).
-  - `pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc` — produces a new doc where: `colors.scheme = over.scheme.clone().or(base.scheme.clone())`; `colors.selectors` = base ∪ over with, per selector key, the over `Decl` field-merged onto the base `Decl` (each `Option` field: `over.or(base)`); `colors.legacy_elements` = base ∪ over (over wins per key); `symbols`: each preset `over.or(base)`, `overrides` = base ∪ over (over wins).
+  - `pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc` — produces a new doc where: `colors.scheme = over.scheme.clone().or(base.scheme.clone())`; `colors.selectors` = base ∪ over with, per selector key, the over `Decl` field-merged onto the base `Decl` (each `Option` field: `over.or(base)`); `symbols`: each preset `over.or(base)`, `overrides` = base ∪ over (over wins).
 
 - [ ] **Step 1: Write the failing test**
 ```rust
@@ -246,8 +246,8 @@ fn merge_field_level_decl_patch() {
 **Interfaces:**
 - Consumes: `StyleDoc`, `StyleColors`, `StyleSymbols`, `Decl`.
 - Produces:
-  - `pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String>` — parses the style-file format: `[colors]` with optional `scheme`, selector keys as inline tables (`"room:current" = { reversed = true }`) into `selectors`, and a legacy `elements = { name = "color" }` map into `legacy_elements`; `[symbols]` presets + `[symbols.overrides]`. Uses `toml::Value` so unknown keys are tolerated.
-  - `pub fn style_from_config(colors: &config::ColorsConfig, symbols: &config::SymbolConfig) -> StyleDoc` — builds the override-layer `StyleDoc` from the already-parsed config sections: `scheme` from `colors.scheme`, `legacy_elements` from `colors.elements`, symbols presets/overrides from `symbols`. (The config layer has no CSS selectors yet; those live only in style files — fine.)
+  - `pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String>` — parses the format used by BOTH the style file and `config.toml`'s override sections: `[colors]` with optional `scheme` and selector keys as inline tables (`"room:current" = { reversed = true }`) into `selectors`; `[symbols]` presets + `[symbols.overrides]`. Uses `toml::Value` so unknown keys are tolerated. (No legacy `elements` map — app is undeployed, no backward compat.)
+  - `pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleDoc` — wraps the config-override partial sections (already in the new format, see Task 9) into a `StyleDoc` for merging.
 
 - [ ] **Step 1: Write the failing test**
 ```rust
@@ -258,7 +258,7 @@ fn parse_style_toml_reads_selectors_scheme_symbols() {
 scheme = "tomorrow-night"
 "room" = { fg = "white" }
 "room:current" = { reversed = true }
-elements = { suggestion = "#7a7a7a" }
+"suggestion" = { fg = "#7a7a7a" }
 
 [symbols]
 box_style = "rounded"
@@ -269,7 +269,7 @@ box_style = "rounded"
     assert_eq!(doc.colors.scheme.as_deref(), Some("tomorrow-night"));
     assert_eq!(doc.colors.selectors["room"].fg.as_deref(), Some("white"));
     assert_eq!(doc.colors.selectors["room:current"].reversed, Some(true));
-    assert_eq!(doc.colors.legacy_elements.get("suggestion").map(String::as_str), Some("#7a7a7a"));
+    assert_eq!(doc.colors.selectors["suggestion"].fg.as_deref(), Some("#7a7a7a"));
     assert_eq!(doc.symbols.box_style.as_deref(), Some("rounded"));
     assert_eq!(doc.symbols.overrides["arrow.north"], "^");
 }
@@ -291,7 +291,7 @@ box_style = "rounded"
 **Interfaces:**
 - Consumes: everything above; `colors::{ColorScheme, GhosttyScheme}`, `colors::resolve`-style logic, `symbols::SymbolSet`.
 - Produces:
-  - `pub fn resolve(doc: &StyleDoc, dir: &std::path::Path) -> (ColorScheme, SymbolSet, Vec<String>)` — (1) build the base `ColorScheme` from `doc.colors.scheme` exactly as `colors::ColorScheme::resolve` does today for a scheme/built-in/path/none (reuse that code path; treat `legacy_elements` as the existing element overrides); (2) obtain the active `GhosttyScheme` (or a default for terminal-default) for color-value palette refs; (3) `apply_color_decls(&mut cs, &doc.colors.selectors, &scheme)` to layer the CSS selectors on top, collecting warnings; (4) `SymbolSet::resolve(&finalize_symbols(&doc.symbols))`. Returns merged warnings (path/scheme warnings + unknown-selector warnings).
+  - `pub fn resolve(doc: &StyleDoc, dir: &std::path::Path) -> (ColorScheme, SymbolSet, Vec<String>)` — (1) build the base `ColorScheme` from `doc.colors.scheme` exactly as `colors::ColorScheme::resolve` does today for a scheme/built-in/path/none (reuse that code path); (2) obtain the active `GhosttyScheme` (or a default for terminal-default) for color-value palette refs; (3) `apply_color_decls(&mut cs, &doc.colors.selectors, &scheme)` to layer the CSS selectors on top, collecting warnings; (4) `SymbolSet::resolve(&finalize_symbols(&doc.symbols))`. Returns merged warnings (path/scheme warnings + unknown-selector warnings).
 
 - [ ] **Step 1: Write the failing test**
 ```rust
@@ -420,8 +420,8 @@ fn write_style_full_is_self_contained() {
 - Test: in `config.rs` tests
 
 **Interfaces:**
-- Consumes: `Config`, `Config::resolve`, `write_config` (existing).
-- Produces: `Config.style: Option<String>`; `resolve` reads `style` from file; `write_config` no longer emits `[colors]`/`[symbols]`.
+- Consumes: `Config`, `Config::resolve`, `write_config` (existing); `style::{StyleColors, StyleSymbols}` (Tasks 4, 3).
+- Produces: `Config.style: Option<String>`; `Config.colors: StyleColors` and `Config.symbols: StyleSymbols` (replacing the old `ColorsConfig`/`SymbolConfig` so the config override layer uses the new format); `resolve` reads `style` from file; `write_config` no longer emits `[colors]`/`[symbols]`. (`config::SymbolConfig` stays as the concrete type that `finalize_symbols` produces for `SymbolSet::resolve`; `ColorsConfig` may be removed if no longer referenced.)
 
 - [ ] **Step 1: Write the failing test**
 ```rust
@@ -447,7 +447,7 @@ fn write_config_does_not_emit_style_sections() {
 ```
 
 - [ ] **Step 2: Run, confirm fail.**
-- [ ] **Step 3: Implement** — add `#[serde(default)] pub style: Option<String>` to `Config` and to `Default`; copy it in `resolve`’s file-merge block; remove the `[colors]`/`[symbols]` writing from `write_config` (leave the functional keys; leave any existing `[colors]`/`[symbols]` already in the file untouched — toml_edit only edits keys it sets).
+- [ ] **Step 3: Implement** — add `#[serde(default)] pub style: Option<String>` to `Config` and to `Default`; change `Config.colors` to `style::StyleColors` and `Config.symbols` to `style::StyleSymbols` (both `#[serde(default)]`, deserializing the new selector/preset format); copy `style`/`colors`/`symbols` in `resolve`’s file-merge block; remove the `[colors]`/`[symbols]` writing from `write_config` (leave the functional keys). Update any code that referenced the old `ColorsConfig`/`SymbolConfig` fields (mainly the startup resolution, replaced in Task 10).
 - [ ] **Step 4: Run, confirm pass; full `cargo test --workspace` green; build clean.**
 - [ ] **Step 5: Commit** — "feat(config): add style pointer; stop writing style sections".
 
@@ -493,13 +493,14 @@ fn personal_style_path_is_user_dir_style_toml() {
 - Model/pointer/layers → Tasks 6, 7, 9, 10. ✅
 - CSS-ish color format + fixed selectors → Tasks 1, 2, 5. ✅
 - Symbols relocated (presets+overrides) → Tasks 3, 5. ✅
-- Legacy `elements` compat → Tasks 5 (parse), 6 (apply as base overrides). ✅
-- Merge present-keys-only / unset-vs-default → Task 4 (partial `Option` model is the mechanism). ✅
+- Inline-include override (style file base ⊕ config override, present-keys-only) → Task 4 (merge) + Task 10 (wiring). ✅
+- Unset-vs-default → Task 4 (partial `Option` model is the mechanism). ✅
+- Config override sections use the new format (no legacy) → Task 9 (`Config.colors/symbols` become `StyleColors`/`StyleSymbols`). ✅
 - Edit→personal file, fork+repoint → Task 10. ✅
 - Gallery "Output all settings" export → Tasks 8 (`write_style_full`), 10 (button/action). ✅
 - Writers preserve unknown sections (future border/header keys) → Task 8. ✅
 - Built-in `default` → Task 7. ✅
-- Backward-compat golden (no pointer = today) → Task 6 (`resolve_empty_doc_equals_terminal_default`) + Task 9. ✅
+- Default look (no pointer/override = today) → Task 6 (`resolve_empty_doc_equals_terminal_default`). ✅
 - Never-crash on bad path/selector → Tasks 2, 7. ✅
 
 **Placeholder scan:** No TBD/vague steps; each code step has concrete code or a concrete test. Temp-dir setup in fs tests should follow the existing pattern in `config.rs`/`persist_files.rs` tests (noted inline as `/* temp dir */`; implementer copies the established pattern).

@@ -19,14 +19,16 @@ This elevates the existing precedent — `colors.scheme` already loads a Ghostty
 style = "<built-in name or file path>"
 ```
 
-The resolved look is built in **layers**, lowest to highest:
+`style` behaves like an **inline include**: conceptually the style file's contents are spliced into `config.toml` at the pointer, and anything **after** it in `config.toml` overrides those settings. Because TOML requires top-level keys (`style`) to precede `[table]` headers, the config's own `[colors]`/`[symbols]` tables always come "after" the include — so the precedence is simply:
 
 1. **Base** = the style file named by `style`:
    - a **built-in name** (embedded; v1 ships exactly one: `default` = today's terminal look), OR
    - a **file path** (`~` expanded, relative paths resolved against `user_dir`).
    - If `style` is **absent**: base = the user's personal `~/.babelmap/style.toml` if it exists, else the built-in `default`.
-2. **Local overrides** = the existing `config.toml` `[colors]` / `[symbols]` sections, layered on top (backward compatible — with no `style` pointer and no style file, these fully define the look exactly as today).
-3. The merged result resolves into `ColorScheme` + `SymbolSet` as now and is stored in `AppState.colors` / `AppState.symbols`.
+2. **Override** = `config.toml`'s own `[colors]`/`[symbols]` sections (written in the SAME new format as the style file), layered on top **per key** — they overwrite only the settings they explicitly name.
+3. The merged result resolves into `ColorScheme` + `SymbolSet` and is stored in `AppState.colors` / `AppState.symbols`.
+
+**No backward compatibility** (the app is undeployed): there is no legacy `[colors].elements` packed-string format and no migration — old-format `~/.babelmap` files can simply be deleted. Both the style file and `config.toml`'s override sections use the new format only.
 
 **No general cascade/selector engine** (ratatui is immediate-mode; there is nothing like Textual TCSS to defer to). We implement a small, fixed selector set ourselves.
 
@@ -74,10 +76,6 @@ scheme = "tomorrow-night"            # optional base palette: Ghostty built-in n
 
 - **`scheme`** (optional): a base palette as today (Ghostty built-in name or file path). Selector declarations override it per element. This preserves the current Ghostty integration.
 
-### Legacy compatibility
-
-The previous `[colors].elements = { name = "color-string" }` map is still parsed: each entry sets that element's `fg`. New files use the selector tables; old configs keep working. Both feed the same merge.
-
 ### `[symbols]` — presets + overrides (unchanged shape)
 
 Glyph selection is not a natural fit for CSS properties, so symbols keep today's shape, relocated into the style file:
@@ -94,12 +92,13 @@ path_style = "light"         # PathGlyphs::preset_names()
 
 ## Layering / merge semantics
 
-`ColorsConfig` and `SymbolConfig` need a **merge(base, override)** where the override only affects keys it explicitly sets. This requires distinguishing "unset" from "default":
+The style file (base) and `config.toml`'s override sections are both parsed into one **partial** `StyleDoc` form (all fields `Option`/presence so "unset" is distinct from "default"), then **merged** so the override only affects keys it explicitly sets:
 
-- The **override-layer** structs (parsed from `config.toml`'s `[colors]`/`[symbols]` and from a style file used as an override) use `Option` fields / presence, NOT defaulted strings. (Today `SymbolConfig` presets are `String` with `#[serde(default=...)]`, which cannot express "unset" — introduce an internal "raw/partial" form for merging, then finalize to the existing concrete `SymbolConfig`/`ColorsConfig` for resolution.)
 - **Colors merge:** `scheme = override.scheme.or(base.scheme)`; per-selector declarations: base map ∪ override map, override wins per selector; within a selector, override properties patch base properties (per-property).
 - **Symbols merge:** each preset = `override.preset.or(base.preset)`; `overrides` map = base ∪ override, override wins per glyph key.
-- After merge, resolve via the existing `ColorScheme::resolve` / `SymbolSet::resolve` (adapted to consume the merged form + the new selector declarations).
+- After merge, **finalize** the partial form (fill unset presets with defaults) and resolve into `ColorScheme` + `SymbolSet`.
+
+Both `config.toml`'s `[colors]`/`[symbols]` and the style file deserialize into the **same** partial structs — there is no separate "config" vs "style" schema.
 
 ## Editing (gallery `g` / config screen `F2`) — writes to the personal style file
 
@@ -115,7 +114,7 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 - **`crates/app/src/style.rs` (new):** the `Style file` model (raw/partial structs for `[colors]` selector declarations + `[symbols]`), `load_style(name_or_path, user_dir) -> (StyleDoc, warnings)`, `merge(base, override) -> StyleDoc`, `resolve(StyleDoc, user_dir) -> (ColorScheme, SymbolSet, warnings)`, `write_style(path, &StyleDoc)` (toml_edit, preserve unknown), `write_style_full(path, &ColorScheme, &SymbolSet)` (the fully-expanded, self-contained export for the gallery button), and the built-in `default` embedded text. The fixed selector→field table lives here.
 - **`render/gallery.rs`:** add the "Output all settings to style file" footer button + its key hint.
 - **`input.rs`:** a gallery action (e.g. `GalleryExportStyle`) that calls `write_style_full` to the personal file and repoints `config.toml` `style`.
-- **`config.rs`:** add `style: Option<String>` to `Config`; `Config::resolve` reads it; stop requiring `[colors]`/`[symbols]` here (still parse them as the override layer). `write_config` drops the style sections.
+- **`config.rs`:** add `style: Option<String>` to `Config`; change `Config.colors`/`Config.symbols` to the new partial style structs (`StyleColors`/`StyleSymbols`) so the config override sections use the same format; `Config::resolve` reads `style`; `write_config` does not emit `[colors]`/`[symbols]` (gallery/config edits go to the style file).
 - **`colors.rs`:** extend the color-value parser to accept named/index/hex uniformly; adapt `ColorScheme` construction to consume merged selector declarations (base palette via `scheme` + per-selector patches).
 - **`symbols.rs`:** `SymbolSet::resolve` consumes the merged symbol form (already preset+override; minimal change).
 - **`main.rs`:** at startup, `load_style(config.style, user_dir)` → merge with config override layer → resolve → `state.colors`/`state.symbols`. Re-resolve after gallery/config save (writing the style file + repointing `style`).
@@ -130,7 +129,8 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 
 - **Pointer resolution:** built-in `default` name; a file path (`~` + relative-to-user_dir); absent ⇒ personal `style.toml` if present else `default`; missing/garbage path ⇒ warning + fall back to `default` (never crash).
 - **Layer merge:** override-only-sets-present-keys (a base with `room.fg=white` + override `room.fg=red` ⇒ red; base `connector.fg=cyan` untouched when override omits it); per-property patch within a selector; `scheme` override-or-base; symbols preset override-or-base + glyph-map union.
-- **Backward compat:** a `config.toml` with the OLD `[colors].elements`/`[symbols]` and no `style` pointer resolves to exactly today's look (golden test against current `ColorScheme`/`SymbolSet`).
+- **Default look:** an empty `StyleDoc` (no `style` pointer, no config override) resolves to exactly today's terminal default (`ColorScheme::terminal_default()` + default `SymbolSet`).
+- **Inline-include override:** a base style file sets `connector.fg = cyan`; a `config.toml` `[colors]` override sets `connector.fg = magenta` and omits everything else ⇒ resolved `connector` is magenta, every other element unchanged from the style file.
 - **Selector → field mapping:** each selector + `:variant` lands on the correct `ColorScheme` field with the right patched Style; unknown selector ⇒ warning, ignored, no crash.
 - **Color value parsing:** named, `#rrggbb`, index `0-255` each parse; bad value ⇒ warning, ignored.
 - **Write round-trip:** `write_style` writes selectors+symbols, is format-preserving, and PRESERVES an unrelated `[header]` section + comments (proves future beautify keys survive). Re-reading yields the same resolved style.
@@ -142,11 +142,10 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 - A general CSS cascade / arbitrary selector matching (fixed selector set only).
 - Layout-from-style (docking/grid) — ratatui doesn't support it; layout stays in code.
 - Borders/header/input *rendering* and their style fields (those are #42/#44/#45/#46).
-- Migrating users' existing `config.toml` style sections out automatically (they stay as the override layer).
+- Backward compatibility / migration of old-format files (app is undeployed; delete old `~/.babelmap` style files instead).
 - `mapper`/`zvm` changes.
 
 ## Risks & limitations (accepted)
 
-- **Two override formats** (new selector tables + legacy `elements` strings) both parsed — small extra parsing, bounded and tested.
-- **"Unset vs default" refactor** for the override layer is the trickiest part — handled by an internal partial/raw form distinct from the finalized concrete config structs.
+- **"Unset vs default"** is the trickiest part — handled by the partial `StyleDoc` form (all-`Option`) used for both the style file and the config override, finalized only at resolve time.
 - **Fork-on-edit repointing** changes `config.toml`'s `style` when you edit while a foreign/built-in style is active — intentional (what you see is what you save); documented behavior, covered by a test.
