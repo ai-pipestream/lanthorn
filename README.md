@@ -102,6 +102,9 @@ and unsupported; v1/v2 are not supported.)
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
   (`--user-dir`, `--config`); CLI overrides the file, which overrides defaults.
+- **In-app config screen** (`F2`) — a settings modal for the common options
+  with an explicit Save (writes the config file, format-preserving) and Cancel;
+  changes apply live.
 - Configurable babelmap home directory.
 
 ---
