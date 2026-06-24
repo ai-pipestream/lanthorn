@@ -133,9 +133,21 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     }
 
     // 2b. Tidy-animation sub-mode: playback owns the arrows (step), Space (play/pause)
-    //     and Esc (exit); every other key is absorbed so the modal view is not disturbed.
+    //     and Esc (exit). The map stays pannable/zoomable during playback — arrows are
+    //     taken for stepping, so panning uses hjkl / Shift+arrows and zoom uses +/-.
     if state.tidy_anim.is_some() {
+        let shift = key.modifiers == KeyModifiers::SHIFT;
         return match key.code {
+            KeyCode::Left if shift => Action::Pan(-1, 0),
+            KeyCode::Right if shift => Action::Pan(1, 0),
+            KeyCode::Up if shift => Action::Pan(0, -1),
+            KeyCode::Down if shift => Action::Pan(0, 1),
+            KeyCode::Char('h') => Action::Pan(-1, 0),
+            KeyCode::Char('l') => Action::Pan(1, 0),
+            KeyCode::Char('k') => Action::Pan(0, -1),
+            KeyCode::Char('j') => Action::Pan(0, 1),
+            KeyCode::Char('+') | KeyCode::Char('=') => Action::ZoomIn,
+            KeyCode::Char('-') => Action::ZoomOut,
             KeyCode::Left => Action::AnimStep(-1),
             KeyCode::Right => Action::AnimStep(1),
             KeyCode::Char(' ') => Action::AnimTogglePlay,
@@ -986,6 +998,12 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(' '))), Action::AnimTogglePlay));
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
+        // The map stays scrollable during playback: hjkl / Shift+arrows pan, +/- zoom.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
         // Exit clears playback.
         apply_action(Action::AnimExit, &mut s, &mut Mapper::default());
         assert!(s.tidy_anim.is_none());

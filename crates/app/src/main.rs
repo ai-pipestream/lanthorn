@@ -141,7 +141,7 @@ fn draw_frame(
             // Playback status: stage progress + the transport controls.
             let f = anim.current();
             format!(
-                "Tidy [{}/{}] {}{} | \u{2190}\u{2192}: step | Space: {} | Esc: exit",
+                "Tidy [{}/{}] {}{} | \u{2190}\u{2192}: step | Space: {} | hjkl: pan | +/-: zoom | Esc: exit",
                 anim.idx + 1,
                 anim.frames.len(),
                 f.label,
