@@ -40,8 +40,6 @@ pub enum Command {
     TogglePortalLabels,
     /// Toggle between Game and Map focus.
     ToggleFocus,
-    /// Open or close the full-screen help overlay.
-    ToggleHelp,
     // ── Nudge (Global, Ctrl+Arrows) ───────────────────────────────────────────
     NudgeLeft,
     NudgeRight,
@@ -99,7 +97,6 @@ impl Command {
             Command::ToggleAlignment => Action::ToggleAlignment,
             Command::TogglePortalLabels => Action::TogglePortalLabels,
             Command::ToggleFocus => Action::ToggleFocus,
-            Command::ToggleHelp => Action::ToggleHelp,
             Command::NudgeLeft => Action::NudgeSelected(-1, 0),
             Command::NudgeRight => Action::NudgeSelected(1, 0),
             Command::NudgeUp => Action::NudgeSelected(0, -1),
@@ -147,7 +144,6 @@ impl Command {
             Command::ToggleAlignment => "toggle_alignment",
             Command::TogglePortalLabels => "toggle_portal_labels",
             Command::ToggleFocus => "toggle_focus",
-            Command::ToggleHelp => "toggle_help",
             Command::NudgeLeft => "nudge_left",
             Command::NudgeRight => "nudge_right",
             Command::NudgeUp => "nudge_up",
@@ -195,7 +191,6 @@ impl Command {
             Command::ToggleAlignment => "alignment",
             Command::TogglePortalLabels => "portals",
             Command::ToggleFocus => "focus",
-            Command::ToggleHelp => "help",
             Command::NudgeLeft => "nudge left",
             Command::NudgeRight => "nudge right",
             Command::NudgeUp => "nudge up",
@@ -243,7 +238,6 @@ impl Command {
             | Command::ToggleAlignment
             | Command::TogglePortalLabels
             | Command::ToggleFocus
-            | Command::ToggleHelp
             | Command::NudgeLeft
             | Command::NudgeRight
             | Command::NudgeUp
@@ -299,7 +293,6 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::ToggleAlignment,
     Command::TogglePortalLabels,
     Command::ToggleFocus,
-    Command::ToggleHelp,
     Command::NudgeLeft,
     Command::NudgeRight,
     Command::NudgeUp,
@@ -521,9 +514,6 @@ impl KeyMap {
         bind!(ctrl(Up), Command::NudgeUp, Context::Global);
         bind!(ctrl(Down), Command::NudgeDown, Context::Global);
 
-        // Help toggle: F1 global, ? in map
-        bind!(plain(F(1)), Command::ToggleHelp, Context::Global);
-
         // ── Map ───────────────────────────────────────────────────────────────
         // Pan: plain arrows + Shift+arrows + hjkl (all three sets)
         bind!(plain(Left), Command::PanLeft, Context::Map);
@@ -565,8 +555,6 @@ impl KeyMap {
         bind!(plain(Char('g')), Command::OpenGallery, Context::Map);
         // Esc → ToggleFocus (in map context)
         bind!(plain(Esc), Command::ToggleFocus, Context::Map);
-        // ? → ToggleHelp (in map context)
-        bind!(plain(Char('?')), Command::ToggleHelp, Context::Map);
 
         // ── Anim ──────────────────────────────────────────────────────────────
         // Pan in anim: Shift+arrows + hjkl (plain arrows go to step)
@@ -719,6 +707,7 @@ const DEFAULT_DIRECT_NAMES: &[&str] = &[
     "select_next",
     "select_prev",
     "recenter",
+    "toggle_focus",
 ];
 
 /// Default groups for the hotkey dialog (title, command snake_case names).
@@ -735,6 +724,7 @@ const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
 /// Controls which key opens the dialog (`prefix`), which commands are always
 /// reachable without the dialog (`direct`), and how commands are grouped inside
 /// the dialog (`groups`).
+#[derive(Debug)]
 pub struct HotkeyLayout {
     /// The key that opens (and closes) the dialog.
     pub prefix: KeySpec,
@@ -897,6 +887,7 @@ mod tests {
         // Direct commands
         assert!(layout.is_direct(Command::Recenter), "Recenter should be direct");
         assert!(layout.is_direct(Command::Quit), "Quit should be direct");
+        assert!(layout.is_direct(Command::ToggleFocus), "ToggleFocus should be direct");
         // Non-direct (dialog-only) commands
         assert!(!layout.is_direct(Command::Retidy), "Retidy should NOT be direct");
         assert!(!layout.is_direct(Command::OpenGallery), "OpenGallery should NOT be direct");
