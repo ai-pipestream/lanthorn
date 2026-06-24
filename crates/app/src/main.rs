@@ -1563,7 +1563,6 @@ mod tests {
     fn split_layout_unfocused_pane_is_dimmed_focused_is_not() {
         let full = Rect::new(0, 0, 20, 5);
         let left_inner = Rect::new(1, 1, 8, 3);   // story (transcript) inner area
-        let right_inner = Rect::new(11, 1, 8, 3); // map inner area
 
         // Simulate Focus::Map: story pane dims, map pane stays bright.
         {
@@ -1592,7 +1591,7 @@ mod tests {
 
         // Simulate Focus::Game: neither pane is dimmed (map pane always stays bright).
         {
-            let mut buf = Buffer::empty(full);
+            let buf = Buffer::empty(full);
             // Focus::Game => no dim_area call at all (map is never dimmed)
 
             // Neither pane has DIM.
@@ -1611,10 +1610,9 @@ mod tests {
     #[test]
     fn map_pane_never_dimmed() {
         let full = Rect::new(0, 0, 20, 5);
-        let right_inner = Rect::new(11, 1, 8, 3); // map inner area
 
         // Focus::Game: map pane should NOT be dimmed (we do NOT call dim_area on it).
-        let mut buf = Buffer::empty(full);
+        let buf = Buffer::empty(full);
         // The new code: "if state.focus == Focus::Map { dim_area(transcript_inner); }"
         // So for Focus::Game, we dim nothing. Map stays bright.
         for y in 1..4 {
@@ -1639,6 +1637,5 @@ mod tests {
                 );
             }
         }
-        let _ = right_inner; // referenced to suppress warning
     }
 }

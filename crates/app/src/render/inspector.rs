@@ -416,7 +416,7 @@ mod tests {
         // Verify the canvas stays blank.
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| {
+        terminal.draw(|_f| {
             // draw nothing — mirror what main.rs does when show_inspector is false
         }).unwrap();
         let buf = terminal.backend().buffer().clone();

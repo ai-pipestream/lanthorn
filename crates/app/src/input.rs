@@ -2241,7 +2241,7 @@ mod tests {
     fn animate_tidy_captures_frames_and_lands_on_instant_retidy() {
         use mapper::direction::Direction::E;
         // Two mappers with identical scrambled input: one animated, one instant-tidied.
-        let mut build = || {
+        let build = || {
             let mut m = Mapper::default();
             m.observe(1, "A", None);
             m.observe(2, "B", Some(E));
@@ -3604,7 +3604,6 @@ mod tests {
     fn minizork_reset_restores_opening_room_and_clears_turns() {
         use crate::session::{apply_turn, GameSession, TurnResult};
         use zvm::current_location;
-        use zvm::ObjectSnapshot;
 
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../zvm/tests/fixtures/minizork.z3");
