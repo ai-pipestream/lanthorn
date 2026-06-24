@@ -87,6 +87,11 @@ pub struct Config {
     /// Sub-directories: maps/ — where per-story map files live.
     #[serde(default = "default_user_dir")]
     pub user_dir: PathBuf,
+    /// When false (default), a story with no .babelmap archive starts with an
+    /// empty map (fog-of-war, self-contained).  When true, fall back to the
+    /// legacy shared <ifid>.map.json so pre-accumulated maps are still visible.
+    #[serde(default)]
+    pub use_default_map: bool,
     /// Map symbol configuration: presets + per-glyph overrides.
     #[serde(default)]
     pub symbols: SymbolConfig,
@@ -99,6 +104,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             user_dir: default_user_dir(),
+            use_default_map: false,
             symbols: SymbolConfig::default(),
             keymap: KeymapConfig::default(),
         }
@@ -130,6 +136,7 @@ pub fn resolve(cli: &Cli) -> Config {
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
             cfg.user_dir = from_file.user_dir;
+            cfg.use_default_map = from_file.use_default_map;
             cfg.symbols = from_file.symbols;
             cfg.keymap = from_file.keymap;
         }
@@ -218,5 +225,24 @@ mod tests {
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
+    }
+
+    #[test]
+    fn use_default_map_is_false_by_default() {
+        let cfg = Config::default();
+        assert!(!cfg.use_default_map, "use_default_map must default to false");
+    }
+
+    #[test]
+    fn use_default_map_parses_from_toml() {
+        let toml = "use_default_map = true";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.use_default_map);
+    }
+
+    #[test]
+    fn use_default_map_omitted_stays_false() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.use_default_map);
     }
 }

@@ -18,9 +18,10 @@ use app::config::{resolve, Cli};
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
-use app::ifid::{compute_ifid, map_path};
+use app::archive::{load_archive, save_archive};
+use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
-use app::persist_files::{load_map, restore_game, save_game, save_map};
+use app::persist_files::{load_map, save_map};
 use app::render::help::draw_help;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
@@ -327,12 +328,37 @@ fn main() {
 
     let ifid = compute_ifid(&story_bytes);
     let dir = map_dir(&cfg.user_dir);
+    let arc_file = archive_path(&dir, &ifid);
     let map_file = map_path(&dir, &ifid);
 
-    let mut mapper = load_map(&map_file).unwrap_or_default();
+    // Load mapper (and optionally restore the game save) from the archive.
+    // Migration: if no archive exists but a legacy .map.json does, load that.
+    // use_default_map = true: also fall back to legacy map when no archive.
+    let mut mapper = if arc_file.exists() {
+        match load_archive(&arc_file) {
+            Ok(ac) => {
+                // Restore the machine from the saved game state in the archive.
+                if let Err(e) = session.machine.restore_quetzal(&ac.save) {
+                    eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
+                }
+                ac.mapper
+            }
+            Err(e) => {
+                eprintln!("babelmap: warning: could not load archive {}: {}", arc_file.display(), e);
+                Mapper::default()
+            }
+        }
+    } else if map_file.exists() {
+        // Back-compat: migrate existing .map.json to the new archive on next save.
+        load_map(&map_file).unwrap_or_default()
+    } else if cfg.use_default_map {
+        // Fall back to legacy shared map when configured to do so.
+        load_map(&map_file).unwrap_or_default()
+    } else {
+        Mapper::default()
+    };
 
-    // Save-slot and export paths (fixed single slot per IFID).
-    let save_slot = dir.join(format!("{}.qzl", ifid));
+    // Export paths (fixed per IFID).
     let svg_path = dir.join(format!("{}.svg", ifid));
     let dot_path = dir.join(format!("{}.dot", ifid));
     let dump_path = dir.join(format!("{}.map.txt", ifid));
@@ -523,12 +549,12 @@ fn main() {
             }
 
             Action::SaveGame => {
-                // v1: fixed single save slot next to the map file.
-                match save_game(&save_slot, &session.machine) {
+                // Bundle map + game into a single .babelmap archive.
+                match save_archive(&arc_file, &mapper, &session.machine) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
-                            save_slot.display()
+                            arc_file.display()
                         ));
                     }
                     Err(e) => {
@@ -538,33 +564,47 @@ fn main() {
             }
 
             Action::RestoreGame => {
-                // v1: restore from the fixed single save slot.
-                match restore_game(&save_slot, &mut session.machine) {
-                    Ok(()) => {
-                        // After restore, re-observe current location.
-                        let loc = zvm::current_location(&session.machine);
-                        if let Some(snap) = loc {
-                            let rid = snap.number as mapper::graph::RoomId;
-                            let restore_result = TurnResult {
-                                transcript: String::new(),
-                                location: Some(snap),
-                                quit: false,
-                                info: None,
-                            };
-                            apply_turn(&mut mapper, "", &restore_result);
-                            state.set_viewed_layer(None);
-                            state.select_room(Some(rid));
-                            if let Some(room) = mapper.graph.room(rid) {
-                                if let Some(pos) = room.pos {
-                                    let (pw, ph) = map_pane_dims(last_map_area);
-                                    state.recenter_on(pos, pw, ph);
+                // Restore map + game from the .babelmap archive.
+                match load_archive(&arc_file) {
+                    Ok(ac) => {
+                        let restore_err = session.machine.restore_quetzal(&ac.save).map_err(|e| {
+                            match e {
+                                zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+                                other => format!("restore failed: {:?}", other),
+                            }
+                        });
+                        match restore_err {
+                            Ok(()) => {
+                                mapper = ac.mapper;
+                                // After restore, re-observe current location.
+                                let loc = zvm::current_location(&session.machine);
+                                if let Some(snap) = loc {
+                                    let rid = snap.number as mapper::graph::RoomId;
+                                    let restore_result = TurnResult {
+                                        transcript: String::new(),
+                                        location: Some(snap),
+                                        quit: false,
+                                        info: None,
+                                    };
+                                    apply_turn(&mut mapper, "", &restore_result);
+                                    state.set_viewed_layer(None);
+                                    state.select_room(Some(rid));
+                                    if let Some(room) = mapper.graph.room(rid) {
+                                        if let Some(pos) = room.pos {
+                                            let (pw, ph) = map_pane_dims(last_map_area);
+                                            state.recenter_on(pos, pw, ph);
+                                        }
+                                    }
                                 }
+                                state.push_transcript(&format!(
+                                    "[Game restored from {}]",
+                                    arc_file.display()
+                                ));
+                            }
+                            Err(e) => {
+                                state.push_transcript(&format!("[Restore failed: {}]", e));
                             }
                         }
-                        state.push_transcript(&format!(
-                            "[Game restored from {}]",
-                            save_slot.display()
-                        ));
                     }
                     Err(e) => {
                         state.push_transcript(&format!("[Restore failed: {}]", e));
@@ -624,12 +664,16 @@ fn main() {
 
     restore_terminal();
 
-    match save_map(&map_file, &mapper) {
+    match save_archive(&arc_file, &mapper, &session.machine) {
         Ok(()) => {
-            eprintln!("babelmap: map saved to {}", map_file.display());
+            eprintln!("babelmap: map saved to {}", arc_file.display());
         }
         Err(e) => {
-            eprintln!("babelmap: warning: could not save map to {}: {}", map_file.display(), e);
+            eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
+            // Fall back to legacy map-only save so data is not lost.
+            if let Err(map_err) = save_map(&map_file, &mapper) {
+                eprintln!("babelmap: warning: fallback map save also failed: {}", map_err);
+            }
         }
     }
 }
