@@ -366,6 +366,19 @@ pub enum Zoom {
     Overview,
 }
 
+/// Map a fine zoom level (0–8) to the three-variant `Zoom` enum used for rendering.
+///
+/// Fine levels 0–2 → Overview, 3–5 → Compact, 6–8 → Boxes.
+/// The fine level slows down zoom transitions so the middle (Compact) level is
+/// reachable without accidentally skipping it when scrolling quickly.
+pub(crate) fn zoom_from_level(level: u8) -> Zoom {
+    match level {
+        0..=2 => Zoom::Overview,
+        3..=5 => Zoom::Compact,
+        _ => Zoom::Boxes,
+    }
+}
+
 impl Zoom {
     /// Returns (step_w, step_h): the terminal cell stride per map-grid cell.
     ///
@@ -389,6 +402,9 @@ pub struct AppState {
     pub focus: Focus,
     pub layout: Layout,
     pub zoom: Zoom,
+    /// Fine zoom level (0–8): 0–2 = Overview, 3–5 = Compact, 6–8 = Boxes.
+    /// Derived from this level; `zoom_in`/`zoom_out`/`zoom_reset` update both.
+    pub zoom_level: u8,
     /// Map scroll offset in grid cells: (x, y).
     pub scroll: (i32, i32),
     pub selected_room: Option<RoomId>,
@@ -421,6 +437,10 @@ pub struct AppState {
     pub room_panel: Option<RoomPanel>,
     /// Middle-button drag-pan state. `Some` while a drag gesture is in progress.
     pub drag: Option<DragState>,
+    /// Sub-character pan offset in terminal columns/rows, applied on top of `scroll`.
+    /// Allows 1-character precision drag panning without changing the cell-unit scroll.
+    /// Cleared by `recenter_on`.
+    pub char_pan: (i32, i32),
     /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
     /// closed by the prefix key again or 'q'.
     pub hotkey_dialog: bool,
@@ -504,6 +524,7 @@ impl Default for AppState {
             focus: Focus::Game,
             layout: Layout::Split,
             zoom: Zoom::Boxes,
+            zoom_level: 7, // default = Boxes (level 7)
             scroll: (0, 0),
             selected_room: None,
             transcript: Vec::new(),
@@ -518,6 +539,7 @@ impl Default for AppState {
             show_inspector: false,
             room_panel: None,
             drag: None,
+            char_pan: (0, 0),
             hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
             colors: crate::colors::ColorScheme::terminal_default(),
@@ -587,22 +609,23 @@ impl AppState {
         };
     }
 
-    /// Zoom in toward Boxes (more detail). Clamps at Boxes.
+    /// Zoom in one fine step (toward Boxes). Clamps at level 8 (Boxes).
     pub fn zoom_in(&mut self) {
-        self.zoom = match self.zoom {
-            Zoom::Overview => Zoom::Compact,
-            Zoom::Compact => Zoom::Boxes,
-            Zoom::Boxes => Zoom::Boxes, // already at max detail
-        };
+        self.zoom_level = self.zoom_level.saturating_add(1).min(8);
+        self.zoom = zoom_from_level(self.zoom_level);
     }
 
-    /// Zoom out toward Overview (less detail). Clamps at Overview.
+    /// Zoom out one fine step (toward Overview). Clamps at level 0 (Overview).
     pub fn zoom_out(&mut self) {
-        self.zoom = match self.zoom {
-            Zoom::Boxes => Zoom::Compact,
-            Zoom::Compact => Zoom::Overview,
-            Zoom::Overview => Zoom::Overview, // already at min detail
-        };
+        self.zoom_level = self.zoom_level.saturating_sub(1);
+        self.zoom = zoom_from_level(self.zoom_level);
+    }
+
+    /// Reset zoom to the default level (7 = Boxes) and clear char_pan.
+    pub fn zoom_reset(&mut self) {
+        self.zoom_level = 7;
+        self.zoom = Zoom::Boxes;
+        self.char_pan = (0, 0);
     }
 
     /// Pan the map scroll by (dx, dy).
@@ -615,11 +638,22 @@ impl AppState {
     /// `pane_w` and `pane_h` are in terminal characters; this method converts
     /// them to map-grid cells using the current zoom step before centering,
     /// so that `scroll` stays in cell units (matching `cell_to_screen`).
+    ///
+    /// For Boxes zoom the non-uniform layout places rooms at roughly
+    /// `(BOX_W + MIN_GUTTER)` × `(BOX_H + MIN_GUTTER)` pixels per cell, which
+    /// is smaller than `zoom.steps()` (19×11). Using the actual cell footprint
+    /// keeps the target room near the pane centre rather than at the top edge.
     pub fn recenter_on(&mut self, cell: (i32, i32), pane_w: u16, pane_h: u16) {
-        let (sw, sh) = self.zoom.steps();
+        use crate::render::map::{BOX_W, BOX_H, MIN_GUTTER};
+        let (sw, sh) = match self.zoom {
+            Zoom::Boxes => (BOX_W + MIN_GUTTER, BOX_H + MIN_GUTTER), // 13 × 7
+            _ => self.zoom.steps(),
+        };
         let cells_w = (pane_w as i32 / sw).max(1);
         let cells_h = (pane_h as i32 / sh).max(1);
         self.scroll = (cell.0 - cells_w / 2, cell.1 - cells_h / 2);
+        // Reset char-granular pan offset when re-centering the view.
+        self.char_pan = (0, 0);
     }
 
     /// Split `text` on `'\n'` and append each line to the transcript.
@@ -696,16 +730,27 @@ mod tests {
         assert!(matches!(s.layout, Layout::MapFull));
         s.cycle_layout();
         assert!(matches!(s.layout, Layout::Split));
-        // zoom clamps
-        s.zoom_out();
+        // zoom clamps — now uses 9-level fine zoom (0-8); starts at level 7 (Boxes).
+        // Level 7→6: still Boxes; 6→5: Compact; …; 0: Overview; clamped at 0.
+        // Zoom out to level 5 (first Compact level).
+        s.zoom_out(); // 7→6: Boxes
+        s.zoom_out(); // 6→5: Compact
         assert!(matches!(s.zoom, Zoom::Compact));
-        s.zoom_out();
+        // Zoom out to level 0 (Overview).
+        s.zoom_out(); // 5→4: Compact
+        s.zoom_out(); // 4→3: Compact
+        s.zoom_out(); // 3→2: Overview
+        s.zoom_out(); // 2→1: Overview
+        s.zoom_out(); // 1→0: Overview
         assert!(matches!(s.zoom, Zoom::Overview));
-        s.zoom_out();
+        s.zoom_out(); // clamp at 0
         assert!(matches!(s.zoom, Zoom::Overview)); // clamped
-        s.zoom_in();
-        s.zoom_in();
-        s.zoom_in();
+        // Zoom back to Boxes (need 8 zoom_in steps from 0).
+        for _ in 0..8 {
+            s.zoom_in();
+        }
+        assert!(matches!(s.zoom, Zoom::Boxes));
+        s.zoom_in(); // clamp at 8
         assert!(matches!(s.zoom, Zoom::Boxes)); // clamped
     }
 
@@ -725,12 +770,34 @@ mod tests {
 
     #[test]
     fn recenter_on_centers_cell() {
-        let mut s = AppState::default(); // Boxes zoom (step 18×6)
+        let mut s = AppState::default(); // Boxes zoom: effective step 13×7
         // Centering cell (5, 5) in a 20×10 character pane:
-        // cells_w = 20 / 18 = 1, cells_h = 10 / 6 = 1
+        // cells_w = 20 / 13 = 1, cells_h = 10 / 7 = 1
         // scroll = (5 - 1/2, 5 - 1/2) = (5 - 0, 5 - 0) = (5, 5)
         s.recenter_on((5, 5), 20, 10);
         assert_eq!(s.scroll, (5, 5));
+    }
+
+    #[test]
+    fn recenter_on_boxes_larger_pane() {
+        let mut s = AppState::default(); // Boxes zoom: effective step 13×7
+        // Centering cell (0, 0) in a 80×24 character pane:
+        // cells_w = 80 / 13 = 6, cells_h = 24 / 7 = 3
+        // scroll = (0 - 6/2, 0 - 3/2) = (0 - 3, 0 - 1) = (-3, -1)
+        s.recenter_on((0, 0), 80, 24);
+        assert_eq!(s.scroll, (-3, -1));
+    }
+
+    #[test]
+    fn recenter_on_compact_zoom() {
+        use crate::state::Zoom;
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact; // steps = (12, 5)
+        // Centering cell (4, 4) in a 48×20 pane:
+        // cells_w = 48 / 12 = 4, cells_h = 20 / 5 = 4
+        // scroll = (4 - 4/2, 4 - 4/2) = (4 - 2, 4 - 2) = (2, 2)
+        s.recenter_on((4, 4), 48, 20);
+        assert_eq!(s.scroll, (2, 2));
     }
 
     #[test]
@@ -863,5 +930,90 @@ mod tests {
         assert!(saw_dir, "should have at least one dir");
         assert!(saw_file, "should have at least one file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── zoom_level / fine zoom tests (item 2) ────────────────────────────────
+
+    #[test]
+    fn zoom_level_default_is_boxes() {
+        let s = AppState::default();
+        assert_eq!(s.zoom_level, 7);
+        assert!(matches!(s.zoom, Zoom::Boxes));
+    }
+
+    #[test]
+    fn zoom_in_increments_level_and_clamps() {
+        let mut s = AppState::default(); // level 7
+        s.zoom_in(); // 7 -> 8
+        assert_eq!(s.zoom_level, 8);
+        assert!(matches!(s.zoom, Zoom::Boxes));
+        s.zoom_in(); // clamp at 8
+        assert_eq!(s.zoom_level, 8);
+    }
+
+    #[test]
+    fn zoom_out_decrements_level_and_clamps() {
+        let mut s = AppState::default(); // level 7
+        s.zoom_out(); // 7 -> 6: Boxes
+        assert_eq!(s.zoom_level, 6);
+        assert!(matches!(s.zoom, Zoom::Boxes));
+        s.zoom_out(); // 6 -> 5: Compact
+        assert_eq!(s.zoom_level, 5);
+        assert!(matches!(s.zoom, Zoom::Compact));
+        // Go all the way to 0
+        for _ in 0..5 {
+            s.zoom_out();
+        }
+        assert_eq!(s.zoom_level, 0);
+        assert!(matches!(s.zoom, Zoom::Overview));
+        s.zoom_out(); // clamp at 0
+        assert_eq!(s.zoom_level, 0);
+    }
+
+    #[test]
+    fn zoom_reset_returns_to_default_level() {
+        let mut s = AppState::default();
+        // Go to Overview
+        for _ in 0..7 {
+            s.zoom_out();
+        }
+        assert!(matches!(s.zoom, Zoom::Overview));
+        // Also set char_pan to something non-zero
+        s.char_pan = (4, -2);
+        // Reset
+        s.zoom_reset();
+        assert_eq!(s.zoom_level, 7, "zoom_reset must restore level to 7");
+        assert!(matches!(s.zoom, Zoom::Boxes), "zoom_reset must restore Zoom::Boxes");
+        assert_eq!(s.char_pan, (0, 0), "zoom_reset must clear char_pan");
+    }
+
+    #[test]
+    fn zoom_from_level_maps_correctly() {
+        use super::zoom_from_level;
+        assert!(matches!(zoom_from_level(0), Zoom::Overview));
+        assert!(matches!(zoom_from_level(1), Zoom::Overview));
+        assert!(matches!(zoom_from_level(2), Zoom::Overview));
+        assert!(matches!(zoom_from_level(3), Zoom::Compact));
+        assert!(matches!(zoom_from_level(4), Zoom::Compact));
+        assert!(matches!(zoom_from_level(5), Zoom::Compact));
+        assert!(matches!(zoom_from_level(6), Zoom::Boxes));
+        assert!(matches!(zoom_from_level(7), Zoom::Boxes));
+        assert!(matches!(zoom_from_level(8), Zoom::Boxes));
+    }
+
+    // ── char_pan / drag-pan tests (item 1) ───────────────────────────────────
+
+    #[test]
+    fn char_pan_default_is_zero() {
+        let s = AppState::default();
+        assert_eq!(s.char_pan, (0, 0));
+    }
+
+    #[test]
+    fn recenter_on_clears_char_pan() {
+        let mut s = AppState::default();
+        s.char_pan = (5, -3);
+        s.recenter_on((0, 0), 80, 24);
+        assert_eq!(s.char_pan, (0, 0), "recenter_on must reset char_pan to (0,0)");
     }
 }

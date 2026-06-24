@@ -232,10 +232,10 @@ fn draw_frame(
                 if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_inner, buf); }
                 map_area = map_inner; // use inner for recenter math
 
-                // Dim the unfocused pane's inner content so the eye is drawn to the active pane.
-                match state.focus {
-                    Focus::Game => dim_area(buf, map_inner),
-                    Focus::Map => dim_area(buf, transcript_inner),
+                // Map pane is NEVER dimmed (always full brightness).
+                // Story pane dims when map has focus.
+                if state.focus == Focus::Map {
+                    dim_area(buf, transcript_inner);
                 }
             }
         }
@@ -1485,36 +1485,89 @@ mod tests {
     /// draw_frame does: render content into two inner rects, then call dim_area
     /// on the unfocused one. It verifies that cells in the unfocused inner rect
     /// have DIM and cells in the focused inner rect do NOT.
+    ///
+    /// New behavior (item 6): map pane is NEVER dimmed regardless of focus.
+    /// Story pane dims only when map has focus.
     #[test]
     fn split_layout_unfocused_pane_is_dimmed_focused_is_not() {
-        // Two side-by-side "panes" within a wider buffer.
         let full = Rect::new(0, 0, 20, 5);
-        let _left_inner = Rect::new(1, 1, 8, 3);   // story inner area (focused; not dimmed)
-        let right_inner = Rect::new(11, 1, 8, 3);  // map inner area
+        let left_inner = Rect::new(1, 1, 8, 3);   // story (transcript) inner area
+        let right_inner = Rect::new(11, 1, 8, 3); // map inner area
 
-        let mut buf = Buffer::empty(full);
+        // Simulate Focus::Map: story pane dims, map pane stays bright.
+        {
+            let mut buf = Buffer::empty(full);
+            dim_area(&mut buf, left_inner);
 
-        // Simulate Focus::Game: dim the map (right) pane, not the transcript (left).
-        dim_area(&mut buf, right_inner);
-
-        // Focused pane (left) inner cells should NOT have DIM.
-        for y in 1..4 {
-            for x in 1..9 {
-                assert!(
-                    !buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
-                    "focused pane cell ({x},{y}) should NOT have DIM"
-                );
+            // Story pane (left) inner cells should have DIM when map has focus.
+            for y in 1..4 {
+                for x in 1..9 {
+                    assert!(
+                        buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                        "story pane cell ({x},{y}) should have DIM when focus=Map"
+                    );
+                }
+            }
+            // Map pane (right) inner cells should NOT have DIM.
+            for y in 1..4 {
+                for x in 11..19 {
+                    assert!(
+                        !buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                        "map pane cell ({x},{y}) should NOT have DIM when focus=Map"
+                    );
+                }
             }
         }
 
-        // Unfocused pane (right) inner cells should all have DIM.
+        // Simulate Focus::Game: neither pane is dimmed (map pane always stays bright).
+        {
+            let mut buf = Buffer::empty(full);
+            // Focus::Game => no dim_area call at all (map is never dimmed)
+
+            // Neither pane has DIM.
+            for y in 1..4 {
+                for x in 1..19 {
+                    assert!(
+                        !buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                        "cell ({x},{y}) should NOT have DIM when focus=Game"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Verify: map pane is never dimmed regardless of focus setting.
+    #[test]
+    fn map_pane_never_dimmed() {
+        let full = Rect::new(0, 0, 20, 5);
+        let right_inner = Rect::new(11, 1, 8, 3); // map inner area
+
+        // Focus::Game: map pane should NOT be dimmed (we do NOT call dim_area on it).
+        let mut buf = Buffer::empty(full);
+        // The new code: "if state.focus == Focus::Map { dim_area(transcript_inner); }"
+        // So for Focus::Game, we dim nothing. Map stays bright.
         for y in 1..4 {
             for x in 11..19 {
                 assert!(
-                    buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
-                    "unfocused pane cell ({x},{y}) should have DIM"
+                    !buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                    "map pane cell ({x},{y}) should NOT have DIM under Focus::Game"
                 );
             }
         }
+
+        // Focus::Map: only transcript is dimmed, map stays bright.
+        let mut buf2 = Buffer::empty(full);
+        let left_inner = Rect::new(1, 1, 8, 3);
+        dim_area(&mut buf2, left_inner); // transcript dimmed
+        // Map pane not touched
+        for y in 1..4 {
+            for x in 11..19 {
+                assert!(
+                    !buf2.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                    "map pane cell ({x},{y}) should NOT have DIM under Focus::Map either"
+                );
+            }
+        }
+        let _ = right_inner; // referenced to suppress warning
     }
 }

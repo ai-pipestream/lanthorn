@@ -50,6 +50,8 @@ pub enum Command {
     OpenGallery,
     ZoomIn,
     ZoomOut,
+    /// Reset zoom to the default level and clear the char-pan offset.
+    ZoomReset,
     Recenter,
     SelectNext,
     SelectPrev,
@@ -124,6 +126,7 @@ impl Command {
             Command::OpenGallery => Action::OpenGallery,
             Command::ZoomIn => Action::ZoomIn,
             Command::ZoomOut => Action::ZoomOut,
+            Command::ZoomReset => Action::ZoomReset,
             Command::Recenter => Action::Recenter,
             Command::SelectNext => Action::SelectNext,
             Command::SelectPrev => Action::SelectPrev,
@@ -176,6 +179,7 @@ impl Command {
             Command::OpenGallery => "open_gallery",
             Command::ZoomIn => "zoom_in",
             Command::ZoomOut => "zoom_out",
+            Command::ZoomReset => "zoom_reset",
             Command::Recenter => "recenter",
             Command::SelectNext => "select_next",
             Command::SelectPrev => "select_prev",
@@ -228,6 +232,7 @@ impl Command {
             Command::OpenGallery => "gallery",
             Command::ZoomIn => "zoom in",
             Command::ZoomOut => "zoom out",
+            Command::ZoomReset => "zoom reset",
             Command::Recenter => "center",
             Command::SelectNext => "next room",
             Command::SelectPrev => "prev room",
@@ -281,6 +286,7 @@ impl Command {
             Command::OpenGallery
             | Command::ZoomIn
             | Command::ZoomOut
+            | Command::ZoomReset
             | Command::Recenter
             | Command::SelectNext
             | Command::SelectPrev
@@ -340,6 +346,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::OpenGallery,
     Command::ZoomIn,
     Command::ZoomOut,
+    Command::ZoomReset,
     Command::Recenter,
     Command::SelectNext,
     Command::SelectPrev,
@@ -610,6 +617,8 @@ impl KeyMap {
         bind!(plain(Char('=')), Command::ZoomIn, Context::Map);
         bind!(shift(Char('+')), Command::ZoomIn, Context::Map);
         bind!(plain(Char('-')), Command::ZoomOut, Context::Map);
+        // '0' (zero) resets zoom to default (Boxes) and clears char-pan offset.
+        bind!(plain(Char('0')), Command::ZoomReset, Context::Map);
 
         // Map commands
         bind!(plain(Char('c')), Command::Recenter, Context::Map);
@@ -794,6 +803,7 @@ const DEFAULT_DIRECT_NAMES: &[&str] = &[
     "pan_down",
     "zoom_in",
     "zoom_out",
+    "zoom_reset",
     "select_next",
     "select_prev",
     "recenter",
@@ -1143,5 +1153,53 @@ mod tests {
         assert!(state.show_inventory);
         apply_action(Action::ToggleInventory, &mut state, &mut mapper);
         assert!(!state.show_inventory);
+    }
+
+    // ── Item 2: ZoomReset command wiring ─────────────────────────────────────
+
+    #[test]
+    fn zoom_reset_command_wiring() {
+        assert_eq!(Command::ZoomReset.name(), "zoom_reset");
+        assert_eq!(Command::ZoomReset.label(), "zoom reset");
+        assert_eq!(Command::ZoomReset.context(), Context::Map);
+        assert!(matches!(Command::ZoomReset.to_action(), Action::ZoomReset));
+    }
+
+    #[test]
+    fn zoom_reset_bound_to_zero_key() {
+        let km = KeyMap::default();
+        let zero = KeySpec { code: KeyCode::Char('0'), ctrl: false, shift: false, alt: false };
+        assert_eq!(
+            km.lookup(&zero, Context::Map),
+            Some(Command::ZoomReset),
+            "'0' key must be bound to ZoomReset in Map context"
+        );
+    }
+
+    #[test]
+    fn zoom_reset_is_in_direct_set() {
+        let layout = HotkeyLayout::default();
+        assert!(
+            layout.is_direct(Command::ZoomReset),
+            "ZoomReset must be in the direct set (accessible without the hotkey dialog)"
+        );
+    }
+
+    #[test]
+    fn zoom_reset_action_resets_level() {
+        use mapper::mapper::Mapper;
+        use crate::input::apply_action;
+        use crate::state::{AppState, Zoom};
+        let mut state = AppState::default();
+        let mut mapper = Mapper::default();
+        // Zoom all the way out first.
+        for _ in 0..8 {
+            apply_action(Action::ZoomOut, &mut state, &mut mapper);
+        }
+        assert!(matches!(state.zoom, Zoom::Overview));
+        // Reset
+        apply_action(Action::ZoomReset, &mut state, &mut mapper);
+        assert_eq!(state.zoom_level, 7, "ZoomReset must restore zoom_level to 7");
+        assert!(matches!(state.zoom, Zoom::Boxes), "ZoomReset must restore Zoom::Boxes");
     }
 }

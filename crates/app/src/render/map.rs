@@ -102,10 +102,10 @@ const LANE_SPACING: i32 = 2;
 /// where same-side departure/arrival anchors live.
 const LANE_BASE: i32 = 1;
 /// Minimum channel pixel size even when it carries no lanes.
-const MIN_GUTTER: i32 = 2;
+pub(crate) const MIN_GUTTER: i32 = 2;
 /// Boxes-zoom box size (matches `zoom_box_size(Zoom::Boxes)`), in cells.
-const BOX_W: i32 = 11;
-const BOX_H: i32 = 5;
+pub(crate) const BOX_W: i32 = 11;
+pub(crate) const BOX_H: i32 = 5;
 
 /// One axis of the non-uniform Boxes-zoom layout: where each room line starts (pixels)
 /// and how wide each channel after it is.
@@ -220,10 +220,17 @@ fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
 }
 
 /// Style for a room given the current selection/current state.
+///
+/// When a room is BOTH current AND selected, combine both states: use the
+/// selected background with the REVERSED modifier from room_current so the
+/// room is visually distinct from either state alone.
 fn room_style(room: &RenderRoom, state: &AppState) -> Style {
-    if room.is_current {
+    let is_selected = state.selected_room == Some(room.id);
+    if room.is_current && is_selected {
+        state.colors.room_selected.add_modifier(Modifier::REVERSED)
+    } else if room.is_current {
         state.colors.room_current
-    } else if state.selected_room == Some(room.id) {
+    } else if is_selected {
         state.colors.room_selected
     } else {
         state.colors.room_normal
@@ -288,12 +295,13 @@ pub fn room_screen_rects(
     let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
     let (off_x, off_y) = match &axes {
         Some((cols, rows)) => (
-            area.x as i32 - cols.room_pixel(scroll.0),
-            area.y as i32 - rows.room_pixel(scroll.1),
+            area.x as i32 - cols.room_pixel(scroll.0) + state.char_pan.0,
+            area.y as i32 - rows.room_pixel(scroll.1) + state.char_pan.1,
         ),
         None => {
             let (step_w, step_h) = zoom_steps(zoom);
-            (area.x as i32 - scroll.0 * step_w, area.y as i32 - scroll.1 * step_h)
+            (area.x as i32 - scroll.0 * step_w + state.char_pan.0,
+             area.y as i32 - scroll.1 * step_h + state.char_pan.1)
         }
     };
     let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
@@ -368,8 +376,8 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // Overview zoom: one glyph per room, no connectors. Uniform stride.
     if matches!(zoom, crate::state::Zoom::Overview) {
         let (step_w, step_h) = zoom_steps(zoom);
-        let off_x = area.x as i32 - scroll.0 * step_w;
-        let off_y = area.y as i32 - scroll.1 * step_h;
+        let off_x = area.x as i32 - scroll.0 * step_w + state.char_pan.0;
+        let off_y = area.y as i32 - scroll.1 * step_h + state.char_pan.1;
         for room in &rm.rooms {
             let (vx, vy) = cell_to_virtual(room.cell, zoom);
             put_char(buf, vx + off_x, vy + off_y, '■', room_style(room, state), area);
@@ -385,12 +393,13 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
     let (off_x, off_y) = match &axes {
         Some((cols, rows)) => (
-            area.x as i32 - cols.room_pixel(scroll.0),
-            area.y as i32 - rows.room_pixel(scroll.1),
+            area.x as i32 - cols.room_pixel(scroll.0) + state.char_pan.0,
+            area.y as i32 - rows.room_pixel(scroll.1) + state.char_pan.1,
         ),
         None => {
             let (step_w, step_h) = zoom_steps(zoom);
-            (area.x as i32 - scroll.0 * step_w, area.y as i32 - scroll.1 * step_h)
+            (area.x as i32 - scroll.0 * step_w + state.char_pan.0,
+             area.y as i32 - scroll.1 * step_h + state.char_pan.1)
         }
     };
     let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
@@ -419,7 +428,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
     //       the rooms drawn below them in step 2.
-    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
+    let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
     if let Some((cols, rows)) = &axes {
         arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.colors);
     }
@@ -447,7 +456,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       border it sits on (replacing the box-edge glyph, pointing outward).
     // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
     if !state.show_portal_labels {
-        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors);
+        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room);
     }
 }
 
@@ -750,9 +759,9 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
 }
 
 /// Draw every plan connector as box-drawing line-art along its lanes, and RETURN the departure
-/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted)`. The arrowheads
-/// are NOT drawn here: each sits ON a room's border cell, so the caller draws them AFTER the
-/// rooms (which render on top of the line-art) so the arrow replaces the box-border glyph.
+/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted, room_id)`. The
+/// arrowheads are NOT drawn here: each sits ON a room's border cell, so the caller draws them
+/// AFTER the rooms (which render on top of the line-art) so the arrow replaces the box-edge glyph.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -763,7 +772,7 @@ fn render_lane_connectors(
     arrows: &crate::symbols::Arrows,
     path: &crate::symbols::PathGlyphs,
     colors: &crate::colors::ColorScheme,
-) -> Vec<((i32, i32), String, bool)> {
+) -> Vec<((i32, i32), String, bool, RoomId)> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -773,7 +782,8 @@ fn render_lane_connectors(
         std::collections::HashMap::new();
     // Arrowheads: (virtual pixel, glyph string, distorted). Returned for the caller to draw on
     // top of the rooms (the arrow embeds in the room border).
-    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
+    // Arrowheads: (virtual pixel, glyph string, distorted, owning room id).
+    let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
 
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
@@ -797,33 +807,55 @@ fn render_lane_connectors(
         } else {
             arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted));
+        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, conn.origin));
         // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
         if conn.reciprocal {
             let arr_ch = match conn.entry_dir {
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted));
+            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, conn.dest));
         }
     }
     arrowheads
 }
 
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
+///
+/// Each arrowhead carries the `RoomId` of the room it belongs to.  For a normal (non-selected)
+/// room the cell is painted with a reset background so no prior selection highlight bleeds
+/// through.  For the currently selected room the arrowhead cell gets the selected room's
+/// background color so the arrow reads as part of the highlighted room border.
 fn draw_connector_arrows(
-    arrowheads: &[((i32, i32), String, bool)],
+    arrowheads: &[((i32, i32), String, bool, RoomId)],
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
     colors: &crate::colors::ColorScheme,
+    selected_room: Option<RoomId>,
 ) {
     let (off_x, off_y) = offset;
-    for (pos, glyph, distorted) in arrowheads {
+    for (pos, glyph, distorted, room_id) in arrowheads {
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let style = if *distorted { colors.connector_distorted } else { colors.connector };
+            let connector_style = if *distorted { colors.connector_distorted } else { colors.connector };
+            let connector_fg = connector_style.fg;
+            let style = if selected_room == Some(*room_id) {
+                // Selected room: paint bg = room_selected background so the arrow cell
+                // reads as part of the highlighted room border.
+                let mut s = Style::reset();
+                if let Some(bg) = colors.room_selected.bg {
+                    s = s.bg(bg);
+                }
+                if let Some(fg) = connector_fg {
+                    s = s.fg(fg);
+                }
+                s
+            } else {
+                // Non-selected room: reset bg so no prior highlight bleeds through.
+                Style::reset().patch(connector_style)
+            };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(style);
             }
@@ -3835,5 +3867,224 @@ mod tests {
                 .map(|(rid, _)| *rid);
             assert_eq!(hit, Some(*id), "click at centre of room {:?} rect must hit that room", id);
         }
+    }
+
+    // ── Item 1: char_pan shifts room screen rects ─────────────────────────────
+
+    /// char_pan should shift room screen rects by the same offset so that
+    /// mouse hit-testing remains accurate after a drag pan.
+    #[test]
+    fn char_pan_shifts_room_screen_rects() {
+        use crate::state::{AppState, Zoom};
+        use mapper::graph::MapGraph;
+        use mapper::render::render_layer;
+        use ratatui::layout::Rect;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
+
+        let area = Rect::new(0, 0, 80, 40);
+
+        // Baseline: no char_pan.
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        state.scroll = (0, 0);
+        state.char_pan = (0, 0);
+        let rects_base = room_screen_rects(&rm, &state, area);
+        assert_eq!(rects_base.len(), 1);
+        let (_, r0) = rects_base[0];
+
+        // Apply char_pan = (5, 3).
+        state.char_pan = (5, 3);
+        let rects_shifted = room_screen_rects(&rm, &state, area);
+        assert_eq!(rects_shifted.len(), 1);
+        let (_, r1) = rects_shifted[0];
+
+        assert_eq!(
+            (r1.x as i32 - r0.x as i32, r1.y as i32 - r0.y as i32),
+            (5, 3),
+            "char_pan (5,3) should shift screen rect by exactly (5,3)"
+        );
+    }
+
+    // ── Item 3: current+selected combined style ───────────────────────────────
+
+    /// When a room is both current AND selected, room_style combines both states:
+    /// it returns room_selected with REVERSED added (not just one or the other).
+    #[test]
+    fn room_style_current_and_selected_combines() {
+        use mapper::render::RenderRoom;
+        use crate::state::AppState;
+
+        let room = RenderRoom {
+            id: 1,
+            cell: (0, 0),
+            label: "Test".into(),
+            is_current: true,
+            has_layer_portal: false,
+            has_notes: false,
+            align_code: String::new(),
+        };
+
+        let mut state = AppState::default();
+        state.selected_room = Some(1); // room is both current AND selected
+
+        let style = room_style(&room, &state);
+
+        // Must have REVERSED (from the combined path) AND use the selected base.
+        assert!(
+            style.add_modifier.contains(Modifier::REVERSED),
+            "current+selected room must have REVERSED modifier; got {:?}",
+            style
+        );
+        // The base must NOT be room_current alone (which would be REVERSED on its own style).
+        // It should be room_selected with REVERSED added.
+        let expected = state.colors.room_selected.add_modifier(Modifier::REVERSED);
+        assert_eq!(style, expected, "current+selected must equal room_selected + REVERSED");
+    }
+
+    /// When a room is current but NOT selected, room_style returns room_current.
+    #[test]
+    fn room_style_current_only() {
+        use mapper::render::RenderRoom;
+        use crate::state::AppState;
+
+        let room = RenderRoom {
+            id: 2,
+            cell: (0, 0),
+            label: "Test".into(),
+            is_current: true,
+            has_layer_portal: false,
+            has_notes: false,
+            align_code: String::new(),
+        };
+
+        let mut state = AppState::default();
+        state.selected_room = Some(99); // different room selected
+
+        let style = room_style(&room, &state);
+        assert_eq!(style, state.colors.room_current, "current-only room must use room_current style");
+    }
+
+    /// When a room is selected but NOT current, room_style returns room_selected.
+    #[test]
+    fn room_style_selected_only() {
+        use mapper::render::RenderRoom;
+        use crate::state::AppState;
+
+        let room = RenderRoom {
+            id: 3,
+            cell: (0, 0),
+            label: "Test".into(),
+            is_current: false,
+            has_layer_portal: false,
+            has_notes: false,
+            align_code: String::new(),
+        };
+
+        let mut state = AppState::default();
+        state.selected_room = Some(3);
+
+        let style = room_style(&room, &state);
+        assert_eq!(style, state.colors.room_selected, "selected-only room must use room_selected style");
+    }
+
+    // ── Item 4: arrow color does not bleed selection bg ───────────────────────
+
+    /// draw_connector_arrows must reset the cell background before applying the
+    /// connector fg, so a selection-highlighted room border cell does not keep
+    /// the selection bg color after the arrowhead is drawn (non-selected room case).
+    #[test]
+    fn arrow_style_resets_bg_for_non_selected_room() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        // Pre-paint the cell with a selection bg color to simulate a selected room border.
+        let selection_bg = Color::Yellow;
+        if let Some(cell) = buf.cell_mut((5, 5)) {
+            cell.set_style(Style::new().bg(selection_bg));
+        }
+        assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
+
+        // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 10)];
+        let colors = ColorScheme::terminal_default();
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None);
+
+        let after_bg = buf.cell((5, 5)).unwrap().bg;
+        assert_ne!(
+            after_bg, selection_bg,
+            "arrow draw must reset selection bg; bg is still Yellow after arrow"
+        );
+    }
+
+    /// draw_connector_arrows must paint the cell background with the selected room's bg color
+    /// when the arrow belongs to the currently selected room.
+    #[test]
+    fn arrow_style_selected_room_gets_room_bg() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        // Use a color scheme where room_selected has a distinct bg.
+        let mut colors = ColorScheme::terminal_default();
+        let selected_bg = Color::Cyan;
+        colors.room_selected = Style::new().fg(Color::White).bg(selected_bg);
+        // connector fg is Green so we can check it independently.
+        colors.connector = Style::new().fg(Color::Green);
+
+        // Arrow at (5, 5) belongs to room 7; room 7 is the selected room.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7));
+
+        let cell = buf.cell((5, 5)).unwrap();
+        assert_eq!(
+            cell.bg, selected_bg,
+            "selected-room arrow must have the room_selected bg color as background"
+        );
+        assert_eq!(
+            cell.fg,
+            Color::Green,
+            "selected-room arrow glyph fg must be the connector color"
+        );
+    }
+
+    /// draw_connector_arrows must NOT apply the selected room's bg to an arrow belonging
+    /// to a different (non-selected) room, even when a selection is active.
+    #[test]
+    fn arrow_style_other_room_unaffected_by_selection() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        let mut colors = ColorScheme::terminal_default();
+        colors.room_selected = Style::new().fg(Color::White).bg(Color::Cyan);
+        colors.connector = Style::new().fg(Color::Green);
+
+        // Arrow belongs to room 5; selected room is 7 — different rooms.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 5)];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7));
+
+        let cell = buf.cell((5, 5)).unwrap();
+        assert_ne!(
+            cell.bg,
+            Color::Cyan,
+            "arrow of a non-selected room must not get the selected room bg"
+        );
     }
 }
