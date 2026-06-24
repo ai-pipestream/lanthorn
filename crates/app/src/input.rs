@@ -110,6 +110,18 @@ pub enum Action {
     Autocomplete,
     /// Toggle the full-screen help overlay.
     ToggleHelp,
+    /// Open the saves-manager modal (loads the save list).
+    OpenSaves,
+    /// Navigate the saves list by delta (-1 = up, +1 = down).
+    SavesNav(i32),
+    /// Load the selected save (caller-handled).
+    SavesLoad,
+    /// Begin a SaveAs prompt for a new named save (sets up the prompt sub-mode).
+    SavesSaveAs,
+    /// Begin a confirm-delete prompt for the selected save (sets up the prompt sub-mode).
+    SavesDelete,
+    /// Close the saves-manager modal without acting.
+    SavesClose,
     /// Open the symbol gallery modal.
     OpenGallery,
     /// Move to next preset in the current gallery category.
@@ -169,6 +181,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // 3b. Gallery sub-mode: when gallery is open, route to gallery keys.
     if state.gallery.is_some() {
         return gallery_key_to_action(key);
+    }
+
+    // 3c. Saves-manager sub-mode: when saves modal is open, route to saves keys.
+    if state.saves.is_some() {
+        return saves_key_to_action(key);
     }
 
     // 4. Tab (no modifiers): stateful autocomplete-or-ToggleFocus (hardwired).
@@ -244,6 +261,21 @@ fn prompt_key_to_action(key: KeyEvent) -> Action {
         {
             Action::InputChar(c)
         }
+        _ => Action::None,
+    }
+}
+
+// ── Internal: saves-manager key routing ───────────────────────────────────────
+
+/// Hardwired saves-manager sub-mode keys (not rebindable, like prompt and anim).
+fn saves_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Up => Action::SavesNav(-1),
+        KeyCode::Down => Action::SavesNav(1),
+        KeyCode::Enter => Action::SavesLoad,
+        KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::SavesSaveAs,
+        KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => Action::SavesDelete,
+        KeyCode::Esc => Action::SavesClose,
         _ => Action::None,
     }
 }
@@ -593,6 +625,54 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.show_help = !state.show_help;
         }
 
+        // ── Saves-manager actions ─────────────────────────────────────────────
+
+        Action::OpenSaves => {
+            // The list must be populated by the caller (main.rs has dir + ifid).
+            // apply_action only sets up the state; the caller refreshes the list
+            // via AppState::open_saves_modal after apply_action returns.
+            // If already open, do nothing.
+        }
+
+        Action::SavesNav(delta) => {
+            if let Some(s) = &mut state.saves {
+                if !s.entries.is_empty() {
+                    let len = s.entries.len() as i32;
+                    s.selected = ((s.selected as i32 + delta).rem_euclid(len)) as usize;
+                }
+            }
+        }
+
+        // SavesLoad, SavesSaveAs, SavesDelete: state-only pre-work here;
+        // the actual I/O is caller-handled.
+
+        Action::SavesSaveAs => {
+            // Open the name-entry prompt; on submit the caller performs the save.
+            state.prompt = Some(crate::state::Prompt {
+                kind: crate::state::PromptKind::SaveAs,
+                buffer: String::new(),
+            });
+        }
+
+        Action::SavesDelete => {
+            // Open the confirm-delete prompt for the selected entry.
+            if let Some(s) = &state.saves {
+                if let Some(entry) = s.entries.get(s.selected) {
+                    let path = entry.path.clone();
+                    state.prompt = Some(crate::state::Prompt {
+                        kind: crate::state::PromptKind::ConfirmDeleteSave(path),
+                        buffer: String::new(),
+                    });
+                }
+            }
+        }
+
+        Action::SavesClose => {
+            state.saves = None;
+        }
+
+        // SavesLoad is caller-handled.
+
         Action::OpenGallery => {
             state.gallery = Some(crate::state::GalleryState {
                 category_idx: 0,
@@ -648,6 +728,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::ExportSvg
         | Action::ExportDot
         | Action::ExportDump
+        | Action::SavesLoad
         | Action::Quit => {}
 
         Action::None => {}
@@ -1598,5 +1679,125 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus(); // Map
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::OpenGallery));
+    }
+
+    // ── Saves-manager sub-mode tests ──────────────────────────────────────────
+
+    fn state_with_saves_open() -> AppState {
+        use crate::state::{SavesState};
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+        let mut s = AppState::default();
+        s.saves = Some(SavesState {
+            entries: vec![
+                SaveInfo {
+                    path: PathBuf::from("/tmp/default.babelmap"),
+                    name: "(default)".to_string(),
+                    turns: 0,
+                    saved_at: String::new(),
+                    is_default: true,
+                },
+                SaveInfo {
+                    path: PathBuf::from("/tmp/named.babelmap"),
+                    name: "before-troll".to_string(),
+                    turns: 10,
+                    saved_at: "2026-06-18T10:00:00Z".to_string(),
+                    is_default: false,
+                },
+            ],
+            selected: 0,
+        });
+        s
+    }
+
+    #[test]
+    fn saves_submode_up_down_navigates() {
+        let mut s = state_with_saves_open();
+        // Down moves selection from 0 to 1.
+        let a = key_to_action(&s, key(KeyCode::Down));
+        assert!(matches!(a, Action::SavesNav(1)));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert_eq!(s.saves.as_ref().unwrap().selected, 1);
+        // Up moves back to 0.
+        let a = key_to_action(&s, key(KeyCode::Up));
+        assert!(matches!(a, Action::SavesNav(-1)));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert_eq!(s.saves.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn saves_submode_s_opens_save_as_prompt() {
+        let mut s = state_with_saves_open();
+        let a = key_to_action(&s, key(KeyCode::Char('s')));
+        assert!(matches!(a, Action::SavesSaveAs));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.prompt.is_some(), "SavesSaveAs should open the prompt sub-mode");
+        assert!(matches!(
+            s.prompt.as_ref().unwrap().kind,
+            crate::state::PromptKind::SaveAs
+        ));
+    }
+
+    #[test]
+    fn saves_submode_d_opens_confirm_delete_prompt() {
+        let mut s = state_with_saves_open();
+        // Select entry 1 (the named save).
+        s.saves.as_mut().unwrap().selected = 1;
+        let a = key_to_action(&s, key(KeyCode::Char('d')));
+        assert!(matches!(a, Action::SavesDelete));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.prompt.is_some(), "SavesDelete should open the confirm prompt");
+        assert!(matches!(
+            s.prompt.as_ref().unwrap().kind,
+            crate::state::PromptKind::ConfirmDeleteSave(_)
+        ));
+    }
+
+    #[test]
+    fn saves_submode_esc_closes_modal() {
+        let mut s = state_with_saves_open();
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        assert!(matches!(a, Action::SavesClose));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.saves.is_none(), "Esc should close the saves modal");
+    }
+
+    #[test]
+    fn saves_submode_enter_produces_saves_load() {
+        let s = state_with_saves_open();
+        let a = key_to_action(&s, key(KeyCode::Enter));
+        assert!(matches!(a, Action::SavesLoad));
+    }
+
+    #[test]
+    fn ctrl_o_opens_saves_in_game_and_map_focus() {
+        // Game focus.
+        let s = AppState::default();
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::OpenSaves));
+        // Map focus.
+        let mut s = AppState::default();
+        s.toggle_focus();
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::OpenSaves));
+    }
+
+    #[test]
+    fn saves_nav_wraps_around() {
+        use crate::state::SavesState;
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+        let mut s = AppState::default();
+        s.saves = Some(SavesState {
+            entries: vec![
+                SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), is_default: false },
+                SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), is_default: false },
+            ],
+            selected: 1,
+        });
+        // Down from last wraps to first.
+        apply_action(Action::SavesNav(1), &mut s, &mut Mapper::default());
+        assert_eq!(s.saves.as_ref().unwrap().selected, 0, "should wrap to 0 after last");
+        // Up from first wraps to last.
+        apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
+        assert_eq!(s.saves.as_ref().unwrap().selected, 1, "should wrap to last");
     }
 }

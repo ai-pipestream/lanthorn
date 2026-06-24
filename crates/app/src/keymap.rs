@@ -76,6 +76,10 @@ pub enum Command {
     AnimTogglePlay,
     AnimExit,
     // Anim pan/zoom reuse the Map variants above.
+
+    // ── Saves manager ─────────────────────────────────────────────────────────
+    /// Open the saves-manager modal (Ctrl+O by default).
+    OpenSaves,
 }
 
 impl Command {
@@ -124,6 +128,7 @@ impl Command {
             Command::AnimStepBack => Action::AnimStep(-1),
             Command::AnimTogglePlay => Action::AnimTogglePlay,
             Command::AnimExit => Action::AnimExit,
+            Command::OpenSaves => Action::OpenSaves,
         }
     }
 
@@ -171,6 +176,7 @@ impl Command {
             Command::AnimStepBack => "anim_step_back",
             Command::AnimTogglePlay => "anim_toggle_play",
             Command::AnimExit => "anim_exit",
+            Command::OpenSaves => "open_saves",
         }
     }
 
@@ -218,6 +224,7 @@ impl Command {
             Command::AnimStepBack => "step back",
             Command::AnimTogglePlay => "play/pause",
             Command::AnimExit => "exit anim",
+            Command::OpenSaves => "saves",
         }
     }
 
@@ -267,6 +274,8 @@ impl Command {
             | Command::AnimStepBack
             | Command::AnimTogglePlay
             | Command::AnimExit => Context::Anim,
+
+            Command::OpenSaves => Context::Global,
         }
     }
 
@@ -319,6 +328,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::AnimStepBack,
     Command::AnimTogglePlay,
     Command::AnimExit,
+    Command::OpenSaves,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -502,6 +512,8 @@ impl KeyMap {
         bind!(ctrl(Char('y')), Command::AnimateTidy, Context::Global);
         bind!(ctrl(Char('a')), Command::ToggleAlignment, Context::Global);
         bind!(ctrl(Char('p')), Command::TogglePortalLabels, Context::Global);
+        // Ctrl+O → open saves manager (free key; not used by any other command).
+        bind!(ctrl(Char('o')), Command::OpenSaves, Context::Global);
 
         // Ctrl+Arrows → Nudge
         bind!(ctrl(Left), Command::NudgeLeft, Context::Global);

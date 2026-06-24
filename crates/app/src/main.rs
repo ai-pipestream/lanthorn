@@ -18,18 +18,19 @@ use app::config::{resolve, Cli};
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
-use app::archive::{load_archive, save_archive};
+use app::archive::{load_archive, save_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
-use app::persist_files::{load_map, save_map};
+use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
 use app::render::gallery::draw_gallery;
 use app::render::help::draw_help;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
+use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::state::{AppState, Focus, Layout, PromptKind};
+use app::state::{AppState, Focus, Layout, PromptKind, SavesState};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -232,7 +233,9 @@ fn draw_frame(
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = Style::default().add_modifier(Modifier::REVERSED);
-        let help_text = if state.gallery.is_some() {
+        let help_text = if state.saves.is_some() {
+            "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | Esc: close".to_string()
+        } else if state.gallery.is_some() {
             "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
         } else if let Some(anim) = &state.tidy_anim {
             // Playback status: stage progress + the transport controls.
@@ -279,6 +282,11 @@ fn draw_frame(
         // ── Gallery overlay — full-screen, drawn after help ───────────────────
         if state.gallery.is_some() {
             draw_gallery(state, full, buf);
+        }
+
+        // ── Saves-manager overlay — drawn after gallery ───────────────────────
+        if state.saves.is_some() {
+            draw_saves(state, full, buf);
         }
 
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
@@ -529,6 +537,12 @@ fn main() {
                 // route to apply_action to apply the prompt to the mapper.
                 if state.prompt.is_some() {
                     apply_action(Action::SubmitCommand(cmd), &mut state, &mut mapper);
+                    // Handle any saves-manager prompt that was submitted.
+                    if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
+                        handle_saves_prompt(
+                            kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state,
+                        );
+                    }
                     continue;
                 }
 
@@ -538,6 +552,9 @@ fn main() {
                 if cmd.is_empty() {
                     continue;
                 }
+
+                // Increment the session turn counter.
+                state.turns += 1;
 
                 let result = session.submit(&cmd);
                 state.push_transcript(&format!("> {}", cmd));
@@ -569,8 +586,24 @@ fn main() {
             }
 
             Action::SaveGame => {
-                // Bundle map + game into a single .babelmap archive.
-                match save_archive(&arc_file, &mapper, &session.machine) {
+                // Bundle map + game into a single .babelmap archive, with turn metadata.
+                let meta = app::archive::Meta {
+                    format_version: 1,
+                    ifid: Some(ifid.clone()),
+                    name: None,
+                    turns: state.turns,
+                    saved_at: {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let secs = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        // Re-use a simple format: delegate to persist_files helper would be
+                        // cleaner but it's private; inline the same logic here.
+                        format_rfc3339(secs)
+                    },
+                };
+                match save_archive_meta(&arc_file, &mapper, &session.machine, meta) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -673,10 +706,79 @@ fn main() {
                 }
             }
 
+            // ── Saves-manager actions ─────────────────────────────────────────
+
+            Action::OpenSaves => {
+                // Populate the saves list and open the modal.
+                let entries = list_saves(&dir, &ifid);
+                state.saves = Some(SavesState { entries, selected: 0 });
+            }
+
+            Action::SavesLoad => {
+                // Load the selected save (archive → mapper + machine restore).
+                // Clone path and name to release the borrow on state.saves before mutating state.
+                let load_info = state.saves.as_ref().and_then(|s| {
+                    s.entries.get(s.selected).map(|e| (e.path.clone(), e.name.clone()))
+                });
+                if let Some((path, entry_name)) = load_info {
+                    match load_archive(&path) {
+                        Ok(ac) => {
+                            let restore_err = session.machine.restore_quetzal(&ac.save).map_err(|e| {
+                                match e {
+                                    zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+                                    other => format!("restore failed: {:?}", other),
+                                }
+                            });
+                            match restore_err {
+                                Ok(()) => {
+                                    mapper = ac.mapper;
+                                    // Restore turn counter from the loaded archive.
+                                    state.turns = ac.meta.turns;
+                                    // Re-observe current location.
+                                    let loc = zvm::current_location(&session.machine);
+                                    if let Some(snap) = loc {
+                                        let rid = snap.number as mapper::graph::RoomId;
+                                        let restore_result = TurnResult {
+                                            transcript: String::new(),
+                                            location: Some(snap),
+                                            quit: false,
+                                            info: None,
+                                        };
+                                        apply_turn(&mut mapper, "", &restore_result);
+                                        state.set_viewed_layer(None);
+                                        state.select_room(Some(rid));
+                                        if let Some(room) = mapper.graph.room(rid) {
+                                            if let Some(pos) = room.pos {
+                                                let (pw, ph) = map_pane_dims(last_map_area);
+                                                state.recenter_on(pos, pw, ph);
+                                            }
+                                        }
+                                    }
+                                    state.push_transcript(&format!("[Loaded save: {}]", entry_name));
+                                    state.saves = None;
+                                }
+                                Err(e) => {
+                                    state.push_transcript(&format!("[Load failed: {}]", e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            state.push_transcript(&format!("[Load failed: {}]", e));
+                        }
+                    }
+                }
+            }
+
             // ── apply_action handles everything else ───────────────────────────
             other => {
                 apply_action(other, &mut state, &mut mapper);
             }
+        }
+
+        // After apply_action: check for saves-manager prompt that was submitted.
+        // (This covers the case where apply_action routed a saves prompt submit.)
+        if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
+            handle_saves_prompt(kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state);
         }
 
         // After apply_action: if gallery was just closed, persist the selections to config.
@@ -689,7 +791,19 @@ fn main() {
 
     restore_terminal();
 
-    match save_archive(&arc_file, &mapper, &session.machine) {
+    let exit_meta = app::archive::Meta {
+        format_version: 1,
+        ifid: Some(ifid.clone()),
+        name: None,
+        turns: state.turns,
+        saved_at: format_rfc3339(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        ),
+    };
+    match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta) {
         Ok(()) => {
             eprintln!("babelmap: map saved to {}", arc_file.display());
         }
@@ -704,6 +818,85 @@ fn main() {
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
+
+/// Handle a submitted saves-manager prompt (SaveAs or ConfirmDeleteSave).
+/// Called after apply_action stores the prompt in `state.saves_prompt_submitted`.
+fn handle_saves_prompt(
+    kind: PromptKind,
+    buf: String,
+    dir: &std::path::Path,
+    ifid: &str,
+    mapper: &mut Mapper,
+    session: &mut app::session::GameSession,
+    state: &mut AppState,
+) {
+    match kind {
+        PromptKind::SaveAs => {
+            if buf.is_empty() {
+                state.push_transcript("[Save name cannot be empty]".to_string().as_str());
+                return;
+            }
+            match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns) {
+                Ok(()) => {
+                    state.push_transcript(&format!("[Saved as: {}]", buf));
+                    // Refresh saves list.
+                    if let Some(s) = &mut state.saves {
+                        s.entries = list_saves(dir, ifid);
+                    }
+                }
+                Err(e) => {
+                    state.push_transcript(&format!("[Save failed: {}]", e));
+                }
+            }
+        }
+        PromptKind::ConfirmDeleteSave(path) => {
+            let confirmed = matches!(buf.trim().to_lowercase().as_str(), "y" | "yes");
+            if confirmed {
+                match delete_save(&path) {
+                    Ok(()) => {
+                        state.push_transcript("[Save deleted]");
+                        if let Some(s) = &mut state.saves {
+                            s.entries = list_saves(dir, ifid);
+                            if s.selected >= s.entries.len() && !s.entries.is_empty() {
+                                s.selected = s.entries.len() - 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        state.push_transcript(&format!("[Delete failed: {}]", e));
+                    }
+                }
+            } else {
+                state.push_transcript("[Delete cancelled]");
+            }
+        }
+        _ => {} // other prompt kinds are handled elsewhere
+    }
+}
+
+/// Format a Unix timestamp (seconds since epoch) as an RFC3339 UTC string.
+fn format_rfc3339(secs: u64) -> String {
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (year, month, day) = days_to_ymd_main(days);
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, min, sec)
+}
+
+fn days_to_ymd_main(mut days: u64) -> (u64, u64, u64) {
+    days += 719468;
+    let era = days / 146097;
+    let doe = days % 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
 
 /// Return (width, height) of the map pane, defaulting to (80, 24) when zero.
 fn map_pane_dims(area: Rect) -> (u16, u16) {
