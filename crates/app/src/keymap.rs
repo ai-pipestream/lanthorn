@@ -82,6 +82,10 @@ pub enum Command {
     // ── Inventory ─────────────────────────────────────────────────────────────
     /// Toggle the inventory strip at the bottom of the story pane (default: v).
     ToggleInventory,
+
+    // ── Layout ────────────────────────────────────────────────────────────────
+    /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
+    CycleLayoutReverse,
 }
 
 impl Command {
@@ -131,6 +135,7 @@ impl Command {
             Command::AnimExit => Action::AnimExit,
             Command::OpenSaves => Action::OpenSaves,
             Command::ToggleInventory => Action::ToggleInventory,
+            Command::CycleLayoutReverse => Action::CycleLayoutReverse,
         }
     }
 
@@ -179,6 +184,7 @@ impl Command {
             Command::AnimExit => "anim_exit",
             Command::OpenSaves => "open_saves",
             Command::ToggleInventory => "toggle_inventory",
+            Command::CycleLayoutReverse => "cycle_layout_reverse",
         }
     }
 
@@ -227,6 +233,7 @@ impl Command {
             Command::AnimExit => "exit anim",
             Command::OpenSaves => "saves",
             Command::ToggleInventory => "inventory",
+            Command::CycleLayoutReverse => "layout back",
         }
     }
 
@@ -278,6 +285,7 @@ impl Command {
 
             Command::OpenSaves => Context::Global,
             Command::ToggleInventory => Context::Global,
+            Command::CycleLayoutReverse => Context::Global,
         }
     }
 
@@ -331,6 +339,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::AnimExit,
     Command::OpenSaves,
     Command::ToggleInventory,
+    Command::CycleLayoutReverse,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -356,8 +365,16 @@ impl KeySpec {
     }
 
     /// Human-readable label for the hint bar / help screen.
-    /// Examples: "Ctrl+S", "Shift+←", "h", "F1", "Space".
+    /// Examples: "Ctrl+S", "Shift+←", "h", "F1", "Space", "Shift+Tab".
     pub fn label(&self) -> String {
+        // BackTab is always "Shift+Tab" regardless of modifier flags.
+        if self.code == KeyCode::BackTab {
+            let mut s = String::new();
+            if self.ctrl { s.push_str("Ctrl+"); }
+            if self.alt { s.push_str("Alt+"); }
+            s.push_str("Shift+Tab");
+            return s;
+        }
         let mut s = String::new();
         if self.ctrl { s.push_str("Ctrl+"); }
         if self.alt { s.push_str("Alt+"); }
@@ -368,6 +385,7 @@ impl KeySpec {
             KeyCode::Up => "↑".to_string(),
             KeyCode::Down => "↓".to_string(),
             KeyCode::Tab => "Tab".to_string(),
+            KeyCode::BackTab => unreachable!("handled above"),
             KeyCode::Char(' ') => "Space".to_string(),
             KeyCode::Esc => "Esc".to_string(),
             KeyCode::Enter => "Enter".to_string(),
@@ -439,7 +457,16 @@ impl std::str::FromStr for KeySpec {
             "right" => KeyCode::Right,
             "up" => KeyCode::Up,
             "down" => KeyCode::Down,
-            "tab" => KeyCode::Tab,
+            "tab" => {
+                // "shift+tab" parses as shift=true + token "tab"; map to BackTab.
+                if shift {
+                    shift = false; // BackTab encodes the shift itself
+                    KeyCode::BackTab
+                } else {
+                    KeyCode::Tab
+                }
+            }
+            "backtab" => KeyCode::BackTab,
             "space" => KeyCode::Char(' '),
             "esc" | "escape" => KeyCode::Esc,
             "enter" | "return" => KeyCode::Enter,
@@ -518,6 +545,9 @@ impl KeyMap {
         bind!(ctrl(Char('o')), Command::OpenSaves, Context::Global);
         // v → toggle inventory strip (free key; not used in any context).
         bind!(plain(Char('v')), Command::ToggleInventory, Context::Global);
+        // Shift+Tab (BackTab) → cycle layout in reverse (inverse of Ctrl+L forward cycle).
+        // BackTab is delivered by crossterm as KeyCode::BackTab, typically with no SHIFT modifier.
+        bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, Command::CycleLayoutReverse, Context::Global);
 
         // Ctrl+Arrows → Nudge
         bind!(ctrl(Left), Command::NudgeLeft, Context::Global);
@@ -735,6 +765,7 @@ const DEFAULT_DIRECT_NAMES: &[&str] = &[
     "select_prev",
     "recenter",
     "toggle_focus",
+    "cycle_layout_reverse",
     "nudge_left",
     "nudge_right",
     "nudge_up",
@@ -963,6 +994,69 @@ mod tests {
         assert_eq!(layout.groups[0].1[0], Command::Retidy);
         assert!(!warnings.is_empty(), "unknown group command should produce warning");
         assert!(warnings.iter().any(|w| w.contains("totally_fake_cmd")));
+    }
+
+    #[test]
+    fn backtab_keyevent_maps_to_cycle_layout_reverse() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use crate::input::{key_to_action, Action};
+        use crate::state::AppState;
+
+        let mut state = AppState::default();
+        // BackTab is typically delivered with no modifiers.
+        let backtab = KeyEvent {
+            code: KeyCode::BackTab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+
+        // In Game focus: BackTab falls through game_key_to_action → Global lookup → CycleLayoutReverse.
+        state.focus = crate::state::Focus::Game;
+        let action = key_to_action(&state, backtab);
+        assert!(
+            matches!(action, Action::CycleLayoutReverse),
+            "BackTab in Game focus should produce CycleLayoutReverse, got {:?}",
+            action
+        );
+
+        // In Map focus: Map context lookup falls through to Global then checks is_direct.
+        // CycleLayoutReverse is in the direct set so it fires without the dialog.
+        state.focus = crate::state::Focus::Map;
+        let action_map = key_to_action(&state, backtab);
+        assert!(
+            matches!(action_map, Action::CycleLayoutReverse),
+            "BackTab in Map focus should produce CycleLayoutReverse, got {:?}",
+            action_map
+        );
+    }
+
+    #[test]
+    fn backtab_keyspec_label_is_shift_tab() {
+        let spec = KeySpec { code: KeyCode::BackTab, ctrl: false, shift: false, alt: false };
+        assert_eq!(spec.label(), "Shift+Tab");
+    }
+
+    #[test]
+    fn shift_tab_parses_to_backtab() {
+        let spec: KeySpec = "shift+tab".parse().unwrap();
+        assert_eq!(spec.code, KeyCode::BackTab);
+        // shift flag should be false (BackTab encodes the shift itself)
+        assert!(!spec.shift);
+    }
+
+    #[test]
+    fn backtab_token_parses_to_backtab() {
+        let spec: KeySpec = "backtab".parse().unwrap();
+        assert_eq!(spec.code, KeyCode::BackTab);
+    }
+
+    #[test]
+    fn cycle_layout_reverse_command_wiring() {
+        assert_eq!(Command::CycleLayoutReverse.name(), "cycle_layout_reverse");
+        assert_eq!(Command::CycleLayoutReverse.label(), "layout back");
+        assert_eq!(Command::CycleLayoutReverse.context(), Context::Global);
+        assert!(matches!(Command::CycleLayoutReverse.to_action(), Action::CycleLayoutReverse));
     }
 
     #[test]

@@ -403,6 +403,15 @@ impl AppState {
         };
     }
 
+    /// Cycle layout in reverse: Split → MapFull → TranscriptFull → Split.
+    pub fn cycle_layout_reverse(&mut self) {
+        self.layout = match self.layout {
+            Layout::Split => Layout::MapFull,
+            Layout::MapFull => Layout::TranscriptFull,
+            Layout::TranscriptFull => Layout::Split,
+        };
+    }
+
     /// Zoom in toward Boxes (more detail). Clamps at Boxes.
     pub fn zoom_in(&mut self) {
         self.zoom = match self.zoom {
@@ -487,6 +496,18 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cycle_layout_reverse_goes_backwards() {
+        let mut s = AppState::default();
+        assert!(matches!(s.layout, Layout::Split));
+        s.cycle_layout_reverse();
+        assert!(matches!(s.layout, Layout::MapFull));
+        s.cycle_layout_reverse();
+        assert!(matches!(s.layout, Layout::TranscriptFull));
+        s.cycle_layout_reverse();
+        assert!(matches!(s.layout, Layout::Split));
+    }
 
     #[test]
     fn focus_layout_zoom_transitions() {

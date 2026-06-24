@@ -146,6 +146,8 @@ pub enum Action {
     GalleryClose,
     /// Toggle the inventory strip at the bottom of the story pane.
     ToggleInventory,
+    /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
+    CycleLayoutReverse,
     /// No binding found — no-op.
     None,
     // ── Mouse actions ─────────────────────────────────────────────────────────
@@ -872,6 +874,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
         Action::ToggleFocus => state.toggle_focus(),
         Action::CycleLayout => state.cycle_layout(),
+        Action::CycleLayoutReverse => state.cycle_layout_reverse(),
         Action::ZoomIn => state.zoom_in(),
         Action::ZoomOut => state.zoom_out(),
         Action::Pan(dx, dy) => state.pan(dx, dy),
@@ -2929,5 +2932,21 @@ mod tests {
         let pos = |g: &mapper::graph::MapGraph, id| g.room(id).and_then(|r| r.pos);
         assert_eq!(pos(&g_pipeline, 1), pos(&g_silent, 1), "room 1 position must match");
         assert_eq!(pos(&g_pipeline, 2), pos(&g_silent, 2), "room 2 position must match");
+    }
+
+    // ── Leaf 1: CycleLayoutReverse ────────────────────────────────────────────
+
+    #[test]
+    fn apply_action_cycle_layout_reverse() {
+        use crate::state::{AppState, Layout};
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        assert!(matches!(s.layout, Layout::Split));
+        apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
+        assert!(matches!(s.layout, Layout::MapFull));
+        apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
+        assert!(matches!(s.layout, Layout::TranscriptFull));
+        apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
+        assert!(matches!(s.layout, Layout::Split));
     }
 }
