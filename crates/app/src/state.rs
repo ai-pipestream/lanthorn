@@ -219,6 +219,104 @@ pub enum PromptKind {
     ConfirmDeleteSave(std::path::PathBuf),
     /// Confirm resetting the game to its opening state (keeps the map).
     ConfirmReset,
+    /// Enter a filename for an exported Quetzal save in the given directory.
+    ExportSaveName(std::path::PathBuf),
+}
+
+// ── File browser state ────────────────────────────────────────────────────────
+
+/// Mode for the file browser: picking a file to import, or a directory to export into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FbMode {
+    /// Import: browse and pick a `.qzl`/`.sav` file.
+    PickFile,
+    /// Export: browse and pick a directory, then enter a filename.
+    PickDir,
+}
+
+/// One entry in the file browser listing.
+#[derive(Debug, Clone)]
+pub struct FbEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+/// Transient state for the file-browser modal.
+/// `None` in `AppState.file_browser` = modal closed.
+#[derive(Debug, Clone)]
+pub struct FileBrowserState {
+    /// Current working directory shown by the browser.
+    pub cwd: std::path::PathBuf,
+    /// Sorted entries: `..` (if not root), then dirs, then matching files.
+    pub entries: Vec<FbEntry>,
+    /// Index of the currently-highlighted row.
+    pub selected: usize,
+    /// Whether we are picking a file (import) or a directory (export).
+    pub mode: FbMode,
+    /// Default filename for the export prompt: `<ifid>.qzl`.
+    pub export_default_name: String,
+}
+
+impl FileBrowserState {
+    /// Build a new `FileBrowserState` for `cwd`, reading the filesystem.
+    /// Entries: `..` when not at root, then dirs sorted, then `.qzl`/`.sav` files sorted
+    /// (PickFile only).  Entries that fail to read are silently omitted.
+    pub fn build(cwd: std::path::PathBuf, mode: FbMode, export_default_name: String) -> Self {
+        let entries = Self::read_entries(&cwd, mode);
+        FileBrowserState { cwd, entries, selected: 0, mode, export_default_name }
+    }
+
+    /// (Re)build entries for the current `cwd` and `mode`.
+    pub fn refresh(&mut self) {
+        self.entries = Self::read_entries(&self.cwd, self.mode);
+        self.selected = 0;
+    }
+
+    /// Navigate into a subdirectory or parent.
+    pub fn cd(&mut self, dir: std::path::PathBuf) {
+        self.cwd = dir;
+        self.refresh();
+    }
+
+    fn read_entries(cwd: &std::path::Path, mode: FbMode) -> Vec<FbEntry> {
+        let mut dirs: Vec<String> = Vec::new();
+        let mut files: Vec<String> = Vec::new();
+
+        if let Ok(iter) = std::fs::read_dir(cwd) {
+            for entry in iter.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+                // Skip hidden files (starting with '.') except we add '..' explicitly.
+                if name.starts_with('.') {
+                    continue;
+                }
+                if path.is_dir() {
+                    dirs.push(name.to_owned());
+                } else if mode == FbMode::PickFile {
+                    let lower = name.to_lowercase();
+                    if lower.ends_with(".qzl") || lower.ends_with(".sav") {
+                        files.push(name.to_owned());
+                    }
+                }
+            }
+        }
+
+        dirs.sort_unstable();
+        files.sort_unstable();
+
+        let mut entries: Vec<FbEntry> = Vec::new();
+        // Prepend ".." if not at root.
+        if cwd.parent().is_some() {
+            entries.push(FbEntry { name: "..".to_owned(), is_dir: true });
+        }
+        for d in dirs {
+            entries.push(FbEntry { name: d, is_dir: true });
+        }
+        for f in files {
+            entries.push(FbEntry { name: f, is_dir: false });
+        }
+        entries
+    }
 }
 
 /// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
@@ -327,6 +425,9 @@ pub struct AppState {
     /// Active saves-manager modal state. `None` means the modal is closed.
     pub saves: Option<SavesState>,
 
+    /// Active file-browser modal state. `None` means the browser is closed.
+    pub file_browser: Option<FileBrowserState>,
+
     /// Active verb/item token-palette modal state. `None` means the modal is closed.
     pub verb_menu: Option<VerbMenuState>,
 
@@ -396,6 +497,7 @@ impl Default for AppState {
             hotkeys: crate::keymap::HotkeyLayout::default(),
             gallery: None,
             saves: None,
+            file_browser: None,
             verb_menu: None,
             turns: 0,
             saves_prompt_submitted: None,
@@ -651,5 +753,85 @@ mod tests {
         assert_eq!(cfg.arrow_set, "filled");
         assert_eq!(cfg.portal_icons, "ascii");
         assert_eq!(cfg.path_style, "light");
+    }
+
+    // ── FileBrowserState tests ────────────────────────────────────────────────
+
+    /// Create a temporary directory with a unique tag.
+    /// Contents: subdir/, save.qzl, notes.txt.
+    fn make_test_fb_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("babelmap-fb-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("save.qzl"), b"fake quetzal").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not a save").unwrap();
+        dir
+    }
+
+    #[test]
+    fn filebrowser_pickfile_shows_dirs_and_qzl_not_txt() {
+        let dir = make_test_fb_dir("pickfile");
+        let fb = FileBrowserState::build(dir.clone(), FbMode::PickFile, "x.qzl".to_string());
+        let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&".."), "should contain parent link");
+        assert!(names.contains(&"subdir"), "should contain subdir");
+        assert!(names.contains(&"save.qzl"), "should contain .qzl file");
+        assert!(!names.contains(&"notes.txt"), ".txt file must not appear in PickFile mode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filebrowser_pickdir_shows_only_dirs() {
+        let dir = make_test_fb_dir("pickdir");
+        let fb = FileBrowserState::build(dir.clone(), FbMode::PickDir, "x.qzl".to_string());
+        let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&".."), "should contain parent link");
+        assert!(names.contains(&"subdir"), "should contain subdir");
+        assert!(!names.contains(&"save.qzl"), ".qzl file must not appear in PickDir mode");
+        assert!(!names.contains(&"notes.txt"), ".txt file must not appear in PickDir mode");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filebrowser_dotdot_absent_at_root() {
+        // Synthesize a state rooted at "/" (or the filesystem root on this OS).
+        let root = std::path::Path::new("/");
+        let fb = FileBrowserState::build(root.to_path_buf(), FbMode::PickDir, "x.qzl".to_string());
+        let has_dotdot = fb.entries.iter().any(|e| e.name == "..");
+        assert!(!has_dotdot, "'..' must not appear when at filesystem root");
+    }
+
+    #[test]
+    fn filebrowser_cd_into_subdir_and_refresh() {
+        let dir = make_test_fb_dir("cd");
+        let mut fb = FileBrowserState::build(dir.clone(), FbMode::PickFile, "x.qzl".to_string());
+        let subdir = dir.join("subdir");
+        fb.cd(subdir.clone());
+        assert_eq!(fb.cwd, subdir, "cwd should update after cd");
+        assert_eq!(fb.selected, 0, "selection should reset to 0 after cd");
+        // subdir is empty (no qzl files), but ".." should be present.
+        let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&".."), "subdir should show '..'");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn filebrowser_entries_sorted_dirs_before_files() {
+        let dir = make_test_fb_dir("sorted");
+        let fb = FileBrowserState::build(dir.clone(), FbMode::PickFile, "x.qzl".to_string());
+        // Verify: ".." first, then dirs, then files.
+        let mut saw_dir = false;
+        let mut saw_file = false;
+        for e in &fb.entries {
+            if e.is_dir {
+                assert!(!saw_file, "dirs should appear before files, but saw a file first");
+                saw_dir = true;
+            } else {
+                saw_file = true;
+            }
+        }
+        assert!(saw_dir, "should have at least one dir");
+        assert!(saw_file, "should have at least one file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
