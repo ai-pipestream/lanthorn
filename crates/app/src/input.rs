@@ -475,6 +475,62 @@ fn filebrowser_dialog_action(
     None
 }
 
+/// Per-modal button-to-action mapping for the verb menu.
+fn verbmenu_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::VerbMenuClose);
+        }
+    }
+
+    // Check buttons: Done → VerbMenuClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::VerbMenuClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the hotkey dialog.
+fn hotkeys_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::CloseHotkeyDialog);
+        }
+    }
+
+    // Check buttons: Done → CloseHotkeyDialog
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::CloseHotkeyDialog,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
 /// bounding rects of the map and story panes, the pre-computed room screen
 /// rects (needed for pixel-accurate room hit-testing on left/right clicks), and
@@ -514,6 +570,14 @@ pub fn mouse_to_action(
                 }
             } else if state.file_browser.is_some() {
                 if let Some(action) = filebrowser_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.verb_menu.is_some() {
+                if let Some(action) = verbmenu_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.hotkey_dialog {
+                if let Some(action) = hotkeys_dialog_action(rects, col, row) {
                     return action;
                 }
             }
@@ -615,11 +679,6 @@ fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return Action::CloseHotkeyDialog;
     }
 
-    // 'q' with no modifiers also closes.
-    if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE {
-        return Action::CloseHotkeyDialog;
-    }
-
     // Look up the key across all contexts (Global, Map, Anim) so that commands
     // in any context can be triggered from the dialog.
     if let Some(cmd) = state.keymap.lookup_any(&spec) {
@@ -708,7 +767,7 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
 /// Tab / Right  → next pane; Shift+Tab / Left → prev pane;
 /// Up / Down    → move within pane;
 /// Enter/Space  → pick selected token;
-/// Esc / q      → close menu.
+/// Esc          → close menu (q freed).
 fn verb_menu_key_to_action(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Tab => Action::VerbMenuNav(VerbMenuNavKind::NextPane),
@@ -719,7 +778,6 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::VerbMenuClose,
         _ => Action::None,
     }
 }
@@ -2908,8 +2966,8 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
-        // 'q' closes the dialog (not gallery/open-gallery)
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
+        // 'q' no longer closes the dialog (q-close removed from hotkey dialog)
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
         s.hotkey_dialog = false;
 
         // ── Anim sub-mode ─────────────────────────────────────────────────────
@@ -3168,14 +3226,17 @@ mod tests {
     }
 
     #[test]
-    fn q_closes_hotkey_dialog_action() {
-        // 'q' with no modifiers when dialog is open → CloseHotkeyDialog.
+    fn q_no_longer_closes_hotkey_dialog() {
+        // q-close removed from hotkey dialog; q now falls through to keymap lookup.
         let mut s = AppState::default();
         s.hotkey_dialog = true;
-        assert!(matches!(
-            key_to_action(&s, key(KeyCode::Char('q'))),
-            Action::CloseHotkeyDialog
-        ));
+        // 'q' is not bound to any command in the keymap, so it should produce None
+        // (not CloseHotkeyDialog).
+        let action = key_to_action(&s, key(KeyCode::Char('q')));
+        assert!(
+            !matches!(action, Action::CloseHotkeyDialog),
+            "q should no longer close the hotkey dialog"
+        );
     }
 
     #[test]
@@ -3951,15 +4012,21 @@ mod tests {
     }
 
     #[test]
-    fn verb_menu_esc_and_q_close() {
+    fn verb_menu_esc_closes() {
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
 
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::VerbMenuClose), "Esc closes the menu");
+    }
 
-        let a2 = key_to_action(&s, key(KeyCode::Char('q')));
-        assert!(matches!(a2, Action::VerbMenuClose), "q closes the menu");
+    #[test]
+    fn verb_menu_q_no_longer_closes() {
+        // q-close removed from verb menu; q now produces None in this sub-mode.
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        let a = key_to_action(&s, key(KeyCode::Char('q')));
+        assert!(matches!(a, Action::None), "q should no longer close the verb menu");
     }
 
     #[test]
@@ -4289,5 +4356,70 @@ mod tests {
         // Click outside → swallowed
         let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
         assert!(matches!(a, Action::None), "outside filebrowser dialog should be swallowed, got {:?}", a);
+    }
+
+    #[test]
+    fn verbmenu_dialog_x_and_done_produce_verb_menu_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::VerbMenuState;
+
+        let rects = DialogRects {
+            area:    Rect::new(0, 0, 80, 24),
+            content: Rect::new(1, 2, 78, 20),
+            close:   Some(Rect::new(78, 0, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(70, 23, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.verb_menu = Some(VerbMenuState {
+            pane: crate::state::VerbMenuPane::Verbs,
+            verb_idx: 0,
+            noun_idx: 0,
+            prep_idx: 0,
+            nouns: vec![],
+        });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → VerbMenuClose
+        let a = mouse_to_action(&state, mouse_left_click(78, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::VerbMenuClose), "verb menu [X] click should produce VerbMenuClose, got {:?}", a);
+
+        // Done button → VerbMenuClose
+        let a = mouse_to_action(&state, mouse_left_click(72, 23), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::VerbMenuClose), "verb menu [Done] click should produce VerbMenuClose, got {:?}", a);
+    }
+
+    #[test]
+    fn hotkey_dialog_x_and_done_produce_close_hotkey_dialog() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+
+        let rects = DialogRects {
+            area:    Rect::new(10, 5, 60, 30),
+            content: Rect::new(11, 7, 58, 26),
+            close:   Some(Rect::new(68, 5, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(60, 34, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.hotkey_dialog = true;
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → CloseHotkeyDialog
+        let a = mouse_to_action(&state, mouse_left_click(68, 5), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::CloseHotkeyDialog), "hotkey dialog [X] click should produce CloseHotkeyDialog, got {:?}", a);
+
+        // Done button → CloseHotkeyDialog
+        let a = mouse_to_action(&state, mouse_left_click(62, 34), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::CloseHotkeyDialog), "hotkey dialog [Done] click should produce CloseHotkeyDialog, got {:?}", a);
     }
 }

@@ -338,7 +338,7 @@ fn draw_frame(
         let help_text = if state.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
         } else if state.verb_menu.is_some() {
-            "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc/q: close".to_string()
+            "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc: close".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickDir).unwrap_or(false) {
@@ -389,7 +389,7 @@ fn draw_frame(
 
         // ── Hotkey dialog overlay — drawn over everything ─────────────────────
         if state.hotkey_dialog {
-            draw_hotkey_dialog(state, full, buf);
+            dialog_rects_out = draw_hotkey_dialog(state, full, buf);
         }
 
         // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
@@ -409,7 +409,7 @@ fn draw_frame(
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
         if state.verb_menu.is_some() {
-            draw_verb_menu(state, full, buf);
+            dialog_rects_out = draw_verb_menu(state, full, buf);
         }
 
         // ── Config screen overlay — drawn after other modals ──────────────────
