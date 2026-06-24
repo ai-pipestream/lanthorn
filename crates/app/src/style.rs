@@ -344,6 +344,101 @@ pub fn resolve(
     (cs, set, warnings)
 }
 
+// ── DEFAULT_STYLE_TOML ────────────────────────────────────────────────────────
+
+/// The embedded built-in `default` style.
+///
+/// Reproduces the terminal-default look: empty `[colors]` (no scheme, no selectors)
+/// and the default symbol presets. An empty StyleDoc resolves to terminal defaults
+/// (see Task 6), so this constant is the canonical baseline.
+pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
+# Empty [colors] means no scheme and no selector overrides => terminal defaults.
+# Symbol presets list the factory defaults; override any preset or individual symbol below.
+
+[colors]
+
+[symbols]
+box_style = "rounded"
+arrow_set = "filled"
+portal_icons = "ascii"
+path_style = "light"
+"#;
+
+// ── load_style ────────────────────────────────────────────────────────────────
+
+/// Load a [`StyleDoc`] according to a pointer string.
+///
+/// Resolution order:
+/// - `None` — if `user_dir/style.toml` exists, read and parse it; else parse
+///   [`DEFAULT_STYLE_TOML`].
+/// - `Some("default")` — always parse [`DEFAULT_STYLE_TOML`].
+/// - `Some(path)` — `~`-expand and resolve relative to `user_dir`; read and parse
+///   the file. On missing file or parse error, push exactly one warning string and
+///   fall back to [`DEFAULT_STYLE_TOML`].
+///
+/// Never panics.
+pub fn load_style(
+    pointer: Option<&str>,
+    user_dir: &std::path::Path,
+) -> (StyleDoc, Vec<String>) {
+    let default_doc = || parse_style_toml(DEFAULT_STYLE_TOML).expect("DEFAULT_STYLE_TOML must parse");
+
+    match pointer {
+        None => {
+            let candidate = user_dir.join("style.toml");
+            if candidate.is_file() {
+                match std::fs::read_to_string(&candidate) {
+                    Ok(text) => match parse_style_toml(&text) {
+                        Ok(doc) => return (doc, Vec::new()),
+                        Err(e) => {
+                            let warn = format!(
+                                "could not parse style file '{}': {}; using built-in default",
+                                candidate.display(),
+                                e
+                            );
+                            return (default_doc(), vec![warn]);
+                        }
+                    },
+                    Err(e) => {
+                        let warn = format!(
+                            "could not read style file '{}': {}; using built-in default",
+                            candidate.display(),
+                            e
+                        );
+                        return (default_doc(), vec![warn]);
+                    }
+                }
+            }
+            (default_doc(), Vec::new())
+        }
+        Some("default") => (default_doc(), Vec::new()),
+        Some(path_str) => {
+            let path = colors::expand_path(path_str, user_dir);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match parse_style_toml(&text) {
+                    Ok(doc) => (doc, Vec::new()),
+                    Err(e) => {
+                        let warn = format!(
+                            "could not parse style file '{}': {}; using built-in default",
+                            path.display(),
+                            e
+                        );
+                        (default_doc(), vec![warn])
+                    }
+                },
+                Err(e) => {
+                    let warn = format!(
+                        "could not read style file '{}': {}; using built-in default",
+                        path.display(),
+                        e
+                    );
+                    (default_doc(), vec![warn])
+                }
+            }
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -470,5 +565,19 @@ box_style = "rounded"
         assert_eq!(doc.colors.selectors["suggestion"].fg.as_deref(), Some("#7a7a7a"));
         assert_eq!(doc.symbols.box_style.as_deref(), Some("rounded"));
         assert_eq!(doc.symbols.overrides["arrow.north"], "^");
+    }
+
+    #[test]
+    fn load_style_default_name_parses_builtin() {
+        let (doc, warns) = load_style(Some("default"), std::path::Path::new("/nonexistent"));
+        assert!(warns.is_empty());
+        let _ = doc; // parses without error
+    }
+
+    #[test]
+    fn load_style_missing_path_warns_and_falls_back() {
+        let (doc, warns) = load_style(Some("/no/such/style.toml"), std::path::Path::new("/tmp"));
+        assert_eq!(warns.len(), 1);
+        assert_eq!(doc, parse_style_toml(DEFAULT_STYLE_TOML).unwrap());
     }
 }
