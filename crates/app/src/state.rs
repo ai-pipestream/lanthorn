@@ -1,5 +1,19 @@
 use std::time::{Duration, Instant};
 
+// ── Gallery constants ─────────────────────────────────────────────────────────
+
+/// Category index for box-style gallery column.
+pub const GALLERY_CATEGORY_BOX: usize = 0;
+/// Category index for arrow-set gallery column.
+pub const GALLERY_CATEGORY_ARROWS: usize = 1;
+/// Category index for portal-icons gallery column.
+pub const GALLERY_CATEGORY_PORTAL: usize = 2;
+/// Category index for path-style gallery column.
+pub const GALLERY_CATEGORY_PATH: usize = 3;
+
+/// Category names displayed in the gallery left pane.
+pub const GALLERY_CATEGORY_NAMES: &[&str] = &["Box style", "Arrows", "Portals", "Path"];
+
 use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
 use mapper::layer::LayerId;
@@ -67,6 +81,33 @@ impl TidyAnim {
             self.playing = false;
         }
         true
+    }
+}
+
+// ── Gallery state ─────────────────────────────────────────────────────────────
+
+/// Transient state for the symbol gallery modal.
+/// `None` in AppState.gallery = closed.
+#[derive(Debug, Clone)]
+pub struct GalleryState {
+    /// Which category column is currently active (0..4).
+    pub category_idx: usize,
+    /// Selected preset index within each category (indices into preset_names()).
+    /// Order: [box, arrows, portal, path]
+    pub selections: [usize; 4],
+}
+
+impl GalleryState {
+    /// Build a SymbolConfig from the current gallery selections.
+    pub fn symbol_config(&self) -> crate::config::SymbolConfig {
+        use crate::symbols::{Arrows, BoxStyle, PathGlyphs, PortalGlyphs};
+        crate::config::SymbolConfig {
+            box_style: BoxStyle::preset_names()[self.selections[GALLERY_CATEGORY_BOX]].to_owned(),
+            arrow_set: Arrows::preset_names()[self.selections[GALLERY_CATEGORY_ARROWS]].to_owned(),
+            portal_icons: PortalGlyphs::preset_names()[self.selections[GALLERY_CATEGORY_PORTAL]].to_owned(),
+            path_style: PathGlyphs::preset_names()[self.selections[GALLERY_CATEGORY_PATH]].to_owned(),
+            overrides: Default::default(),
+        }
     }
 }
 
@@ -176,6 +217,9 @@ pub struct AppState {
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
 
+    /// Active symbol gallery modal state. `None` means the gallery is closed.
+    pub gallery: Option<GalleryState>,
+
     // ── Autocomplete state ────────────────────────────────────────────────────
 
     /// Cached parser-vocabulary words from the Z-machine dictionary.
@@ -212,6 +256,7 @@ impl Default for AppState {
             show_help: false,
             symbols: crate::symbols::SymbolSet::default(),
             keymap: crate::keymap::KeyMap::default(),
+            gallery: None,
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -425,5 +470,18 @@ mod tests {
     fn appstate_default_symbols_are_default_set() {
         let st = AppState::default();
         assert_eq!(st.symbols, crate::symbols::SymbolSet::default());
+    }
+
+    #[test]
+    fn gallery_state_symbol_config_roundtrips() {
+        let g = GalleryState {
+            category_idx: 0,
+            selections: [0, 0, 0, 0], // rounded, filled, ascii, light (the defaults)
+        };
+        let cfg = g.symbol_config();
+        assert_eq!(cfg.box_style, "rounded");
+        assert_eq!(cfg.arrow_set, "filled");
+        assert_eq!(cfg.portal_icons, "ascii");
+        assert_eq!(cfg.path_style, "light");
     }
 }
