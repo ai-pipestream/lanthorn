@@ -107,11 +107,14 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 
 - Edits write to the user's **personal style file** `~/.babelmap/style.toml` (created on first edit), format-preserving via `toml_edit`, **preserving unknown sections** (future `[header]` etc.).
 - **Fork-on-edit:** the edit session starts from the currently-resolved style (whatever `style` points at, plus overrides), and on save writes the result to `~/.babelmap/style.toml` AND sets `config.toml`'s `style` to point at the personal file (or clears it, since absent ⇒ personal file). So: load a friend's style, tweak it, and it becomes *your* style — what you see is what you save.
+- **Gallery "Output all settings to style file" button:** an explicit, discoverable gallery action (footer button + key) that writes the **complete current style fully expanded** — every color selector and every symbol preset/override, not just deltas — to the personal `~/.babelmap/style.toml`, producing a **self-contained, shareable** file (no reliance on a base `scheme` or inherited defaults). It also repoints `config.toml`'s `style` to the personal file. This is the deliberate "export my whole look" affordance; fork-on-edit is the implicit version that fires on any normal save.
 - `write_config` no longer writes `[colors]`/`[symbols]` (those move to the style file); it keeps writing the functional keys. A new `style::write_style(path, &resolved_style)` handles the style file. The legacy `[colors]`/`[symbols]` already in a user's `config.toml` are left untouched (still read as the override layer) but are no longer the write target.
 
 ## Components
 
-- **`crates/app/src/style.rs` (new):** the `Style file` model (raw/partial structs for `[colors]` selector declarations + `[symbols]`), `load_style(name_or_path, user_dir) -> (StyleDoc, warnings)`, `merge(base, override) -> StyleDoc`, `resolve(StyleDoc, user_dir) -> (ColorScheme, SymbolSet, warnings)`, `write_style(path, &StyleDoc)` (toml_edit, preserve unknown), and the built-in `default` embedded text. The fixed selector→field table lives here.
+- **`crates/app/src/style.rs` (new):** the `Style file` model (raw/partial structs for `[colors]` selector declarations + `[symbols]`), `load_style(name_or_path, user_dir) -> (StyleDoc, warnings)`, `merge(base, override) -> StyleDoc`, `resolve(StyleDoc, user_dir) -> (ColorScheme, SymbolSet, warnings)`, `write_style(path, &StyleDoc)` (toml_edit, preserve unknown), `write_style_full(path, &ColorScheme, &SymbolSet)` (the fully-expanded, self-contained export for the gallery button), and the built-in `default` embedded text. The fixed selector→field table lives here.
+- **`render/gallery.rs`:** add the "Output all settings to style file" footer button + its key hint.
+- **`input.rs`:** a gallery action (e.g. `GalleryExportStyle`) that calls `write_style_full` to the personal file and repoints `config.toml` `style`.
 - **`config.rs`:** add `style: Option<String>` to `Config`; `Config::resolve` reads it; stop requiring `[colors]`/`[symbols]` here (still parse them as the override layer). `write_config` drops the style sections.
 - **`colors.rs`:** extend the color-value parser to accept named/index/hex uniformly; adapt `ColorScheme` construction to consume merged selector declarations (base palette via `scheme` + per-selector patches).
 - **`symbols.rs`:** `SymbolSet::resolve` consumes the merged symbol form (already preset+override; minimal change).
@@ -132,6 +135,7 @@ Today the gallery writes `[symbols]` to `config.toml` and the config screen writ
 - **Color value parsing:** named, `#rrggbb`, index `0-255` each parse; bad value ⇒ warning, ignored.
 - **Write round-trip:** `write_style` writes selectors+symbols, is format-preserving, and PRESERVES an unrelated `[header]` section + comments (proves future beautify keys survive). Re-reading yields the same resolved style.
 - **Fork-on-edit:** saving from the gallery/config writes `~/.babelmap/style.toml` and sets `config.toml` `style` to it; a subsequent load reflects the edit.
+- **Gallery export-all:** the "Output all settings" action writes a fully-expanded style file — every selector + every symbol key present, no inherited gaps — and re-loading it WITHOUT any base scheme/overrides reproduces the same `ColorScheme`/`SymbolSet` (self-contained); the `style` pointer is repointed to it.
 
 ## Out of scope / non-goals
 
