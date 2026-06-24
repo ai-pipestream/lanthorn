@@ -129,7 +129,10 @@ pub fn draw_room_info(
     let section_style = Style::default().fg(Color::DarkGray);
 
     // Fill the panel with a solid opaque background so the map does not show through.
-    let bg_style = Style::new().bg(Color::Black);
+    // Style::reset() clears all inherited attributes (fg, modifiers such as REVERSED)
+    // before applying bg(Black), preventing map connector colors and reversed-block
+    // modifiers from bleeding through.
+    let bg_style = Style::reset().bg(Color::Black);
     for y in panel.y..panel.bottom() {
         for x in panel.x..panel.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -299,6 +302,48 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         // Without machine_mem, objects list is empty, so "Here:" should not appear.
         assert!(!buf_contains(&buf, "Here:"), "Here: should not appear without machine_mem");
+    }
+
+    #[test]
+    fn room_info_panel_clears_reversed_modifier_and_fg() {
+        // Pre-fill the buffer with REVERSED + fg(Cyan) to simulate map connector bleed.
+        // After rendering, cells inside the panel must have no REVERSED modifier
+        // and must have bg(Black).
+        use ratatui::style::{Color, Modifier, Style};
+        let (g, room1, _) = make_graph_with_rooms();
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let area = f.area();
+            let bleed_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED);
+            // Pre-fill every cell with the bleed style.
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+                        cell.set_symbol(" ").set_style(bleed_style);
+                    }
+                }
+            }
+            draw_room_info(&g, None, room1, None, area, f.buffer_mut());
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for y in 0..4u16 {
+            for x in 0..36u16 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    assert!(
+                        !cell.style().add_modifier.contains(Modifier::REVERSED),
+                        "cell ({x},{y}) must not have REVERSED modifier inside panel"
+                    );
+                    assert_eq!(
+                        cell.style().bg,
+                        Some(Color::Black),
+                        "cell ({x},{y}) must have bg(Black) inside panel"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
