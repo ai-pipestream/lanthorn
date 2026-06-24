@@ -65,6 +65,39 @@ pub fn decl_to_style(d: &Decl, scheme: &colors::GhosttyScheme) -> Style {
     s
 }
 
+// ── StyleSymbols ──────────────────────────────────────────────────────────────
+
+/// Partial symbol configuration from a style file.
+///
+/// Every preset field is `Option` so unset fields are distinguished from
+/// explicitly set ones. [`finalize_symbols`] fills `None` fields with the
+/// existing `config::default_*` values to produce a concrete [`config::SymbolConfig`].
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct StyleSymbols {
+    pub box_style: Option<String>,
+    pub arrow_set: Option<String>,
+    pub portal_icons: Option<String>,
+    pub path_style: Option<String>,
+    #[serde(default)]
+    pub overrides: BTreeMap<String, String>,
+}
+
+// ── finalize_symbols ──────────────────────────────────────────────────────────
+
+/// Resolve a partial [`StyleSymbols`] into a concrete [`config::SymbolConfig`].
+///
+/// Each `None` preset is filled with the existing `config::default_*` value.
+/// The `overrides` map is copied as-is.
+pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
+    crate::config::SymbolConfig {
+        box_style: s.box_style.clone().unwrap_or_else(crate::config::default_box_style),
+        arrow_set: s.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
+        portal_icons: s.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
+        path_style: s.path_style.clone().unwrap_or_else(crate::config::default_path_style),
+        overrides: s.overrides.clone(),
+    }
+}
+
 // ── SELECTOR_FIELDS ───────────────────────────────────────────────────────────
 
 /// The recognized CSS-ish selectors for color declarations.
@@ -161,5 +194,18 @@ mod tests {
         decls.insert("bogus".to_string(), Decl { fg: Some("red".into()), ..Default::default() });
         let warns = apply_color_decls(&mut cs, &decls, &scheme);
         assert_eq!(warns.len(), 1);
+    }
+
+    #[test]
+    fn finalize_symbols_fills_defaults_and_keeps_overrides() {
+        let mut s = StyleSymbols::default();
+        s.box_style = Some("thick".into());
+        s.overrides.insert("arrow.north".into(), "^".into());
+        let cfg = finalize_symbols(&s);
+        assert_eq!(cfg.box_style, "thick");
+        assert_eq!(cfg.arrow_set, crate::config::default_arrow_set()); // unspecified => default
+        assert_eq!(cfg.overrides.get("arrow.north").map(String::as_str), Some("^"));
+        // resolve must succeed
+        let _set = crate::symbols::SymbolSet::resolve(&cfg);
     }
 }

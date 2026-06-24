@@ -39,10 +39,10 @@ pub struct KeymapConfig {
 
 // ── Symbol config ─────────────────────────────────────────────────────────────
 
-fn default_box_style() -> String { "rounded".into() }
-fn default_arrow_set() -> String { "filled".into() }
-fn default_portal_icons() -> String { "ascii".into() }
-fn default_path_style() -> String { "light".into() }
+pub(crate) fn default_box_style() -> String { "rounded".into() }
+pub(crate) fn default_arrow_set() -> String { "filled".into() }
+pub(crate) fn default_portal_icons() -> String { "ascii".into() }
+pub(crate) fn default_path_style() -> String { "light".into() }
 
 /// The [symbols] section of config.toml.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
