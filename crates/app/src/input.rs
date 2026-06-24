@@ -384,21 +384,19 @@ fn room_at_screen(
         .map(|(id, _)| *id)
 }
 
+/// Test whether (col, row) is inside `rect`.
+fn hit(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
 /// Per-modal button-to-action mapping for the config screen.
 /// Maps a `ButtonId` click (or the close [X] hit) to the appropriate `Action`.
-/// Later modals can add their own similar functions or a match on which modal
-/// is open to return the right mapping.
 fn config_dialog_action(
     rects: &crate::render::dialog::DialogRects,
     col: u16,
     row: u16,
 ) -> Option<Action> {
     use crate::render::dialog::ButtonId;
-
-    /// Test whether (col, row) is inside `rect`.
-    fn hit(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
-        col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
-    }
 
     // Check close [X]
     if let Some(close_rect) = rects.close {
@@ -414,6 +412,62 @@ fn config_dialog_action(
                 ButtonId::Save   => Action::ConfigSave,
                 ButtonId::Cancel => Action::ConfigCancel,
                 _                => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the saves manager.
+fn saves_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::SavesClose);
+        }
+    }
+
+    // Check buttons: Done → SavesClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::SavesClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the file browser.
+fn filebrowser_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::FbClose);
+        }
+    }
+
+    // Check buttons: Done → FbClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::FbClose,
+                _              => Action::None,
             });
         }
     }
@@ -452,6 +506,14 @@ pub fn mouse_to_action(
             // Determine which modal is open and route button/close clicks
             if state.config_screen.is_some() {
                 if let Some(action) = config_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.saves.is_some() {
+                if let Some(action) = saves_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.file_browser.is_some() {
+                if let Some(action) = filebrowser_dialog_action(rects, col, row) {
                     return action;
                 }
             }
@@ -621,7 +683,6 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Enter => Action::FbEnter,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::FbChooseDir,
         KeyCode::Esc => Action::FbClose,
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::FbClose,
         _ => Action::None,
     }
 }
@@ -3988,10 +4049,11 @@ mod tests {
     }
 
     #[test]
-    fn filebrowser_q_produces_fb_close() {
+    fn filebrowser_q_no_longer_closes() {
+        // q-close removed from file browser; q now produces None in this sub-mode.
         let s = state_with_filebrowser(crate::state::FbMode::PickDir);
         let a = key_to_action(&s, key(KeyCode::Char('q')));
-        assert!(matches!(a, Action::FbClose), "q in file browser should produce FbClose");
+        assert!(matches!(a, Action::None), "q should no longer close the file browser");
     }
 
     #[test]
@@ -4144,5 +4206,88 @@ mod tests {
         s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::ConfigCancel), "ESC in config screen should produce ConfigCancel");
+    }
+
+    #[test]
+    fn saves_dialog_x_and_done_produce_saves_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::SavesState;
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+
+        let rects = DialogRects {
+            area:    Rect::new(10, 5, 40, 15),
+            content: Rect::new(11, 7, 38, 10),
+            close:   Some(Rect::new(48, 5, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(40, 19, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.saves = Some(SavesState {
+            entries: vec![SaveInfo {
+                path: PathBuf::from("/tmp/a.babelmap"),
+                name: "a".into(),
+                turns: 0,
+                saved_at: String::new(),
+                is_default: false,
+            }],
+            selected: 0,
+        });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → SavesClose
+        let a = mouse_to_action(&state, mouse_left_click(48, 5), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::SavesClose), "saves [X] click should produce SavesClose, got {:?}", a);
+
+        // Done button → SavesClose
+        let a = mouse_to_action(&state, mouse_left_click(42, 19), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::SavesClose), "saves [Done] click should produce SavesClose, got {:?}", a);
+
+        // Click outside → swallowed
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside saves dialog should be swallowed, got {:?}", a);
+    }
+
+    #[test]
+    fn filebrowser_dialog_x_and_done_produce_fb_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+
+        let rects = DialogRects {
+            area:    Rect::new(8, 4, 50, 18),
+            content: Rect::new(9, 6, 48, 13),
+            close:   Some(Rect::new(56, 4, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(48, 21, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        let tmp = std::env::temp_dir();
+        state.file_browser = Some(crate::state::FileBrowserState::build(
+            tmp,
+            crate::state::FbMode::PickFile,
+            String::new(),
+        ));
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → FbClose
+        let a = mouse_to_action(&state, mouse_left_click(56, 4), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::FbClose), "filebrowser [X] click should produce FbClose, got {:?}", a);
+
+        // Done button → FbClose
+        let a = mouse_to_action(&state, mouse_left_click(50, 21), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::FbClose), "filebrowser [Done] click should produce FbClose, got {:?}", a);
+
+        // Click outside → swallowed
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside filebrowser dialog should be swallowed, got {:?}", a);
     }
 }

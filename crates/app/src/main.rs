@@ -340,9 +340,9 @@ fn draw_frame(
         } else if state.verb_menu.is_some() {
             "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc/q: close".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
-            "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc/q: cancel".to_string()
+            "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickDir).unwrap_or(false) {
-            "Export Save | \u{2191}\u{2193}: move | Enter: open dir | s: export here | Esc/q: cancel".to_string()
+            "Export Save | \u{2191}\u{2193}: move | Enter: open dir | s: export here | Esc: cancel".to_string()
         } else if state.saves.is_some() {
             "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | e: export | i: import | Esc: close".to_string()
         } else if state.gallery.is_some() {
@@ -399,12 +399,12 @@ fn draw_frame(
 
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
-            draw_saves(state, full, buf);
+            dialog_rects_out = draw_saves(state, full, buf);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
         if state.file_browser.is_some() {
-            draw_file_browser(state, full, buf);
+            dialog_rects_out = draw_file_browser(state, full, buf);
         }
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
