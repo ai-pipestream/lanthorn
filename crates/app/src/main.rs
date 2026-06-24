@@ -9,7 +9,6 @@ use mapper::render::{render as render_map_data, render_layer};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
 use clap::Parser;
@@ -29,7 +28,7 @@ use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects};
-use app::render::paneframe::{build_layer_segments, draw_pane_frame, draw_top_inset};
+use app::render::paneframe::{build_layer_segments, draw_pane_frame, draw_top_inset, InsetSegment};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
@@ -202,23 +201,6 @@ fn draw_frame(
         let main_area = vert[0];
         let help_row = vert[1];
 
-        // Focus indicator: the pane receiving keys gets a bright bold border and a ▸
-        // marker in its title (with a reverse-video title bar); the other pane keeps
-        // the default border.
-        let focused_border = state.colors.focused_border;
-        let pane = |title: &str, focused: bool| {
-            let block = Block::default().borders(Borders::ALL);
-            if focused {
-                let title_span = ratatui::text::Span::styled(
-                    format!("\u{25b8} {title}"),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                );
-                block.title(title_span).border_style(focused_border)
-            } else {
-                block.title(title.to_string())
-            }
-        };
-
         // When a background tidy job is in flight, the map pane border pulses between
         // red and green. This overrides the normal border color (focused or unfocused).
         let map_border_override: Option<ratatui::style::Color> = state.tidy_job.as_ref().map(|job| {
@@ -227,11 +209,10 @@ fn draw_frame(
 
         match state.layout {
             Layout::TranscriptFull => {
-                let block = pane("Story", state.focus == Focus::Game);
-                let inner = block.inner(main_area);
-                block.render(main_area, buf);
-                render_transcript(&session.machine, state, inner, buf);
-                story_area = inner;
+                let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, state.colors.story_border);
+                render_transcript(&session.machine, state, story_frame.content, buf);
+                draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
+                story_area = story_frame.content;
                 map_area = Rect::default();
             }
             Layout::MapFull => {
@@ -271,11 +252,10 @@ fn draw_frame(
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
 
-                let transcript_block = pane("Story", state.focus == Focus::Game);
-                let transcript_inner = transcript_block.inner(chunks[0]);
-                transcript_block.render(chunks[0], buf);
-                render_transcript(&session.machine, state, transcript_inner, buf);
-                story_area = transcript_inner;
+                let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, state.colors.story_border);
+                render_transcript(&session.machine, state, story_frame.content, buf);
+                draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
+                story_area = story_frame.content;
 
                 let map_frame = draw_pane_frame(buf, chunks[1], state.colors.map_border_style, state.colors.map_border);
                 render_map_layered(&rm, &mapper.graph, state, map_frame.content, buf);
@@ -310,7 +290,7 @@ fn draw_frame(
                 // Map pane is NEVER dimmed (always full brightness).
                 // Story pane dims when map has focus.
                 if state.focus == Focus::Map {
-                    dim_area(buf, transcript_inner);
+                    dim_area(buf, story_frame.content);
                 }
             }
         }
@@ -1444,7 +1424,7 @@ mod tests {
 
     use super::{dim_area, hint_line, hint_line_game};
     use app::keymap::{Context, KeyMap};
-    use app::render::paneframe::draw_pane_frame;
+    use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
 
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
 
@@ -1469,6 +1449,51 @@ mod tests {
         );
         // Content area must be inset by 2 on all sides for picture-frame (20-4=16, 10-4=6)
         assert_eq!(frame.content, Rect::new(2, 2, 16, 6));
+    }
+
+    // ── TestBackend: story pane shows adventure title in picture-frame border ─────
+
+    /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
+    /// story_border_style as picture-frame, that rendering it produces the ┏ outer
+    /// corner at top-left, and that the adventure title appears in the top border row.
+    #[test]
+    fn story_pane_shows_title_in_border_by_default() {
+        // Resolve the default look from DEFAULT_STYLE_TOML (same path as startup).
+        let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
+            .expect("DEFAULT_STYLE_TOML must parse");
+        let (cs, _set, _warnings) = app::style::resolve(&doc, std::path::Path::new("."));
+
+        let area = Rect::new(0, 0, 40, 15);
+        let mut buf = Buffer::empty(area);
+
+        // Draw the story pane frame (same as draw_frame does).
+        let frame = draw_pane_frame(&mut buf, area, cs.story_border_style, cs.story_border);
+
+        // Overlay the adventure title (single centered segment, not active).
+        draw_top_inset(
+            &mut buf,
+            frame.top_inset,
+            &[InsetSegment { text: "ZORK I", active: false }],
+            cs.story_title,
+            cs.story_title,
+        );
+
+        // DEFAULT_STYLE_TOML sets story_border to picture-frame; top-left outer corner must be ┏
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "┏",
+            "default story border must be picture-frame (┏ at top-left)"
+        );
+
+        // The title "ZORK I" must appear somewhere in the top border row (row 1 for picture-frame).
+        let title_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            title_row.contains("ZORK I"),
+            "top border row must contain the adventure title 'ZORK I'; got: {:?}",
+            title_row
+        );
     }
 
     // ── hint_line ──────────────────────────────────────────────────────────────
