@@ -203,6 +203,49 @@ fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
         .expect("GameSession machine must have a CaptureSink output")
 }
 
+// ── Adventure-title helpers ───────────────────────────────────────────────────
+
+/// Return the first non-empty, non-`>`-prompt line from the game's opening
+/// banner, trimmed and capped at 40 characters.  Returns `None` if no such
+/// line exists.
+pub fn first_banner_line(intro_text: &str) -> Option<String> {
+    for line in intro_text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == ">" {
+            continue;
+        }
+        // Skip pure prompt lines (just ">" possibly with whitespace).
+        if trimmed.starts_with('>') && trimmed.trim_start_matches('>').trim().is_empty() {
+            continue;
+        }
+        let capped: String = trimmed.chars().take(40).collect();
+        return Some(capped);
+    }
+    None
+}
+
+/// Resolve the adventure title using a three-tier priority:
+/// 1. `override_name` if provided.
+/// 2. `banner` (a captured first-banner-line) if provided.
+/// 3. The story file's stem (filename without extension).
+pub fn resolve_title(
+    override_name: Option<&str>,
+    banner: Option<&str>,
+    story_path: &std::path::Path,
+) -> String {
+    if let Some(name) = override_name {
+        return name.to_owned();
+    }
+    if let Some(b) = banner {
+        return b.to_owned();
+    }
+    story_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -347,6 +390,23 @@ mod tests {
         // czech is an automated test suite that runs to completion (quit=true is normal).
         let transcript = session.take_transcript();
         assert!(!transcript.is_empty(), "czech should produce output before quitting");
+    }
+
+    // ── Task 4: first_banner_line + resolve_title tests ──────────────────────
+
+    #[test]
+    fn first_banner_line_skips_blank_and_prompt() {
+        assert_eq!(first_banner_line("\n\nZORK I: The Great Underground Empire\nCopyright...\n> ").as_deref(),
+                   Some("ZORK I: The Great Underground Empire"));
+        assert_eq!(first_banner_line("\n\n").as_deref(), None);
+    }
+
+    #[test]
+    fn resolve_title_prefers_override_then_banner_then_filename() {
+        use std::path::Path;
+        assert_eq!(resolve_title(Some("My Game"), Some("ZORK I"), Path::new("/x/zork1.z3")), "My Game");
+        assert_eq!(resolve_title(None, Some("ZORK I"), Path::new("/x/zork1.z3")), "ZORK I");
+        assert_eq!(resolve_title(None, None, Path::new("/x/zork1.z3")), "zork1");
     }
 
     // ── strip_read_prompt unit tests ──────────────────────────────────────────

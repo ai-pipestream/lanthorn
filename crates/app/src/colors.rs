@@ -14,6 +14,8 @@ use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
 
+use crate::render::paneframe::BorderStyle;
+
 // ── Built-in theme texts ──────────────────────────────────────────────────────
 
 const BUILTIN_MONO: &str = include_str!("colors/mono.ghostty");
@@ -156,6 +158,28 @@ pub struct ColorScheme {
     pub focused_border: Style,
     /// Help bar (bottom row).
     pub help_bar: Style,
+    /// Map pane border color.
+    pub map_border: Style,
+    /// Story pane border color.
+    pub story_border: Style,
+    /// Story pane title (centered in border).
+    pub story_title: Style,
+    /// Map layer tab (inactive).
+    pub map_layer_tab: Style,
+    /// Map layer tab (active).
+    pub map_layer_tab_active: Style,
+    /// Status header style.
+    pub status_header: Style,
+    /// Input line style.
+    pub input_line: Style,
+    /// Resolved border style for the map pane.
+    pub map_border_style: BorderStyle,
+    /// Resolved border style for the story pane.
+    pub story_border_style: BorderStyle,
+    /// Resolved border style for the status header.
+    pub status_header_style: BorderStyle,
+    /// Resolved border style for the input line.
+    pub input_line_style: BorderStyle,
 }
 
 impl ColorScheme {
@@ -184,6 +208,17 @@ impl ColorScheme {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
             help_bar: Style::new().add_modifier(Modifier::REVERSED),
+            map_border: Style::new().fg(Color::Cyan),
+            story_border: Style::new().fg(Color::Cyan),
+            story_title: Style::new().fg(Color::White),
+            map_layer_tab: Style::new().fg(Color::White),
+            map_layer_tab_active: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            status_header: Style::new(),
+            input_line: Style::new(),
+            map_border_style: BorderStyle::None,
+            story_border_style: BorderStyle::None,
+            status_header_style: BorderStyle::None,
+            input_line_style: BorderStyle::None,
         }
     }
 
@@ -288,6 +323,17 @@ impl ColorScheme {
                 .fg(focused_border_fg)
                 .add_modifier(Modifier::BOLD),
             help_bar,
+            map_border: Style::new().fg(scheme.palette[6]),
+            story_border: Style::new().fg(scheme.palette[6]),
+            story_title: Style::new().fg(fg),
+            map_layer_tab: Style::new().fg(fg),
+            map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
+            status_header: Style::new(),
+            input_line: Style::new(),
+            map_border_style: BorderStyle::None,
+            story_border_style: BorderStyle::None,
+            status_header_style: BorderStyle::None,
+            input_line_style: BorderStyle::None,
         }
     }
 

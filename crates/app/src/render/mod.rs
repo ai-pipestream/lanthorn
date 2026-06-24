@@ -1,4 +1,5 @@
 pub mod config_screen;
+pub mod paneframe;
 pub mod filebrowser;
 pub mod gallery;
 pub mod hotkeys;

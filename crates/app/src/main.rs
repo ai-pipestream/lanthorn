@@ -9,7 +9,6 @@ use mapper::render::{render as render_map_data, render_layer};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
 use clap::Parser;
@@ -29,8 +28,10 @@ use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects};
+use app::render::paneframe::{build_layer_segments, draw_pane_frame, draw_top_inset, InsetSegment};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
+use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
@@ -159,10 +160,15 @@ pub fn hint_line_game(keymap: &KeyMap) -> String {
 /// `map` is `Rect::default()` when the layout hides the map (TranscriptFull).
 /// `story` is `Rect::default()` when the layout hides the story (MapFull).
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
+/// `layer_tabs` pairs each visible layer tab with its hit-rect (for future click-to-switch).
 struct PaneRects {
     map: Rect,
     story: Rect,
     room_rects: Vec<(RoomId, Rect)>,
+    /// Hit-rects for each layer tab, paired with the layer id.
+    /// Populated but not yet consumed; reserved for a future click-to-switch feature.
+    #[allow(dead_code)]
+    layer_tabs: Vec<(LayerId, Rect)>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -176,6 +182,7 @@ fn draw_frame(
     let mut map_area = Rect::default();
     let mut story_area = Rect::default();
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
+    let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
 
     terminal.draw(|f| {
         let full = f.area();
@@ -194,54 +201,49 @@ fn draw_frame(
         let main_area = vert[0];
         let help_row = vert[1];
 
-        // Focus indicator: the pane receiving keys gets a bright bold border and a ▸
-        // marker in its title (with a reverse-video title bar); the other pane keeps
-        // the default border.
-        let focused_border = state.colors.focused_border;
-        let pane = |title: &str, focused: bool| {
-            let block = Block::default().borders(Borders::ALL);
-            if focused {
-                let title_span = ratatui::text::Span::styled(
-                    format!("\u{25b8} {title}"),
-                    Style::default().add_modifier(Modifier::REVERSED),
-                );
-                block.title(title_span).border_style(focused_border)
-            } else {
-                block.title(title.to_string())
-            }
-        };
-
         // When a background tidy job is in flight, the map pane border pulses between
         // red and green. This overrides the normal border color (focused or unfocused).
         let map_border_override: Option<ratatui::style::Color> = state.tidy_job.as_ref().map(|job| {
             pulse_border_color(job.started.elapsed())
         });
-        let map_pane = |title: &str, focused: bool| {
-            let block = pane(title, focused);
-            if let Some(pulse_color) = map_border_override {
-                block.border_style(Style::default().fg(pulse_color))
-            } else {
-                block
-            }
-        };
 
         match state.layout {
             Layout::TranscriptFull => {
-                let block = pane("Story", state.focus == Focus::Game);
-                let inner = block.inner(main_area);
-                block.render(main_area, buf);
-                render_transcript(&session.machine, state, inner, buf);
-                story_area = inner;
+                let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, state.colors.story_border);
+                render_transcript(&session.machine, state, story_frame.content, buf);
+                draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
+                story_area = story_frame.content;
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                let block = map_pane("Map", state.focus == Focus::Map);
-                let inner = block.inner(main_area);
-                block.render(main_area, buf);
-                render_map_layered(&rm, &mapper.graph, state, inner, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), inner, buf); }
-                map_area = inner; // use inner for recenter math
+                let graph = match &state.tidy_anim {
+                    Some(anim) => &anim.current().graph,
+                    None => &mapper.graph,
+                };
+                let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
+                let active_layer = state.active_layer(graph);
+                let frame = draw_pane_frame(buf, main_area, state.colors.map_border_style, state.colors.map_border);
+                render_map_layered(&rm, &mapper.graph, state, frame.content, buf);
+                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), frame.content, buf); }
+                map_area = frame.content;
                 story_area = Rect::default();
+                // Overlay layer tabs
+                let owned_segs = build_layer_segments(&layer_ids, active_layer);
+                let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
+                let tab_rects = draw_top_inset(buf, frame.top_inset, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active);
+                layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                // Apply pulsing border color overlay when a tidy job is in flight
+                if let Some(pulse_color) = map_border_override {
+                    let pulse_style = Style::default().fg(pulse_color);
+                    for cy in main_area.y..main_area.bottom() {
+                        if let Some(c) = buf.cell_mut((main_area.x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((main_area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    }
+                    for cx in main_area.x..main_area.right() {
+                        if let Some(c) = buf.cell_mut((cx, main_area.y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, main_area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    }
+                }
             }
             Layout::Split => {
                 // Split 50/50 horizontally with bordered blocks (no divider column).
@@ -250,23 +252,45 @@ fn draw_frame(
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
 
-                let transcript_block = pane("Story", state.focus == Focus::Game);
-                let transcript_inner = transcript_block.inner(chunks[0]);
-                transcript_block.render(chunks[0], buf);
-                render_transcript(&session.machine, state, transcript_inner, buf);
-                story_area = transcript_inner;
+                let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, state.colors.story_border);
+                render_transcript(&session.machine, state, story_frame.content, buf);
+                draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
+                story_area = story_frame.content;
 
-                let map_block = map_pane("Map", state.focus == Focus::Map);
-                let map_inner = map_block.inner(chunks[1]);
-                map_block.render(chunks[1], buf);
-                render_map_layered(&rm, &mapper.graph, state, map_inner, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_inner, buf); }
-                map_area = map_inner; // use inner for recenter math
+                let map_frame = draw_pane_frame(buf, chunks[1], state.colors.map_border_style, state.colors.map_border);
+                render_map_layered(&rm, &mapper.graph, state, map_frame.content, buf);
+                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_frame.content, buf); }
+                map_area = map_frame.content;
+                // Overlay layer tabs
+                {
+                    let graph = match &state.tidy_anim {
+                        Some(anim) => &anim.current().graph,
+                        None => &mapper.graph,
+                    };
+                    let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
+                    let active_layer = state.active_layer(graph);
+                    let owned_segs = build_layer_segments(&layer_ids, active_layer);
+                    let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
+                    let tab_rects = draw_top_inset(buf, map_frame.top_inset, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active);
+                    layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                }
+                // Apply pulsing border color overlay when a tidy job is in flight
+                if let Some(pulse_color) = map_border_override {
+                    let pulse_style = Style::default().fg(pulse_color);
+                    for cy in chunks[1].y..chunks[1].bottom() {
+                        if let Some(c) = buf.cell_mut((chunks[1].x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((chunks[1].right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    }
+                    for cx in chunks[1].x..chunks[1].right() {
+                        if let Some(c) = buf.cell_mut((cx, chunks[1].y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, chunks[1].bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    }
+                }
 
                 // Map pane is NEVER dimmed (always full brightness).
                 // Story pane dims when map has focus.
                 if state.focus == Focus::Map {
-                    dim_area(buf, transcript_inner);
+                    dim_area(buf, story_frame.content);
                 }
             }
         }
@@ -411,7 +435,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -527,8 +551,10 @@ fn main() {
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);
 
-    // Push the game's opening banner.
+    // Push the game's opening banner and capture the title from it.
     let banner = session.take_transcript();
+    let banner_line = app::session::first_banner_line(&banner);
+    state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
     state.push_transcript(&banner);
 
     // Observe the starting room so it appears on the map immediately.
@@ -595,7 +621,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new() };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new() };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1392,12 +1418,81 @@ fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
 mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::{Modifier, Style};
-    use ratatui::text::Span;
-    use ratatui::widgets::{Block, Borders, Widget};
+    use ratatui::style::Modifier;
 
     use super::{dim_area, hint_line, hint_line_game};
     use app::keymap::{Context, KeyMap};
+    use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
+
+    // ── TestBackend: map pane shows picture-frame top-left by default ──────────
+
+    /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
+    /// `map_border_style` as picture-frame, and that rendering it produces ┏ at
+    /// the top-left corner of the map pane area.
+    #[test]
+    fn map_pane_default_shows_picture_frame_corner() {
+        // Resolve the default look from DEFAULT_STYLE_TOML (same path as startup).
+        let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
+            .expect("DEFAULT_STYLE_TOML must parse");
+        let (cs, _set, _warnings) = app::style::resolve(&doc, std::path::Path::new("."));
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, cs.map_border);
+        // DEFAULT_STYLE_TOML sets map_border to picture-frame; top-left outer corner must be ┏
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "┏",
+            "default map border (from DEFAULT_STYLE_TOML) must be picture-frame (┏ at top-left)"
+        );
+        // Content area must be inset by 2 on all sides for picture-frame (20-4=16, 10-4=6)
+        assert_eq!(frame.content, Rect::new(2, 2, 16, 6));
+    }
+
+    // ── TestBackend: story pane shows adventure title in picture-frame border ─────
+
+    /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
+    /// story_border_style as picture-frame, that rendering it produces the ┏ outer
+    /// corner at top-left, and that the adventure title appears in the top border row.
+    #[test]
+    fn story_pane_shows_title_in_border_by_default() {
+        // Resolve the default look from DEFAULT_STYLE_TOML (same path as startup).
+        let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
+            .expect("DEFAULT_STYLE_TOML must parse");
+        let (cs, _set, _warnings) = app::style::resolve(&doc, std::path::Path::new("."));
+
+        let area = Rect::new(0, 0, 40, 15);
+        let mut buf = Buffer::empty(area);
+
+        // Draw the story pane frame (same as draw_frame does).
+        let frame = draw_pane_frame(&mut buf, area, cs.story_border_style, cs.story_border);
+
+        // Overlay the adventure title (single centered segment, not active).
+        draw_top_inset(
+            &mut buf,
+            frame.top_inset,
+            &[InsetSegment { text: "ZORK I", active: false }],
+            cs.story_title,
+            cs.story_title,
+        );
+
+        // DEFAULT_STYLE_TOML sets story_border to picture-frame; top-left outer corner must be ┏
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "┏",
+            "default story border must be picture-frame (┏ at top-left)"
+        );
+
+        // The title "ZORK I" must appear somewhere in the top border row (row 1 for picture-frame).
+        let title_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            title_row.contains("ZORK I"),
+            "top border row must contain the adventure title 'ZORK I'; got: {:?}",
+            title_row
+        );
+    }
 
     // ── hint_line ──────────────────────────────────────────────────────────────
 
@@ -1540,50 +1635,6 @@ mod tests {
         );
     }
 
-    // ── Focused-pane title carries REVERSED ───────────────────────────────────
-
-    /// Build a block the same way `pane()` does for the focused case, render it,
-    /// and check that the title cell carries REVERSED.
-    #[test]
-    fn focused_pane_title_has_reversed_modifier() {
-        // Reproduce what pane() does when focused=true.
-        let title_span = Span::styled(
-            "\u{25b8} Story",
-            Style::default().add_modifier(Modifier::REVERSED),
-        );
-        let block = Block::default().borders(Borders::ALL).title(title_span);
-
-        let area = Rect::new(0, 0, 20, 5);
-        let mut buf = Buffer::empty(area);
-        block.render(area, &mut buf);
-
-        // The title starts at x=1 on the top border row (y=0) inside the block.
-        // The first title character (▸) should carry REVERSED.
-        let title_cell = buf.cell((1, 0)).expect("title cell should exist");
-        assert!(
-            title_cell.modifier.contains(Modifier::REVERSED),
-            "focused title cell should have REVERSED modifier; got {:?}",
-            title_cell.modifier
-        );
-    }
-
-    #[test]
-    fn unfocused_pane_title_does_not_have_reversed_modifier() {
-        // Reproduce what pane() does when focused=false.
-        let block = Block::default().borders(Borders::ALL).title("Story".to_string());
-
-        let area = Rect::new(0, 0, 20, 5);
-        let mut buf = Buffer::empty(area);
-        block.render(area, &mut buf);
-
-        let title_cell = buf.cell((1, 0)).expect("title cell should exist");
-        assert!(
-            !title_cell.modifier.contains(Modifier::REVERSED),
-            "unfocused title cell should NOT have REVERSED; got {:?}",
-            title_cell.modifier
-        );
-    }
-
     // ── Split layout: dim unfocused, leave focused undimmed ───────────────────
 
     /// This test exercises the split-layout dimming logic by simulating what
@@ -1670,6 +1721,66 @@ mod tests {
                     "map pane cell ({x},{y}) should NOT have DIM under Focus::Map either"
                 );
             }
+        }
+    }
+
+    // ── Fix 4: pulse overlay only touches outer perimeter ─────────────────────
+
+    /// The pulse overlay (applied during a tidy job) writes the pulse color to the
+    /// outer perimeter cells of the map pane area. For a picture-frame border with
+    /// a top_inset at row y+1, the inner tab row center cells (x in 2..=right-3,
+    /// y == area.y + 1) must NOT be overwritten by the pulse.
+    ///
+    /// This test directly exercises the perimeter-loop invariant: identical to what
+    /// draw_frame executes, extracted inline so it runs without a full render stack.
+    #[test]
+    fn pulse_overlay_touches_only_outer_perimeter_not_inner_tab_row() {
+        use ratatui::style::{Color, Style};
+
+        // Use a 30x15 area (large enough for picture-frame: requires w>=7, h>=7).
+        let area = Rect::new(0, 0, 30, 15);
+        let mut buf = Buffer::empty(area);
+
+        // The pulse color to apply (distinct from default Reset).
+        let pulse_color = Color::Rgb(60, 200, 90); // PULSE_GREEN
+        let pulse_style = Style::default().fg(pulse_color);
+
+        // Apply the pulse overlay exactly as draw_frame does.
+        for cy in area.y..area.bottom() {
+            if let Some(c) = buf.cell_mut((area.x, cy)) { c.set_style(pulse_style); }
+            if let Some(c) = buf.cell_mut((area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+        }
+        for cx in area.x..area.right() {
+            if let Some(c) = buf.cell_mut((cx, area.y)) { c.set_style(pulse_style); }
+            if let Some(c) = buf.cell_mut((cx, area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+        }
+
+        // Outer perimeter (top row y=0) must carry the pulse color.
+        let top_left_fg = buf.cell((area.x, area.y)).map(|c| c.fg).unwrap();
+        assert_eq!(
+            top_left_fg,
+            pulse_color,
+            "top-left outer perimeter cell must carry pulse color"
+        );
+        let top_right_fg = buf.cell((area.right() - 1, area.y)).map(|c| c.fg).unwrap();
+        assert_eq!(
+            top_right_fg,
+            pulse_color,
+            "top-right outer perimeter cell must carry pulse color"
+        );
+
+        // Inner tab row (y+1) center cells must NOT carry the pulse color.
+        // For a picture-frame border, top_inset is at y+1, cols 3..=(w-4).
+        // The pulse only writes to x==area.x and x==area.right()-1 for the side columns,
+        // so the center of the inner tab row (e.g. col area.x+5) is untouched.
+        let tab_row_y = area.y + 1;
+        for cx in (area.x + 2)..(area.right() - 2) {
+            let fg = buf.cell((cx, tab_row_y)).map(|c| c.fg).unwrap();
+            assert_ne!(
+                fg,
+                pulse_color,
+                "inner tab row center cell ({cx}, {tab_row_y}) must NOT be overwritten by pulse"
+            );
         }
     }
 }

@@ -9,11 +9,15 @@ use std::collections::BTreeMap;
 use ratatui::style::{Modifier, Style};
 
 use crate::colors::{self, ColorScheme, GhosttyScheme};
+use crate::render::paneframe;
 
 // ── Decl ──────────────────────────────────────────────────────────────────────
 
 /// A partial style declaration: every field is `Option` so unset fields are
 /// distinguished from explicitly set ones.
+///
+/// The `style` field is only meaningful for border selectors (`map_border`,
+/// `story_border`, `status_header`, `input_line`); it is ignored for other selectors.
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 pub struct Decl {
     pub fg: Option<String>,
@@ -23,6 +27,10 @@ pub struct Decl {
     pub underline: Option<bool>,
     pub dim: Option<bool>,
     pub reversed: Option<bool>,
+    /// Optional border-style name (e.g. `"picture-frame"`, `"single"`, etc.).
+    /// Only interpreted for border selectors; ignored for others.
+    #[serde(default)]
+    pub style: Option<String>,
 }
 
 // ── decl_to_style ─────────────────────────────────────────────────────────────
@@ -114,6 +122,13 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "transcript",
     "suggestion",
     "helpbar",
+    "map_border",
+    "story_border",
+    "story_title",
+    "map_layer_tab",
+    "map_layer_tab_active",
+    "status_header",
+    "input_line",
 ];
 
 // ── apply_color_decls ─────────────────────────────────────────────────────────
@@ -123,6 +138,8 @@ pub const SELECTOR_FIELDS: &[&str] = &[
 /// For each known selector present in `decls`, patches the matching
 /// `ColorScheme` field via `field = field.patch(decl_to_style(decl, scheme))`.
 /// `border` with no variant is accepted and ignored (reserved, no warning).
+/// For `map_border` and `story_border`, an optional `style` key in the `Decl`
+/// also sets `cs.map_border_style`/`cs.story_border_style`.
 /// Unknown selectors are collected into the returned warnings vec.
 pub fn apply_color_decls(
     cs: &mut ColorScheme,
@@ -146,6 +163,33 @@ pub fn apply_color_decls(
             "transcript"         => cs.transcript = cs.transcript.patch(style),
             "suggestion"         => cs.suggestion = cs.suggestion.patch(style),
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
+            "map_border" => {
+                cs.map_border = cs.map_border.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.map_border_style = paneframe::parse_border_style(s);
+                }
+            }
+            "story_border" => {
+                cs.story_border = cs.story_border.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.story_border_style = paneframe::parse_border_style(s);
+                }
+            }
+            "story_title"        => cs.story_title = cs.story_title.patch(style),
+            "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
+            "map_layer_tab_active" => cs.map_layer_tab_active = cs.map_layer_tab_active.patch(style),
+            "status_header" => {
+                cs.status_header = cs.status_header.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.status_header_style = paneframe::parse_border_style(s);
+                }
+            }
+            "input_line" => {
+                cs.input_line = cs.input_line.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.input_line_style = paneframe::parse_border_style(s);
+                }
+            }
             _                    => warnings.push(format!("unknown selector: {}", selector)),
         }
     }
@@ -263,6 +307,7 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
         underline: over.underline.or(base.underline),
         dim:       over.dim.or(base.dim),
         reversed:  over.reversed.or(base.reversed),
+        style:     over.style.clone().or(base.style.clone()),
     }
 }
 
@@ -331,6 +376,7 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
         underline: t.get("underline").and_then(toml::Value::as_bool),
         dim:       t.get("dim").and_then(toml::Value::as_bool),
         reversed:  t.get("reversed").and_then(toml::Value::as_bool),
+        style:     t.get("style").and_then(toml::Value::as_str).map(str::to_string),
     }
 }
 
@@ -380,14 +426,15 @@ pub fn resolve(
 
 /// The embedded built-in `default` style.
 ///
-/// Reproduces the terminal-default look: empty `[colors]` (no scheme, no selectors)
-/// and the default symbol presets. An empty StyleDoc resolves to terminal defaults
-/// (see Task 6), so this constant is the canonical baseline.
+/// Sets picture-frame borders for both panes as the default look.
+/// An empty `[symbols]` means all presets resolve to their factory defaults via finalize_symbols.
 pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
-# Empty [colors] means no scheme and no selector overrides => terminal defaults.
+# map_border/story_border set picture-frame; other selectors use terminal defaults.
 # Empty [symbols] means all presets resolve to their factory defaults via finalize_symbols.
 
 [colors]
+"map_border" = { style = "picture-frame" }
+"story_border" = { style = "picture-frame" }
 
 [symbols]
 "#;
@@ -500,6 +547,7 @@ fn style_to_decl(s: &Style) -> Decl {
         underline: modifier_flag(s.add_modifier, Modifier::UNDERLINED),
         dim: modifier_flag(s.add_modifier, Modifier::DIM),
         reversed: modifier_flag(s.add_modifier, Modifier::REVERSED),
+        style: None, // color-only inverse; callers set this for border selectors
     }
 }
 
@@ -575,6 +623,7 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
         // Write each selector as an inline table.
         for (selector, decl) in &doc.colors.selectors {
             let mut itbl = toml_edit::InlineTable::new();
+            if let Some(st) = &decl.style  { itbl.insert("style",     toml_edit::Value::from(st.as_str())); }
             if let Some(fg) = &decl.fg { itbl.insert("fg", toml_edit::Value::from(fg.as_str())); }
             if let Some(bg) = &decl.bg { itbl.insert("bg", toml_edit::Value::from(bg.as_str())); }
             if decl.bold      == Some(true) { itbl.insert("bold",      toml_edit::Value::from(true)); }
@@ -654,6 +703,34 @@ pub fn write_style_full(
     doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
     doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
+    // New pane border/title/tab/header/input selectors.
+    {
+        let mut d = style_to_decl(&cs.map_border);
+        d.style = Some(paneframe::border_style_name(cs.map_border_style).to_string());
+        doc.colors.selectors.insert("map_border".to_string(), d);
+    }
+    {
+        let mut d = style_to_decl(&cs.story_border);
+        d.style = Some(paneframe::border_style_name(cs.story_border_style).to_string());
+        doc.colors.selectors.insert("story_border".to_string(), d);
+    }
+    doc.colors.selectors.insert("story_title".to_string(),        style_to_decl(&cs.story_title));
+    doc.colors.selectors.insert("map_layer_tab".to_string(),      style_to_decl(&cs.map_layer_tab));
+    doc.colors.selectors.insert("map_layer_tab_active".to_string(), style_to_decl(&cs.map_layer_tab_active));
+    {
+        let mut d = style_to_decl(&cs.status_header);
+        if cs.status_header_style != paneframe::BorderStyle::None {
+            d.style = Some(paneframe::border_style_name(cs.status_header_style).to_string());
+        }
+        doc.colors.selectors.insert("status_header".to_string(), d);
+    }
+    {
+        let mut d = style_to_decl(&cs.input_line);
+        if cs.input_line_style != paneframe::BorderStyle::None {
+            d.style = Some(paneframe::border_style_name(cs.input_line_style).to_string());
+        }
+        doc.colors.selectors.insert("input_line".to_string(), d);
+    }
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
@@ -890,6 +967,23 @@ box_style = "rounded"
     }
 
     #[test]
+    fn resolve_sets_border_style_and_default_is_picture_frame() {
+        // default doc (DEFAULT_STYLE_TOML) => picture-frame for both panes
+        let doc = parse_style_toml(DEFAULT_STYLE_TOML).unwrap();
+        let (cs, _set, _w) = resolve(&doc, std::path::Path::new("."));
+        assert!(matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::PictureFrame));
+        assert!(matches!(cs.story_border_style, crate::render::paneframe::BorderStyle::PictureFrame));
+    }
+
+    #[test]
+    fn border_selector_reads_style_and_color() {
+        let doc = parse_style_toml("[colors]\n\"map_border\" = { style = \"double\", fg = \"cyan\" }\n").unwrap();
+        let (cs, _s, _w) = resolve(&doc, std::path::Path::new("."));
+        assert!(matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::Double));
+        assert_eq!(cs.map_border.fg, Some(ratatui::style::Color::Cyan));
+    }
+
+    #[test]
     fn write_style_full_is_self_contained() {
         let dir = std::env::temp_dir()
             .join(format!("babelmap-style-test-full-{}", std::process::id()));
@@ -904,6 +998,40 @@ box_style = "rounded"
         let (cs2, set2, _w) = resolve(&doc, &dir);
         assert_eq!(cs2, cs);
         assert_eq!(set2, set);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_round_trips_non_none_border_styles() {
+        use crate::render::paneframe::BorderStyle;
+
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-border-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("border-full.toml");
+
+        // Build a ColorScheme with non-None border styles.
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.map_border_style   = BorderStyle::PictureFrame;
+        cs.story_border_style = BorderStyle::Double;
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+
+        assert!(
+            matches!(cs2.map_border_style, BorderStyle::PictureFrame),
+            "map_border_style must survive write_style_full -> parse -> resolve; got {:?}",
+            cs2.map_border_style
+        );
+        assert!(
+            matches!(cs2.story_border_style, BorderStyle::Double),
+            "story_border_style must survive write_style_full -> parse -> resolve; got {:?}",
+            cs2.story_border_style
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
