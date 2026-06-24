@@ -534,6 +534,12 @@ pub struct AppState {
     /// `Tab` advances this (cycling); typing resets it to 0.
     pub suggestion_idx: usize,
 
+    // ── Adventure title ───────────────────────────────────────────────────────
+
+    /// Resolved adventure title (override > banner > filename stem).
+    /// Set once at startup; used by pane chrome to label the story pane.
+    pub title: String,
+
     // ── Inventory panel state ─────────────────────────────────────────────────
 
     /// When true, the inventory strip is shown above the input line.
@@ -590,6 +596,7 @@ impl Default for AppState {
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
+            title: String::new(),
             show_inventory: false,
             player_obj: None,
             inventory_fallback: Vec::new(),

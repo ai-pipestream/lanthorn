@@ -527,8 +527,10 @@ fn main() {
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);
 
-    // Push the game's opening banner.
+    // Push the game's opening banner and capture the title from it.
     let banner = session.take_transcript();
+    let banner_line = app::session::first_banner_line(&banner);
+    state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
     state.push_transcript(&banner);
 
     // Observe the starting room so it appears on the map immediately.
