@@ -2,6 +2,7 @@ pub mod gallery;
 pub mod hotkeys;
 pub mod inspector;
 pub mod map;
+pub mod room_info;
 pub mod saves;
 pub mod transcript;
 
