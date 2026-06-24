@@ -90,12 +90,17 @@ fn draw_frame(
         let help_row = vert[1];
 
         // Focus indicator: the pane receiving keys gets a bright bold border and a ▸
-        // marker in its title; the other pane keeps the default border.
+        // marker in its title (with a reverse-video title bar); the other pane keeps
+        // the default border.
         let focused_border = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
         let pane = |title: &str, focused: bool| {
             let block = Block::default().borders(Borders::ALL);
             if focused {
-                block.title(format!("\u{25b8} {title}")).border_style(focused_border)
+                let title_span = ratatui::text::Span::styled(
+                    format!("\u{25b8} {title}"),
+                    Style::default().add_modifier(Modifier::REVERSED),
+                );
+                block.title(title_span).border_style(focused_border)
             } else {
                 block.title(title.to_string())
             }
@@ -133,6 +138,12 @@ fn draw_frame(
                 map_block.render(chunks[1], buf);
                 render_map_layered(&rm, &mapper.graph, state, map_inner, buf);
                 map_area = map_inner; // use inner for recenter math
+
+                // Dim the unfocused pane's inner content so the eye is drawn to the active pane.
+                match state.focus {
+                    Focus::Game => dim_area(buf, map_inner),
+                    Focus::Map => dim_area(buf, transcript_inner),
+                }
             }
         }
 
@@ -538,4 +549,163 @@ fn map_pane_dims(area: Rect) -> (u16, u16) {
     let w = if area.width == 0 { 80 } else { area.width };
     let h = if area.height == 0 { 24 } else { area.height };
     (w, h)
+}
+
+/// Apply `Modifier::DIM` to every cell in `area` of `buf`.
+/// Called after a pane's content is rendered to de-emphasise the unfocused pane.
+fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_style(cell.style().add_modifier(Modifier::DIM));
+            }
+        }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::{Modifier, Style};
+    use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Widget};
+
+    use super::{dim_area};
+
+    // ── dim_area ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn dim_area_sets_dim_on_all_cells() {
+        let area = Rect::new(0, 0, 4, 3);
+        let mut buf = Buffer::empty(area);
+        // Pre-fill one cell with some content so we can check DIM ORs onto existing modifier.
+        buf.cell_mut((1, 1)).unwrap().set_symbol("X");
+
+        dim_area(&mut buf, area);
+
+        for y in 0..3 {
+            for x in 0..4 {
+                let cell = buf.cell((x, y)).unwrap();
+                assert!(
+                    cell.modifier.contains(Modifier::DIM),
+                    "cell ({x},{y}) should have DIM; modifier={:?}",
+                    cell.modifier
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dim_area_does_not_affect_cells_outside_area() {
+        let full = Rect::new(0, 0, 6, 4);
+        let target = Rect::new(2, 1, 3, 2); // x:2..5, y:1..3
+        let mut buf = Buffer::empty(full);
+
+        dim_area(&mut buf, target);
+
+        // Cells inside target have DIM.
+        for y in 1..3 {
+            for x in 2..5 {
+                assert!(
+                    buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                    "cell ({x},{y}) inside target should have DIM"
+                );
+            }
+        }
+        // Cells outside target do NOT have DIM.
+        assert!(
+            !buf.cell((0, 0)).unwrap().modifier.contains(Modifier::DIM),
+            "cell (0,0) outside target should NOT have DIM"
+        );
+        assert!(
+            !buf.cell((5, 3)).unwrap().modifier.contains(Modifier::DIM),
+            "cell (5,3) outside target should NOT have DIM"
+        );
+    }
+
+    // ── Focused-pane title carries REVERSED ───────────────────────────────────
+
+    /// Build a block the same way `pane()` does for the focused case, render it,
+    /// and check that the title cell carries REVERSED.
+    #[test]
+    fn focused_pane_title_has_reversed_modifier() {
+        // Reproduce what pane() does when focused=true.
+        let title_span = Span::styled(
+            "\u{25b8} Story",
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+        let block = Block::default().borders(Borders::ALL).title(title_span);
+
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buf = Buffer::empty(area);
+        block.render(area, &mut buf);
+
+        // The title starts at x=1 on the top border row (y=0) inside the block.
+        // The first title character (▸) should carry REVERSED.
+        let title_cell = buf.cell((1, 0)).expect("title cell should exist");
+        assert!(
+            title_cell.modifier.contains(Modifier::REVERSED),
+            "focused title cell should have REVERSED modifier; got {:?}",
+            title_cell.modifier
+        );
+    }
+
+    #[test]
+    fn unfocused_pane_title_does_not_have_reversed_modifier() {
+        // Reproduce what pane() does when focused=false.
+        let block = Block::default().borders(Borders::ALL).title("Story".to_string());
+
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buf = Buffer::empty(area);
+        block.render(area, &mut buf);
+
+        let title_cell = buf.cell((1, 0)).expect("title cell should exist");
+        assert!(
+            !title_cell.modifier.contains(Modifier::REVERSED),
+            "unfocused title cell should NOT have REVERSED; got {:?}",
+            title_cell.modifier
+        );
+    }
+
+    // ── Split layout: dim unfocused, leave focused undimmed ───────────────────
+
+    /// This test exercises the split-layout dimming logic by simulating what
+    /// draw_frame does: render content into two inner rects, then call dim_area
+    /// on the unfocused one. It verifies that cells in the unfocused inner rect
+    /// have DIM and cells in the focused inner rect do NOT.
+    #[test]
+    fn split_layout_unfocused_pane_is_dimmed_focused_is_not() {
+        // Two side-by-side "panes" within a wider buffer.
+        let full = Rect::new(0, 0, 20, 5);
+        let _left_inner = Rect::new(1, 1, 8, 3);   // story inner area (focused; not dimmed)
+        let right_inner = Rect::new(11, 1, 8, 3);  // map inner area
+
+        let mut buf = Buffer::empty(full);
+
+        // Simulate Focus::Game: dim the map (right) pane, not the transcript (left).
+        dim_area(&mut buf, right_inner);
+
+        // Focused pane (left) inner cells should NOT have DIM.
+        for y in 1..4 {
+            for x in 1..9 {
+                assert!(
+                    !buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                    "focused pane cell ({x},{y}) should NOT have DIM"
+                );
+            }
+        }
+
+        // Unfocused pane (right) inner cells should all have DIM.
+        for y in 1..4 {
+            for x in 11..19 {
+                assert!(
+                    buf.cell((x, y)).unwrap().modifier.contains(Modifier::DIM),
+                    "unfocused pane cell ({x},{y}) should have DIM"
+                );
+            }
+        }
+    }
 }
