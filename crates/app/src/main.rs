@@ -383,9 +383,12 @@ fn main() {
     let mut mapper = if arc_file.exists() {
         match load_archive(&arc_file) {
             Ok(ac) => {
-                // Restore the machine from the saved game state in the archive.
-                if let Err(e) = session.machine.restore_quetzal(&ac.save) {
-                    eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
+                // Restore the machine from the saved game state only when auto_load is enabled.
+                // When auto_load = false the accumulated map still loads, but the game starts fresh.
+                if cfg.auto_load {
+                    if let Err(e) = session.machine.restore_quetzal(&ac.save) {
+                        eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
+                    }
                 }
                 ac.mapper
             }
