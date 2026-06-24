@@ -126,6 +126,34 @@ fn default_user_dir() -> PathBuf {
     PathBuf::from(base).join(".babelmap")
 }
 
+fn default_true() -> bool { true }
+
+// ── Background-tidy mode ──────────────────────────────────────────────────────
+
+/// Controls when the map is automatically re-tidied after new rooms are discovered.
+///
+/// TOML: `background_tidy = "every_room"` (default), `"off"`, `"on_overlap"`, `"debounced"`.
+///
+/// NOTE: the default (`EveryRoom`) changes today's behavior — a full relayout runs on
+/// each turn that discovers a new room. Set `background_tidy = "off"` to keep the
+/// manual-only tidy behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundTidy {
+    /// Never auto-tidy; only manual Retidy / AnimateTidy.
+    Off,
+    /// Re-tidy whenever a turn discovers a new room (default).
+    #[default]
+    EveryRoom,
+    /// Re-tidy only when incremental placement caused an overlap or distorted edge.
+    OnOverlap,
+    /// Re-tidy once every K new rooms (`BG_TIDY_DEBOUNCE`).
+    Debounced,
+}
+
+/// Number of new rooms that must accumulate before a `Debounced` background tidy fires.
+pub const BG_TIDY_DEBOUNCE: u32 = 5;
+
 /// User preferences loaded from TOML.  Every field has a default so a missing
 /// config file (or a file with only some fields) is always valid.
 #[derive(Debug, Deserialize)]
@@ -139,6 +167,19 @@ pub struct Config {
     /// legacy shared <ifid>.map.json so pre-accumulated maps are still visible.
     #[serde(default)]
     pub use_default_map: bool,
+    /// When true (default), restore the game state from the archive on startup so
+    /// play resumes where it left off. Set false to start a fresh playthrough while
+    /// retaining the accumulated map.
+    #[serde(default = "default_true")]
+    pub auto_load: bool,
+    /// When true, save the archive after every game turn (in addition to the
+    /// exit-save and Ctrl+S quick-save). Default false.
+    #[serde(default)]
+    pub auto_save: bool,
+    /// Controls automatic background re-tidy when new rooms are discovered.
+    /// Default: EveryRoom (re-tidy on each turn that finds a new room).
+    #[serde(default)]
+    pub background_tidy: BackgroundTidy,
     /// Map symbol configuration: presets + per-glyph overrides.
     #[serde(default)]
     pub symbols: SymbolConfig,
@@ -158,6 +199,9 @@ impl Default for Config {
         Self {
             user_dir: default_user_dir(),
             use_default_map: false,
+            auto_load: true,
+            auto_save: false,
+            background_tidy: BackgroundTidy::EveryRoom,
             symbols: SymbolConfig::default(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
@@ -192,6 +236,9 @@ pub fn resolve(cli: &Cli) -> Config {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
             cfg.user_dir = from_file.user_dir;
             cfg.use_default_map = from_file.use_default_map;
+            cfg.auto_load = from_file.auto_load;
+            cfg.auto_save = from_file.auto_save;
+            cfg.background_tidy = from_file.background_tidy;
             cfg.symbols = from_file.symbols;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
@@ -362,6 +409,54 @@ mod tests {
         assert_eq!(doc["symbols"]["box_style"].as_str(), Some("ascii"));
         assert_eq!(doc["symbols"]["arrow_set"].as_str(), Some("line"));
         assert_eq!(doc["other"]["foo"].as_str(), Some("bar")); // preserved
+    }
+
+    #[test]
+    fn auto_load_defaults_true() {
+        let cfg = Config::default();
+        assert!(cfg.auto_load, "auto_load must default to true");
+    }
+
+    #[test]
+    fn auto_save_defaults_false() {
+        let cfg = Config::default();
+        assert!(!cfg.auto_save, "auto_save must default to false");
+    }
+
+    #[test]
+    fn background_tidy_defaults_every_room() {
+        let cfg = Config::default();
+        assert_eq!(cfg.background_tidy, BackgroundTidy::EveryRoom);
+    }
+
+    #[test]
+    fn auto_load_parses_false_from_toml() {
+        let cfg: Config = toml::from_str("auto_load = false").unwrap();
+        assert!(!cfg.auto_load);
+    }
+
+    #[test]
+    fn auto_save_parses_true_from_toml() {
+        let cfg: Config = toml::from_str("auto_save = true").unwrap();
+        assert!(cfg.auto_save);
+    }
+
+    #[test]
+    fn background_tidy_parses_on_overlap_from_toml() {
+        let cfg: Config = toml::from_str("background_tidy = \"on_overlap\"").unwrap();
+        assert_eq!(cfg.background_tidy, BackgroundTidy::OnOverlap);
+    }
+
+    #[test]
+    fn background_tidy_parses_off_from_toml() {
+        let cfg: Config = toml::from_str("background_tidy = \"off\"").unwrap();
+        assert_eq!(cfg.background_tidy, BackgroundTidy::Off);
+    }
+
+    #[test]
+    fn background_tidy_parses_debounced_from_toml() {
+        let cfg: Config = toml::from_str("background_tidy = \"debounced\"").unwrap();
+        assert_eq!(cfg.background_tidy, BackgroundTidy::Debounced);
     }
 
     #[test]
