@@ -81,6 +81,8 @@ pub enum Action {
     ZoomIn,
     /// Zoom the map out (less detail).
     ZoomOut,
+    /// Reset zoom to the default level (Boxes) and clear the char-pan offset.
+    ZoomReset,
     /// Pan the map scroll by (dx, dy).
     Pan(i32, i32),
     /// Re-center the map on the selected room.
@@ -1021,6 +1023,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::CycleLayoutReverse => state.cycle_layout_reverse(),
         Action::ZoomIn => state.zoom_in(),
         Action::ZoomOut => state.zoom_out(),
+        Action::ZoomReset => state.zoom_reset(),
         Action::Pan(dx, dy) => state.pan(dx, dy),
         Action::Recenter => apply_recenter(state, mapper),
         Action::SelectNext => select_adjacent(state, mapper, 1),
