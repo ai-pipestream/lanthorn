@@ -102,7 +102,7 @@ pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) {
     let footer_y = modal.bottom().saturating_sub(1);
     if footer_y > modal.y {
         let footer_style = Style::new().fg(Color::DarkGray).bg(Color::Black);
-        let footer = "Enter:load  s:save-as  d:delete  Esc:close";
+        let footer = "Enter:load  s:save-as  d:delete  e:export  i:import  Esc:close";
         // Fill footer row.
         for col in modal.x..modal.right() {
             if let Some(cell) = buf.cell_mut((col, footer_y)) {
