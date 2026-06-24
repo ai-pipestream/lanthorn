@@ -307,6 +307,21 @@ pub struct AppState {
     /// Index into `suggestions` of the currently-highlighted candidate.
     /// `Tab` advances this (cycling); typing resets it to 0.
     pub suggestion_idx: usize,
+
+    // ── Inventory panel state ─────────────────────────────────────────────────
+
+    /// When true, the inventory strip is shown above the input line.
+    pub show_inventory: bool,
+    /// Locked player object number once detected by the heuristic. None until
+    /// the player moves between two rooms and exactly one object follows.
+    pub player_obj: Option<u16>,
+    /// Last parsed output from an inventory command (parse fallback when player_obj
+    /// is not yet locked).
+    pub inventory_fallback: Vec<String>,
+    /// The player's previous room (global 0 value from the previous turn).
+    pub prev_location: Option<u16>,
+    /// Objects whose parent was prev_location at the end of the previous turn.
+    pub prev_objects_here: std::collections::BTreeSet<u16>,
 }
 
 impl Default for AppState {
@@ -341,6 +356,11 @@ impl Default for AppState {
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
+            show_inventory: false,
+            player_obj: None,
+            inventory_fallback: Vec::new(),
+            prev_location: None,
+            prev_objects_here: std::collections::BTreeSet::new(),
         }
     }
 }
