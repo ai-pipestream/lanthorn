@@ -104,6 +104,12 @@ and unsupported; v1/v2 are not supported.)
   use a CSS-ish element→properties format (`fg`/`bg`/`bold`/…). Customizing in
   the gallery or config screen writes your personal `~/.babelmap/style.toml`, and
   the gallery can export a self-contained style file to hand to someone else.
+- **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
+  `thick`/a notched **picture-frame**, the default). The map's top border carries
+  a centered **layer-tab strip** (active layer highlighted); the story's top
+  border shows the **adventure title** (taken from an override, the game's opening
+  banner, or the filename). The status line and input prompt can be boxed too —
+  all via `style.toml`.
 
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
