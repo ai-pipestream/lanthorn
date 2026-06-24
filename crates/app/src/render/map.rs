@@ -177,20 +177,14 @@ pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTab
 }
 
 
-/// Diagonal arrow glyphs (swappable named constants; e.g. to `◥◤◣◢`).
-const DIAG_NE: &str = "↗";
-const DIAG_NW: &str = "↖";
-const DIAG_SE: &str = "↘";
-const DIAG_SW: &str = "↙";
-
 /// Arrow glyph for a diagonal departure/arrival (caller guards with `is_diagonal`).
-fn diagonal_arrow(dir: Direction) -> &'static str {
+fn diagonal_arrow(dir: Direction, arrows: &crate::symbols::Arrows) -> char {
     match dir {
-        Direction::NE => DIAG_NE,
-        Direction::NW => DIAG_NW,
-        Direction::SE => DIAG_SE,
-        Direction::SW => DIAG_SW,
-        _ => DIAG_NE, // unreachable when guarded by is_diagonal
+        Direction::NE => arrows.ne,
+        Direction::NW => arrows.nw,
+        Direction::SE => arrows.se,
+        Direction::SW => arrows.sw,
+        _ => arrows.ne, // unreachable when guarded by is_diagonal
     }
 }
 
@@ -209,15 +203,12 @@ fn corner_anchor(cols: &PosTable, rows: &PosTable, cell: (i32, i32), dir: Direct
 }
 
 /// Return the arrowhead glyph that points OUTWARD from the origin along `dep_side`.
-///
-/// Arrows signify the outgoing direction only — the departure direction is always
-/// known, so arrows are always filled (▶◀▲▼).
-fn arrow_for_departure(dep_side: Side) -> &'static str {
+fn arrow_for_departure(dep_side: Side, arrows: &crate::symbols::Arrows) -> char {
     match dep_side {
-        Side::Right  => "▶", // leaving east
-        Side::Left   => "◀", // leaving west
-        Side::Top    => "▲", // leaving north
-        Side::Bottom => "▼", // leaving south
+        Side::Right  => arrows.east,
+        Side::Left   => arrows.west,
+        Side::Top    => arrows.north,
+        Side::Bottom => arrows.south,
     }
 }
 
@@ -346,9 +337,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
     //       the rooms drawn below them in step 2.
-    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
+    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows);
     }
 
     if boxes {
@@ -687,7 +678,8 @@ fn render_lane_connectors(
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
-) -> Vec<((i32, i32), &'static str, bool)> {
+    arrows: &crate::symbols::Arrows,
+) -> Vec<((i32, i32), String, bool)> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -695,9 +687,9 @@ fn render_lane_connectors(
     // idempotent and harmless.
     let mut cells: std::collections::HashMap<(i32, i32), u8> =
         std::collections::HashMap::new();
-    // Arrowheads: (virtual pixel, glyph, distorted). Returned for the caller to draw on top
-    // of the rooms (the arrow embeds in the room border).
-    let mut arrowheads: Vec<((i32, i32), &'static str, bool)> = Vec::new();
+    // Arrowheads: (virtual pixel, glyph string, distorted). Returned for the caller to draw on
+    // top of the rooms (the arrow embeds in the room border).
+    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
 
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
@@ -716,19 +708,19 @@ fn render_lane_connectors(
             }
         }
 
-        let dep_glyph = if mapper::direction::is_diagonal(conn.exit_dir) {
-            diagonal_arrow(conn.exit_dir)
+        let dep_ch = if mapper::direction::is_diagonal(conn.exit_dir) {
+            diagonal_arrow(conn.exit_dir, arrows)
         } else {
-            arrow_for_departure(conn.exit)
+            arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_glyph, conn.distorted));
+        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted));
         // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
         if conn.reciprocal {
-            let arr_glyph = match conn.entry_dir {
-                Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d),
-                _ => arrow_for_departure(conn.entry),
+            let arr_ch = match conn.entry_dir {
+                Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
+                _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_glyph, conn.distorted));
+            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted));
         }
     }
     arrowheads
@@ -736,16 +728,17 @@ fn render_lane_connectors(
 
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
 fn draw_connector_arrows(
-    arrowheads: &[((i32, i32), &'static str, bool)],
+    arrowheads: &[((i32, i32), String, bool)],
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
 ) {
     let (off_x, off_y) = offset;
-    for &((vx, vy), glyph, distorted) in arrowheads {
+    for (pos, glyph, distorted) in arrowheads {
+        let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let color = if distorted { Color::Magenta } else { Color::Cyan };
+            let color = if *distorted { Color::Magenta } else { Color::Cyan };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(Style::new().fg(color));
             }
@@ -3425,6 +3418,47 @@ mod tests {
         assert!(
             all_text.contains('╔') && all_text.contains('║'),
             "the layer-portal room must render with a double-line outline"
+        );
+    }
+
+    #[test]
+    fn arrow_uses_symbol_set() {
+        // room1(0,0) →E→ room2(1,0): with default symbols the departure arrow is '▶';
+        // with arrow_set = "line" it becomes '→'.
+        use mapper::graph::MapGraph;
+        use crate::symbols::SymbolSet;
+        use crate::config::SymbolConfig;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        let rm = mapper::render::render(&g);
+
+        // Default: '▶' at the departure arrow cell (10, 2)
+        let mut state = AppState::default();
+        state.scroll = (0, 0);
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        assert_eq!(
+            buf.cell((10, 2)).map(|c| c.symbol()),
+            Some("▶"),
+            "default symbols: east departure arrow must be '▶'"
+        );
+
+        // Line preset: '→' at the same cell
+        let mut cfg = SymbolConfig::default();
+        cfg.arrow_set = "line".into();
+        state.symbols = SymbolSet::resolve(&cfg);
+        let mut buf2 = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf2);
+        assert_eq!(
+            buf2.cell((10, 2)).map(|c| c.symbol()),
+            Some("→"),
+            "line preset: east departure arrow must be '→'"
         );
     }
 
