@@ -1,3 +1,4 @@
+pub mod filebrowser;
 pub mod gallery;
 pub mod hotkeys;
 pub mod inspector;
