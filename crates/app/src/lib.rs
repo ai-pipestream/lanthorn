@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod export_dot;
 pub mod export_svg;
 pub mod ifid;
