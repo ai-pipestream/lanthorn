@@ -61,6 +61,71 @@ fn map_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
     user_dir.join("maps")
 }
 
+// ── Hint bar ─────────────────────────────────────────────────────────────────
+
+use app::keymap::{Command, Context, KeyMap};
+
+/// Curated per-context shortlists for the bottom hint bar.
+/// Each element is (Command, short label override).
+const GAME_HINTS: &[(Command, &str)] = &[
+    (Command::ToggleFocus, "map"),
+    (Command::SaveGame, "save"),
+    (Command::RestoreGame, "restore"),
+    (Command::CycleLayout, "layout"),
+    (Command::Retidy, "tidy"),
+    (Command::AnimateTidy, "animate"),
+    (Command::ToggleHelp, "help"),
+];
+
+const MAP_HINTS: &[(Command, &str)] = &[
+    (Command::ToggleFocus, "story"),
+    (Command::CycleLayout, "layout"),
+    (Command::ZoomIn, "zoom+"),
+    (Command::Recenter, "center"),
+    (Command::SelectNext, "next"),
+    (Command::Retidy, "tidy"),
+    (Command::ToggleInspector, "inspect"),
+    (Command::ToggleHelp, "help"),
+];
+
+const ANIM_HINTS: &[(Command, &str)] = &[
+    (Command::AnimStepFwd, "step"),
+    (Command::AnimTogglePlay, "play/pause"),
+    (Command::AnimExit, "exit"),
+    (Command::PanLeft, "pan"),
+    (Command::ZoomIn, "zoom"),
+];
+
+/// Build the hint bar string for the given context from the keymap.
+/// Each entry renders as "KEY: label"; entries are joined with " | ".
+pub fn hint_line(keymap: &KeyMap, ctx: Context) -> String {
+    let hints: &[(Command, &str)] = match ctx {
+        Context::Global => MAP_HINTS, // not used directly, but safe fallback
+        Context::Map => MAP_HINTS,
+        Context::Anim => ANIM_HINTS,
+    };
+    // We also have a game-focus path — the caller selects the right context.
+    let _ = GAME_HINTS; // suppress unused; caller picks via game_hint_line
+    hints
+        .iter()
+        .filter_map(|(cmd, lbl)| {
+            keymap.primary_key(*cmd).map(|k| format!("{}: {}", k.label(), lbl))
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Hint line for game focus.
+pub fn hint_line_game(keymap: &KeyMap) -> String {
+    GAME_HINTS
+        .iter()
+        .filter_map(|(cmd, lbl)| {
+            keymap.primary_key(*cmd).map(|k| format!("{}: {}", k.label(), lbl))
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 // ── Draw helper ───────────────────────────────────────────────────────────────
 
 /// Render one frame.  Returns the map pane rect (INNER content area) so the event
@@ -166,13 +231,14 @@ fn draw_frame(
         let help_text = if let Some(anim) = &state.tidy_anim {
             // Playback status: stage progress + the transport controls.
             let f = anim.current();
+            let hints = hint_line(&state.keymap, Context::Anim);
             format!(
-                "Tidy [{}/{}] {}{} | \u{2190}\u{2192}: step | Space: {} | hjkl: pan | +/-: zoom | Esc: exit",
+                "Tidy [{}/{}] {}{} | {}",
                 anim.idx + 1,
                 anim.frames.len(),
                 f.label,
                 if anim.playing { " \u{25b6}" } else { "" },
-                if anim.playing { "pause" } else { "play" },
+                hints,
             )
         } else if let Some(prompt) = &state.prompt {
             // Show prompt label with instructions when a prompt is active.
@@ -185,12 +251,8 @@ fn draw_frame(
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
             match state.focus {
-                Focus::Game => {
-                    "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Ctrl+Y: animate | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+P: portals | Ctrl+Q: quit".to_string()
-                }
-                Focus::Map => {
-                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/Shift+\u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | Ctrl+arrows: nudge | +/-: zoom | c: center | n/p: select | [/]: layer | P/M/N: peel/merge/name | r/o/d/e: edit | i: inspect | Ctrl+Q: quit".to_string()
-                }
+                Focus::Game => hint_line_game(&state.keymap),
+                Focus::Map => hint_line(&state.keymap, Context::Map),
             }
         };
         // Fill help row with reversed style, then draw text.
@@ -597,7 +659,38 @@ mod tests {
     use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, Widget};
 
-    use super::{dim_area};
+    use super::{dim_area, hint_line, hint_line_game};
+    use app::keymap::{Context, KeyMap};
+
+    // ── hint_line ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hint_line_map_contains_zoom_with_plus_key() {
+        let km = KeyMap::default();
+        let line = hint_line(&km, Context::Map);
+        // With default keymap: ZoomIn primary key is '+', label is "zoom+"
+        assert!(line.contains("+: zoom+"), "expected '+: zoom+' in '{line}'");
+    }
+
+    #[test]
+    fn hint_line_game_contains_save_game() {
+        let km = KeyMap::default();
+        let line = hint_line_game(&km);
+        // Ctrl+S → SaveGame; label is "save"
+        assert!(line.contains("Ctrl+S: save"), "expected 'Ctrl+S: save' in '{line}'");
+    }
+
+    #[test]
+    fn hint_line_reflects_rebinding() {
+        let mut cfg = app::config::KeymapConfig::default();
+        cfg.overrides.insert("zoom_in".into(), "z".into());
+        let (km, _) = KeyMap::resolve(&cfg);
+        let line = hint_line(&km, Context::Map);
+        // After rebinding, 'z' is the primary key for ZoomIn
+        assert!(line.contains("Z: zoom+"), "expected 'Z: zoom+' in '{line}'");
+        // The old '+' key should NOT appear as the primary
+        assert!(!line.contains("+: zoom+"), "old binding should not be primary");
+    }
 
     // ── dim_area ──────────────────────────────────────────────────────────────
 

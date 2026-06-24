@@ -597,9 +597,16 @@ impl KeyMap {
         None
     }
 
-    /// Return the first (primary) `KeySpec` bound to `cmd` in any context,
-    /// for use in hint bar and help screen.
+    /// Return the first (primary) `KeySpec` bound to `cmd`.
+    ///
+    /// Prefers the binding in the command's own context; falls back to any context.
     pub fn primary_key(&self, cmd: Command) -> Option<KeySpec> {
+        let preferred_ctx = cmd.context();
+        // Try the command's own context first.
+        if let Some((s, _, _)) = self.bindings.iter().find(|(_, c, cx)| *c == cmd && *cx == preferred_ctx) {
+            return Some(*s);
+        }
+        // Fall back to any context.
         self.bindings.iter()
             .find(|(_, c, _)| *c == cmd)
             .map(|(s, _, _)| *s)
