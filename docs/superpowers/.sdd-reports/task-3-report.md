@@ -3,7 +3,7 @@
 ## STATUS: COMPLETE
 
 ## Commit SHA
-(see below — committed after this file is written)
+8d425577
 
 ## Cargo test result
 `cargo test --workspace`: 480 + 13 + 3 + 159 + 1 + 153 + 2 passed; 0 failed across all crates.
