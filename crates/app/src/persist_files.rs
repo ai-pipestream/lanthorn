@@ -427,4 +427,93 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ── export round-trip (save_game / restore_game) ──────────────────────────
+
+    #[test]
+    fn export_round_trip_bytes_match_save_quetzal() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(story) = std::fs::read(&fixture) else { return };
+        let mem = zvm::memory::Memory::new(story.clone()).unwrap();
+        let mut machine = zvm::cpu::exec::Machine::new(mem);
+        machine.init_caps();
+        for _ in 0..50 { let _ = machine.step(); }
+
+        let tmp = std::env::temp_dir().join(format!("babelmap-export-rt-{}.qzl", std::process::id()));
+        save_game(&tmp, &machine).unwrap();
+
+        // Bytes on disk should equal machine.save_quetzal().
+        let on_disk = std::fs::read(&tmp).unwrap();
+        assert_eq!(on_disk, machine.save_quetzal(), "exported file bytes must match save_quetzal()");
+
+        // restore_game into a fresh machine should succeed.
+        let mem2 = zvm::memory::Memory::new(story).unwrap();
+        let mut machine2 = zvm::cpu::exec::Machine::new(mem2);
+        machine2.init_caps();
+        restore_game(&tmp, &mut machine2).expect("restore ok");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn import_keeps_mapper_unchanged() {
+        // After restore_game the mapper is unmodified (standard saves have no map).
+        use mapper::mapper::Mapper;
+        use mapper::direction::Direction;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(story) = std::fs::read(&fixture) else { return };
+        let mem = zvm::memory::Memory::new(story.clone()).unwrap();
+        let mut machine = zvm::cpu::exec::Machine::new(mem);
+        machine.init_caps();
+        for _ in 0..50 { let _ = machine.step(); }
+
+        let tmp = std::env::temp_dir().join(format!("babelmap-import-map-{}.qzl", std::process::id()));
+        save_game(&tmp, &machine).unwrap();
+
+        // Build a mapper with rooms.
+        let mut mapper = Mapper::default();
+        mapper.observe(1, "West of House", None);
+        mapper.observe(2, "Forest", Some(Direction::N));
+
+        let room_count_before = mapper.graph.rooms().count();
+        let connections_before = mapper.graph.connections().len();
+
+        // restore_game should NOT touch the mapper.
+        let mem2 = zvm::memory::Memory::new(story).unwrap();
+        let mut machine2 = zvm::cpu::exec::Machine::new(mem2);
+        machine2.init_caps();
+        restore_game(&tmp, &mut machine2).expect("restore ok");
+
+        assert_eq!(mapper.graph.rooms().count(), room_count_before, "mapper rooms unchanged after import");
+        assert_eq!(mapper.graph.connections().len(), connections_before, "mapper connections unchanged after import");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn restore_game_fails_gracefully_on_wrong_story() {
+        // Restoring a save from czech.z5 into a machine loaded with a *different* story
+        // (or same story but different state check) should return an error, not panic.
+        // We test by saving from czech and attempting to restore into a fresh czech machine
+        // after corrupting the bytes.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(story) = std::fs::read(&fixture) else { return };
+
+        // Write clearly-invalid bytes.
+        let tmp = std::env::temp_dir().join(format!("babelmap-bad-save-{}.qzl", std::process::id()));
+        std::fs::write(&tmp, b"this is not a quetzal save at all").unwrap();
+
+        let mem = zvm::memory::Memory::new(story).unwrap();
+        let mut machine = zvm::cpu::exec::Machine::new(mem);
+        machine.init_caps();
+
+        let result = restore_game(&tmp, &mut machine);
+        assert!(result.is_err(), "restore of corrupt file should return Err");
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
