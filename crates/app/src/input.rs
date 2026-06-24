@@ -28,7 +28,7 @@
 //!   - `ExportSvg` — caller writes file.
 //!   - `Quit` — caller exits the event loop.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use mapper::mapper::Mapper;
 
 use crate::complete::{room_words_from_text, suggest};
@@ -144,6 +144,21 @@ pub enum Action {
     GalleryClose,
     /// No binding found — no-op.
     None,
+    // ── Mouse actions ─────────────────────────────────────────────────────────
+    /// Show the story-info panel for `RoomId` (left-click on a room).
+    ShowRoomInfo(mapper::graph::RoomId),
+    /// Show the diagnostics panel for `RoomId` (right-click on a room).
+    ShowRoomDiagnostics(mapper::graph::RoomId),
+    /// Close the open room panel (click on map gutter).
+    CloseRoomPanel,
+    /// Begin a middle-button drag-pan gesture at terminal cell (col, row).
+    BeginDragPan(u16, u16),
+    /// Continue a middle-button drag-pan gesture at terminal cell (col, row).
+    DragPanTo(u16, u16),
+    /// End a middle-button drag-pan gesture.
+    EndDragPan,
+    /// Scroll the transcript by delta lines (positive = down, negative = up).
+    TranscriptScroll(i32),
 }
 
 // ── key_to_action ─────────────────────────────────────────────────────────────
@@ -257,6 +272,92 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
                 None => Action::None,
             }
         }
+    }
+}
+
+// ── mouse_to_action ───────────────────────────────────────────────────────────
+
+/// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
+/// bounding rects of the map and story panes, and the live map graph (needed for
+/// room hit-testing on left/right clicks).
+///
+/// Returns `Action::None` for events outside both panes or with no binding.
+pub fn mouse_to_action(
+    state: &AppState,
+    m: MouseEvent,
+    map: ratatui::layout::Rect,
+    story: ratatui::layout::Rect,
+    graph: &mapper::graph::MapGraph,
+) -> Action {
+    use crate::render::map::{room_at_cell, screen_to_cell};
+
+    let col = m.column;
+    let row = m.row;
+    let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+
+    let in_map = map.width > 0 && map.height > 0
+        && col >= map.x && col < map.right()
+        && row >= map.y && row < map.bottom();
+    let in_story = story.width > 0 && story.height > 0
+        && col >= story.x && col < story.right()
+        && row >= story.y && row < story.bottom();
+
+    match m.kind {
+        // ── Left-click in map ─────────────────────────────────────────────────
+        MouseEventKind::Down(MouseButton::Left) if in_map => {
+            let cell = screen_to_cell((col as i32, row as i32), state.zoom, state.scroll, map);
+            let layer = state.active_layer(graph);
+            match room_at_cell(graph, layer, cell) {
+                Some(id) => Action::ShowRoomInfo(id),
+                None => Action::CloseRoomPanel,
+            }
+        }
+        // ── Right-click in map ────────────────────────────────────────────────
+        MouseEventKind::Down(MouseButton::Right) if in_map => {
+            let cell = screen_to_cell((col as i32, row as i32), state.zoom, state.scroll, map);
+            let layer = state.active_layer(graph);
+            match room_at_cell(graph, layer, cell) {
+                Some(id) => Action::ShowRoomDiagnostics(id),
+                None => Action::CloseRoomPanel,
+            }
+        }
+        // ── Middle-button: drag-pan ───────────────────────────────────────────
+        MouseEventKind::Down(MouseButton::Middle) if in_map => {
+            Action::BeginDragPan(col, row)
+        }
+        MouseEventKind::Drag(MouseButton::Middle) => {
+            Action::DragPanTo(col, row)
+        }
+        MouseEventKind::Up(MouseButton::Middle) => {
+            Action::EndDragPan
+        }
+        // ── Wheel in map: pan or zoom ─────────────────────────────────────────
+        MouseEventKind::ScrollUp if in_map => {
+            if ctrl {
+                Action::ZoomIn
+            } else if shift {
+                Action::Pan(-1, 0)
+            } else {
+                Action::Pan(0, -1)
+            }
+        }
+        MouseEventKind::ScrollDown if in_map => {
+            if ctrl {
+                Action::ZoomOut
+            } else if shift {
+                Action::Pan(1, 0)
+            } else {
+                Action::Pan(0, 1)
+            }
+        }
+        MouseEventKind::ScrollLeft if in_map => Action::Pan(-1, 0),
+        MouseEventKind::ScrollRight if in_map => Action::Pan(1, 0),
+        // ── Wheel in story: scroll transcript ────────────────────────────────
+        MouseEventKind::ScrollUp if in_story => Action::TranscriptScroll(-1),
+        MouseEventKind::ScrollDown if in_story => Action::TranscriptScroll(1),
+        // ── Everything else ───────────────────────────────────────────────────
+        _ => Action::None,
     }
 }
 
@@ -609,7 +710,28 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
-        Action::ToggleInspector => state.show_inspector = !state.show_inspector,
+        Action::ToggleInspector => {
+            // Toggle: if a Diagnostics panel is already open for the selected room, close it;
+            // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
+            use crate::state::{RoomPanel, RoomPanelMode};
+            if let Some(id) = state.selected_room {
+                let already_open = matches!(
+                    state.room_panel,
+                    Some(RoomPanel { id: pid, mode: RoomPanelMode::Diagnostics }) if pid == id
+                );
+                if already_open {
+                    state.room_panel = None;
+                    state.show_inspector = false;
+                } else {
+                    state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Diagnostics });
+                    state.show_inspector = true;
+                }
+            } else {
+                // No selected room: toggle off.
+                state.room_panel = None;
+                state.show_inspector = false;
+            }
+        }
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
@@ -782,6 +904,76 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(g) = state.gallery.take() {
                 state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
                 // Persistence is handled by the caller (main.rs detects GalleryClose).
+            }
+        }
+
+        // ── Mouse room-panel actions ──────────────────────────────────────────
+
+        Action::ShowRoomInfo(id) => {
+            use crate::state::{RoomPanel, RoomPanelMode};
+            state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Info });
+            state.selected_room = Some(id);
+            state.show_inspector = false;
+        }
+
+        Action::ShowRoomDiagnostics(id) => {
+            use crate::state::{RoomPanel, RoomPanelMode};
+            state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Diagnostics });
+            state.selected_room = Some(id);
+            state.show_inspector = true;
+        }
+
+        Action::CloseRoomPanel => {
+            state.room_panel = None;
+            state.show_inspector = false;
+        }
+
+        // ── Mouse drag-pan actions ────────────────────────────────────────────
+
+        Action::BeginDragPan(col, row) => {
+            use crate::state::DragState;
+            state.drag = Some(DragState { last: (col, row), acc_x: 0, acc_y: 0 });
+        }
+
+        Action::DragPanTo(col, row) => {
+            if let Some(drag) = &mut state.drag {
+                let (step_w, step_h) = state.zoom.steps();
+                let dx = col as i32 - drag.last.0 as i32;
+                let dy = row as i32 - drag.last.1 as i32;
+                drag.acc_x += dx;
+                drag.acc_y += dy;
+                drag.last = (col, row);
+                // Pan by whole grid cells (grab-and-drag: dragging right scrolls left).
+                while drag.acc_x >= step_w {
+                    state.scroll.0 -= 1;
+                    drag.acc_x -= step_w;
+                }
+                while drag.acc_x <= -step_w {
+                    state.scroll.0 += 1;
+                    drag.acc_x += step_w;
+                }
+                while drag.acc_y >= step_h {
+                    state.scroll.1 -= 1;
+                    drag.acc_y -= step_h;
+                }
+                while drag.acc_y <= -step_h {
+                    state.scroll.1 += 1;
+                    drag.acc_y += step_h;
+                }
+            }
+        }
+
+        Action::EndDragPan => {
+            state.drag = None;
+        }
+
+        // ── Transcript scroll ─────────────────────────────────────────────────
+
+        Action::TranscriptScroll(delta) => {
+            if delta < 0 {
+                state.transcript_scroll = state.transcript_scroll.saturating_sub((-delta) as u16);
+            } else {
+                state.transcript_scroll = state.transcript_scroll.saturating_add(delta as u16);
             }
         }
 
@@ -1611,14 +1803,29 @@ mod tests {
     }
 
     #[test]
-    fn toggle_inspector_flips_show_inspector() {
+    fn toggle_inspector_opens_diagnostics_for_selected_room() {
+        use crate::state::{RoomPanel, RoomPanelMode};
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        assert!(!s.show_inspector, "off by default");
+        // Without a selected room, ToggleInspector is a no-op (room_panel stays None).
         apply_action(Action::ToggleInspector, &mut s, &mut m);
-        assert!(s.show_inspector, "toggled on");
+        assert!(s.room_panel.is_none(), "no room selected: panel should stay None");
+        assert!(!s.show_inspector, "no room selected: show_inspector stays false");
+
+        // With a selected room, ToggleInspector opens a Diagnostics panel.
+        s.select_room(Some(42));
         apply_action(Action::ToggleInspector, &mut s, &mut m);
-        assert!(!s.show_inspector, "toggled off");
+        assert_eq!(
+            s.room_panel,
+            Some(RoomPanel { id: 42, mode: RoomPanelMode::Diagnostics }),
+            "should open Diagnostics panel for selected room"
+        );
+        assert!(s.show_inspector, "show_inspector should be true when panel opens");
+
+        // Second toggle closes it.
+        apply_action(Action::ToggleInspector, &mut s, &mut m);
+        assert!(s.room_panel.is_none(), "second toggle should close the panel");
+        assert!(!s.show_inspector, "show_inspector should be false after closing");
     }
 
     #[test]
@@ -2077,5 +2284,229 @@ mod tests {
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy),
             "retidy should fire from the hotkey dialog"
         );
+    }
+
+    // ── mouse_to_action tests ─────────────────────────────────────────────────
+
+    fn mouse_event(
+        kind: crossterm::event::MouseEventKind,
+        col: u16,
+        row: u16,
+        modifiers: KeyModifiers,
+    ) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent { kind, column: col, row, modifiers }
+    }
+
+    fn map_rect() -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(0, 0, 80, 40)
+    }
+
+    fn story_rect() -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(80, 0, 40, 40)
+    }
+
+    fn make_graph_with_room_at(id: u16, pos: (i32, i32)) -> mapper::graph::MapGraph {
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(id, "Room".into());
+        g.set_pos(id, pos);
+        g
+    }
+
+    #[test]
+    fn left_down_on_room_cell_produces_show_room_info() {
+        use crossterm::event::MouseEventKind;
+        use crate::state::Zoom;
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact; // step = (12, 5)
+        s.scroll = (0, 0);
+
+        // Room 1 at cell (0,0) → screen (0,0) with Compact zoom and area at (0,0).
+        let g = make_graph_with_room_at(1, (0, 0));
+
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(
+            matches!(action, Action::ShowRoomInfo(1)),
+            "left-down on room cell should produce ShowRoomInfo(1), got {:?}", action
+        );
+    }
+
+    #[test]
+    fn right_down_on_room_cell_produces_show_room_diagnostics() {
+        use crossterm::event::MouseEventKind;
+        use crate::state::Zoom;
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact;
+        s.scroll = (0, 0);
+        let g = make_graph_with_room_at(2, (0, 0));
+
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(
+            matches!(action, Action::ShowRoomDiagnostics(2)),
+            "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
+        );
+    }
+
+    #[test]
+    fn left_down_on_gutter_produces_close_room_panel() {
+        use crossterm::event::MouseEventKind;
+        use crate::state::Zoom;
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact; // step = (12, 5)
+        s.scroll = (0, 0);
+        // Room is at cell (0,0); click at screen (1, 0) is inside cell 0 (div 12 = 0)
+        // Actually with step 12, col 1 → cell 0. Let's click at col 50 → cell 4 (no room).
+        let g = make_graph_with_room_at(1, (0, 0)); // room only at cell (0,0)
+
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(
+            matches!(action, Action::CloseRoomPanel),
+            "left-down on gutter should produce CloseRoomPanel, got {:?}", action
+        );
+    }
+
+    #[test]
+    fn scroll_up_in_map_produces_pan_up() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(matches!(action, Action::Pan(0, -1)), "scroll up in map without modifier -> Pan(0,-1)");
+    }
+
+    #[test]
+    fn scroll_down_in_map_produces_pan_down() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        let m = mouse_event(MouseEventKind::ScrollDown, 10, 10, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(matches!(action, Action::Pan(0, 1)), "scroll down in map without modifier -> Pan(0,1)");
+    }
+
+    #[test]
+    fn scroll_up_with_shift_pans_left() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::SHIFT);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(matches!(action, Action::Pan(-1, 0)), "scroll up + Shift -> Pan(-1,0)");
+    }
+
+    #[test]
+    fn scroll_up_with_ctrl_zooms_in() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::CONTROL);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(matches!(action, Action::ZoomIn), "scroll up + Ctrl -> ZoomIn");
+    }
+
+    #[test]
+    fn scroll_in_story_produces_transcript_scroll() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        // col 85 is inside story_rect (x=80..120).
+        let m_up = mouse_event(MouseEventKind::ScrollUp, 85, 5, KeyModifiers::NONE);
+        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &g);
+        assert!(matches!(action_up, Action::TranscriptScroll(-1)), "scroll up in story -> TranscriptScroll(-1)");
+
+        let m_dn = mouse_event(MouseEventKind::ScrollDown, 85, 5, KeyModifiers::NONE);
+        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &g);
+        assert!(matches!(action_dn, Action::TranscriptScroll(1)), "scroll down in story -> TranscriptScroll(1)");
+    }
+
+    #[test]
+    fn middle_down_produces_begin_drag_pan() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Middle), 20, 15, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &g);
+        assert!(matches!(action, Action::BeginDragPan(20, 15)), "middle-down -> BeginDragPan");
+    }
+
+    #[test]
+    fn middle_drag_and_up_produce_drag_actions() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        let g = mapper::graph::MapGraph::new();
+        let drag = mouse_event(MouseEventKind::Drag(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
+        let up = mouse_event(MouseEventKind::Up(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
+        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &g), Action::DragPanTo(25, 18)));
+        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &g), Action::EndDragPan));
+    }
+
+    // ── Drag-pan accumulator tests ────────────────────────────────────────────
+
+    #[test]
+    fn drag_pan_accumulates_and_pans_at_step_boundary() {
+        use crate::state::Zoom;
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact; // step_w=12, step_h=5
+        let mut m = Mapper::default();
+
+        // Begin at (10, 10).
+        apply_action(Action::BeginDragPan(10, 10), &mut s, &mut m);
+        assert!(s.drag.is_some(), "drag state should be set after BeginDragPan");
+
+        // Move less than one step_w (11 columns) — no pan yet, scroll unchanged.
+        apply_action(Action::DragPanTo(21, 10), &mut s, &mut m); // dx=11 < step_w=12
+        assert_eq!(s.scroll, (0, 0), "sub-step move should not pan");
+
+        // Move one more column to cross step_w=12 total.
+        apply_action(Action::DragPanTo(22, 10), &mut s, &mut m); // dx=1, total acc=12
+        // Grab-and-drag: dragging right means content moves right (scroll decreases).
+        assert_eq!(s.scroll.0, -1, "crossing step_w rightward should scroll left by 1");
+        assert_eq!(s.scroll.1, 0, "y scroll should be unchanged");
+    }
+
+    #[test]
+    fn drag_pan_sub_step_movement_does_not_pan() {
+        use crate::state::Zoom;
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Boxes; // step_w=19, step_h=11
+        let mut m = Mapper::default();
+
+        apply_action(Action::BeginDragPan(0, 0), &mut s, &mut m);
+        // Move 5 cols right — less than step_w=19.
+        apply_action(Action::DragPanTo(5, 0), &mut s, &mut m);
+        assert_eq!(s.scroll, (0, 0), "sub-step movement should not pan");
+    }
+
+    #[test]
+    fn drag_pan_grab_and_drag_direction() {
+        // Drag LEFT should scroll RIGHT (content moves right = scroll.0 increases).
+        use crate::state::Zoom;
+
+        let mut s = AppState::default();
+        s.zoom = Zoom::Compact; // step_w=12
+        let mut m = Mapper::default();
+
+        apply_action(Action::BeginDragPan(20, 0), &mut s, &mut m);
+        // Drag left by 12+ columns.
+        apply_action(Action::DragPanTo(8, 0), &mut s, &mut m); // dx = -12
+        assert_eq!(s.scroll.0, 1, "dragging left should scroll right (content follows grab)");
+    }
+
+    #[test]
+    fn end_drag_pan_clears_state() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        apply_action(Action::BeginDragPan(0, 0), &mut s, &mut m);
+        assert!(s.drag.is_some());
+        apply_action(Action::EndDragPan, &mut s, &mut m);
+        assert!(s.drag.is_none(), "EndDragPan should clear drag state");
     }
 }
