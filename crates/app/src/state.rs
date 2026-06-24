@@ -57,6 +57,9 @@ use mapper::layer::LayerId;
 pub struct TidyFrame {
     pub label: String,
     pub graph: MapGraph,
+    pub description: String,
+    pub stats: mapper::layout::TidyStats,
+    pub stage_start: bool,
 }
 
 /// Transient playback state for the tidy animation. While this is `Some`, the map

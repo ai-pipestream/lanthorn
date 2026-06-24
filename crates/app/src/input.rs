@@ -507,45 +507,168 @@ pub(crate) fn run_tidy_pipeline(
     graph: &mut mapper::graph::MapGraph,
     layer: mapper::layer::LayerId,
 ) -> Vec<crate::state::TidyFrame> {
-    use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints, stack_updown_rooms};
+    use crate::render::map::{cleanup_overlaps_observed, compact_empty_lines_observed, repair_directional_hints_observed, stack_updown_rooms_observed};
     use crate::state::TidyFrame;
+    use mapper::layout::TidyStats;
+
+    const MAX_TIDY_FRAMES: usize = 2000;
 
     let mut sub = graph.layer_subgraph(layer);
-    let mut frames = vec![TidyFrame { label: "before".into(), graph: sub.clone() }];
-    let snap = |g: &mapper::graph::MapGraph, label: &str, frames: &mut Vec<TidyFrame>| {
-        frames.push(TidyFrame { label: label.into(), graph: g.clone() });
-    };
+    let mut frames: Vec<TidyFrame> = Vec::new();
 
-    mapper::layout::relayout_auto(&mut sub);
-    snap(&sub, "relayout", &mut frames);
-    cleanup_overlaps(&mut sub, 3, 40);
-    snap(&sub, "cleanup overlaps", &mut frames);
-    // Recover directional hints a post-solve stage sacrificed (e.g. a room ejected across a one-way
-    // edge), without re-introducing overlaps.
-    repair_directional_hints(&mut sub, 3, 40);
-    snap(&sub, "repair hints", &mut frames);
-    // Stack Up/Down rooms on the correct side of their partner (north for Up, south for Down),
-    // accepting a temporary overlap where the area is dense.
-    stack_updown_rooms(&mut sub);
-    snap(&sub, "stack up/down", &mut frames);
-    // Clear any overlap the stacking introduced by moving OTHER rooms — the cleanup is
-    // direction-aware, so it won't drag the Up/Down room back to the wrong side.
-    cleanup_overlaps(&mut sub, 3, 40);
-    snap(&sub, "cleanup overlaps", &mut frames);
-    // Collapse any fully-empty rows/columns the shuffling left behind.
-    compact_empty_lines(&mut sub);
-    snap(&sub, "compact", &mut frames);
+    let mut pipe_overlaps: u32 = 0;
+    let mut pipe_hints: u32 = 0;
+    let mut pipe_rooms_moved: u32 = 0;
+    let mut pipe_constraints: u32 = 0;
+
+    // "before" frame
+    frames.push(TidyFrame {
+        label: "before".into(),
+        graph: sub.clone(),
+        description: "Initial state before tidy pipeline.".into(),
+        stats: TidyStats::default(),
+        stage_start: true,
+    });
+
+    // Layout stages via relayout_auto_observed
+    mapper::layout::relayout_auto_observed(&mut sub, Some(&mut |g: &mapper::graph::MapGraph, label: &str, desc: &str, s: &TidyStats| {
+        pipe_rooms_moved = s.rooms_moved;
+        pipe_constraints = s.constraints_dropped;
+        if frames.len() < MAX_TIDY_FRAMES {
+            frames.push(TidyFrame {
+                label: label.into(),
+                graph: g.clone(),
+                description: desc.into(),
+                stats: TidyStats {
+                    rooms_moved: s.rooms_moved,
+                    constraints_dropped: s.constraints_dropped,
+                    overlaps_resolved: pipe_overlaps,
+                    hints_repaired: pipe_hints,
+                },
+                stage_start: true,
+            });
+        }
+    }));
+
+    // First cleanup_overlaps pass
+    {
+        let mut first = true;
+        cleanup_overlaps_observed(&mut sub, 3, 40, Some(&mut |g, _label, desc, _s| {
+            pipe_overlaps += 1;
+            if frames.len() < MAX_TIDY_FRAMES {
+                frames.push(TidyFrame {
+                    label: "cleanup_overlaps".into(),
+                    graph: g.clone(),
+                    description: desc.into(),
+                    stats: TidyStats {
+                        rooms_moved: pipe_rooms_moved,
+                        constraints_dropped: pipe_constraints,
+                        overlaps_resolved: pipe_overlaps,
+                        hints_repaired: pipe_hints,
+                    },
+                    stage_start: first,
+                });
+                first = false;
+            }
+        }));
+    }
+
+    // repair_directional_hints
+    {
+        let mut first = true;
+        repair_directional_hints_observed(&mut sub, 3, 40, Some(&mut |g, _label, desc, _s| {
+            pipe_hints += 1;
+            if frames.len() < MAX_TIDY_FRAMES {
+                frames.push(TidyFrame {
+                    label: "repair_hints".into(),
+                    graph: g.clone(),
+                    description: desc.into(),
+                    stats: TidyStats {
+                        rooms_moved: pipe_rooms_moved,
+                        constraints_dropped: pipe_constraints,
+                        overlaps_resolved: pipe_overlaps,
+                        hints_repaired: pipe_hints,
+                    },
+                    stage_start: first,
+                });
+                first = false;
+            }
+        }));
+    }
+
+    // stack_updown_rooms
+    stack_updown_rooms_observed(&mut sub, Some(&mut |g, _label, desc, _s| {
+        if frames.len() < MAX_TIDY_FRAMES {
+            frames.push(TidyFrame {
+                label: "stack_updown".into(),
+                graph: g.clone(),
+                description: desc.into(),
+                stats: TidyStats {
+                    rooms_moved: pipe_rooms_moved,
+                    constraints_dropped: pipe_constraints,
+                    overlaps_resolved: pipe_overlaps,
+                    hints_repaired: pipe_hints,
+                },
+                stage_start: true,
+            });
+        }
+    }));
+
+    // Second cleanup_overlaps pass
+    {
+        let mut first = true;
+        cleanup_overlaps_observed(&mut sub, 3, 40, Some(&mut |g, _label, desc, _s| {
+            pipe_overlaps += 1;
+            if frames.len() < MAX_TIDY_FRAMES {
+                frames.push(TidyFrame {
+                    label: "cleanup_overlaps".into(),
+                    graph: g.clone(),
+                    description: desc.into(),
+                    stats: TidyStats {
+                        rooms_moved: pipe_rooms_moved,
+                        constraints_dropped: pipe_constraints,
+                        overlaps_resolved: pipe_overlaps,
+                        hints_repaired: pipe_hints,
+                    },
+                    stage_start: first,
+                });
+                first = false;
+            }
+        }));
+    }
+
+    // compact_empty_lines
+    {
+        let mut first = true;
+        compact_empty_lines_observed(&mut sub, Some(&mut |g, _label, desc, _s| {
+            if frames.len() < MAX_TIDY_FRAMES {
+                frames.push(TidyFrame {
+                    label: "compact".into(),
+                    graph: g.clone(),
+                    description: desc.into(),
+                    stats: TidyStats {
+                        rooms_moved: pipe_rooms_moved,
+                        constraints_dropped: pipe_constraints,
+                        overlaps_resolved: pipe_overlaps,
+                        hints_repaired: pipe_hints,
+                    },
+                    stage_start: first,
+                });
+                first = false;
+            }
+        }));
+    }
+
+    // Frame cap: if the layout is extremely large, frames are silently truncated at MAX_TIDY_FRAMES.
 
     // Write the tidied positions back into the live graph for this layer's rooms.
     for id in graph.rooms_in_layer(layer) {
-        // pos is always Some after relayout_auto; the guard is defensive.
         if let Some(p) = sub.room(id).and_then(|r| r.pos) {
             graph.set_pos(id, p);
         }
     }
 
-    // relayout_auto set distorted flags on sub for this layer's geometry; copy them
-    // back so the live map's distortion coloring is fresh (positions alone are not enough).
+    // Write distortion flags back.
     let n = graph.connections().len();
     for idx in 0..n {
         let c = graph.connections()[idx].clone();
@@ -1572,7 +1695,7 @@ mod tests {
         apply_action(Action::Retidy, &mut s_inst, &mut m_inst);
 
         let anim = s_anim.tidy_anim.expect("animation populated");
-        assert_eq!(anim.frames.len(), 7, "before + 6 stages");
+        assert!(anim.frames.len() >= 2, "at least before + one layout stage frame");
         assert_eq!(anim.idx, 0, "starts on the first frame");
         // Final frame and the live graph match the instant-tidy result room-for-room.
         for id in [1u16, 2, 3] {
@@ -1601,7 +1724,7 @@ mod tests {
         // No animation: arrows pan as usual (not stepping).
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(..)));
         // Animation active: arrows step, Space toggles, Esc exits.
-        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new() };
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false };
         s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
@@ -1622,7 +1745,7 @@ mod tests {
     fn anim_step_clamps_pauses_and_holds_at_end() {
         use crate::state::{TidyAnim, TidyFrame};
         use std::time::Duration;
-        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new() };
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false };
         let mut a = TidyAnim::new(vec![frame("a"), frame("b"), frame("c")]);
         assert!(a.playing && a.idx == 0);
         a.step(-1); // clamps at 0, and a manual step pauses
@@ -2079,7 +2202,7 @@ mod tests {
         // ── Anim sub-mode ─────────────────────────────────────────────────────
         let mut s = AppState::default();
         s.focus = Focus::Map;
-        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new() };
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false };
         s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
         // Step
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
