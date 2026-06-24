@@ -18,7 +18,7 @@ use app::config::{resolve, Cli};
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
-use app::archive::{load_archive, save_archive, save_archive_meta};
+use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action};
 use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
@@ -514,8 +514,9 @@ fn main() {
     // ── 5. Event loop ─────────────────────────────────────────────────────────
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
-    // Defaults are used as a fallback; updated after each successful draw.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new() };
+    // Assigned by the first `draw_frame` at the top of the loop before any read (the draw's
+    // error arm diverges), so it never needs a dead initial value.
+    let mut last_panes: PaneRects;
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
