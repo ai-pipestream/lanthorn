@@ -160,9 +160,16 @@ pub fn render_dump(graph: &MapGraph) -> String {
             format!(" dropped=[{}]", dropped.join(", "))
         };
 
+        // Tag the room's layer when it is not the base layer, so a multi-layer dump
+        // says which plane each room lives on. Single-layer dumps stay unchanged.
+        let layer_str = if r.layer != mapper::layer::MAIN_LAYER {
+            format!(" layer={}", r.layer)
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "ROOM {} {:?} pos={}{} align={}{}\n",
-            r.id, r.label(), pos, notes, align, dropped_str
+            "ROOM {} {:?} pos={}{} align={}{}{}\n",
+            r.id, r.label(), pos, notes, align, dropped_str, layer_str
         ));
     }
 
@@ -189,7 +196,25 @@ pub fn render_dump(graph: &MapGraph) -> String {
     }
 
     out.push_str("#\n# === MAP (#id = room, lines = connectors, ▶◀▲▼ = exits) ===\n");
-    out.push_str(&ascii_map(graph));
+    // Each layer is its own coordinate plane — render them separately so they don't
+    // overlap. A single-layer map renders exactly as before (one map, no layer header).
+    let map_layers: Vec<mapper::layer::LayerId> = graph
+        .layers()
+        .keys()
+        .copied()
+        .filter(|&l| !graph.rooms_in_layer(l).is_empty())
+        .collect();
+    if map_layers.len() <= 1 {
+        out.push_str(&ascii_map(graph));
+    } else {
+        for (i, &l) in map_layers.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.push_str(&format!("# --- layer {} ({}) ---\n", l, graph.layer_name(l)));
+            out.push_str(&ascii_map(&graph.layer_subgraph(l)));
+        }
+    }
     out.push_str("\n#\n# Annotate problems below — lines starting with # are comments:\n#\n");
 
     out
@@ -202,6 +227,26 @@ mod tests {
     use super::*;
     use mapper::direction::Direction;
     use mapper::mapper::Mapper;
+
+    #[test]
+    fn dump_separates_layers_and_tags_membership() {
+        // Hall (1) on MAIN; Cellar (2) reached by Down, peeled into its own layer.
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 0)); // SAME cell as Hall — only safe because they're different layers
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        let l = mapper::layer::peel_region(&mut g, 2).expect("peel cellar");
+        let dump = render_dump(&g);
+        // ROOM legend tags the peeled room's layer; the base room carries no tag.
+        assert!(dump.contains(&format!("ROOM 2 \"Cellar\" pos=0,0 align=none layer={l}")), "dump:\n{dump}");
+        assert!(dump.lines().any(|ln| ln.starts_with("ROOM 1 \"Hall\"") && !ln.contains("layer=")));
+        // The MAP renders each layer under its own header (no single merged plane).
+        assert!(dump.contains("# --- layer 0 (Main) ---"), "dump:\n{dump}");
+        assert!(dump.contains(&format!("# --- layer {l} (Cellar) ---")), "dump:\n{dump}");
+    }
 
     #[test]
     fn dump_lists_rooms_edges_and_ids() {
