@@ -80,6 +80,9 @@ and unsupported; v1/v2 are not supported.)
   opt into a shared default map with `use_default_map`.
 - **Multiple named save slots** with a saves-manager modal (load / save-as /
   delete), each slot tracking name, turn count, and timestamp.
+- **Import / export standard saves** — exchange standard Quetzal `.qzl`/`.sav`
+  files with other interpreters via the saves manager (a built-in file browser
+  picks the file/destination). Importing keeps your accumulated map.
 - **Auto-save** (per turn) and **auto-load** (resume on launch) — both
   configurable.
 
