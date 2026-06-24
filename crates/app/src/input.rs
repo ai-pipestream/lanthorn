@@ -142,6 +142,8 @@ pub enum Action {
     GalleryCategoryPrev,
     /// Close the gallery and persist selections to config (persistence handled by main.rs).
     GalleryClose,
+    /// Toggle the inventory strip at the bottom of the story pane.
+    ToggleInventory,
     /// No binding found — no-op.
     None,
     // ── Mouse actions ─────────────────────────────────────────────────────────
@@ -1084,6 +1086,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             } else {
                 state.transcript_scroll = state.transcript_scroll.saturating_add(delta as u16);
             }
+        }
+
+        Action::ToggleInventory => {
+            state.show_inventory = !state.show_inventory;
         }
 
         // Caller-handled: silently ignored.

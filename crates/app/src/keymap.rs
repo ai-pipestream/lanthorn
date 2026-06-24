@@ -78,6 +78,10 @@ pub enum Command {
     // ── Saves manager ─────────────────────────────────────────────────────────
     /// Open the saves-manager modal (Ctrl+O by default).
     OpenSaves,
+
+    // ── Inventory ─────────────────────────────────────────────────────────────
+    /// Toggle the inventory strip at the bottom of the story pane (default: v).
+    ToggleInventory,
 }
 
 impl Command {
@@ -126,6 +130,7 @@ impl Command {
             Command::AnimTogglePlay => Action::AnimTogglePlay,
             Command::AnimExit => Action::AnimExit,
             Command::OpenSaves => Action::OpenSaves,
+            Command::ToggleInventory => Action::ToggleInventory,
         }
     }
 
@@ -173,6 +178,7 @@ impl Command {
             Command::AnimTogglePlay => "anim_toggle_play",
             Command::AnimExit => "anim_exit",
             Command::OpenSaves => "open_saves",
+            Command::ToggleInventory => "toggle_inventory",
         }
     }
 
@@ -220,6 +226,7 @@ impl Command {
             Command::AnimTogglePlay => "play/pause",
             Command::AnimExit => "exit anim",
             Command::OpenSaves => "saves",
+            Command::ToggleInventory => "inventory",
         }
     }
 
@@ -270,6 +277,7 @@ impl Command {
             | Command::AnimExit => Context::Anim,
 
             Command::OpenSaves => Context::Global,
+            Command::ToggleInventory => Context::Global,
         }
     }
 
@@ -322,6 +330,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::AnimTogglePlay,
     Command::AnimExit,
     Command::OpenSaves,
+    Command::ToggleInventory,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -507,6 +516,8 @@ impl KeyMap {
         bind!(ctrl(Char('p')), Command::TogglePortalLabels, Context::Global);
         // Ctrl+O → open saves manager (free key; not used by any other command).
         bind!(ctrl(Char('o')), Command::OpenSaves, Context::Global);
+        // v → toggle inventory strip (free key; not used in any context).
+        bind!(plain(Char('v')), Command::ToggleInventory, Context::Global);
 
         // Ctrl+Arrows → Nudge
         bind!(ctrl(Left), Command::NudgeLeft, Context::Global);
@@ -736,7 +747,7 @@ const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
     ("Layers", &["peel_layer", "merge_layer", "cycle_layer_next", "cycle_layer_prev", "rename_layer"]),
     ("Edit", &["rename_room", "edit_notes", "delete_selected_connection", "relabel_selected_edge"]),
     ("Files", &["open_saves", "export_svg", "export_dot", "export_dump"]),
-    ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery"]),
+    ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery", "toggle_inventory"]),
 ];
 
 /// Runtime layout for the hotkey dialog.
@@ -952,5 +963,37 @@ mod tests {
         assert_eq!(layout.groups[0].1[0], Command::Retidy);
         assert!(!warnings.is_empty(), "unknown group command should produce warning");
         assert!(warnings.iter().any(|w| w.contains("totally_fake_cmd")));
+    }
+
+    #[test]
+    fn toggle_inventory_key_is_v_and_routes_to_action() {
+        let km = KeyMap::default();
+        let spec = KeySpec { code: KeyCode::Char('v'), ctrl: false, shift: false, alt: false };
+        let cmd = km.lookup(&spec, Context::Global);
+        assert_eq!(cmd, Some(Command::ToggleInventory), "v should be bound to ToggleInventory");
+        assert!(matches!(Command::ToggleInventory.to_action(), Action::ToggleInventory));
+    }
+
+    #[test]
+    fn toggle_inventory_in_view_group() {
+        let layout = HotkeyLayout::default();
+        let view_group = layout.groups.iter().find(|(title, _)| title == "View");
+        assert!(view_group.is_some(), "View group should exist");
+        let (_, cmds) = view_group.unwrap();
+        assert!(cmds.contains(&Command::ToggleInventory), "ToggleInventory should be in View group");
+    }
+
+    #[test]
+    fn apply_action_toggle_inventory_flips_bool() {
+        use mapper::mapper::Mapper;
+        use crate::input::apply_action;
+        use crate::state::AppState;
+        let mut state = AppState::default();
+        let mut mapper = Mapper::default();
+        assert!(!state.show_inventory);
+        apply_action(Action::ToggleInventory, &mut state, &mut mapper);
+        assert!(state.show_inventory);
+        apply_action(Action::ToggleInventory, &mut state, &mut mapper);
+        assert!(!state.show_inventory);
     }
 }
