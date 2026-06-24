@@ -21,7 +21,8 @@ use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action};
-use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
+use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
+use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
@@ -34,7 +35,7 @@ use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::state::{AppState, Focus, Layout, PromptKind, RoomPanelMode, SavesState};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -275,8 +276,12 @@ fn draw_frame(
         let help_style = state.colors.help_bar;
         let help_text = if state.verb_menu.is_some() {
             "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc/q: close".to_string()
+        } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
+            "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc/q: cancel".to_string()
+        } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickDir).unwrap_or(false) {
+            "Export Save | \u{2191}\u{2193}: move | Enter: open dir | s: export here | Esc/q: cancel".to_string()
         } else if state.saves.is_some() {
-            "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | Esc: close".to_string()
+            "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | e: export | i: import | Esc: close".to_string()
         } else if state.gallery.is_some() {
             "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
         } else if let Some(anim) = &state.tidy_anim {
@@ -301,6 +306,7 @@ fn draw_frame(
                 PromptKind::SaveAs => "Save name",
                 PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
                 PromptKind::ConfirmReset => "Reset game? (y/n)",
+                PromptKind::ExportSaveName(_) => "Export filename",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
@@ -332,6 +338,11 @@ fn draw_frame(
             draw_saves(state, full, buf);
         }
 
+        // ── File-browser overlay — drawn after saves ──────────────────────────
+        if state.file_browser.is_some() {
+            draw_file_browser(state, full, buf);
+        }
+
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
         if state.verb_menu.is_some() {
             draw_verb_menu(state, full, buf);
@@ -350,6 +361,7 @@ fn draw_frame(
                     PromptKind::SaveAs => "Name:   ",
                     PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
                     PromptKind::ConfirmReset => "Reset?  ",
+                    PromptKind::ExportSaveName(_) => "Export: ",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
                 let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
@@ -359,6 +371,16 @@ fn draw_frame(
     })?;
 
     Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out })
+}
+
+// ── File-browser entry action helper ─────────────────────────────────────────
+
+/// Decoded action when Enter is pressed in the file browser.
+enum FbEntryAction {
+    /// Navigate into the given directory.
+    CdInto(std::path::PathBuf),
+    /// Import the given file.
+    ImportFile(std::path::PathBuf),
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -887,6 +909,93 @@ fn main() {
                 state.saves = Some(SavesState { entries, selected: 0 });
             }
 
+            Action::SavesExport => {
+                // Close saves modal and open file browser in PickDir mode.
+                state.saves = None;
+                let start_dir = cfg.user_dir.clone();
+                let default_name = format!("{}.qzl", ifid);
+                state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickDir, default_name));
+            }
+
+            Action::SavesImport => {
+                // Close saves modal and open file browser in PickFile mode.
+                state.saves = None;
+                let start_dir = cfg.user_dir.clone();
+                state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile, String::new()));
+            }
+
+            Action::FbEnter => {
+                // Handle file-browser Enter: cd into dir or import file.
+                let fb_action = state.file_browser.as_ref().and_then(|fb| {
+                    fb.entries.get(fb.selected).map(|e| {
+                        if e.is_dir {
+                            let new_path = if e.name == ".." {
+                                fb.cwd.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| fb.cwd.clone())
+                            } else {
+                                fb.cwd.join(&e.name)
+                            };
+                            FbEntryAction::CdInto(new_path)
+                        } else {
+                            FbEntryAction::ImportFile(fb.cwd.join(&e.name))
+                        }
+                    })
+                });
+                match fb_action {
+                    Some(FbEntryAction::CdInto(path)) => {
+                        if let Some(fb) = &mut state.file_browser {
+                            fb.cd(path);
+                        }
+                    }
+                    Some(FbEntryAction::ImportFile(path)) => {
+                        state.file_browser = None;
+                        match restore_game(&path, &mut session.machine) {
+                            Ok(()) => {
+                                // Re-observe current location (same as RestoreGame/SavesLoad).
+                                let loc = zvm::current_location(&session.machine);
+                                if let Some(snap) = loc {
+                                    let rid = snap.number as mapper::graph::RoomId;
+                                    let restore_result = TurnResult {
+                                        transcript: String::new(),
+                                        location: Some(snap),
+                                        quit: false,
+                                        info: None,
+                                    };
+                                    apply_turn(&mut mapper, "", &restore_result);
+                                    state.set_viewed_layer(None);
+                                    state.select_room(Some(rid));
+                                    if let Some(room) = mapper.graph.room(rid) {
+                                        if let Some(pos) = room.pos {
+                                            let (pw, ph) = map_pane_dims(last_panes.map);
+                                            state.recenter_on(pos, pw, ph);
+                                        }
+                                    }
+                                }
+                                state.push_transcript(&format!("[Imported: {}]", path.display()));
+                            }
+                            Err(e) => {
+                                state.push_transcript(&format!("[Import failed: {}]", e));
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            Action::FbChooseDir => {
+                // PickDir mode: open the ExportSaveName prompt for the current dir.
+                if let Some(fb) = &state.file_browser {
+                    if fb.mode == FbMode::PickDir {
+                        let chosen_dir = fb.cwd.clone();
+                        let default_name = fb.export_default_name.clone();
+                        state.file_browser = None;
+                        state.prompt = Some(app::state::Prompt {
+                            kind: PromptKind::ExportSaveName(chosen_dir),
+                            buffer: default_name,
+                        });
+                    }
+                }
+            }
+
             Action::SavesLoad => {
                 // Load the selected save (archive → mapper + machine restore).
                 // Clone path and name to release the borrow on state.saves before mutating state.
@@ -1084,6 +1193,22 @@ fn handle_saves_prompt(
                 }
             } else {
                 state.push_transcript("[Delete cancelled]");
+            }
+        }
+        PromptKind::ExportSaveName(export_dir) => {
+            let filename = buf.trim().to_string();
+            if filename.is_empty() {
+                state.push_transcript("[Export filename cannot be empty]");
+                return;
+            }
+            let target = export_dir.join(&filename);
+            match save_game(&target, &session.machine) {
+                Ok(()) => {
+                    state.push_transcript(&format!("[Exported to {}]", target.display()));
+                }
+                Err(e) => {
+                    state.push_transcript(&format!("[Export failed: {}]", e));
+                }
             }
         }
         _ => {} // other prompt kinds are handled elsewhere
