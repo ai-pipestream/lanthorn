@@ -34,6 +34,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::state::{AppState, Zoom};
+use crate::symbols::{BoxStyle, SymbolSet};
 
 // ── Step sizes and box dimensions ─────────────────────────────────────────────
 
@@ -1085,6 +1086,21 @@ fn draw_portal_icons(
 
 // ── Room drawing ──────────────────────────────────────────────────────────────
 
+/// Pick the outline `BoxStyle` for a room given its flags.
+///
+/// Precedence: current > portal > selected > normal.
+fn outline_for<'a>(
+    sym: &'a SymbolSet,
+    is_current: bool,
+    has_portal: bool,
+    selected: bool,
+) -> &'a BoxStyle {
+    if is_current { &sym.room_current }
+    else if has_portal { &sym.room_portal }
+    else if selected { &sym.room_selected }
+    else { &sym.room_normal }
+}
+
 /// Draw a room at screen top-left `(sx, sy)` (already translated from virtual space;
 /// may be partially or fully off-area — drawing is clipped per cell).
 fn draw_room(
@@ -1097,16 +1113,17 @@ fn draw_room(
     buf: &mut Buffer,
 ) {
     let base_style = room_style(room, state);
+    let selected = state.selected_room == Some(room.id);
 
     match zoom {
         Zoom::Overview => {
             put_char(buf, sx, sy, '■', base_style, area);
         }
         Zoom::Compact => {
-            draw_compact_room(room, sx, sy, base_style, area, buf);
+            draw_compact_room(room, sx, sy, base_style, &state.symbols, selected, area, buf);
         }
         Zoom::Boxes => {
-            draw_box_room(room, sx, sy, base_style, state.show_alignment, area, buf);
+            draw_box_room(room, sx, sy, base_style, &state.symbols, selected, state.show_alignment, area, buf);
         }
     }
 }
@@ -1120,6 +1137,8 @@ fn draw_compact_room(
     sx: i32,
     sy: i32,
     style: Style,
+    sym: &SymbolSet,
+    selected: bool,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -1127,13 +1146,8 @@ fn draw_compact_room(
     let (bw, bh) = (bw as i32, bh as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
-    let (tl, tr, bl, br, h, v) = if is_current {
-        ('┏', '┓', '┗', '┛', '━', '┃')
-    } else if room.has_layer_portal {
-        ('╔', '╗', '╚', '╝', '═', '║')
-    } else {
-        ('╭', '╮', '╰', '╯', '─', '│')
-    };
+    let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
+    let (tl, tr, bl, br, h, v) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
     put_char(buf, sx, sy, tl, style, area);
@@ -1210,6 +1224,8 @@ fn draw_box_room(
     sx: i32,
     sy: i32,
     style: Style,
+    sym: &SymbolSet,
+    selected: bool,
     show_alignment: bool,
     area: Rect,
     buf: &mut Buffer,
@@ -1218,15 +1234,9 @@ fn draw_box_room(
     let (w, h) = (w as i32, h as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
-    // Box outline: heavy for the current room, double-line for a room with a portal to
-    // another layer (so cross-layer exits read at a glance), rounded otherwise.
-    let (tl, tr, bl, br, horiz, vert) = if is_current {
-        ('┏', '┓', '┗', '┛', '━', '┃')
-    } else if room.has_layer_portal {
-        ('╔', '╗', '╚', '╝', '═', '║')
-    } else {
-        ('╭', '╮', '╰', '╯', '─', '│')
-    };
+    // Box outline picked by precedence: current > portal > selected > normal.
+    let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
+    let (tl, tr, bl, br, horiz, vert) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
     put_char(buf, sx, sy, tl, style, area);
@@ -3415,6 +3425,45 @@ mod tests {
         assert!(
             all_text.contains('╔') && all_text.contains('║'),
             "the layer-portal room must render with a double-line outline"
+        );
+    }
+
+    #[test]
+    fn room_outline_uses_symbol_set() {
+        // Default symbols: a normal (non-current, non-portal) room at cell (0,0) with
+        // scroll (0,0) and Boxes zoom renders its top-left corner as '╭'.
+        use mapper::graph::MapGraph;
+        use crate::symbols::SymbolSet;
+        use crate::config::SymbolConfig;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        // Room 1 is not current, not a portal room.
+        let rm = mapper::render::render(&g);
+
+        // --- Default symbols: expect '╭' at (0,0) ---
+        let mut state = AppState::default(); // SymbolSet::default() inside
+        state.scroll = (0, 0);
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        assert_eq!(
+            buf.cell((0, 0)).map(|c| c.symbol()),
+            Some("╭"),
+            "default symbols must render normal room top-left as rounded corner"
+        );
+
+        // --- ASCII preset: expect '+' at (0,0) ---
+        let mut cfg = SymbolConfig::default();
+        cfg.box_style = "ascii".into();
+        state.symbols = SymbolSet::resolve(&cfg);
+        let mut buf2 = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf2);
+        assert_eq!(
+            buf2.cell((0, 0)).map(|c| c.symbol()),
+            Some("+"),
+            "ascii preset must render normal room top-left as '+'"
         );
     }
 }
