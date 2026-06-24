@@ -21,6 +21,7 @@ use app::map_dump::render_dump;
 use app::ifid::{compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
 use app::persist_files::{load_map, restore_game, save_game, save_map};
+use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
@@ -147,6 +148,19 @@ fn draw_frame(
             }
         }
 
+        // ── Inspector overlay ─────────────────────────────────────────────────
+        if state.show_inspector && map_area.height > 0 {
+            if let Some(id) = state.selected_room {
+                let graph = match &state.tidy_anim {
+                    Some(anim) => &anim.current().graph,
+                    None => &mapper.graph,
+                };
+                if let Some(diag) = room_diagnostics(graph, id) {
+                    draw_inspector(&diag, map_area, buf);
+                }
+            }
+        }
+
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = Style::default().add_modifier(Modifier::REVERSED);
         let help_text = if let Some(anim) = &state.tidy_anim {
@@ -175,7 +189,7 @@ fn draw_frame(
                     "Shift+\u{2190}\u{2191}\u{2193}\u{2192}: pan | PgUp/Dn: zoom | Home: center | Ctrl+T: tidy | Ctrl+Y: animate | Tab: map | Ctrl+S/R: save/restore | Ctrl+L: layout | Ctrl+A: align | Ctrl+P: portals | Ctrl+Q: quit".to_string()
                 }
                 Focus::Map => {
-                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/Shift+\u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | Ctrl+arrows: nudge | +/-: zoom | c: center | n/p: select | [/]: layer | P/M/N: peel/merge/name | r/o/d/e: edit | Ctrl+Q: quit".to_string()
+                    "Tab/Esc: story | \u{2190}\u{2191}\u{2193}\u{2192}/Shift+\u{2190}\u{2191}\u{2193}\u{2192}/hjkl: pan | Ctrl+arrows: nudge | +/-: zoom | c: center | n/p: select | [/]: layer | P/M/N: peel/merge/name | r/o/d/e: edit | i: inspect | Ctrl+Q: quit".to_string()
                 }
             }
         };
