@@ -173,6 +173,18 @@ pub enum Action {
     VerbMenuPick,
     /// Close the verb menu, leaving `state.input` intact.
     VerbMenuClose,
+    /// Open the file browser in PickDir mode to choose a directory for export.
+    SavesExport,
+    /// Open the file browser in PickFile mode to import a .qzl/.sav file.
+    SavesImport,
+    /// Navigate the file browser by delta (-1 = up, +1 = down).
+    FbNav(i32),
+    /// Activate the selected file-browser entry (cd into dir or import file).
+    FbEnter,
+    /// Choose the current directory as the export target (PickDir mode).
+    FbChooseDir,
+    /// Close the file browser without acting.
+    FbClose,
     /// No binding found — no-op.
     None,
     // ── Mouse actions ─────────────────────────────────────────────────────────
@@ -249,6 +261,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // 5. Saves-manager sub-mode: when saves modal is open, route to saves keys.
     if state.saves.is_some() {
         return saves_key_to_action(key);
+    }
+
+    // 5.1. File-browser sub-mode: when the browser is open, route to browser keys.
+    if state.file_browser.is_some() {
+        return filebrowser_key_to_action(key);
     }
 
     // 5.5. Verb-menu sub-mode: when the token palette is open, route to verb-menu keys.
@@ -491,7 +508,24 @@ fn saves_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Enter => Action::SavesLoad,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::SavesSaveAs,
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => Action::SavesDelete,
+        KeyCode::Char('e') if key.modifiers == KeyModifiers::NONE => Action::SavesExport,
+        KeyCode::Char('i') if key.modifiers == KeyModifiers::NONE => Action::SavesImport,
         KeyCode::Esc => Action::SavesClose,
+        _ => Action::None,
+    }
+}
+
+// ── Internal: file-browser key routing ───────────────────────────────────────
+
+/// Hardwired file-browser sub-mode keys.
+fn filebrowser_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Up => Action::FbNav(-1),
+        KeyCode::Down => Action::FbNav(1),
+        KeyCode::Enter => Action::FbEnter,
+        KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::FbChooseDir,
+        KeyCode::Esc => Action::FbClose,
+        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::FbClose,
         _ => Action::None,
     }
 }
@@ -1162,6 +1196,23 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         // SavesLoad is caller-handled.
 
+        // ── File-browser actions ──────────────────────────────────────────────
+
+        // SavesExport, SavesImport, FbEnter, FbChooseDir are caller-handled.
+
+        Action::FbNav(delta) => {
+            if let Some(fb) = &mut state.file_browser {
+                if !fb.entries.is_empty() {
+                    let len = fb.entries.len() as i32;
+                    fb.selected = ((fb.selected as i32 + delta).rem_euclid(len)) as usize;
+                }
+            }
+        }
+
+        Action::FbClose => {
+            state.file_browser = None;
+        }
+
         Action::OpenGallery => {
             state.hotkey_dialog = false;
             state.gallery = Some(crate::state::GalleryState {
@@ -1407,6 +1458,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::ExportDot
         | Action::ExportDump
         | Action::SavesLoad
+        | Action::SavesExport
+        | Action::SavesImport
+        | Action::FbEnter
+        | Action::FbChooseDir
         | Action::Quit => {}
 
         Action::None => {}
@@ -1520,8 +1575,11 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
-        // Saves-manager and game-reset prompts: return to the caller to act on.
-        PromptKind::SaveAs | PromptKind::ConfirmDeleteSave(_) | PromptKind::ConfirmReset => {
+        // Saves-manager, export, and game-reset prompts: return to the caller to act on.
+        PromptKind::SaveAs
+        | PromptKind::ConfirmDeleteSave(_)
+        | PromptKind::ConfirmReset
+        | PromptKind::ExportSaveName(_) => {
             return Some(prompt);
         }
     }
@@ -3458,5 +3516,96 @@ mod tests {
         let nouns = &s.verb_menu.as_ref().unwrap().nouns;
         let mailbox_count = nouns.iter().filter(|n| n.as_str() == "mailbox").count();
         assert_eq!(mailbox_count, 1, "mailbox should appear exactly once in nouns (dedup)");
+    }
+
+    // ── File-browser sub-mode key tests ───────────────────────────────────────
+
+    /// Build a state with saves open (for testing e/i dispatch).
+    fn state_with_saves_for_fb_tests() -> AppState {
+        let mut s = AppState::default();
+        s.saves = Some(crate::state::SavesState { entries: Vec::new(), selected: 0 });
+        s
+    }
+
+    /// Build a state with the file browser open.
+    fn state_with_filebrowser(mode: crate::state::FbMode) -> AppState {
+        use crate::state::FileBrowserState;
+        let mut s = AppState::default();
+        let tmp = std::env::temp_dir();
+        s.file_browser = Some(FileBrowserState::build(tmp, mode, "test.qzl".to_string()));
+        s
+    }
+
+    #[test]
+    fn saves_e_opens_export_browser_action() {
+        let s = state_with_saves_for_fb_tests();
+        let a = key_to_action(&s, key(KeyCode::Char('e')));
+        assert!(matches!(a, Action::SavesExport), "e in saves sub-mode should produce SavesExport");
+    }
+
+    #[test]
+    fn saves_i_opens_import_browser_action() {
+        let s = state_with_saves_for_fb_tests();
+        let a = key_to_action(&s, key(KeyCode::Char('i')));
+        assert!(matches!(a, Action::SavesImport), "i in saves sub-mode should produce SavesImport");
+    }
+
+    #[test]
+    fn filebrowser_esc_produces_fb_close() {
+        let s = state_with_filebrowser(crate::state::FbMode::PickFile);
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        assert!(matches!(a, Action::FbClose), "Esc in file browser should produce FbClose");
+    }
+
+    #[test]
+    fn filebrowser_q_produces_fb_close() {
+        let s = state_with_filebrowser(crate::state::FbMode::PickDir);
+        let a = key_to_action(&s, key(KeyCode::Char('q')));
+        assert!(matches!(a, Action::FbClose), "q in file browser should produce FbClose");
+    }
+
+    #[test]
+    fn filebrowser_up_down_navigate() {
+        let s = state_with_filebrowser(crate::state::FbMode::PickFile);
+        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::FbNav(-1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::FbNav(1)));
+    }
+
+    #[test]
+    fn filebrowser_enter_produces_fb_enter() {
+        let s = state_with_filebrowser(crate::state::FbMode::PickFile);
+        let a = key_to_action(&s, key(KeyCode::Enter));
+        assert!(matches!(a, Action::FbEnter), "Enter in file browser should produce FbEnter");
+    }
+
+    #[test]
+    fn filebrowser_s_produces_fb_choose_dir() {
+        let s = state_with_filebrowser(crate::state::FbMode::PickDir);
+        let a = key_to_action(&s, key(KeyCode::Char('s')));
+        assert!(matches!(a, Action::FbChooseDir), "s in file browser should produce FbChooseDir");
+    }
+
+    #[test]
+    fn fb_close_action_clears_file_browser() {
+        let mut s = state_with_filebrowser(crate::state::FbMode::PickFile);
+        assert!(s.file_browser.is_some());
+        apply_action(Action::FbClose, &mut s, &mut Mapper::default());
+        assert!(s.file_browser.is_none(), "FbClose should clear file_browser");
+    }
+
+    #[test]
+    fn fb_nav_wraps_around() {
+        let mut s = state_with_filebrowser(crate::state::FbMode::PickFile);
+        // We need at least one entry — the tmp dir should have ".." if not root.
+        if let Some(fb) = &s.file_browser {
+            if fb.entries.is_empty() {
+                return; // nothing to navigate
+            }
+        }
+        // Move up from 0 should wrap to last entry.
+        apply_action(Action::FbNav(-1), &mut s, &mut Mapper::default());
+        if let Some(fb) = &s.file_browser {
+            assert_eq!(fb.selected, fb.entries.len() - 1, "nav -1 from 0 should wrap to last");
+        }
     }
 }
