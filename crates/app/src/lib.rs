@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod colors;
 pub mod complete;
 pub mod config;
 pub mod export_dot;

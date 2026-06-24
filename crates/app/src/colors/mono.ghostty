@@ -1,0 +1,19 @@
+# Monochrome theme: shades of gray only.
+palette = 0=1c1c1c
+palette = 1=5f5f5f
+palette = 2=6e6e6e
+palette = 3=7d7d7d
+palette = 4=8c8c8c
+palette = 5=9b9b9b
+palette = 6=aaaaaa
+palette = 7=c0c0c0
+palette = 8=3a3a3a
+palette = 9=6a6a6a
+palette = 10=797979
+palette = 11=888888
+palette = 12=979797
+palette = 13=a6a6a6
+palette = 14=b5b5b5
+palette = 15=eeeeee
+background = 1c1c1c
+foreground = c0c0c0

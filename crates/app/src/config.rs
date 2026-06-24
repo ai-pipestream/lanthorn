@@ -4,6 +4,24 @@ use std::path::PathBuf;
 use clap::Parser;
 use serde::Deserialize;
 
+// ── Colors config ─────────────────────────────────────────────────────────────
+
+/// The `[colors]` section of config.toml.  Controls color scheme selection and
+/// per-element color overrides.
+///
+/// - `scheme`: a built-in name (`mono`, `high-contrast`, `tomorrow-night`), a path
+///   to a Ghostty theme file, or absent (terminal defaults).
+/// - `elements`: per-element color overrides.  Keys are element names; values may
+///   be `palette:N`, `background`, `foreground`, a ratatui named color (`cyan`),
+///   a 256-index (`"17"`), or hex (`#5fafd7`).
+#[derive(Debug, Default, Deserialize)]
+pub struct ColorsConfig {
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub elements: BTreeMap<String, String>,
+}
+
 // ── Keymap config ─────────────────────────────────────────────────────────────
 
 /// The [keymap] section of config.toml.  Maps snake_case command names to
@@ -130,6 +148,9 @@ pub struct Config {
     /// Hotkey dialog configuration: prefix key, direct commands, dialog groups.
     #[serde(default)]
     pub hotkeys: HotkeysConfig,
+    /// Color scheme configuration: scheme name/path and per-element overrides.
+    #[serde(default)]
+    pub colors: ColorsConfig,
 }
 
 impl Default for Config {
@@ -140,6 +161,7 @@ impl Default for Config {
             symbols: SymbolConfig::default(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
+            colors: ColorsConfig::default(),
         }
     }
 }
@@ -173,6 +195,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.symbols = from_file.symbols;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
+            cfg.colors = from_file.colors;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
