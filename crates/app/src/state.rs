@@ -31,6 +31,43 @@ pub struct DragState {
     pub acc_y: i32,
 }
 
+// ── Verb menu state ───────────────────────────────────────────────────────────
+
+/// Which pane is active in the verb menu modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerbMenuPane {
+    Verbs,
+    Nouns,
+    Preps,
+}
+
+/// Transient state for the verb/item token-palette modal.
+/// `None` in `AppState.verb_menu` = modal closed.
+#[derive(Debug, Clone)]
+pub struct VerbMenuState {
+    /// Which column is currently active.
+    pub pane: VerbMenuPane,
+    /// Selected index within the Verbs pane.
+    pub verb_idx: usize,
+    /// Selected index within the Nouns pane.
+    pub noun_idx: usize,
+    /// Selected index within the Preps pane.
+    pub prep_idx: usize,
+    /// Noun list built from room words ∪ inventory at menu-open time.
+    pub nouns: Vec<String>,
+}
+
+impl VerbMenuState {
+    /// Return the token that is currently selected (token to append on Pick).
+    pub fn selected_token<'a>(&'a self, verbs: &'a [&'static str], preps: &'a [&'static str]) -> &'a str {
+        match self.pane {
+            VerbMenuPane::Verbs => verbs.get(self.verb_idx).copied().unwrap_or(""),
+            VerbMenuPane::Nouns => self.nouns.get(self.noun_idx).map(|s| s.as_str()).unwrap_or(""),
+            VerbMenuPane::Preps => preps.get(self.prep_idx).copied().unwrap_or(""),
+        }
+    }
+}
+
 // ── Gallery constants ─────────────────────────────────────────────────────────
 
 /// Category index for box-style gallery column.
@@ -290,6 +327,9 @@ pub struct AppState {
     /// Active saves-manager modal state. `None` means the modal is closed.
     pub saves: Option<SavesState>,
 
+    /// Active verb/item token-palette modal state. `None` means the modal is closed.
+    pub verb_menu: Option<VerbMenuState>,
+
     /// Session turn counter; incremented on each non-empty `SubmitCommand`.
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
@@ -356,6 +396,7 @@ impl Default for AppState {
             hotkeys: crate::keymap::HotkeyLayout::default(),
             gallery: None,
             saves: None,
+            verb_menu: None,
             turns: 0,
             saves_prompt_submitted: None,
             dict_words: Vec::new(),
