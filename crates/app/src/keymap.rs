@@ -619,6 +619,22 @@ impl KeyMap {
             .map(|(s, _, _)| *s)
     }
 
+    /// Look up a key across ALL contexts (Global → Map → Anim) and return the
+    /// first match. Used by the hotkey dialog so that commands in any context
+    /// can be triggered from the dialog.
+    pub fn lookup_any(&self, spec: &KeySpec) -> Option<Command> {
+        for ctx in [Context::Global, Context::Map, Context::Anim] {
+            // Use exact context match only (no Map→Global fallthrough here,
+            // since we already iterate Global first).
+            for (s, cmd, c) in &self.bindings {
+                if c == &ctx && s == spec {
+                    return Some(*cmd);
+                }
+            }
+        }
+        None
+    }
+
     /// Iterate all `(KeySpec, Command)` pairs that belong to `ctx`
     /// (for the help screen's per-context listing).
     pub fn for_context(&self, ctx: Context) -> impl Iterator<Item = (&KeySpec, &Command)> {
@@ -708,6 +724,10 @@ const DEFAULT_DIRECT_NAMES: &[&str] = &[
     "select_prev",
     "recenter",
     "toggle_focus",
+    "nudge_left",
+    "nudge_right",
+    "nudge_up",
+    "nudge_down",
 ];
 
 /// Default groups for the hotkey dialog (title, command snake_case names).
