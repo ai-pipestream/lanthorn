@@ -31,7 +31,9 @@ use mapper::router::{RoutedEdge, Side};
 use mapper::direction::Direction;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Color;
 
 use crate::state::{AppState, Zoom};
 use crate::symbols::{BoxStyle, SymbolSet};
@@ -220,11 +222,11 @@ fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
 /// Style for a room given the current selection/current state.
 fn room_style(room: &RenderRoom, state: &AppState) -> Style {
     if room.is_current {
-        CURRENT_STYLE
+        state.colors.room_current
     } else if state.selected_room == Some(room.id) {
-        SELECTED_STYLE
+        state.colors.room_selected
     } else {
-        NORMAL_STYLE
+        state.colors.room_normal
     }
 }
 
@@ -347,22 +349,10 @@ pub fn room_at_cell(
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
-
-/// Style for the current room (reversed video — visually distinct).
-/// `bg(Reset)` ensures the room cell clears any path ribbon drawn underneath.
-const CURRENT_STYLE: Style = Style::new()
-    .add_modifier(Modifier::REVERSED)
-    .fg(Color::White)
-    .bg(Color::Reset);
-
-/// Style for the selected room (yellow border).
-const SELECTED_STYLE: Style = Style::new().fg(Color::Yellow).bg(Color::Reset);
-
-/// Style for normal rooms.
-const NORMAL_STYLE: Style = Style::new().fg(Color::White).bg(Color::Reset);
-
-/// Style for stub-connector labels — Cyan text.
-const CONNECTOR_STYLE: Style = Style::new().fg(Color::Cyan);
+//
+// Room and connector styles are now read from `state.colors` at render time
+// rather than from compile-time constants.  The constants have been removed.
+// See `room_style()` and the connector-drawing functions for usage.
 
 // ── render_map ────────────────────────────────────────────────────────────────
 
@@ -423,7 +413,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       the in-room portal-icon overlay after the rooms (below).
     for edge in &rm.edges {
         if edge.is_stub && !boxes {
-            draw_stub(edge, &placed, off_x, off_y, area, buf);
+            draw_stub(edge, &placed, off_x, off_y, area, buf, state.colors.connector);
         }
     }
 
@@ -431,11 +421,11 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       the rooms drawn below them in step 2.
     let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.colors);
     }
 
     if boxes {
-        draw_portal_connectors(rm, &placed, off_x, off_y, area, buf, &state.symbols.portal);
+        draw_portal_connectors(rm, &placed, off_x, off_y, area, buf, &state.symbols.portal, &state.colors);
     }
 
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -457,7 +447,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       border it sits on (replacing the box-edge glyph, pointing outward).
     // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
     if !state.show_portal_labels {
-        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf);
+        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors);
     }
 }
 
@@ -772,6 +762,7 @@ fn render_lane_connectors(
     buf: &mut Buffer,
     arrows: &crate::symbols::Arrows,
     path: &crate::symbols::PathGlyphs,
+    colors: &crate::colors::ColorScheme,
 ) -> Vec<((i32, i32), String, bool)> {
     let (off_x, off_y) = offset;
 
@@ -786,7 +777,7 @@ fn render_lane_connectors(
 
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
-        let color = if conn.distorted { Color::Magenta } else { Color::Cyan };
+        let style = if conn.distorted { colors.connector_distorted } else { colors.connector };
 
         for (c, mask) in &plot.cells {
             let (sx, sy) = (c.0 + off_x, c.1 + off_y);
@@ -797,7 +788,7 @@ fn render_lane_connectors(
             *entry |= *mask;
             let glyph_s = glyph_for(*entry, path).unwrap_or('·').to_string();
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(&glyph_s).set_style(Style::new().fg(color));
+                cell.set_symbol(&glyph_s).set_style(style);
             }
         }
 
@@ -825,15 +816,16 @@ fn draw_connector_arrows(
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
+    colors: &crate::colors::ColorScheme,
 ) {
     let (off_x, off_y) = offset;
     for (pos, glyph, distorted) in arrowheads {
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let color = if *distorted { Color::Magenta } else { Color::Cyan };
+            let style = if *distorted { colors.connector_distorted } else { colors.connector };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(glyph).set_style(Style::new().fg(color));
+                cell.set_symbol(glyph).set_style(style);
             }
         }
     }
@@ -943,6 +935,7 @@ fn draw_stub(
     off_y: i32,
     area: Rect,
     buf: &mut Buffer,
+    connector_style: Style,
 ) {
     let Some(&origin_rect) = placed.get(&edge.origin) else {
         return;
@@ -951,7 +944,7 @@ fn draw_stub(
     // Top-right gutter: just right of the box, at the top row.
     let lx = origin_rect.right() + off_x;
     let ly = origin_rect.y + off_y;
-    put_str(buf, lx, ly, label, CONNECTOR_STYLE, area);
+    put_str(buf, lx, ly, label, connector_style, area);
 }
 
 /// Draw Up/Down portal links that no compass connector already covers. When the two rooms are
@@ -969,8 +962,9 @@ fn draw_portal_connectors(
     area: Rect,
     buf: &mut Buffer,
     portal: &crate::symbols::PortalGlyphs,
+    colors: &crate::colors::ColorScheme,
 ) {
-    let style = Style::new().fg(Color::Cyan);
+    let style = colors.portal_connector;
     let interiors: Vec<VRect> = placed.values().copied().collect();
     let in_interior = |x: i32, y: i32| {
         interiors

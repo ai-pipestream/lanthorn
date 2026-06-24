@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use zvm::cpu::exec::Machine;
 use zvm::screen::{StatusLine, StatusRight};
 
@@ -10,12 +10,10 @@ use crate::state::{AppState, Focus};
 use super::draw_str_clipped;
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
-
-const STATUS_STYLE: Style = Style::new()
-    .add_modifier(Modifier::REVERSED);
-
-const NORMAL_STYLE: Style = Style::new()
-    .fg(Color::White);
+//
+// Status, normal text, and suggestion styles are read from `state.colors` at
+// render time.  The CURSOR style remains a local constant as it is structural
+// (REVERSED only, no color content mapped by ColorScheme).
 
 const CURSOR_STYLE: Style = Style::new()
     .add_modifier(Modifier::REVERSED);
@@ -210,6 +208,8 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     }
 
     let w = area.width as usize;
+    let status_style = state.colors.status_bar;
+    let normal_style = state.colors.transcript;
 
     // ── Top row: status line ─────────────────────────────────────────────────
 
@@ -218,7 +218,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         // Fill entire top row with the status style first (background fill).
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, status_y)) {
-                cell.set_symbol(" ").set_style(STATUS_STYLE);
+                cell.set_symbol(" ").set_style(status_style);
             }
         }
 
@@ -227,12 +227,12 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 
         // Draw left (location).
         let left_trunc = truncate_line(&left, w);
-        draw_str_clipped(buf, area.x, status_y, left_trunc, STATUS_STYLE, area);
+        draw_str_clipped(buf, area.x, status_y, left_trunc, status_style, area);
 
         // Draw right (score/time), right-aligned if it fits without overlapping left.
         if right.len() < w {
             let right_x = area.x + (w - right.len()) as u16;
-            draw_str_clipped(buf, right_x, status_y, &right, STATUS_STYLE, area);
+            draw_str_clipped(buf, right_x, status_y, &right, status_style, area);
         }
     }
 
@@ -246,7 +246,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     {
         let prompt = format_input_line(&state.input);
         let prompt_trunc = truncate_line(&prompt, w);
-        draw_str_clipped(buf, area.x, input_y, prompt_trunc, NORMAL_STYLE, area);
+        draw_str_clipped(buf, area.x, input_y, prompt_trunc, normal_style, area);
 
         // Cursor indicator when focused on Game pane.
         if state.focus == Focus::Game {
@@ -268,8 +268,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     if has_suggestions && area.height >= 3 && suggestion_y > area.y {
         let sug_line = format_suggestion_line(&state.suggestions, state.suggestion_idx);
         let sug_trunc = truncate_line(&sug_line, w);
-        // Draw with a dim style so it is visually subordinate to the input.
-        let sug_style = Style::new().fg(Color::DarkGray);
+        let sug_style = state.colors.suggestion;
         draw_str_clipped(buf, area.x, suggestion_y, sug_trunc, sug_style, area);
     }
 
@@ -301,7 +300,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
             break;
         }
         // Lines are already wrapped to width, just draw them.
-        draw_str_clipped(buf, area.x, row_y, line, NORMAL_STYLE, area);
+        draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
     }
 }
 

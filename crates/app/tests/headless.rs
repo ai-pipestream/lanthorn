@@ -3,6 +3,8 @@
 //! Drives a scripted 3-room walk through state + render + export + persistence
 //! without a real TTY, using `ratatui::backend::TestBackend` buffers.
 
+use app::colors::ColorScheme;
+use app::config::ColorsConfig;
 use app::export_svg::render_svg;
 use app::persist_files::{load_map, save_map};
 use app::render::map::render_map;
@@ -13,7 +15,7 @@ use mapper::mapper::Mapper;
 use mapper::render::render as render_map_data;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use zvm::ObjectSnapshot;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -168,4 +170,79 @@ fn headless_e2e_smoke() {
 
     // Clean up.
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+/// Back-compat: a frame rendered with default (no-scheme) config uses today's exact ANSI
+/// colors.  The connector arrowhead's fg must be Cyan, matching the pre-refactor constant.
+#[test]
+fn colors_default_config_connector_is_cyan() {
+    use mapper::graph::MapGraph;
+    use mapper::direction::Direction;
+
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "R1".into());
+    g.upsert_room(2, "R2".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (1, 0));
+    g.add_edge(1, Direction::E, 2);
+
+    let rm = render_map_data(&g);
+
+    // Default state has terminal_default() colors (no config).
+    let state = AppState::default();
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    render_map(&rm, &state, area, &mut buf);
+
+    // The arrowhead embedded in room1's right border (col 10, row 2) must be Cyan.
+    let cell = buf.cell((10, 2)).expect("arrow cell must exist");
+    assert_eq!(
+        cell.fg, Color::Cyan,
+        "with terminal_default colors, arrowhead fg must be Cyan (back-compat); got {:?}",
+        cell.fg
+    );
+}
+
+/// Scheme-swap: resolving a built-in scheme (tomorrow-night) changes the connector color
+/// to the scheme's palette[6] (0x70c0ba), not Cyan.
+#[test]
+fn colors_scheme_swap_changes_connector_color() {
+    use mapper::graph::MapGraph;
+    use mapper::direction::Direction;
+    use std::collections::BTreeMap;
+
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (1, 0));
+    g.add_edge(1, Direction::E, 2);
+
+    let rm = render_map_data(&g);
+
+    let cfg = ColorsConfig {
+        scheme: Some("tomorrow-night".to_string()),
+        elements: BTreeMap::new(),
+    };
+    let (colors, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
+    assert!(warnings.is_empty(), "tomorrow-night should resolve without warnings");
+
+    let mut state = AppState::default();
+    state.colors = colors;
+
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    render_map(&rm, &state, area, &mut buf);
+
+    // Tomorrow Night palette[6] = #70c0ba.
+    let expected = Color::Rgb(0x70, 0xc0, 0xba);
+
+    let cell = buf.cell((10, 2)).expect("arrow cell must exist");
+    assert_eq!(
+        cell.fg, expected,
+        "with tomorrow-night scheme, arrowhead fg must be Rgb(0x70,0xc0,0xba); got {:?}",
+        cell.fg
+    );
+    // Confirm it is different from the default Cyan (sanity check the test is meaningful).
+    assert_ne!(cell.fg, Color::Cyan, "scheme color should differ from default Cyan");
 }
