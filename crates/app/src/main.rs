@@ -259,6 +259,9 @@ fn main() {
 
     let mut state = AppState::default();
 
+    // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
+    state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);
+
     // Push the game's opening banner.
     let banner = session.take_transcript();
     state.push_transcript(&banner);
