@@ -84,6 +84,18 @@ impl TidyAnim {
     }
 }
 
+// ── Saves manager state ───────────────────────────────────────────────────────
+
+/// Transient state for the saves-manager modal.
+/// `None` in `AppState.saves` = modal closed.
+#[derive(Debug, Clone)]
+pub struct SavesState {
+    /// All discovered save files for the current story (default first, then named).
+    pub entries: Vec<crate::persist_files::SaveInfo>,
+    /// Index of the currently-highlighted row.
+    pub selected: usize,
+}
+
 // ── Gallery state ─────────────────────────────────────────────────────────────
 
 /// Transient state for the symbol gallery modal.
@@ -130,6 +142,10 @@ pub enum PromptKind {
     RelabelEdge(RoomId, Direction),
     /// Rename the layer with the given id.
     RenameLayer(LayerId),
+    /// Enter a name for a new named save slot (saves-manager sub-mode).
+    SaveAs,
+    /// Confirm deletion of the named save at this path.
+    ConfirmDeleteSave(std::path::PathBuf),
 }
 
 /// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
@@ -220,6 +236,18 @@ pub struct AppState {
     /// Active symbol gallery modal state. `None` means the gallery is closed.
     pub gallery: Option<GalleryState>,
 
+    /// Active saves-manager modal state. `None` means the modal is closed.
+    pub saves: Option<SavesState>,
+
+    /// Session turn counter; incremented on each non-empty `SubmitCommand`.
+    /// Written into `Meta` on every save (quick-save and named).
+    pub turns: u32,
+
+    /// Set by apply_action when a saves-manager prompt (SaveAs or ConfirmDeleteSave)
+    /// is submitted. The caller (main.rs) reads this to perform the I/O operation,
+    /// then clears it. The tuple is (kind, user_input_buffer).
+    pub saves_prompt_submitted: Option<(PromptKind, String)>,
+
     // ── Autocomplete state ────────────────────────────────────────────────────
 
     /// Cached parser-vocabulary words from the Z-machine dictionary.
@@ -257,6 +285,9 @@ impl Default for AppState {
             symbols: crate::symbols::SymbolSet::default(),
             keymap: crate::keymap::KeyMap::default(),
             gallery: None,
+            saves: None,
+            turns: 0,
+            saves_prompt_submitted: None,
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,

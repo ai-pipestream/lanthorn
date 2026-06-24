@@ -407,7 +407,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // Enter sentinel: apply prompt to mapper then clear.
             Action::SubmitCommand(_) => {
                 if let Some(p) = state.prompt.take() {
-                    apply_prompt(p, mapper);
+                    // apply_prompt returns the prompt back for saves-manager kinds.
+                    if let Some(saves_prompt) = apply_prompt(p, mapper) {
+                        // Saves-manager prompt submitted: store for the caller to act on.
+                        state.saves_prompt_submitted =
+                            Some((saves_prompt.kind, saves_prompt.buffer));
+                    }
                 }
             }
             // Esc sentinel: cancel without applying.
@@ -680,7 +685,8 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Apply a completed prompt to the mapper.
-fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) {
+/// Returns the prompt back if it was a saves-manager kind (caller handles it).
+fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
     match prompt.kind {
         PromptKind::RenameRoom(id) => {
             let label = if prompt.buffer.is_empty() {
@@ -702,7 +708,12 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
+        // Saves-manager prompts: return the prompt so the caller can act on it.
+        PromptKind::SaveAs | PromptKind::ConfirmDeleteSave(_) => {
+            return Some(prompt);
+        }
     }
+    None
 }
 
 /// Select the next (+1) or previous (-1) room, cycling through all room ids in

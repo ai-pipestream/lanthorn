@@ -253,6 +253,8 @@ fn draw_frame(
                 PromptKind::EditNotes(_) => "Notes",
                 PromptKind::RelabelEdge(_, _) => "Direction",
                 PromptKind::RenameLayer(_) => "Layer name",
+                PromptKind::SaveAs => "Save name",
+                PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
@@ -289,6 +291,8 @@ fn draw_frame(
                     PromptKind::EditNotes(_) => "Notes:  ",
                     PromptKind::RelabelEdge(_, _) => "Dir:    ",
                     PromptKind::RenameLayer(_) => "Layer:  ",
+                    PromptKind::SaveAs => "Name:   ",
+                    PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
                 let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
