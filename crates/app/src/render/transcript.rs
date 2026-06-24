@@ -354,7 +354,7 @@ fn render_input_content(
     let prompt_trunc = truncate_line(&prompt, w);
     draw_str_clipped(buf, region.x, input_y, prompt_trunc, normal_style, region);
 
-    if state.focus == Focus::Game {
+    if state.focus == Focus::Game && !state.any_overlay_open() {
         let cursor_x = region.x + prompt_trunc.chars().count() as u16;
         if cursor_x < region.right() {
             if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
@@ -706,6 +706,33 @@ mod tests {
         // Position x=4 should not have '_'.
         let cell = buf.cell((4, 4)).expect("cell should exist");
         assert_ne!(cell.symbol(), "_", "no cursor when focus is Map");
+    }
+
+    #[test]
+    fn render_transcript_no_cursor_when_overlay_open() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.input = "hi".to_string();
+        state.focus = Focus::Game; // focused on game, but overlay is open
+
+        // Open the hotkey dialog — the simplest boolean overlay.
+        state.hotkey_dialog = true;
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Position x=4 (after "> hi") should NOT have '_' because an overlay is open.
+        let cell = buf.cell((4, 4)).expect("cell should exist");
+        assert_ne!(
+            cell.symbol(),
+            "_",
+            "cursor must be suppressed when an overlay is open even if focus is Game"
+        );
+        assert!(
+            !cell.modifier.contains(Modifier::REVERSED),
+            "cursor REVERSED modifier must be absent when overlay is open"
+        );
     }
 
     #[test]

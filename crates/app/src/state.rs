@@ -607,6 +607,21 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Return true if any modal, dialog, or overlay is currently open.
+    ///
+    /// Used to suppress the story input cursor while an overlay is covering the pane.
+    pub fn any_overlay_open(&self) -> bool {
+        self.gallery.is_some()
+            || self.saves.is_some()
+            || self.file_browser.is_some()
+            || self.config_screen.is_some()
+            || self.verb_menu.is_some()
+            || self.hotkey_dialog
+            || self.room_panel.is_some()
+            || self.tidy_anim.is_some()
+            || self.prompt.is_some()
+    }
+
     /// Set the explicit layer override. `None` means follow the current room's layer.
     pub fn set_viewed_layer(&mut self, layer: Option<LayerId>) {
         self.viewed_layer = layer;
@@ -746,6 +761,78 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn any_overlay_open_reflects_state() {
+        let mut s = AppState::default();
+        assert!(!s.any_overlay_open(), "default AppState must have no overlay open");
+
+        // gallery
+        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        assert!(s.any_overlay_open(), "gallery open => any_overlay_open true");
+        s.gallery = None;
+
+        // saves
+        s.saves = Some(SavesState { entries: vec![], selected: 0 });
+        assert!(s.any_overlay_open(), "saves open => any_overlay_open true");
+        s.saves = None;
+
+        // file_browser
+        s.file_browser = Some(FileBrowserState::build(
+            std::path::PathBuf::from("/tmp"),
+            FbMode::PickFile,
+            "x.qzl".to_string(),
+        ));
+        assert!(s.any_overlay_open(), "file_browser open => any_overlay_open true");
+        s.file_browser = None;
+
+        // config_screen
+        s.config_screen = Some(ConfigScreenState {
+            working: crate::config::Config::default(),
+            selected: 0,
+        });
+        assert!(s.any_overlay_open(), "config_screen open => any_overlay_open true");
+        s.config_screen = None;
+
+        // verb_menu
+        s.verb_menu = Some(VerbMenuState {
+            pane: VerbMenuPane::Verbs,
+            verb_idx: 0,
+            noun_idx: 0,
+            prep_idx: 0,
+            nouns: vec![],
+        });
+        assert!(s.any_overlay_open(), "verb_menu open => any_overlay_open true");
+        s.verb_menu = None;
+
+        // hotkey_dialog
+        s.hotkey_dialog = true;
+        assert!(s.any_overlay_open(), "hotkey_dialog true => any_overlay_open true");
+        s.hotkey_dialog = false;
+
+        // room_panel
+        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        assert!(s.any_overlay_open(), "room_panel open => any_overlay_open true");
+        s.room_panel = None;
+
+        // tidy_anim
+        s.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {
+            label: "test".to_string(),
+            graph: mapper::graph::MapGraph::new(),
+            description: String::new(),
+            stats: mapper::layout::TidyStats::default(),
+            stage_start: false,
+        }]));
+        assert!(s.any_overlay_open(), "tidy_anim active => any_overlay_open true");
+        s.tidy_anim = None;
+
+        // prompt
+        s.prompt = Some(Prompt { kind: PromptKind::SaveAs, buffer: String::new() });
+        assert!(s.any_overlay_open(), "prompt active => any_overlay_open true");
+        s.prompt = None;
+
+        assert!(!s.any_overlay_open(), "all cleared => any_overlay_open false again");
+    }
 
     #[test]
     fn cycle_layout_reverse_goes_backwards() {
