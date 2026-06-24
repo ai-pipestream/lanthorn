@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::config::BackgroundTidy;
+use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::state::AppState;
 
 /// Row definitions: (display name, type tag).
@@ -32,46 +33,71 @@ enum ConfigRowKind {
 
 /// Draw the config-screen modal centered over `area`.
 /// Does nothing when `state.config_screen` is `None`.
-pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) {
-    let Some(cs) = &state.config_screen else { return };
+/// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
+pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+    let Some(cs) = &state.config_screen else { return None };
 
     let modal_w = 64u16.min(area.width.saturating_sub(4));
-    let modal_h = (CONFIG_ROWS.len() as u16 + 4).min(area.height.saturating_sub(2));
+    // +4: title row (inside border) + header + button row + border overhead
+    let modal_h = (CONFIG_ROWS.len() as u16 + 6).min(area.height.saturating_sub(2));
     if modal_w < 20 || modal_h < 4 {
-        return;
+        return None;
     }
 
-    let x = area.x + area.width.saturating_sub(modal_w) / 2;
-    let y = area.y + area.height.saturating_sub(modal_h) / 2;
-    let modal = Rect { x, y, width: modal_w, height: modal_h };
+    // Build DialogStyle from state colors
+    let st = DialogStyle {
+        frame: state.colors.dialog,
+        box_style: state.colors.dialog_box_style,
+        title: state.colors.dialog_title,
+        button: state.colors.dialog_button,
+        button_active: state.colors.dialog_button_active,
+        shadow: state.colors.dialog_shadow,
+        shadow_on: state.colors.dialog_shadow_on,
+    };
 
-    // Opaque background.
-    let bg = Style::reset().bg(Color::DarkGray);
-    for row in modal.y..modal.bottom() {
-        for col in modal.x..modal.right() {
-            if let Some(cell) = buf.cell_mut((col, row)) {
-                cell.set_symbol(" ").set_style(bg);
-            }
-        }
-    }
+    let buttons = &[
+        DialogButton { id: ButtonId::Save,   label: "Save"   },
+        DialogButton { id: ButtonId::Cancel, label: "Cancel" },
+    ];
 
-    // Title.
-    let title_style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD).bg(Color::DarkGray);
-    crate::render::draw_str_clipped(buf, modal.x + 1, modal.y, "Settings", title_style, modal);
+    let spec = DialogSpec {
+        title: "Settings",
+        placement: Placement::Centered { w: modal_w, h: modal_h },
+        buttons,
+        show_close: true,
+    };
 
-    // Column headers.
-    let hdr_style = Style::new().fg(Color::White).add_modifier(Modifier::UNDERLINED).bg(Color::DarkGray);
+    let rects = draw_dialog(buf, &spec, &st);
+    let content = rects.content;
+
+    // Draw column headers inside content
+    let hdr_style = Style::new()
+        .fg(Color::White)
+        .add_modifier(Modifier::UNDERLINED)
+        .patch(state.colors.dialog);
     let name_col_w = 22usize;
     let hdr = format!("{:<width$}  Value", "Setting", width = name_col_w);
-    crate::render::draw_str_clipped(buf, modal.x + 1, modal.y + 1, &hdr, hdr_style, modal);
+    if content.height > 0 {
+        crate::render::draw_str_clipped(buf, content.x, content.y, &hdr, hdr_style, content);
+    }
 
-    // Row styles.
-    let normal = Style::new().fg(Color::White).bg(Color::DarkGray);
-    let selected_style = Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
+    // Row styles
+    let normal = state.colors.dialog;
+    let selected_style = Style::new()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+
+    // Content rows start after the header line
+    let rows_area = if content.height > 1 {
+        Rect::new(content.x, content.y + 1, content.width, content.height - 1)
+    } else {
+        Rect::new(content.x, content.y, content.width, 0)
+    };
 
     for (i, (name, _kind)) in CONFIG_ROWS.iter().enumerate() {
-        let row_y = modal.y + 2 + i as u16;
-        if row_y >= modal.bottom().saturating_sub(1) {
+        let row_y = rows_area.y + i as u16;
+        if row_y >= rows_area.bottom() {
             break;
         }
 
@@ -79,7 +105,7 @@ pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) {
         let row_style = if is_selected { selected_style } else { normal };
 
         // Fill row background.
-        for col in modal.x..modal.right() {
+        for col in content.x..content.right() {
             if let Some(cell) = buf.cell_mut((col, row_y)) {
                 cell.set_symbol(" ").set_style(row_style);
             }
@@ -91,21 +117,10 @@ pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) {
         let marker = if is_selected { ">" } else { " " };
         let name_trunc: String = name.chars().take(name_col_w).collect();
         let line = format!("{} {:<width$}  {}", marker, name_trunc, value, width = name_col_w);
-        crate::render::draw_str_clipped(buf, modal.x + 1, row_y, &line, row_style, modal);
+        crate::render::draw_str_clipped(buf, content.x, row_y, &line, row_style, rows_area);
     }
 
-    // Footer.
-    let footer_y = modal.bottom().saturating_sub(1);
-    if footer_y > modal.y + 2 {
-        let footer_style = Style::new().fg(Color::DarkGray).bg(Color::Black);
-        let footer = "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel";
-        for col in modal.x..modal.right() {
-            if let Some(cell) = buf.cell_mut((col, footer_y)) {
-                cell.set_symbol(" ").set_style(footer_style);
-            }
-        }
-        crate::render::draw_str_clipped(buf, modal.x + 1, footer_y, footer, footer_style, modal);
-    }
+    Some(rects)
 }
 
 /// Build the display value string for row `i` from the working config.
@@ -181,5 +196,43 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         assert_eq!(before, after, "draw_config_screen should be no-op when closed");
+    }
+
+    #[test]
+    fn draw_config_screen_shows_chrome() {
+        // Render test: config screen shows a border + title + [Save]/[Cancel] + [X]
+        // with colors from state.colors.dialog_*
+        use crate::render::paneframe::BorderStyle;
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = state_with_config_screen();
+        // Use Single border so the title renders on the border row (not overlapping content)
+        state.colors.dialog_box_style = BorderStyle::Single;
+        let mut rects_out: Option<DialogRects> = None;
+        terminal.draw(|f| {
+            rects_out = draw_config_screen(&state, f.area(), f.buffer_mut());
+        }).unwrap();
+
+        let content: String = terminal.backend().buffer().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+
+        // Title should appear
+        assert!(content.contains("Settings"), "title 'Settings' should be present");
+        // Save and Cancel buttons
+        assert!(content.contains("Save"), "[Save] button should be visible");
+        assert!(content.contains("Cancel"), "[Cancel] button should be visible");
+        // Close button (✕)
+        assert!(content.contains('✕'), "[X] close button should be visible");
+
+        // DialogRects should be returned
+        let rects = rects_out.expect("draw_config_screen should return DialogRects when open");
+        assert!(rects.close.is_some(), "close rect should be present");
+        assert_eq!(rects.buttons.len(), 2, "should have 2 buttons");
+
+        // Verify button ids
+        let ids: Vec<ButtonId> = rects.buttons.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&ButtonId::Save));
+        assert!(ids.contains(&ButtonId::Cancel));
     }
 }

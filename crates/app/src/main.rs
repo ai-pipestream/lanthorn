@@ -22,6 +22,7 @@ use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action, ApplyTidyOutcome};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
+use app::render::dialog::DialogRects;
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
@@ -161,6 +162,7 @@ pub fn hint_line_game(keymap: &KeyMap) -> String {
 /// `story` is `Rect::default()` when the layout hides the story (MapFull).
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
 /// `layer_tabs` pairs each visible layer tab with its hit-rect (for future click-to-switch).
+/// `dialog` holds the last-drawn dialog chrome rects for mouse hit-testing.
 struct PaneRects {
     map: Rect,
     story: Rect,
@@ -169,6 +171,8 @@ struct PaneRects {
     /// Populated but not yet consumed; reserved for a future click-to-switch feature.
     #[allow(dead_code)]
     layer_tabs: Vec<(LayerId, Rect)>,
+    /// Active dialog chrome rects (when a dialog is open).
+    pub dialog: Option<DialogRects>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -183,6 +187,7 @@ fn draw_frame(
     let mut story_area = Rect::default();
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
+    let mut dialog_rects_out: Option<DialogRects> = None;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -409,7 +414,7 @@ fn draw_frame(
 
         // ── Config screen overlay — drawn after other modals ──────────────────
         if state.config_screen.is_some() {
-            draw_config_screen(state, full, buf);
+            dialog_rects_out = draw_config_screen(state, full, buf);
         }
 
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
@@ -435,7 +440,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -621,7 +626,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new() };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -722,7 +727,7 @@ fn main() {
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
             Event::Mouse(m) => {
-                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects)
+                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
             }
             // Resize: continue so the next draw uses the updated terminal size.
             Event::Resize(_, _) => continue,

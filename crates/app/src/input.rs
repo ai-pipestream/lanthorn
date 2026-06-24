@@ -384,22 +384,94 @@ fn room_at_screen(
         .map(|(id, _)| *id)
 }
 
+/// Per-modal button-to-action mapping for the config screen.
+/// Maps a `ButtonId` click (or the close [X] hit) to the appropriate `Action`.
+/// Later modals can add their own similar functions or a match on which modal
+/// is open to return the right mapping.
+fn config_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    /// Test whether (col, row) is inside `rect`.
+    fn hit(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+        col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+    }
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::ConfigCancel);
+        }
+    }
+
+    // Check buttons
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Save   => Action::ConfigSave,
+                ButtonId::Cancel => Action::ConfigCancel,
+                _                => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
-/// bounding rects of the map and story panes, and the pre-computed room screen
-/// rects (needed for pixel-accurate room hit-testing on left/right clicks).
+/// bounding rects of the map and story panes, the pre-computed room screen
+/// rects (needed for pixel-accurate room hit-testing on left/right clicks), and
+/// the active dialog chrome rects (if a dialog is open).
+///
+/// When `dialog` is `Some`, dialog hit-testing runs FIRST:
+/// - close [X] click → the active modal's close action
+/// - button click → the button's mapped action
+/// - any click OUTSIDE the dialog `area` → swallowed (Action::None)
+/// Only when no dialog is open does normal map/room routing apply.
 ///
 /// Returns `Action::None` for events outside both panes or with no binding.
 pub fn mouse_to_action(
-    _state: &AppState,
+    state: &AppState,
     m: MouseEvent,
     map: ratatui::layout::Rect,
     story: ratatui::layout::Rect,
     room_rects: &[(mapper::graph::RoomId, ratatui::layout::Rect)],
+    dialog: &Option<crate::render::dialog::DialogRects>,
 ) -> Action {
     let col = m.column;
     let row = m.row;
     let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
     let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+
+    // ── Dialog chrome hit-testing (checked FIRST) ─────────────────────────────
+    if let Some(rects) = dialog {
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // Determine which modal is open and route button/close clicks
+            if state.config_screen.is_some() {
+                if let Some(action) = config_dialog_action(rects, col, row) {
+                    return action;
+                }
+            }
+
+            // Click is inside the dialog area: swallow (no map/room routing).
+            let area = rects.area;
+            let in_dialog = col >= area.x && col < area.right()
+                && row >= area.y && row < area.bottom();
+            if in_dialog {
+                return Action::None;
+            }
+
+            // Click OUTSIDE the dialog area while dialog is open: swallow.
+            return Action::None;
+        }
+        // For non-left-click events while a dialog is open: swallow everything.
+        return Action::None;
+    }
+
+    // ── Normal routing (no dialog open) ──────────────────────────────────────
 
     let in_map = map.width > 0 && map.height > 0
         && col >= map.x && col < map.right()
@@ -3173,7 +3245,7 @@ mod tests {
 
         // Click at (0,0) which is inside the Compact box (8x3).
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
             matches!(action, Action::ShowRoomInfo(1)),
             "left-down on room cell should produce ShowRoomInfo(1), got {:?}", action
@@ -3192,7 +3264,7 @@ mod tests {
         let rects = room_rects_for_compact(2, (0, 0), map_rect());
 
         let m = mouse_event(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
             matches!(action, Action::ShowRoomDiagnostics(2)),
             "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
@@ -3212,7 +3284,7 @@ mod tests {
         let rects = room_rects_for_compact(1, (0, 0), map_rect());
 
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
             matches!(action, Action::ActivatePane(Focus::Map)),
             "left-down on map gutter should produce ActivatePane(Map), got {:?}", action
@@ -3225,7 +3297,7 @@ mod tests {
         let s = AppState::default();
         // col 85 is inside story_rect (x=80..120).
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 85, 5, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(
             matches!(action, Action::ActivatePane(Focus::Game)),
             "left-down in story pane should produce ActivatePane(Game), got {:?}", action
@@ -3258,7 +3330,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::Pan(0, -1)), "scroll up in map without modifier -> Pan(0,-1)");
     }
 
@@ -3267,7 +3339,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollDown, 10, 10, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::Pan(0, 1)), "scroll down in map without modifier -> Pan(0,1)");
     }
 
@@ -3276,7 +3348,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::SHIFT);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::Pan(-1, 0)), "scroll up + Shift -> Pan(-1,0)");
     }
 
@@ -3285,7 +3357,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::CONTROL);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::ZoomIn), "scroll up + Ctrl -> ZoomIn");
     }
 
@@ -3295,11 +3367,11 @@ mod tests {
         let s = AppState::default();
         // col 85 is inside story_rect (x=80..120).
         let m_up = mouse_event(MouseEventKind::ScrollUp, 85, 5, KeyModifiers::NONE);
-        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &[]);
+        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action_up, Action::TranscriptScroll(-1)), "scroll up in story -> TranscriptScroll(-1)");
 
         let m_dn = mouse_event(MouseEventKind::ScrollDown, 85, 5, KeyModifiers::NONE);
-        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &[]);
+        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action_dn, Action::TranscriptScroll(1)), "scroll down in story -> TranscriptScroll(1)");
     }
 
@@ -3308,7 +3380,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::Down(MouseButton::Middle), 20, 15, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::BeginDragPan(20, 15)), "middle-down -> BeginDragPan");
     }
 
@@ -3318,8 +3390,8 @@ mod tests {
         let s = AppState::default();
         let drag = mouse_event(MouseEventKind::Drag(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
         let up = mouse_event(MouseEventKind::Up(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
-        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &[]), Action::DragPanTo(25, 18)));
-        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &[]), Action::EndDragPan));
+        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &[], &None), Action::DragPanTo(25, 18)));
+        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &[], &None), Action::EndDragPan));
     }
 
     // ── Drag-pan accumulator tests ────────────────────────────────────────────
@@ -4004,5 +4076,73 @@ mod tests {
         apply_action(Action::EndDragPan, &mut s, &mut m);
         assert!(s.drag.is_none(), "EndDragPan should clear drag state");
         assert_eq!(s.char_pan, (-3, 0), "EndDragPan must not reset char_pan");
+    }
+
+    /// Build a minimal MouseEvent for testing.
+    fn mouse_left_click(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn config_dialog_button_clicks_map_to_actions() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::ConfigScreenState;
+
+        // Build known rects:
+        // dialog area at (10, 5, 40, 15)
+        // close at (48, 5, 1, 1)  — just inside top-right
+        // Save button at (20, 19, 8, 1)
+        // Cancel button at (29, 19, 10, 1)
+        let rects = DialogRects {
+            area:    Rect::new(10, 5, 40, 15),
+            content: Rect::new(11, 7, 38, 10),
+            close:   Some(Rect::new(48, 5, 1, 1)),
+            buttons: vec![
+                (ButtonId::Save,   Rect::new(20, 19, 8,  1)),
+                (ButtonId::Cancel, Rect::new(29, 19, 10, 1)),
+            ],
+        };
+
+        // State with config_screen open (so dialog routing knows which modal).
+        let mut state = AppState::default();
+        let working = crate::input::clone_config(&state.config);
+        state.config_screen = Some(ConfigScreenState { working, selected: 0 });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → ConfigCancel
+        let a = mouse_to_action(&state, mouse_left_click(48, 5), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::ConfigCancel), "close click should produce ConfigCancel, got {:?}", a);
+
+        // Save button → ConfigSave
+        let a = mouse_to_action(&state, mouse_left_click(22, 19), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::ConfigSave), "Save button should produce ConfigSave, got {:?}", a);
+
+        // Cancel button → ConfigCancel
+        let a = mouse_to_action(&state, mouse_left_click(32, 19), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::ConfigCancel), "Cancel button should produce ConfigCancel, got {:?}", a);
+
+        // Click outside dialog area → swallowed (Action::None)
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside-dialog click should be swallowed (None), got {:?}", a);
+    }
+
+    #[test]
+    fn config_esc_maps_to_config_cancel() {
+        // ESC in config screen should produce ConfigCancel (same as [X] and Cancel button).
+        let mut s = AppState::default();
+        let working = crate::input::clone_config(&s.config);
+        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        assert!(matches!(a, Action::ConfigCancel), "ESC in config screen should produce ConfigCancel");
     }
 }
