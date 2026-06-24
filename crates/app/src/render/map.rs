@@ -220,10 +220,17 @@ fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
 }
 
 /// Style for a room given the current selection/current state.
+///
+/// When a room is BOTH current AND selected, combine both states: use the
+/// selected background with the REVERSED modifier from room_current so the
+/// room is visually distinct from either state alone.
 fn room_style(room: &RenderRoom, state: &AppState) -> Style {
-    if room.is_current {
+    let is_selected = state.selected_room == Some(room.id);
+    if room.is_current && is_selected {
+        state.colors.room_selected.add_modifier(Modifier::REVERSED)
+    } else if room.is_current {
         state.colors.room_current
-    } else if state.selected_room == Some(room.id) {
+    } else if is_selected {
         state.colors.room_selected
     } else {
         state.colors.room_normal
@@ -811,6 +818,10 @@ fn render_lane_connectors(
 }
 
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
+///
+/// Uses `Style::reset().patch(connector_style)` so the background is reset to terminal
+/// default before the connector fg is applied. This prevents a selected room's highlight
+/// bg (e.g. yellow) from bleeding onto the arrowhead cell sitting on the room border.
 fn draw_connector_arrows(
     arrowheads: &[((i32, i32), String, bool)],
     offset: (i32, i32),
@@ -823,7 +834,9 @@ fn draw_connector_arrows(
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let style = if *distorted { colors.connector_distorted } else { colors.connector };
+            let connector_style = if *distorted { colors.connector_distorted } else { colors.connector };
+            // Reset bg so selection highlight does not paint the arrow background.
+            let style = Style::reset().patch(connector_style);
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(style);
             }
@@ -3835,5 +3848,123 @@ mod tests {
                 .map(|(rid, _)| *rid);
             assert_eq!(hit, Some(*id), "click at centre of room {:?} rect must hit that room", id);
         }
+    }
+
+    // ── Item 3: current+selected combined style ───────────────────────────────
+
+    /// When a room is both current AND selected, room_style combines both states:
+    /// it returns room_selected with REVERSED added (not just one or the other).
+    #[test]
+    fn room_style_current_and_selected_combines() {
+        use mapper::render::RenderRoom;
+        use crate::state::AppState;
+
+        let room = RenderRoom {
+            id: 1,
+            cell: (0, 0),
+            label: "Test".into(),
+            is_current: true,
+            has_layer_portal: false,
+            has_notes: false,
+            align_code: String::new(),
+        };
+
+        let mut state = AppState::default();
+        state.selected_room = Some(1); // room is both current AND selected
+
+        let style = room_style(&room, &state);
+
+        // Must have REVERSED (from the combined path) AND use the selected base.
+        assert!(
+            style.add_modifier.contains(Modifier::REVERSED),
+            "current+selected room must have REVERSED modifier; got {:?}",
+            style
+        );
+        // The base must NOT be room_current alone (which would be REVERSED on its own style).
+        // It should be room_selected with REVERSED added.
+        let expected = state.colors.room_selected.add_modifier(Modifier::REVERSED);
+        assert_eq!(style, expected, "current+selected must equal room_selected + REVERSED");
+    }
+
+    /// When a room is current but NOT selected, room_style returns room_current.
+    #[test]
+    fn room_style_current_only() {
+        use mapper::render::RenderRoom;
+        use crate::state::AppState;
+
+        let room = RenderRoom {
+            id: 2,
+            cell: (0, 0),
+            label: "Test".into(),
+            is_current: true,
+            has_layer_portal: false,
+            has_notes: false,
+            align_code: String::new(),
+        };
+
+        let mut state = AppState::default();
+        state.selected_room = Some(99); // different room selected
+
+        let style = room_style(&room, &state);
+        assert_eq!(style, state.colors.room_current, "current-only room must use room_current style");
+    }
+
+    /// When a room is selected but NOT current, room_style returns room_selected.
+    #[test]
+    fn room_style_selected_only() {
+        use mapper::render::RenderRoom;
+        use crate::state::AppState;
+
+        let room = RenderRoom {
+            id: 3,
+            cell: (0, 0),
+            label: "Test".into(),
+            is_current: false,
+            has_layer_portal: false,
+            has_notes: false,
+            align_code: String::new(),
+        };
+
+        let mut state = AppState::default();
+        state.selected_room = Some(3);
+
+        let style = room_style(&room, &state);
+        assert_eq!(style, state.colors.room_selected, "selected-only room must use room_selected style");
+    }
+
+    // ── Item 4: arrow color does not bleed selection bg ───────────────────────
+
+    /// draw_connector_arrows must reset the cell background before applying the
+    /// connector fg, so a selection-highlighted room border cell does not keep
+    /// the selection bg color after the arrowhead is drawn.
+    #[test]
+    fn arrow_style_resets_bg() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        // Pre-paint the cell with a selection bg color to simulate a selected room border.
+        let selection_bg = Color::Yellow;
+        if let Some(cell) = buf.cell_mut((5, 5)) {
+            cell.set_style(Style::new().bg(selection_bg));
+        }
+        // Verify it's set before the arrow draw.
+        assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
+
+        // Simulate one arrowhead at virtual (5, 5) with offset (0, 0).
+        let arrowheads: Vec<((i32, i32), String, bool)> = vec![((5, 5), ">".to_string(), false)];
+        let colors = ColorScheme::terminal_default();
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors);
+
+        // After drawing the arrow, the bg must NOT be selection_bg — it should be reset.
+        let after_bg = buf.cell((5, 5)).unwrap().bg;
+        assert_ne!(
+            after_bg, selection_bg,
+            "arrow draw must reset selection bg; bg is still Yellow after arrow"
+        );
     }
 }
