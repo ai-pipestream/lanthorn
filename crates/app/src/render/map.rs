@@ -428,7 +428,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
     //       the rooms drawn below them in step 2.
-    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
+    let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
     if let Some((cols, rows)) = &axes {
         arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.colors);
     }
@@ -456,7 +456,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       border it sits on (replacing the box-edge glyph, pointing outward).
     // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
     if !state.show_portal_labels {
-        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors);
+        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room);
     }
 }
 
@@ -759,9 +759,9 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
 }
 
 /// Draw every plan connector as box-drawing line-art along its lanes, and RETURN the departure
-/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted)`. The arrowheads
-/// are NOT drawn here: each sits ON a room's border cell, so the caller draws them AFTER the
-/// rooms (which render on top of the line-art) so the arrow replaces the box-border glyph.
+/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted, room_id)`. The
+/// arrowheads are NOT drawn here: each sits ON a room's border cell, so the caller draws them
+/// AFTER the rooms (which render on top of the line-art) so the arrow replaces the box-edge glyph.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -772,7 +772,7 @@ fn render_lane_connectors(
     arrows: &crate::symbols::Arrows,
     path: &crate::symbols::PathGlyphs,
     colors: &crate::colors::ColorScheme,
-) -> Vec<((i32, i32), String, bool)> {
+) -> Vec<((i32, i32), String, bool, RoomId)> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -782,7 +782,8 @@ fn render_lane_connectors(
         std::collections::HashMap::new();
     // Arrowheads: (virtual pixel, glyph string, distorted). Returned for the caller to draw on
     // top of the rooms (the arrow embeds in the room border).
-    let mut arrowheads: Vec<((i32, i32), String, bool)> = Vec::new();
+    // Arrowheads: (virtual pixel, glyph string, distorted, owning room id).
+    let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
 
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
@@ -806,14 +807,14 @@ fn render_lane_connectors(
         } else {
             arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted));
+        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, conn.origin));
         // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
         if conn.reciprocal {
             let arr_ch = match conn.entry_dir {
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted));
+            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, conn.dest));
         }
     }
     arrowheads
@@ -821,24 +822,40 @@ fn render_lane_connectors(
 
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
 ///
-/// Uses `Style::reset().patch(connector_style)` so the background is reset to terminal
-/// default before the connector fg is applied. This prevents a selected room's highlight
-/// bg (e.g. yellow) from bleeding onto the arrowhead cell sitting on the room border.
+/// Each arrowhead carries the `RoomId` of the room it belongs to.  For a normal (non-selected)
+/// room the cell is painted with a reset background so no prior selection highlight bleeds
+/// through.  For the currently selected room the arrowhead cell gets the selected room's
+/// background color so the arrow reads as part of the highlighted room border.
 fn draw_connector_arrows(
-    arrowheads: &[((i32, i32), String, bool)],
+    arrowheads: &[((i32, i32), String, bool, RoomId)],
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
     colors: &crate::colors::ColorScheme,
+    selected_room: Option<RoomId>,
 ) {
     let (off_x, off_y) = offset;
-    for (pos, glyph, distorted) in arrowheads {
+    for (pos, glyph, distorted, room_id) in arrowheads {
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
             let connector_style = if *distorted { colors.connector_distorted } else { colors.connector };
-            // Reset bg so selection highlight does not paint the arrow background.
-            let style = Style::reset().patch(connector_style);
+            let connector_fg = connector_style.fg;
+            let style = if selected_room == Some(*room_id) {
+                // Selected room: paint bg = room_selected background so the arrow cell
+                // reads as part of the highlighted room border.
+                let mut s = Style::reset();
+                if let Some(bg) = colors.room_selected.bg {
+                    s = s.bg(bg);
+                }
+                if let Some(fg) = connector_fg {
+                    s = s.fg(fg);
+                }
+                s
+            } else {
+                // Non-selected room: reset bg so no prior highlight bleeds through.
+                Style::reset().patch(connector_style)
+            };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(glyph).set_style(style);
             }
@@ -3978,9 +3995,9 @@ mod tests {
 
     /// draw_connector_arrows must reset the cell background before applying the
     /// connector fg, so a selection-highlighted room border cell does not keep
-    /// the selection bg color after the arrowhead is drawn.
+    /// the selection bg color after the arrowhead is drawn (non-selected room case).
     #[test]
-    fn arrow_style_resets_bg() {
+    fn arrow_style_resets_bg_for_non_selected_room() {
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         use ratatui::style::{Color, Style};
@@ -3994,19 +4011,80 @@ mod tests {
         if let Some(cell) = buf.cell_mut((5, 5)) {
             cell.set_style(Style::new().bg(selection_bg));
         }
-        // Verify it's set before the arrow draw.
         assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
 
-        // Simulate one arrowhead at virtual (5, 5) with offset (0, 0).
-        let arrowheads: Vec<((i32, i32), String, bool)> = vec![((5, 5), ">".to_string(), false)];
+        // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 10)];
         let colors = ColorScheme::terminal_default();
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors);
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None);
 
-        // After drawing the arrow, the bg must NOT be selection_bg — it should be reset.
         let after_bg = buf.cell((5, 5)).unwrap().bg;
         assert_ne!(
             after_bg, selection_bg,
             "arrow draw must reset selection bg; bg is still Yellow after arrow"
+        );
+    }
+
+    /// draw_connector_arrows must paint the cell background with the selected room's bg color
+    /// when the arrow belongs to the currently selected room.
+    #[test]
+    fn arrow_style_selected_room_gets_room_bg() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        // Use a color scheme where room_selected has a distinct bg.
+        let mut colors = ColorScheme::terminal_default();
+        let selected_bg = Color::Cyan;
+        colors.room_selected = Style::new().fg(Color::White).bg(selected_bg);
+        // connector fg is Green so we can check it independently.
+        colors.connector = Style::new().fg(Color::Green);
+
+        // Arrow at (5, 5) belongs to room 7; room 7 is the selected room.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7));
+
+        let cell = buf.cell((5, 5)).unwrap();
+        assert_eq!(
+            cell.bg, selected_bg,
+            "selected-room arrow must have the room_selected bg color as background"
+        );
+        assert_eq!(
+            cell.fg,
+            Color::Green,
+            "selected-room arrow glyph fg must be the connector color"
+        );
+    }
+
+    /// draw_connector_arrows must NOT apply the selected room's bg to an arrow belonging
+    /// to a different (non-selected) room, even when a selection is active.
+    #[test]
+    fn arrow_style_other_room_unaffected_by_selection() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        let mut colors = ColorScheme::terminal_default();
+        colors.room_selected = Style::new().fg(Color::White).bg(Color::Cyan);
+        colors.connector = Style::new().fg(Color::Green);
+
+        // Arrow belongs to room 5; selected room is 7 — different rooms.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 5)];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7));
+
+        let cell = buf.cell((5, 5)).unwrap();
+        assert_ne!(
+            cell.bg,
+            Color::Cyan,
+            "arrow of a non-selected room must not get the selected room bg"
         );
     }
 }
