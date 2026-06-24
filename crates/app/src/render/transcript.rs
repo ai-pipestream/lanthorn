@@ -1,4 +1,8 @@
 //! GAME pane rendering: status line (top), scrolling transcript (middle), input line (bottom).
+//!
+//! When `state.show_inventory` is true, a 1-row inventory strip is drawn just
+//! above the input line (and below the suggestion line when present), shrinking
+//! the transcript area by one row exactly as the suggestion line does.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -195,6 +199,39 @@ pub(crate) fn format_suggestion_line(suggestions: &[String], highlight_idx: usiz
         .join("  ")
 }
 
+/// Format the inventory strip content: "Inv: item1, item2, ..." truncated to `width`.
+///
+/// Returns None when the strip should not show (show_inventory is false).
+/// When show_inventory is true but no items are available, falls back to a hint.
+pub(crate) fn format_inventory_line(
+    show_inventory: bool,
+    player_obj: Option<u16>,
+    inventory_fallback: &[String],
+    machine: &zvm::cpu::exec::Machine,
+) -> Option<String> {
+    if !show_inventory {
+        return None;
+    }
+    // Use live object-tree children when player_obj is locked.
+    let items: Vec<String> = if let Some(obj) = player_obj {
+        crate::inventory::list_inventory(&machine.mem, obj)
+    } else {
+        inventory_fallback.to_vec()
+    };
+
+    if items.is_empty() {
+        if player_obj.is_none() && inventory_fallback.is_empty() {
+            // Neither source has data yet.
+            Some("Inv: (press i)".to_string())
+        } else {
+            Some("Inv: (empty)".to_string())
+        }
+    } else {
+        let body = items.join(", ");
+        Some(format!("Inv: {}", body))
+    }
+}
+
 // ── Main render function ───────────────────────────────────────────────────────
 
 /// Render the GAME pane into `buf` within `area`:
@@ -259,12 +296,32 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         }
     }
 
-    // ── Suggestion line: one row above input (game focus only) ───────────────
+    // ── Inventory strip: one row above input (when show_inventory) ──────────
 
-    // Reserve the row above input for suggestions when they are available.
+    let inv_line = format_inventory_line(
+        state.show_inventory,
+        state.player_obj,
+        &state.inventory_fallback,
+        machine,
+    );
+    let has_inventory = inv_line.is_some();
+    let inventory_y = input_y.saturating_sub(1);
+    if has_inventory && area.height >= 3 && inventory_y > area.y {
+        let inv_text = inv_line.as_deref().unwrap_or("");
+        let inv_trunc = truncate_line(inv_text, w);
+        let inv_style = state.colors.suggestion; // reuse muted suggestion style
+        draw_str_clipped(buf, area.x, inventory_y, inv_trunc, inv_style, area);
+    }
+
+    // ── Suggestion line: one row above inventory (or above input when no strip) ─
+
+    // Reserve the row above input (or above the inventory strip) for suggestions.
     // The transcript area shrinks accordingly so suggestions never overlap text.
     let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty();
-    let suggestion_y = input_y.saturating_sub(1);
+    // suggestion_y sits above inventory strip (or above input when strip absent).
+    let rows_from_bottom = 1u16
+        + if has_inventory && area.height >= 3 && inventory_y > area.y { 1 } else { 0 };
+    let suggestion_y = input_y.saturating_sub(rows_from_bottom);
     if has_suggestions && area.height >= 3 && suggestion_y > area.y {
         let sug_line = format_suggestion_line(&state.suggestions, state.suggestion_idx);
         let sug_trunc = truncate_line(&sug_line, w);
@@ -278,11 +335,13 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         return;
     }
 
-    // Middle rows: from status_y + 1 to input_y - 1 (or input_y - 2 when the
-    // suggestion line is visible, so transcript text is never overdrawn).
+    // Middle rows: from status_y + 1 upward to the lowest reserved row.
+    // Reserved rows (from bottom): input, [inventory strip], [suggestion line].
     let transcript_top = area.y + 1;
     let transcript_bottom = if has_suggestions && suggestion_y > area.y {
         suggestion_y // exclusive: transcript stops before the suggestion row
+    } else if has_inventory && area.height >= 3 && inventory_y > area.y {
+        inventory_y // exclusive: transcript stops before the inventory row
     } else {
         input_y // exclusive: transcript stops before the input row
     };
@@ -705,5 +764,112 @@ mod tests {
             top_has_reversed,
             "status line row should be fully reversed-video for czech.z5"
         );
+    }
+
+    // ── Inventory strip tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn render_transcript_inventory_strip_shown_when_enabled() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.show_inventory = true;
+        state.inventory_fallback = vec!["brass lamp".to_string(), "sword".to_string()];
+
+        // 10-row area: row0=status, rows1..7=transcript, row8=inventory, row9=input.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Row 9 (bottom) must contain the input prompt.
+        let input_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 9)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(input_row.contains("> "), "input row: {:?}", input_row);
+
+        // Row 8 must contain the inventory strip.
+        let inv_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 8)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(inv_row.contains("Inv:"), "inventory row should contain 'Inv:': {:?}", inv_row);
+        assert!(inv_row.contains("brass lamp"), "inventory row should contain item: {:?}", inv_row);
+    }
+
+    #[test]
+    fn render_transcript_inventory_strip_hidden_when_disabled() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.show_inventory = false;
+        state.inventory_fallback = vec!["brass lamp".to_string()];
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // No row should contain "Inv:".
+        let found_inv = (0..10u16).any(|y| {
+            let row: String = (0..40u16)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            row.contains("Inv:")
+        });
+        assert!(!found_inv, "Inv: should not appear when show_inventory is false");
+    }
+
+    #[test]
+    fn render_transcript_inventory_strip_shrinks_transcript_area() {
+        // With inventory strip shown, transcript should have one fewer row.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.transcript = (0..10).map(|i| format!("L{}", i)).collect();
+        state.inventory_fallback = vec!["lamp".to_string()];
+
+        // 7-row area without inventory: 1 status + 5 transcript + 1 input.
+        // 7-row area with inventory:    1 status + 4 transcript + 1 inventory + 1 input.
+        let area = Rect::new(0, 0, 40, 7);
+
+        // Without inventory.
+        let mut buf_no = Buffer::empty(area);
+        state.show_inventory = false;
+        render_transcript(&machine, &state, area, &mut buf_no);
+        let transcript_rows_no = (1u16..6u16).filter(|&y| {
+            let row: String = (0..40u16)
+                .map(|x| buf_no.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            row.trim_end().contains('L')
+        }).count();
+
+        // With inventory.
+        let mut buf_yes = Buffer::empty(area);
+        state.show_inventory = true;
+        render_transcript(&machine, &state, area, &mut buf_yes);
+        let transcript_rows_yes = (1u16..6u16).filter(|&y| {
+            let row: String = (0..40u16)
+                .map(|x| buf_yes.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            row.trim_end().contains('L')
+        }).count();
+
+        assert!(
+            transcript_rows_yes < transcript_rows_no,
+            "transcript should have fewer rows with inventory strip ({} vs {})",
+            transcript_rows_yes, transcript_rows_no
+        );
+    }
+
+    #[test]
+    fn format_inventory_line_live_vs_fallback_vs_hint() {
+        let machine = minimal_machine();
+        // No player_obj, no fallback → "(press i)" hint.
+        let line = format_inventory_line(true, None, &[], &machine);
+        assert_eq!(line, Some("Inv: (press i)".to_string()));
+
+        // No player_obj but fallback available.
+        let items = vec!["brass lamp".to_string()];
+        let line2 = format_inventory_line(true, None, &items, &machine);
+        assert!(line2.unwrap().contains("brass lamp"));
+
+        // show_inventory = false → None.
+        let line3 = format_inventory_line(false, None, &items, &machine);
+        assert_eq!(line3, None);
     }
 }
