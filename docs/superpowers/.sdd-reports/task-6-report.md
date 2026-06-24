@@ -4,7 +4,7 @@
 
 ## Commit SHA(s)
 
-(see below — committed after report written)
+5838cd5f
 
 ## Exact cargo test result line
 
