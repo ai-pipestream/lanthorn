@@ -202,6 +202,13 @@ pub enum Focus {
 
 // ── Prompt sub-mode ───────────────────────────────────────────────────────────
 
+/// Which path field is being edited in the config screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigPathField {
+    UserDir,
+    ColorsScheme,
+}
+
 /// What triggered the prompt, carrying the target room (and edge direction where
 /// applicable).  Used by `apply_action` to know which mapper method to call on
 /// Enter.
@@ -221,6 +228,8 @@ pub enum PromptKind {
     ConfirmReset,
     /// Enter a filename for an exported Quetzal save in the given directory.
     ExportSaveName(std::path::PathBuf),
+    /// Edit a config path field (user_dir or colors.scheme) from the config screen.
+    ConfigEditPath { field: ConfigPathField },
 }
 
 // ── File browser state ────────────────────────────────────────────────────────
@@ -317,6 +326,19 @@ impl FileBrowserState {
         }
         entries
     }
+}
+
+// ── Config screen state ───────────────────────────────────────────────────────
+
+/// Transient state for the config-screen modal.
+/// `None` in `AppState.config_screen` = modal closed.
+#[derive(Debug, Clone)]
+pub struct ConfigScreenState {
+    /// A working copy of the config, edited in the modal.
+    /// On Save this is copied to `state.config`; on Cancel it is dropped.
+    pub working: crate::config::Config,
+    /// Index of the currently-selected row.
+    pub selected: usize,
 }
 
 /// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
@@ -431,6 +453,12 @@ pub struct AppState {
     /// Active verb/item token-palette modal state. `None` means the modal is closed.
     pub verb_menu: Option<VerbMenuState>,
 
+    /// The resolved runtime config. Set at startup; updated on config-screen Save.
+    pub config: crate::config::Config,
+
+    /// Active config-screen modal state. `None` means the screen is closed.
+    pub config_screen: Option<ConfigScreenState>,
+
     /// Session turn counter; incremented on each non-empty `SubmitCommand`.
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
@@ -499,6 +527,8 @@ impl Default for AppState {
             saves: None,
             file_browser: None,
             verb_menu: None,
+            config: crate::config::Config::default(),
+            config_screen: None,
             turns: 0,
             saves_prompt_submitted: None,
             dict_words: Vec::new(),

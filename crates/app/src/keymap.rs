@@ -94,6 +94,10 @@ pub enum Command {
     // ── Verb menu ─────────────────────────────────────────────────────────────
     /// Open the verb/item token-palette modal (default: m).
     OpenVerbMenu,
+
+    // ── Config screen ─────────────────────────────────────────────────────────
+    /// Open the in-app config screen modal (default: F2).
+    OpenConfig,
 }
 
 impl Command {
@@ -146,6 +150,7 @@ impl Command {
             Command::CycleLayoutReverse => Action::CycleLayoutReverse,
             Command::ResetGame => Action::ResetGame,
             Command::OpenVerbMenu => Action::OpenVerbMenu,
+            Command::OpenConfig => Action::OpenConfig,
         }
     }
 
@@ -197,6 +202,7 @@ impl Command {
             Command::CycleLayoutReverse => "cycle_layout_reverse",
             Command::ResetGame => "reset_game",
             Command::OpenVerbMenu => "open_verb_menu",
+            Command::OpenConfig => "open_config",
         }
     }
 
@@ -248,6 +254,7 @@ impl Command {
             Command::CycleLayoutReverse => "layout back",
             Command::ResetGame => "reset game",
             Command::OpenVerbMenu => "verb menu",
+            Command::OpenConfig => "settings",
         }
     }
 
@@ -302,6 +309,7 @@ impl Command {
             Command::CycleLayoutReverse => Context::Global,
             Command::ResetGame => Context::Global,
             Command::OpenVerbMenu => Context::Global,
+            Command::OpenConfig => Context::Global,
         }
     }
 
@@ -358,6 +366,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::CycleLayoutReverse,
     Command::ResetGame,
     Command::OpenVerbMenu,
+    Command::OpenConfig,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -565,6 +574,8 @@ impl KeyMap {
         bind!(plain(Char('v')), Command::ToggleInventory, Context::Global);
         // m → open verb/item token-palette modal (free key; not used by any other command).
         bind!(plain(Char('m')), Command::OpenVerbMenu, Context::Global);
+        // F2 → open config screen.
+        bind!(plain(F(2)), Command::OpenConfig, Context::Global);
         // Shift+Tab (BackTab) → cycle layout in reverse (inverse of Ctrl+L forward cycle).
         // BackTab is delivered by crossterm as KeyCode::BackTab, typically with no SHIFT modifier.
         bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, Command::CycleLayoutReverse, Context::Global);
@@ -800,7 +811,7 @@ const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
     ("Layers", &["peel_layer", "merge_layer", "cycle_layer_next", "cycle_layer_prev", "rename_layer"]),
     ("Edit", &["rename_room", "edit_notes", "delete_selected_connection", "relabel_selected_edge"]),
     ("Files", &["open_saves", "reset_game", "export_svg", "export_dot", "export_dump"]),
-    ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery", "toggle_inventory", "open_verb_menu"]),
+    ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery", "toggle_inventory", "open_verb_menu", "open_config"]),
 ];
 
 /// Runtime layout for the hotkey dialog.

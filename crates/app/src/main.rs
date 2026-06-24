@@ -22,6 +22,7 @@ use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
+use app::render::config_screen::draw_config_screen;
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
@@ -274,7 +275,9 @@ fn draw_frame(
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = state.colors.help_bar;
-        let help_text = if state.verb_menu.is_some() {
+        let help_text = if state.config_screen.is_some() {
+            "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
+        } else if state.verb_menu.is_some() {
             "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc/q: close".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc/q: cancel".to_string()
@@ -307,6 +310,7 @@ fn draw_frame(
                 PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
                 PromptKind::ConfirmReset => "Reset game? (y/n)",
                 PromptKind::ExportSaveName(_) => "Export filename",
+                PromptKind::ConfigEditPath { .. } => "Config path",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
@@ -348,6 +352,11 @@ fn draw_frame(
             draw_verb_menu(state, full, buf);
         }
 
+        // ── Config screen overlay — drawn after other modals ──────────────────
+        if state.config_screen.is_some() {
+            draw_config_screen(state, full, buf);
+        }
+
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
         if let Some(prompt) = &state.prompt {
             let overlay_area = if map_area.height > 0 { map_area } else { main_area };
@@ -362,6 +371,7 @@ fn draw_frame(
                     PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
                     PromptKind::ConfirmReset => "Reset?  ",
                     PromptKind::ExportSaveName(_) => "Export: ",
+                    PromptKind::ConfigEditPath { .. } => "Path:   ",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
                 let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
@@ -478,6 +488,7 @@ fn main() {
     for w in hotkey_warnings {
         state.push_transcript(&format!("[{}]", w));
     }
+    state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);
@@ -615,6 +626,13 @@ fn main() {
             None
         };
 
+        // Snapshot working config before apply_action clears it on ConfigSave.
+        let config_to_save = if matches!(action, Action::ConfigSave) {
+            state.config_screen.as_ref().map(|cs| cs.working.clone())
+        } else {
+            None
+        };
+
         match action {
             // ── Caller-handled actions ─────────────────────────────────────────
 
@@ -708,7 +726,7 @@ fn main() {
 
                 // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
                 // transcript status line so the player is aware but the loop continues.
-                if cfg.auto_save {
+                if state.config.auto_save {
                     let meta = app::archive::Meta {
                         format_version: 1,
                         ifid: Some(ifid.clone()),
@@ -731,7 +749,7 @@ fn main() {
                 if mapper.mode == mapper::layout::LayoutMode::Auto {
                     let new_room = mapper.graph.rooms().count() > rooms_before;
                     let active_layer = state.active_layer(&mapper.graph);
-                    let overlap = if cfg.background_tidy == app::config::BackgroundTidy::OnOverlap {
+                    let overlap = if state.config.background_tidy == app::config::BackgroundTidy::OnOverlap {
                         // Overlap: any duplicate cell in the active layer OR any distorted edge.
                         let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
                         let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
@@ -745,7 +763,7 @@ fn main() {
                     } else {
                         false
                     };
-                    if should_bg_tidy(cfg.background_tidy, new_room, overlap, &mut bg_tidy_counter) {
+                    if should_bg_tidy(state.config.background_tidy, new_room, overlap, &mut bg_tidy_counter) {
                         tidy_layer_silent(&mut mapper.graph, active_layer);
                         // Re-center on the current room if it moved off-screen.
                         if let Some(snap) = &result.location {
@@ -912,7 +930,7 @@ fn main() {
             Action::SavesExport => {
                 // Close saves modal and open file browser in PickDir mode.
                 state.saves = None;
-                let start_dir = cfg.user_dir.clone();
+                let start_dir = state.config.user_dir.clone();
                 let default_name = format!("{}.qzl", ifid);
                 state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickDir, default_name));
             }
@@ -920,7 +938,7 @@ fn main() {
             Action::SavesImport => {
                 // Close saves modal and open file browser in PickFile mode.
                 state.saves = None;
-                let start_dir = cfg.user_dir.clone();
+                let start_dir = state.config.user_dir.clone();
                 state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile, String::new()));
             }
 
@@ -1065,7 +1083,12 @@ fn main() {
 
         // After apply_action: if gallery was just closed, persist the selections to config.
         if let Some(sym_cfg) = gallery_cfg_on_close {
-            let _ = app::config::write_symbols(&cfg.user_dir, &sym_cfg);
+            let _ = app::config::write_symbols(&state.config.user_dir, &sym_cfg);
+        }
+
+        // After apply_action: if config screen was just saved, write config to disk.
+        if let Some(cfg_to_write) = config_to_save {
+            let _ = app::config::write_config(&cfg_to_write.user_dir, &cfg_to_write);
         }
     }
 
