@@ -312,6 +312,38 @@ pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleD
     }
 }
 
+// ── resolve ───────────────────────────────────────────────────────────────────
+
+/// Resolve a [`StyleDoc`] into a concrete [`ColorScheme`], [`SymbolSet`], and warnings.
+///
+/// Resolution:
+/// 1. Build the base `ColorScheme` from `doc.colors.scheme` via [`colors::resolve_base`]
+///    (handles `None` → terminal-default, built-in name, or file path).
+/// 2. Obtain the active `GhosttyScheme` returned by `resolve_base` (or
+///    `GhosttyScheme::default()` for the terminal-default case).
+/// 3. Apply `doc.colors.selectors` on top via [`apply_color_decls`], collecting
+///    unknown-selector warnings.
+/// 4. Resolve symbols via `SymbolSet::resolve(&finalize_symbols(&doc.symbols))`.
+///
+/// Returns all warnings: base-scheme path/parse warnings ++ unknown-selector warnings.
+pub fn resolve(
+    doc: &StyleDoc,
+    dir: &std::path::Path,
+) -> (ColorScheme, crate::symbols::SymbolSet, Vec<String>) {
+    // Step 1+2: build base ColorScheme and get the active GhosttyScheme.
+    let (mut cs, gs, mut warnings) =
+        colors::resolve_base(doc.colors.scheme.as_deref(), dir);
+
+    // Step 3: layer CSS selectors on top.
+    let selector_warnings = apply_color_decls(&mut cs, &doc.colors.selectors, &gs);
+    warnings.extend(selector_warnings);
+
+    // Step 4: resolve symbols.
+    let set = crate::symbols::SymbolSet::resolve(&finalize_symbols(&doc.symbols));
+
+    (cs, set, warnings)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -394,6 +426,27 @@ mod tests {
         let m = merge(&base, &over);
         assert_eq!(m.colors.selectors["room"].fg.as_deref(), Some("red")); // over wins
         assert_eq!(m.colors.selectors["room"].bold, Some(true));            // base bold kept
+    }
+
+    #[test]
+    fn resolve_terminal_default_with_selector_override() {
+        use ratatui::style::Color;
+        let mut doc = StyleDoc::default(); // no scheme => terminal default base
+        doc.colors.selectors.insert("connector".into(), Decl { fg: Some("magenta".into()), ..Default::default() });
+        let (cs, _set, warns) = resolve(&doc, std::path::Path::new("."));
+        assert!(warns.is_empty());
+        assert_eq!(cs.connector.fg, Some(Color::Magenta));
+        // a field with no decl keeps the terminal-default value:
+        let def = crate::colors::ColorScheme::terminal_default();
+        assert_eq!(cs.transcript, def.transcript);
+    }
+
+    #[test]
+    fn resolve_empty_doc_equals_terminal_default() {
+        let doc = StyleDoc::default();
+        let (cs, set, _w) = resolve(&doc, std::path::Path::new("."));
+        assert_eq!(cs, crate::colors::ColorScheme::terminal_default());
+        assert_eq!(set, crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default()));
     }
 
     #[test]

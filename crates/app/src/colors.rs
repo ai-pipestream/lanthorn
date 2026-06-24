@@ -303,76 +303,103 @@ impl ColorScheme {
     ///
     /// Element overrides from `cfg.elements` are always applied on top (even for `terminal_default`).
     pub fn resolve(cfg: &ColorsConfig, dir: &Path) -> (ColorScheme, Vec<String>) {
-        let mut warnings: Vec<String> = Vec::new();
+        let (cs, gs, warnings) = resolve_base(cfg.scheme.as_deref(), dir);
 
-        let scheme_name = cfg.scheme.as_deref();
-
-        let base = match scheme_name {
-            None => {
-                // No scheme: use terminal defaults, then apply any element overrides.
-                if cfg.elements.is_empty() {
-                    return (ColorScheme::terminal_default(), warnings);
-                }
-                // Apply overrides on top of terminal_default by building a pseudo-scheme
-                // from ANSI named colors then running from_ghostty.
-                // Simpler: just apply element overrides directly to terminal_default.
-                let mut cs = ColorScheme::terminal_default();
-                apply_terminal_overrides(&mut cs, &cfg.elements);
+        if cfg.scheme.is_none() {
+            // terminal-default path: apply element overrides directly
+            if cfg.elements.is_empty() {
                 return (cs, warnings);
             }
-            Some(name) => {
-                match builtin_scheme_text(name) {
-                    Some(text) => match GhosttyScheme::parse(text) {
-                        Ok(gs) => gs,
-                        Err(e) => {
-                            warnings.push(format!(
-                                "built-in scheme '{}' failed to parse: {}; using terminal defaults",
-                                name, e
-                            ));
-                            let mut cs = ColorScheme::terminal_default();
-                            apply_terminal_overrides(&mut cs, &cfg.elements);
-                            return (cs, warnings);
-                        }
-                    },
-                    None => {
-                        // Not a built-in: treat as a file path.
-                        let path = expand_path(name, dir);
-                        match std::fs::read_to_string(&path) {
-                            Ok(text) => match GhosttyScheme::parse(&text) {
-                                Ok(gs) => gs,
-                                Err(e) => {
-                                    warnings.push(format!(
-                                        "scheme file '{}' failed to parse: {}; using terminal defaults",
-                                        path.display(),
-                                        e
-                                    ));
-                                    let mut cs = ColorScheme::terminal_default();
-                                    apply_terminal_overrides(&mut cs, &cfg.elements);
-                                    return (cs, warnings);
-                                }
-                            },
-                            Err(e) => {
-                                warnings.push(format!(
-                                    "could not read scheme file '{}': {}; using terminal defaults",
-                                    path.display(),
-                                    e
-                                ));
-                                let mut cs = ColorScheme::terminal_default();
-                                apply_terminal_overrides(&mut cs, &cfg.elements);
-                                return (cs, warnings);
-                            }
-                        }
-                    }
-                }
+            let mut cs2 = cs;
+            apply_terminal_overrides(&mut cs2, &cfg.elements);
+            (cs2, warnings)
+        } else if warnings.is_empty() {
+            // scheme was resolved successfully: re-derive with overrides
+            let cs2 = ColorScheme::from_ghostty(&gs, &cfg.elements);
+            (cs2, warnings)
+        } else {
+            // scheme failed, cs is already terminal_default; apply any overrides
+            if cfg.elements.is_empty() {
+                return (cs, warnings);
             }
-        };
-
-        let cs = ColorScheme::from_ghostty(&base, &cfg.elements);
-        (cs, warnings)
+            let mut cs2 = cs;
+            apply_terminal_overrides(&mut cs2, &cfg.elements);
+            (cs2, warnings)
+        }
     }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Resolve a scheme name/path to a `(ColorScheme, GhosttyScheme, warnings)` triple.
+///
+/// - `scheme == None` → returns `(terminal_default(), GhosttyScheme::default(), [])`
+/// - A known built-in name or a file path → parses the Ghostty theme and returns
+///   `(ColorScheme::from_ghostty(&gs, &empty), gs, [])`.
+/// - Parse/read failure → returns `(terminal_default(), GhosttyScheme::default(), [warning])`.
+///
+/// The caller is responsible for applying element overrides on top of the returned
+/// `ColorScheme` if needed.
+pub(crate) fn resolve_base(
+    scheme: Option<&str>,
+    dir: &Path,
+) -> (ColorScheme, GhosttyScheme, Vec<String>) {
+    let mut warnings: Vec<String> = Vec::new();
+
+    let name = match scheme {
+        None => return (ColorScheme::terminal_default(), GhosttyScheme::default(), warnings),
+        Some(n) => n,
+    };
+
+    let gs = match builtin_scheme_text(name) {
+        Some(text) => match GhosttyScheme::parse(text) {
+            Ok(gs) => gs,
+            Err(e) => {
+                warnings.push(format!(
+                    "built-in scheme '{}' failed to parse: {}; using terminal defaults",
+                    name, e
+                ));
+                return (ColorScheme::terminal_default(), GhosttyScheme::default(), warnings);
+            }
+        },
+        None => {
+            let path = expand_path(name, dir);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match GhosttyScheme::parse(&text) {
+                    Ok(gs) => gs,
+                    Err(e) => {
+                        warnings.push(format!(
+                            "scheme file '{}' failed to parse: {}; using terminal defaults",
+                            path.display(),
+                            e
+                        ));
+                        return (
+                            ColorScheme::terminal_default(),
+                            GhosttyScheme::default(),
+                            warnings,
+                        );
+                    }
+                },
+                Err(e) => {
+                    warnings.push(format!(
+                        "could not read scheme file '{}': {}; using terminal defaults",
+                        path.display(),
+                        e
+                    ));
+                    return (
+                        ColorScheme::terminal_default(),
+                        GhosttyScheme::default(),
+                        warnings,
+                    );
+                }
+            }
+        }
+    };
+
+    let empty_overrides = std::collections::BTreeMap::new();
+    let cs = ColorScheme::from_ghostty(&gs, &empty_overrides);
+    (cs, gs, warnings)
+}
 
 /// Return the embedded Ghostty theme text for a known built-in name, or `None`.
 fn builtin_scheme_text(name: &str) -> Option<&'static str> {
