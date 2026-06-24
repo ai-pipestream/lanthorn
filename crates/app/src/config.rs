@@ -8,9 +8,14 @@ use serde::Deserialize;
 
 /// The [keymap] section of config.toml.  Maps snake_case command names to
 /// comma-separated key-spec strings.  Absent commands keep their defaults.
+///
+/// Keys are written flat under [keymap] in the TOML file, e.g.:
+///   [keymap]
+///   zoom_in = "z"
+///   save_game = "ctrl+s"
 #[derive(Debug, Default, Deserialize)]
 pub struct KeymapConfig {
-    #[serde(default)]
+    #[serde(flatten)]
     pub overrides: BTreeMap<String, String>,
 }
 
@@ -244,5 +249,26 @@ mod tests {
     fn use_default_map_omitted_stays_false() {
         let cfg: Config = toml::from_str("").unwrap();
         assert!(!cfg.use_default_map);
+    }
+
+    #[test]
+    fn flat_keymap_toml_parses_into_overrides() {
+        let toml = "[keymap]\nzoom_in = \"z\"";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.keymap.overrides.get("zoom_in").map(String::as_str), Some("z"));
+    }
+
+    #[test]
+    fn flat_keymap_resolve_binds_override() {
+        let toml = "[keymap]\nzoom_in = \"z\"";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (km, warns) = crate::keymap::KeyMap::resolve(&cfg.keymap);
+        assert!(warns.is_empty(), "unexpected warnings: {:?}", warns);
+        // ZoomIn should now be bound to 'z'
+        use crate::keymap::{Command, Context, KeySpec};
+        use crossterm::event::KeyCode;
+        let spec = KeySpec { code: KeyCode::Char('z'), ctrl: false, shift: false, alt: false };
+        let cmd = km.lookup(&spec, Context::Map);
+        assert_eq!(cmd, Some(Command::ZoomIn), "z should map to ZoomIn");
     }
 }
