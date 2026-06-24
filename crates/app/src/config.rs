@@ -14,7 +14,7 @@ use serde::Deserialize;
 /// - `elements`: per-element color overrides.  Keys are element names; values may
 ///   be `palette:N`, `background`, `foreground`, a ratatui named color (`cyan`),
 ///   a 256-index (`"17"`), or hex (`#5fafd7`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct ColorsConfig {
     #[serde(default)]
     pub scheme: Option<String>,
@@ -31,7 +31,7 @@ pub struct ColorsConfig {
 ///   [keymap]
 ///   zoom_in = "z"
 ///   save_game = "ctrl+s"
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Clone)]
 pub struct KeymapConfig {
     #[serde(flatten)]
     pub overrides: BTreeMap<String, String>,
@@ -46,7 +46,7 @@ fn default_path_style() -> String { "light".into() }
 
 /// The [symbols] section of config.toml.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SymbolConfig {
     /// Room outline style preset name.
     #[serde(default = "default_box_style")]
@@ -156,7 +156,7 @@ pub const BG_TIDY_DEBOUNCE: u32 = 5;
 
 /// User preferences loaded from TOML.  Every field has a default so a missing
 /// config file (or a file with only some fields) is always valid.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Root directory for babelmap data (maps, saves, exports).
     /// Sub-directories: maps/ — where per-story map files live.
@@ -176,6 +176,9 @@ pub struct Config {
     /// exit-save and Ctrl+S quick-save). Default false.
     #[serde(default)]
     pub auto_save: bool,
+    /// When true (default), record command history across sessions. Set false to disable.
+    #[serde(default = "default_true")]
+    pub record_history: bool,
     /// Controls automatic background re-tidy when new rooms are discovered.
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
@@ -201,6 +204,7 @@ impl Default for Config {
             use_default_map: false,
             auto_load: true,
             auto_save: false,
+            record_history: true,
             background_tidy: BackgroundTidy::EveryRoom,
             symbols: SymbolConfig::default(),
             keymap: KeymapConfig::default(),
@@ -238,6 +242,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.use_default_map = from_file.use_default_map;
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
+            cfg.record_history = from_file.record_history;
             cfg.background_tidy = from_file.background_tidy;
             cfg.symbols = from_file.symbols;
             cfg.keymap = from_file.keymap;
@@ -282,6 +287,57 @@ pub fn write_symbols(dir: &std::path::Path, cfg: &SymbolConfig) -> std::io::Resu
     symbols["arrow_set"] = toml_edit::value(cfg.arrow_set.as_str());
     symbols["portal_icons"] = toml_edit::value(cfg.portal_icons.as_str());
     symbols["path_style"] = toml_edit::value(cfg.path_style.as_str());
+
+    std::fs::write(&config_path, doc.to_string())
+}
+
+/// Write all scalar/enum/preset config fields to `dir/config.toml` using toml_edit
+/// (format-preserving). Creates the file and parent directory if absent.
+/// Preserves all other content (comments, [keymap], [hotkeys], [colors].elements, etc.).
+pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let config_path = dir.join("config.toml");
+
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
+
+    // Top-level scalar fields.
+    doc["user_dir"] = toml_edit::value(cfg.user_dir.to_string_lossy().as_ref());
+    doc["use_default_map"] = toml_edit::value(cfg.use_default_map);
+    doc["auto_load"] = toml_edit::value(cfg.auto_load);
+    doc["auto_save"] = toml_edit::value(cfg.auto_save);
+    doc["record_history"] = toml_edit::value(cfg.record_history);
+    let bg_str = match cfg.background_tidy {
+        BackgroundTidy::Off => "off",
+        BackgroundTidy::EveryRoom => "every_room",
+        BackgroundTidy::OnOverlap => "on_overlap",
+        BackgroundTidy::Debounced => "debounced",
+    };
+    doc["background_tidy"] = toml_edit::value(bg_str);
+
+    // [colors].scheme — preserve the rest of [colors].
+    {
+        let colors = doc.entry("colors")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "[colors] is not a table"))?;
+        match &cfg.colors.scheme {
+            Some(s) => { colors["scheme"] = toml_edit::value(s.as_str()); }
+            None => { colors.remove("scheme"); }
+        }
+    }
+
+    // [symbols] presets — preserve overrides.
+    {
+        let symbols = doc.entry("symbols")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "[symbols] is not a table"))?;
+        symbols["box_style"] = toml_edit::value(cfg.symbols.box_style.as_str());
+        symbols["arrow_set"] = toml_edit::value(cfg.symbols.arrow_set.as_str());
+        symbols["portal_icons"] = toml_edit::value(cfg.symbols.portal_icons.as_str());
+        symbols["path_style"] = toml_edit::value(cfg.symbols.path_style.as_str());
+    }
 
     std::fs::write(&config_path, doc.to_string())
 }
@@ -471,5 +527,55 @@ mod tests {
         let spec = KeySpec { code: KeyCode::Char('z'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, Context::Map);
         assert_eq!(cmd, Some(Command::ZoomIn), "z should map to ZoomIn");
+    }
+
+    #[test]
+    fn write_config_round_trips_scalars_and_preserves_keymap() {
+        let dir = std::env::temp_dir().join(format!("babelmap_write_config_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write initial config with a [keymap] section and a comment.
+        let initial = "# babelmap config\n[keymap]\nzoom_in = \"z\"\n";
+        std::fs::write(dir.join("config.toml"), initial).unwrap();
+
+        let cfg = Config {
+            user_dir: dir.clone(),
+            use_default_map: true,
+            auto_load: false,
+            auto_save: true,
+            record_history: false,
+            background_tidy: BackgroundTidy::OnOverlap,
+            symbols: SymbolConfig {
+                box_style: "ascii".into(),
+                arrow_set: "line".into(),
+                portal_icons: "nerdfont".into(),
+                path_style: "heavy".into(),
+                overrides: Default::default(),
+            },
+            colors: ColorsConfig { scheme: Some("mono".into()), elements: Default::default() },
+            keymap: KeymapConfig::default(),
+            hotkeys: HotkeysConfig::default(),
+        };
+        write_config(&dir, &cfg).unwrap();
+
+        let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = content.parse().unwrap();
+
+        // Scalars are set.
+        assert_eq!(doc["use_default_map"].as_bool(), Some(true));
+        assert_eq!(doc["auto_load"].as_bool(), Some(false));
+        assert_eq!(doc["auto_save"].as_bool(), Some(true));
+        assert_eq!(doc["record_history"].as_bool(), Some(false));
+        assert_eq!(doc["background_tidy"].as_str(), Some("on_overlap"));
+        // Symbol presets.
+        assert_eq!(doc["symbols"]["box_style"].as_str(), Some("ascii"));
+        assert_eq!(doc["symbols"]["arrow_set"].as_str(), Some("line"));
+        // Color scheme.
+        assert_eq!(doc["colors"]["scheme"].as_str(), Some("mono"));
+        // Keymap is preserved.
+        assert_eq!(doc["keymap"]["zoom_in"].as_str(), Some("z"));
+        // Comment is in the raw text.
+        assert!(content.contains("# babelmap config"), "comment must be preserved");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

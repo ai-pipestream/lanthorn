@@ -173,6 +173,20 @@ pub enum Action {
     VerbMenuPick,
     /// Close the verb menu, leaving `state.input` intact.
     VerbMenuClose,
+    /// Open the config screen modal.
+    OpenConfig,
+    /// Navigate the config screen by delta (-1 = up, +1 = down).
+    ConfigNav(i32),
+    /// Toggle the selected bool field in the working config.
+    ConfigToggle,
+    /// Cycle an enum/choice field in the working config by delta (-1 or +1).
+    ConfigCycle(i32),
+    /// Begin text-editing the selected path field.
+    ConfigEdit,
+    /// Save the working config: apply to state.config, re-resolve symbols/colors, write file.
+    ConfigSave,
+    /// Cancel the config screen without saving.
+    ConfigCancel,
     /// Open the file browser in PickDir mode to choose a directory for export.
     SavesExport,
     /// Open the file browser in PickFile mode to import a .qzl/.sav file.
@@ -271,6 +285,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // 5.5. Verb-menu sub-mode: when the token palette is open, route to verb-menu keys.
     if state.verb_menu.is_some() {
         return verb_menu_key_to_action(key);
+    }
+
+    // 5.7. Config-screen sub-mode: when config screen is open, route to config keys.
+    if state.config_screen.is_some() {
+        return config_screen_key_to_action(key);
     }
 
     // 6. Hotkey dialog open: route to dialog handler.
@@ -562,6 +581,24 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
         KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::VerbMenuClose,
+        _ => Action::None,
+    }
+}
+
+// ── Internal: config-screen key routing ──────────────────────────────────────
+
+fn config_screen_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Up => Action::ConfigNav(-1),
+        KeyCode::Down => Action::ConfigNav(1),
+        KeyCode::Left => Action::ConfigCycle(-1),
+        KeyCode::Right => Action::ConfigCycle(1),
+        KeyCode::Char(' ') | KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+            Action::ConfigToggle
+        }
+        KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::ConfigSave,
+        KeyCode::Esc => Action::ConfigCancel,
+        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::ConfigCancel,
         _ => Action::None,
     }
 }
@@ -908,11 +945,31 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // Enter sentinel: apply prompt to mapper then clear.
             Action::SubmitCommand(_) => {
                 if let Some(p) = state.prompt.take() {
-                    // apply_prompt returns the prompt back for saves-manager kinds.
-                    if let Some(saves_prompt) = apply_prompt(p, mapper) {
-                        // Saves-manager prompt submitted: store for the caller to act on.
-                        state.saves_prompt_submitted =
-                            Some((saves_prompt.kind, saves_prompt.buffer));
+                    // apply_prompt returns the prompt back for saves-manager and config kinds.
+                    if let Some(returned) = apply_prompt(p, mapper) {
+                        match &returned.kind {
+                            crate::state::PromptKind::ConfigEditPath { field } => {
+                                if let Some(cs) = &mut state.config_screen {
+                                    match field {
+                                        crate::state::ConfigPathField::UserDir => {
+                                            cs.working.user_dir = std::path::PathBuf::from(&returned.buffer);
+                                        }
+                                        crate::state::ConfigPathField::ColorsScheme => {
+                                            cs.working.colors.scheme = if returned.buffer.is_empty() {
+                                                None
+                                            } else {
+                                                Some(returned.buffer.clone())
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Saves-manager prompt submitted: store for the caller to act on.
+                                state.saves_prompt_submitted =
+                                    Some((returned.kind, returned.buffer));
+                            }
+                        }
                     }
                 }
             }
@@ -1440,6 +1497,68 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.verb_menu = None;
         }
 
+        // ── Config screen actions ─────────────────────────────────────────────
+
+        Action::OpenConfig => {
+            state.hotkey_dialog = false;
+            let working = clone_config(&state.config);
+            state.config_screen = Some(crate::state::ConfigScreenState {
+                working,
+                selected: 0,
+            });
+        }
+
+        Action::ConfigNav(delta) => {
+            if let Some(cs) = &mut state.config_screen {
+                let n = CONFIG_ROW_COUNT as i32;
+                cs.selected = ((cs.selected as i32 + delta).rem_euclid(n)) as usize;
+            }
+        }
+
+        Action::ConfigToggle => {
+            if state.config_screen.is_some() {
+                // Split the borrow: take the selected row, then call helper.
+                let selected = state.config_screen.as_ref().map(|cs| cs.selected).unwrap_or(0);
+                config_toggle_or_edit(selected, state);
+            }
+        }
+
+        Action::ConfigCycle(delta) => {
+            if let Some(cs) = &mut state.config_screen {
+                config_cycle(&mut cs.working, cs.selected, delta);
+            }
+        }
+
+        Action::ConfigEdit => {
+            if let Some(cs) = &state.config_screen {
+                let field = config_path_field(cs.selected);
+                if let Some(f) = field {
+                    let current = match &f {
+                        crate::state::ConfigPathField::UserDir => cs.working.user_dir.to_string_lossy().to_string(),
+                        crate::state::ConfigPathField::ColorsScheme => cs.working.colors.scheme.clone().unwrap_or_default(),
+                    };
+                    state.prompt = Some(crate::state::Prompt {
+                        kind: crate::state::PromptKind::ConfigEditPath { field: f },
+                        buffer: current,
+                    });
+                }
+            }
+        }
+
+        Action::ConfigSave => {
+            if let Some(cs) = state.config_screen.take() {
+                state.config = clone_config(&cs.working);
+                state.symbols = crate::symbols::SymbolSet::resolve(&cs.working.symbols);
+                let (colors, _) = crate::colors::ColorScheme::resolve(&cs.working.colors, &cs.working.user_dir);
+                state.colors = colors;
+                // write_config is caller-handled (main.rs snapshots working before this runs).
+            }
+        }
+
+        Action::ConfigCancel => {
+            state.config_screen = None;
+        }
+
         Action::ResetGame => {
             // Open a confirmation prompt; the caller (main.rs) performs the actual reset
             // when the prompt is submitted with y/yes.
@@ -1575,11 +1694,12 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
-        // Saves-manager, export, and game-reset prompts: return to the caller to act on.
+        // Saves-manager, export, game-reset, and config-path prompts: return to the caller to act on.
         PromptKind::SaveAs
         | PromptKind::ConfirmDeleteSave(_)
         | PromptKind::ConfirmReset
-        | PromptKind::ExportSaveName(_) => {
+        | PromptKind::ExportSaveName(_)
+        | PromptKind::ConfigEditPath { .. } => {
             return Some(prompt);
         }
     }
@@ -1626,6 +1746,111 @@ fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
     }
     // No selected room or no position: recenter on origin.
     state.recenter_on((0, 0), 80, 24);
+}
+
+// ── Config screen helpers ─────────────────────────────────────────────────────
+
+/// Number of rows in the config screen.
+pub(crate) const CONFIG_ROW_COUNT: usize = 11;
+
+/// Clone a Config (Config derives Clone, this is a convenience wrapper for tests).
+pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config {
+    cfg.clone()
+}
+
+/// Return the ConfigPathField for a row, if the row is a path type.
+fn config_path_field(row: usize) -> Option<crate::state::ConfigPathField> {
+    match row {
+        0 => Some(crate::state::ConfigPathField::UserDir),
+        6 => Some(crate::state::ConfigPathField::ColorsScheme),
+        _ => None,
+    }
+}
+
+/// Apply ConfigToggle to the selected row: toggle bool, advance enum by 1, or open path edit.
+fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
+    match selected {
+        0 => {
+            // user_dir — open path edit prompt.
+            let current = state.config_screen.as_ref()
+                .map(|cs| cs.working.user_dir.to_string_lossy().to_string())
+                .unwrap_or_default();
+            state.prompt = Some(crate::state::Prompt {
+                kind: crate::state::PromptKind::ConfigEditPath {
+                    field: crate::state::ConfigPathField::UserDir,
+                },
+                buffer: current,
+            });
+        }
+        1 => { if let Some(cs) = &mut state.config_screen { cs.working.use_default_map = !cs.working.use_default_map; } }
+        2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
+        3 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
+        4 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
+        5 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
+        6 => {
+            // colors.scheme — cycle through preset names + None.
+            if let Some(cs) = &mut state.config_screen {
+                config_cycle_colors_scheme(&mut cs.working.colors.scheme, 1);
+            }
+        }
+        7 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::BoxStyle::preset_names(), &mut cs.working.symbols.box_style, 1); } }
+        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::Arrows::preset_names(), &mut cs.working.symbols.arrow_set, 1); } }
+        9 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PortalGlyphs::preset_names(), &mut cs.working.symbols.portal_icons, 1); } }
+        10 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PathGlyphs::preset_names(), &mut cs.working.symbols.path_style, 1); } }
+        _ => {}
+    }
+}
+
+/// Cycle a BackgroundTidy enum value by delta.
+fn config_cycle_background_tidy(val: &mut crate::config::BackgroundTidy, delta: i32) {
+    use crate::config::BackgroundTidy::*;
+    let variants = [Off, EveryRoom, OnOverlap, Debounced];
+    let pos = variants.iter().position(|v| v == val).unwrap_or(0) as i32;
+    let n = variants.len() as i32;
+    *val = variants[((pos + delta).rem_euclid(n)) as usize];
+}
+
+/// Cycle the colors.scheme through: None, "mono", "high-contrast", "tomorrow-night", and back.
+fn config_cycle_colors_scheme(scheme: &mut Option<String>, delta: i32) {
+    let presets: &[&str] = &["mono", "high-contrast", "tomorrow-night"];
+    let current_idx = match scheme.as_deref() {
+        None => -1i32,
+        Some(s) => presets.iter().position(|p| *p == s).map(|i| i as i32).unwrap_or(-1),
+    };
+    let n = presets.len() as i32;
+    let next = current_idx + delta;
+    if next < 0 || next >= n {
+        *scheme = None;
+    } else {
+        *scheme = Some(presets[next as usize].to_string());
+    }
+}
+
+/// Cycle a string preset value through the preset_names() list by delta.
+fn config_cycle_preset(names: &[&str], val: &mut String, delta: i32) {
+    let n = names.len() as i32;
+    if n == 0 { return; }
+    let pos = names.iter().position(|p| *p == val.as_str()).unwrap_or(0) as i32;
+    *val = names[((pos + delta).rem_euclid(n)) as usize].to_string();
+}
+
+/// Apply ConfigCycle to the selected row.
+fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
+    use crate::symbols::{Arrows, BoxStyle, PathGlyphs, PortalGlyphs};
+    match row {
+        0 => {} // path: no cycling
+        1 => working.use_default_map = !working.use_default_map,
+        2 => working.auto_load = !working.auto_load,
+        3 => working.auto_save = !working.auto_save,
+        4 => working.record_history = !working.record_history,
+        5 => config_cycle_background_tidy(&mut working.background_tidy, delta),
+        6 => config_cycle_colors_scheme(&mut working.colors.scheme, delta),
+        7 => config_cycle_preset(BoxStyle::preset_names(), &mut working.symbols.box_style, delta),
+        8 => config_cycle_preset(Arrows::preset_names(), &mut working.symbols.arrow_set, delta),
+        9 => config_cycle_preset(PortalGlyphs::preset_names(), &mut working.symbols.portal_icons, delta),
+        10 => config_cycle_preset(PathGlyphs::preset_names(), &mut working.symbols.path_style, delta),
+        _ => {}
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
