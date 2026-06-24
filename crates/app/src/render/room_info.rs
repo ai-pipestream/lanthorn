@@ -128,6 +128,16 @@ pub fn draw_room_info(
     let value_style = Style::default();
     let section_style = Style::default().fg(Color::DarkGray);
 
+    // Fill the panel with a solid opaque background so the map does not show through.
+    let bg_style = Style::new().bg(Color::Black);
+    for y in panel.y..panel.bottom() {
+        for x in panel.x..panel.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(bg_style);
+            }
+        }
+    }
+
     draw_border(buf, panel, border_style);
 
     let inner_x = panel.x + 1;
@@ -289,5 +299,32 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         // Without machine_mem, objects list is empty, so "Here:" should not appear.
         assert!(!buf_contains(&buf, "Here:"), "Here: should not appear without machine_mem");
+    }
+
+    #[test]
+    fn room_info_panel_has_solid_black_background() {
+        // All cells within the panel rect must have bg(Color::Black) to prevent
+        // the map from showing through.
+        let (g, room1, _) = make_graph_with_rooms();
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, None, room1, None, area, f.buffer_mut());
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Panel is at (0,0) with width=36 (or area width if smaller).
+        // Check a sample of cells inside the panel top-left region.
+        for y in 0..4u16 {
+            for x in 0..36u16 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    assert_eq!(
+                        cell.style().bg,
+                        Some(Color::Black),
+                        "cell ({x},{y}) should have bg(Black) inside panel"
+                    );
+                }
+            }
+        }
     }
 }

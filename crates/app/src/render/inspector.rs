@@ -107,6 +107,16 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer) 
     let distorted_style = Style::default().fg(Color::Red);
     let ok_style = Style::default().fg(Color::Green);
 
+    // Fill the panel with a solid opaque background so the map does not show through.
+    let bg_style = Style::new().bg(Color::Black);
+    for y in panel.y..panel.bottom() {
+        for x in panel.x..panel.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(bg_style);
+            }
+        }
+    }
+
     // Draw border.
     draw_border(buf, panel, border_style);
 
@@ -409,5 +419,33 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         // No room name should appear.
         assert!(!buf_contains(&buf, "Clearing"));
+    }
+
+    #[test]
+    fn inspector_panel_has_solid_black_background() {
+        // All cells within the panel rect must have bg(Color::Black) to prevent
+        // the map from showing through.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let diag = make_diag(1, "Start", vec![]);
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_inspector(&diag, area, f.buffer_mut());
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Panel is 38 wide, top-right corner: x = 80 - 38 = 42, y = 0.
+        // Check that a sample of interior cells have bg(Black).
+        let panel_x = 80u16.saturating_sub(38);
+        for y in 0..4u16 {
+            for x in panel_x..80u16 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    assert_eq!(
+                        cell.style().bg,
+                        Some(Color::Black),
+                        "cell ({x},{y}) should have bg(Black) inside inspector panel"
+                    );
+                }
+            }
+        }
     }
 }
