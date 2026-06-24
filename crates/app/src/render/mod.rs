@@ -1,5 +1,5 @@
 pub mod gallery;
-pub mod help;
+pub mod hotkeys;
 pub mod inspector;
 pub mod map;
 pub mod saves;

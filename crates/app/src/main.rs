@@ -23,7 +23,7 @@ use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
 use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
 use app::render::gallery::draw_gallery;
-use app::render::help::draw_help;
+use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
 use app::render::saves::draw_saves;
@@ -78,7 +78,6 @@ const GAME_HINTS: &[(Command, &str)] = &[
     (Command::CycleLayout, "layout"),
     (Command::Retidy, "tidy"),
     (Command::AnimateTidy, "animate"),
-    (Command::ToggleHelp, "help"),
 ];
 
 const MAP_HINTS: &[(Command, &str)] = &[
@@ -90,7 +89,6 @@ const MAP_HINTS: &[(Command, &str)] = &[
     (Command::Retidy, "tidy"),
     (Command::OpenGallery, "gallery"),
     (Command::ToggleInspector, "inspect"),
-    (Command::ToggleHelp, "help"),
 ];
 
 const ANIM_HINTS: &[(Command, &str)] = &[
@@ -274,12 +272,12 @@ fn draw_frame(
         }
         draw_str_clipped(buf, help_row.x, help_row.y, &help_text, help_style, help_row);
 
-        // ── Help overlay — full-screen, drawn last so it covers everything ────
-        if state.show_help {
-            draw_help(&state.keymap, full, buf);
+        // ── Hotkey dialog overlay — drawn over everything ─────────────────────
+        if state.hotkey_dialog {
+            draw_hotkey_dialog(state, full, buf);
         }
 
-        // ── Gallery overlay — full-screen, drawn after help ───────────────────
+        // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
         if state.gallery.is_some() {
             draw_gallery(state, full, buf);
         }
@@ -392,6 +390,11 @@ fn main() {
     state.keymap = keymap;
     // Surface any keymap conflict warnings once in the transcript.
     for w in keymap_warnings {
+        state.push_transcript(&format!("[{}]", w));
+    }
+    let (hotkeys, hotkey_warnings) = app::keymap::HotkeyLayout::resolve(&cfg.hotkeys);
+    state.hotkeys = hotkeys;
+    for w in hotkey_warnings {
         state.push_transcript(&format!("[{}]", w));
     }
 
@@ -948,59 +951,64 @@ mod tests {
         assert!(line.contains("Ctrl+S: save"), "expected 'Ctrl+S: save' in '{line}'");
     }
 
-    // ── Help overlay key and action tests ─────────────────────────────────────
+    // ── Hotkey dialog tests ───────────────────────────────────────────────────
 
     #[test]
-    fn f1_yields_toggle_help_in_game_focus() {
+    fn prefix_key_opens_hotkey_dialog() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-        use app::input::key_to_action;
-        use app::input::Action;
+        use app::input::{apply_action, key_to_action, Action};
         use app::state::AppState;
-        let s = AppState::default(); // game focus
-        let f1 = KeyEvent {
-            code: KeyCode::F(1),
-            modifiers: KeyModifiers::NONE,
-            kind: KeyEventKind::Press,
-            state: KeyEventState::NONE,
-        };
-        assert!(
-            matches!(key_to_action(&s, f1), Action::ToggleHelp),
-            "F1 in game focus should produce ToggleHelp"
-        );
-    }
-
-    #[test]
-    fn f1_yields_toggle_help_in_map_focus() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
-        use app::input::key_to_action;
-        use app::input::Action;
-        use app::state::{AppState, Focus};
+        use mapper::mapper::Mapper;
         let mut s = AppState::default();
-        s.focus = Focus::Map;
-        let f1 = KeyEvent {
-            code: KeyCode::F(1),
-            modifiers: KeyModifiers::NONE,
+        // Default prefix is Ctrl+K
+        let ctrlk = KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         };
+        let action = key_to_action(&s, ctrlk);
         assert!(
-            matches!(key_to_action(&s, f1), Action::ToggleHelp),
-            "F1 in map focus should produce ToggleHelp"
+            matches!(action, Action::OpenHotkeyDialog),
+            "Ctrl+K should produce OpenHotkeyDialog"
         );
+        apply_action(action, &mut s, &mut Mapper::default());
+        assert!(s.hotkey_dialog, "hotkey_dialog should be true after OpenHotkeyDialog");
     }
 
     #[test]
-    fn apply_toggle_help_flips_show_help() {
+    fn prefix_key_closes_hotkey_dialog() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        use app::input::{apply_action, key_to_action, Action};
+        use app::state::AppState;
+        use mapper::mapper::Mapper;
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        let ctrlk = KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let action = key_to_action(&s, ctrlk);
+        assert!(
+            matches!(action, Action::CloseHotkeyDialog),
+            "Ctrl+K when dialog open should produce CloseHotkeyDialog"
+        );
+        apply_action(action, &mut s, &mut Mapper::default());
+        assert!(!s.hotkey_dialog, "hotkey_dialog should be false after CloseHotkeyDialog");
+    }
+
+    #[test]
+    fn apply_open_gallery_clears_hotkey_dialog() {
         use app::input::{apply_action, Action};
         use app::state::AppState;
         use mapper::mapper::Mapper;
         let mut s = AppState::default();
-        let mut m = Mapper::default();
-        assert!(!s.show_help, "show_help is false by default");
-        apply_action(Action::ToggleHelp, &mut s, &mut m);
-        assert!(s.show_help, "ToggleHelp flips to true");
-        apply_action(Action::ToggleHelp, &mut s, &mut m);
-        assert!(!s.show_help, "ToggleHelp flips back to false");
+        s.hotkey_dialog = true;
+        apply_action(Action::OpenGallery, &mut s, &mut Mapper::default());
+        assert!(!s.hotkey_dialog, "OpenGallery should clear hotkey_dialog");
+        assert!(s.gallery.is_some(), "gallery should be open");
     }
 
     #[test]

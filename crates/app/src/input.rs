@@ -3,11 +3,17 @@
 //! # Focus routing
 //! `key_to_action` applies bindings in this strict precedence order:
 //! 1. Ctrl+Q / Ctrl+C → Quit (always wins, even during a prompt).
-//! 2. Prompt active → route to prompt only; all other keys (Tab, Ctrl+S/R/E/L,
-//!    …) are absorbed as `Action::None` so the prompt cannot be escaped by a
-//!    global shortcut.
-//! 3. Remaining globals (Ctrl+S/R/E/L, Tab) — only reached when no prompt.
-//! 4. Per-focus routing (Game / Map).
+//! 2. Prompt active → route to prompt only; all other keys absorbed as None.
+//! 3. Tidy-anim sub-mode → KeyMap lookup in Anim context; no fallthrough.
+//! 4. Gallery sub-mode → gallery_key_to_action.
+//! 5. Saves-manager sub-mode → saves_key_to_action.
+//! 6. Hotkey dialog open → hotkey_dialog_key_to_action.
+//! 7. Key == hotkeys.prefix → OpenHotkeyDialog.
+//! 8. Tab (no modifiers) → autocomplete-or-ToggleFocus special case.
+//! 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct.
+//! 10. Per-focus routing:
+//!     - Game: game_key_to_action, then Global fallthrough.
+//!     - Map: Map context lookup, filtered by hotkeys.is_direct (direct commands only).
 //!
 //! While `state.prompt` is `Some` (text-entry sub-mode), printable chars,
 //! Backspace, Enter and Esc are routed to the prompt buffer; everything else is
@@ -108,8 +114,10 @@ pub enum Action {
     /// typed AND suggestions are available; otherwise Tab keeps its ToggleFocus
     /// role).
     Autocomplete,
-    /// Toggle the full-screen help overlay.
-    ToggleHelp,
+    /// Open the hotkey dialog overlay.
+    OpenHotkeyDialog,
+    /// Close the hotkey dialog overlay.
+    CloseHotkeyDialog,
     /// Open the saves-manager modal (loads the save list).
     OpenSaves,
     /// Navigate the saves list by delta (-1 = up, +1 = down).
@@ -142,19 +150,19 @@ pub enum Action {
 
 /// Map a crossterm `KeyEvent` to an `Action` given the current `AppState`.
 ///
-/// Routing order (preserved from the original hardcoded dispatch):
-/// 1. **Quit** — Ctrl+Q / Ctrl+C → `Quit`, hardwired, always wins.
-/// 2. **Prompt active** — all input consumed by the prompt sub-mode; no
-///    global shortcuts escape (Tab, Ctrl+S, …) are absorbed as `None`.
-/// 3. **Tidy-anim active** — KeyMap lookup in `Context::Anim`; no fallthrough
-///    to Global.  Unmatched keys → `None`.
-/// 4. **Tab** (no modifiers) — stateful autocomplete-or-ToggleFocus special
-///    case, hardwired exactly as before.
-/// 5. **Ctrl modifier** — KeyMap lookup in `Context::Global`; unmatched → `None`.
-/// 6. **Game focus** — `game_key_to_action` (text entry, hardwired);
-///    if it returns `None`, fall through to a `Context::Global` KeyMap lookup
-///    so that non-ctrl Global bindings (e.g. F1→ToggleHelp) reach Game focus.
-/// 7. **Map focus** — KeyMap lookup in `Context::Map` (falls through to Global).
+/// Routing order:
+/// 1. Ctrl+Q / Ctrl+C → Quit (hardwired, always wins).
+/// 2. Prompt active → prompt_key_to_action; everything else absorbed.
+/// 3. Tidy-anim active → Anim context lookup; no fallthrough.
+/// 4. Gallery open → gallery_key_to_action.
+/// 5. Saves modal open → saves_key_to_action.
+/// 6. Hotkey dialog open → hotkey_dialog_key_to_action.
+/// 7. Key == hotkeys.prefix → OpenHotkeyDialog.
+/// 8. Tab (no modifiers) → autocomplete-or-ToggleFocus.
+/// 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct.
+/// 10. Per-focus routing:
+///     - Game: game_key_to_action, then Global fallthrough (non-ctrl non-printable).
+///     - Map: Map context lookup, filtered by hotkeys.is_direct.
 pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -178,17 +186,28 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         };
     }
 
-    // 3b. Gallery sub-mode: when gallery is open, route to gallery keys.
+    // 4. Gallery sub-mode: when gallery is open, route to gallery keys.
     if state.gallery.is_some() {
         return gallery_key_to_action(key);
     }
 
-    // 3c. Saves-manager sub-mode: when saves modal is open, route to saves keys.
+    // 5. Saves-manager sub-mode: when saves modal is open, route to saves keys.
     if state.saves.is_some() {
         return saves_key_to_action(key);
     }
 
-    // 4. Tab (no modifiers): stateful autocomplete-or-ToggleFocus (hardwired).
+    // 6. Hotkey dialog open: route to dialog handler.
+    if state.hotkey_dialog {
+        return hotkey_dialog_key_to_action(state, key);
+    }
+
+    // 7. Prefix key → open the hotkey dialog.
+    let spec = KeySpec::from_key_event(key);
+    if spec == state.hotkeys.prefix {
+        return Action::OpenHotkeyDialog;
+    }
+
+    // 8. Tab (no modifiers): stateful autocomplete-or-ToggleFocus (hardwired).
     if key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Tab {
         // Autocomplete takes priority over focus-toggle when: game is focused,
         // the player is mid-word (non-empty partial), AND suggestions exist.
@@ -202,22 +221,22 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return Action::ToggleFocus;
     }
 
-    // 5. Ctrl modifier: Global KeyMap lookup; unmatched → None.
+    // 9. Ctrl modifier: Global KeyMap lookup, filtered by is_direct — same rule
+    //    as Map context. A command is reachable directly iff it is in the direct
+    //    set, regardless of whether it uses a Ctrl modifier.
     if ctrl {
-        let spec = KeySpec::from_key_event(key);
         return match state.keymap.lookup(&spec, Context::Global) {
-            Some(cmd) => cmd.to_action(),
-            None => Action::None,
+            Some(cmd) if state.hotkeys.is_direct(cmd) => cmd.to_action(),
+            _ => Action::None,
         };
     }
 
-    // 6 & 7. Per-focus routing.
-    let spec = KeySpec::from_key_event(key);
+    // 10. Per-focus routing.
     match state.focus {
         Focus::Game => {
             // Text entry is hardwired (printable chars, Enter, Backspace, Shift+Arrows,
-            // Home, PageUp/Down).  Non-printable / unmatched keys fall through to a
-            // Global KeyMap lookup so that e.g. F1→ToggleHelp is reachable from Game.
+            // Home, PageUp/Down). Non-printable / unmatched keys fall through to a
+            // Global KeyMap lookup so that non-ctrl global bindings reach Game focus.
             let a = game_key_to_action(state, key);
             if a != Action::None {
                 return a;
@@ -229,13 +248,43 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             }
         }
         Focus::Map => {
-            // Map context falls through to Global on miss.
+            // Map context lookup with direct filter: only return the action if the
+            // command is in the direct (always-available) set. Dialog-only commands
+            // return None when the dialog is closed.
             match state.keymap.lookup(&spec, Context::Map) {
-                Some(cmd) => cmd.to_action(),
+                Some(cmd) if state.hotkeys.is_direct(cmd) => cmd.to_action(),
+                Some(_) => Action::None,
                 None => Action::None,
             }
         }
     }
+}
+
+// ── Internal: hotkey dialog key routing ───────────────────────────────────────
+
+/// When the hotkey dialog is open, route keys to either close the dialog or
+/// fire the bound command action. The dialog closes itself when a sub-mode
+/// opens (handled in apply_action).
+fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
+    let spec = KeySpec::from_key_event(key);
+
+    // Prefix key closes the dialog.
+    if spec == state.hotkeys.prefix {
+        return Action::CloseHotkeyDialog;
+    }
+
+    // 'q' with no modifiers also closes.
+    if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE {
+        return Action::CloseHotkeyDialog;
+    }
+
+    // Look up the key across all contexts (Global, Map, Anim) so that commands
+    // in any context can be triggered from the dialog.
+    if let Some(cmd) = state.keymap.lookup_any(&spec) {
+        return cmd.to_action();
+    }
+
+    Action::None
 }
 
 // ── Internal: prompt key routing ──────────────────────────────────────────────
@@ -564,6 +613,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
+                state.hotkey_dialog = false;
                 state.prompt = Some(Prompt {
                     kind: PromptKind::RenameRoom(id),
                     buffer: String::new(),
@@ -573,6 +623,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::RenameLayer => {
             let layer = state.active_layer(&mapper.graph);
             let current_name = mapper.graph.layer_name(layer).to_owned();
+            state.hotkey_dialog = false;
             state.prompt = Some(Prompt {
                 kind: PromptKind::RenameLayer(layer),
                 buffer: current_name,
@@ -580,6 +631,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
         Action::EditNotes => {
             if let Some(id) = state.selected_room {
+                state.hotkey_dialog = false;
                 state.prompt = Some(Prompt {
                     kind: PromptKind::EditNotes(id),
                     buffer: String::new(),
@@ -593,6 +645,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     mapper.graph.connections().iter().find(|c| c.origin == id)
                 {
                     let old_dir = conn.dir;
+                    state.hotkey_dialog = false;
                     state.prompt = Some(Prompt {
                         kind: PromptKind::RelabelEdge(id, old_dir),
                         buffer: String::new(),
@@ -621,8 +674,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             }
         }
 
-        Action::ToggleHelp => {
-            state.show_help = !state.show_help;
+        Action::OpenHotkeyDialog => {
+            state.hotkey_dialog = true;
+            // Close other overlays if open.
+            state.gallery = None;
+            state.saves = None;
+        }
+
+        Action::CloseHotkeyDialog => {
+            state.hotkey_dialog = false;
         }
 
         // ── Saves-manager actions ─────────────────────────────────────────────
@@ -632,6 +692,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // apply_action only sets up the state; the caller refreshes the list
             // via AppState::open_saves_modal after apply_action returns.
             // If already open, do nothing.
+            state.hotkey_dialog = false;
         }
 
         Action::SavesNav(delta) => {
@@ -648,6 +709,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::SavesSaveAs => {
             // Open the name-entry prompt; on submit the caller performs the save.
+            state.hotkey_dialog = false;
             state.prompt = Some(crate::state::Prompt {
                 kind: crate::state::PromptKind::SaveAs,
                 buffer: String::new(),
@@ -659,6 +721,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(s) = &state.saves {
                 if let Some(entry) = s.entries.get(s.selected) {
                     let path = entry.path.clone();
+                    state.hotkey_dialog = false;
                     state.prompt = Some(crate::state::Prompt {
                         kind: crate::state::PromptKind::ConfirmDeleteSave(path),
                         buffer: String::new(),
@@ -674,6 +737,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // SavesLoad is caller-handled.
 
         Action::OpenGallery => {
+            state.hotkey_dialog = false;
             state.gallery = Some(crate::state::GalleryState {
                 category_idx: 0,
                 selections: [0, 0, 0, 0],
@@ -732,6 +796,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::Quit => {}
 
         Action::None => {}
+        // Note: OpenHotkeyDialog and CloseHotkeyDialog are handled above.
     }
 }
 
@@ -939,7 +1004,8 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Home)), Action::Recenter));
         assert!(matches!(key_to_action(&s, key(KeyCode::PageUp)), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, key(KeyCode::PageDown)), Action::ZoomOut));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy));
+        // Retidy (Ctrl+T) is not in the direct set: returns None when dialog is closed.
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None));
         // Typing still reaches the command line (plain and shifted/capital letters).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::InputChar('N')));
@@ -1041,6 +1107,10 @@ mod tests {
     fn shift_n_starts_layer_rename_in_map_focus() {
         let mut s = AppState::default();
         s.focus = Focus::Map;
+        // RenameLayer is dialog-only: returns None when dialog is closed.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::None));
+        // Returns the action when dialog is open.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::RenameLayer));
     }
 
@@ -1048,9 +1118,17 @@ mod tests {
     fn global_shortcuts_work_in_map_focus() {
         let mut s = AppState::default();
         s.toggle_focus();
+        // Direct commands fire without the dialog.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
+        // Non-direct commands return None when dialog is closed.
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
+        // Non-direct commands fire from the dialog.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::ExportSvg));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::ExportDump));
@@ -1112,8 +1190,12 @@ mod tests {
     fn shift_r_in_map_focus_is_retidy() {
         let mut s = AppState::default();
         s.toggle_focus(); // → Map
+        // Retidy and RenameRoom are dialog-only: return None when dialog is closed.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::None));
+        // Return actions when dialog is open.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
-        // plain 'r' is still RenameRoom (no clash with the new shift binding).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
     }
 
@@ -1240,10 +1322,16 @@ mod tests {
         state.toggle_focus(); // Map
         state.select_room(Some(1));
 
-        // Press 'r' → RenameRoom action → prompt becomes active.
+        // RenameRoom is dialog-only: 'r' returns None when dialog is closed.
+        assert!(matches!(key_to_action(&state, key(KeyCode::Char('r'))), Action::None));
+
+        // With dialog open, 'r' → RenameRoom action → prompt becomes active.
+        state.hotkey_dialog = true;
         let a = key_to_action(&state, key(KeyCode::Char('r')));
         assert!(matches!(a, Action::RenameRoom));
         apply_action(a, &mut state, &mut mapper);
+        // apply_action clears hotkey_dialog when opening a sub-mode
+        assert!(!state.hotkey_dialog, "hotkey_dialog cleared when prompt opens");
         assert!(state.prompt.is_some());
         assert!(matches!(
             state.prompt.as_ref().unwrap().kind,
@@ -1302,9 +1390,11 @@ mod tests {
 
     #[test]
     fn ctrl_a_toggles_alignment_overlay() {
+        // toggle_alignment is dialog-only: Ctrl+A returns None when dialog closed.
         let s = AppState::default();
         assert!(!s.show_alignment, "off by default");
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::ToggleAlignment));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::None));
+        // The action itself still works when dispatched directly.
         let mut s = AppState::default();
         let mut m = Mapper::default();
         apply_action(Action::ToggleAlignment, &mut s, &mut m);
@@ -1315,24 +1405,31 @@ mod tests {
 
     #[test]
     fn ctrl_p_toggles_portal_labels() {
+        // toggle_portal_labels is dialog-only: Ctrl+P returns None when dialog closed.
         let s = AppState::default();
         assert!(matches!(
             key_to_action(&s, ctrl(KeyCode::Char('p'))),
-            Action::TogglePortalLabels
+            Action::None
         ));
+        // The action itself still works when dispatched directly.
         let mut s = AppState::default();
         let mut m = mapper::mapper::Mapper::default();
         assert!(!s.show_portal_labels, "default off");
         apply_action(Action::TogglePortalLabels, &mut s, &mut m);
-        assert!(s.show_portal_labels, "Ctrl+P turns labels on");
+        assert!(s.show_portal_labels, "TogglePortalLabels turns labels on");
         apply_action(Action::TogglePortalLabels, &mut s, &mut m);
-        assert!(!s.show_portal_labels, "Ctrl+P toggles back off");
+        assert!(!s.show_portal_labels, "TogglePortalLabels toggles back off");
     }
 
     #[test]
     fn bracket_keys_cycle_layer_in_map_focus() {
         let mut s = AppState::default();
         s.focus = Focus::Map;
+        // CycleLayer is dialog-only: returns None when dialog is closed.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::None));
+        // Returns actions when dialog is open.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CycleLayer(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CycleLayer(-1)));
     }
@@ -1341,6 +1438,11 @@ mod tests {
     fn shift_p_peels_and_shift_m_merges_in_map_focus() {
         let mut s = AppState::default();
         s.focus = Focus::Map;
+        // PeelLayer/MergeLayer are dialog-only: return None when dialog is closed.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::None));
+        // Return actions when dialog is open.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
     }
@@ -1495,6 +1597,10 @@ mod tests {
     fn i_in_map_focus_yields_toggle_inspector() {
         let mut s = AppState::default();
         s.focus = Focus::Map;
+        // ToggleInspector is dialog-only: returns None when dialog is closed.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
+        // Returns the action when dialog is open.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
     }
 
@@ -1545,17 +1651,18 @@ mod tests {
 
         // ── Game focus (default) ──────────────────────────────────────────────
         let s = AppState::default(); // focus = Game
-        // Ctrl globals work from game focus
+        // Direct ctrl commands work without the dialog.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::ExportSvg));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::ExportDump));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::CycleLayout));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('y'))), Action::AnimateTidy));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::ToggleAlignment));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::TogglePortalLabels));
+        // Non-direct ctrl commands return None when dialog is closed.
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('y'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::None));
         // Ctrl+Arrows nudge from game focus
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::NudgeSelected(1, 0)));
@@ -1566,33 +1673,56 @@ mod tests {
         // Text entry
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')));
 
-        // ── Map focus ─────────────────────────────────────────────────────────
+        // ── Map focus (dialog closed) ──────────────────────────────────────────
         let mut s = AppState::default();
         s.toggle_focus(); // Map
-        // Plain arrows pan
+        // Plain arrows pan (direct)
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
-        // Shift arrows pan
+        // Shift arrows pan (direct)
         assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
-        // hjkl pan
+        // hjkl pan (direct)
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
-        // Zoom
+        // Zoom (direct)
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('='))), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('+'))), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
-        // Map commands
+        // Direct map commands
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
+        // Dialog-only map commands: return None when dialog is closed
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
+        // Esc → ToggleFocus (direct, always works)
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
+        // Direct ctrl globals work in map focus
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
+        // Tab → ToggleFocus in map focus
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+
+        // ── Map focus (dialog open) ───────────────────────────────────────────
+        s.hotkey_dialog = true;
+        // Dialog-only commands now work
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::RenameLayer));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
@@ -1604,12 +1734,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
-        // Map falls through to Global: ctrl globals work in map focus
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
-        // Tab → ToggleFocus in map focus
-        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+        // 'q' closes the dialog (not gallery/open-gallery)
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
+        s.hotkey_dialog = false;
 
         // ── Anim sub-mode ─────────────────────────────────────────────────────
         let mut s = AppState::default();
@@ -1678,6 +1805,10 @@ mod tests {
     fn open_gallery_key_in_map_focus() {
         let mut s = AppState::default();
         s.toggle_focus(); // Map
+        // OpenGallery is dialog-only: returns None when dialog is closed.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::None));
+        // Returns the action when dialog is open.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::OpenGallery));
     }
 
@@ -1771,12 +1902,14 @@ mod tests {
 
     #[test]
     fn ctrl_o_opens_saves_in_game_and_map_focus() {
-        // Game focus.
+        // open_saves is not in the direct set: Ctrl+O returns None when dialog is closed.
         let s = AppState::default();
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::OpenSaves));
-        // Map focus.
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::None));
         let mut s = AppState::default();
         s.toggle_focus();
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::None));
+        // It fires from the dialog.
+        s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::OpenSaves));
     }
 
@@ -1799,5 +1932,150 @@ mod tests {
         // Up from first wraps to last.
         apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
         assert_eq!(s.saves.as_ref().unwrap().selected, 1, "should wrap to last");
+    }
+
+    // ── Hotkey dialog dispatch tests ──────────────────────────────────────────
+
+    #[test]
+    fn dialog_closed_dialog_only_cmd_returns_none() {
+        // In map focus with dialog closed, a dialog-only command returns None.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        // Retidy is bound to Shift+R in Map context but is NOT direct.
+        assert!(matches!(
+            key_to_action(&s, shift(KeyCode::Char('R'))),
+            Action::None
+        ));
+        // ToggleInspector ('i') is also dialog-only.
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Char('i'))),
+            Action::None
+        ));
+    }
+
+    #[test]
+    fn dialog_closed_direct_cmd_still_works() {
+        // In map focus with dialog closed, direct commands still work.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        // SelectNext ('n') is in the direct set.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
+        // PanLeft ('h') is in the direct set.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
+        // Recenter ('c') is in the direct set.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
+    }
+
+    #[test]
+    fn prefix_opens_hotkey_dialog_action() {
+        // Ctrl+K in any non-dialog state → OpenHotkeyDialog.
+        let s = AppState::default(); // game focus
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::OpenHotkeyDialog
+        ));
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::OpenHotkeyDialog
+        ));
+    }
+
+    #[test]
+    fn prefix_closes_hotkey_dialog_action() {
+        // Ctrl+K when dialog is open → CloseHotkeyDialog.
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::CloseHotkeyDialog
+        ));
+    }
+
+    #[test]
+    fn q_closes_hotkey_dialog_action() {
+        // 'q' with no modifiers when dialog is open → CloseHotkeyDialog.
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Char('q'))),
+            Action::CloseHotkeyDialog
+        ));
+    }
+
+    #[test]
+    fn dialog_open_dialog_only_cmd_fires() {
+        // When dialog is open, Shift+R in map focus fires Retidy.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        s.hotkey_dialog = true;
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
+        // ToggleInspector fires too.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
+    }
+
+    #[test]
+    fn apply_open_hotkey_dialog_sets_flag() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        assert!(!s.hotkey_dialog);
+        apply_action(Action::OpenHotkeyDialog, &mut s, &mut m);
+        assert!(s.hotkey_dialog);
+        apply_action(Action::CloseHotkeyDialog, &mut s, &mut m);
+        assert!(!s.hotkey_dialog);
+    }
+
+    #[test]
+    fn open_saves_clears_hotkey_dialog() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.hotkey_dialog = true;
+        apply_action(Action::OpenSaves, &mut s, &mut m);
+        assert!(!s.hotkey_dialog, "OpenSaves should clear the hotkey dialog");
+    }
+
+    // ── is_direct as sole direct-vs-prefix determiner ─────────────────────────
+
+    /// Promoting a command via config makes it reachable directly (dialog closed).
+    #[test]
+    fn direct_config_promotes_retidy_to_direct() {
+        use crate::config::{HotkeysConfig, HotkeyGroupConfig};
+        let cfg = HotkeysConfig {
+            prefix: None,
+            direct: Some(vec!["retidy".into()]),
+            group: vec![HotkeyGroupConfig {
+                title: "Layout".into(),
+                commands: vec!["retidy".into()],
+            }],
+        };
+        let (layout, _) = crate::keymap::HotkeyLayout::resolve(&cfg);
+        let mut s = AppState::default();
+        s.hotkeys = layout;
+        s.focus = Focus::Map;
+        // With dialog closed: retidy is now direct → fires.
+        assert!(
+            matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy),
+            "promoted retidy should fire directly (dialog closed)"
+        );
+    }
+
+    /// With the default layout (retidy NOT in direct): closed dialog → None,
+    /// open dialog → Retidy.
+    #[test]
+    fn default_layout_retidy_is_dialog_only() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        // Closed dialog: Ctrl+T returns None.
+        assert!(
+            matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None),
+            "retidy should NOT fire directly with default layout (dialog closed)"
+        );
+        // Open dialog: Ctrl+T fires Retidy.
+        s.hotkey_dialog = true;
+        assert!(
+            matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy),
+            "retidy should fire from the hotkey dialog"
+        );
     }
 }

@@ -222,8 +222,9 @@ pub struct AppState {
     /// When true, draw the per-room diagnostics inspector overlay over the map pane.
     /// Toggled by the `i` key in map focus.
     pub show_inspector: bool,
-    /// When true, show the full-screen help overlay. Toggled by F1 / ?.
-    pub show_help: bool,
+    /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
+    /// closed by the prefix key again or 'q'.
+    pub hotkey_dialog: bool,
 
     /// Resolved glyph set for the map renderer.  Defaults to today's hardcoded glyphs;
     /// overwritten at startup via `SymbolSet::resolve(&cfg.symbols)` when a config is present.
@@ -232,6 +233,10 @@ pub struct AppState {
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
+
+    /// Hotkey layout: prefix key, direct command set, dialog groups.
+    /// Defaults to the built-in layout; overwritten at startup from config.
+    pub hotkeys: crate::keymap::HotkeyLayout,
 
     /// Active symbol gallery modal state. `None` means the gallery is closed.
     pub gallery: Option<GalleryState>,
@@ -281,9 +286,10 @@ impl Default for AppState {
             tidy_anim: None,
             viewed_layer: None,
             show_inspector: false,
-            show_help: false,
+            hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
             keymap: crate::keymap::KeyMap::default(),
+            hotkeys: crate::keymap::HotkeyLayout::default(),
             gallery: None,
             saves: None,
             turns: 0,
