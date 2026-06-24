@@ -603,6 +603,26 @@ fn main() {
 
                 apply_turn(&mut mapper, &cmd, &result);
 
+                // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
+                // transcript status line so the player is aware but the loop continues.
+                if cfg.auto_save {
+                    let meta = app::archive::Meta {
+                        format_version: 1,
+                        ifid: Some(ifid.clone()),
+                        name: None,
+                        turns: state.turns,
+                        saved_at: format_rfc3339(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        ),
+                    };
+                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta) {
+                        state.push_transcript(&format!("[Auto-save failed: {}]", e));
+                    }
+                }
+
                 // Clear any manual layer browse override so the view follows the player.
                 state.set_viewed_layer(None);
 
