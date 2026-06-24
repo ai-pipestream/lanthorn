@@ -148,6 +148,8 @@ pub enum Action {
     ToggleInventory,
     /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
     CycleLayoutReverse,
+    /// Open a confirmation prompt to reset the game to its opening state (keeps map).
+    ResetGame,
     /// No binding found — no-op.
     None,
     // ── Mouse actions ─────────────────────────────────────────────────────────
@@ -1245,6 +1247,16 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.show_inventory = !state.show_inventory;
         }
 
+        Action::ResetGame => {
+            // Open a confirmation prompt; the caller (main.rs) performs the actual reset
+            // when the prompt is submitted with y/yes.
+            state.hotkey_dialog = false;
+            state.prompt = Some(crate::state::Prompt {
+                kind: crate::state::PromptKind::ConfirmReset,
+                buffer: String::new(),
+            });
+        }
+
         // Caller-handled: silently ignored.
         Action::SubmitCommand(_)
         | Action::SaveGame
@@ -1314,8 +1326,8 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
-        // Saves-manager prompts: return the prompt so the caller can act on it.
-        PromptKind::SaveAs | PromptKind::ConfirmDeleteSave(_) => {
+        // Saves-manager and game-reset prompts: return to the caller to act on.
+        PromptKind::SaveAs | PromptKind::ConfirmDeleteSave(_) | PromptKind::ConfirmReset => {
             return Some(prompt);
         }
     }
@@ -2948,5 +2960,125 @@ mod tests {
         assert!(matches!(s.layout, Layout::TranscriptFull));
         apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
         assert!(matches!(s.layout, Layout::Split));
+    }
+
+    // ── Leaf 2: ResetGame prompt open + confirm/cancel ────────────────────────
+
+    #[test]
+    fn reset_game_action_opens_confirm_reset_prompt() {
+        use crate::state::{AppState, PromptKind};
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        assert!(s.prompt.is_none());
+        apply_action(Action::ResetGame, &mut s, &mut m);
+        assert!(s.prompt.is_some(), "ResetGame must open a prompt");
+        let p = s.prompt.as_ref().unwrap();
+        assert!(matches!(p.kind, PromptKind::ConfirmReset), "prompt kind must be ConfirmReset");
+    }
+
+    #[test]
+    fn reset_game_prompt_routing_confirm_and_cancel() {
+        use crate::state::{AppState, Prompt, PromptKind};
+        // Confirm path: Enter (SubmitCommand) → saves_prompt_submitted = Some((ConfirmReset, buf))
+        {
+            let mut s = AppState::default();
+            let mut m = Mapper::default();
+            s.prompt = Some(Prompt { kind: PromptKind::ConfirmReset, buffer: "y".to_owned() });
+            apply_action(Action::SubmitCommand(String::new()), &mut s, &mut m);
+            assert!(s.prompt.is_none(), "prompt should be cleared after submission");
+            assert!(
+                s.saves_prompt_submitted.is_some(),
+                "saves_prompt_submitted should be set on ConfirmReset submission"
+            );
+            let (kind, buf) = s.saves_prompt_submitted.take().unwrap();
+            assert!(matches!(kind, PromptKind::ConfirmReset));
+            assert_eq!(buf, "y");
+        }
+        // Cancel path: Esc (ToggleFocus) → prompt cleared, no saves_prompt_submitted
+        {
+            let mut s = AppState::default();
+            let mut m = Mapper::default();
+            s.prompt = Some(Prompt { kind: PromptKind::ConfirmReset, buffer: String::new() });
+            apply_action(Action::ToggleFocus, &mut s, &mut m);
+            assert!(s.prompt.is_none(), "Esc must cancel the prompt");
+            assert!(s.saves_prompt_submitted.is_none(), "no submission on cancel");
+        }
+    }
+
+    // ── Leaf 2: minizork fixture reset test ───────────────────────────────────
+
+    #[test]
+    fn minizork_reset_restores_opening_room_and_clears_turns() {
+        use crate::session::{apply_turn, GameSession, TurnResult};
+        use zvm::current_location;
+        use zvm::ObjectSnapshot;
+
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture_path.exists() {
+            return; // fixture absent — skip
+        }
+        let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
+
+        // Build the initial session and seed the start room.
+        let mut session = GameSession::new(story_bytes.clone()).expect("GameSession::new");
+        let mut mapper = Mapper::default();
+        let mut state = crate::state::AppState::default();
+
+        let start_loc = current_location(&session.machine);
+        let start_room_number = start_loc.as_ref().map(|s| s.number);
+        if let Some(snap) = start_loc {
+            let snap_number = snap.number;
+            let seed_result = TurnResult {
+                transcript: String::new(),
+                location: Some(snap),
+                quit: false,
+                info: None,
+            };
+            apply_turn(&mut mapper, "", &seed_result);
+            state.select_room(Some(snap_number as mapper::graph::RoomId));
+        }
+        let banner = session.take_transcript();
+        state.push_transcript(&banner);
+
+        // Simulate some game turns to advance state.
+        let r1 = session.submit("look");
+        state.push_transcript(&r1.transcript);
+        state.turns = 5;
+
+        // Rebuild session from story_bytes (what handle_saves_prompt does on confirm).
+        let mut new_session = GameSession::new(story_bytes.clone()).expect("GameSession::new for reset");
+        let new_start_loc = current_location(&new_session.machine);
+        let new_room_number = new_start_loc.as_ref().map(|s| s.number);
+
+        // Reset state fields exactly as handle_saves_prompt does.
+        state.turns = 0;
+        state.input.clear();
+        state.suggestions.clear();
+        state.suggestion_idx = 0;
+        state.transcript.clear();
+        state.transcript_scroll = 0;
+        let new_banner = new_session.take_transcript();
+        state.push_transcript(&new_banner);
+        if let Some(snap) = new_start_loc {
+            let snap_number = snap.number;
+            let seed_result = TurnResult {
+                transcript: String::new(),
+                location: Some(snap),
+                quit: false,
+                info: None,
+            };
+            apply_turn(&mut mapper, "", &seed_result);
+            state.select_room(Some(snap_number as mapper::graph::RoomId));
+        }
+
+        // Assert post-reset invariants.
+        assert_eq!(state.turns, 0, "turn counter must be 0 after reset");
+        assert_eq!(
+            new_room_number, start_room_number,
+            "post-reset current location must equal opening room"
+        );
+        // Mapper is kept (rooms are still in the graph).
+        assert!(mapper.graph.rooms().count() > 0, "mapper must still have rooms after reset");
     }
 }

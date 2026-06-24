@@ -297,6 +297,7 @@ fn draw_frame(
                 PromptKind::RenameLayer(_) => "Layer name",
                 PromptKind::SaveAs => "Save name",
                 PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
+                PromptKind::ConfirmReset => "Reset game? (y/n)",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
@@ -340,6 +341,7 @@ fn draw_frame(
                     PromptKind::RenameLayer(_) => "Layer:  ",
                     PromptKind::SaveAs => "Name:   ",
                     PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
+                    PromptKind::ConfirmReset => "Reset?  ",
                 };
                 let line = format!("{}{}_", label, prompt.buffer);
                 let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
@@ -593,10 +595,10 @@ fn main() {
                 // route to apply_action to apply the prompt to the mapper.
                 if state.prompt.is_some() {
                     apply_action(Action::SubmitCommand(cmd), &mut state, &mut mapper);
-                    // Handle any saves-manager prompt that was submitted.
+                    // Handle any saves-manager or reset prompt that was submitted.
                     if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
                         handle_saves_prompt(
-                            kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state,
+                            kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes,
                         );
                     }
                     continue;
@@ -938,10 +940,10 @@ fn main() {
             }
         }
 
-        // After apply_action: check for saves-manager prompt that was submitted.
-        // (This covers the case where apply_action routed a saves prompt submit.)
+        // After apply_action: check for saves-manager or reset prompt that was submitted.
+        // (This covers the case where apply_action routed a saves/reset prompt submit.)
         if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
-            handle_saves_prompt(kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state);
+            handle_saves_prompt(kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes);
         }
 
         // After apply_action: if gallery was just closed, persist the selections to config.
@@ -982,7 +984,7 @@ fn main() {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-/// Handle a submitted saves-manager prompt (SaveAs or ConfirmDeleteSave).
+/// Handle a submitted saves-manager or game-reset prompt.
 /// Called after apply_action stores the prompt in `state.saves_prompt_submitted`.
 fn handle_saves_prompt(
     kind: PromptKind,
@@ -992,8 +994,51 @@ fn handle_saves_prompt(
     mapper: &mut Mapper,
     session: &mut app::session::GameSession,
     state: &mut AppState,
+    story_bytes: &[u8],
 ) {
     match kind {
+        PromptKind::ConfirmReset => {
+            let confirmed = matches!(buf.trim().to_lowercase().as_str(), "y" | "yes");
+            if !confirmed {
+                state.push_transcript("[Reset cancelled]");
+                return;
+            }
+            // Rebuild the session from the original story bytes. Map is kept untouched.
+            match app::session::GameSession::new(story_bytes.to_vec()) {
+                Ok(new_session) => {
+                    *session = new_session;
+                    // Seed the starting room exactly as startup does.
+                    let start_loc = zvm::current_location(&session.machine);
+                    // Reset turn counter, input, and transcript (like startup).
+                    state.turns = 0;
+                    state.input.clear();
+                    state.suggestions.clear();
+                    state.suggestion_idx = 0;
+                    state.transcript.clear();
+                    state.transcript_scroll = 0;
+                    // Push the new opening banner.
+                    let banner = session.take_transcript();
+                    state.push_transcript(&banner);
+                    // Re-seed the starting room in the mapper and select it.
+                    if let Some(snap) = start_loc {
+                        let snap_number = snap.number;
+                        let seed_result = TurnResult {
+                            transcript: String::new(),
+                            location: Some(snap),
+                            quit: false,
+                            info: None,
+                        };
+                        apply_turn(mapper, "", &seed_result);
+                        let rid = snap_number as mapper::graph::RoomId;
+                        state.select_room(Some(rid));
+                    }
+                    state.push_transcript("[Game reset]");
+                }
+                Err(e) => {
+                    state.push_transcript(&format!("[Reset failed: {:?}]", e));
+                }
+            }
+        }
         PromptKind::SaveAs => {
             if buf.is_empty() {
                 state.push_transcript("[Save name cannot be empty]".to_string().as_str());

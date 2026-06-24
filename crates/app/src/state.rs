@@ -180,6 +180,8 @@ pub enum PromptKind {
     SaveAs,
     /// Confirm deletion of the named save at this path.
     ConfirmDeleteSave(std::path::PathBuf),
+    /// Confirm resetting the game to its opening state (keeps the map).
+    ConfirmReset,
 }
 
 /// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`

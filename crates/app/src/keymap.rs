@@ -86,6 +86,10 @@ pub enum Command {
     // ── Layout ────────────────────────────────────────────────────────────────
     /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
     CycleLayoutReverse,
+
+    // ── Game ──────────────────────────────────────────────────────────────────
+    /// Reset the game to its opening state (keeps the accumulated map).
+    ResetGame,
 }
 
 impl Command {
@@ -136,6 +140,7 @@ impl Command {
             Command::OpenSaves => Action::OpenSaves,
             Command::ToggleInventory => Action::ToggleInventory,
             Command::CycleLayoutReverse => Action::CycleLayoutReverse,
+            Command::ResetGame => Action::ResetGame,
         }
     }
 
@@ -185,6 +190,7 @@ impl Command {
             Command::OpenSaves => "open_saves",
             Command::ToggleInventory => "toggle_inventory",
             Command::CycleLayoutReverse => "cycle_layout_reverse",
+            Command::ResetGame => "reset_game",
         }
     }
 
@@ -234,6 +240,7 @@ impl Command {
             Command::OpenSaves => "saves",
             Command::ToggleInventory => "inventory",
             Command::CycleLayoutReverse => "layout back",
+            Command::ResetGame => "reset game",
         }
     }
 
@@ -286,6 +293,7 @@ impl Command {
             Command::OpenSaves => Context::Global,
             Command::ToggleInventory => Context::Global,
             Command::CycleLayoutReverse => Context::Global,
+            Command::ResetGame => Context::Global,
         }
     }
 
@@ -340,6 +348,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::OpenSaves,
     Command::ToggleInventory,
     Command::CycleLayoutReverse,
+    Command::ResetGame,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -548,6 +557,8 @@ impl KeyMap {
         // Shift+Tab (BackTab) → cycle layout in reverse (inverse of Ctrl+L forward cycle).
         // BackTab is delivered by crossterm as KeyCode::BackTab, typically with no SHIFT modifier.
         bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, Command::CycleLayoutReverse, Context::Global);
+        // F5 → reset game (free key; opens a confirmation prompt before acting).
+        bind!(plain(F(5)), Command::ResetGame, Context::Global);
 
         // Ctrl+Arrows → Nudge
         bind!(ctrl(Left), Command::NudgeLeft, Context::Global);
@@ -777,7 +788,7 @@ const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
     ("Layout", &["retidy", "animate_tidy", "cycle_layout"]),
     ("Layers", &["peel_layer", "merge_layer", "cycle_layer_next", "cycle_layer_prev", "rename_layer"]),
     ("Edit", &["rename_room", "edit_notes", "delete_selected_connection", "relabel_selected_edge"]),
-    ("Files", &["open_saves", "export_svg", "export_dot", "export_dump"]),
+    ("Files", &["open_saves", "reset_game", "export_svg", "export_dot", "export_dump"]),
     ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery", "toggle_inventory"]),
 ];
 
@@ -1057,6 +1068,27 @@ mod tests {
         assert_eq!(Command::CycleLayoutReverse.label(), "layout back");
         assert_eq!(Command::CycleLayoutReverse.context(), Context::Global);
         assert!(matches!(Command::CycleLayoutReverse.to_action(), Action::CycleLayoutReverse));
+    }
+
+    #[test]
+    fn reset_game_command_wiring() {
+        assert_eq!(Command::ResetGame.name(), "reset_game");
+        assert_eq!(Command::ResetGame.label(), "reset game");
+        assert_eq!(Command::ResetGame.context(), Context::Global);
+        assert!(matches!(Command::ResetGame.to_action(), Action::ResetGame));
+        // F5 is the default key
+        let km = KeyMap::default();
+        let f5 = KeySpec { code: KeyCode::F(5), ctrl: false, shift: false, alt: false };
+        assert_eq!(km.lookup(&f5, Context::Global), Some(Command::ResetGame));
+    }
+
+    #[test]
+    fn reset_game_in_files_dialog_group() {
+        let layout = HotkeyLayout::default();
+        let files_group = layout.groups.iter().find(|(title, _)| title == "Files");
+        assert!(files_group.is_some(), "Files group should exist");
+        let (_, cmds) = files_group.unwrap();
+        assert!(cmds.contains(&Command::ResetGame), "ResetGame should be in Files group");
     }
 
     #[test]
