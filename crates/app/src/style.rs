@@ -439,6 +439,248 @@ pub fn load_style(
     }
 }
 
+// ── style_to_decl ─────────────────────────────────────────────────────────────
+
+/// Inverse of [`decl_to_style`]: convert a ratatui [`Style`] into a [`Decl`].
+///
+/// Color encoding:
+/// - `Color::Rgb(r,g,b)` → `"#rrggbb"` hex string.
+/// - `Color::Indexed(n)` → decimal index string (e.g. `"17"`).
+/// - Named colors (Black, Red, … White, DarkGray, Light*, Reset) → lowercase name.
+/// - `None` (unset) → `None` in the Decl (field omitted from TOML output).
+///
+/// Modifier encoding: each modifier flag set in `add_modifier` becomes `Some(true)`.
+fn style_to_decl(s: &Style) -> Decl {
+    Decl {
+        fg: s.fg.map(color_to_str),
+        bg: s.bg.map(color_to_str),
+        bold: modifier_flag(s.add_modifier, Modifier::BOLD),
+        italic: modifier_flag(s.add_modifier, Modifier::ITALIC),
+        underline: modifier_flag(s.add_modifier, Modifier::UNDERLINED),
+        dim: modifier_flag(s.add_modifier, Modifier::DIM),
+        reversed: modifier_flag(s.add_modifier, Modifier::REVERSED),
+    }
+}
+
+/// Encode a [`Color`] as a string suitable for a [`Decl`] fg/bg field.
+fn color_to_str(c: ratatui::style::Color) -> String {
+    use ratatui::style::Color::*;
+    match c {
+        Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        Indexed(n) => n.to_string(),
+        Black => "black".to_string(),
+        Red => "red".to_string(),
+        Green => "green".to_string(),
+        Yellow => "yellow".to_string(),
+        Blue => "blue".to_string(),
+        Magenta => "magenta".to_string(),
+        Cyan => "cyan".to_string(),
+        Gray => "gray".to_string(),
+        White => "white".to_string(),
+        DarkGray => "dark-gray".to_string(),
+        LightRed => "light-red".to_string(),
+        LightGreen => "light-green".to_string(),
+        LightYellow => "light-yellow".to_string(),
+        LightBlue => "light-blue".to_string(),
+        LightMagenta => "light-magenta".to_string(),
+        LightCyan => "light-cyan".to_string(),
+        Reset => "reset".to_string(),
+    }
+}
+
+/// Return `Some(true)` if `modifiers` contains `flag`, else `None`.
+fn modifier_flag(modifiers: Modifier, flag: Modifier) -> Option<bool> {
+    if modifiers.contains(flag) { Some(true) } else { None }
+}
+
+// ── write_style ───────────────────────────────────────────────────────────────
+
+/// Write a [`StyleDoc`] to a TOML file at `path`, preserving existing content.
+///
+/// Uses `toml_edit` for format-preserving writes: existing tables, comments, and
+/// unknown sections are left intact. Only the keys owned by the style model
+/// (`[colors]` scheme + selectors, `[symbols]` presets + overrides) are written.
+///
+/// If the file does not exist it is created (parent directory must exist).
+pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()> {
+    // Load existing content or start fresh.
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let mut tdoc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
+
+    // ── [colors] ──────────────────────────────────────────────────────────────
+    {
+        let colors = tdoc.entry("colors")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::InvalidData, "[colors] is not a table"))?;
+
+        // scheme key
+        match &doc.colors.scheme {
+            Some(s) => { colors["scheme"] = toml_edit::value(s.as_str()); }
+            None    => { colors.remove("scheme"); }
+        }
+
+        // Remove selector keys that are no longer present (we rewrite all of them).
+        // Collect first to avoid mutating while iterating.
+        let existing_selector_keys: Vec<String> = colors.iter()
+            .filter(|(k, _)| *k != "scheme")
+            .map(|(k, _)| k.to_string())
+            .collect();
+        for k in &existing_selector_keys {
+            colors.remove(k);
+        }
+
+        // Write each selector as an inline table.
+        for (selector, decl) in &doc.colors.selectors {
+            let mut itbl = toml_edit::InlineTable::new();
+            if let Some(fg) = &decl.fg { itbl.insert("fg", toml_edit::Value::from(fg.as_str())); }
+            if let Some(bg) = &decl.bg { itbl.insert("bg", toml_edit::Value::from(bg.as_str())); }
+            if decl.bold      == Some(true) { itbl.insert("bold",      toml_edit::Value::from(true)); }
+            if decl.italic    == Some(true) { itbl.insert("italic",    toml_edit::Value::from(true)); }
+            if decl.underline == Some(true) { itbl.insert("underline", toml_edit::Value::from(true)); }
+            if decl.dim       == Some(true) { itbl.insert("dim",       toml_edit::Value::from(true)); }
+            if decl.reversed  == Some(true) { itbl.insert("reversed",  toml_edit::Value::from(true)); }
+            colors[selector.as_str()] = toml_edit::Item::Value(toml_edit::Value::InlineTable(itbl));
+        }
+    }
+
+    // ── [symbols] ─────────────────────────────────────────────────────────────
+    {
+        let symbols = tdoc.entry("symbols")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::InvalidData, "[symbols] is not a table"))?;
+
+        // Presets (only write if set; remove if absent).
+        macro_rules! write_preset {
+            ($field:ident, $key:literal) => {
+                match &doc.symbols.$field {
+                    Some(v) => { symbols[$key] = toml_edit::value(v.as_str()); }
+                    None    => { symbols.remove($key); }
+                }
+            };
+        }
+        write_preset!(box_style,    "box_style");
+        write_preset!(arrow_set,    "arrow_set");
+        write_preset!(portal_icons, "portal_icons");
+        write_preset!(path_style,   "path_style");
+
+        // [symbols.overrides] — get or create sub-table.
+        if !doc.symbols.overrides.is_empty() {
+            let overrides = symbols.entry("overrides")
+                .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_mut()
+                .ok_or_else(|| std::io::Error::new(
+                    std::io::ErrorKind::InvalidData, "[symbols.overrides] is not a table"))?;
+            for (k, v) in &doc.symbols.overrides {
+                overrides[k.as_str()] = toml_edit::value(v.as_str());
+            }
+        }
+    }
+
+    std::fs::write(path, tdoc.to_string())
+}
+
+// ── write_style_full ──────────────────────────────────────────────────────────
+
+/// Write a fully-expanded, self-contained style file.
+///
+/// Encodes every [`ColorScheme`] field as a selector declaration (using
+/// [`style_to_decl`]) and every [`SymbolSet`] slot as an override so that
+/// re-parsing and resolving with no base scheme reproduces the same
+/// `ColorScheme`/`SymbolSet` exactly.
+///
+/// Still preserves unknown tables already present in the file.
+pub fn write_style_full(
+    path: &std::path::Path,
+    cs: &ColorScheme,
+    set: &crate::symbols::SymbolSet,
+) -> std::io::Result<()> {
+    // Build a StyleDoc with every selector populated.
+    let mut doc = StyleDoc::default();
+
+    // Color selectors (inverse mapping of apply_color_decls).
+    doc.colors.selectors.insert("room".to_string(),              style_to_decl(&cs.room_normal));
+    doc.colors.selectors.insert("room:current".to_string(),      style_to_decl(&cs.room_current));
+    doc.colors.selectors.insert("room:selected".to_string(),     style_to_decl(&cs.room_selected));
+    doc.colors.selectors.insert("connector".to_string(),         style_to_decl(&cs.connector));
+    doc.colors.selectors.insert("connector:distorted".to_string(), style_to_decl(&cs.connector_distorted));
+    doc.colors.selectors.insert("connector:portal".to_string(),  style_to_decl(&cs.portal_connector));
+    doc.colors.selectors.insert("border:focused".to_string(),    style_to_decl(&cs.focused_border));
+    doc.colors.selectors.insert("statusbar".to_string(),         style_to_decl(&cs.status_bar));
+    doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
+    doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
+    doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
+
+    // Symbol slots: use default preset names, then override every slot explicitly.
+    // This guarantees round-trip fidelity regardless of which preset produced the set.
+    doc.symbols.box_style    = Some(crate::config::default_box_style());
+    doc.symbols.arrow_set    = Some(crate::config::default_arrow_set());
+    doc.symbols.portal_icons = Some(crate::config::default_portal_icons());
+    doc.symbols.path_style   = Some(crate::config::default_path_style());
+
+    // Write every slot key so that overrides fully define the resolved SymbolSet.
+    let ov = &mut doc.symbols.overrides;
+    // Box styles (room variants)
+    ov.insert("room.normal.tl".to_string(),   set.room_normal.tl.to_string());
+    ov.insert("room.normal.tr".to_string(),   set.room_normal.tr.to_string());
+    ov.insert("room.normal.bl".to_string(),   set.room_normal.bl.to_string());
+    ov.insert("room.normal.br".to_string(),   set.room_normal.br.to_string());
+    ov.insert("room.normal.h".to_string(),    set.room_normal.h.to_string());
+    ov.insert("room.normal.v".to_string(),    set.room_normal.v.to_string());
+    ov.insert("room.current.tl".to_string(),  set.room_current.tl.to_string());
+    ov.insert("room.current.tr".to_string(),  set.room_current.tr.to_string());
+    ov.insert("room.current.bl".to_string(),  set.room_current.bl.to_string());
+    ov.insert("room.current.br".to_string(),  set.room_current.br.to_string());
+    ov.insert("room.current.h".to_string(),   set.room_current.h.to_string());
+    ov.insert("room.current.v".to_string(),   set.room_current.v.to_string());
+    ov.insert("room.portal.tl".to_string(),   set.room_portal.tl.to_string());
+    ov.insert("room.portal.tr".to_string(),   set.room_portal.tr.to_string());
+    ov.insert("room.portal.bl".to_string(),   set.room_portal.bl.to_string());
+    ov.insert("room.portal.br".to_string(),   set.room_portal.br.to_string());
+    ov.insert("room.portal.h".to_string(),    set.room_portal.h.to_string());
+    ov.insert("room.portal.v".to_string(),    set.room_portal.v.to_string());
+    ov.insert("room.selected.tl".to_string(), set.room_selected.tl.to_string());
+    ov.insert("room.selected.tr".to_string(), set.room_selected.tr.to_string());
+    ov.insert("room.selected.bl".to_string(), set.room_selected.bl.to_string());
+    ov.insert("room.selected.br".to_string(), set.room_selected.br.to_string());
+    ov.insert("room.selected.h".to_string(),  set.room_selected.h.to_string());
+    ov.insert("room.selected.v".to_string(),  set.room_selected.v.to_string());
+    // Arrows
+    ov.insert("arrow.north".to_string(), set.arrows.north.to_string());
+    ov.insert("arrow.south".to_string(), set.arrows.south.to_string());
+    ov.insert("arrow.east".to_string(),  set.arrows.east.to_string());
+    ov.insert("arrow.west".to_string(),  set.arrows.west.to_string());
+    ov.insert("arrow.ne".to_string(),    set.arrows.ne.to_string());
+    ov.insert("arrow.nw".to_string(),    set.arrows.nw.to_string());
+    ov.insert("arrow.se".to_string(),    set.arrows.se.to_string());
+    ov.insert("arrow.sw".to_string(),    set.arrows.sw.to_string());
+    // Path glyphs
+    ov.insert("path.ew".to_string(),    set.path.ew.to_string());
+    ov.insert("path.ns".to_string(),    set.path.ns.to_string());
+    ov.insert("path.se".to_string(),    set.path.se.to_string());
+    ov.insert("path.sw".to_string(),    set.path.sw.to_string());
+    ov.insert("path.ne".to_string(),    set.path.ne.to_string());
+    ov.insert("path.nw".to_string(),    set.path.nw.to_string());
+    ov.insert("path.nse".to_string(),   set.path.nse.to_string());
+    ov.insert("path.nsw".to_string(),   set.path.nsw.to_string());
+    ov.insert("path.ews".to_string(),   set.path.ews.to_string());
+    ov.insert("path.ewn".to_string(),   set.path.ewn.to_string());
+    ov.insert("path.cross".to_string(), set.path.nesw.to_string());
+    // Portal glyphs
+    ov.insert("portal.up".to_string(),      set.portal.up.to_string());
+    ov.insert("portal.down".to_string(),    set.portal.down.to_string());
+    ov.insert("portal.in".to_string(),      set.portal.in_.to_string());
+    ov.insert("portal.out".to_string(),     set.portal.out.to_string());
+    ov.insert("portal.unknown".to_string(), set.portal.unknown.to_string());
+    ov.insert("portal.path".to_string(),    set.portal.path.to_string());
+    ov.insert("portal.marker".to_string(),  set.portal.marker.to_string());
+
+    write_style(path, &doc)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -579,5 +821,42 @@ box_style = "rounded"
         let (doc, warns) = load_style(Some("/no/such/style.toml"), std::path::Path::new("/tmp"));
         assert_eq!(warns.len(), 1);
         assert_eq!(doc, parse_style_toml(DEFAULT_STYLE_TOML).unwrap());
+    }
+
+    #[test]
+    fn write_style_preserves_unknown_sections() {
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-preserve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("style.toml");
+        std::fs::write(&path, "# my style\n[header]\ntitle = \"book\"\n").unwrap();
+        let mut doc = StyleDoc::default();
+        doc.colors.selectors.insert("connector".into(), Decl { fg: Some("cyan".into()), ..Default::default() });
+        write_style(&path, &doc).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[header]"));          // unknown section survived
+        assert!(text.contains("title = \"book\""));
+        // re-parse reflects the written selector
+        let reparsed = parse_style_toml(&text).unwrap();
+        assert_eq!(reparsed.colors.selectors["connector"].fg.as_deref(), Some("cyan"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_is_self_contained() {
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-full-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("full.toml");
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        // resolving the exported doc with NO base reproduces the same scheme
+        let (cs2, set2, _w) = resolve(&doc, &dir);
+        assert_eq!(cs2, cs);
+        assert_eq!(set2, set);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
