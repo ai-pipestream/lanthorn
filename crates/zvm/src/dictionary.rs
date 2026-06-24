@@ -59,6 +59,31 @@ pub fn load(mem: &Memory) -> Dictionary {
 }
 
 impl Dictionary {
+    /// Return all words stored in the dictionary as decoded strings.
+    ///
+    /// Each entry's key bytes are decoded with `zvm::text::decode_string`.
+    /// The decoded strings are returned in entry order (sorted order for
+    /// typical dictionaries). Trailing pad characters (Z-char 5 pad = ASCII
+    /// space in some contexts) are stripped; empty strings are omitted.
+    pub fn words(&self, mem: &Memory) -> Vec<String> {
+        use crate::text::decode::decode_string;
+        let elen = self.entry_length as u32;
+        let mut result = Vec::with_capacity(self.count as usize);
+        for i in 0..self.count as u32 {
+            let entry_addr = self.base + i * elen;
+            // The key occupies the first key_len bytes of each entry. We
+            // decode from the entry address; decode_string reads until the
+            // high-bit terminator word, which for a 4-byte (v3) or 6-byte
+            // (v4+) key is the single 2-byte or 3-byte Z-string.
+            let (word, _) = decode_string(mem, entry_addr);
+            let word = word.trim().to_lowercase();
+            if !word.is_empty() {
+                result.push(word);
+            }
+        }
+        result
+    }
+
     /// Look up `word` in the dictionary. Returns the entry's byte address, or
     /// 0 if not found. Encodes `word` with `encode_word` (which truncates to
     /// the key length) and compares against stored keys.
@@ -352,5 +377,20 @@ mod tests {
         let toks = d.tokenise(&m, "open mailbox");
         assert_eq!(toks.len(), 2);
         assert!(toks[0].dict_addr != 0, "'open' should be in MiniZork's dictionary");
+    }
+
+    // Fixture-backed test for words() — skips if minizork.z3 is not present.
+    #[test]
+    fn words_returns_nonempty_list_containing_known_verb() {
+        let Some(story) = crate::fixtures::load("minizork.z3") else { return };
+        let m = crate::memory::Memory::new(story).unwrap();
+        let d = load(&m);
+        let words = d.words(&m);
+        assert!(!words.is_empty(), "words() must return a non-empty list for minizork.z3");
+        assert!(
+            words.iter().any(|w| w == "open"),
+            "minizork.z3 dictionary must contain 'open'; got: {:?}",
+            &words[..words.len().min(20)]
+        );
     }
 }

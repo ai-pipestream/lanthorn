@@ -25,6 +25,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use mapper::mapper::Mapper;
 
+use crate::complete::{room_words_from_text, suggest};
 use crate::state::{AppState, Focus, Prompt, PromptKind};
 
 // ── Action enum ───────────────────────────────────────────────────────────────
@@ -99,6 +100,11 @@ pub enum Action {
     PeelLayer,
     /// Merge the active layer into its parent layer.
     MergeLayer,
+    /// Advance autocomplete to the next suggestion, applying the current one to
+    /// the input buffer (game focus, Tab key — only when a partial word is being
+    /// typed AND suggestions are available; otherwise Tab keeps its ToggleFocus
+    /// role).
+    Autocomplete,
     /// No binding found — no-op.
     None,
 }
@@ -178,6 +184,15 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         };
     }
     if key.modifiers == KeyModifiers::NONE && key.code == KeyCode::Tab {
+        // Autocomplete takes priority over focus-toggle when: game is focused,
+        // the player is mid-word (non-empty partial), AND suggestions exist.
+        // In all other cases Tab keeps its existing ToggleFocus behaviour.
+        if state.focus == Focus::Game
+            && !state.current_partial().is_empty()
+            && !state.suggestions.is_empty()
+        {
+            return Action::Autocomplete;
+        }
         return Action::ToggleFocus;
     }
 
@@ -418,8 +433,38 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
     // ── Normal action dispatch ────────────────────────────────────────────
     match action {
-        Action::InputChar(c) => state.push_input_char(c),
-        Action::Backspace => state.backspace(),
+        Action::InputChar(c) => {
+            state.push_input_char(c);
+            // Recompute suggestions after every character typed in game focus.
+            if state.focus == Focus::Game {
+                recompute_suggestions(state);
+                state.suggestion_idx = 0;
+            }
+        }
+        Action::Backspace => {
+            state.backspace();
+            // Recompute suggestions after deletion in game focus.
+            if state.focus == Focus::Game {
+                recompute_suggestions(state);
+                state.suggestion_idx = 0;
+            }
+        }
+        Action::Autocomplete => {
+            // Apply the currently-highlighted suggestion to the input buffer,
+            // replacing the partial word being typed. Then advance the index
+            // so repeated Tab cycles through candidates.
+            if !state.suggestions.is_empty() {
+                let idx = state.suggestion_idx % state.suggestions.len();
+                let completion = state.suggestions[idx].clone();
+                // Replace the partial word at the end of input with the completion.
+                let partial_len = state.current_partial().len();
+                let new_len = state.input.len() - partial_len;
+                state.input.truncate(new_len);
+                state.input.push_str(&completion);
+                // Advance index for next Tab press (cycles).
+                state.suggestion_idx = (idx + 1) % state.suggestions.len();
+            }
+        }
         Action::ToggleFocus => state.toggle_focus(),
         Action::CycleLayout => state.cycle_layout(),
         Action::ZoomIn => state.zoom_in(),
@@ -561,6 +606,34 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::None => {}
     }
+}
+
+// ── Suggestion recompute ──────────────────────────────────────────────────────
+
+/// Recompute `state.suggestions` from `state.dict_words`, the room words
+/// extracted from `state.transcript`, and the current partial word being typed.
+/// Called internally after every input character change in game focus.
+pub(crate) fn recompute_suggestions(state: &mut AppState) {
+    const SUGGESTION_LIMIT: usize = 6;
+    let partial = state.current_partial().to_owned();
+    if partial.is_empty() {
+        state.suggestions.clear();
+        return;
+    }
+    // Extract room words from the last few transcript lines (recent context).
+    let room_text: String = state
+        .transcript
+        .iter()
+        .rev()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let room_words = room_words_from_text(&room_text);
+    state.suggestions = suggest(&state.dict_words, &room_words, &partial, SUGGESTION_LIMIT);
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1197,5 +1270,89 @@ mod tests {
         assert_eq!(g.room(2).unwrap().pos, Some((5, 5)), "layer-0 room 2 untouched");
         // Room 9 is the only room in layer l → relayout anchors it at the origin.
         assert_eq!(g.room(9).unwrap().pos, Some((0, 0)), "lone room in tidied layer is anchored");
+    }
+
+    // ── Autocomplete / Tab precedence tests ───────────────────────────────────
+
+    #[test]
+    fn tab_is_toggle_focus_with_empty_input() {
+        // Game focus, empty input, no suggestions → Tab is ToggleFocus.
+        let s = AppState::default(); // focus = Game, input = "", suggestions = []
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+    }
+
+    #[test]
+    fn tab_is_toggle_focus_with_input_but_no_suggestions() {
+        // Game focus, non-empty partial, but no suggestions (dict not loaded) →
+        // Tab is still ToggleFocus.
+        let mut s = AppState::default();
+        s.input = "nor".to_string();
+        // suggestions is empty by default
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+    }
+
+    #[test]
+    fn tab_is_autocomplete_when_suggestions_available() {
+        // Game focus, non-empty partial, suggestions populated → Tab is Autocomplete.
+        let mut s = AppState::default();
+        s.input = "nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string()];
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::Autocomplete));
+    }
+
+    #[test]
+    fn tab_is_toggle_focus_in_map_focus_even_with_suggestions() {
+        // Map focus: Tab always toggles focus regardless of suggestions.
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        s.suggestions = vec!["north".to_string()]; // not relevant for map focus
+        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
+    }
+
+    #[test]
+    fn autocomplete_action_replaces_partial_word() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.input = "go nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string()];
+        s.suggestion_idx = 0;
+        apply_action(Action::Autocomplete, &mut s, &mut m);
+        // "nor" should be replaced with "north" (index 0 suggestion).
+        assert_eq!(s.input, "go north");
+        // Index should advance to 1 for next Tab.
+        assert_eq!(s.suggestion_idx, 1);
+    }
+
+    #[test]
+    fn autocomplete_cycles_on_repeated_tab() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.input = "go nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string()];
+        s.suggestion_idx = 0;
+        // First Tab: north
+        apply_action(Action::Autocomplete, &mut s, &mut m);
+        assert_eq!(s.input, "go north");
+        assert_eq!(s.suggestion_idx, 1);
+        // Second Tab: northeast
+        s.input = "go nor".to_string(); // simulate user going back to partial
+        apply_action(Action::Autocomplete, &mut s, &mut m);
+        assert_eq!(s.input, "go northeast");
+        assert_eq!(s.suggestion_idx, 0); // wrapped
+    }
+
+    #[test]
+    fn typing_resets_suggestion_index() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        // Pre-load some suggestions and set idx > 0.
+        s.input = "no".to_string();
+        s.dict_words = vec!["north".to_string(), "northeast".to_string()];
+        s.suggestion_idx = 1;
+        // Type another character: should recompute suggestions and reset idx to 0.
+        apply_action(Action::InputChar('r'), &mut s, &mut m);
+        assert_eq!(s.suggestion_idx, 0);
+        // Suggestions should now match "nor".
+        assert!(s.suggestions.iter().any(|w| w.starts_with("nor")));
     }
 }

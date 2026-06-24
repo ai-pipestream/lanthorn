@@ -173,6 +173,30 @@ pub(crate) fn format_input_line(input: &str) -> String {
     format!("> {}", input)
 }
 
+/// Format the autocomplete suggestion bar from a list of candidates and the
+/// currently-highlighted index.  Returns an empty string when `suggestions` is
+/// empty.  The highlighted entry is wrapped in `[brackets]`; others are plain.
+///
+/// Example: `north  [northeast]  northwest`
+pub(crate) fn format_suggestion_line(suggestions: &[String], highlight_idx: usize) -> String {
+    if suggestions.is_empty() {
+        return String::new();
+    }
+    let idx = highlight_idx % suggestions.len();
+    suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            if i == idx {
+                format!("[{}]", w)
+            } else {
+                w.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
 // ── Main render function ───────────────────────────────────────────────────────
 
 /// Render the GAME pane into `buf` within `area`:
@@ -235,15 +259,34 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         }
     }
 
+    // ── Suggestion line: one row above input (game focus only) ───────────────
+
+    // Reserve the row above input for suggestions when they are available.
+    // The transcript area shrinks accordingly so suggestions never overlap text.
+    let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty();
+    let suggestion_y = input_y.saturating_sub(1);
+    if has_suggestions && area.height >= 3 && suggestion_y > area.y {
+        let sug_line = format_suggestion_line(&state.suggestions, state.suggestion_idx);
+        let sug_trunc = truncate_line(&sug_line, w);
+        // Draw with a dim style so it is visually subordinate to the input.
+        let sug_style = Style::new().fg(Color::DarkGray);
+        draw_str_clipped(buf, area.x, suggestion_y, sug_trunc, sug_style, area);
+    }
+
     // ── Middle rows: transcript ───────────────────────────────────────────────
 
     if area.height < 3 {
         return;
     }
 
-    // Middle rows: from status_y + 1 to input_y - 1.
+    // Middle rows: from status_y + 1 to input_y - 1 (or input_y - 2 when the
+    // suggestion line is visible, so transcript text is never overdrawn).
     let transcript_top = area.y + 1;
-    let transcript_bottom = input_y; // exclusive
+    let transcript_bottom = if has_suggestions && suggestion_y > area.y {
+        suggestion_y // exclusive: transcript stops before the suggestion row
+    } else {
+        input_y // exclusive: transcript stops before the input row
+    };
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
     let lines = visible_wrapped_lines(
@@ -567,6 +610,71 @@ mod tests {
     }
 
     // ── Status line test with czech.z5 fixture (skipped if absent) ───────────
+
+    // ── format_suggestion_line tests ─────────────────────────────────────────
+
+    #[test]
+    fn format_suggestion_line_empty() {
+        assert_eq!(format_suggestion_line(&[], 0), "");
+    }
+
+    #[test]
+    fn format_suggestion_line_single_highlighted() {
+        let sug = vec!["north".to_string()];
+        let line = format_suggestion_line(&sug, 0);
+        assert_eq!(line, "[north]");
+    }
+
+    #[test]
+    fn format_suggestion_line_highlight_first() {
+        let sug = vec!["north".to_string(), "northeast".to_string(), "northwest".to_string()];
+        let line = format_suggestion_line(&sug, 0);
+        assert!(line.starts_with("[north]"), "first entry should be highlighted: {}", line);
+        assert!(line.contains("northeast") && !line.contains("[northeast]"));
+    }
+
+    #[test]
+    fn format_suggestion_line_highlight_second() {
+        let sug = vec!["north".to_string(), "northeast".to_string()];
+        let line = format_suggestion_line(&sug, 1);
+        assert!(line.contains("[northeast]"), "second entry highlighted: {}", line);
+        assert!(!line.contains("[north]"), "first not highlighted: {}", line);
+    }
+
+    #[test]
+    fn format_suggestion_line_idx_wraps() {
+        let sug = vec!["north".to_string(), "northeast".to_string()];
+        // idx=2 wraps to 0
+        let line = format_suggestion_line(&sug, 2);
+        assert!(line.starts_with("[north]"), "idx wraps: {}", line);
+    }
+
+    #[test]
+    fn render_transcript_shows_suggestion_line_above_input() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.focus = Focus::Game;
+        state.input = "nor".to_string();
+        state.suggestions = vec!["north".to_string()];
+        state.suggestion_idx = 0;
+
+        // 10-row area: row 0=status, rows 1..7=transcript, row 8=suggestion, row 9=input
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Row 9 (bottom) must contain the input.
+        let input_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 9)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(input_row.contains("> nor"), "input row: {:?}", input_row);
+
+        // Row 8 must contain the suggestion.
+        let sug_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 8)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(sug_row.contains("north"), "suggestion row: {:?}", sug_row);
+    }
 
     #[test]
     fn render_transcript_status_line_nonblank_with_fixture() {
