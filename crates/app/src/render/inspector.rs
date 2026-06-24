@@ -108,7 +108,10 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer) 
     let ok_style = Style::default().fg(Color::Green);
 
     // Fill the panel with a solid opaque background so the map does not show through.
-    let bg_style = Style::new().bg(Color::Black);
+    // Style::reset() clears all inherited attributes (fg, modifiers such as REVERSED)
+    // before applying bg(Black), preventing map connector colors and reversed-block
+    // modifiers from bleeding through.
+    let bg_style = Style::reset().bg(Color::Black);
     for y in panel.y..panel.bottom() {
         for x in panel.x..panel.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -419,6 +422,48 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         // No room name should appear.
         assert!(!buf_contains(&buf, "Clearing"));
+    }
+
+    #[test]
+    fn inspector_panel_clears_reversed_modifier_and_fg() {
+        // Pre-fill the buffer with REVERSED + fg(Cyan) to simulate map connector bleed.
+        // After rendering, cells inside the panel must have no REVERSED modifier
+        // and must have bg(Black).
+        use ratatui::style::{Color, Modifier, Style};
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let diag = make_diag(1, "Start", vec![]);
+        terminal.draw(|f| {
+            let area = f.area();
+            let bleed_style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::REVERSED);
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+                        cell.set_symbol(" ").set_style(bleed_style);
+                    }
+                }
+            }
+            draw_inspector(&diag, area, f.buffer_mut());
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let panel_x = 80u16.saturating_sub(38);
+        for y in 0..4u16 {
+            for x in panel_x..80u16 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    assert!(
+                        !cell.style().add_modifier.contains(Modifier::REVERSED),
+                        "cell ({x},{y}) must not have REVERSED modifier inside inspector panel"
+                    );
+                    assert_eq!(
+                        cell.style().bg,
+                        Some(Color::Black),
+                        "cell ({x},{y}) must have bg(Black) inside inspector panel"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

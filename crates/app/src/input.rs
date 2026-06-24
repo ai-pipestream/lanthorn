@@ -145,6 +145,8 @@ pub enum Action {
     /// No binding found — no-op.
     None,
     // ── Mouse actions ─────────────────────────────────────────────────────────
+    /// Activate a specific pane (left-click on pane background).
+    ActivatePane(crate::state::Focus),
     /// Show the story-info panel for `RoomId` (left-click on a room).
     ShowRoomInfo(mapper::graph::RoomId),
     /// Show the diagnostics panel for `RoomId` (right-click on a room).
@@ -304,7 +306,7 @@ fn room_at_screen(
 ///
 /// Returns `Action::None` for events outside both panes or with no binding.
 pub fn mouse_to_action(
-    state: &AppState,
+    _state: &AppState,
     m: MouseEvent,
     map: ratatui::layout::Rect,
     story: ratatui::layout::Rect,
@@ -323,11 +325,17 @@ pub fn mouse_to_action(
         && row >= story.y && row < story.bottom();
 
     match m.kind {
+        // ── Left-click in story: activate game pane ───────────────────────────
+        MouseEventKind::Down(MouseButton::Left) if in_story => {
+            Action::ActivatePane(crate::state::Focus::Game)
+        }
         // ── Left-click in map ─────────────────────────────────────────────────
         MouseEventKind::Down(MouseButton::Left) if in_map => {
             match room_at_screen(room_rects, col, row) {
+                // Room hit: show its info panel (apply_action also sets Focus::Map).
                 Some(id) => Action::ShowRoomInfo(id),
-                None => Action::CloseRoomPanel,
+                // Empty map gutter: activate map focus and close any open panel.
+                None => Action::ActivatePane(crate::state::Focus::Map),
             }
         }
         // ── Right-click in map ────────────────────────────────────────────────
@@ -996,6 +1004,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         // ── Mouse room-panel actions ──────────────────────────────────────────
+
+        Action::ActivatePane(focus) => {
+            state.focus = focus;
+            // Activating the map with no specific room selected clears the panel;
+            // activating the game pane also clears any open room panel so the
+            // story view is unobstructed.
+            state.room_panel = None;
+            state.show_inspector = false;
+        }
 
         Action::ShowRoomInfo(id) => {
             use crate::state::{RoomPanel, RoomPanelMode};
@@ -2474,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn left_down_on_gutter_produces_close_room_panel() {
+    fn left_down_on_gutter_produces_activate_map_pane() {
         use crossterm::event::MouseEventKind;
         use crate::state::Zoom;
 
@@ -2488,9 +2505,43 @@ mod tests {
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
         assert!(
-            matches!(action, Action::CloseRoomPanel),
-            "left-down on gutter should produce CloseRoomPanel, got {:?}", action
+            matches!(action, Action::ActivatePane(Focus::Map)),
+            "left-down on map gutter should produce ActivatePane(Map), got {:?}", action
         );
+    }
+
+    #[test]
+    fn left_down_in_story_produces_activate_game_pane() {
+        use crossterm::event::MouseEventKind;
+        let s = AppState::default();
+        // col 85 is inside story_rect (x=80..120).
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 85, 5, KeyModifiers::NONE);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        assert!(
+            matches!(action, Action::ActivatePane(Focus::Game)),
+            "left-down in story pane should produce ActivatePane(Game), got {:?}", action
+        );
+    }
+
+    #[test]
+    fn apply_activate_pane_sets_focus_and_clears_panel() {
+        use crate::state::{RoomPanel, RoomPanelMode};
+        let mut s = AppState::default(); // starts Focus::Game
+        let mut m = Mapper::default();
+
+        // Pre-open a room panel.
+        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        s.show_inspector = true;
+
+        // ActivatePane(Game) sets game focus and clears the panel.
+        apply_action(Action::ActivatePane(Focus::Game), &mut s, &mut m);
+        assert_eq!(s.focus, Focus::Game, "ActivatePane(Game) must set focus to Game");
+        assert!(s.room_panel.is_none(), "ActivatePane must clear room_panel");
+        assert!(!s.show_inspector, "ActivatePane must clear show_inspector");
+
+        // ActivatePane(Map) sets map focus.
+        apply_action(Action::ActivatePane(Focus::Map), &mut s, &mut m);
+        assert_eq!(s.focus, Focus::Map, "ActivatePane(Map) must set focus to Map");
     }
 
     #[test]
