@@ -536,6 +536,79 @@ pub(crate) fn run_tidy_pipeline(
     frames
 }
 
+/// Run the same tidy pipeline stages as `run_tidy_pipeline` but discard the
+/// animation frames. The final positions and distortion flags are written back
+/// into `graph` exactly as `run_tidy_pipeline` does, but no frame snapshots are
+/// allocated. Use this for silent background re-tidy where playback is not wanted.
+pub fn tidy_layer_silent(
+    graph: &mut mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) {
+    use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints, stack_updown_rooms};
+
+    let mut sub = graph.layer_subgraph(layer);
+    mapper::layout::relayout_auto(&mut sub);
+    cleanup_overlaps(&mut sub, 3, 40);
+    repair_directional_hints(&mut sub, 3, 40);
+    stack_updown_rooms(&mut sub);
+    cleanup_overlaps(&mut sub, 3, 40);
+    compact_empty_lines(&mut sub);
+
+    // Write final positions back into the live graph.
+    for id in graph.rooms_in_layer(layer) {
+        if let Some(p) = sub.room(id).and_then(|r| r.pos) {
+            graph.set_pos(id, p);
+        }
+    }
+
+    // Write distortion flags back.
+    let n = graph.connections().len();
+    for idx in 0..n {
+        let c = graph.connections()[idx].clone();
+        if graph.layer_of(c.origin) == layer && graph.layer_of(c.dest) == layer {
+            if let Some(sc) = sub.connections().iter()
+                .find(|s| s.origin == c.origin && s.dir == c.dir && s.dest == c.dest)
+            {
+                graph.set_conn_distorted(idx, sc.distorted);
+            }
+        }
+    }
+}
+
+/// Pure decision function for background-tidy mode. Extracted for unit-testability.
+///
+/// - `mode`: the configured `BackgroundTidy` value.
+/// - `new_room`: whether this turn discovered at least one new room.
+/// - `overlap`: whether the active layer has a room overlap or distorted edge after
+///   incremental placement (only meaningful for `OnOverlap`).
+/// - `counter`: mutable debounce counter; incremented on each new room, reset when
+///   a tidy fires under `Debounced`.
+///
+/// Returns true when a background re-tidy should be triggered.
+pub fn should_bg_tidy(
+    mode: crate::config::BackgroundTidy,
+    new_room: bool,
+    overlap: bool,
+    counter: &mut u32,
+) -> bool {
+    use crate::config::BackgroundTidy;
+    match mode {
+        BackgroundTidy::Off => false,
+        BackgroundTidy::EveryRoom => new_room,
+        BackgroundTidy::OnOverlap => overlap,
+        BackgroundTidy::Debounced => {
+            if new_room {
+                *counter += 1;
+                if *counter >= crate::config::BG_TIDY_DEBOUNCE {
+                    *counter = 0;
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
 // ── Gallery helpers ───────────────────────────────────────────────────────────
 
 /// Return the number of presets for the given gallery category index.
@@ -2508,5 +2581,82 @@ mod tests {
         assert!(s.drag.is_some());
         apply_action(Action::EndDragPan, &mut s, &mut m);
         assert!(s.drag.is_none(), "EndDragPan should clear drag state");
+    }
+
+    // ── should_bg_tidy ────────────────────────────────────────────────────────
+
+    #[test]
+    fn should_bg_tidy_off_always_false() {
+        use crate::config::BackgroundTidy;
+        let mut c = 0u32;
+        assert!(!should_bg_tidy(BackgroundTidy::Off, true, true, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::Off, false, false, &mut c));
+    }
+
+    #[test]
+    fn should_bg_tidy_every_room_follows_new_room() {
+        use crate::config::BackgroundTidy;
+        let mut c = 0u32;
+        assert!(should_bg_tidy(BackgroundTidy::EveryRoom, true, false, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::EveryRoom, false, false, &mut c));
+    }
+
+    #[test]
+    fn should_bg_tidy_on_overlap_follows_overlap() {
+        use crate::config::BackgroundTidy;
+        let mut c = 0u32;
+        assert!(should_bg_tidy(BackgroundTidy::OnOverlap, false, true, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::OnOverlap, true, false, &mut c));
+    }
+
+    #[test]
+    fn should_bg_tidy_debounced_fires_every_k_new_rooms() {
+        use crate::config::{BackgroundTidy, BG_TIDY_DEBOUNCE};
+        let mut c = 0u32;
+        // First K-1 new rooms should not fire.
+        for _ in 0..BG_TIDY_DEBOUNCE - 1 {
+            assert!(!should_bg_tidy(BackgroundTidy::Debounced, true, false, &mut c));
+        }
+        // K-th new room fires and resets counter.
+        assert!(should_bg_tidy(BackgroundTidy::Debounced, true, false, &mut c));
+        assert_eq!(c, 0, "counter resets after Debounced fires");
+        // No new room: never fires.
+        assert!(!should_bg_tidy(BackgroundTidy::Debounced, false, false, &mut c));
+    }
+
+    // ── tidy_layer_silent ─────────────────────────────────────────────────────
+
+    #[test]
+    fn tidy_layer_silent_single_room_noop() {
+        // A single-room layer should not panic and leave the room with a position.
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "Room".into());
+        tidy_layer_silent(&mut g, 0);
+        // Room should still exist.
+        assert!(g.room(1).is_some());
+    }
+
+    #[test]
+    fn tidy_layer_silent_leaves_graph_in_same_final_state_as_run_tidy_pipeline() {
+        // Build a small two-room graph; run both paths and compare final positions.
+        use mapper::direction::Direction;
+        let make_graph = || {
+            let mut g = mapper::graph::MapGraph::new();
+            g.upsert_room(1, "A".into());
+            g.upsert_room(2, "B".into());
+            g.add_edge(1, Direction::E, 2);
+            g.add_edge(2, Direction::W, 1);
+            g
+        };
+
+        let mut g_pipeline = make_graph();
+        run_tidy_pipeline(&mut g_pipeline, 0);
+
+        let mut g_silent = make_graph();
+        tidy_layer_silent(&mut g_silent, 0);
+
+        let pos = |g: &mapper::graph::MapGraph, id| g.room(id).and_then(|r| r.pos);
+        assert_eq!(pos(&g_pipeline, 1), pos(&g_silent, 1), "room 1 position must match");
+        assert_eq!(pos(&g_pipeline, 2), pos(&g_silent, 2), "room 2 position must match");
     }
 }
