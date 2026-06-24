@@ -165,6 +165,38 @@ pub struct StyleColors {
     pub selectors: BTreeMap<String, Decl>,
 }
 
+impl<'de> serde::Deserialize<'de> for StyleColors {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // The `[colors]` section is a flat map: `scheme` is a string and every
+        // other key is a selector whose value is a [`Decl`] inline table. We
+        // deserialize into a tolerant intermediate that accepts either shape per
+        // key, mirroring `parse_style_toml`.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum SchemeOrDecl {
+            Scheme(String),
+            Decl(Decl),
+        }
+
+        let raw: BTreeMap<String, SchemeOrDecl> = BTreeMap::deserialize(deserializer)?;
+        let mut out = StyleColors::default();
+        for (key, val) in raw {
+            if key == "scheme" {
+                if let SchemeOrDecl::Scheme(s) = val {
+                    out.scheme = Some(s);
+                }
+            } else if let SchemeOrDecl::Decl(d) = val {
+                out.selectors.insert(key, d);
+            }
+            // Unknown shapes (e.g. non-string scheme) are ignored, never fatal.
+        }
+        Ok(out)
+    }
+}
+
 // ── StyleDoc ──────────────────────────────────────────────────────────────────
 
 /// A complete (but partial/raw) style document combining color and symbol config.
@@ -437,6 +469,16 @@ pub fn load_style(
             }
         }
     }
+}
+
+// ── personal_style_path ───────────────────────────────────────────────────────
+
+/// The path to the user's personal style file: `user_dir/style.toml`.
+///
+/// This is the file written by gallery/config saves and the "Output all settings"
+/// export; `config.style` is repointed at it so the saved look persists.
+pub fn personal_style_path(user_dir: &std::path::Path) -> std::path::PathBuf {
+    user_dir.join("style.toml")
 }
 
 // ── style_to_decl ─────────────────────────────────────────────────────────────
@@ -840,6 +882,12 @@ box_style = "rounded"
         let reparsed = parse_style_toml(&text).unwrap();
         assert_eq!(reparsed.colors.selectors["connector"].fg.as_deref(), Some("cyan"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn personal_style_path_is_user_dir_style_toml() {
+        let p = personal_style_path(std::path::Path::new("/home/u/.babelmap"));
+        assert_eq!(p, std::path::Path::new("/home/u/.babelmap/style.toml"));
     }
 
     #[test]

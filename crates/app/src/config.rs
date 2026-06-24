@@ -183,18 +183,22 @@ pub struct Config {
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
     pub background_tidy: BackgroundTidy,
-    /// Map symbol configuration: presets + per-glyph overrides.
-    #[serde(default)]
-    pub symbols: SymbolConfig,
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
     /// Hotkey dialog configuration: prefix key, direct commands, dialog groups.
     #[serde(default)]
     pub hotkeys: HotkeysConfig,
-    /// Color scheme configuration: scheme name/path and per-element overrides.
+    /// Style-file pointer: a built-in name, a file path, or absent (use
+    /// `user_dir/style.toml` if present, else the built-in default).
     #[serde(default)]
-    pub colors: ColorsConfig,
+    pub style: Option<String>,
+    /// Color override layer (style-file format): optional scheme + per-selector decls.
+    #[serde(default)]
+    pub colors: crate::style::StyleColors,
+    /// Symbol override layer (style-file format): optional presets + per-glyph overrides.
+    #[serde(default)]
+    pub symbols: crate::style::StyleSymbols,
 }
 
 impl Default for Config {
@@ -206,10 +210,11 @@ impl Default for Config {
             auto_save: false,
             record_history: true,
             background_tidy: BackgroundTidy::EveryRoom,
-            symbols: SymbolConfig::default(),
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
-            colors: ColorsConfig::default(),
+            style: None,
+            colors: crate::style::StyleColors::default(),
+            symbols: crate::style::StyleSymbols::default(),
         }
     }
 }
@@ -244,10 +249,11 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.auto_save = from_file.auto_save;
             cfg.record_history = from_file.record_history;
             cfg.background_tidy = from_file.background_tidy;
-            cfg.symbols = from_file.symbols;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
+            cfg.style = from_file.style;
             cfg.colors = from_file.colors;
+            cfg.symbols = from_file.symbols;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
@@ -291,9 +297,10 @@ pub fn write_symbols(dir: &std::path::Path, cfg: &SymbolConfig) -> std::io::Resu
     std::fs::write(&config_path, doc.to_string())
 }
 
-/// Write all scalar/enum/preset config fields to `dir/config.toml` using toml_edit
-/// (format-preserving). Creates the file and parent directory if absent.
-/// Preserves all other content (comments, [keymap], [hotkeys], [colors].elements, etc.).
+/// Write the functional config fields (and the `style` pointer) to `dir/config.toml`
+/// using toml_edit (format-preserving). Creates the file and parent directory if absent.
+/// Does NOT emit `[colors]`/`[symbols]` — those now live in the style file.
+/// Preserves all other content (comments, [keymap], [hotkeys], any visual sections, etc.).
 pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let config_path = dir.join("config.toml");
@@ -315,28 +322,12 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     };
     doc["background_tidy"] = toml_edit::value(bg_str);
 
-    // [colors].scheme — preserve the rest of [colors].
-    {
-        let colors = doc.entry("colors")
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-            .as_table_mut()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "[colors] is not a table"))?;
-        match &cfg.colors.scheme {
-            Some(s) => { colors["scheme"] = toml_edit::value(s.as_str()); }
-            None => { colors.remove("scheme"); }
-        }
-    }
-
-    // [symbols] presets — preserve overrides.
-    {
-        let symbols = doc.entry("symbols")
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-            .as_table_mut()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "[symbols] is not a table"))?;
-        symbols["box_style"] = toml_edit::value(cfg.symbols.box_style.as_str());
-        symbols["arrow_set"] = toml_edit::value(cfg.symbols.arrow_set.as_str());
-        symbols["portal_icons"] = toml_edit::value(cfg.symbols.portal_icons.as_str());
-        symbols["path_style"] = toml_edit::value(cfg.symbols.path_style.as_str());
+    // style pointer — the only visual key written to config.toml. The actual
+    // colors/symbols live in the style file ([colors]/[symbols] are no longer
+    // emitted here). Visual override sections, if present, are preserved as-is.
+    match &cfg.style {
+        Some(s) => { doc["style"] = toml_edit::value(s.as_str()); }
+        None => { doc.remove("style"); }
     }
 
     std::fs::write(&config_path, doc.to_string())
@@ -544,16 +535,11 @@ mod tests {
             auto_save: true,
             record_history: false,
             background_tidy: BackgroundTidy::OnOverlap,
-            symbols: SymbolConfig {
-                box_style: "ascii".into(),
-                arrow_set: "line".into(),
-                portal_icons: "nerdfont".into(),
-                path_style: "heavy".into(),
-                overrides: Default::default(),
-            },
-            colors: ColorsConfig { scheme: Some("mono".into()), elements: Default::default() },
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
+            style: Some("neon".into()),
+            colors: Default::default(),
+            symbols: Default::default(),
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -566,15 +552,40 @@ mod tests {
         assert_eq!(doc["auto_save"].as_bool(), Some(true));
         assert_eq!(doc["record_history"].as_bool(), Some(false));
         assert_eq!(doc["background_tidy"].as_str(), Some("on_overlap"));
-        // Symbol presets.
-        assert_eq!(doc["symbols"]["box_style"].as_str(), Some("ascii"));
-        assert_eq!(doc["symbols"]["arrow_set"].as_str(), Some("line"));
-        // Color scheme.
-        assert_eq!(doc["colors"]["scheme"].as_str(), Some("mono"));
+        // Style pointer is written; visual sections are NOT.
+        assert_eq!(doc["style"].as_str(), Some("neon"));
+        assert!(!content.contains("[colors]"));
+        assert!(!content.contains("[symbols]"));
         // Keymap is preserved.
         assert_eq!(doc["keymap"]["zoom_in"].as_str(), Some("z"));
         // Comment is in the raw text.
         assert!(content.contains("# babelmap config"), "comment must be preserved");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_reads_style_pointer() {
+        let cfg: Config = toml::from_str("style = \"neon\"\n").unwrap();
+        assert_eq!(cfg.style.as_deref(), Some("neon"));
+    }
+
+    #[test]
+    fn write_config_does_not_emit_style_sections() {
+        let dir = std::env::temp_dir().join(format!(
+            "babelmap_write_config_no_style_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // seed a config with functional + a [keymap] to confirm preservation
+        std::fs::write(dir.join("config.toml"), "auto_save = true\n[keymap]\nquit = \"q\"\n").unwrap();
+        let mut cfg = Config::default();
+        cfg.auto_save = true;
+        write_config(&dir, &cfg).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(!text.contains("[colors]"));
+        assert!(!text.contains("[symbols]"));
+        assert!(text.contains("[keymap]")); // functional sections preserved
 
         let _ = std::fs::remove_dir_all(&dir);
     }
