@@ -30,7 +30,7 @@ const BUILTIN_TOMORROW_NIGHT: &str = include_str!("colors/tomorrow-night.ghostty
 /// `palette = N=#rrggbb` (or `rrggbb`), `background`, `foreground`,
 /// `cursor-color`, `selection-background`, `selection-foreground`.
 /// All other keys are silently ignored.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct GhosttyScheme {
     /// The 16-color ANSI palette.  Entries that were not specified in the file
     /// default to `Color::Reset`.
@@ -458,7 +458,11 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
 }
 
 /// Parse a ratatui named color (case-insensitive).
-fn parse_named_color(s: &str) -> Option<Color> {
+///
+/// Accepts the standard ANSI names (`black`, `red`, … `white`) and their
+/// `bright-*` / `light-*` / `dark-*` variants. `bright-black` and `dark-black`
+/// both map to `DarkGray`.
+pub fn parse_named_color(s: &str) -> Option<Color> {
     match s.to_lowercase().as_str() {
         "black" => Some(Color::Black),
         "red" => Some(Color::Red),
@@ -468,15 +472,26 @@ fn parse_named_color(s: &str) -> Option<Color> {
         "magenta" => Some(Color::Magenta),
         "cyan" => Some(Color::Cyan),
         "gray" | "grey" => Some(Color::Gray),
-        "darkgray" | "dark_gray" | "darkgrey" | "dark_grey" => Some(Color::DarkGray),
-        "lightred" | "light_red" => Some(Color::LightRed),
-        "lightgreen" | "light_green" => Some(Color::LightGreen),
-        "lightyellow" | "light_yellow" => Some(Color::LightYellow),
-        "lightblue" | "light_blue" => Some(Color::LightBlue),
-        "lightmagenta" | "light_magenta" => Some(Color::LightMagenta),
-        "lightcyan" | "light_cyan" => Some(Color::LightCyan),
         "white" => Some(Color::White),
         "reset" => Some(Color::Reset),
+        // dark- variants
+        "dark-gray" | "dark-grey" | "darkgray" | "dark_gray" | "darkgrey" | "dark_grey"
+        | "bright-black" | "dark-black" => Some(Color::DarkGray),
+        // light- / bright- variants
+        "light-red" | "lightred" | "light_red" | "bright-red" => Some(Color::LightRed),
+        "light-green" | "lightgreen" | "light_green" | "bright-green" => Some(Color::LightGreen),
+        "light-yellow" | "lightyellow" | "light_yellow" | "bright-yellow" => {
+            Some(Color::LightYellow)
+        }
+        "light-blue" | "lightblue" | "light_blue" | "bright-blue" => Some(Color::LightBlue),
+        "light-magenta" | "lightmagenta" | "light_magenta" | "bright-magenta" => {
+            Some(Color::LightMagenta)
+        }
+        "light-cyan" | "lightcyan" | "light_cyan" | "bright-cyan" => Some(Color::LightCyan),
+        "light-white" | "bright-white" => Some(Color::White),
+        "light-black" | "bright-gray" | "bright-grey" | "light-gray" | "light-grey" => {
+            Some(Color::Gray)
+        }
         _ => None,
     }
 }
@@ -531,6 +546,14 @@ fn dummy_ansi_scheme() -> GhosttyScheme {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn parse_color_value_accepts_named_colors() {
+        let scheme = GhosttyScheme::default(); // or a minimal scheme
+        assert_eq!(parse_color_value("red", &scheme), Some(Color::Red));
+        assert_eq!(parse_color_value("bright-blue", &scheme), Some(Color::LightBlue));
+        assert_eq!(parse_color_value("white", &scheme), Some(Color::White));
+    }
 
     // ── GhosttyScheme::parse ──────────────────────────────────────────────────
 
