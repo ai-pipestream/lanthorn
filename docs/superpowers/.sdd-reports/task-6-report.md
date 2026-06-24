@@ -4,7 +4,7 @@
 
 ## Commit SHA
 
-TBD (committed below)
+b9a81858
 
 ## Cargo test result
 
