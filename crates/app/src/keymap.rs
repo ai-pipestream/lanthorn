@@ -49,6 +49,7 @@ pub enum Command {
     NudgeDown,
 
     // ── Map ───────────────────────────────────────────────────────────────────
+    OpenGallery,
     ZoomIn,
     ZoomOut,
     Recenter,
@@ -99,6 +100,7 @@ impl Command {
             Command::NudgeRight => Action::NudgeSelected(1, 0),
             Command::NudgeUp => Action::NudgeSelected(0, -1),
             Command::NudgeDown => Action::NudgeSelected(0, 1),
+            Command::OpenGallery => Action::OpenGallery,
             Command::ZoomIn => Action::ZoomIn,
             Command::ZoomOut => Action::ZoomOut,
             Command::Recenter => Action::Recenter,
@@ -145,6 +147,7 @@ impl Command {
             Command::NudgeRight => "nudge_right",
             Command::NudgeUp => "nudge_up",
             Command::NudgeDown => "nudge_down",
+            Command::OpenGallery => "open_gallery",
             Command::ZoomIn => "zoom_in",
             Command::ZoomOut => "zoom_out",
             Command::Recenter => "recenter",
@@ -191,6 +194,7 @@ impl Command {
             Command::NudgeRight => "nudge right",
             Command::NudgeUp => "nudge up",
             Command::NudgeDown => "nudge down",
+            Command::OpenGallery => "gallery",
             Command::ZoomIn => "zoom in",
             Command::ZoomOut => "zoom out",
             Command::Recenter => "center",
@@ -238,7 +242,8 @@ impl Command {
             | Command::NudgeUp
             | Command::NudgeDown => Context::Global,
 
-            Command::ZoomIn
+            Command::OpenGallery
+            | Command::ZoomIn
             | Command::ZoomOut
             | Command::Recenter
             | Command::SelectNext
@@ -290,6 +295,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::NudgeRight,
     Command::NudgeUp,
     Command::NudgeDown,
+    Command::OpenGallery,
     Command::ZoomIn,
     Command::ZoomOut,
     Command::Recenter,
@@ -544,6 +550,7 @@ impl KeyMap {
         bind!(plain(Char('d')), Command::DeleteSelectedConnection, Context::Map);
         bind!(plain(Char('e')), Command::RelabelSelectedEdge, Context::Map);
         bind!(plain(Char('i')), Command::ToggleInspector, Context::Map);
+        bind!(plain(Char('g')), Command::OpenGallery, Context::Map);
         // Esc → ToggleFocus (in map context)
         bind!(plain(Esc), Command::ToggleFocus, Context::Map);
         // ? → ToggleHelp (in map context)

@@ -22,6 +22,7 @@ use app::archive::{load_archive, save_archive};
 use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, key_to_action, Action};
 use app::persist_files::{load_map, save_map};
+use app::render::gallery::draw_gallery;
 use app::render::help::draw_help;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::render_map_layered;
@@ -86,6 +87,7 @@ const MAP_HINTS: &[(Command, &str)] = &[
     (Command::Recenter, "center"),
     (Command::SelectNext, "next"),
     (Command::Retidy, "tidy"),
+    (Command::OpenGallery, "gallery"),
     (Command::ToggleInspector, "inspect"),
     (Command::ToggleHelp, "help"),
 ];
@@ -230,7 +232,9 @@ fn draw_frame(
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = Style::default().add_modifier(Modifier::REVERSED);
-        let help_text = if let Some(anim) = &state.tidy_anim {
+        let help_text = if state.gallery.is_some() {
+            "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
+        } else if let Some(anim) = &state.tidy_anim {
             // Playback status: stage progress + the transport controls.
             let f = anim.current();
             let hints = hint_line(&state.keymap, Context::Anim);
@@ -268,6 +272,11 @@ fn draw_frame(
         // ── Help overlay — full-screen, drawn last so it covers everything ────
         if state.show_help {
             draw_help(&state.keymap, full, buf);
+        }
+
+        // ── Gallery overlay — full-screen, drawn after help ───────────────────
+        if state.gallery.is_some() {
+            draw_gallery(state, full, buf);
         }
 
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
@@ -499,6 +508,13 @@ fn main() {
 
         let action = key_to_action(&state, key_event);
 
+        // Snapshot gallery config before apply_action clears it on GalleryClose.
+        let gallery_cfg_on_close = if matches!(action, Action::GalleryClose) {
+            state.gallery.as_ref().map(|g| g.symbol_config())
+        } else {
+            None
+        };
+
         match action {
             // ── Caller-handled actions ─────────────────────────────────────────
 
@@ -657,6 +673,11 @@ fn main() {
             other => {
                 apply_action(other, &mut state, &mut mapper);
             }
+        }
+
+        // After apply_action: if gallery was just closed, persist the selections to config.
+        if let Some(sym_cfg) = gallery_cfg_on_close {
+            let _ = app::config::write_symbols(&cfg.user_dir, &sym_cfg);
         }
     }
 

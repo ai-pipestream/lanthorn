@@ -110,6 +110,18 @@ pub enum Action {
     Autocomplete,
     /// Toggle the full-screen help overlay.
     ToggleHelp,
+    /// Open the symbol gallery modal.
+    OpenGallery,
+    /// Move to next preset in the current gallery category.
+    GalleryNext,
+    /// Move to previous preset in the current gallery category.
+    GalleryPrev,
+    /// Switch to the next gallery category.
+    GalleryCategoryNext,
+    /// Switch to the previous gallery category.
+    GalleryCategoryPrev,
+    /// Close the gallery and persist selections to config (persistence handled by main.rs).
+    GalleryClose,
     /// No binding found — no-op.
     None,
 }
@@ -152,6 +164,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             Some(cmd) => cmd.to_action(),
             None => Action::None,
         };
+    }
+
+    // 3b. Gallery sub-mode: when gallery is open, route to gallery keys.
+    if state.gallery.is_some() {
+        return gallery_key_to_action(key);
     }
 
     // 4. Tab (no modifiers): stateful autocomplete-or-ToggleFocus (hardwired).
@@ -227,6 +244,19 @@ fn prompt_key_to_action(key: KeyEvent) -> Action {
         {
             Action::InputChar(c)
         }
+        _ => Action::None,
+    }
+}
+
+// ── Internal: gallery key routing ─────────────────────────────────────────────
+
+fn gallery_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Up => Action::GalleryPrev,
+        KeyCode::Down => Action::GalleryNext,
+        KeyCode::Left => Action::GalleryCategoryPrev,
+        KeyCode::Right => Action::GalleryCategoryNext,
+        KeyCode::Esc | KeyCode::Enter => Action::GalleryClose,
         _ => Action::None,
     }
 }
@@ -322,6 +352,19 @@ pub(crate) fn run_tidy_pipeline(
     }
 
     frames
+}
+
+// ── Gallery helpers ───────────────────────────────────────────────────────────
+
+/// Return the number of presets for the given gallery category index.
+fn preset_count(cat: usize) -> usize {
+    use crate::symbols::{Arrows, BoxStyle, PathGlyphs, PortalGlyphs};
+    match cat {
+        0 => BoxStyle::preset_names().len(),
+        1 => Arrows::preset_names().len(),
+        2 => PortalGlyphs::preset_names().len(),
+        _ => PathGlyphs::preset_names().len(),
+    }
 }
 
 // ── apply_action ──────────────────────────────────────────────────────────────
@@ -543,6 +586,54 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ToggleHelp => {
             state.show_help = !state.show_help;
+        }
+
+        Action::OpenGallery => {
+            state.gallery = Some(crate::state::GalleryState {
+                category_idx: 0,
+                selections: [0, 0, 0, 0],
+            });
+        }
+
+        Action::GalleryNext => {
+            if let Some(g) = &mut state.gallery {
+                let cat = g.category_idx;
+                let count = preset_count(cat);
+                g.selections[cat] = (g.selections[cat] + 1) % count;
+            }
+            if let Some(g) = &state.gallery {
+                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
+            }
+        }
+
+        Action::GalleryPrev => {
+            if let Some(g) = &mut state.gallery {
+                let cat = g.category_idx;
+                let count = preset_count(cat);
+                g.selections[cat] = (g.selections[cat] + count - 1) % count;
+            }
+            if let Some(g) = &state.gallery {
+                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
+            }
+        }
+
+        Action::GalleryCategoryNext => {
+            if let Some(g) = &mut state.gallery {
+                g.category_idx = (g.category_idx + 1) % 4;
+            }
+        }
+
+        Action::GalleryCategoryPrev => {
+            if let Some(g) = &mut state.gallery {
+                g.category_idx = (g.category_idx + 3) % 4;
+            }
+        }
+
+        Action::GalleryClose => {
+            if let Some(g) = state.gallery.take() {
+                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
+                // Persistence is handled by the caller (main.rs detects GalleryClose).
+            }
         }
 
         // Caller-handled: silently ignored.
@@ -1451,5 +1542,50 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
         // Anim does NOT fall through to Global: unknown key → None
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::None));
+    }
+
+    #[test]
+    fn gallery_submode_routes_arrow_keys() {
+        use crate::state::GalleryState;
+        let mut s = AppState::default();
+        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::GalleryPrev));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::GalleryNext));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::GalleryCategoryPrev));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::GalleryCategoryNext));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::GalleryClose));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Enter)), Action::GalleryClose));
+    }
+
+    #[test]
+    fn gallery_next_wraps_and_updates_symbols() {
+        use crate::state::GalleryState;
+        use crate::symbols::BoxStyle;
+        let mut s = AppState::default();
+        let n = BoxStyle::preset_names().len();
+        s.gallery = Some(GalleryState { category_idx: 0, selections: [n - 1, 0, 0, 0] });
+        let mut m = mapper::mapper::Mapper::default();
+        apply_action(Action::GalleryNext, &mut s, &mut m);
+        assert_eq!(s.gallery.as_ref().unwrap().selections[0], 0, "wraps to 0");
+        // symbols should be updated live
+        let expected = crate::symbols::SymbolSet::resolve(&s.gallery.as_ref().unwrap().symbol_config());
+        assert_eq!(s.symbols, expected);
+    }
+
+    #[test]
+    fn gallery_close_clears_state() {
+        use crate::state::GalleryState;
+        let mut s = AppState::default();
+        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        let mut m = mapper::mapper::Mapper::default();
+        apply_action(Action::GalleryClose, &mut s, &mut m);
+        assert!(s.gallery.is_none());
+    }
+
+    #[test]
+    fn open_gallery_key_in_map_focus() {
+        let mut s = AppState::default();
+        s.toggle_focus(); // Map
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::OpenGallery));
     }
 }
