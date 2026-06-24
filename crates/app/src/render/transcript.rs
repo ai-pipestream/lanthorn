@@ -11,6 +11,7 @@ use zvm::cpu::exec::Machine;
 use zvm::screen::{StatusLine, StatusRight};
 
 use crate::state::{AppState, Focus};
+use crate::render::paneframe::{draw_pane_frame, BorderStyle};
 use super::draw_str_clipped;
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
@@ -236,68 +237,151 @@ pub(crate) fn format_inventory_line(
 
 /// Render the GAME pane into `buf` within `area`:
 ///
-/// - Top row: v3 status line (location left, score/turns or time right), reversed style.
+/// - Top row(s): v3 status line (location left, score/turns or time right), reversed style.
+///   When `state.colors.status_header_style != None`, the status line is wrapped in a box
+///   (3 rows total: border-top, content, border-bottom).  Falls back to plain when the area
+///   is too small.
 /// - Middle rows: scrolling transcript from `state.transcript` (newest at bottom).
-/// - Bottom row: `"> " + state.input`; cursor indicator `_` when `state.focus == Focus::Game`.
+/// - Bottom row(s): `"> " + state.input`; cursor indicator `_` when `state.focus == Focus::Game`.
+///   When `state.colors.input_line_style != None`, the input line is wrapped in a box
+///   (3 rows total).  Falls back to plain when the area is too small.
 pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
     }
 
-    let w = area.width as usize;
-    let status_style = state.colors.status_bar;
     let normal_style = state.colors.transcript;
 
-    // ── Top row: status line ─────────────────────────────────────────────────
+    // ── Determine status and input heights based on border style ─────────────
 
-    let status_y = area.y;
-    {
-        // Fill entire top row with the status style first (background fill).
-        for x in area.x..area.right() {
-            if let Some(cell) = buf.cell_mut((x, status_y)) {
-                cell.set_symbol(" ").set_style(status_style);
-            }
-        }
+    let status_style_kind = state.colors.status_header_style;
+    let input_style_kind  = state.colors.input_line_style;
 
-        let sl = machine.status_line();
-        let (left, right) = format_status(&sl);
+    // When boxed, status/input each take 3 rows; fall back to 1 if too small.
+    let status_boxed = status_style_kind != BorderStyle::None && area.height >= 5;
+    let input_boxed  = input_style_kind  != BorderStyle::None && area.height >= 5;
+    let status_rows: u16 = if status_boxed { 3 } else { 1 };
+    let input_rows:  u16 = if input_boxed  { 3 } else { 1 };
 
-        // Draw left (location).
-        let left_trunc = truncate_line(&left, w);
-        draw_str_clipped(buf, area.x, status_y, left_trunc, status_style, area);
+    // ── Top row(s): status line ──────────────────────────────────────────────
 
-        // Draw right (score/time), right-aligned if it fits without overlapping left.
-        if right.len() < w {
-            let right_x = area.x + (w - right.len()) as u16;
-            draw_str_clipped(buf, right_x, status_y, &right, status_style, area);
-        }
+    let status_region = Rect::new(area.x, area.y, area.width, status_rows.min(area.height));
+
+    if status_boxed {
+        // Draw a pane frame around the status region.
+        let frame = draw_pane_frame(buf, status_region, status_style_kind, state.colors.status_header);
+        // Render status text into the inner content row.
+        render_status_content(machine, buf, frame.content, state.colors.status_bar);
+    } else {
+        render_status_content(machine, buf, status_region, state.colors.status_bar);
     }
 
-    if area.height < 2 {
+    if area.height < status_rows + 1 {
         return;
     }
 
-    // ── Bottom row: input line ────────────────────────────────────────────────
+    // ── Bottom row(s): input line ─────────────────────────────────────────────
 
-    let input_y = area.bottom() - 1;
-    {
-        let prompt = format_input_line(&state.input);
-        let prompt_trunc = truncate_line(&prompt, w);
-        draw_str_clipped(buf, area.x, input_y, prompt_trunc, normal_style, area);
+    let input_region_top = area.bottom().saturating_sub(input_rows);
+    let input_region = Rect::new(area.x, input_region_top, area.width, input_rows.min(area.height));
 
-        // Cursor indicator when focused on Game pane.
-        if state.focus == Focus::Game {
-            let cursor_x = area.x + prompt_trunc.chars().count() as u16;
-            if cursor_x < area.right() {
-                if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
-                    cell.set_symbol("_").set_style(CURSOR_STYLE);
-                }
-            }
+    if input_boxed {
+        let frame = draw_pane_frame(buf, input_region, input_style_kind, state.colors.input_line);
+        render_input_content(machine, state, buf, frame.content, normal_style);
+    } else {
+        render_input_content(machine, state, buf, input_region, normal_style);
+    }
+
+    // ── Middle area: transcript + inventory + suggestion ─────────────────────
+
+    let middle_top = area.y + status_rows;
+    let middle_bottom = input_region_top;
+    if middle_top >= middle_bottom {
+        return;
+    }
+    let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
+    render_middle(machine, state, buf, middle_area, normal_style);
+}
+
+/// Draw the status bar (location + score/time) into `region` with `status_style`.
+/// The region may be 1 row (plain) or 1 row inside a frame (boxed).
+fn render_status_content(
+    machine: &Machine,
+    buf: &mut Buffer,
+    region: Rect,
+    status_style: Style,
+) {
+    if region.height == 0 || region.width == 0 {
+        return;
+    }
+    let w = region.width as usize;
+    let status_y = region.y;
+
+    // Fill entire region with the status style (background fill).
+    for x in region.x..region.right() {
+        if let Some(cell) = buf.cell_mut((x, status_y)) {
+            cell.set_symbol(" ").set_style(status_style);
         }
     }
 
-    // ── Inventory strip: one row above input (when show_inventory) ──────────
+    let sl = machine.status_line();
+    let (left, right) = format_status(&sl);
 
+    let left_trunc = truncate_line(&left, w);
+    draw_str_clipped(buf, region.x, status_y, left_trunc, status_style, region);
+
+    if right.len() < w {
+        let right_x = region.x + (w - right.len()) as u16;
+        draw_str_clipped(buf, right_x, status_y, &right, status_style, region);
+    }
+}
+
+/// Draw the input prompt (and cursor) into `region` with `normal_style`.
+fn render_input_content(
+    _machine: &Machine,
+    state: &AppState,
+    buf: &mut Buffer,
+    region: Rect,
+    normal_style: Style,
+) {
+    if region.height == 0 || region.width == 0 {
+        return;
+    }
+    let w = region.width as usize;
+    let input_y = region.y;
+
+    let prompt = format_input_line(&state.input);
+    let prompt_trunc = truncate_line(&prompt, w);
+    draw_str_clipped(buf, region.x, input_y, prompt_trunc, normal_style, region);
+
+    if state.focus == Focus::Game {
+        let cursor_x = region.x + prompt_trunc.chars().count() as u16;
+        if cursor_x < region.right() {
+            if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
+                cell.set_symbol("_").set_style(CURSOR_STYLE);
+            }
+        }
+    }
+}
+
+/// Render the middle section: inventory strip, suggestion line, transcript body.
+fn render_middle(
+    machine: &Machine,
+    state: &AppState,
+    buf: &mut Buffer,
+    area: Rect,
+    normal_style: Style,
+) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let w = area.width as usize;
+
+    // The input_y used by the original code was area.bottom() - 1 of the *full* area;
+    // here area is already the middle section, so its bottom is the boundary.
+    let middle_bottom = area.bottom(); // exclusive
+
+    // ── Inventory strip: one row above middle_bottom ──────────────────────
     let inv_line = format_inventory_line(
         state.show_inventory,
         state.player_obj,
@@ -305,46 +389,44 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         machine,
     );
     let has_inventory = inv_line.is_some();
-    let inventory_y = input_y.saturating_sub(1);
-    if has_inventory && area.height >= 3 && inventory_y > area.y {
+    let inventory_y = middle_bottom.saturating_sub(1);
+    if has_inventory && area.height >= 2 && inventory_y > area.y {
         let inv_text = inv_line.as_deref().unwrap_or("");
         let inv_trunc = truncate_line(inv_text, w);
-        let inv_style = state.colors.suggestion; // reuse muted suggestion style
+        let inv_style = state.colors.suggestion;
         draw_str_clipped(buf, area.x, inventory_y, inv_trunc, inv_style, area);
     }
 
-    // ── Suggestion line: one row above inventory (or above input when no strip) ─
-
-    // Reserve the row above input (or above the inventory strip) for suggestions.
-    // The transcript area shrinks accordingly so suggestions never overlap text.
+    // ── Suggestion line: above inventory (or above middle_bottom when no strip) ─
     let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty();
-    // suggestion_y sits above inventory strip (or above input when strip absent).
-    let rows_from_bottom = 1u16
-        + if has_inventory && area.height >= 3 && inventory_y > area.y { 1 } else { 0 };
-    let suggestion_y = input_y.saturating_sub(rows_from_bottom);
-    if has_suggestions && area.height >= 3 && suggestion_y > area.y {
+    let rows_from_bottom = 0u16
+        + if has_inventory && area.height >= 2 && inventory_y > area.y { 1 } else { 0 };
+    let suggestion_y = middle_bottom.saturating_sub(1 + rows_from_bottom);
+    if has_suggestions && area.height >= 2 && suggestion_y > area.y {
         let sug_line = format_suggestion_line(&state.suggestions, state.suggestion_idx);
         let sug_trunc = truncate_line(&sug_line, w);
         let sug_style = state.colors.suggestion;
         draw_str_clipped(buf, area.x, suggestion_y, sug_trunc, sug_style, area);
     }
 
-    // ── Middle rows: transcript ───────────────────────────────────────────────
-
-    if area.height < 3 {
+    // ── Transcript body ───────────────────────────────────────────────────────
+    if area.height < 2 {
+        // Not enough room for transcript when there's an inventory/suggestion row.
         return;
     }
 
-    // Middle rows: from status_y + 1 upward to the lowest reserved row.
-    // Reserved rows (from bottom): input, [inventory strip], [suggestion line].
-    let transcript_top = area.y + 1;
+    let transcript_top = area.y;
     let transcript_bottom = if has_suggestions && suggestion_y > area.y {
-        suggestion_y // exclusive: transcript stops before the suggestion row
-    } else if has_inventory && area.height >= 3 && inventory_y > area.y {
-        inventory_y // exclusive: transcript stops before the inventory row
+        suggestion_y
+    } else if has_inventory && area.height >= 2 && inventory_y > area.y {
+        inventory_y
     } else {
-        input_y // exclusive: transcript stops before the input row
+        middle_bottom
     };
+
+    if transcript_top >= transcript_bottom {
+        return;
+    }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
     let lines = visible_wrapped_lines(
@@ -358,7 +440,6 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         if row_y >= transcript_bottom {
             break;
         }
-        // Lines are already wrapped to width, just draw them.
         draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
     }
 }
@@ -871,5 +952,162 @@ mod tests {
         // show_inventory = false → None.
         let line3 = format_inventory_line(false, None, &items, &machine);
         assert_eq!(line3, None);
+    }
+
+    // ── Task 8: status-header + input-line boxing + opt-out ───────────────────
+
+    /// Default (status_header_style = None): top row is the plain reversed bar
+    /// with no border glyphs.  When status_header_style = Single, the status row
+    /// is wrapped in a box (3 rows: top border, content, bottom border).
+    #[test]
+    fn status_header_plain_by_default_boxed_when_styled() {
+        let machine = minimal_machine();
+
+        // -- Default: plain reversed bar, no border glyphs --
+        {
+            let state = AppState::default();
+            // status_header_style defaults to None
+            assert!(
+                matches!(state.colors.status_header_style, BorderStyle::None),
+                "default status_header_style must be None"
+            );
+
+            let area = Rect::new(0, 0, 40, 10);
+            let mut buf = Buffer::empty(area);
+            render_transcript(&machine, &state, area, &mut buf);
+
+            // Row 0 (status) must have REVERSED modifier (plain bar style).
+            let top_cell = buf.cell((0, 0)).expect("top-left must exist");
+            assert!(
+                top_cell.modifier.contains(Modifier::REVERSED),
+                "default status row must be reversed-video (plain bar)"
+            );
+
+            // No box corners in the top 3 rows.
+            let has_corner_glyph = (0..3u16).any(|y| {
+                (0..40u16).any(|x| {
+                    let sym = buf.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+                    matches!(sym, "┌" | "└" | "┐" | "┘" | "╔" | "╚" | "╗" | "╝" | "┏" | "┗" | "┓" | "┛")
+                })
+            });
+            assert!(
+                !has_corner_glyph,
+                "default (None) status header must not render box corners"
+            );
+        }
+
+        // -- Boxed: status_header_style = Single → 3-row box around status --
+        {
+            let mut state = AppState::default();
+            state.colors.status_header_style = BorderStyle::Single;
+
+            // Use a large enough area so boxing is not suppressed (needs >= 5 rows).
+            let area = Rect::new(0, 0, 40, 12);
+            let mut buf = Buffer::empty(area);
+            render_transcript(&machine, &state, area, &mut buf);
+
+            // Row 0 must be the top border: top-left corner must be "┌".
+            assert_eq!(
+                buf.cell((0, 0)).unwrap().symbol(),
+                "┌",
+                "boxed status header top-left must be a single-border corner"
+            );
+            // Row 1 (content) must have the status text with REVERSED style.
+            // col 0 is the side border glyph; col 1 is the first content cell.
+            let content_cell = buf.cell((1, 1)).expect("status content row must exist");
+            assert!(
+                content_cell.modifier.contains(Modifier::REVERSED),
+                "status content row (inside box) must have REVERSED modifier"
+            );
+            // Row 2 must be the bottom border: bottom-left corner must be "└".
+            assert_eq!(
+                buf.cell((0, 2)).unwrap().symbol(),
+                "└",
+                "boxed status header bottom-left must be a single-border corner"
+            );
+        }
+    }
+
+    /// Default (input_line_style = None): bottom row is a plain `> ` prompt with
+    /// no border glyphs.
+    #[test]
+    fn input_line_plain_by_default() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.input = "go north".to_string();
+        state.focus = Focus::Game;
+
+        // input_line_style defaults to None
+        assert!(
+            matches!(state.colors.input_line_style, BorderStyle::None),
+            "default input_line_style must be None"
+        );
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Bottom row (y=9) must contain "> go north" (plain, no box).
+        let bottom_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 9)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(
+            bottom_row.contains("> go north"),
+            "default input row must contain '> go north'; got: {:?}",
+            bottom_row
+        );
+
+        // No corner glyphs in the bottom 3 rows.
+        let has_corner = (7u16..10u16).any(|y| {
+            (0..40u16).any(|x| {
+                let sym = buf.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+                matches!(sym, "┌" | "└" | "┐" | "┘" | "╔" | "╚" | "╗" | "╝" | "┏" | "┗" | "┓" | "┛")
+            })
+        });
+        assert!(
+            !has_corner,
+            "default (None) input line must not render box corners"
+        );
+    }
+
+    /// With map_border_style = None and story_border_style = None, calling draw_pane_frame
+    /// with those styles produces no border glyphs (the opt-out path).  This is the
+    /// "plain borderless" mode that reproduces the pre-beautification pane appearance.
+    #[test]
+    fn panes_none_reproduce_plain_borderless() {
+        use crate::render::paneframe::{draw_pane_frame, BorderStyle};
+        use ratatui::style::Style;
+
+        // Resolve a color scheme with none borders (simulate `map_border = none`).
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf_map = Buffer::empty(area);
+        let frame = draw_pane_frame(&mut buf_map, area, BorderStyle::None, Style::default());
+
+        // Content must equal the full area (no inset).
+        assert_eq!(
+            frame.content, area,
+            "BorderStyle::None must return content == area (no inset)"
+        );
+
+        // No border glyphs anywhere in the buffer.
+        let has_border_glyph = (0..10u16).any(|y| {
+            (0..20u16).any(|x| {
+                let sym = buf_map.cell((x, y)).map(|c| c.symbol()).unwrap_or("");
+                matches!(sym,
+                    "┌" | "─" | "┐" | "│" | "└" | "┘" |
+                    "╔" | "═" | "╗" | "║" | "╚" | "╝" |
+                    "┏" | "━" | "┓" | "┃" | "┗" | "┛"
+                )
+            })
+        });
+        assert!(
+            !has_border_glyph,
+            "BorderStyle::None must not render any border glyphs (opt-out path)"
+        );
+
+        // Same for story pane simulation.
+        let mut buf_story = Buffer::empty(area);
+        let story_frame = draw_pane_frame(&mut buf_story, area, BorderStyle::None, Style::default());
+        assert_eq!(story_frame.content, area, "story pane None border must also have content == area");
     }
 }

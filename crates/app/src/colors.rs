@@ -176,6 +176,10 @@ pub struct ColorScheme {
     pub map_border_style: BorderStyle,
     /// Resolved border style for the story pane.
     pub story_border_style: BorderStyle,
+    /// Resolved border style for the status header.
+    pub status_header_style: BorderStyle,
+    /// Resolved border style for the input line.
+    pub input_line_style: BorderStyle,
 }
 
 impl ColorScheme {
@@ -213,6 +217,8 @@ impl ColorScheme {
             input_line: Style::new(),
             map_border_style: BorderStyle::None,
             story_border_style: BorderStyle::None,
+            status_header_style: BorderStyle::None,
+            input_line_style: BorderStyle::None,
         }
     }
 
@@ -326,6 +332,8 @@ impl ColorScheme {
             input_line: Style::new(),
             map_border_style: BorderStyle::None,
             story_border_style: BorderStyle::None,
+            status_header_style: BorderStyle::None,
+            input_line_style: BorderStyle::None,
         }
     }
 

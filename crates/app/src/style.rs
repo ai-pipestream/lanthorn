@@ -178,8 +178,18 @@ pub fn apply_color_decls(
             "story_title"        => cs.story_title = cs.story_title.patch(style),
             "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
             "map_layer_tab_active" => cs.map_layer_tab_active = cs.map_layer_tab_active.patch(style),
-            "status_header"      => cs.status_header = cs.status_header.patch(style),
-            "input_line"         => cs.input_line = cs.input_line.patch(style),
+            "status_header" => {
+                cs.status_header = cs.status_header.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.status_header_style = paneframe::parse_border_style(s);
+                }
+            }
+            "input_line" => {
+                cs.input_line = cs.input_line.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.input_line_style = paneframe::parse_border_style(s);
+                }
+            }
             _                    => warnings.push(format!("unknown selector: {}", selector)),
         }
     }
@@ -707,8 +717,20 @@ pub fn write_style_full(
     doc.colors.selectors.insert("story_title".to_string(),        style_to_decl(&cs.story_title));
     doc.colors.selectors.insert("map_layer_tab".to_string(),      style_to_decl(&cs.map_layer_tab));
     doc.colors.selectors.insert("map_layer_tab_active".to_string(), style_to_decl(&cs.map_layer_tab_active));
-    doc.colors.selectors.insert("status_header".to_string(),      style_to_decl(&cs.status_header));
-    doc.colors.selectors.insert("input_line".to_string(),         style_to_decl(&cs.input_line));
+    {
+        let mut d = style_to_decl(&cs.status_header);
+        if cs.status_header_style != paneframe::BorderStyle::None {
+            d.style = Some(paneframe::border_style_name(cs.status_header_style).to_string());
+        }
+        doc.colors.selectors.insert("status_header".to_string(), d);
+    }
+    {
+        let mut d = style_to_decl(&cs.input_line);
+        if cs.input_line_style != paneframe::BorderStyle::None {
+            d.style = Some(paneframe::border_style_name(cs.input_line_style).to_string());
+        }
+        doc.colors.selectors.insert("input_line".to_string(), d);
+    }
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
