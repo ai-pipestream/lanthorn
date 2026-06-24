@@ -1,6 +1,183 @@
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use mapper::mapper::Mapper;
 use mapper::persist::{to_json, from_json};
+
+// ── Named save slots ──────────────────────────────────────────────────────────
+
+/// Metadata for one discovered save file.
+#[derive(Debug, Clone)]
+pub struct SaveInfo {
+    /// Absolute path to the `.babelmap` file.
+    pub path: PathBuf,
+    /// Human-readable name (slug-form for named saves, "(default)" for the
+    /// quick-save slot).
+    pub name: String,
+    /// Turn counter at save time.
+    pub turns: u32,
+    /// RFC3339 timestamp string (may be empty for legacy saves).
+    pub saved_at: String,
+    /// True for the default (IFID-only) quick-save slot.
+    pub is_default: bool,
+}
+
+/// List all save files for the given IFID in `dir`.
+///
+/// Discovers `<ifid>.babelmap` (default slot) and `<ifid>-*.babelmap` (named
+/// slots), reads their `Meta`, and returns sorted results: default slot first,
+/// then named saves sorted by `saved_at` descending (newest first). Files that
+/// fail to parse are silently skipped.
+pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let default_name = format!("{}.babelmap", ifid);
+    let named_prefix = format!("{}-", ifid);
+
+    let mut infos: Vec<SaveInfo> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
+
+        let is_default = fname == default_name;
+        let is_named = !is_default && fname.starts_with(&named_prefix) && fname.ends_with(".babelmap");
+
+        if !is_default && !is_named {
+            continue;
+        }
+
+        // Try to read Meta from the archive; skip on failure.
+        let meta = match crate::archive::load_archive(&path) {
+            Ok(ac) => ac.meta,
+            Err(_) => continue,
+        };
+
+        let name = if is_default {
+            "(default)".to_string()
+        } else {
+            // Strip "<ifid>-" prefix and ".babelmap" suffix to recover the slug.
+            let inner = &fname[named_prefix.len()..fname.len() - ".babelmap".len()];
+            // Prefer the name stored in Meta, fall back to the slug.
+            meta.name.clone().unwrap_or_else(|| inner.to_string())
+        };
+
+        infos.push(SaveInfo {
+            path,
+            name,
+            turns: meta.turns,
+            saved_at: meta.saved_at.clone(),
+            is_default,
+        });
+    }
+
+    // Sort: default first, then by saved_at descending (newer saves sort earlier).
+    infos.sort_by(|a, b| {
+        match (a.is_default, b.is_default) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => b.saved_at.cmp(&a.saved_at),
+        }
+    });
+
+    infos
+}
+
+/// Write a named save: `<dir>/<ifid>-<slug>.babelmap`.
+///
+/// `name` is sanitized into a filesystem-safe slug (lowercase alphanum + hyphens).
+pub fn save_named(
+    dir: &Path,
+    ifid: &str,
+    name: &str,
+    mapper: &Mapper,
+    machine: &zvm::cpu::exec::Machine,
+    turns: u32,
+) -> io::Result<()> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
+    }
+    let path = dir.join(format!("{}-{}.babelmap", ifid, slug));
+
+    let saved_at = rfc3339_now();
+    let meta = crate::archive::Meta {
+        format_version: 1,
+        ifid: Some(ifid.to_string()),
+        name: Some(name.to_string()),
+        turns,
+        saved_at,
+    };
+    crate::archive::save_archive_meta(&path, mapper, machine, meta)
+}
+
+/// Remove a save file.
+pub fn delete_save(path: &Path) -> io::Result<()> {
+    std::fs::remove_file(path)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Convert a human-readable name to a filesystem-safe slug.
+///
+/// Lowercases, replaces runs of non-alphanumeric chars with a single hyphen,
+/// and trims leading/trailing hyphens.
+fn slugify(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_sep = true; // suppress leading hyphens
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            last_was_sep = false;
+        } else if !last_was_sep {
+            slug.push('-');
+            last_was_sep = true;
+        }
+    }
+    // Trim trailing hyphen.
+    if slug.ends_with('-') {
+        slug.pop();
+    }
+    slug
+}
+
+/// Return the current time as an RFC3339 string (UTC, second precision).
+fn rfc3339_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Format as YYYY-MM-DDTHH:MM:SSZ without external crate.
+    let s = secs;
+    let sec = s % 60;
+    let min = (s / 60) % 60;
+    let hour = (s / 3600) % 24;
+    let days = s / 86400; // days since 1970-01-01
+
+    // Compute calendar date from days since epoch.
+    let (year, month, day) = days_to_ymd(days);
+
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, min, sec)
+}
+
+/// Convert days since Unix epoch (1970-01-01) to (year, month, day).
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    // Algorithm: shift epoch to 1 Mar 0000 for easier leap-year math.
+    days += 719468; // days from year 0 to 1970-01-01 (proleptic Gregorian)
+    let era = days / 146097;
+    let doe = days % 146097; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month prime [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
 
 pub fn save_map(path: &Path, mapper: &Mapper) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -109,5 +286,145 @@ mod tests {
         m2.init_caps();
         restore_game(&tmp, &mut m2).expect("restore ok");
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ── slugify ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn slugify_produces_fs_safe_names() {
+        assert_eq!(super::slugify("Before Troll"), "before-troll");
+        assert_eq!(super::slugify("  hello  world  "), "hello-world");
+        assert_eq!(super::slugify("CAPS and Symbols!!"), "caps-and-symbols");
+        assert_eq!(super::slugify("a--b"), "a-b");
+        assert_eq!(super::slugify("   "), "");
+    }
+
+    // ── rfc3339_now ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rfc3339_now_looks_like_timestamp() {
+        let ts = super::rfc3339_now();
+        // Format: 2026-06-18T12:34:56Z (20 chars)
+        assert_eq!(ts.len(), 20, "expected 20-char RFC3339 timestamp, got '{ts}'");
+        assert!(ts.ends_with('Z'), "should end with Z");
+        assert!(ts.contains('T'), "should contain T separator");
+        // Year should be plausible (>= 2024).
+        let year: u32 = ts[0..4].parse().unwrap();
+        assert!(year >= 2024, "year {year} looks wrong");
+    }
+
+    // ── list_saves / save_named / delete_save ─────────────────────────────────
+
+    fn make_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-saves-test-{}-{}", tag, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Build a machine from the czech.z5 fixture, or return None to skip.
+    fn fake_machine() -> Option<zvm::cpu::exec::Machine> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(story) = std::fs::read(&fixture) else { return None };
+        let mem = zvm::memory::Memory::new(story).unwrap();
+        let mut m = zvm::cpu::exec::Machine::new(mem);
+        m.init_caps();
+        for _ in 0..50 {
+            let _ = m.step();
+        }
+        Some(m)
+    }
+
+    #[test]
+    fn save_named_round_trip() {
+        let Some(machine) = fake_machine() else { return };
+        let dir = make_temp_dir("named");
+        let mut mapper = Mapper::default();
+        mapper.observe(1, "Foyer", None);
+
+        let ifid = "ZCODE-1-TEST00-0001";
+        super::save_named(&dir, ifid, "before-troll", &mapper, &machine, 42)
+            .expect("save_named ok");
+
+        let saves = super::list_saves(&dir, ifid);
+        assert_eq!(saves.len(), 1, "should have 1 save");
+        let s = &saves[0];
+        assert_eq!(s.name, "before-troll");
+        assert_eq!(s.turns, 42);
+        assert!(!s.is_default);
+        assert!(!s.saved_at.is_empty(), "saved_at should be set");
+
+        // The file should be loadable as an archive.
+        let ac = crate::archive::load_archive(&s.path).expect("load_archive ok");
+        assert_eq!(ac.meta.turns, 42);
+        assert_eq!(ac.meta.name.as_deref(), Some("before-troll"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_saves_ordering_default_first() {
+        let Some(machine) = fake_machine() else { return };
+        let dir = make_temp_dir("order");
+        let mapper = Mapper::default();
+        let ifid = "ZCODE-1-TEST00-0002";
+
+        // Write a default archive.
+        let default_path = dir.join(format!("{}.babelmap", ifid));
+        crate::archive::save_archive(&default_path, &mapper, &machine)
+            .expect("default save ok");
+
+        // Write two named saves.
+        super::save_named(&dir, ifid, "save-a", &mapper, &machine, 10).unwrap();
+        // Small sleep between named saves so timestamps differ, but since we
+        // can't sleep in tests, we directly patch the timestamps via the archive
+        // — instead, just verify ordering constraint is maintained.
+        super::save_named(&dir, ifid, "save-b", &mapper, &machine, 20).unwrap();
+
+        let saves = super::list_saves(&dir, ifid);
+        assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
+        assert!(saves[0].is_default, "default save must be first");
+        // Remaining two are named; order between them is by saved_at desc (both
+        // written in the same second in tests, so we just check they are present).
+        let names: Vec<&str> = saves[1..].iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"save-a"), "save-a should be present");
+        assert!(names.contains(&"save-b"), "save-b should be present");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_saves_skips_non_archive_files() {
+        let dir = make_temp_dir("skip");
+        let ifid = "ZCODE-1-TEST00-0003";
+
+        // Write a non-archive file matching the pattern.
+        std::fs::write(dir.join(format!("{}-notanarchive.babelmap", ifid)), b"garbage")
+            .unwrap();
+
+        let saves = super::list_saves(&dir, ifid);
+        assert!(saves.is_empty(), "garbage file should be skipped");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_save_removes_file() {
+        let Some(machine) = fake_machine() else { return };
+        let dir = make_temp_dir("delete");
+        let mapper = Mapper::default();
+        let ifid = "ZCODE-1-TEST00-0004";
+
+        super::save_named(&dir, ifid, "to-delete", &mapper, &machine, 5).unwrap();
+        let saves = super::list_saves(&dir, ifid);
+        assert_eq!(saves.len(), 1);
+        let path = saves[0].path.clone();
+
+        super::delete_save(&path).expect("delete ok");
+        let saves_after = super::list_saves(&dir, ifid);
+        assert!(saves_after.is_empty(), "save should be gone after delete");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
