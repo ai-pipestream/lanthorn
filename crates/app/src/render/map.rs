@@ -228,7 +228,7 @@ fn room_style(room: &RenderRoom, state: &AppState) -> Style {
     }
 }
 
-// ── cell_to_screen ────────────────────────────────────────────────────────────
+// ── cell_to_screen / screen_to_cell / room_at_cell ───────────────────────────
 
 /// Map a logical room cell to an absolute screen coordinate within `area`.
 ///
@@ -252,6 +252,38 @@ pub fn cell_to_screen(
         return None;
     }
     Some((sx as u16, sy as u16))
+}
+
+/// Map an absolute screen coordinate back to a logical room cell — the exact
+/// inverse of `cell_to_screen`.
+///
+/// `cell.x = (screen.x - area.x) / step_w + scroll.x` (integer division).
+/// The result is a grid cell; whether a room actually occupies it is determined
+/// separately by `room_at_cell`.
+pub fn screen_to_cell(screen: (i32, i32), zoom: Zoom, scroll: (i32, i32), area: Rect) -> (i32, i32) {
+    let (step_w, step_h) = zoom_steps(zoom);
+    let cx = (screen.0 - area.x as i32).div_euclid(step_w) + scroll.0;
+    let cy = (screen.1 - area.y as i32).div_euclid(step_h) + scroll.1;
+    (cx, cy)
+}
+
+/// Return the `RoomId` of the room in `layer` at grid `cell`, or `None` if no
+/// placed room sits at exactly that cell.  Clicks in the gutter between boxes
+/// (where `pos` would fall on a non-integer part of the grid) naturally land on
+/// a cell that no room occupies, so they return `None`.
+pub fn room_at_cell(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId, // LayerId is u8 (pub type alias in mapper)
+    cell: (i32, i32),
+) -> Option<RoomId> {
+    for id in graph.rooms_in_layer(layer) {
+        if let Some(room) = graph.room(id) {
+            if room.pos == Some(cell) {
+                return Some(id);
+            }
+        }
+    }
+    None
 }
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -3574,5 +3606,71 @@ mod tests {
             Some("+"),
             "ascii preset must render normal room top-left as '+'"
         );
+    }
+
+    // ── screen_to_cell / room_at_cell tests ───────────────────────────────────
+
+    /// screen_to_cell is the exact inverse of cell_to_screen for placed rooms.
+    #[test]
+    fn screen_to_cell_inverts_cell_to_screen() {
+        use crate::state::Zoom;
+        use ratatui::layout::Rect;
+
+        for zoom in [Zoom::Boxes, Zoom::Compact, Zoom::Overview] {
+            let scroll = (2, 3);
+            let area = Rect::new(5, 2, 100, 50);
+            let cell = (4, 5);
+
+            // Forward: cell → screen.
+            let screen = cell_to_screen(cell, zoom, scroll, area).expect("should be in area");
+
+            // Inverse: screen → cell.
+            let back = screen_to_cell((screen.0 as i32, screen.1 as i32), zoom, scroll, area);
+            assert_eq!(
+                back, cell,
+                "screen_to_cell should invert cell_to_screen for zoom {:?}: cell {:?} -> screen {:?} -> back {:?}",
+                zoom, cell, screen, back
+            );
+        }
+    }
+
+    #[test]
+    fn screen_to_cell_with_zero_scroll_and_origin_area() {
+        use crate::state::Zoom;
+        use ratatui::layout::Rect;
+
+        let zoom = Zoom::Compact; // step = (12, 5)
+        let scroll = (0, 0);
+        let area = Rect::new(0, 0, 80, 40);
+
+        // A click at screen (24, 10) should land in cell (2, 2).
+        let cell = screen_to_cell((24, 10), zoom, scroll, area);
+        assert_eq!(cell, (2, 2));
+
+        // A click at (0, 0) lands at (0, 0).
+        let cell0 = screen_to_cell((0, 0), zoom, scroll, area);
+        assert_eq!(cell0, (0, 0));
+    }
+
+    /// room_at_cell finds a placed room and returns None for an empty cell.
+    #[test]
+    fn room_at_cell_finds_placed_room() {
+        use mapper::graph::MapGraph;
+        use mapper::layer::MAIN_LAYER;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Start".into());
+        g.upsert_room(2, "North".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+
+        // Room 1 is at (0,0).
+        assert_eq!(room_at_cell(&g, MAIN_LAYER, (0, 0)), Some(1));
+        // Room 2 is at (0,-1).
+        assert_eq!(room_at_cell(&g, MAIN_LAYER, (0, -1)), Some(2));
+        // (1, 0) has no room.
+        assert_eq!(room_at_cell(&g, MAIN_LAYER, (1, 0)), None);
+        // (0, 1) has no room.
+        assert_eq!(room_at_cell(&g, MAIN_LAYER, (0, 1)), None);
     }
 }
