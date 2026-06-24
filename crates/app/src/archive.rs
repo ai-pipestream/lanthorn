@@ -37,6 +37,15 @@ const CURRENT_FORMAT_VERSION: u32 = 1;
 pub struct Meta {
     pub format_version: u32,
     pub ifid: Option<String>,
+    /// Human-readable save name, or None for the default (quick-save) slot.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Turn counter at save time (app-tracked, 0 for saves written before this field existed).
+    #[serde(default)]
+    pub turns: u32,
+    /// RFC3339 timestamp of when this save was written, empty string for legacy saves.
+    #[serde(default)]
+    pub saved_at: String,
 }
 
 #[derive(Debug)]
@@ -54,6 +63,24 @@ pub fn save_archive(
     path: &Path,
     mapper: &Mapper,
     machine: &zvm::cpu::exec::Machine,
+) -> io::Result<()> {
+    save_archive_meta(path, mapper, machine, Meta {
+        format_version: CURRENT_FORMAT_VERSION,
+        ifid: None,
+        name: None,
+        turns: 0,
+        saved_at: String::new(),
+    })
+}
+
+/// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
+///
+/// Used by `persist_files::save_named` to attach save slot information.
+pub fn save_archive_meta(
+    path: &Path,
+    mapper: &Mapper,
+    machine: &zvm::cpu::exec::Machine,
+    meta: Meta,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -75,10 +102,6 @@ pub fn save_archive(
     zip.write_all(&save_bytes)?;
 
     // meta.json
-    let meta = Meta {
-        format_version: CURRENT_FORMAT_VERSION,
-        ifid: None,
-    };
     let meta_json =
         serde_json::to_string_pretty(&meta).expect("Meta is always serializable");
     zip.start_file(ENTRY_META, options)?;
@@ -227,7 +250,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write only meta.json; omit map.json and game.sav
-            let meta = Meta { format_version: 1, ifid: None };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new() };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -237,6 +260,46 @@ mod tests {
         let result = load_archive(&path);
         let _ = std::fs::remove_file(&path);
         assert!(result.is_err(), "archive missing map.json must return Err");
+    }
+
+    // -------------------------------------------------------------------------
+    // back-compat: old archive (no name/turns/saved_at fields) still loads
+    // -------------------------------------------------------------------------
+    #[test]
+    fn old_archive_without_new_meta_fields_loads_with_defaults() {
+        use std::io::Write as _;
+
+        let path = temp_archive_path("backcompat");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+
+            // Write a meta.json with only the original two fields.
+            let old_meta_json = r#"{"format_version":1,"ifid":"ZCODE-1-000000-0000"}"#;
+            zip.start_file(ENTRY_META, options).unwrap();
+            zip.write_all(old_meta_json.as_bytes()).unwrap();
+
+            // map.json: minimal valid mapper JSON
+            let mapper = Mapper::default();
+            let map_json = mapper::persist::to_json(&mapper);
+            zip.start_file(ENTRY_MAP, options).unwrap();
+            zip.write_all(map_json.as_bytes()).unwrap();
+
+            // game.sav: empty bytes (won't be restored in this test)
+            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.write_all(&[]).unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let ac = load_archive(&path).expect("old archive should load");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(ac.meta.name.is_none(), "name defaults to None");
+        assert_eq!(ac.meta.turns, 0, "turns defaults to 0");
+        assert_eq!(ac.meta.saved_at, "", "saved_at defaults to empty string");
+        assert_eq!(ac.meta.ifid.as_deref(), Some("ZCODE-1-000000-0000"));
     }
 
     // -------------------------------------------------------------------------
@@ -252,7 +315,7 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
 
-            let meta = Meta { format_version: 99, ifid: None };
+            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new() };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
