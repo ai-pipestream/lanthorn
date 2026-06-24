@@ -421,6 +421,10 @@ pub struct AppState {
     pub room_panel: Option<RoomPanel>,
     /// Middle-button drag-pan state. `Some` while a drag gesture is in progress.
     pub drag: Option<DragState>,
+    /// Sub-character pan offset in terminal columns/rows, applied on top of `scroll`.
+    /// Allows 1-character precision drag panning without changing the cell-unit scroll.
+    /// Cleared by `recenter_on`.
+    pub char_pan: (i32, i32),
     /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
     /// closed by the prefix key again or 'q'.
     pub hotkey_dialog: bool,
@@ -518,6 +522,7 @@ impl Default for AppState {
             show_inspector: false,
             room_panel: None,
             drag: None,
+            char_pan: (0, 0),
             hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
             colors: crate::colors::ColorScheme::terminal_default(),
@@ -629,6 +634,8 @@ impl AppState {
         let cells_w = (pane_w as i32 / sw).max(1);
         let cells_h = (pane_h as i32 / sh).max(1);
         self.scroll = (cell.0 - cells_w / 2, cell.1 - cells_h / 2);
+        // Reset char-granular pan offset when re-centering the view.
+        self.char_pan = (0, 0);
     }
 
     /// Split `text` on `'\n'` and append each line to the transcript.
@@ -894,5 +901,21 @@ mod tests {
         assert!(saw_dir, "should have at least one dir");
         assert!(saw_file, "should have at least one file");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── char_pan / drag-pan tests (item 1) ───────────────────────────────────
+
+    #[test]
+    fn char_pan_default_is_zero() {
+        let s = AppState::default();
+        assert_eq!(s.char_pan, (0, 0));
+    }
+
+    #[test]
+    fn recenter_on_clears_char_pan() {
+        let mut s = AppState::default();
+        s.char_pan = (5, -3);
+        s.recenter_on((0, 0), 80, 24);
+        assert_eq!(s.char_pan, (0, 0), "recenter_on must reset char_pan to (0,0)");
     }
 }

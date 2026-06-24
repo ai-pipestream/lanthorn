@@ -295,12 +295,13 @@ pub fn room_screen_rects(
     let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
     let (off_x, off_y) = match &axes {
         Some((cols, rows)) => (
-            area.x as i32 - cols.room_pixel(scroll.0),
-            area.y as i32 - rows.room_pixel(scroll.1),
+            area.x as i32 - cols.room_pixel(scroll.0) + state.char_pan.0,
+            area.y as i32 - rows.room_pixel(scroll.1) + state.char_pan.1,
         ),
         None => {
             let (step_w, step_h) = zoom_steps(zoom);
-            (area.x as i32 - scroll.0 * step_w, area.y as i32 - scroll.1 * step_h)
+            (area.x as i32 - scroll.0 * step_w + state.char_pan.0,
+             area.y as i32 - scroll.1 * step_h + state.char_pan.1)
         }
     };
     let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
@@ -375,8 +376,8 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // Overview zoom: one glyph per room, no connectors. Uniform stride.
     if matches!(zoom, crate::state::Zoom::Overview) {
         let (step_w, step_h) = zoom_steps(zoom);
-        let off_x = area.x as i32 - scroll.0 * step_w;
-        let off_y = area.y as i32 - scroll.1 * step_h;
+        let off_x = area.x as i32 - scroll.0 * step_w + state.char_pan.0;
+        let off_y = area.y as i32 - scroll.1 * step_h + state.char_pan.1;
         for room in &rm.rooms {
             let (vx, vy) = cell_to_virtual(room.cell, zoom);
             put_char(buf, vx + off_x, vy + off_y, '■', room_style(room, state), area);
@@ -392,12 +393,13 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let axes = boxes.then(|| boxes_axes(&rm.plan, rm.bounds));
     let (off_x, off_y) = match &axes {
         Some((cols, rows)) => (
-            area.x as i32 - cols.room_pixel(scroll.0),
-            area.y as i32 - rows.room_pixel(scroll.1),
+            area.x as i32 - cols.room_pixel(scroll.0) + state.char_pan.0,
+            area.y as i32 - rows.room_pixel(scroll.1) + state.char_pan.1,
         ),
         None => {
             let (step_w, step_h) = zoom_steps(zoom);
-            (area.x as i32 - scroll.0 * step_w, area.y as i32 - scroll.1 * step_h)
+            (area.x as i32 - scroll.0 * step_w + state.char_pan.0,
+             area.y as i32 - scroll.1 * step_h + state.char_pan.1)
         }
     };
     let room_virtual = |cell: (i32, i32)| -> (i32, i32) {
@@ -3848,6 +3850,46 @@ mod tests {
                 .map(|(rid, _)| *rid);
             assert_eq!(hit, Some(*id), "click at centre of room {:?} rect must hit that room", id);
         }
+    }
+
+    // ── Item 1: char_pan shifts room screen rects ─────────────────────────────
+
+    /// char_pan should shift room screen rects by the same offset so that
+    /// mouse hit-testing remains accurate after a drag pan.
+    #[test]
+    fn char_pan_shifts_room_screen_rects() {
+        use crate::state::{AppState, Zoom};
+        use mapper::graph::MapGraph;
+        use mapper::render::render_layer;
+        use ratatui::layout::Rect;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
+
+        let area = Rect::new(0, 0, 80, 40);
+
+        // Baseline: no char_pan.
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        state.scroll = (0, 0);
+        state.char_pan = (0, 0);
+        let rects_base = room_screen_rects(&rm, &state, area);
+        assert_eq!(rects_base.len(), 1);
+        let (_, r0) = rects_base[0];
+
+        // Apply char_pan = (5, 3).
+        state.char_pan = (5, 3);
+        let rects_shifted = room_screen_rects(&rm, &state, area);
+        assert_eq!(rects_shifted.len(), 1);
+        let (_, r1) = rects_shifted[0];
+
+        assert_eq!(
+            (r1.x as i32 - r0.x as i32, r1.y as i32 - r0.y as i32),
+            (5, 3),
+            "char_pan (5,3) should shift screen rect by exactly (5,3)"
+        );
     }
 
     // ── Item 3: current+selected combined style ───────────────────────────────
