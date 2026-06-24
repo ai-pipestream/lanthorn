@@ -621,6 +621,56 @@ fn main() {
 
                 apply_turn(&mut mapper, &cmd, &result);
 
+                // ── Inventory tracking ────────────────────────────────────────
+                {
+                    use app::inventory::{detect_player_obj, parse_inventory_output};
+                    use zvm::objects::get_parent;
+
+                    let current_loc = zvm::current_location(&session.machine)
+                        .map(|s| s.number)
+                        .unwrap_or(0);
+
+                    if current_loc != 0 {
+                        // Compute objects whose parent is the current room.
+                        let max_obj = {
+                            // Infer max by scanning (same approach as location.rs).
+                            // We stop at the first entry whose prop-table ptr is before the entry.
+                            // Quick safe upper bound: iterate until parent==0 fails.
+                            // We use zvm::object_tree_view to avoid duplicating the logic.
+                            zvm::object_tree_view(&session.machine)
+                                .into_iter()
+                                .map(|s| s.number)
+                                .max()
+                                .unwrap_or(0)
+                        };
+                        let objects_here: std::collections::BTreeSet<u16> = (1..=max_obj)
+                            .filter(|&o| get_parent(&session.machine.mem, o) == current_loc)
+                            .collect();
+
+                        // Try to lock the player object on a room change.
+                        if state.player_obj.is_none() {
+                            if let Some(locked) = detect_player_obj(
+                                state.prev_location,
+                                &state.prev_objects_here,
+                                current_loc,
+                                &objects_here,
+                            ) {
+                                state.player_obj = Some(locked);
+                            }
+                        }
+
+                        // Update tracking for next turn.
+                        state.prev_location = Some(current_loc);
+                        state.prev_objects_here = objects_here;
+                    }
+
+                    // If the submitted command was an inventory command, parse the output.
+                    let cmd_norm = cmd.trim().to_lowercase();
+                    if cmd_norm == "i" || cmd_norm == "inv" || cmd_norm == "inventory" {
+                        state.inventory_fallback = parse_inventory_output(&result.transcript);
+                    }
+                }
+
                 // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
                 // transcript status line so the player is aware but the loop continues.
                 if cfg.auto_save {
