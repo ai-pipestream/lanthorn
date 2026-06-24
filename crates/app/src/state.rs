@@ -1,5 +1,36 @@
 use std::time::{Duration, Instant};
 
+// ── Room panel ────────────────────────────────────────────────────────────────
+
+/// Which display mode the room panel is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomPanelMode {
+    /// Story/game info view (name, notes, exits, objects for current room).
+    Info,
+    /// Layout diagnostics view (reuses draw_inspector).
+    Diagnostics,
+}
+
+/// The currently-open room info/diagnostics panel, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomPanel {
+    pub id: mapper::graph::RoomId,
+    pub mode: RoomPanelMode,
+}
+
+// ── Drag-pan state ────────────────────────────────────────────────────────────
+
+/// Middle-button drag-pan accumulator state.
+#[derive(Debug, Clone, Copy)]
+pub struct DragState {
+    /// Terminal cell position of the last drag event.
+    pub last: (u16, u16),
+    /// Sub-cell accumulator for x (in terminal columns).
+    pub acc_x: i32,
+    /// Sub-cell accumulator for y (in terminal rows).
+    pub acc_y: i32,
+}
+
 // ── Gallery constants ─────────────────────────────────────────────────────────
 
 /// Category index for box-style gallery column.
@@ -221,7 +252,13 @@ pub struct AppState {
     pub viewed_layer: Option<LayerId>,
     /// When true, draw the per-room diagnostics inspector overlay over the map pane.
     /// Toggled by the `i` key in map focus.
+    /// Deprecated: use `room_panel` for new code. Kept for keyboard-toggle compat.
     pub show_inspector: bool,
+    /// Currently-open room panel (info or diagnostics), if any.
+    /// Set by mouse clicks and the keyboard inspector toggle; drives `draw_frame`.
+    pub room_panel: Option<RoomPanel>,
+    /// Middle-button drag-pan state. `Some` while a drag gesture is in progress.
+    pub drag: Option<DragState>,
     /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
     /// closed by the prefix key again or 'q'.
     pub hotkey_dialog: bool,
@@ -286,6 +323,8 @@ impl Default for AppState {
             tidy_anim: None,
             viewed_layer: None,
             show_inspector: false,
+            room_panel: None,
+            drag: None,
             hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
             keymap: crate::keymap::KeyMap::default(),
