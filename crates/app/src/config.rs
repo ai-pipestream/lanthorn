@@ -157,6 +157,36 @@ pub fn resolve(cli: &Cli) -> Config {
     cfg
 }
 
+// ── Write helpers ─────────────────────────────────────────────────────────────
+
+/// Write the four symbol-preset fields to `dir/config.toml` using toml_edit
+/// (format-preserving). Creates the file and parent directory if absent.
+/// Only sets [symbols] box_style, arrow_set, portal_icons, path_style.
+/// All other content (comments, other tables) is preserved.
+pub fn write_symbols(dir: &std::path::Path, cfg: &SymbolConfig) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let config_path = dir.join("config.toml");
+
+    // Read existing content or start with an empty string.
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    // Parse with toml_edit (format-preserving); fall back to empty doc on parse failure.
+    let mut doc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
+
+    // Get or create the [symbols] table.
+    let symbols = doc.entry("symbols")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "[symbols] is not a table"))?;
+
+    symbols["box_style"] = toml_edit::value(cfg.box_style.as_str());
+    symbols["arrow_set"] = toml_edit::value(cfg.arrow_set.as_str());
+    symbols["portal_icons"] = toml_edit::value(cfg.portal_icons.as_str());
+    symbols["path_style"] = toml_edit::value(cfg.path_style.as_str());
+
+    std::fs::write(&config_path, doc.to_string())
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -256,6 +286,30 @@ mod tests {
         let toml = "[keymap]\nzoom_in = \"z\"";
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.keymap.overrides.get("zoom_in").map(String::as_str), Some("z"));
+    }
+
+    #[test]
+    fn write_symbols_round_trips_preserving_other_keys() {
+        let dir = std::env::temp_dir().join("babelmap_gallery_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write initial config with an unrelated [other] section.
+        let initial = "[other]\nfoo = \"bar\"\n";
+        std::fs::write(dir.join("config.toml"), initial).unwrap();
+
+        let cfg = SymbolConfig {
+            box_style: "ascii".into(),
+            arrow_set: "line".into(),
+            portal_icons: "ascii".into(),
+            path_style: "heavy".into(),
+            overrides: Default::default(),
+        };
+        write_symbols(&dir, &cfg).unwrap();
+
+        let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = content.parse().unwrap();
+        assert_eq!(doc["symbols"]["box_style"].as_str(), Some("ascii"));
+        assert_eq!(doc["symbols"]["arrow_set"].as_str(), Some("line"));
+        assert_eq!(doc["other"]["foo"].as_str(), Some("bar")); // preserved
     }
 
     #[test]
