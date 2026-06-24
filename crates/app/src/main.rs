@@ -20,7 +20,7 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
-use app::input::{apply_action, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action};
+use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action, ApplyTidyOutcome};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::filebrowser::draw_file_browser;
@@ -28,7 +28,7 @@ use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
-use app::render::map::{render_map_layered, room_screen_rects};
+use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use app::render::room_info::draw_room_info;
@@ -36,7 +36,7 @@ use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -194,6 +194,20 @@ fn draw_frame(
             }
         };
 
+        // When a background tidy job is in flight, the map pane border pulses between
+        // red and green. This overrides the normal border color (focused or unfocused).
+        let map_border_override: Option<ratatui::style::Color> = state.tidy_job.as_ref().map(|job| {
+            pulse_border_color(job.started.elapsed())
+        });
+        let map_pane = |title: &str, focused: bool| {
+            let block = pane(title, focused);
+            if let Some(pulse_color) = map_border_override {
+                block.border_style(Style::default().fg(pulse_color))
+            } else {
+                block
+            }
+        };
+
         match state.layout {
             Layout::TranscriptFull => {
                 let block = pane("Story", state.focus == Focus::Game);
@@ -204,7 +218,7 @@ fn draw_frame(
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                let block = pane("Map", state.focus == Focus::Map);
+                let block = map_pane("Map", state.focus == Focus::Map);
                 let inner = block.inner(main_area);
                 block.render(main_area, buf);
                 render_map_layered(&rm, &mapper.graph, state, inner, buf);
@@ -225,7 +239,7 @@ fn draw_frame(
                 render_transcript(&session.machine, state, transcript_inner, buf);
                 story_area = transcript_inner;
 
-                let map_block = pane("Map", state.focus == Focus::Map);
+                let map_block = map_pane("Map", state.focus == Focus::Map);
                 let map_inner = map_block.inner(chunks[1]);
                 map_block.render(chunks[1], buf);
                 render_map_layered(&rm, &mapper.graph, state, map_inner, buf);
@@ -560,14 +574,62 @@ fn main() {
     // ── 5. Event loop ─────────────────────────────────────────────────────────
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
-    // Assigned by the first `draw_frame` at the top of the loop before any read (the draw's
-    // error arm diverges), so it never needs a dead initial value.
-    let mut last_panes: PaneRects;
+    // Initialized to a zero-sized default; updated by every draw_frame call.
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new() };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
 
+    // Poll FPS while a background tidy is in flight.
+    const TIDY_POLL_MS: u64 = 33;
+
     loop {
+        // ── Background tidy job: poll and apply ───────────────────────────────
+        // Check whether the in-flight tidy job has finished. Do this BEFORE the
+        // draw so the first fully-drawn frame after completion shows the new layout.
+        if state.tidy_job.as_ref().map_or(false, |j| j.handle.is_finished()) {
+            let job = state.tidy_job.take().unwrap();
+            let current_gen = state.graph_gen;
+            let active_layer = job.layer;
+            match job.handle.join() {
+                Ok(tidied) => {
+                    match apply_tidy_result(&mut mapper.graph, tidied, active_layer, job.gen, current_gen) {
+                        ApplyTidyOutcome::Applied => {
+                            // Re-center on the current room if it moved.
+                            if let Some(rid) = mapper.graph.current() {
+                                if let Some(room) = mapper.graph.room(rid) {
+                                    if let Some(pos) = room.pos {
+                                        let (pw, ph) = map_pane_dims(last_panes.map);
+                                        state.recenter_on(pos, pw, ph);
+                                    }
+                                }
+                            }
+                        }
+                        ApplyTidyOutcome::Stale => {
+                            // Graph changed mid-tidy: re-trigger a fresh tidy immediately.
+                            let active_layer2 = state.active_layer(&mapper.graph);
+                            let graph_clone = mapper.graph.clone();
+                            let gen2 = state.graph_gen;
+                            let handle2 = std::thread::spawn(move || {
+                                let mut g = graph_clone;
+                                tidy_layer_silent(&mut g, active_layer2);
+                                g
+                            });
+                            state.tidy_job = Some(TidyJob {
+                                handle: handle2,
+                                layer: active_layer2,
+                                gen: gen2,
+                                started: std::time::Instant::now(),
+                            });
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Worker panicked: discard result, leave graph as-is. Do not crash.
+                }
+            }
+        }
+
         // Draw.
         match draw_frame(&mut terminal, &session, &mapper, &state) {
             Ok(panes) => {
@@ -580,8 +642,10 @@ fn main() {
             }
         }
 
-        // Poll for a key event with a short timeout so we stay responsive.
-        let event_ready = match poll(Duration::from_millis(50)) {
+        // Poll for a key event. Use a shorter timeout while a tidy job is in flight
+        // so the pulsing border animates at ~30fps; otherwise use the normal 50ms.
+        let poll_ms = if state.tidy_job.is_some() { TIDY_POLL_MS } else { 50 };
+        let event_ready = match poll(Duration::from_millis(poll_ms)) {
             Ok(r) => r,
             Err(e) => {
                 restore_terminal();
@@ -674,6 +738,9 @@ fn main() {
 
                 apply_turn(&mut mapper, &cmd, &result);
 
+                // Bump the graph generation so any in-flight tidy result is detected as stale.
+                state.graph_gen = state.graph_gen.wrapping_add(1);
+
                 // ── Inventory tracking ────────────────────────────────────────
                 {
                     use app::inventory::{detect_player_obj, parse_inventory_output};
@@ -746,35 +813,39 @@ fn main() {
 
                 // Background tidy: silently re-tidy the active layer when the
                 // configured mode calls for it. Only runs in Auto layout mode.
+                // Overlap signal is computed for ALL modes (not only OnOverlap).
                 if mapper.mode == mapper::layout::LayoutMode::Auto {
                     let new_room = mapper.graph.rooms().count() > rooms_before;
                     let active_layer = state.active_layer(&mapper.graph);
-                    let overlap = if state.config.background_tidy == app::config::BackgroundTidy::OnOverlap {
-                        // Overlap: any duplicate cell in the active layer OR any distorted edge.
-                        let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
-                        let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
-                        let has_overlap = cells.len() < total_rooms;
-                        let has_distorted = mapper.graph.connections().iter().any(|c| {
-                            c.distorted
-                                && mapper.graph.layer_of(c.origin) == active_layer
-                                && mapper.graph.layer_of(c.dest) == active_layer
-                        });
-                        has_overlap || has_distorted
-                    } else {
-                        false
-                    };
+                    // Always compute overlap so all modes can react to it.
+                    let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
+                    let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
+                    let has_overlap = cells.len() < total_rooms;
+                    let has_distorted = mapper.graph.connections().iter().any(|c| {
+                        c.distorted
+                            && mapper.graph.layer_of(c.origin) == active_layer
+                            && mapper.graph.layer_of(c.dest) == active_layer
+                    });
+                    let overlap = has_overlap || has_distorted;
                     if should_bg_tidy(state.config.background_tidy, new_room, overlap, &mut bg_tidy_counter) {
-                        tidy_layer_silent(&mut mapper.graph, active_layer);
-                        // Re-center on the current room if it moved off-screen.
-                        if let Some(snap) = &result.location {
-                            let rid = snap.number as mapper::graph::RoomId;
-                            if let Some(room) = mapper.graph.room(rid) {
-                                if let Some(pos) = room.pos {
-                                    let (pw, ph) = map_pane_dims(last_panes.map);
-                                    state.recenter_on(pos, pw, ph);
-                                }
-                            }
+                        // Spawn a worker thread only if no job is currently in flight (coalesce).
+                        if state.tidy_job.is_none() {
+                            let graph_clone = mapper.graph.clone();
+                            let gen = state.graph_gen;
+                            let handle = std::thread::spawn(move || {
+                                let mut g = graph_clone;
+                                tidy_layer_silent(&mut g, active_layer);
+                                g
+                            });
+                            state.tidy_job = Some(TidyJob {
+                                handle,
+                                layer: active_layer,
+                                gen,
+                                started: std::time::Instant::now(),
+                            });
                         }
+                        // If a job is already in flight we skip spawning; the gen check after
+                        // join will detect the stale result and re-trigger as needed.
                     }
                 }
 

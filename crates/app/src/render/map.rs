@@ -31,12 +31,41 @@ use mapper::router::{RoutedEdge, Side};
 use mapper::direction::Direction;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-#[cfg(test)]
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::state::{AppState, Zoom};
 use crate::symbols::{BoxStyle, SymbolSet};
+
+// ── Pulsing border ────────────────────────────────────────────────────────────
+
+/// Pulse frequency in Hz (cycles per second) for the background-tidy border animation.
+pub const PULSE_HZ: f64 = 1.0;
+/// Red endpoint of the pulse (220, 60, 60).
+const PULSE_RED: (u8, u8, u8) = (220, 60, 60);
+/// Green endpoint of the pulse (60, 200, 90).
+const PULSE_GREEN: (u8, u8, u8) = (60, 200, 90);
+
+/// Compute the pulsed map-border color for a given elapsed time since job spawn.
+///
+/// The color oscillates between `PULSE_RED` and `PULSE_GREEN` at `PULSE_HZ` Hz
+/// using a sine-based lerp:
+///   f = (sin(t * TAU * PULSE_HZ) + 1) / 2  →  [0, 1]
+///
+/// At `elapsed = 0` (phase 0, sin = 0) the result is the midpoint.
+/// At quarter-period (sin = 1, f = 1) the result is the green endpoint.
+/// At three-quarter-period (sin = -1, f = 0) the result is the red endpoint.
+///
+/// Called only when a tidy job is in flight; the caller picks `normal` when idle.
+pub fn pulse_border_color(elapsed: std::time::Duration) -> Color {
+    let t = elapsed.as_secs_f64();
+    let f = ((t * std::f64::consts::TAU * PULSE_HZ).sin() + 1.0) / 2.0;
+    let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * f).round() as u8;
+    Color::Rgb(
+        lerp(PULSE_RED.0, PULSE_GREEN.0),
+        lerp(PULSE_RED.1, PULSE_GREEN.1),
+        lerp(PULSE_RED.2, PULSE_GREEN.2),
+    )
+}
 
 // ── Step sizes and box dimensions ─────────────────────────────────────────────
 
@@ -4086,5 +4115,79 @@ mod tests {
             Color::Cyan,
             "arrow of a non-selected room must not get the selected room bg"
         );
+    }
+
+    // ── pulse_border_color ────────────────────────────────────────────────────
+
+    /// At three-quarter period (sin = -1, f = 0) the result is the red endpoint.
+    #[test]
+    fn pulse_border_color_red_at_three_quarter_period() {
+        use std::time::Duration;
+        // Three-quarter period: sin = -1, f = 0 → pure red endpoint.
+        let three_quarter = Duration::from_secs_f64(3.0 / (4.0 * PULSE_HZ));
+        let color = pulse_border_color(three_quarter);
+        assert_eq!(color, Color::Rgb(PULSE_RED.0, PULSE_RED.1, PULSE_RED.2),
+            "at three-quarter period the border must be the red endpoint");
+    }
+
+    /// At quarter period (sin = 1, f = 1) the result is the green endpoint.
+    #[test]
+    fn pulse_border_color_green_at_quarter_period() {
+        use std::time::Duration;
+        // Quarter period: sin = 1, f = 1 → pure green endpoint.
+        let quarter = Duration::from_secs_f64(1.0 / (4.0 * PULSE_HZ));
+        let color = pulse_border_color(quarter);
+        assert_eq!(color, Color::Rgb(PULSE_GREEN.0, PULSE_GREEN.1, PULSE_GREEN.2),
+            "at quarter period the border must be the green endpoint");
+    }
+
+    /// The pulsing border smoke test: with a tidy_job active, the map border cell
+    /// style differs from the idle border (which uses the normal focused_border color).
+    #[test]
+    fn tidy_job_active_border_color_differs_from_idle() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::widgets::{Block, Borders};
+        use ratatui::prelude::Widget;
+        use ratatui::style::Style;
+        use std::time::Duration;
+        use crate::state::AppState;
+
+        let state = AppState::default();
+        let normal_border_color = state.colors.focused_border.fg.unwrap_or(Color::White);
+
+        // At quarter period the pulse is the green endpoint.
+        let quarter = Duration::from_secs_f64(1.0 / (4.0 * PULSE_HZ));
+        let active_color = pulse_border_color(quarter);
+
+        // The pulsed green color must differ from the normal idle color (Cyan).
+        assert_ne!(normal_border_color, active_color,
+            "pulsing border color at quarter period must differ from the normal border color");
+
+        // Render smoke: draw a Block with each border style into a TestBackend and
+        // verify the border cell fg differs between idle and active.
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let area = f.area();
+            let buf = f.buffer_mut();
+
+            // Idle: normal border color.
+            let idle_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(normal_border_color));
+            idle_block.render(area, buf);
+            let idle_cell_fg = buf.cell((0, 0)).map(|c| c.fg).unwrap_or(Color::Reset);
+
+            // Active: pulsing color.
+            let active_block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(active_color));
+            active_block.render(area, buf);
+            let active_cell_fg = buf.cell((0, 0)).map(|c| c.fg).unwrap_or(Color::Reset);
+
+            assert_ne!(idle_cell_fg, active_cell_fg,
+                "rendered border cell fg must differ when tidy_job is active");
+        }).unwrap();
     }
 }

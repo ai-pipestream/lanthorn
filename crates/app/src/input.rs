@@ -860,12 +860,63 @@ pub fn tidy_layer_silent(
     }
 }
 
+/// Outcome of attempting to apply a finished async tidy job to the real graph.
+pub enum ApplyTidyOutcome {
+    /// Positions were applied; caller should recenter if needed.
+    Applied,
+    /// Job result was stale (graph changed mid-tidy); caller should re-trigger.
+    Stale,
+}
+
+/// Pure helper: apply the positions from a finished tidy worker to the real graph,
+/// guarded by a generation check.
+///
+/// If `job_gen == current_gen` the worker's final room positions (and distortion flags)
+/// are written into `real_graph` for every room that still exists, and `Applied` is
+/// returned.  If the generations differ the result is discarded and `Stale` is returned;
+/// the caller must re-trigger a fresh tidy.
+///
+/// Extracted for unit-testability; does not spawn threads.
+pub fn apply_tidy_result(
+    real_graph: &mut mapper::graph::MapGraph,
+    tidied: mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+    job_gen: u64,
+    current_gen: u64,
+) -> ApplyTidyOutcome {
+    if job_gen != current_gen {
+        return ApplyTidyOutcome::Stale;
+    }
+
+    // Copy final positions from the tidied clone back into the real graph.
+    for id in real_graph.rooms_in_layer(layer) {
+        if let Some(p) = tidied.room(id).and_then(|r| r.pos) {
+            real_graph.set_pos(id, p);
+        }
+    }
+
+    // Copy distortion flags.
+    let n = real_graph.connections().len();
+    for idx in 0..n {
+        let c = real_graph.connections()[idx].clone();
+        if real_graph.layer_of(c.origin) == layer && real_graph.layer_of(c.dest) == layer {
+            if let Some(sc) = tidied.connections().iter()
+                .find(|s| s.origin == c.origin && s.dir == c.dir && s.dest == c.dest)
+            {
+                real_graph.set_conn_distorted(idx, sc.distorted);
+            }
+        }
+    }
+
+    ApplyTidyOutcome::Applied
+}
+
 /// Pure decision function for background-tidy mode. Extracted for unit-testability.
 ///
 /// - `mode`: the configured `BackgroundTidy` value.
 /// - `new_room`: whether this turn discovered at least one new room.
 /// - `overlap`: whether the active layer has a room overlap or distorted edge after
-///   incremental placement (only meaningful for `OnOverlap`).
+///   incremental placement (fed to all modes now, not only `OnOverlap`).
 /// - `counter`: mutable debounce counter; incremented on each new room, reset when
 ///   a tidy fires under `Debounced`.
 ///
@@ -879,9 +930,14 @@ pub fn should_bg_tidy(
     use crate::config::BackgroundTidy;
     match mode {
         BackgroundTidy::Off => false,
-        BackgroundTidy::EveryRoom => new_room,
+        BackgroundTidy::EveryRoom => new_room || overlap,
         BackgroundTidy::OnOverlap => overlap,
         BackgroundTidy::Debounced => {
+            // An overlap fires immediately without waiting for the debounce counter.
+            if overlap {
+                *counter = 0;
+                return true;
+            }
             if new_room {
                 *counter += 1;
                 if *counter >= crate::config::BG_TIDY_DEBOUNCE {
@@ -3347,10 +3403,14 @@ mod tests {
     }
 
     #[test]
-    fn should_bg_tidy_every_room_follows_new_room() {
+    fn should_bg_tidy_every_room_follows_new_room_or_overlap() {
         use crate::config::BackgroundTidy;
         let mut c = 0u32;
+        // Fires on new room.
         assert!(should_bg_tidy(BackgroundTidy::EveryRoom, true, false, &mut c));
+        // Fires on overlap even without a new room.
+        assert!(should_bg_tidy(BackgroundTidy::EveryRoom, false, true, &mut c));
+        // No new room and no overlap: no fire.
         assert!(!should_bg_tidy(BackgroundTidy::EveryRoom, false, false, &mut c));
     }
 
@@ -3375,6 +3435,22 @@ mod tests {
         assert_eq!(c, 0, "counter resets after Debounced fires");
         // No new room: never fires.
         assert!(!should_bg_tidy(BackgroundTidy::Debounced, false, false, &mut c));
+    }
+
+    #[test]
+    fn should_bg_tidy_debounced_fires_immediately_on_overlap() {
+        use crate::config::BackgroundTidy;
+        // Overlap fires immediately regardless of debounce counter value.
+        let mut c = 0u32;
+        assert!(should_bg_tidy(BackgroundTidy::Debounced, false, true, &mut c),
+            "overlap should fire immediately even without a new room");
+        assert_eq!(c, 0, "counter is reset when overlap fires");
+
+        // Even with a partially-accumulated counter, overlap fires immediately.
+        let mut c = 2u32;
+        assert!(should_bg_tidy(BackgroundTidy::Debounced, false, true, &mut c),
+            "overlap fires even with a non-zero counter");
+        assert_eq!(c, 0, "counter is reset when overlap fires");
     }
 
     // ── tidy_layer_silent ─────────────────────────────────────────────────────
@@ -3411,6 +3487,56 @@ mod tests {
         let pos = |g: &mapper::graph::MapGraph, id| g.room(id).and_then(|r| r.pos);
         assert_eq!(pos(&g_pipeline, 1), pos(&g_silent, 1), "room 1 position must match");
         assert_eq!(pos(&g_pipeline, 2), pos(&g_silent, 2), "room 2 position must match");
+    }
+
+    // ── apply_tidy_result ─────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_tidy_result_matching_gen_writes_positions() {
+        use mapper::direction::Direction;
+        // Build a two-room graph, run tidy on a clone (simulating worker output),
+        // then apply to the original.
+        let mut real = mapper::graph::MapGraph::new();
+        real.upsert_room(1, "A".into());
+        real.upsert_room(2, "B".into());
+        real.add_edge(1, Direction::E, 2);
+        real.add_edge(2, Direction::W, 1);
+
+        let mut tidied = real.clone();
+        tidy_layer_silent(&mut tidied, mapper::layer::MAIN_LAYER);
+        let tidied_pos1 = tidied.room(1).and_then(|r| r.pos);
+        let tidied_pos2 = tidied.room(2).and_then(|r| r.pos);
+
+        let gen = 42u64;
+        let outcome = apply_tidy_result(&mut real, tidied, mapper::layer::MAIN_LAYER, gen, gen);
+        assert!(matches!(outcome, ApplyTidyOutcome::Applied), "matching gen should return Applied");
+        assert_eq!(real.room(1).and_then(|r| r.pos), tidied_pos1, "position 1 must be applied");
+        assert_eq!(real.room(2).and_then(|r| r.pos), tidied_pos2, "position 2 must be applied");
+    }
+
+    #[test]
+    fn apply_tidy_result_stale_gen_discards_result() {
+        use mapper::direction::Direction;
+        let mut real = mapper::graph::MapGraph::new();
+        real.upsert_room(1, "A".into());
+        real.upsert_room(2, "B".into());
+        real.add_edge(1, Direction::E, 2);
+        real.add_edge(2, Direction::W, 1);
+
+        // Force known positions on the real graph so we can confirm they are NOT overwritten.
+        real.set_pos(1, (100, 100));
+        real.set_pos(2, (200, 200));
+
+        let mut tidied = real.clone();
+        tidy_layer_silent(&mut tidied, mapper::layer::MAIN_LAYER);
+
+        let job_gen = 5u64;
+        let current_gen = 6u64; // graph changed mid-tidy
+        let outcome = apply_tidy_result(&mut real, tidied, mapper::layer::MAIN_LAYER, job_gen, current_gen);
+        assert!(matches!(outcome, ApplyTidyOutcome::Stale), "differing gen should return Stale");
+        // Positions must be untouched.
+        assert_eq!(real.room(1).and_then(|r| r.pos), Some((100, 100)), "stale result must not overwrite position 1");
+        assert_eq!(real.room(2).and_then(|r| r.pos), Some((200, 200)), "stale result must not overwrite position 2");
     }
 
     // ── Leaf 1: CycleLayoutReverse ────────────────────────────────────────────
