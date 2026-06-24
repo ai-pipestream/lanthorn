@@ -12,6 +12,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Widget};
 use ratatui::Terminal;
 
+use clap::Parser;
+
+use app::config::{resolve, Cli};
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
@@ -48,15 +51,13 @@ fn install_panic_hook() {
 /// Determine the directory where maps (and saves) are stored.
 ///
 /// Priority:
-/// 1. `$BABELMAP_MAP_DIR` environment variable.
-/// 2. `$HOME/.babelmap/maps`.
-/// 3. `./.babelmap/maps` (fallback when HOME is unset).
-fn map_dir() -> std::path::PathBuf {
+/// 1. `$BABELMAP_MAP_DIR` environment variable (escape hatch for scripts).
+/// 2. `config.user_dir/maps` (from config file / CLI flags / defaults).
+fn map_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
     if let Ok(d) = std::env::var("BABELMAP_MAP_DIR") {
         return std::path::PathBuf::from(d);
     }
-    let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(base).join(".babelmap").join("maps")
+    user_dir.join("maps")
 }
 
 // ── Draw helper ───────────────────────────────────────────────────────────────
@@ -199,21 +200,16 @@ fn draw_frame(
 // ── main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
-    // ── 1. Parse args ─────────────────────────────────────────────────────────
+    // ── 1. Parse args + load config ───────────────────────────────────────────
 
-    let mut args = std::env::args().skip(1);
-    let story_path = match args.next() {
-        Some(p) => p,
-        None => {
-            eprintln!("Usage: babelmap <story.z5>");
-            std::process::exit(2);
-        }
-    };
+    let cli = Cli::parse();
+    let cfg = resolve(&cli);
+    let story_path = cli.story.clone();
 
     let story_bytes = match std::fs::read(&story_path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("babelmap: cannot read '{}': {}", story_path, e);
+            eprintln!("babelmap: cannot read '{}': {}", story_path.display(), e);
             std::process::exit(1);
         }
     };
@@ -237,7 +233,7 @@ fn main() {
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
     let ifid = compute_ifid(&story_bytes);
-    let dir = map_dir();
+    let dir = map_dir(&cfg.user_dir);
     let map_file = map_path(&dir, &ifid);
 
     let mut mapper = load_map(&map_file).unwrap_or_default();

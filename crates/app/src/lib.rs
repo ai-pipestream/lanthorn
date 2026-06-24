@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod config;
 pub mod export_dot;
 pub mod export_svg;
 pub mod ifid;
