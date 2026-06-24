@@ -107,6 +107,8 @@ pub enum Action {
     /// typed AND suggestions are available; otherwise Tab keeps its ToggleFocus
     /// role).
     Autocomplete,
+    /// Toggle the full-screen help overlay.
+    ToggleHelp,
     /// No binding found — no-op.
     None,
 }
@@ -597,6 +599,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     }
                 }
             }
+        }
+
+        Action::ToggleHelp => {
+            state.show_help = !state.show_help;
         }
 
         // Caller-handled: silently ignored.

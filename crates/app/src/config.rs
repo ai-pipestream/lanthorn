@@ -4,6 +4,16 @@ use std::path::PathBuf;
 use clap::Parser;
 use serde::Deserialize;
 
+// ── Keymap config ─────────────────────────────────────────────────────────────
+
+/// The [keymap] section of config.toml.  Maps snake_case command names to
+/// comma-separated key-spec strings.  Absent commands keep their defaults.
+#[derive(Debug, Default, Deserialize)]
+pub struct KeymapConfig {
+    #[serde(default)]
+    pub overrides: BTreeMap<String, String>,
+}
+
 // ── Symbol config ─────────────────────────────────────────────────────────────
 
 fn default_box_style() -> String { "rounded".into() }
@@ -80,11 +90,18 @@ pub struct Config {
     /// Map symbol configuration: presets + per-glyph overrides.
     #[serde(default)]
     pub symbols: SymbolConfig,
+    /// Keymap overrides: command_name → key-spec string(s).
+    #[serde(default)]
+    pub keymap: KeymapConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { user_dir: default_user_dir(), symbols: SymbolConfig::default() }
+        Self {
+            user_dir: default_user_dir(),
+            symbols: SymbolConfig::default(),
+            keymap: KeymapConfig::default(),
+        }
     }
 }
 
@@ -114,6 +131,7 @@ pub fn resolve(cli: &Cli) -> Config {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
             cfg.user_dir = from_file.user_dir;
             cfg.symbols = from_file.symbols;
+            cfg.keymap = from_file.keymap;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
