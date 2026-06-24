@@ -123,10 +123,10 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             BackgroundTidy::Debounced => "debounced".to_string(),
         },
         6 => cfg.colors.scheme.clone().unwrap_or_else(|| "(none)".to_string()),
-        7 => cfg.symbols.box_style.clone(),
-        8 => cfg.symbols.arrow_set.clone(),
-        9 => cfg.symbols.portal_icons.clone(),
-        10 => cfg.symbols.path_style.clone(),
+        7 => cfg.symbols.box_style.clone().unwrap_or_else(crate::config::default_box_style),
+        8 => cfg.symbols.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
+        9 => cfg.symbols.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
+        10 => cfg.symbols.path_style.clone().unwrap_or_else(crate::config::default_path_style),
         _ => String::new(),
     }
 }

@@ -72,6 +72,23 @@ fn map_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
     user_dir.join("maps")
 }
 
+/// Persist the live look (`state.colors`/`state.symbols`) to the user's personal
+/// style file and repoint `config.toml`'s `style` key at it, then re-resolve so the
+/// live look matches the self-contained file just written.
+fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
+    let style_path = app::style::personal_style_path(user_dir);
+    let _ = app::style::write_style_full(&style_path, &state.colors, &state.symbols);
+    state.config.style = Some(style_path.to_string_lossy().into_owned());
+    let _ = app::config::write_config(user_dir, &state.config);
+
+    // Re-resolve from the now-self-contained style file (+ any config overrides).
+    let (base, _w1) = app::style::load_style(state.config.style.as_deref(), user_dir);
+    let over = app::style::style_from_config(&state.config.colors, &state.config.symbols);
+    let (cs, set, _w2) = app::style::resolve(&app::style::merge(&base, &over), user_dir);
+    state.colors = cs;
+    state.symbols = set;
+}
+
 // ── Hint bar ─────────────────────────────────────────────────────────────────
 
 use app::keymap::{Command, Context, KeyMap};
@@ -485,10 +502,13 @@ fn main() {
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
     let mut state = AppState::default();
-    state.symbols = app::symbols::SymbolSet::resolve(&cfg.symbols);
-    let (colors, color_warnings) = app::colors::ColorScheme::resolve(&cfg.colors, &cfg.user_dir);
-    state.colors = colors;
-    for w in color_warnings {
+    // Resolve the look from the style file (base) ⊕ config override sections.
+    let (base, w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
+    let over = app::style::style_from_config(&cfg.colors, &cfg.symbols);
+    let (cs, set, w2) = app::style::resolve(&app::style::merge(&base, &over), &cfg.user_dir);
+    state.colors = cs;
+    state.symbols = set;
+    for w in w1.into_iter().chain(w2) {
         state.push_transcript(&format!("[{}]", w));
     }
     let (keymap, keymap_warnings) = app::keymap::KeyMap::resolve(&cfg.keymap);
@@ -683,12 +703,11 @@ fn main() {
             _ => continue,
         };
 
-        // Snapshot gallery config before apply_action clears it on GalleryClose.
-        let gallery_cfg_on_close = if matches!(action, Action::GalleryClose) {
-            state.gallery.as_ref().map(|g| g.symbol_config())
-        } else {
-            None
-        };
+        // Note whether this action closes the gallery (persist the look afterward).
+        let gallery_cfg_on_close = matches!(action, Action::GalleryClose);
+
+        // Note whether this action is the on-demand "Output all settings" export.
+        let export_style_now = matches!(action, Action::GalleryExportStyle);
 
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
@@ -1152,14 +1171,29 @@ fn main() {
             handle_saves_prompt(kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes);
         }
 
-        // After apply_action: if gallery was just closed, persist the selections to config.
-        if let Some(sym_cfg) = gallery_cfg_on_close {
-            let _ = app::config::write_symbols(&state.config.user_dir, &sym_cfg);
+        // After apply_action: if gallery was just closed, write the resolved look to
+        // the personal style file and repoint config.toml at it.
+        if gallery_cfg_on_close {
+            let user_dir = state.config.user_dir.clone();
+            save_style_and_repoint(&mut state, &user_dir);
         }
 
-        // After apply_action: if config screen was just saved, write config to disk.
+        // After apply_action: if the "Output all settings" button was pressed, sync the
+        // live gallery selections, then write_style_full + repoint on demand (gallery
+        // stays open).
+        if export_style_now {
+            if let Some(g) = state.gallery.as_ref() {
+                state.symbols = app::symbols::SymbolSet::resolve(&g.symbol_config());
+            }
+            let user_dir = state.config.user_dir.clone();
+            save_style_and_repoint(&mut state, &user_dir);
+        }
+
+        // After apply_action: if config screen was just saved, write the resolved look
+        // to the personal style file and repoint config.toml at it.
         if let Some(cfg_to_write) = config_to_save {
-            let _ = app::config::write_config(&cfg_to_write.user_dir, &cfg_to_write);
+            let user_dir = cfg_to_write.user_dir.clone();
+            save_style_and_repoint(&mut state, &user_dir);
         }
     }
 

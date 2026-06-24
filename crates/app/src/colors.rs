@@ -6,15 +6,13 @@
 //! - [`ColorScheme`] holds the resolved per-element colors used by the renderer.
 //! - [`ColorScheme::terminal_default`] reproduces the hardcoded colors in the current renderer.
 //! - [`ColorScheme::from_ghostty`] maps a parsed scheme onto UI elements.
-//! - [`ColorScheme::resolve`] is the top-level entry point: reads config, finds the scheme,
-//!   applies overrides, and returns the final scheme plus any diagnostic warnings.
+//! - [`resolve_base`] is the live entry point: resolves a scheme name/path to a
+//!   `(ColorScheme, GhosttyScheme, warnings)` triple used by `style::resolve`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
-
-use crate::config::ColorsConfig;
 
 // ── Built-in theme texts ──────────────────────────────────────────────────────
 
@@ -30,7 +28,7 @@ const BUILTIN_TOMORROW_NIGHT: &str = include_str!("colors/tomorrow-night.ghostty
 /// `palette = N=#rrggbb` (or `rrggbb`), `background`, `foreground`,
 /// `cursor-color`, `selection-background`, `selection-foreground`.
 /// All other keys are silently ignored.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct GhosttyScheme {
     /// The 16-color ANSI palette.  Entries that were not specified in the file
     /// default to `Color::Reset`.
@@ -293,86 +291,79 @@ impl ColorScheme {
         }
     }
 
-    /// Resolve the final `ColorScheme` from config and the user-data directory.
-    ///
-    /// Resolution order:
-    /// 1. `cfg.scheme == None` → [`terminal_default`], then element overrides applied.
-    /// 2. A known built-in name → that scheme's embedded text.
-    /// 3. Any other string → treated as a file path (`~` expanded; relative to `dir`).
-    /// 4. Parse failure or missing file → warning appended, fall back to [`terminal_default`].
-    ///
-    /// Element overrides from `cfg.elements` are always applied on top (even for `terminal_default`).
-    pub fn resolve(cfg: &ColorsConfig, dir: &Path) -> (ColorScheme, Vec<String>) {
-        let mut warnings: Vec<String> = Vec::new();
-
-        let scheme_name = cfg.scheme.as_deref();
-
-        let base = match scheme_name {
-            None => {
-                // No scheme: use terminal defaults, then apply any element overrides.
-                if cfg.elements.is_empty() {
-                    return (ColorScheme::terminal_default(), warnings);
-                }
-                // Apply overrides on top of terminal_default by building a pseudo-scheme
-                // from ANSI named colors then running from_ghostty.
-                // Simpler: just apply element overrides directly to terminal_default.
-                let mut cs = ColorScheme::terminal_default();
-                apply_terminal_overrides(&mut cs, &cfg.elements);
-                return (cs, warnings);
-            }
-            Some(name) => {
-                match builtin_scheme_text(name) {
-                    Some(text) => match GhosttyScheme::parse(text) {
-                        Ok(gs) => gs,
-                        Err(e) => {
-                            warnings.push(format!(
-                                "built-in scheme '{}' failed to parse: {}; using terminal defaults",
-                                name, e
-                            ));
-                            let mut cs = ColorScheme::terminal_default();
-                            apply_terminal_overrides(&mut cs, &cfg.elements);
-                            return (cs, warnings);
-                        }
-                    },
-                    None => {
-                        // Not a built-in: treat as a file path.
-                        let path = expand_path(name, dir);
-                        match std::fs::read_to_string(&path) {
-                            Ok(text) => match GhosttyScheme::parse(&text) {
-                                Ok(gs) => gs,
-                                Err(e) => {
-                                    warnings.push(format!(
-                                        "scheme file '{}' failed to parse: {}; using terminal defaults",
-                                        path.display(),
-                                        e
-                                    ));
-                                    let mut cs = ColorScheme::terminal_default();
-                                    apply_terminal_overrides(&mut cs, &cfg.elements);
-                                    return (cs, warnings);
-                                }
-                            },
-                            Err(e) => {
-                                warnings.push(format!(
-                                    "could not read scheme file '{}': {}; using terminal defaults",
-                                    path.display(),
-                                    e
-                                ));
-                                let mut cs = ColorScheme::terminal_default();
-                                apply_terminal_overrides(&mut cs, &cfg.elements);
-                                return (cs, warnings);
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        let cs = ColorScheme::from_ghostty(&base, &cfg.elements);
-        (cs, warnings)
-    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Resolve a scheme name/path to a `(ColorScheme, GhosttyScheme, warnings)` triple.
+///
+/// - `scheme == None` → returns `(terminal_default(), GhosttyScheme::default(), [])`
+/// - A known built-in name or a file path → parses the Ghostty theme and returns
+///   `(ColorScheme::from_ghostty(&gs, &empty), gs, [])`.
+/// - Parse/read failure → returns `(terminal_default(), GhosttyScheme::default(), [warning])`.
+///
+/// The caller is responsible for applying element overrides on top of the returned
+/// `ColorScheme` if needed.
+pub(crate) fn resolve_base(
+    scheme: Option<&str>,
+    dir: &Path,
+) -> (ColorScheme, GhosttyScheme, Vec<String>) {
+    let mut warnings: Vec<String> = Vec::new();
+
+    let name = match scheme {
+        None => return (ColorScheme::terminal_default(), GhosttyScheme::default(), warnings),
+        Some(n) => n,
+    };
+
+    let gs = match builtin_scheme_text(name) {
+        Some(text) => match GhosttyScheme::parse(text) {
+            Ok(gs) => gs,
+            Err(e) => {
+                warnings.push(format!(
+                    "built-in scheme '{}' failed to parse: {}; using terminal defaults",
+                    name, e
+                ));
+                return (ColorScheme::terminal_default(), GhosttyScheme::default(), warnings);
+            }
+        },
+        None => {
+            let path = expand_path(name, dir);
+            match std::fs::read_to_string(&path) {
+                Ok(text) => match GhosttyScheme::parse(&text) {
+                    Ok(gs) => gs,
+                    Err(e) => {
+                        warnings.push(format!(
+                            "scheme file '{}' failed to parse: {}; using terminal defaults",
+                            path.display(),
+                            e
+                        ));
+                        return (
+                            ColorScheme::terminal_default(),
+                            GhosttyScheme::default(),
+                            warnings,
+                        );
+                    }
+                },
+                Err(e) => {
+                    warnings.push(format!(
+                        "could not read scheme file '{}': {}; using terminal defaults",
+                        path.display(),
+                        e
+                    ));
+                    return (
+                        ColorScheme::terminal_default(),
+                        GhosttyScheme::default(),
+                        warnings,
+                    );
+                }
+            }
+        }
+    };
+
+    let empty_overrides = std::collections::BTreeMap::new();
+    let cs = ColorScheme::from_ghostty(&gs, &empty_overrides);
+    (cs, gs, warnings)
+}
 
 /// Return the embedded Ghostty theme text for a known built-in name, or `None`.
 fn builtin_scheme_text(name: &str) -> Option<&'static str> {
@@ -385,7 +376,7 @@ fn builtin_scheme_text(name: &str) -> Option<&'static str> {
 }
 
 /// Expand `~` in a path string and resolve relative paths against `base_dir`.
-fn expand_path(s: &str, base_dir: &Path) -> std::path::PathBuf {
+pub(crate) fn expand_path(s: &str, base_dir: &Path) -> std::path::PathBuf {
     let expanded = if s.starts_with('~') {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         std::path::PathBuf::from(home).join(s.trim_start_matches("~/").trim_start_matches('~'))
@@ -458,7 +449,11 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
 }
 
 /// Parse a ratatui named color (case-insensitive).
-fn parse_named_color(s: &str) -> Option<Color> {
+///
+/// Accepts the standard ANSI names (`black`, `red`, … `white`) and their
+/// `bright-*` / `light-*` / `dark-*` variants. `bright-black` and `dark-black`
+/// both map to `DarkGray`.
+pub fn parse_named_color(s: &str) -> Option<Color> {
     match s.to_lowercase().as_str() {
         "black" => Some(Color::Black),
         "red" => Some(Color::Red),
@@ -468,60 +463,27 @@ fn parse_named_color(s: &str) -> Option<Color> {
         "magenta" => Some(Color::Magenta),
         "cyan" => Some(Color::Cyan),
         "gray" | "grey" => Some(Color::Gray),
-        "darkgray" | "dark_gray" | "darkgrey" | "dark_grey" => Some(Color::DarkGray),
-        "lightred" | "light_red" => Some(Color::LightRed),
-        "lightgreen" | "light_green" => Some(Color::LightGreen),
-        "lightyellow" | "light_yellow" => Some(Color::LightYellow),
-        "lightblue" | "light_blue" => Some(Color::LightBlue),
-        "lightmagenta" | "light_magenta" => Some(Color::LightMagenta),
-        "lightcyan" | "light_cyan" => Some(Color::LightCyan),
         "white" => Some(Color::White),
         "reset" => Some(Color::Reset),
-        _ => None,
-    }
-}
-
-/// Apply per-element overrides to an existing `ColorScheme` using terminal default
-/// colors as context (no Ghostty scheme available).  Accepts only named colors,
-/// 256-index, and hex values — `palette:N` / `background` / `foreground` have no
-/// meaning without a scheme and are ignored with no error.
-fn apply_terminal_overrides(cs: &mut ColorScheme, elements: &BTreeMap<String, String>) {
-    // Build a dummy scheme so we can reuse parse_color_value; palette/bg/fg are ANSI defaults.
-    let dummy = dummy_ansi_scheme();
-    for (element, value) in elements {
-        if let Some(c) = parse_color_value(value, &dummy) {
-            match element.as_str() {
-                "room_normal" => cs.room_normal = cs.room_normal.fg(c),
-                "room_current" => cs.room_current = cs.room_current.fg(c),
-                "room_selected" => cs.room_selected = cs.room_selected.fg(c),
-                "connector" => cs.connector = cs.connector.fg(c),
-                "connector_distorted" => cs.connector_distorted = cs.connector_distorted.fg(c),
-                "portal_connector" => cs.portal_connector = cs.portal_connector.fg(c),
-                "status_bar" => cs.status_bar = cs.status_bar.fg(c),
-                "transcript" => cs.transcript = cs.transcript.fg(c),
-                "suggestion" => cs.suggestion = cs.suggestion.fg(c),
-                "focused_border" => cs.focused_border = cs.focused_border.fg(c),
-                "help_bar" => cs.help_bar = cs.help_bar.fg(c),
-                _ => {} // unknown element names are silently ignored
-            }
+        // dark- variants
+        "dark-gray" | "dark-grey" | "darkgray" | "dark_gray" | "darkgrey" | "dark_grey"
+        | "bright-black" | "dark-black" => Some(Color::DarkGray),
+        // light- / bright- variants
+        "light-red" | "lightred" | "light_red" | "bright-red" => Some(Color::LightRed),
+        "light-green" | "lightgreen" | "light_green" | "bright-green" => Some(Color::LightGreen),
+        "light-yellow" | "lightyellow" | "light_yellow" | "bright-yellow" => {
+            Some(Color::LightYellow)
         }
-    }
-}
-
-/// A dummy `GhosttyScheme` using approximate ANSI named colors, used when
-/// resolving element overrides in terminal-default mode (no file scheme).
-fn dummy_ansi_scheme() -> GhosttyScheme {
-    use Color::*;
-    GhosttyScheme {
-        palette: [
-            Black, Red, Green, Yellow, Blue, Magenta, Cyan, White,
-            DarkGray, LightRed, LightGreen, LightYellow, LightBlue, LightMagenta, LightCyan, White,
-        ],
-        background: Black,
-        foreground: White,
-        cursor: None,
-        selection_bg: None,
-        selection_fg: None,
+        "light-blue" | "lightblue" | "light_blue" | "bright-blue" => Some(Color::LightBlue),
+        "light-magenta" | "lightmagenta" | "light_magenta" | "bright-magenta" => {
+            Some(Color::LightMagenta)
+        }
+        "light-cyan" | "lightcyan" | "light_cyan" | "bright-cyan" => Some(Color::LightCyan),
+        "light-white" | "bright-white" => Some(Color::White),
+        "light-black" | "bright-gray" | "bright-grey" | "light-gray" | "light-grey" => {
+            Some(Color::Gray)
+        }
+        _ => None,
     }
 }
 
@@ -530,7 +492,14 @@ fn dummy_ansi_scheme() -> GhosttyScheme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+
+    #[test]
+    fn parse_color_value_accepts_named_colors() {
+        let scheme = GhosttyScheme::default(); // or a minimal scheme
+        assert_eq!(parse_color_value("red", &scheme), Some(Color::Red));
+        assert_eq!(parse_color_value("bright-blue", &scheme), Some(Color::LightBlue));
+        assert_eq!(parse_color_value("white", &scheme), Some(Color::White));
+    }
 
     // ── GhosttyScheme::parse ──────────────────────────────────────────────────
 
@@ -711,99 +680,4 @@ unknown-key = ignored
         assert_eq!(cs.connector, Style::new().fg(Color::Cyan));
     }
 
-    // ── ColorScheme::resolve ──────────────────────────────────────────────────
-
-    #[test]
-    fn resolve_no_scheme_gives_terminal_default() {
-        let cfg = ColorsConfig::default();
-        let dir = std::path::Path::new("/tmp");
-        let (cs, warnings) = ColorScheme::resolve(&cfg, dir);
-        assert_eq!(cs, ColorScheme::terminal_default());
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn resolve_builtin_tomorrow_night() {
-        let cfg = ColorsConfig {
-            scheme: Some("tomorrow-night".to_string()),
-            elements: BTreeMap::new(),
-        };
-        let (cs, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
-        assert!(warnings.is_empty());
-        // Tomorrow Night palette[6] = #70c0ba.
-        let expected_connector_fg = Color::Rgb(0x70, 0xc0, 0xba);
-        assert_eq!(cs.connector.fg, Some(expected_connector_fg));
-    }
-
-    #[test]
-    fn resolve_builtin_mono() {
-        let cfg = ColorsConfig {
-            scheme: Some("mono".to_string()),
-            elements: BTreeMap::new(),
-        };
-        let (cs, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
-        assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
-        // Just check it resolved without errors and connector has some color.
-        let _ = cs.connector;
-    }
-
-    #[test]
-    fn resolve_bad_path_warns_and_falls_back() {
-        let cfg = ColorsConfig {
-            scheme: Some("/nonexistent/path/theme.ghostty".to_string()),
-            elements: BTreeMap::new(),
-        };
-        let (cs, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
-        assert!(!warnings.is_empty(), "expected a warning for missing file");
-        assert_eq!(cs, ColorScheme::terminal_default());
-    }
-
-    #[test]
-    fn resolve_file_path_loads_scheme() {
-        // Write a temp Ghostty theme file and resolve it.
-        let path = std::env::temp_dir().join("babelmap_test_colors_resolve.ghostty");
-        {
-            let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "background = 1d1f21").unwrap();
-            writeln!(f, "foreground = c5c8c6").unwrap();
-            writeln!(f, "palette = 6=#aabbcc").unwrap();
-        }
-        let cfg = ColorsConfig {
-            scheme: Some(path.to_string_lossy().to_string()),
-            elements: BTreeMap::new(),
-        };
-        let (cs, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
-        assert!(warnings.is_empty(), "unexpected warnings: {:?}", warnings);
-        assert_eq!(cs.connector.fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
-    }
-
-    #[test]
-    fn resolve_no_scheme_with_element_override() {
-        let mut elements = BTreeMap::new();
-        elements.insert("connector".to_string(), "#aabbcc".to_string());
-        let cfg = ColorsConfig {
-            scheme: None,
-            elements,
-        };
-        let (cs, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
-        assert!(warnings.is_empty());
-        assert_eq!(cs.connector.fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
-    }
-
-    #[test]
-    fn resolve_bad_parse_warns_and_falls_back() {
-        // Write a malformed theme file (no background/foreground).
-        let path = std::env::temp_dir().join("babelmap_test_colors_bad_parse.ghostty");
-        {
-            let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "palette = 6=#aabbcc").unwrap();
-        }
-        let cfg = ColorsConfig {
-            scheme: Some(path.to_string_lossy().to_string()),
-            elements: BTreeMap::new(),
-        };
-        let (cs, warnings) = ColorScheme::resolve(&cfg, std::path::Path::new("/tmp"));
-        assert!(!warnings.is_empty(), "expected a warning for bad parse");
-        assert_eq!(cs, ColorScheme::terminal_default());
-    }
 }

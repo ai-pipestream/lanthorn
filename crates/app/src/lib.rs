@@ -13,4 +13,5 @@ pub mod persist_files;
 pub mod render;
 pub mod session;
 pub mod state;
+pub mod style;
 pub mod symbols;
