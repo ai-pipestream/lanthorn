@@ -6,6 +6,7 @@ pub mod room_info;
 pub mod saves;
 pub mod tidy_panel;
 pub mod transcript;
+pub mod verbmenu;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

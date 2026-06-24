@@ -35,6 +35,21 @@ use crate::complete::{room_words_from_text, suggest};
 use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, Prompt, PromptKind};
 
+// ── VerbMenuNavKind ───────────────────────────────────────────────────────────
+
+/// Navigation kind for `Action::VerbMenuNav`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerbMenuNavKind {
+    /// Move the selection up by one in the current pane.
+    Up,
+    /// Move the selection down by one in the current pane.
+    Down,
+    /// Switch to the next pane (Tab / Right).
+    NextPane,
+    /// Switch to the previous pane (Shift+Tab / Left).
+    PrevPane,
+}
+
 // ── Action enum ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +165,14 @@ pub enum Action {
     CycleLayoutReverse,
     /// Open a confirmation prompt to reset the game to its opening state (keeps map).
     ResetGame,
+    /// Open the verb/item token-palette modal, building the noun list from the current room and inventory.
+    OpenVerbMenu,
+    /// Navigate within the verb menu: `Tab`/`Left`/`Right` switches pane; `Up`/`Down` moves selection.
+    VerbMenuNav(VerbMenuNavKind),
+    /// Pick the currently-selected token: append it (+ a space) to `state.input`.
+    VerbMenuPick,
+    /// Close the verb menu, leaving `state.input` intact.
+    VerbMenuClose,
     /// No binding found — no-op.
     None,
     // ── Mouse actions ─────────────────────────────────────────────────────────
@@ -226,6 +249,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // 5. Saves-manager sub-mode: when saves modal is open, route to saves keys.
     if state.saves.is_some() {
         return saves_key_to_action(key);
+    }
+
+    // 5.5. Verb-menu sub-mode: when the token palette is open, route to verb-menu keys.
+    if state.verb_menu.is_some() {
+        return verb_menu_key_to_action(key);
     }
 
     // 6. Hotkey dialog open: route to dialog handler.
@@ -477,6 +505,29 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Left => Action::GalleryCategoryPrev,
         KeyCode::Right => Action::GalleryCategoryNext,
         KeyCode::Esc | KeyCode::Enter => Action::GalleryClose,
+        _ => Action::None,
+    }
+}
+
+// ── Internal: verb-menu key routing ──────────────────────────────────────────
+
+/// Hardwired verb-menu sub-mode keys (not rebindable).
+///
+/// Tab / Right  → next pane; Shift+Tab / Left → prev pane;
+/// Up / Down    → move within pane;
+/// Enter/Space  → pick selected token;
+/// Esc / q      → close menu.
+fn verb_menu_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Tab => Action::VerbMenuNav(VerbMenuNavKind::NextPane),
+        KeyCode::BackTab => Action::VerbMenuNav(VerbMenuNavKind::PrevPane),
+        KeyCode::Right => Action::VerbMenuNav(VerbMenuNavKind::NextPane),
+        KeyCode::Left => Action::VerbMenuNav(VerbMenuNavKind::PrevPane),
+        KeyCode::Up => Action::VerbMenuNav(VerbMenuNavKind::Up),
+        KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
+        KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
+        KeyCode::Esc => Action::VerbMenuClose,
+        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::VerbMenuClose,
         _ => Action::None,
     }
 }
@@ -1247,6 +1298,97 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.show_inventory = !state.show_inventory;
         }
 
+        Action::OpenVerbMenu => {
+            state.hotkey_dialog = false;
+            let nouns = build_verb_menu_nouns(state, mapper);
+            state.verb_menu = Some(crate::state::VerbMenuState {
+                pane: crate::state::VerbMenuPane::Verbs,
+                verb_idx: 0,
+                noun_idx: 0,
+                prep_idx: 0,
+                nouns,
+            });
+        }
+
+        Action::VerbMenuNav(kind) => {
+            use crate::state::VerbMenuPane;
+            use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
+            if let Some(vm) = &mut state.verb_menu {
+                match kind {
+                    VerbMenuNavKind::NextPane => {
+                        vm.pane = match vm.pane {
+                            VerbMenuPane::Verbs => VerbMenuPane::Nouns,
+                            VerbMenuPane::Nouns => VerbMenuPane::Preps,
+                            VerbMenuPane::Preps => VerbMenuPane::Verbs,
+                        };
+                    }
+                    VerbMenuNavKind::PrevPane => {
+                        vm.pane = match vm.pane {
+                            VerbMenuPane::Verbs => VerbMenuPane::Preps,
+                            VerbMenuPane::Nouns => VerbMenuPane::Verbs,
+                            VerbMenuPane::Preps => VerbMenuPane::Nouns,
+                        };
+                    }
+                    VerbMenuNavKind::Up => {
+                        match vm.pane {
+                            VerbMenuPane::Verbs => {
+                                let n = VERB_MENU_VERBS.len();
+                                if n > 0 {
+                                    vm.verb_idx = vm.verb_idx.saturating_sub(1);
+                                }
+                            }
+                            VerbMenuPane::Nouns => {
+                                vm.noun_idx = vm.noun_idx.saturating_sub(1);
+                            }
+                            VerbMenuPane::Preps => {
+                                let n = VERB_MENU_PREPS.len();
+                                if n > 0 {
+                                    vm.prep_idx = vm.prep_idx.saturating_sub(1);
+                                }
+                            }
+                        }
+                    }
+                    VerbMenuNavKind::Down => {
+                        match vm.pane {
+                            VerbMenuPane::Verbs => {
+                                let n = VERB_MENU_VERBS.len();
+                                if n > 0 {
+                                    vm.verb_idx = (vm.verb_idx + 1).min(n - 1);
+                                }
+                            }
+                            VerbMenuPane::Nouns => {
+                                let n = vm.nouns.len();
+                                if n > 0 {
+                                    vm.noun_idx = (vm.noun_idx + 1).min(n - 1);
+                                }
+                            }
+                            VerbMenuPane::Preps => {
+                                let n = VERB_MENU_PREPS.len();
+                                if n > 0 {
+                                    vm.prep_idx = (vm.prep_idx + 1).min(n - 1);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Action::VerbMenuPick => {
+            use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
+            if let Some(vm) = &state.verb_menu {
+                let token = vm.selected_token(VERB_MENU_VERBS, VERB_MENU_PREPS).to_owned();
+                if !token.is_empty() {
+                    state.input.push_str(&token);
+                    state.input.push(' ');
+                }
+            }
+        }
+
+        Action::VerbMenuClose => {
+            state.verb_menu = None;
+        }
+
         Action::ResetGame => {
             // Open a confirmation prompt; the caller (main.rs) performs the actual reset
             // when the prompt is submitted with y/yes.
@@ -1273,6 +1415,58 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 }
 
 // ── Suggestion recompute ──────────────────────────────────────────────────────
+
+/// Build the noun list for the verb menu: dedup(room nouns ∪ inventory names),
+/// sorted alphabetically.  Room nouns come from the last 20 transcript lines (same
+/// source as autocomplete); inventory names come from `list_inventory` when
+/// `state.player_obj` is known, or from `state.inventory_fallback` otherwise.
+fn build_verb_menu_nouns(state: &AppState, _mapper: &Mapper) -> Vec<String> {
+    use std::collections::HashSet;
+
+    // Room words from recent transcript.
+    let room_text: String = state
+        .transcript
+        .iter()
+        .rev()
+        .take(20)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let room_words = room_words_from_text(&room_text);
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut nouns: Vec<String> = Vec::new();
+
+    for w in room_words {
+        if seen.insert(w.clone()) {
+            nouns.push(w);
+        }
+    }
+
+    // Inventory items — prefer list_inventory when player_obj is known.
+    let inv_names: Vec<String> = if let Some(p) = state.player_obj {
+        // We need access to the Z-machine memory here but apply_action only takes Mapper.
+        // The mapper does not hold machine memory, so we fall back to inventory_fallback
+        // (which is populated each turn). This is the same graceful path as player_obj=None.
+        let _ = p;
+        state.inventory_fallback.clone()
+    } else {
+        state.inventory_fallback.clone()
+    };
+
+    for name in inv_names {
+        let lower = name.to_lowercase();
+        if seen.insert(lower.clone()) {
+            nouns.push(lower);
+        }
+    }
+
+    nouns.sort_unstable();
+    nouns
+}
 
 /// Recompute `state.suggestions` from `state.dict_words`, the room words
 /// extracted from `state.transcript`, and the current partial word being typed.
@@ -3080,5 +3274,189 @@ mod tests {
         );
         // Mapper is kept (rooms are still in the graph).
         assert!(mapper.graph.rooms().count() > 0, "mapper must still have rooms after reset");
+    }
+
+    // ── Verb menu tests ───────────────────────────────────────────────────────
+
+    /// Helper: open the verb menu with a specific noun list.
+    fn open_verb_menu_with_nouns(state: &mut AppState, nouns: Vec<String>) {
+        state.verb_menu = Some(crate::state::VerbMenuState {
+            pane: crate::state::VerbMenuPane::Verbs,
+            verb_idx: 0,
+            noun_idx: 0,
+            prep_idx: 0,
+            nouns,
+        });
+    }
+
+    #[test]
+    fn verb_menu_pick_appends_token_and_space() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+
+        // Select "unlock" (index 6 in VERB_MENU_VERBS).
+        // Pick from Verbs pane (default on open) at verb_idx=0 → "look".
+        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
+        assert_eq!(s.input, "look ");
+
+        // Pick again → "look look ".
+        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
+        assert_eq!(s.input, "look look ");
+    }
+
+    #[test]
+    fn verb_menu_pick_builds_unlock_door_with_key() {
+        use crate::render::verbmenu::VERB_MENU_VERBS;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        let nouns = vec!["door".to_string(), "key".to_string()];
+        open_verb_menu_with_nouns(&mut s, nouns);
+
+        // Find indices.
+        let unlock_idx = VERB_MENU_VERBS.iter().position(|&v| v == "unlock").expect("unlock in verbs");
+        let with_idx = crate::render::verbmenu::VERB_MENU_PREPS.iter().position(|&p| p == "with").expect("with in preps");
+
+        // 1. Pick "unlock" from Verbs pane.
+        s.verb_menu.as_mut().unwrap().verb_idx = unlock_idx;
+        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
+        assert_eq!(s.input, "unlock ");
+
+        // 2. Switch to Nouns pane and pick "door" (noun_idx=0).
+        s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
+        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
+        assert_eq!(s.input, "unlock door ");
+
+        // 3. Switch to Preps pane and pick "with".
+        s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
+        s.verb_menu.as_mut().unwrap().prep_idx = with_idx;
+        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
+        assert_eq!(s.input, "unlock door with ");
+
+        // 4. Switch back to Nouns and pick "key" (noun_idx=1).
+        s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
+        s.verb_menu.as_mut().unwrap().noun_idx = 1;
+        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
+        assert_eq!(s.input, "unlock door with key ");
+    }
+
+    #[test]
+    fn verb_menu_close_leaves_input_intact() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.input = "unlock door ".to_string();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
+        assert!(s.verb_menu.is_none(), "menu should be closed");
+        assert_eq!(s.input, "unlock door ", "input must be preserved");
+    }
+
+    #[test]
+    fn verb_menu_nav_tab_and_arrows_switch_pane() {
+        use crate::state::VerbMenuPane;
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        assert_eq!(s.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Verbs);
+
+        // Tab → Nouns.
+        let a = key_to_action(&s, key(KeyCode::Tab));
+        assert!(matches!(a, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
+
+        // Right → same.
+        let a2 = key_to_action(&s, key(KeyCode::Right));
+        assert!(matches!(a2, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
+
+        // Left → PrevPane.
+        let a3 = key_to_action(&s, key(KeyCode::Left));
+        assert!(matches!(a3, Action::VerbMenuNav(VerbMenuNavKind::PrevPane)));
+
+        // Up/Down → move within pane.
+        let a4 = key_to_action(&s, key(KeyCode::Up));
+        assert!(matches!(a4, Action::VerbMenuNav(VerbMenuNavKind::Up)));
+        let a5 = key_to_action(&s, key(KeyCode::Down));
+        assert!(matches!(a5, Action::VerbMenuNav(VerbMenuNavKind::Down)));
+    }
+
+    #[test]
+    fn verb_menu_nav_up_down_moves_index() {
+        use crate::state::VerbMenuPane;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_verb_menu_with_nouns(&mut s, vec!["door".to_string(), "mailbox".to_string()]);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 1);
+
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+
+        // Up at 0 stays at 0 (saturating).
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+
+        // Switch to Nouns, move down.
+        s.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Nouns;
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
+        assert_eq!(s.verb_menu.as_ref().unwrap().noun_idx, 1);
+    }
+
+    #[test]
+    fn verb_menu_esc_and_q_close() {
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        assert!(matches!(a, Action::VerbMenuClose), "Esc closes the menu");
+
+        let a2 = key_to_action(&s, key(KeyCode::Char('q')));
+        assert!(matches!(a2, Action::VerbMenuClose), "q closes the menu");
+    }
+
+    #[test]
+    fn open_verb_menu_key_m_routes_to_open_verb_menu() {
+        use crate::keymap::{KeyMap, KeySpec};
+        use crossterm::event::KeyCode;
+        let km = KeyMap::default();
+        let spec = KeySpec { code: KeyCode::Char('m'), ctrl: false, shift: false, alt: false };
+        let cmd = km.lookup(&spec, crate::keymap::Context::Global);
+        assert_eq!(cmd, Some(crate::keymap::Command::OpenVerbMenu), "m should be bound to OpenVerbMenu");
+        assert!(matches!(crate::keymap::Command::OpenVerbMenu.to_action(), Action::OpenVerbMenu));
+    }
+
+    #[test]
+    fn open_verb_menu_in_view_dialog_group() {
+        use crate::keymap::HotkeyLayout;
+        let layout = HotkeyLayout::default();
+        let view_group = layout.groups.iter().find(|(title, _)| title == "View");
+        assert!(view_group.is_some(), "View group should exist");
+        let (_, cmds) = view_group.unwrap();
+        assert!(cmds.contains(&crate::keymap::Command::OpenVerbMenu), "OpenVerbMenu should be in View group");
+    }
+
+    #[test]
+    fn open_verb_menu_action_opens_modal() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        assert!(s.verb_menu.is_none());
+        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
+        assert!(s.verb_menu.is_some(), "verb_menu should be Some after OpenVerbMenu");
+        assert!(matches!(s.verb_menu.as_ref().unwrap().pane, crate::state::VerbMenuPane::Verbs));
+    }
+
+    #[test]
+    fn noun_list_deduplicates_room_and_inventory() {
+        // A noun that appears in both room transcript and inventory_fallback
+        // should appear exactly once.
+        let mut s = AppState::default();
+        // Push transcript text with "mailbox" as a room word.
+        s.push_transcript("There is a small mailbox here.");
+        // Also have "mailbox" in inventory fallback.
+        s.inventory_fallback = vec!["mailbox".to_string()];
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
+        let nouns = &s.verb_menu.as_ref().unwrap().nouns;
+        let mailbox_count = nouns.iter().filter(|n| n.as_str() == "mailbox").count();
+        assert_eq!(mailbox_count, 1, "mailbox should appear exactly once in nouns (dedup)");
     }
 }

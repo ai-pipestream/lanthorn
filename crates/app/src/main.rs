@@ -24,6 +24,7 @@ use app::input::{apply_action, key_to_action, mouse_to_action, should_bg_tidy, t
 use app::persist_files::{delete_save, list_saves, load_map, save_map, save_named};
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
+use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{render_map_layered, room_screen_rects};
 use app::render::tidy_panel::draw_tidy_panel;
@@ -272,7 +273,9 @@ fn draw_frame(
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = state.colors.help_bar;
-        let help_text = if state.saves.is_some() {
+        let help_text = if state.verb_menu.is_some() {
+            "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc/q: close".to_string()
+        } else if state.saves.is_some() {
             "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | Esc: close".to_string()
         } else if state.gallery.is_some() {
             "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
@@ -327,6 +330,11 @@ fn draw_frame(
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
             draw_saves(state, full, buf);
+        }
+
+        // ── Verb-menu overlay — drawn after saves ─────────────────────────────
+        if state.verb_menu.is_some() {
+            draw_verb_menu(state, full, buf);
         }
 
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
