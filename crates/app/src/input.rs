@@ -92,6 +92,8 @@ pub enum Action {
     ToggleAlignment,
     /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
     TogglePortalLabels,
+    /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
+    ToggleInspector,
     /// Caller: exit the application.
     Quit,
     /// Cycle the viewed layer by `delta` steps over the sorted non-empty layer list (clamped at ends).
@@ -308,6 +310,7 @@ fn map_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Char('o') if plain!() => Action::EditNotes,
         KeyCode::Char('d') if plain!() => Action::DeleteSelectedConnection,
         KeyCode::Char('e') if plain!() => Action::RelabelSelectedEdge,
+        KeyCode::Char('i') if plain!() => Action::ToggleInspector,
 
         KeyCode::Esc => Action::ToggleFocus,
 
@@ -535,6 +538,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
+        Action::ToggleInspector => state.show_inspector = !state.show_inspector,
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
@@ -1354,5 +1358,49 @@ mod tests {
         assert_eq!(s.suggestion_idx, 0);
         // Suggestions should now match "nor".
         assert!(s.suggestions.iter().any(|w| w.starts_with("nor")));
+    }
+
+    // ── Inspector toggle tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn i_in_map_focus_yields_toggle_inspector() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
+    }
+
+    #[test]
+    fn i_in_game_focus_is_input_char_not_inspector() {
+        let s = AppState::default(); // game focus
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::InputChar('i')));
+    }
+
+    #[test]
+    fn toggle_inspector_flips_show_inspector() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        assert!(!s.show_inspector, "off by default");
+        apply_action(Action::ToggleInspector, &mut s, &mut m);
+        assert!(s.show_inspector, "toggled on");
+        apply_action(Action::ToggleInspector, &mut s, &mut m);
+        assert!(!s.show_inspector, "toggled off");
+    }
+
+    #[test]
+    fn n_p_select_still_work_after_inspector_added() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
+    }
+
+    #[test]
+    fn pan_keys_still_work_after_inspector_added() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
     }
 }

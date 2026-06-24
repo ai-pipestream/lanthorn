@@ -162,6 +162,9 @@ pub struct AppState {
     pub tidy_anim: Option<TidyAnim>,
     /// Explicit layer override for the map view. `None` means follow the current room's layer.
     pub viewed_layer: Option<LayerId>,
+    /// When true, draw the per-room diagnostics inspector overlay over the map pane.
+    /// Toggled by the `i` key in map focus.
+    pub show_inspector: bool,
 
     // ── Autocomplete state ────────────────────────────────────────────────────
 
@@ -195,6 +198,7 @@ impl Default for AppState {
             show_portal_labels: false,
             tidy_anim: None,
             viewed_layer: None,
+            show_inspector: false,
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
