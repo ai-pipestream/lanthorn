@@ -46,6 +46,60 @@
 
 use crate::cpu::exec::Machine;
 use crate::objects::{entries_base, entry_size, object_snapshot, prop_table_ptr_offset, ObjectSnapshot};
+use crate::screen::UpperWindow;
+
+/// Normalize for matching/hashing: trim, collapse whitespace, lowercase.
+pub(crate) fn normalize_name(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Strip the posture suffix after the first comma, then trim.
+fn clean_room_text(s: &str) -> String {
+    s.split(',').next().unwrap_or(s).trim().to_string()
+}
+
+/// Extract a candidate room name from the v4+ status-line grid, or None.
+///
+/// Scans at most the first 2 active rows. Prefers a `Location:` label segment;
+/// otherwise takes row 1's first segment (text before the first run of 2+
+/// spaces, which separates the left-justified room name from the right-aligned
+/// score/moves/time block). Strips a trailing posture suffix after a comma.
+pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<String> {
+    let scan = active_rows.min(2).min(upper.rows);
+    let row_text = |r: u16| -> String {
+        let mut s = String::new();
+        for c in 1..=upper.cols {
+            s.push(upper.cell(r, c).ch);
+        }
+        s
+    };
+
+    // 1. Label form: any scanned row containing a "Location:" segment.
+    for r in 1..=scan {
+        let line = row_text(r);
+        let lower = line.to_lowercase();
+        if let Some(idx) = lower.find("location:") {
+            let after = line[idx + "location:".len()..].trim_start();
+            let value = after.split("  ").next().unwrap_or("").trim();
+            let candidate = clean_room_text(value);
+            if !candidate.is_empty() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 2. Common form: row 1's first segment (before the first 2+ space run).
+    if scan >= 1 {
+        let line = row_text(1);
+        let first = line.split("  ").next().unwrap_or("").trim();
+        let candidate = clean_room_text(first);
+        if !candidate.is_empty() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
 
 /// Returns the object representing the player's current location, or `None` if
 /// the heuristic cannot determine a plausible location.
@@ -121,6 +175,46 @@ mod tests {
     use crate::cpu::exec::{Machine, StepResult};
     use crate::header::tests_support::sample_story;
     use crate::memory::Memory;
+    use crate::screen::UpperWindow;
+
+    fn upper_with(rows: &[&str]) -> UpperWindow {
+        let cols = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
+        let mut u = UpperWindow::default();
+        u.resize(rows.len() as u16, cols.max(1));
+        for (r, line) in rows.iter().enumerate() {
+            for (c, ch) in line.chars().enumerate() {
+                u.put((r + 1) as u16, (c + 1) as u16, ch, 0);
+            }
+        }
+        u
+    }
+
+    #[test]
+    fn status_room_name_common_form_strips_score_and_posture() {
+        let u = upper_with(&[" Bedroom, in the bed                              Score: 0     Moves: 1"]);
+        assert_eq!(status_line_room_name(&u, 1).as_deref(), Some("Bedroom"));
+    }
+
+    #[test]
+    fn status_room_name_plain() {
+        let u = upper_with(&[" Darkness                                         Score: 0     Moves: 0"]);
+        assert_eq!(status_line_room_name(&u, 1).as_deref(), Some("Darkness"));
+    }
+
+    #[test]
+    fn status_room_name_location_label_form() {
+        let u = upper_with(&[
+            " Mode:  Communications Mode                                Time:  7:07pm",
+            " Location:  Foo Bar                                        Date:  3/16/2031",
+        ]);
+        assert_eq!(status_line_room_name(&u, 2).as_deref(), Some("Foo Bar"));
+    }
+
+    #[test]
+    fn status_room_name_empty_grid_is_none() {
+        let u = upper_with(&["                                "]);
+        assert_eq!(status_line_room_name(&u, 1), None);
+    }
 
     // We reuse the same object-table layout as objects.rs tests:
     //   object_table = 0x0100, entries_base = 0x013E (v3)
