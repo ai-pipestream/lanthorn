@@ -22,6 +22,10 @@
 "connector:distorted"  = { fg = "magenta" }     # one-way / distorted
 "connector:portal"     = { fg = "cyan" }        # up/down/in/out portals
 "map_border"           = { style = "picture-frame", fg = "cyan" }
+# Per-side borders: override individual sides (none/single/double/thick); a side
+# falls back to `style`. `header = false` hides the title / layer-tab strip.
+# "map_border"  = { style = "none", style_left = "single", style_right = "single" }
+# "story_border" = { style = "single", style_top = "thick", header = false }
 "map_layer_tab"        = { fg = "dark-gray" }   # inactive layer tab
 "map_layer_tab_active" = { fg = "cyan", bold = true }
 "loc_indicator"        = { fg = "dark-gray" }   # room-detection method indicator
