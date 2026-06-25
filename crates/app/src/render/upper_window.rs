@@ -36,6 +36,8 @@ fn apply_text_style(base: Style, text_style: u8) -> Style {
 /// - `upper`: the grid to render (from `machine.screen.upper`).
 /// - `upper_rows`: the active row count (`machine.screen.upper_window_rows`).
 /// - `cursor`: 1-based (row, col) of the upper-window cursor.
+/// - `show_cursor`: when true, mark the cursor cell (e.g. while the game is
+///   awaiting input in the upper window) so forms show where typing lands.
 /// - `colors`: resolved color scheme.
 /// - `area`: target rectangle in the buffer.
 ///
@@ -44,6 +46,7 @@ pub fn draw_grid(
     upper: &UpperWindow,
     upper_rows: u16,
     cursor: (u16, u16),
+    show_cursor: bool,
     colors: &ColorScheme,
     area: Rect,
     buf: &mut Buffer,
@@ -127,6 +130,22 @@ pub fn draw_grid(
         }
     }
 
+    // Cursor: toggle reverse-video on the cell under the (offset-adjusted)
+    // cursor so it stays visible over both normal and already-reversed cells.
+    if show_cursor && crow >= row_offset && ccol >= col_offset {
+        let cur_dy = crow - row_offset;
+        let cur_dx = ccol - col_offset;
+        if cur_dy < content.height && cur_dx < content.width {
+            if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
+                if c.modifier.contains(Modifier::REVERSED) {
+                    c.modifier.remove(Modifier::REVERSED);
+                } else {
+                    c.modifier.insert(Modifier::REVERSED);
+                }
+            }
+        }
+    }
+
     needed
 }
 
@@ -134,17 +153,24 @@ pub fn draw_grid(
 
 /// Draw the Z-machine upper-window grid into the top of `area`, returning the
 /// number of story-pane rows consumed (0 when the upper window is inactive).
+///
+/// `char_mode` is true when the game is awaiting a keypress; combined with the
+/// upper window being the current window, it decides whether to show the
+/// cursor (so in-place forms reveal where typed characters land).
 pub fn draw_upper_window(
     machine: &Machine,
+    char_mode: bool,
     colors: &ColorScheme,
     area: Rect,
     buf: &mut Buffer,
 ) -> u16 {
     let screen = &machine.screen;
+    let show_cursor = char_mode && screen.current_window == 1;
     draw_grid(
         &screen.upper,
         screen.upper_window_rows,
         (screen.cursor_row, screen.cursor_col),
+        show_cursor,
         colors,
         area,
         buf,
@@ -184,7 +210,7 @@ mod tests {
         let mut colors_no_border = colors.clone();
         colors_no_border.virtual_window_border = BorderStyle::None;
 
-        let consumed = draw_grid(&upper, 2, (1, 1), &colors_no_border, area, &mut buf);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors_no_border, area, &mut buf);
 
         // Should consume exactly 2 rows (grid height, no border).
         assert_eq!(consumed, 2, "consumed rows should equal upper_window_rows");
@@ -201,7 +227,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         // upper_rows = 0 means inactive.
-        let consumed = draw_grid(&upper, 0, (1, 1), &colors, area, &mut buf);
+        let consumed = draw_grid(&upper, 0, (1, 1), false, &colors, area, &mut buf);
         assert_eq!(consumed, 0);
     }
 
@@ -213,7 +239,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
 
-        let consumed = draw_grid(&upper, 2, (1, 1), &colors, area, &mut buf);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf);
 
         // 2 grid rows + 2 border rows = 4 total.
         assert_eq!(consumed, 4);
@@ -236,7 +262,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
 
-        let consumed = draw_grid(&upper, 5, (5, 1), &colors, area, &mut buf);
+        let consumed = draw_grid(&upper, 5, (5, 1), false, &colors, area, &mut buf);
         assert_eq!(consumed, 3);
 
         // Row offset = cursor_row-1 - (height-1) = 4 - 2 = 2.
@@ -258,12 +284,37 @@ mod tests {
 
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 1), &colors, area, &mut buf);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf);
 
         let x_cell = buf.cell((0, 0)).unwrap();
         assert!(x_cell.modifier.contains(Modifier::BOLD), "X should be bold");
 
         let y_cell = buf.cell((1, 0)).unwrap();
         assert!(y_cell.modifier.contains(Modifier::REVERSED), "Y should be reversed");
+    }
+
+    #[test]
+    fn cursor_cell_is_marked_when_show_cursor() {
+        let mut upper = UpperWindow::default();
+        upper.resize(2, 5);
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        let area = Rect::new(0, 0, 10, 3);
+
+        // With show_cursor=false the cursor cell is a plain (non-reversed) space.
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf);
+        assert!(
+            !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+            "no cursor mark when show_cursor=false"
+        );
+
+        // With show_cursor=true the cell under (row 2, col 3) — 0-based (2,1) — is reversed.
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf);
+        assert!(
+            buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+            "cursor cell should be reverse-video when show_cursor=true"
+        );
     }
 }

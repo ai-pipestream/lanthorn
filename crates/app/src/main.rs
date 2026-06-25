@@ -259,7 +259,7 @@ fn draw_frame(
             Layout::TranscriptFull => {
                 let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, state.colors.story_border);
                 let c = story_frame.content;
-                let used = draw_upper_window(&session.machine, &state.colors, c, buf);
+                let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
                 render_transcript(&session.machine, state, tarea, buf);
                 draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
@@ -310,7 +310,7 @@ fn draw_frame(
 
                 let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, state.colors.story_border);
                 let c = story_frame.content;
-                let used = draw_upper_window(&session.machine, &state.colors, c, buf);
+                let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
                 render_transcript(&session.machine, state, tarea, buf);
                 draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
@@ -1182,12 +1182,19 @@ fn main() {
         // ── Char-input mode gate ──────────────────────────────────────────────
         // When the Z-machine is waiting for a single keypress (read_char) and no
         // overlay is open, forward the keystroke directly to the VM — unless it is
-        // the hotkey-dialog prefix (Ctrl+K), which still opens the hotkey dialog.
+        // the hotkey-dialog prefix (Ctrl+K) or any Ctrl/Alt combo. Those are
+        // reserved for app routing so the user can always escape (quit, hotkeys)
+        // out of a read_char form; only plain keypresses become game input.
         if state.char_mode && !state.any_overlay_open() {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
+                    use crossterm::event::KeyModifiers;
                     let spec = app::keymap::KeySpec::from_key_event(*k);
-                    if spec != state.hotkeys.prefix {
+                    // Ctrl/Alt combos (hotkeys, quit, etc.) are never game input —
+                    // let them fall through to app routing so the user can always
+                    // escape a read_char form. Only plain keypresses reach the VM.
+                    let app_combo = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                    if spec != state.hotkeys.prefix && !app_combo {
                         // Map to ZSCII and forward; unknown keys are silently ignored.
                         if let Some(byte) = key_to_zscii(*k) {
                             let result = session.submit_char(byte);
@@ -3258,12 +3265,16 @@ mod tests {
 
     // ── char-mode gate predicate test ─────────────────────────────────────────
 
-    /// The gate fires iff: char_mode && !any_overlay_open && key != prefix.
-    /// Test with a default AppState (no overlays, no char_mode initially).
+    /// The gate fires iff: char_mode && !any_overlay_open && key != prefix &&
+    /// no Ctrl/Alt modifier. Test with a default AppState (no overlays, no
+    /// char_mode initially).
     #[test]
     fn char_mode_gate_predicate() {
         use app::state::AppState;
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+        // The forward-to-VM predicate mirrors the run-loop gate.
+        let app_combo = |m: KeyModifiers| m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
 
         let mut s = AppState::default();
         // char_mode false → gate should not fire.
@@ -3273,7 +3284,7 @@ mod tests {
         // Simulate char_mode = true (as the run loop sets it from pending_input).
         s.char_mode = true;
 
-        // A plain 'y' key: gate should accept it (not prefix, not overlay).
+        // A plain 'y' key: gate should accept it (not prefix, not overlay, no combo).
         let y_key = KeyEvent {
             code: KeyCode::Char('y'),
             modifiers: KeyModifiers::NONE,
@@ -3283,9 +3294,22 @@ mod tests {
         let spec = app::keymap::KeySpec::from_key_event(y_key);
         let is_prefix = spec == s.hotkeys.prefix;
         assert!(!is_prefix, "'y' must not be the default prefix (Ctrl+K)");
-        assert!(s.char_mode && !s.any_overlay_open() && !is_prefix,
+        assert!(s.char_mode && !s.any_overlay_open() && !is_prefix && !app_combo(y_key.modifiers),
             "char_mode gate should fire for 'y' with no overlays");
         assert_eq!(key_to_zscii(y_key), Some(b'y'), "'y' should map to ZSCII 121");
+
+        // Ctrl+Q (a quit binding) must NOT be forwarded to the VM — it falls
+        // through to app routing so the user can escape the form.
+        let ctrlq = KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let spec_q = app::keymap::KeySpec::from_key_event(ctrlq);
+        let is_prefix_q = spec_q == s.hotkeys.prefix;
+        assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_q && !app_combo(ctrlq.modifiers)),
+            "char_mode gate must NOT fire for Ctrl+Q (a Ctrl combo)");
 
         // Ctrl+K (the default prefix): gate must NOT fire for it (falls through
         // to normal routing so the hotkey dialog still opens).
@@ -3298,8 +3322,8 @@ mod tests {
         let spec_k = app::keymap::KeySpec::from_key_event(ctrlk);
         let is_prefix_k = spec_k == s.hotkeys.prefix;
         assert!(is_prefix_k, "Ctrl+K must match the default prefix");
-        // Gate condition: char_mode && !overlay && !is_prefix → false because is_prefix = true.
-        assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_k),
+        // Gate condition false because is_prefix = true (and it is a Ctrl combo).
+        assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_k && !app_combo(ctrlk.modifiers)),
             "char_mode gate must NOT fire for the prefix key Ctrl+K");
 
         // If an overlay is open, the gate must not fire.
