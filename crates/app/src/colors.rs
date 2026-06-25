@@ -43,6 +43,17 @@ pub enum Align {
     Right,
 }
 
+impl Align {
+    /// The lowercase config name for this alignment.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Align::Left => "left",
+            Align::Center => "center",
+            Align::Right => "right",
+        }
+    }
+}
+
 /// One resolved status-bar segment: a text template, its cluster, and the style
 /// patched over the base `statusbar` style.
 #[derive(Debug, Clone, PartialEq)]
