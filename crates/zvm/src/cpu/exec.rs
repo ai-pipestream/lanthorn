@@ -2944,7 +2944,7 @@ pub(crate) mod tests {
     #[test]
     fn screen_set_text_style_and_split_window() {
         // Program at 0x10 (v5):
-        //   set_text_style 1  (bold)   → screen.text_style = 1
+        //   set_text_style 1  (reverse) → screen.text_style = 1
         //   split_window  3           → screen.upper_window_rows = 3
         //   set_window    1           → screen.current_window = 1
         //   quit

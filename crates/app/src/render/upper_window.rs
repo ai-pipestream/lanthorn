@@ -15,14 +15,15 @@ use crate::render::paneframe::{draw_pane_frame, BorderStyle};
 
 /// Apply Z-machine text_style bits on top of a base `Style`.
 ///
-/// bit 1 = bold, bit 4 = reverse-video (Z-machine ZMSD §8.7.2 numbering is
-/// 1-based, so bit 1 means the 0x02 mask and bit 4 means the 0x10 mask).
+/// ZMSD §8.7.2 operand values: 1 = reverse-video, 2 = bold, 4 = italic,
+/// 8 = fixed-pitch.  The VM stores the raw game operand verbatim, so test
+/// the exact value bits (0x01 for reverse, 0x02 for bold).
 fn apply_text_style(base: Style, text_style: u8) -> Style {
     let mut s = base;
     if text_style & 0x02 != 0 {
         s = s.add_modifier(Modifier::BOLD);
     }
-    if text_style & 0x10 != 0 {
+    if text_style & 0x01 != 0 {
         s = s.add_modifier(Modifier::REVERSED);
     }
     s
@@ -248,9 +249,9 @@ mod tests {
     fn bold_and_reverse_style_applied() {
         let mut upper = UpperWindow::default();
         upper.resize(1, 3);
-        // bit 1 = bold (0x02), bit 4 = reverse (0x10)
+        // ZMSD §8.7.2 operand values: 1 = reverse-video, 2 = bold
         upper.put(1, 1, 'X', 0x02); // bold
-        upper.put(1, 2, 'Y', 0x10); // reverse
+        upper.put(1, 2, 'Y', 0x01); // reverse-video
 
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;

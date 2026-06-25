@@ -96,7 +96,7 @@ pub struct ScreenState {
     /// Currently selected window: 0 = lower, 1 = upper.
     pub current_window: u8,
     /// Current text-style bitmask (ZMSD §8.7.2):
-    ///   bit 1 = bold, bit 2 = italic, bit 3 = fixed-pitch, bit 4 = reverse-video.
+    ///   value 1 = reverse video, 2 = bold, 4 = italic, 8 = fixed-pitch (ZMSD §8.7.2).
     pub text_style: u8,
     /// Cursor position in the upper window (1-based row, col).
     pub cursor_row: u16,
