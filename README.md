@@ -41,6 +41,15 @@ and unsupported; v1/v2 are not supported.)
 - Full play of v3/v4/v5/v7/v8 story files.
 - Standard **Quetzal** save/restore — interchangeable with other interpreters.
 - Story dictionary introspection (powers verb/noun autocomplete).
+- **v4+ upper-window screen model** — cursor-addressed status lines and forms
+  (e.g. Bureaucracy's licence application) render in a fixed grid atop the
+  transcript, and `read_char` keystrokes are forwarded so forms are fillable in
+  place. The game sees a fixed, configurable virtual screen
+  (`virtual_screen_cols`/`virtual_screen_rows`, default 80×24); the viewport
+  auto-follows the cursor when the pane is smaller. The virtual window is
+  themeable (`upper_window`, `upper_window_border`, `virtual_window_border`).
+  During a `read_char` prompt keystrokes go to the game; the hotkey prefix
+  (default `Ctrl+K`) stays reserved.
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
@@ -148,6 +157,9 @@ and unsupported; v1/v2 are not supported.)
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
   (`--user-dir`, `--config`); CLI overrides the file, which overrides defaults.
+- **Virtual screen size** — `virtual_screen_cols` / `virtual_screen_rows`
+  (default 80 × 24) set the fixed screen dimensions reported to the game; v4+
+  cursor-addressed games (forms, status displays) want a roomy story pane.
 - **In-app config screen** (`F2`) — a settings modal for the common options
   with an explicit Save (writes the config file, format-preserving) and Cancel;
   changes apply live.
