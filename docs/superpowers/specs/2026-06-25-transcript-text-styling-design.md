@@ -72,6 +72,12 @@ color separate, per the codebase's symbol/color split):
   **`warning_marker`** selector styles the warning gutter.
 - Both Meta and Warning lines reserve the 2-col gutter and indent text past it
   (today's Meta behavior, now also for Warning). Story and Input get no gutter.
+- **Wrapping honors the gutter.** A gutter line wraps its text to `width - 2`
+  and indents **every** visual row by the 2-col gutter, not just the first.
+  The gutter glyph is drawn once on the first row; continuation rows show 2
+  blank gutter columns so wrapped text stays in its column and never renders
+  under (or to the left of) the gutter. Today's code wraps Meta to `width - 2`
+  but does not re-indent continuation rows — this is the bug being fixed.
 
 ### 3. Story sub-styling rules
 
@@ -152,7 +158,9 @@ equivalents):
   (defaults `▏` / `!`) with overrides + export.
 - `crates/app/src/render/transcript.rs` — resolve each line's style by kind,
   then (for Story) apply the rule list (user → built-in → base, first-match
-  patch); per-category gutter glyph/style for Meta and Warning.
+  patch); per-category gutter glyph/style for Meta and Warning. Wrap gutter
+  lines to `width - 2` and indent **every** wrapped row past the 2-col gutter
+  (glyph on row 1, blank gutter columns on continuation rows).
 - `crates/app/Cargo.toml` — add `regex`.
 
 ## Error handling
@@ -179,6 +187,9 @@ equivalents):
   gutter glyphs + `warning_marker` resolve.
 - Render: each kind draws with its style; Meta/Warning draw their own gutter
   glyph+color; a rule-matched Story line draws the patched style.
+- Wrapping: a Meta/Warning line long enough to wrap indents every continuation
+  row past the 2-col gutter (no wrapped text in the gutter columns); the gutter
+  glyph appears only on the first row.
 
 ## Out of scope (deferred)
 
