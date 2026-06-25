@@ -833,9 +833,9 @@ fn main() {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
-                        crossterm::event::KeyCode::Tab =>
+                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
-                        crossterm::event::KeyCode::BackTab =>
+                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
                         code => match reset_dialog_key_focused(code, state.dialog_focus) {
                             ResetDialogAction::Confirm => {
@@ -893,9 +893,9 @@ fn main() {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
-                        crossterm::event::KeyCode::Tab =>
+                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 3, 1),
-                        crossterm::event::KeyCode::BackTab =>
+                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 3, -1),
                         code => match quit_dialog_key_focused(code, state.dialog_focus) {
                             QuitDialogAction::Save => {
@@ -974,9 +974,9 @@ fn main() {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
-                        crossterm::event::KeyCode::Tab =>
+                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
-                        crossterm::event::KeyCode::BackTab =>
+                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
                         code => match launch_dialog_key_focused(code, state.dialog_focus) {
                             LaunchDialogAction::Resume => {
