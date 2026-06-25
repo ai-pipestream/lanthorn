@@ -196,6 +196,12 @@ pub struct ColorScheme {
     pub dialog_box_style: BorderStyle,
     /// Whether the dialog drop-shadow is enabled.
     pub dialog_shadow_on: bool,
+    /// Upper (virtual) window content style.
+    pub upper_window: Style,
+    /// Upper (virtual) window border style.
+    pub upper_window_border: Style,
+    /// Resolved border style for the upper (virtual) window frame.
+    pub virtual_window_border: BorderStyle,
 }
 
 impl ColorScheme {
@@ -245,6 +251,9 @@ impl ColorScheme {
             dialog_shadow: Style::new().bg(Color::DarkGray),
             dialog_box_style: BorderStyle::None,
             dialog_shadow_on: false,
+            upper_window: Style::new(),
+            upper_window_border: Style::new().fg(Color::Cyan),
+            virtual_window_border: BorderStyle::Single,
         }
     }
 
@@ -368,6 +377,9 @@ impl ColorScheme {
             dialog_shadow: Style::new().bg(scheme.palette[8]),
             dialog_box_style: BorderStyle::None,
             dialog_shadow_on: false,
+            upper_window: Style::new().fg(fg),
+            upper_window_border: Style::new().fg(scheme.palette[6]),
+            virtual_window_border: BorderStyle::Single,
         }
     }
 

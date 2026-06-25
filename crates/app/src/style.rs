@@ -138,6 +138,8 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "dialog:button",
     "dialog:button:active",
     "dialog:shadow",
+    "upper_window",
+    "upper_window_border",
 ];
 
 // ── apply_color_decls ─────────────────────────────────────────────────────────
@@ -213,6 +215,13 @@ pub fn apply_color_decls(
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
             "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
             "dialog:shadow"        => cs.dialog_shadow = cs.dialog_shadow.patch(style),
+            "upper_window"         => cs.upper_window = cs.upper_window.patch(style),
+            "upper_window_border" => {
+                cs.upper_window_border = cs.upper_window_border.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.virtual_window_border = paneframe::parse_border_style(s);
+                }
+            }
             _                    => warnings.push(format!("unknown selector: {}", selector)),
         }
     }
@@ -777,6 +786,12 @@ pub fn write_style_full(
     doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
     doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
     doc.colors.selectors.insert("dialog:shadow".to_string(),        style_to_decl(&cs.dialog_shadow));
+    doc.colors.selectors.insert("upper_window".to_string(),         style_to_decl(&cs.upper_window));
+    {
+        let mut d = style_to_decl(&cs.upper_window_border);
+        d.style = Some(paneframe::border_style_name(cs.virtual_window_border).to_string());
+        doc.colors.selectors.insert("upper_window_border".to_string(), d);
+    }
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
@@ -1122,5 +1137,16 @@ box_style = "rounded"
             cs2.dialog_box_style
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upper_window_selectors_parse_and_default() {
+        // default border is single
+        let (cs, _, _) = resolve(&parse_style_toml(DEFAULT_STYLE_TOML).unwrap(), std::path::Path::new("."));
+        assert_eq!(cs.virtual_window_border, crate::render::paneframe::BorderStyle::Single);
+        // selector applies fg
+        let doc = parse_style_toml("[colors]\n\"upper_window\" = { fg = \"cyan\" }\n").unwrap();
+        let (cs2, _, _) = resolve(&doc, std::path::Path::new("."));
+        assert_eq!(cs2.upper_window.fg, Some(ratatui::style::Color::Cyan));
     }
 }
