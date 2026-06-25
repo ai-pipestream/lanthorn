@@ -51,8 +51,8 @@ pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Dial
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
-        default: None,
-        focus: None,
+        default: Some(ButtonId::Done),
+        focus: Some(state.dialog_focus),
     };
 
     let rects = draw_dialog(buf, &spec, &st);

@@ -1129,6 +1129,38 @@ fn main() {
             }
         }
 
+        // ── Config-screen Tab focus intercept ────────────────────────────────
+        // Ring length 2: [Save(0), Cancel(1)].
+        if state.config_screen.is_some() {
+            if let Event::Key(k) = &event {
+                if k.kind == KeyEventKind::Press {
+                    match k.code {
+                        crossterm::event::KeyCode::Tab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                        crossterm::event::KeyCode::BackTab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // ── Saves Tab focus intercept ─────────────────────────────────────────
+        // Ring length 1: [Done(0)].
+        if state.saves.is_some() {
+            if let Event::Key(k) = &event {
+                if k.kind == KeyEventKind::Press {
+                    match k.code {
+                        crossterm::event::KeyCode::Tab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 1, 1),
+                        crossterm::event::KeyCode::BackTab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 1, -1),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // Route event to an Action.
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
@@ -1671,6 +1703,7 @@ fn main() {
                 // Populate the saves list and open the modal.
                 let entries = list_saves(&dir, &ifid);
                 state.saves = Some(SavesState { entries, selected: 0 });
+                state.dialog_focus = 0;
             }
 
             Action::SavesExport => {

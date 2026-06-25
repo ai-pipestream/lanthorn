@@ -283,7 +283,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
 
     // 5. Saves-manager sub-mode: when saves modal is open, route to saves keys.
     if state.saves.is_some() {
-        return saves_key_to_action(key);
+        return saves_key_to_action(key, state.dialog_focus);
     }
 
     // 5.1. File-browser sub-mode: when the browser is open, route to browser keys.
@@ -298,7 +298,7 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
 
     // 5.7. Config-screen sub-mode: when config screen is open, route to config keys.
     if state.config_screen.is_some() {
-        return config_screen_key_to_action(key);
+        return config_screen_key_to_action(key, state.dialog_focus);
     }
 
     // 6. Hotkey dialog open: route to dialog handler.
@@ -828,7 +828,14 @@ fn prompt_key_to_action(key: KeyEvent) -> Action {
 // ── Internal: saves-manager key routing ───────────────────────────────────────
 
 /// Hardwired saves-manager sub-mode keys (not rebindable, like prompt and anim).
-fn saves_key_to_action(key: KeyEvent) -> Action {
+///
+/// `focus` is the current button-focus index within the saves button ring:
+///   0 = Done (close). Ring length is 1; the [Done] button is the only button.
+/// Tab/BackTab are handled upstream (main.rs intercept) and never reach here.
+/// The saves dialog has only one button (Done); Enter continues to load the
+/// selected save (existing behavior) rather than activating the focused button,
+/// since no Load button exists in the button row.
+fn saves_key_to_action(key: KeyEvent, _focus: usize) -> Action {
     match key.code {
         KeyCode::Up => Action::SavesNav(-1),
         KeyCode::Down => Action::SavesNav(1),
@@ -894,14 +901,23 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
 
 // ── Internal: config-screen key routing ──────────────────────────────────────
 
-fn config_screen_key_to_action(key: KeyEvent) -> Action {
+/// `focus` is the current button-focus index within the config-screen ring:
+///   0 = Save, 1 = Cancel. Ring length is 2.
+/// Tab/BackTab are handled upstream (main.rs intercept) and never reach here.
+/// Enter activates the focused button; Space still toggles the selected row.
+fn config_screen_key_to_action(key: KeyEvent, focus: usize) -> Action {
     match key.code {
         KeyCode::Up => Action::ConfigNav(-1),
         KeyCode::Down => Action::ConfigNav(1),
         KeyCode::Left => Action::ConfigCycle(-1),
         KeyCode::Right => Action::ConfigCycle(1),
-        KeyCode::Char(' ') | KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-            Action::ConfigToggle
+        KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => Action::ConfigToggle,
+        KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+            // Ring: [Save(0), Cancel(1)]. Enter activates the focused button.
+            match focus {
+                1 => Action::ConfigCancel,
+                _ => Action::ConfigSave, // default: Save (focus 0)
+            }
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::ConfigSave,
         KeyCode::Esc => Action::ConfigCancel,
@@ -1600,6 +1616,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // via AppState::open_saves_modal after apply_action returns.
             // If already open, do nothing.
             state.hotkey_dialog = false;
+            state.dialog_focus = 0;
         }
 
         Action::SavesNav(delta) => {
@@ -1875,6 +1892,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::OpenConfig => {
             state.hotkey_dialog = false;
+            state.dialog_focus = 0;
             let working = clone_config(&state.config);
             state.config_screen = Some(crate::state::ConfigScreenState {
                 working,
@@ -4911,5 +4929,92 @@ mod tests {
         assert_eq!(cycle_focus(2, 3, 1), 0); // wrap forward
         assert_eq!(cycle_focus(0, 3, -1), 2); // wrap backward
         assert_eq!(cycle_focus(5, 0, 1), 0); // empty
+    }
+
+    // ── Task 3: config_screen Tab focus + Enter-activates-focused ─────────────
+
+    #[test]
+    fn config_screen_tab_then_enter_fires_cancel() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut s = AppState::default();
+        let working = clone_config(&s.config);
+        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.dialog_focus = cycle_focus(0, 2, 1); // focus Cancel (index 1)
+        let a = config_screen_key_to_action(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            s.dialog_focus,
+        );
+        assert!(matches!(a, Action::ConfigCancel),
+            "Enter with focus=1 (Cancel) should fire ConfigCancel, got {:?}", a);
+    }
+
+    #[test]
+    fn config_screen_enter_at_default_focus_fires_save() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut s = AppState::default();
+        let working = clone_config(&s.config);
+        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.dialog_focus = 0; // focus Save (default)
+        let a = config_screen_key_to_action(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            s.dialog_focus,
+        );
+        assert!(matches!(a, Action::ConfigSave),
+            "Enter with focus=0 (Save) should fire ConfigSave, got {:?}", a);
+    }
+
+    #[test]
+    fn config_screen_space_still_toggles_row() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut s = AppState::default();
+        let working = clone_config(&s.config);
+        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        // Space must toggle the selected row regardless of focus.
+        for focus in [0, 1] {
+            let a = config_screen_key_to_action(
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                focus,
+            );
+            assert!(matches!(a, Action::ConfigToggle),
+                "Space with focus={focus} should fire ConfigToggle, got {:?}", a);
+        }
+    }
+
+    #[test]
+    fn saves_tab_cycles_done_button_focus() {
+        // The saves dialog has a ring of length 1 (Done only). Tab cycles 0 → 0 (stays).
+        // Enter still loads the selected save (existing behavior).
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut s = AppState::default();
+        s.saves = Some(crate::state::SavesState { entries: Vec::new(), selected: 0 });
+        s.dialog_focus = 0;
+        // Tab with ring len 1 stays at 0.
+        let after_tab = cycle_focus(s.dialog_focus, 1, 1);
+        assert_eq!(after_tab, 0, "Tab on ring-len-1 should stay at 0");
+        // Enter still produces SavesLoad (not SavesClose) regardless of focus.
+        let a = saves_key_to_action(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            s.dialog_focus,
+        );
+        assert!(matches!(a, Action::SavesLoad),
+            "Enter in saves should still fire SavesLoad (not affected by focus), got {:?}", a);
+    }
+
+    #[test]
+    fn open_config_resets_dialog_focus() {
+        let mut s = AppState::default();
+        s.dialog_focus = 5; // non-zero
+        let mut m = mapper::mapper::Mapper::default();
+        apply_action(Action::OpenConfig, &mut s, &mut m);
+        assert_eq!(s.dialog_focus, 0, "OpenConfig must reset dialog_focus to 0");
+    }
+
+    #[test]
+    fn open_saves_resets_dialog_focus_in_apply() {
+        let mut s = AppState::default();
+        s.dialog_focus = 5; // non-zero
+        let mut m = mapper::mapper::Mapper::default();
+        apply_action(Action::OpenSaves, &mut s, &mut m);
+        assert_eq!(s.dialog_focus, 0, "OpenSaves must reset dialog_focus to 0");
     }
 }
