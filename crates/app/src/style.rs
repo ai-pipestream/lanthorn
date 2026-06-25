@@ -124,6 +124,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "statusbar",
     "transcript",
     "suggestion",
+    "meta_marker",
     "helpbar",
     "map_border",
     "story_border",
@@ -170,6 +171,7 @@ pub fn apply_color_decls(
             "statusbar"          => cs.status_bar = cs.status_bar.patch(style),
             "transcript"         => cs.transcript = cs.transcript.patch(style),
             "suggestion"         => cs.suggestion = cs.suggestion.patch(style),
+            "meta_marker"        => cs.meta_marker = cs.meta_marker.patch(style),
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
             "map_border" => {
                 cs.map_border = cs.map_border.patch(style);
@@ -733,6 +735,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("statusbar".to_string(),         style_to_decl(&cs.status_bar));
     doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
     doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
+    doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
     // New pane border/title/tab/header/input selectors.
     {

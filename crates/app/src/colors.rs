@@ -154,6 +154,8 @@ pub struct ColorScheme {
     pub transcript: Style,
     /// Autocomplete suggestion line.
     pub suggestion: Style,
+    /// Gutter marker drawn beside META (app/slash) transcript output.
+    pub meta_marker: Style,
     /// Focused-pane border.
     pub focused_border: Style,
     /// Help bar (bottom row).
@@ -218,6 +220,7 @@ impl ColorScheme {
             status_bar: Style::new().add_modifier(Modifier::REVERSED),
             transcript: Style::new().fg(Color::White),
             suggestion: Style::new().fg(Color::DarkGray),
+            meta_marker: Style::new().fg(Color::DarkGray),
             focused_border: Style::new()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -340,6 +343,7 @@ impl ColorScheme {
             status_bar,
             transcript: Style::new().fg(transcript_fg),
             suggestion: Style::new().fg(suggestion_fg),
+            meta_marker: Style::new().fg(suggestion_fg),
             focused_border: Style::new()
                 .fg(focused_border_fg)
                 .add_modifier(Modifier::BOLD),

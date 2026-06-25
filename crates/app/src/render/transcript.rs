@@ -10,7 +10,7 @@ use ratatui::style::{Modifier, Style};
 use zvm::cpu::exec::Machine;
 use zvm::screen::{StatusLine, StatusRight};
 
-use crate::state::{AppState, Focus};
+use crate::state::{AppState, Focus, TranscriptKind};
 use crate::render::paneframe::{draw_pane_frame, BorderStyle};
 use super::draw_str_clipped;
 
@@ -142,28 +142,49 @@ pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
     rows
 }
 
-/// Expand a slice of logical transcript lines into wrapped display rows.
-pub(crate) fn wrap_lines(transcript: &[String], width: u16) -> Vec<String> {
+/// Columns reserved at the left of a META line for the gutter marker (`▏` + space).
+pub(crate) const META_GUTTER: u16 = 2;
+/// The gutter glyph drawn beside META (app/slash) output.
+pub(crate) const META_MARKER: &str = "▏";
+
+/// Expand a slice of logical transcript lines into wrapped display rows, carrying
+/// each row's `TranscriptKind`. META lines wrap to `width - META_GUTTER` so the
+/// gutter marker has room; STORY lines use the full `width`. `kinds` parallels
+/// `transcript`; a missing/short entry defaults to `Story`.
+pub(crate) fn wrap_lines_kinded(
+    transcript: &[String],
+    kinds: &[TranscriptKind],
+    width: u16,
+) -> Vec<(String, TranscriptKind)> {
     transcript
         .iter()
-        .flat_map(|line| wrap_line(line, width))
+        .enumerate()
+        .flat_map(|(i, line)| {
+            let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
+            let w = match kind {
+                TranscriptKind::Meta => width.saturating_sub(META_GUTTER),
+                TranscriptKind::Story => width,
+            };
+            wrap_line(line, w).into_iter().map(move |row| (row, kind))
+        })
         .collect()
 }
 
-/// Return the slice of **wrapped** display rows visible in `rows` rows,
+/// Return the **wrapped** display rows (with kinds) visible in `rows` rows,
 /// honouring `scroll` (0 = newest at bottom; higher = further back in history).
 ///
 /// The returned vec is ordered oldest-first so the caller can draw top-to-bottom.
-pub(crate) fn visible_wrapped_lines(
+pub(crate) fn visible_wrapped_lines_kinded(
     transcript: &[String],
+    kinds: &[TranscriptKind],
     rows: usize,
     scroll: u16,
     width: u16,
-) -> Vec<String> {
+) -> Vec<(String, TranscriptKind)> {
     if rows == 0 || transcript.is_empty() {
         return Vec::new();
     }
-    let display_rows = wrap_lines(transcript, width);
+    let display_rows = wrap_lines_kinded(transcript, kinds, width);
     let n = display_rows.len();
     let scroll = scroll as usize;
     let end = n.saturating_sub(scroll);
@@ -439,18 +460,29 @@ fn render_middle(
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
-    let lines = visible_wrapped_lines(
+    let lines = visible_wrapped_lines_kinded(
         &state.transcript,
+        &state.transcript_kinds,
         transcript_rows,
         state.transcript_scroll,
         area.width,
     );
-    for (i, line) in lines.iter().enumerate() {
+    let marker_style = state.colors.meta_marker;
+    for (i, (line, kind)) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
         }
-        draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
+        match kind {
+            // META lines get a configurable gutter marker; text is indented past it.
+            TranscriptKind::Meta => {
+                draw_str_clipped(buf, area.x, row_y, META_MARKER, marker_style, area);
+                draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, normal_style, area);
+            }
+            TranscriptKind::Story => {
+                draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
+            }
+        }
     }
 }
 
@@ -555,35 +587,50 @@ mod tests {
     }
 
     #[test]
-    fn wrap_lines_expands_multiple_logical_lines() {
+    fn wrap_lines_kinded_expands_multiple_logical_lines() {
         let lines = vec![
             "hello world test".to_string(),
             "short".to_string(),
         ];
+        let kinds = vec![TranscriptKind::Story; 2];
         // width 5: "hello" + "world" + "test" + "short"
-        let result = wrap_lines(&lines, 5);
-        assert_eq!(result, vec!["hello", "world", "test", "short"]);
+        let result = wrap_lines_kinded(&lines, &kinds, 5);
+        let rows: Vec<&str> = result.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(rows, vec!["hello", "world", "test", "short"]);
     }
 
     #[test]
-    fn visible_wrapped_lines_newest_at_bottom() {
-        // 3 logical lines at width 5 = 3 display rows; scroll=0, rows=3
+    fn meta_lines_wrap_narrower_and_carry_kind() {
+        // An 8-char wordless line: STORY fits in width 8; META wraps to width-2 = 6.
+        let transcript = vec!["abcdefgh".to_string()];
+        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], 8);
+        assert_eq!(m.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
+        assert!(m.iter().all(|(_, k)| matches!(k, TranscriptKind::Meta)));
+        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], 8);
+        assert_eq!(s.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+    }
+
+    #[test]
+    fn visible_wrapped_lines_kinded_newest_at_bottom() {
+        // 3 logical lines at width 10 = 3 display rows; scroll=0, rows=3
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
-        let vis = visible_wrapped_lines(&transcript, 3, 0, 10);
+        let kinds = vec![TranscriptKind::Story; 3];
+        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, 3, 0, 10);
         assert_eq!(vis.len(), 3);
-        assert_eq!(vis[2], "ghi");
+        assert_eq!(vis[2].0, "ghi");
     }
 
     #[test]
-    fn visible_wrapped_lines_scroll_offset() {
+    fn visible_wrapped_lines_kinded_scroll_offset() {
         // "hello world" wraps to ["hello", "world"] at width 5
         let transcript = vec!["hello world".to_string()];
+        let kinds = vec![TranscriptKind::Story];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let vis = visible_wrapped_lines(&transcript, 1, 1, 5);
-        assert_eq!(vis, vec!["hello"]);
+        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, 1, 1, 5);
+        assert_eq!(vis[0].0, "hello");
         // scroll=0: end=2, start=1 → ["world"]
-        let vis2 = visible_wrapped_lines(&transcript, 1, 0, 5);
-        assert_eq!(vis2, vec!["world"]);
+        let vis2 = visible_wrapped_lines_kinded(&transcript, &kinds, 1, 0, 5);
+        assert_eq!(vis2[0].0, "world");
     }
 
     #[test]
