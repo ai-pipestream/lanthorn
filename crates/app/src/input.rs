@@ -2432,17 +2432,23 @@ mod tests {
     }
 
     #[test]
-    fn shift_arrows_pan_and_ctrl_arrows_nudge_in_map_focus() {
+    fn plain_arrows_pan_and_fn_keys_nudge_in_map_focus() {
         let mut s = AppState::default();
         s.toggle_focus(); // map focus
-        // Shift+Arrows pan (consistent with game focus and animation playback).
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
-        // Nudging the selected room relocated to Ctrl+Arrows (handled globally).
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::NudgeSelected(1, 0)));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::NudgeSelected(0, -1)));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::NudgeSelected(0, 1)));
+        // Plain arrows pan in map focus.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
+        // Shift+Arrows no longer bound in map context.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::None));
+        // Nudge via plain F6-F9 (direct, via Map->Global fallthrough).
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(7))), Action::NudgeSelected(1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(8))), Action::NudgeSelected(0, -1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(9))), Action::NudgeSelected(0, 1)));
+        // Ctrl+Arrows no longer nudge (not in keymap).
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
     }
 
     #[test]
@@ -2651,10 +2657,10 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(' '))), Action::AnimTogglePlay));
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
-        // The map stays scrollable during playback: hjkl / Shift+arrows pan, +/- zoom.
+        // The map stays scrollable during playback: hjkl pan (shift-arrows removed), +/- zoom.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::None));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
         // Exit clears playback.
@@ -3045,11 +3051,16 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('y'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::None));
-        // Ctrl+Arrows nudge from game focus
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::NudgeSelected(1, 0)));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::NudgeSelected(0, -1)));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::NudgeSelected(0, 1)));
+        // Ctrl+Arrows no longer nudge (nudge moved to plain F6-F9).
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::None));
+        // F6-F9 nudge via Global fallthrough from game focus.
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(7))), Action::NudgeSelected(1, 0)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(8))), Action::NudgeSelected(0, -1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(9))), Action::NudgeSelected(0, 1)));
         // Tab → ToggleFocus (no input, no suggestions)
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
         // Text entry
@@ -3063,20 +3074,20 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
-        // Shift arrows pan (direct)
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
+        // Shift+Arrows no longer bound in map context.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::None));
         // hjkl pan (direct)
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
-        // Zoom (direct)
+        // Zoom (direct); shift(+) alias removed, plain alternatives remain.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('='))), Action::ZoomIn));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('+'))), Action::ZoomIn));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('+'))), Action::None));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
         // Direct map commands
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
@@ -3096,9 +3107,12 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
         // Esc → ToggleFocus (direct, always works)
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
-        // Direct ctrl globals work in map focus
+        // Direct ctrl globals work in map focus (save/restore kept with ctrl).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::NudgeSelected(-1, 0)));
+        // Ctrl+Left no longer nudges (nudge moved to F6-F9).
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
+        // F6-F9 nudge work in map focus via Global fallthrough.
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
         // Tab → ToggleFocus in map focus
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
 
@@ -3133,9 +3147,9 @@ mod tests {
         // Exit
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
         assert!(matches!(key_to_action(&s, key(KeyCode::Enter)), Action::AnimExit));
-        // Pan in anim: Shift+arrows + hjkl
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        // Pan in anim: hjkl only (shift-arrows removed from Anim keymap).
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::None));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
         // Zoom in anim

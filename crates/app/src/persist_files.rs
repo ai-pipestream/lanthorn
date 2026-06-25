@@ -95,6 +95,8 @@ pub fn save_named(
     mapper: &Mapper,
     machine: &zvm::cpu::exec::Machine,
     turns: u32,
+    transcript: &[String],
+    transcript_kinds: &[crate::state::TranscriptKind],
 ) -> io::Result<()> {
     let slug = slugify(name);
     if slug.is_empty() {
@@ -110,7 +112,7 @@ pub fn save_named(
         turns,
         saved_at,
     };
-    crate::archive::save_archive_meta(&path, mapper, machine, meta)
+    crate::archive::save_archive_meta(&path, mapper, machine, meta, transcript, transcript_kinds)
 }
 
 /// Remove a save file.
@@ -344,7 +346,7 @@ mod tests {
         mapper.observe(1, "Foyer", None);
 
         let ifid = "ZCODE-1-TEST00-0001";
-        super::save_named(&dir, ifid, "before-troll", &mapper, &machine, 42)
+        super::save_named(&dir, ifid, "before-troll", &mapper, &machine, 42, &[], &[])
             .expect("save_named ok");
 
         let saves = super::list_saves(&dir, ifid);
@@ -372,15 +374,15 @@ mod tests {
 
         // Write a default archive.
         let default_path = dir.join(format!("{}.babelmap", ifid));
-        crate::archive::save_archive(&default_path, &mapper, &machine)
+        crate::archive::save_archive(&default_path, &mapper, &machine, &[], &[])
             .expect("default save ok");
 
         // Write two named saves.
-        super::save_named(&dir, ifid, "save-a", &mapper, &machine, 10).unwrap();
+        super::save_named(&dir, ifid, "save-a", &mapper, &machine, 10, &[], &[]).unwrap();
         // Small sleep between named saves so timestamps differ, but since we
         // can't sleep in tests, we directly patch the timestamps via the archive
         // — instead, just verify ordering constraint is maintained.
-        super::save_named(&dir, ifid, "save-b", &mapper, &machine, 20).unwrap();
+        super::save_named(&dir, ifid, "save-b", &mapper, &machine, 20, &[], &[]).unwrap();
 
         let saves = super::list_saves(&dir, ifid);
         assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
@@ -416,7 +418,7 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0004";
 
-        super::save_named(&dir, ifid, "to-delete", &mapper, &machine, 5).unwrap();
+        super::save_named(&dir, ifid, "to-delete", &mapper, &machine, 5, &[], &[]).unwrap();
         let saves = super::list_saves(&dir, ifid);
         assert_eq!(saves.len(), 1);
         let path = saves[0].path.clone();
