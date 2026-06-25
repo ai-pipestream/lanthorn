@@ -2143,8 +2143,8 @@ fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
 
 // ── Config screen helpers ─────────────────────────────────────────────────────
 
-/// Number of rows in the config screen.
-pub(crate) const CONFIG_ROW_COUNT: usize = 11;
+/// Number of rows in the config screen — derived from the row list so it cannot drift.
+pub(crate) const CONFIG_ROW_COUNT: usize = crate::render::config_screen::CONFIG_ROWS.len();
 
 /// Clone a Config (Config derives Clone, this is a convenience wrapper for tests).
 pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config {
@@ -4829,5 +4829,17 @@ mod tests {
         let s = slash_suggestions("pa", &names, 6);
         assert!(s.contains(&"panh".to_string()) && s.contains(&"panv".to_string()));
         assert!(!s.contains(&"zoom".to_string()));
+    }
+
+    /// Regression: CONFIG_ROW_COUNT must equal CONFIG_ROWS.len() so every config row is
+    /// keyboard-reachable.  If a row is added to CONFIG_ROWS without updating this constant,
+    /// Down from the penultimate row wraps to row 0 and the last row becomes unreachable.
+    #[test]
+    fn config_row_count_matches_config_rows_len() {
+        assert_eq!(
+            CONFIG_ROW_COUNT,
+            crate::render::config_screen::CONFIG_ROWS.len(),
+            "CONFIG_ROW_COUNT must equal CONFIG_ROWS.len(); update CONFIG_ROW_COUNT when adding/removing rows"
+        );
     }
 }

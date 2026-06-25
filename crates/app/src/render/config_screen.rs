@@ -9,7 +9,7 @@ use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, Dia
 use crate::state::AppState;
 
 /// Row definitions: (display name, type tag).
-const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
+pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("user_dir",             ConfigRowKind::Path),
     ("use_default_map",      ConfigRowKind::Bool),
     ("auto_load",            ConfigRowKind::Bool),
@@ -25,7 +25,7 @@ const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ConfigRowKind {
+pub(crate) enum ConfigRowKind {
     Path,
     Bool,
     Enum,
