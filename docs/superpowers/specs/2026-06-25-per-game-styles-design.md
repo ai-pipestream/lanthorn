@@ -1,7 +1,7 @@
 # Per-Game Style Overrides — Design
 
 **Date:** 2026-06-25
-**Status:** Draft, pending user review
+**Status:** Approved, ready for planning (after live-reload merges)
 **Depends on:** Live Style Reload (`reload_style` is the single resolution point) and #82 — implement after both merge.
 
 ## Goal
