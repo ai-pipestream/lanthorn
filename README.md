@@ -109,10 +109,13 @@ and unsupported; v1/v2 are not supported.)
   feedback.
 - **Transcript search / filter / export** — `/search <query>` highlights matches
   (case-insensitive) and lands on the most recent; `n`/`N` step back/forward
-  (configurable), `Esc` clears. `/filter story|meta|both` shows only game output,
-  only app/slash output, or both. `/export [file]` writes the visible transcript
-  to a text file (auto-named under `~/.babelmap/exports/` by default). App/slash
-  output is set off with a themeable `▏` gutter marker.
+  (configurable), `Esc` clears. `/filter story|meta|both` shows only game output
+  (including your commands), only app/engine output, or both. `/export [file]`
+  writes the visible transcript to a text file (auto-named under
+  `~/.babelmap/exports/` by default). Every transcript line carries a category —
+  **story**, your **input** echo, **meta** (app/slash), and VM **warnings** — each
+  independently themeable; meta and warning lines are set off with their own
+  configurable gutter markers (`▏` / `!`).
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and
@@ -141,6 +144,15 @@ and unsupported; v1/v2 are not supported.)
 - **Color schemes** — recolor rooms, connectors, and chrome from a
   [Ghostty](https://ghostty.org) theme file or a built-in (mono / high-contrast /
   tomorrow-night), with per-element overrides. Defaults to your terminal colors.
+- **Transcript text styling** — color each transcript category independently via
+  the `transcript`, `transcript:input`, `transcript:meta`, and `transcript:warning`
+  selectors (`fg`/`bg`/`bold`/`italic`). Story lines also run through styling rules:
+  built-in ones for the room-name **location** header (`transcript:location`) and
+  bracketed **system** lines such as `[Your score just went up.]`
+  (`transcript:system`), plus your own ordered `[[transcript.rule]]` regex rules in
+  `style.toml` (e.g. paint every `grue` red). The meta/warning gutter glyphs come
+  from the `gutter.meta` / `gutter.warning` symbol overrides and are colored by the
+  `meta_marker` / `warning_marker` selectors.
 - **Configurable keymap** via a leader-key model: a configurable prefix
   (default `Ctrl+K`) opens a sticky **hotkey dialog** listing every command;
   any command can be made directly available or routed through the dialog.
