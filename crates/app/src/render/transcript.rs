@@ -13,7 +13,7 @@ use zvm::screen::StatusRight;
 use ratatui::style::Color;
 
 use crate::state::{AppState, Focus, TranscriptFilter, TranscriptKind};
-use crate::render::paneframe::{draw_pane_frame, BorderStyle};
+use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
@@ -503,7 +503,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 
     if status_boxed {
         // Draw a pane frame around the status region.
-        let frame = draw_pane_frame(buf, status_region, status_style_kind, state.colors.status_header);
+        let frame = draw_framed(buf, status_region, status_style_kind, state.colors.status_header_sides, state.colors.status_header, false);
         // Render status text into the inner content row.
         render_status_content(machine, state, buf, frame.content);
     } else {
@@ -520,7 +520,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let input_region = Rect::new(area.x, input_region_top, area.width, input_rows.min(area.height));
 
     if input_boxed {
-        let frame = draw_pane_frame(buf, input_region, input_style_kind, state.colors.input_line);
+        let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, state.colors.input_line, false);
         render_input_content(machine, state, buf, frame.content, normal_style);
     } else {
         render_input_content(machine, state, buf, input_region, normal_style);
@@ -1574,6 +1574,7 @@ mod tests {
         {
             let mut state = AppState::default();
             state.colors.status_header_style = BorderStyle::Single;
+            state.colors.status_header_sides = crate::render::paneframe::PaneSides::all(BorderStyle::Single);
 
             // Use a large enough area so boxing is not suppressed (needs >= 5 rows).
             let area = Rect::new(0, 0, 40, 12);
@@ -1683,6 +1684,26 @@ mod tests {
         let mut buf_story = Buffer::empty(area);
         let story_frame = draw_pane_frame(&mut buf_story, area, BorderStyle::None, Style::default());
         assert_eq!(story_frame.content, area, "story pane None border must also have content == area");
+    }
+
+    #[test]
+    fn status_header_left_right_only_draws_side_bars_no_top() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        // base none, left/right single, large enough to box.
+        state.colors.status_header_style = crate::render::paneframe::BorderStyle::None;
+        state.colors.status_header_sides = crate::render::paneframe::PaneSides {
+            top: crate::render::paneframe::BorderStyle::None,
+            bottom: crate::render::paneframe::BorderStyle::None,
+            left: crate::render::paneframe::BorderStyle::Single,
+            right: crate::render::paneframe::BorderStyle::Single,
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+        // A side bar should appear in column 0 somewhere in the status region (rows 0..3),
+        // and no top corner glyph at (0,0).
+        assert_ne!(buf.cell((0, 0)).unwrap().symbol(), "┌");
     }
 
     // ── draw_str_highlighted regression tests ────────────────────────────────

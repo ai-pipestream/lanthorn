@@ -33,7 +33,7 @@ use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color, SOUND_PULSE_MS};
-use app::render::paneframe::{build_layer_segments, draw_pane_frame, draw_top_inset, InsetSegment};
+use app::render::paneframe::{build_layer_segments, draw_framed, draw_header_plain, draw_top_inset, InsetSegment};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
@@ -291,13 +291,20 @@ fn draw_frame(
 
         match state.layout {
             Layout::TranscriptFull => {
-                let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, story_border_style);
-                let c = story_frame.content;
+                let story_fp = draw_framed(buf, main_area, state.colors.story_border_style, state.colors.story_border_sides, story_border_style, state.colors.story_header_on);
+                let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
                 render_transcript(&session.machine, state, tarea, buf);
-                draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
-                story_area = story_frame.content;
+                if let Some(hrect) = story_fp.header {
+                    let segs = [InsetSegment { text: &state.title, active: false }];
+                    if story_fp.header_bordered {
+                        draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                    } else {
+                        draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                    }
+                }
+                story_area = story_fp.content;
                 map_area = Rect::default();
             }
             Layout::MapFull => {
@@ -307,21 +314,27 @@ fn draw_frame(
                 };
                 let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                 let active_layer = state.active_layer(graph);
-                let frame = draw_pane_frame(buf, main_area, state.colors.map_border_style, state.colors.map_border);
-                render_map_layered(&rm, &mapper.graph, state, frame.content, buf);
+                let map_fp = draw_framed(buf, main_area, state.colors.map_border_style, state.colors.map_border_sides, state.colors.map_border, state.colors.map_header_on);
+                render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
-                    if let Some(dr) = draw_tidy_panel(anim.current(), frame.content, buf, &tidy_ds) {
+                    if let Some(dr) = draw_tidy_panel(anim.current(), map_fp.content, buf, &tidy_ds) {
                         dialog_rects_out = Some(dr);
                     }
                 }
-                map_area = frame.content;
+                map_area = map_fp.content;
                 story_area = Rect::default();
                 // Overlay layer tabs
                 let owned_segs = build_layer_segments(&layer_ids, active_layer);
                 let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                let tab_rects = draw_top_inset(buf, frame.top_inset, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active);
-                layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                if let Some(hrect) = map_fp.header {
+                    let tab_rects = if map_fp.header_bordered {
+                        draw_top_inset(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                    } else {
+                        draw_header_plain(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                    };
+                    layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                }
                 // Apply pulsing border color overlay when a tidy job is in flight
                 if let Some(pulse_color) = map_border_override {
                     let pulse_style = Style::default().fg(pulse_color);
@@ -342,23 +355,30 @@ fn draw_frame(
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
 
-                let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, story_border_style);
-                let c = story_frame.content;
+                let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, story_border_style, state.colors.story_header_on);
+                let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
                 render_transcript(&session.machine, state, tarea, buf);
-                draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
-                story_area = story_frame.content;
+                if let Some(hrect) = story_fp.header {
+                    let segs = [InsetSegment { text: &state.title, active: false }];
+                    if story_fp.header_bordered {
+                        draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                    } else {
+                        draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                    }
+                }
+                story_area = story_fp.content;
 
-                let map_frame = draw_pane_frame(buf, chunks[1], state.colors.map_border_style, state.colors.map_border);
-                render_map_layered(&rm, &mapper.graph, state, map_frame.content, buf);
+                let map_fp = draw_framed(buf, chunks[1], state.colors.map_border_style, state.colors.map_border_sides, state.colors.map_border, state.colors.map_header_on);
+                render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
-                    if let Some(dr) = draw_tidy_panel(anim.current(), map_frame.content, buf, &tidy_ds) {
+                    if let Some(dr) = draw_tidy_panel(anim.current(), map_fp.content, buf, &tidy_ds) {
                         dialog_rects_out = Some(dr);
                     }
                 }
-                map_area = map_frame.content;
+                map_area = map_fp.content;
                 // Overlay layer tabs
                 {
                     let graph = match &state.tidy_anim {
@@ -369,8 +389,14 @@ fn draw_frame(
                     let active_layer = state.active_layer(graph);
                     let owned_segs = build_layer_segments(&layer_ids, active_layer);
                     let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                    let tab_rects = draw_top_inset(buf, map_frame.top_inset, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active);
-                    layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                    if let Some(hrect) = map_fp.header {
+                        let tab_rects = if map_fp.header_bordered {
+                            draw_top_inset(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                        } else {
+                            draw_header_plain(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                        };
+                        layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                    }
                 }
                 // Apply pulsing border color overlay when a tidy job is in flight
                 if let Some(pulse_color) = map_border_override {
@@ -388,7 +414,7 @@ fn draw_frame(
                 // Map pane is NEVER dimmed (always full brightness).
                 // Story pane dims when map has focus.
                 if state.focus == Focus::Map {
-                    dim_area(buf, story_frame.content);
+                    dim_area(buf, story_fp.content);
                 }
             }
         }

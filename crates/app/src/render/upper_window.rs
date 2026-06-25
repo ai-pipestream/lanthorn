@@ -9,7 +9,7 @@ use zvm::cpu::exec::Machine;
 use zvm::screen::UpperWindow;
 
 use crate::colors::ColorScheme;
-use crate::render::paneframe::{draw_pane_frame, BorderStyle};
+use crate::render::paneframe::{draw_framed, BorderStyle};
 
 // ── Style helpers ─────────────────────────────────────────────────────────────
 
@@ -70,7 +70,7 @@ pub fn draw_grid(
     let uw_area = Rect::new(area.x, area.y, area.width, needed);
 
     // Draw the optional border and get the inner content rect.
-    let frame = draw_pane_frame(buf, uw_area, border_style, border_color);
+    let frame = draw_framed(buf, uw_area, border_style, colors.upper_window_border_sides, border_color, false);
     let content = frame.content;
 
     if content.height == 0 || content.width == 0 {
@@ -209,6 +209,7 @@ mod tests {
         // Use BorderStyle::None to avoid border overhead for simplicity.
         let mut colors_no_border = colors.clone();
         colors_no_border.virtual_window_border = BorderStyle::None;
+        colors_no_border.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
 
         let consumed = draw_grid(&upper, 2, (1, 1), false, &colors_no_border, area, &mut buf);
 
@@ -257,6 +258,7 @@ mod tests {
 
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
 
         // Only 3 rows available, but cursor is at row 5.
         let area = Rect::new(0, 0, 10, 3);
@@ -281,6 +283,7 @@ mod tests {
 
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
 
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
@@ -299,6 +302,7 @@ mod tests {
         upper.resize(2, 5);
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
         let area = Rect::new(0, 0, 10, 3);
 
         // With show_cursor=false the cursor cell is a plain (non-reversed) space.
