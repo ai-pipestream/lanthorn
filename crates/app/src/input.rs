@@ -163,6 +163,8 @@ pub enum Action {
     GalleryCategoryPrev,
     /// Close the gallery and persist selections to config (persistence handled by main.rs).
     GalleryClose,
+    /// Apply the current gallery selection: persist to personal style then close (handled by main.rs).
+    GalleryApply,
     /// Export all current settings to the personal style file and repoint config
     /// (handled by main.rs); leaves the gallery open.
     GalleryExportStyle,
@@ -592,12 +594,12 @@ fn gallery_dialog_action(
         }
     }
 
-    // Check buttons: Done → GalleryClose
+    // Check buttons: Ok → GalleryApply
     for (id, rect) in &rects.buttons {
         if hit(*rect, col, row) {
             return Some(match id {
-                ButtonId::Done => Action::GalleryClose,
-                _              => Action::None,
+                ButtonId::Ok => Action::GalleryApply,
+                _            => Action::None,
             });
         }
     }
@@ -871,6 +873,7 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::GalleryNext,
         KeyCode::Left => Action::GalleryCategoryPrev,
         KeyCode::Right => Action::GalleryCategoryNext,
+        KeyCode::Enter => Action::GalleryApply,
         KeyCode::Esc => Action::GalleryClose,
         KeyCode::Char('o') | KeyCode::Char('O') => Action::GalleryExportStyle,
         _ => Action::None,
@@ -1679,6 +1682,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::OpenGallery => {
             state.hotkey_dialog = false;
+            state.dialog_focus = 0;
             state.gallery = Some(crate::state::GalleryState {
                 category_idx: 0,
                 selections: [0, 0, 0, 0],
@@ -1723,6 +1727,13 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(g) = state.gallery.take() {
                 state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
                 // Persistence is handled by the caller (main.rs detects GalleryClose).
+            }
+        }
+
+        Action::GalleryApply => {
+            if let Some(g) = state.gallery.take() {
+                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
+                // Persistence is handled by the caller (main.rs detects GalleryApply).
             }
         }
 
@@ -3263,6 +3274,13 @@ mod tests {
         let mut m = mapper::mapper::Mapper::default();
         apply_action(Action::GalleryClose, &mut s, &mut m);
         assert!(s.gallery.is_none());
+    }
+
+    #[test]
+    fn gallery_enter_is_apply() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let a = gallery_key_to_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(a, Action::GalleryApply));
     }
 
     #[test]
@@ -4816,7 +4834,7 @@ mod tests {
         }
     }
 
-    /// Assert gallery [X] and [Done] clicks produce GalleryClose.
+    /// Assert gallery [X] produces GalleryClose and [OK] produces GalleryApply.
     #[test]
     fn gallery_dialog_x_and_done_produce_gallery_close() {
         use ratatui::layout::Rect;
@@ -4827,7 +4845,7 @@ mod tests {
             area:    Rect::new(5, 3, 70, 24),
             content: Rect::new(6, 5, 68, 19),
             close:   Some(Rect::new(73, 3, 1, 1)),
-            buttons: vec![(ButtonId::Done, Rect::new(65, 26, 8, 1))],
+            buttons: vec![(ButtonId::Ok, Rect::new(65, 26, 8, 1))],
         };
 
         let mut state = AppState::default();
@@ -4842,9 +4860,9 @@ mod tests {
         let a = mouse_to_action(&state, mouse_left_click(73, 3), map, story, room_rects, &dialog);
         assert!(matches!(a, Action::GalleryClose), "gallery [X] click should produce GalleryClose, got {:?}", a);
 
-        // Done button → GalleryClose
+        // OK button → GalleryApply
         let a = mouse_to_action(&state, mouse_left_click(67, 26), map, story, room_rects, &dialog);
-        assert!(matches!(a, Action::GalleryClose), "gallery [Done] click should produce GalleryClose, got {:?}", a);
+        assert!(matches!(a, Action::GalleryApply), "gallery [OK] click should produce GalleryApply, got {:?}", a);
 
         // Click outside → swallowed (None)
         let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);

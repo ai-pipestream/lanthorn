@@ -46,14 +46,14 @@ pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         shadow_on: state.colors.dialog_shadow_on,
     };
 
-    let buttons = &[DialogButton { id: ButtonId::Done, label: "Done" }];
+    let buttons = &[DialogButton { id: ButtonId::Ok, label: "OK" }];
     let spec = DialogSpec {
         title: "Symbol Gallery",
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
-        default: None,
-        focus: None,
+        default: Some(ButtonId::Ok),
+        focus: Some(state.dialog_focus),
     };
 
     let rects = draw_dialog(buf, &spec, &st);
@@ -320,11 +320,11 @@ mod tests {
             (rects.area.x, rects.area.y)
         );
 
-        // Must have [X] close button and [Done] button.
+        // Must have [X] close button and [OK] button.
         assert!(rects.close.is_some(), "gallery dialog must have [X] close button");
         assert_eq!(rects.buttons.len(), 1, "gallery dialog must have one button");
         let ids: Vec<ButtonId> = rects.buttons.iter().map(|(id, _)| *id).collect();
-        assert!(ids.contains(&ButtonId::Done), "gallery dialog must have [Done] button");
+        assert!(ids.contains(&ButtonId::Ok), "gallery dialog must have [OK] button");
 
         // The top-left cell must be a border corner, not a space.
         let buf = terminal.backend().buffer();
@@ -359,7 +359,7 @@ mod tests {
             .flat_map(|c| c.symbol().chars())
             .collect();
         assert!(all_syms.contains("Symbol Gallery"), "title 'Symbol Gallery' should be present");
-        assert!(all_syms.contains("Done"), "[Done] button should be visible");
+        assert!(all_syms.contains("OK"), "[OK] button should be visible");
         assert!(all_syms.contains('✕'), "[X] close button should be visible");
     }
 

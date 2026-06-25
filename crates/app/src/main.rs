@@ -1173,7 +1173,7 @@ fn main() {
         };
 
         // Note whether this action closes the gallery (persist the look afterward).
-        let gallery_cfg_on_close = matches!(action, Action::GalleryClose);
+        let gallery_cfg_on_close = matches!(action, Action::GalleryClose | Action::GalleryApply);
 
         // Note whether this action is the on-demand "Output all settings" export.
         let export_style_now = matches!(action, Action::GalleryExportStyle);
