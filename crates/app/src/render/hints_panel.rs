@@ -67,7 +67,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
-        default: None,
+        default: Some(ButtonId::Close),
         focus: None,
     };
 

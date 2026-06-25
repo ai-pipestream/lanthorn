@@ -3077,6 +3077,19 @@ mod tests {
         assert!(matches!(hint_key_routes(KeyCode::Char('a')), HintKeyKind::ToSession));
     }
 
+    /// Regression: Enter must route to the hint session input (ToSession), not Close.
+    /// The hints panel has a text input; Enter submits that input regardless of any
+    /// default-button decoration on the Close button.
+    #[test]
+    fn hints_enter_submits_input_not_close() {
+        use crossterm::event::KeyCode;
+        let routed = hint_key_routes(KeyCode::Enter);
+        assert!(
+            matches!(routed, HintKeyKind::ToSession),
+            "Enter must be routed to the hint session input (ToSession), not Close"
+        );
+    }
+
     // ── reset_dialog_tab_then_enter_fires_focused ─────────────────────────────
 
     #[test]
