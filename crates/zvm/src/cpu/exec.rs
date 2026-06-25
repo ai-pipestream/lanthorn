@@ -3385,6 +3385,9 @@ pub(crate) mod tests {
     fn scan_table_not_found_stores_zero() {
         let mut m = build_test_machine(&[]);
         m.mem.write_word(0x0200, 0x1111);
+        // Pre-seed G0 nonzero so the assertion proves the opcode actively wrote 0
+        // (not that the store path was skipped on a default-0 global).
+        m.do_store(Some(16), 0xBEEF);
         m.exec_var(0x17, &[0x9999, 0x0200, 1, 0x82], Some(16), None);
         assert_eq!(m.global(0), 0, "no match -> store 0");
     }
