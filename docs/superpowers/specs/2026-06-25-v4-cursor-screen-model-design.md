@@ -1,7 +1,13 @@
 # v4+ Cursor-Addressed Screen Model — Design
 
-**Status:** Draft for review
+**Status:** Approved; PARKED behind the v4+ opcode-completeness pass
 **Date:** 2026-06-25
+
+> **Prerequisite (decided 2026-06-25):** a v4+ opcode-completeness pass runs first —
+> it implements `scan_table`, `copy_table`, `print_table`, `get_cursor`, `erase_line`
+> and turns the silent VAR fallthrough into a warning. `get_cursor`/`erase_line` are
+> therefore implemented there, not here; this spec consumes them. Without that pass,
+> v4+ games (incl. Bureaucracy) malfunction regardless of the screen model.
 
 ## Goal
 
