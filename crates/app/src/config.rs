@@ -244,12 +244,9 @@ pub struct Config {
     /// `user_dir/style.toml` if present, else the built-in default).
     #[serde(default)]
     pub style: Option<String>,
-    /// Color override layer (style-file format): optional scheme + per-selector decls.
+    /// Watch the resolved style.toml and live-reload it on change (default false).
     #[serde(default)]
-    pub colors: crate::style::StyleColors,
-    /// Symbol override layer (style-file format): optional presets + per-glyph overrides.
-    #[serde(default)]
-    pub symbols: crate::style::StyleSymbols,
+    pub watch_style: bool,
     /// The prefix character that triggers slash-command routing (default: '/').
     /// Stored as a single-character string in TOML: command_prefix = "/".
     #[serde(default = "default_command_prefix", deserialize_with = "deserialize_char_from_str")]
@@ -286,8 +283,7 @@ impl Default for Config {
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: None,
-            colors: crate::style::StyleColors::default(),
-            symbols: crate::style::StyleSymbols::default(),
+            watch_style: false,
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
             show_loc_method: false,
@@ -295,6 +291,25 @@ impl Default for Config {
             virtual_screen_cols: default_virtual_screen_cols(),
             virtual_screen_rows: default_virtual_screen_rows(),
         }
+    }
+}
+
+/// The config file path `resolve` reads from: the `--config` override, else the
+/// default `user_dir/config.toml`.
+pub fn config_path(cli: &Cli) -> std::path::PathBuf {
+    match &cli.config {
+        Some(p) => p.clone(),
+        None => default_user_dir().join("config.toml"),
+    }
+}
+
+/// True if a raw config.toml still contains a top-level `[colors]` or `[symbols]`
+/// table. Those style sections moved to style.toml and are no longer read; the
+/// caller warns once so users can migrate.
+pub fn config_has_style_sections(raw: &str) -> bool {
+    match raw.parse::<toml::Value>() {
+        Ok(toml::Value::Table(t)) => t.contains_key("colors") || t.contains_key("symbols"),
+        _ => false,
     }
 }
 
@@ -307,14 +322,7 @@ impl Default for Config {
 /// `Cli::parse()` before calling this; pass a reference here.
 pub fn resolve(cli: &Cli) -> Config {
     // Determine which config file to read.
-    let config_path = match &cli.config {
-        Some(p) => p.clone(),
-        None => {
-            // Default location: derive from the default user_dir, not from the
-            // CLI user_dir override, so the file location is stable.
-            default_user_dir().join("config.toml")
-        }
-    };
+    let config_path = config_path(cli);
 
     // Start from defaults.
     let mut cfg = Config::default();
@@ -333,8 +341,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
-            cfg.colors = from_file.colors;
-            cfg.symbols = from_file.symbols;
+            cfg.watch_style = from_file.watch_style;
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
             cfg.show_loc_method = from_file.show_loc_method;
@@ -411,6 +418,15 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_style_defaults_false_and_detector_works() {
+        let c = Config::default();
+        assert!(!c.watch_style);
+        assert!(config_has_style_sections("[colors]\n\"room\" = { fg = \"red\" }\n"));
+        assert!(config_has_style_sections("[symbols]\nbox_style = \"thick\"\n"));
+        assert!(!config_has_style_sections("style = \"s.toml\"\nuse_default_map = true\n"));
+    }
 
     #[test]
     fn virtual_screen_defaults_80x24() {
@@ -624,8 +640,7 @@ mod tests {
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),
-            colors: Default::default(),
-            symbols: Default::default(),
+            watch_style: false,
             command_prefix: '/',
             show_room_numbers: false,
             show_loc_method: false,

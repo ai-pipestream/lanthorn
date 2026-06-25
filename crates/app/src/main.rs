@@ -98,10 +98,9 @@ fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
     state.config.style = Some(style_path.to_string_lossy().into_owned());
     let _ = app::config::write_config(user_dir, &state.config);
 
-    // Re-resolve from the now-self-contained style file (+ any config overrides).
+    // Re-resolve from the now-self-contained style file (style.toml is the single source).
     let (base, _w1) = app::style::load_style(state.config.style.as_deref(), user_dir);
-    let over = app::style::style_from_config(&state.config.colors, &state.config.symbols);
-    let (cs, set, _w2) = app::style::resolve(&app::style::merge(&base, &over), user_dir);
+    let (cs, set, _w2) = app::style::resolve(&base, user_dir);
     state.colors = cs;
     state.symbols = set;
 }
@@ -601,6 +600,28 @@ enum FbEntryAction {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+/// Toggle the opt-in style.toml file-watcher on/off, updating the status line.
+fn toggle_style_watch(
+    state: &mut app::state::AppState,
+    watcher: &mut Option<app::watch::StyleWatcher>,
+) {
+    if watcher.is_some() {
+        *watcher = None;
+        state.set_status("style watch off");
+    } else if let Some(p) =
+        app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
+    {
+        *watcher = app::watch::start(&p);
+        state.set_status(if watcher.is_some() {
+            "style watch on"
+        } else {
+            "style watch: no file to watch"
+        });
+    } else {
+        state.set_status("style watch: no file to watch");
+    }
+}
+
 fn main() {
     // ── 1. Parse args + load config ───────────────────────────────────────────
 
@@ -695,10 +716,9 @@ fn main() {
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
     let mut state = AppState::default();
-    // Resolve the look from the style file (base) ⊕ config override sections.
+    // Resolve the look from style.toml (the single styling source).
     let (base, w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let over = app::style::style_from_config(&cfg.colors, &cfg.symbols);
-    let (cs, set, w2) = app::style::resolve(&app::style::merge(&base, &over), &cfg.user_dir);
+    let (cs, set, w2) = app::style::resolve(&base, &cfg.user_dir);
     state.colors = cs;
     state.symbols = set;
     for w in w1.into_iter().chain(w2) {
@@ -727,6 +747,16 @@ fn main() {
     let banner_line = app::session::first_banner_line(&banner);
     state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
     state.push_transcript(&banner);
+
+    // One-time notice: config.toml no longer carries style — those moved to style.toml.
+    if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(&cli)) {
+        if app::config::config_has_style_sections(&raw_cfg) {
+            state.push_transcript_kind(
+                "config.toml [colors]/[symbols] are no longer used — move them into style.toml",
+                app::state::TranscriptKind::Warning,
+            );
+        }
+    }
 
     // Observe the starting room so it appears on the map immediately.
     let start_loc = zvm::current_location(&session.machine);
@@ -817,7 +847,45 @@ fn main() {
     // Poll FPS while a background tidy is in flight.
     const TIDY_POLL_MS: u64 = 33;
 
+    // Optional style.toml file-watcher (opt-in via watch_style; toggled by /watch).
+    let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+    let mut watch_dirty: Option<std::time::Instant> = None;
+    if state.config.watch_style {
+        if let Some(p) =
+            app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
+        {
+            style_watcher = app::watch::start(&p);
+        }
+    }
+
     loop {
+        // ── Style watch: drain events, debounce, then reload ──────────────────
+        if let Some(w) = &style_watcher {
+            let mut saw = false;
+            while w.rx.try_recv().is_ok() { saw = true; }
+            if saw { watch_dirty = Some(std::time::Instant::now()); }
+        } else {
+            // Watch turned off: drop any pending debounce so it can't fire later.
+            watch_dirty = None;
+        }
+        if app::watch::due(watch_dirty, std::time::Instant::now(), Duration::from_millis(200)) {
+            watch_dirty = None;
+            match app::reload::reload_style(&mut state) {
+                app::reload::ReloadOutcome::Reloaded { warnings } => {
+                    for wn in &warnings {
+                        state.push_transcript_kind(wn, TranscriptKind::Warning);
+                    }
+                    state.set_status("style reloaded (watch)");
+                }
+                app::reload::ReloadOutcome::Failed { msg } => {
+                    state.push_transcript_kind(
+                        &format!("style reload failed: {}", msg),
+                        TranscriptKind::Warning,
+                    );
+                }
+            }
+        }
+
         // ── Background tidy job: poll and apply ───────────────────────────────
         // Check whether the in-flight tidy job has finished. Do this BEFORE the
         // draw so the first fully-drawn frame after completion shows the new layout.
@@ -1313,6 +1381,12 @@ fn main() {
             _ => continue,
         };
 
+        // ToggleWatch is run-loop-only (owns the watcher): intercept before dispatch.
+        if matches!(action, Action::ToggleWatch) {
+            toggle_style_watch(&mut state, &mut style_watcher);
+            continue;
+        }
+
         // Note whether this action closes the gallery (persist the look afterward).
         let gallery_cfg_on_close = matches!(action, Action::GalleryClose | Action::GalleryApply);
 
@@ -1368,7 +1442,11 @@ fn main() {
                     let body = &cmd[state.config.command_prefix.len_utf8()..];
                     match slash::parse(body, state.config.command_prefix) {
                         SlashOutcome::Action(a) => {
-                            apply_action(a, &mut state, &mut mapper);
+                            if matches!(a, Action::ToggleWatch) {
+                                toggle_style_watch(&mut state, &mut style_watcher);
+                            } else {
+                                apply_action(a, &mut state, &mut mapper);
+                            }
                         }
                         SlashOutcome::Message(m) | SlashOutcome::Error(m) => {
                             state.set_status(m);

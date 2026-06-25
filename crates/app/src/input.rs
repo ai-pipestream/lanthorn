@@ -67,6 +67,10 @@ pub enum Action {
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
     /// No-op in Manual mode (positions are user-controlled and frozen).
     Retidy,
+    /// Re-read style.toml and swap the live colors/symbols (keeps current look on error).
+    ReloadStyle,
+    /// Toggle the opt-in style.toml file-watcher (handled in the run loop).
+    ToggleWatch,
     /// Run the tidy pipeline and start animated playback of its stages (Auto only).
     AnimateTidy,
     /// Step the tidy animation by N frames (negative = back); pauses playback.
@@ -1378,13 +1382,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                                         crate::state::ConfigPathField::UserDir => {
                                             cs.working.user_dir = std::path::PathBuf::from(&returned.buffer);
                                         }
-                                        crate::state::ConfigPathField::ColorsScheme => {
-                                            cs.working.colors.scheme = if returned.buffer.is_empty() {
-                                                None
-                                            } else {
-                                                Some(returned.buffer.clone())
-                                            };
-                                        }
                                     }
                                 }
                             }
@@ -1488,6 +1485,26 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 run_tidy_pipeline(&mut mapper.graph, layer);
             }
         }
+
+        Action::ReloadStyle => {
+            match crate::reload::reload_style(state) {
+                crate::reload::ReloadOutcome::Reloaded { warnings } => {
+                    for w in &warnings {
+                        state.push_transcript_kind(w, crate::state::TranscriptKind::Warning);
+                    }
+                    state.set_status("style reloaded");
+                }
+                crate::reload::ReloadOutcome::Failed { msg } => {
+                    state.push_transcript_kind(
+                        &format!("style reload failed: {}", msg),
+                        crate::state::TranscriptKind::Warning,
+                    );
+                    state.set_status("reload failed — keeping current style");
+                }
+            }
+        }
+
+        Action::ToggleWatch => { /* handled in the run loop (owns the watcher) */ }
 
         Action::AnimateTidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
@@ -1970,7 +1987,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 if let Some(f) = field {
                     let current = match &f {
                         crate::state::ConfigPathField::UserDir => cs.working.user_dir.to_string_lossy().to_string(),
-                        crate::state::ConfigPathField::ColorsScheme => cs.working.colors.scheme.clone().unwrap_or_default(),
                     };
                     state.prompt = Some(crate::state::Prompt {
                         kind: crate::state::PromptKind::ConfigEditPath { field: f },
@@ -1983,13 +1999,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigSave => {
             if let Some(cs) = state.config_screen.take() {
                 state.config = clone_config(&cs.working);
-                // Re-resolve the live look through the style pipeline: style-file
-                // base ⊕ the config override sections edited on this screen.
+                // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
                     crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);
-                let over = crate::style::style_from_config(&cs.working.colors, &cs.working.symbols);
                 let (colors, set, _w2) =
-                    crate::style::resolve(&crate::style::merge(&base, &over), &cs.working.user_dir);
+                    crate::style::resolve(&base, &cs.working.user_dir);
                 state.colors = colors;
                 state.symbols = set;
                 // The style-file write + config repoint is caller-handled
@@ -2246,7 +2260,6 @@ pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config
 fn config_path_field(row: usize) -> Option<crate::state::ConfigPathField> {
     match row {
         0 => Some(crate::state::ConfigPathField::UserDir),
-        9 => Some(crate::state::ConfigPathField::ColorsScheme),
         _ => None,
     }
 }
@@ -2274,16 +2287,6 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         6 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
         7 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
         8 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
-        9 => {
-            // colors.scheme — cycle through preset names + None.
-            if let Some(cs) = &mut state.config_screen {
-                config_cycle_colors_scheme(&mut cs.working.colors.scheme, 1);
-            }
-        }
-        10 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::BoxStyle::preset_names(), &mut cs.working.symbols.box_style, 1); } }
-        11 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::Arrows::preset_names(), &mut cs.working.symbols.arrow_set, 1); } }
-        12 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PortalGlyphs::preset_names(), &mut cs.working.symbols.portal_icons, 1); } }
-        13 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PathGlyphs::preset_names(), &mut cs.working.symbols.path_style, 1); } }
         _ => {}
     }
 }
@@ -2297,39 +2300,9 @@ fn config_cycle_background_tidy(val: &mut crate::config::BackgroundTidy, delta: 
     *val = variants[((pos + delta).rem_euclid(n)) as usize];
 }
 
-/// Cycle the colors.scheme through: None, "mono", "high-contrast", "tomorrow-night", and back.
-fn config_cycle_colors_scheme(scheme: &mut Option<String>, delta: i32) {
-    let presets: &[&str] = &["mono", "high-contrast", "tomorrow-night"];
-    let current_idx = match scheme.as_deref() {
-        None => -1i32,
-        Some(s) => presets.iter().position(|p| *p == s).map(|i| i as i32).unwrap_or(-1),
-    };
-    let n = presets.len() as i32;
-    let next = current_idx + delta;
-    if next < 0 || next >= n {
-        *scheme = None;
-    } else {
-        *scheme = Some(presets[next as usize].to_string());
-    }
-}
-
-/// Cycle an optional string preset value through the preset_names() list by delta.
-///
-/// `None` is treated as the first preset; the result is always `Some`, so an
-/// explicit gallery/config edit pins the preset in the style file.
-fn config_cycle_preset(names: &[&str], val: &mut Option<String>, delta: i32) {
-    let n = names.len() as i32;
-    if n == 0 { return; }
-    let pos = val
-        .as_deref()
-        .and_then(|v| names.iter().position(|p| *p == v))
-        .unwrap_or(0) as i32;
-    *val = Some(names[((pos + delta).rem_euclid(n)) as usize].to_string());
-}
 
 /// Apply ConfigCycle to the selected row.
 fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
-    use crate::symbols::{Arrows, BoxStyle, PathGlyphs, PortalGlyphs};
     match row {
         0 => {} // path: no cycling
         1 => working.use_default_map = !working.use_default_map,
@@ -2340,11 +2313,6 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         6 => working.record_history = !working.record_history,
         7 => working.show_room_numbers = !working.show_room_numbers,
         8 => config_cycle_background_tidy(&mut working.background_tidy, delta),
-        9 => config_cycle_colors_scheme(&mut working.colors.scheme, delta),
-        10 => config_cycle_preset(BoxStyle::preset_names(), &mut working.symbols.box_style, delta),
-        11 => config_cycle_preset(Arrows::preset_names(), &mut working.symbols.arrow_set, delta),
-        12 => config_cycle_preset(PortalGlyphs::preset_names(), &mut working.symbols.portal_icons, delta),
-        13 => config_cycle_preset(PathGlyphs::preset_names(), &mut working.symbols.path_style, delta),
         _ => {}
     }
 }
@@ -2703,6 +2671,23 @@ mod tests {
         apply_action(Action::Retidy, &mut s, &mut m);
         assert_eq!(m.graph.room(1).unwrap().pos, Some((5, 5)), "Manual: retidy must not move rooms");
         assert_eq!(m.graph.room(2).unwrap().pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn reload_action_applies_style_file() {
+        let dir = std::env::temp_dir().join(format!("babelmap-reloadact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("style.toml");
+        std::fs::write(&path, "[colors]\n\"transcript\" = { fg = \"magenta\" }\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(path.to_string_lossy().to_string());
+        let mut mapper = Mapper::default();
+
+        apply_action(Action::ReloadStyle, &mut state, &mut mapper);
+        assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Magenta));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

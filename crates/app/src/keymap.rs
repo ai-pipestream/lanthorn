@@ -35,6 +35,8 @@ pub enum Command {
     ExportDump,
     CycleLayout,
     Retidy,
+    ReloadStyle,
+    ToggleWatch,
     AnimateTidy,
     ToggleAlignment,
     TogglePortalLabels,
@@ -125,6 +127,8 @@ impl Command {
             Command::ExportDump => Action::ExportDump,
             Command::CycleLayout => Action::CycleLayout,
             Command::Retidy => Action::Retidy,
+            Command::ReloadStyle => Action::ReloadStyle,
+            Command::ToggleWatch => Action::ToggleWatch,
             Command::AnimateTidy => Action::AnimateTidy,
             Command::ToggleAlignment => Action::ToggleAlignment,
             Command::TogglePortalLabels => Action::TogglePortalLabels,
@@ -181,6 +185,8 @@ impl Command {
             Command::ExportDump => "export_dump",
             Command::CycleLayout => "cycle_layout",
             Command::Retidy => "retidy",
+            Command::ReloadStyle => "reload_style",
+            Command::ToggleWatch => "toggle_watch",
             Command::AnimateTidy => "animate_tidy",
             Command::ToggleAlignment => "toggle_alignment",
             Command::TogglePortalLabels => "toggle_portal_labels",
@@ -237,6 +243,8 @@ impl Command {
             Command::ExportDump => "dump map",
             Command::CycleLayout => "layout",
             Command::Retidy => "retidy",
+            Command::ReloadStyle => "reload style",
+            Command::ToggleWatch => "watch style",
             Command::AnimateTidy => "animate tidy",
             Command::ToggleAlignment => "alignment",
             Command::TogglePortalLabels => "portals",
@@ -293,6 +301,8 @@ impl Command {
             | Command::ExportDump
             | Command::CycleLayout
             | Command::Retidy
+            | Command::ReloadStyle
+            | Command::ToggleWatch
             | Command::AnimateTidy
             | Command::ToggleAlignment
             | Command::TogglePortalLabels
@@ -357,6 +367,8 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::ExportDump,
     Command::CycleLayout,
     Command::Retidy,
+    Command::ReloadStyle,
+    Command::ToggleWatch,
     Command::AnimateTidy,
     Command::ToggleAlignment,
     Command::TogglePortalLabels,
