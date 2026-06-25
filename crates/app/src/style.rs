@@ -302,6 +302,17 @@ impl<'de> serde::Deserialize<'de> for StyleColors {
 pub struct StyleDoc {
     pub colors: StyleColors,
     pub symbols: StyleSymbols,
+    /// User story-styling rules from `[[transcript.rule]]`, in file order.
+    pub transcript_rules: Vec<RawRule>,
+}
+
+/// A raw (uncompiled) user transcript-styling rule from `[[transcript.rule]]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawRule {
+    /// The regex source string (from the rule's `match` key).
+    pub pattern: String,
+    /// The fg/bg/bold/italic style fields applied on a match.
+    pub decl: Decl,
 }
 
 // ── merge ─────────────────────────────────────────────────────────────────────
@@ -341,9 +352,16 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         },
     };
 
+    let transcript_rules = if over.transcript_rules.is_empty() {
+        base.transcript_rules.clone()
+    } else {
+        over.transcript_rules.clone()
+    };
+
     StyleDoc {
         colors: StyleColors { scheme, selectors },
         symbols,
+        transcript_rules,
     }
 }
 
@@ -414,7 +432,27 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
         }
     }
 
-    Ok(StyleDoc { colors, symbols })
+    let mut transcript_rules: Vec<RawRule> = Vec::new();
+    if let Some(toml::Value::Table(tr_table)) = root.get("transcript") {
+        if let Some(toml::Value::Array(rules)) = tr_table.get("rule") {
+            for item in rules {
+                if let toml::Value::Table(rt) = item {
+                    let pattern = rt
+                        .get("match")
+                        .and_then(toml::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if pattern.is_empty() {
+                        continue; // a rule with no `match` is skipped
+                    }
+                    let decl = parse_decl_from_table(rt);
+                    transcript_rules.push(RawRule { pattern, decl });
+                }
+            }
+        }
+    }
+
+    Ok(StyleDoc { colors, symbols, transcript_rules })
 }
 
 /// Parse a [`Decl`] from a TOML inline table (field-by-field).
@@ -439,6 +477,7 @@ pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleD
     StyleDoc {
         colors: colors.clone(),
         symbols: symbols.clone(),
+        transcript_rules: Vec::new(),
     }
 }
 
@@ -467,6 +506,18 @@ pub fn resolve(
     // Step 3: layer CSS selectors on top.
     let selector_warnings = apply_color_decls(&mut cs, &doc.colors.selectors, &gs);
     warnings.extend(selector_warnings);
+
+    // Compile user transcript rules; an invalid regex warns and is skipped.
+    for r in &doc.transcript_rules {
+        match regex::Regex::new(&r.pattern) {
+            Ok(rx) => cs.transcript_rules.push(crate::colors::CompiledRule {
+                pattern: r.pattern.clone(),
+                regex: rx,
+                style: decl_to_style(&r.decl, &gs),
+            }),
+            Err(e) => warnings.push(format!("invalid transcript rule regex '{}': {}", r.pattern, e)),
+        }
+    }
 
     // Step 4: resolve symbols.
     let set = crate::symbols::SymbolSet::resolve(&finalize_symbols(&doc.symbols));
@@ -892,6 +943,64 @@ pub fn write_style_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_rules_parse_compile_in_order() {
+        let text = r##"
+[colors]
+[[transcript.rule]]
+match = "^>.*"
+fg = "magenta"
+bold = true
+
+[[transcript.rule]]
+match = "(?i)\\bgrue\\b"
+fg = "red"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        assert_eq!(doc.transcript_rules.len(), 2);
+        assert_eq!(doc.transcript_rules[0].pattern, "^>.*");
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cs.transcript_rules.len(), 2);
+        assert!(cs.transcript_rules[0].regex.is_match("> go north"));
+        assert!(cs.transcript_rules[1].regex.is_match("A lurking GRUE!"));
+        use ratatui::style::Color;
+        assert_eq!(cs.transcript_rules[0].style.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn invalid_transcript_rule_warns_and_skips() {
+        let text = r##"
+[colors]
+[[transcript.rule]]
+match = "("
+fg = "red"
+
+[[transcript.rule]]
+match = "ok"
+fg = "green"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert_eq!(warnings.len(), 1, "exactly one invalid-regex warning: {warnings:?}");
+        assert_eq!(cs.transcript_rules.len(), 1, "valid rule still loads");
+        assert!(cs.transcript_rules[0].regex.is_match("ok"));
+    }
+
+    #[test]
+    fn merge_replaces_transcript_rules_when_override_has_any() {
+        let mut base = StyleDoc::default();
+        base.transcript_rules.push(RawRule { pattern: "a".into(), decl: Decl::default() });
+        let mut over = StyleDoc::default();
+        over.transcript_rules.push(RawRule { pattern: "b".into(), decl: Decl::default() });
+        let m = merge(&base, &over);
+        assert_eq!(m.transcript_rules.len(), 1);
+        assert_eq!(m.transcript_rules[0].pattern, "b");
+        // Empty override keeps base rules.
+        let m2 = merge(&base, &StyleDoc::default());
+        assert_eq!(m2.transcript_rules[0].pattern, "a");
+    }
 
     #[test]
     fn transcript_category_selectors_parse_and_apply() {
