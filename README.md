@@ -162,6 +162,9 @@ and unsupported; v1/v2 are not supported.)
   use a CSS-ish element→properties format (`fg`/`bg`/`bold`/…). Customizing in
   the gallery or config screen writes your personal `~/.babelmap/style.toml`, and
   the gallery can export a self-contained style file to hand to someone else.
+  See `style.example.toml` at the repo root for a fully-commented reference of
+  every selector, the `[[transcript.rule]]` story rules, the `[statusbar]`
+  segment bar, and the `[symbols]` overrides.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/a notched **picture-frame**). The map defaults to the picture-frame; the
   story pane defaults to a single-line border. The map's top border carries

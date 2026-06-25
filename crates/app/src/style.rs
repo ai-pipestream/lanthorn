@@ -1120,6 +1120,18 @@ align = "right"
     }
 
     #[test]
+    fn style_example_toml_parses_and_resolves_clean() {
+        // The repo-root style.example.toml is the user-facing reference; it must
+        // parse and resolve with zero warnings so the docs cannot drift from the code.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        let doc = parse_style_toml(&text).expect("style.example.toml must parse");
+        let (_cs, _set, warnings) = resolve(&doc, path.parent().unwrap());
+        assert!(warnings.is_empty(), "style.example.toml resolved with warnings: {warnings:?}");
+    }
+
+    #[test]
     fn write_style_full_round_trips_statusbar_and_transcript_rules() {
         use crate::colors::{Align, StatusSegment, StatusBarLayout};
         use ratatui::style::Color;
