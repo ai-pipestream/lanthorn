@@ -197,6 +197,13 @@ pub(crate) fn visible_wrapped_lines_kinded(
 /// Draw `text` at `(x, y)` into `buf`, using `base_style` for normal characters
 /// and `highlight_style` for every case-insensitive occurrence of `query`.
 /// Advances `x` by the number of characters drawn. Does not exceed `clip_area`.
+///
+/// The implementation builds a lowered copy of `text` alongside a map from
+/// lowered-byte-offset to original-byte-offset so that match positions found in
+/// the lowered string can be safely mapped back to char boundaries in `text`.
+/// This is necessary because `to_lowercase()` is not byte-length-preserving
+/// (e.g. Turkish dotted-I U+0130 expands from 2 bytes to 3 bytes), so naive
+/// offset reuse can produce non-char-boundary panics.
 fn draw_str_highlighted(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -211,28 +218,67 @@ fn draw_str_highlighted(
         draw_str_clipped(buf, x, y, text, base_style, clip_area);
         return;
     }
-    let text_lower = text.to_lowercase();
-    let mut cursor_x = x;
-    let mut start = 0usize; // byte index into text
 
-    while start < text.len() {
-        let remaining_lower = &text_lower[start..];
-        if let Some(rel) = remaining_lower.find(query_lower) {
+    // Build a lowered string and a map: for each source char, record
+    // (lowered_byte_start, original_byte_start).  A sentinel entry is appended
+    // for the end of both strings.
+    let mut tl = String::with_capacity(text.len() + 4);
+    let mut map: Vec<(usize, usize)> = Vec::with_capacity(text.chars().count() + 1);
+    let mut ob = 0usize;
+    for ch in text.chars() {
+        map.push((tl.len(), ob));
+        for lc in ch.to_lowercase() {
+            tl.push(lc);
+        }
+        ob += ch.len_utf8();
+    }
+    map.push((tl.len(), text.len())); // sentinel
+
+    // Convert a lowered-byte-offset to the nearest original-byte-offset.
+    // For a START offset we round DOWN (largest entry with lowered_start <= L).
+    // For an END offset we round UP (smallest entry with lowered_start >= L).
+    let orig_start_for = |l: usize| -> usize {
+        // Binary search for the largest map entry with .0 <= l.
+        let idx = map.partition_point(|&(lb, _)| lb <= l);
+        // idx is the first entry AFTER l; step back one.
+        let i = if idx > 0 { idx - 1 } else { 0 };
+        map[i].1
+    };
+    let orig_end_for = |l: usize| -> usize {
+        // Binary search for the smallest map entry with .0 >= l.
+        let idx = map.partition_point(|&(lb, _)| lb < l);
+        map[idx].1
+    };
+
+    let mut cursor_x = x;
+    let mut search_from = 0usize; // byte index into tl
+
+    while search_from < tl.len() {
+        if let Some(rel) = tl[search_from..].find(query_lower) {
+            let tl_match_start = search_from + rel;
+            let tl_match_end   = tl_match_start + query_lower.len();
+
+            // Map lowered offsets back to original char boundaries.
+            let orig_ms = orig_start_for(tl_match_start);
+            let orig_me = orig_end_for(tl_match_end);
+            let orig_ss = orig_start_for(search_from);
+
             // Draw the non-matching prefix.
-            let prefix = &text[start..start + rel];
+            let prefix = &text[orig_ss..orig_ms];
             if !prefix.is_empty() {
                 draw_str_clipped(buf, cursor_x, y, prefix, base_style, clip_area);
                 cursor_x = cursor_x.saturating_add(prefix.chars().count() as u16);
             }
             // Draw the matching segment.
-            let match_end = start + rel + query_lower.len();
-            let matched = &text[start + rel..match_end];
+            let matched = &text[orig_ms..orig_me];
             draw_str_clipped(buf, cursor_x, y, matched, highlight_style, clip_area);
             cursor_x = cursor_x.saturating_add(matched.chars().count() as u16);
-            start = match_end;
+
+            search_from = tl_match_end;
         } else {
             // No more matches: draw the rest with the base style.
-            draw_str_clipped(buf, cursor_x, y, &text[start..], base_style, clip_area);
+            let orig_ss = orig_start_for(search_from);
+            draw_str_clipped(buf, cursor_x, y, &text[orig_ss..], base_style, clip_area);
             break;
         }
     }
@@ -1312,5 +1358,130 @@ mod tests {
         let mut buf_story = Buffer::empty(area);
         let story_frame = draw_pane_frame(&mut buf_story, area, BorderStyle::None, Style::default());
         assert_eq!(story_frame.content, area, "story pane None border must also have content == area");
+    }
+
+    // ── draw_str_highlighted regression tests ────────────────────────────────
+
+    /// Helper: render `draw_str_highlighted` into a fresh buffer and return the
+    /// symbol string for row 0 (concatenated cell symbols).
+    fn highlighted_row(text: &str, query_lower: &str, width: u16) -> String {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        draw_str_highlighted(
+            &mut buf,
+            0, 0,
+            text,
+            Style::default(),
+            query_lower,
+            Style::new().fg(ratatui::style::Color::Yellow),
+            area,
+        );
+        (0..width)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()).unwrap_or_default())
+            .collect()
+    }
+
+    /// Turkish dotted-I (U+0130, 2 UTF-8 bytes) lowercases to the two-byte
+    /// sequence "i\u{307}" (3 UTF-8 bytes).  When such a char precedes the
+    /// search query, the old byte-offset arithmetic would produce a
+    /// non-char-boundary panic.  This test verifies the fix: no panic and the
+    /// correct glyphs appear in the buffer.
+    #[test]
+    fn draw_str_highlighted_dotted_i_no_panic() {
+        // "İkey diary" with query "key": İ precedes the match, offsets shift.
+        let row = highlighted_row("İkey diary", "key", 20);
+        // Must contain the glyphs for the original text (no panic).
+        assert!(row.contains('İ'), "dotted-I glyph must appear; got: {:?}", row);
+        assert!(row.contains('k'), "k of key must appear; got: {:?}", row);
+        assert!(row.contains('e'), "e of key must appear; got: {:?}", row);
+        assert!(row.contains('y'), "y of key must appear; got: {:?}", row);
+    }
+
+    /// Verify the highlight STYLE is applied to the matched segment and only to
+    /// it.  We use a plain ASCII line so the style boundaries are unambiguous.
+    #[test]
+    fn draw_str_highlighted_ascii_highlight_style() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let highlight_style = Style::new().fg(ratatui::style::Color::Yellow);
+        draw_str_highlighted(
+            &mut buf,
+            0, 0,
+            "hello world",
+            Style::default(),
+            "world",
+            highlight_style,
+            area,
+        );
+
+        // "hello " (6 chars, x=0..5) must NOT have Yellow fg.
+        for x in 0u16..6 {
+            let cell = buf.cell((x, 0)).unwrap();
+            assert_ne!(
+                cell.style().fg,
+                Some(ratatui::style::Color::Yellow),
+                "x={} should not be highlighted", x
+            );
+        }
+        // "world" (5 chars, x=6..10) must have Yellow fg.
+        for x in 6u16..11 {
+            let cell = buf.cell((x, 0)).unwrap();
+            assert_eq!(
+                cell.style().fg,
+                Some(ratatui::style::Color::Yellow),
+                "x={} should be highlighted", x
+            );
+        }
+    }
+
+    /// Multiple occurrences of the query on the same line all get highlighted.
+    #[test]
+    fn draw_str_highlighted_multiple_matches() {
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        let highlight_style = Style::new().fg(ratatui::style::Color::Yellow);
+        // "aXa" with query "a": matches at x=0 and x=2.
+        draw_str_highlighted(
+            &mut buf,
+            0, 0,
+            "aXa",
+            Style::default(),
+            "a",
+            highlight_style,
+            area,
+        );
+        let cell0 = buf.cell((0, 0)).unwrap();
+        let cell2 = buf.cell((2, 0)).unwrap();
+        assert_eq!(cell0.style().fg, Some(ratatui::style::Color::Yellow), "first 'a' highlighted");
+        assert_eq!(cell2.style().fg, Some(ratatui::style::Color::Yellow), "second 'a' highlighted");
+        let cell1 = buf.cell((1, 0)).unwrap();
+        assert_ne!(cell1.style().fg, Some(ratatui::style::Color::Yellow), "'X' not highlighted");
+    }
+
+    /// Empty query draws text with base style and no panic.
+    #[test]
+    fn draw_str_highlighted_empty_query_no_highlight() {
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        draw_str_highlighted(
+            &mut buf,
+            0, 0,
+            "hello",
+            Style::default(),
+            "",
+            Style::new().fg(ratatui::style::Color::Yellow),
+            area,
+        );
+        for x in 0u16..5 {
+            let cell = buf.cell((x, 0)).unwrap();
+            assert_ne!(cell.style().fg, Some(ratatui::style::Color::Yellow), "no highlight for empty query at x={}", x);
+        }
+    }
+
+    /// Query longer than text produces no match and no panic.
+    #[test]
+    fn draw_str_highlighted_query_longer_than_text_no_panic() {
+        let row = highlighted_row("hi", "hello world", 10);
+        assert!(row.contains('h'), "text glyphs must still appear; got: {:?}", row);
     }
 }
