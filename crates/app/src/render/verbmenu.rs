@@ -99,7 +99,7 @@ pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
-        default: None,
+        default: Some(ButtonId::Done),
         focus: None,
     };
 

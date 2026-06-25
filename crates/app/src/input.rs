@@ -5065,4 +5065,12 @@ mod tests {
             a
         );
     }
+
+    // ── Task 6: navigation panels — regression guard ──────────────────────────
+
+    #[test]
+    fn verb_menu_tab_still_navigates_panes() {
+        let a = verb_menu_key_to_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(matches!(a, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
+    }
 }
