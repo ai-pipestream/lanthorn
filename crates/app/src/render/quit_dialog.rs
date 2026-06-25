@@ -60,8 +60,8 @@ pub fn draw_quit_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
-        default: None,
-        focus: None,
+        default: Some(ButtonId::Save),
+        focus: Some(state.dialog_focus),
     };
 
     let rects = draw_dialog(buf, &spec, &st);

@@ -942,8 +942,7 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
 
 /// Cycle a button-focus index by `delta` (+1 Tab, -1 Shift-Tab), wrapping within
 /// `0..len`. Returns 0 when `len` is 0.
-#[allow(dead_code)]
-pub(crate) fn cycle_focus(idx: usize, len: usize, delta: i32) -> usize {
+pub fn cycle_focus(idx: usize, len: usize, delta: i32) -> usize {
     if len == 0 {
         return 0;
     }
@@ -1946,6 +1945,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.hotkey_dialog = false;
             state.reset_dialog = true;
             state.reset_clear_map = false;
+            state.dialog_focus = 0;
         }
 
         // Caller-handled: silently ignored.

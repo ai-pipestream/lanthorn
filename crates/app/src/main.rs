@@ -687,6 +687,7 @@ fn main() {
     if let Some(stash) = pending_resume_stash {
         state.pending_resume = Some(stash);
         state.launch_dialog = true;
+        state.dialog_focus = 0;
     }
 
     // If the game quit immediately (e.g. czech.z5 test suite), bail without
@@ -831,19 +832,25 @@ fn main() {
         if state.reset_dialog {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match reset_dialog_key(k.code) {
-                        ResetDialogAction::Confirm => {
-                            let clear = state.reset_clear_map;
-                            state.reset_dialog = false;
-                            reset_game(&mut session, &mut mapper, &mut state, &story_bytes, clear);
-                        }
-                        ResetDialogAction::Cancel => {
-                            state.reset_dialog = false;
-                        }
-                        ResetDialogAction::ToggleClear => {
-                            state.reset_clear_map = !state.reset_clear_map;
-                        }
-                        ResetDialogAction::None => {}
+                    match k.code {
+                        crossterm::event::KeyCode::Tab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                        crossterm::event::KeyCode::BackTab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                        code => match reset_dialog_key_focused(code, state.dialog_focus) {
+                            ResetDialogAction::Confirm => {
+                                let clear = state.reset_clear_map;
+                                state.reset_dialog = false;
+                                reset_game(&mut session, &mut mapper, &mut state, &story_bytes, clear);
+                            }
+                            ResetDialogAction::Cancel => {
+                                state.reset_dialog = false;
+                            }
+                            ResetDialogAction::ToggleClear => {
+                                state.reset_clear_map = !state.reset_clear_map;
+                            }
+                            ResetDialogAction::None => {}
+                        },
                     }
                 }
                 Event::Mouse(m) => {
@@ -885,31 +892,37 @@ fn main() {
         if state.quit_dialog {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match quit_dialog_key(k.code) {
-                        QuitDialogAction::Save => {
-                            state.quit_dialog = false;
-                            let meta = app::archive::Meta {
-                                format_version: 1,
-                                ifid: Some(ifid.clone()),
-                                name: None,
-                                turns: state.turns,
-                                saved_at: format_rfc3339(
-                                    std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .map(|d| d.as_secs())
-                                        .unwrap_or(0),
-                                ),
-                            };
-                            let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
-                            break;
-                        }
-                        QuitDialogAction::Quit => {
-                            break;
-                        }
-                        QuitDialogAction::Cancel => {
-                            state.quit_dialog = false;
-                        }
-                        QuitDialogAction::None => {}
+                    match k.code {
+                        crossterm::event::KeyCode::Tab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 3, 1),
+                        crossterm::event::KeyCode::BackTab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 3, -1),
+                        code => match quit_dialog_key_focused(code, state.dialog_focus) {
+                            QuitDialogAction::Save => {
+                                state.quit_dialog = false;
+                                let meta = app::archive::Meta {
+                                    format_version: 1,
+                                    ifid: Some(ifid.clone()),
+                                    name: None,
+                                    turns: state.turns,
+                                    saved_at: format_rfc3339(
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0),
+                                    ),
+                                };
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                                break;
+                            }
+                            QuitDialogAction::Quit => {
+                                break;
+                            }
+                            QuitDialogAction::Cancel => {
+                                state.quit_dialog = false;
+                            }
+                            QuitDialogAction::None => {}
+                        },
                     }
                 }
                 Event::Mouse(m) => {
@@ -960,18 +973,24 @@ fn main() {
         if state.launch_dialog {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match launch_dialog_key(k.code) {
-                        LaunchDialogAction::Resume => {
-                            if let Some((save, lines, kinds)) = state.pending_resume.take() {
-                                state.launch_dialog = false;
-                                apply_launch_resume(&save, lines, kinds, &mut session, &mut mapper, &mut state, &last_panes);
+                    match k.code {
+                        crossterm::event::KeyCode::Tab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                        crossterm::event::KeyCode::BackTab =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                        code => match launch_dialog_key_focused(code, state.dialog_focus) {
+                            LaunchDialogAction::Resume => {
+                                if let Some((save, lines, kinds)) = state.pending_resume.take() {
+                                    state.launch_dialog = false;
+                                    apply_launch_resume(&save, lines, kinds, &mut session, &mut mapper, &mut state, &last_panes);
+                                }
                             }
-                        }
-                        LaunchDialogAction::NewGame => {
-                            state.launch_dialog = false;
-                            state.pending_resume = None;
-                        }
-                        LaunchDialogAction::None => {}
+                            LaunchDialogAction::NewGame => {
+                                state.launch_dialog = false;
+                                state.pending_resume = None;
+                            }
+                            LaunchDialogAction::None => {}
+                        },
                     }
                 }
                 Event::Mouse(m) => {
@@ -1140,6 +1159,7 @@ fn main() {
             Action::Quit => {
                 if should_prompt_save_on_quit(&state) {
                     state.quit_dialog = true;
+                    state.dialog_focus = 0;
                 } else {
                     break;
                 }
@@ -1284,6 +1304,7 @@ fn main() {
                         SlashOutcome::Quit => {
                             if should_prompt_save_on_quit(&state) {
                                 state.quit_dialog = true;
+                                state.dialog_focus = 0;
                             } else {
                                 break;
                             }
@@ -2107,12 +2128,30 @@ enum ResetDialogAction {
 
 /// Map a key code to a ResetDialogAction.
 /// Esc and 'c' cancel; Enter and 'r' confirm; Space toggles the checkbox.
+#[cfg_attr(not(test), allow(dead_code))]
 fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
         KeyCode::Enter | KeyCode::Char('r') => ResetDialogAction::Confirm,
         KeyCode::Char(' ') => ResetDialogAction::ToggleClear,
+        _ => ResetDialogAction::None,
+    }
+}
+
+/// Reset-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
+/// the existing accelerators.
+fn reset_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> ResetDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
+        KeyCode::Char('r') => ResetDialogAction::Confirm,
+        KeyCode::Char(' ') => ResetDialogAction::ToggleClear,
+        KeyCode::Enter => match focus {
+            1 => ResetDialogAction::Cancel,
+            _ => ResetDialogAction::Confirm, // focus 0 = Reset (default)
+        },
         _ => ResetDialogAction::None,
     }
 }
@@ -2243,12 +2282,31 @@ enum QuitDialogAction {
 
 /// Map a key code to a QuitDialogAction.
 /// 's' or Enter → Save & quit; 'q' → Quit without saving; Esc or 'c' → Cancel.
+#[cfg_attr(not(test), allow(dead_code))]
 fn quit_dialog_key(code: crossterm::event::KeyCode) -> QuitDialogAction {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Char('s') | KeyCode::Enter => QuitDialogAction::Save,
         KeyCode::Char('q') => QuitDialogAction::Quit,
         KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
+        _ => QuitDialogAction::None,
+    }
+}
+
+/// Quit-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
+/// the existing accelerators.
+fn quit_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> QuitDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
+        KeyCode::Char('s') => QuitDialogAction::Save,
+        KeyCode::Char('q') => QuitDialogAction::Quit,
+        KeyCode::Enter => match focus {
+            1 => QuitDialogAction::Quit,
+            2 => QuitDialogAction::Cancel,
+            _ => QuitDialogAction::Save, // focus 0 = Save & quit (default)
+        },
         _ => QuitDialogAction::None,
     }
 }
@@ -2264,11 +2322,29 @@ enum LaunchDialogAction {
 
 /// Map a key code to a LaunchDialogAction.
 /// 'r' or Enter → Resume; 'n' or Esc → New game.
+#[cfg_attr(not(test), allow(dead_code))]
 fn launch_dialog_key(code: crossterm::event::KeyCode) -> LaunchDialogAction {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Char('r') | KeyCode::Enter => LaunchDialogAction::Resume,
         KeyCode::Char('n') | KeyCode::Esc => LaunchDialogAction::NewGame,
+        _ => LaunchDialogAction::None,
+    }
+}
+
+/// Launch-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
+/// the existing accelerators.
+fn launch_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> LaunchDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => LaunchDialogAction::NewGame,
+        KeyCode::Char('r') => LaunchDialogAction::Resume,
+        KeyCode::Char('n') => LaunchDialogAction::NewGame,
+        KeyCode::Enter => match focus {
+            1 => LaunchDialogAction::NewGame,
+            _ => LaunchDialogAction::Resume, // focus 0 = Resume (default)
+        },
         _ => LaunchDialogAction::None,
     }
 }
@@ -2356,7 +2432,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_bar, hint_key_routes, is_slash, launch_dialog_key, quit_dialog_key, reset_dialog_key, scroll_for_match, should_prompt_save_on_quit, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
+    use super::{dim_area, hint_bar, hint_key_routes, is_slash, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
@@ -2966,5 +3042,47 @@ mod tests {
         use crossterm::event::KeyCode;
         assert!(matches!(hint_key_routes(KeyCode::Esc), HintKeyKind::Close));
         assert!(matches!(hint_key_routes(KeyCode::Char('a')), HintKeyKind::ToSession));
+    }
+
+    // ── reset_dialog_tab_then_enter_fires_focused ─────────────────────────────
+
+    #[test]
+    fn reset_dialog_tab_then_enter_fires_focused() {
+        use crossterm::event::KeyCode;
+        // buttons: [Reset(0), Cancel(1)], default focus 0.
+        // Tab -> focus 1 (Cancel); Enter on focus 1 -> Cancel.
+        let mut focus = 0usize;
+        focus = app::input::cycle_focus(focus, 2, 1);
+        assert_eq!(focus, 1);
+        let act = reset_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, ResetDialogAction::Cancel));
+    }
+
+    // ── quit_dialog_tab_then_enter_fires_focused ──────────────────────────────
+
+    #[test]
+    fn quit_dialog_tab_then_enter_fires_focused() {
+        use crossterm::event::KeyCode;
+        // buttons: [Save & quit(0), Quit(1), Cancel(2)], default focus 0.
+        // Tab -> focus 1 (Quit); Enter on focus 1 -> Quit.
+        let mut focus = 0usize;
+        focus = app::input::cycle_focus(focus, 3, 1);
+        assert_eq!(focus, 1);
+        let act = quit_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, QuitDialogAction::Quit));
+    }
+
+    // ── launch_dialog_tab_then_enter_fires_focused ────────────────────────────
+
+    #[test]
+    fn launch_dialog_tab_then_enter_fires_focused() {
+        use crossterm::event::KeyCode;
+        // buttons: [Resume(0), New game(1)], default focus 0.
+        // Tab -> focus 1 (New game); Enter on focus 1 -> NewGame.
+        let mut focus = 0usize;
+        focus = app::input::cycle_focus(focus, 2, 1);
+        assert_eq!(focus, 1);
+        let act = launch_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, LaunchDialogAction::NewGame));
     }
 }
