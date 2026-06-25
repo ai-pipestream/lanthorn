@@ -25,6 +25,7 @@ use app::render::config_screen::draw_config_screen;
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
+use app::render::hints_panel::{draw_hints_panel, HintsPanelRects};
 use app::render::launch_dialog::draw_launch_dialog;
 use app::render::quit_dialog::draw_quit_dialog;
 use app::render::reset_dialog::draw_reset_dialog;
@@ -208,6 +209,8 @@ struct PaneRects {
     pub quit_dialog: Option<app::render::quit_dialog::QuitDialogRects>,
     /// Hit-rects for the launch dialog (when open).
     pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
+    /// Hit-rects for the hints panel (when open).
+    pub hints_panel: Option<HintsPanelRects>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -226,6 +229,7 @@ fn draw_frame(
     let mut reset_dialog_rects_out: Option<app::render::reset_dialog::ResetDialogRects> = None;
     let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
+    let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -488,6 +492,11 @@ fn draw_frame(
             launch_dialog_rects_out = draw_launch_dialog(state, full, buf);
         }
 
+        // ── Hints panel overlay — drawn after other overlays ───────────────────
+        if state.hints.is_some() {
+            hints_panel_rects_out = draw_hints_panel(state, full, buf);
+        }
+
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
         if let Some(prompt) = &state.prompt {
             let overlay_area = if map_area.height > 0 { map_area } else { main_area };
@@ -510,7 +519,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -719,7 +728,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -986,6 +995,64 @@ fn main() {
                             } else if !in_dialog {
                                 // Click outside: swallow (keep dialog open).
                             }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { continue; }
+                _ => {}
+            }
+            continue;
+        }
+
+        // ── Hints panel intercept — before normal action routing ──────────────
+        // When the hints panel is open, route keyboard/mouse directly here and
+        // continue (swallowing events the panel does not handle).
+        if state.hints.is_some() {
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    use crossterm::event::KeyCode;
+                    match hint_key_routes(k.code) {
+                        HintKeyKind::Close => {
+                            state.hints = None;
+                        }
+                        HintKeyKind::ToSession => {
+                            match k.code {
+                                KeyCode::Enter => {
+                                    if let Some(ref mut hs) = state.hints {
+                                        let line = std::mem::take(&mut hs.input);
+                                        let app::state::HintSource::Zcode(ref mut vm) = hs.source;
+                                        let result = vm.submit(&line);
+                                        for l in result.transcript.split('\n') {
+                                            hs.transcript.push(l.to_owned());
+                                        }
+                                        hs.scroll = 0;
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    if let Some(ref mut hs) = state.hints {
+                                        hs.input.pop();
+                                    }
+                                }
+                                KeyCode::Char(c) => {
+                                    if let Some(ref mut hs) = state.hints {
+                                        hs.input.push(c);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(hp) = &last_panes.hints_panel {
+                            let in_close = hp.close.map_or(false, |r| r.contains(pt));
+                            if in_close {
+                                state.hints = None;
+                            }
+                            // Clicks inside the dialog but not on close: swallow.
                         }
                     }
                 }
@@ -1295,8 +1362,12 @@ fn main() {
                                 Err(e)   => state.set_status(format!("export failed: {}", e)),
                             }
                         }
-                        // TODO Task D: open the Hints panel (discovery + sub-session).
-                        SlashOutcome::OpenHints => {}
+                        SlashOutcome::OpenHints => {
+                            let sp = story_path.clone();
+                            let id = ifid.clone();
+                            let ud = state.config.user_dir.clone();
+                            open_hints(&mut state, &sp, &id, &ud);
+                        }
                     }
                     continue;
                 }
@@ -1725,6 +1796,14 @@ fn main() {
                 }
             }
 
+            // ── Open hints panel ──────────────────────────────────────────────
+            Action::OpenHints => {
+                let sp = story_path.clone();
+                let id = ifid.clone();
+                let ud = state.config.user_dir.clone();
+                open_hints(&mut state, &sp, &id, &ud);
+            }
+
             // ── apply_action handles everything else ───────────────────────────
             other => {
                 apply_action(other, &mut state, &mut mapper);
@@ -1989,6 +2068,26 @@ fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
     }
 }
 
+// ── Hints panel keyboard routing ──────────────────────────────────────────────
+
+/// Routing decision for a key pressed while the hints panel is open.
+enum HintKeyKind {
+    /// Close the hints panel (Esc).
+    Close,
+    /// Route the key to the hint sub-session.
+    ToSession,
+}
+
+/// Map a key code to a HintKeyKind.
+/// Esc → Close; everything else → ToSession.
+fn hint_key_routes(code: crossterm::event::KeyCode) -> HintKeyKind {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => HintKeyKind::Close,
+        _ => HintKeyKind::ToSession,
+    }
+}
+
 // ── Slash-command helper ──────────────────────────────────────────────────────
 
 /// Return true when `input` starts with the configured command `prefix` char.
@@ -2019,6 +2118,112 @@ fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
 }
 
 // ── Quit dialog helpers ───────────────────────────────────────────────────────
+
+// ── Hints open helper ─────────────────────────────────────────────────────────
+
+/// Open the hints panel for the current story, resolving the hint source.
+///
+/// If a panel is already open this is a no-op.  Discovery order:
+/// 1. Remembered per-IFID association.
+/// 2. Sibling hint file.
+/// 3. Inside a sibling ZIP.
+/// 4. AskUser: status message + TODO for file-browser wiring.
+/// 5. None: status "no hints found".
+fn open_hints(
+    state: &mut AppState,
+    story_path: &std::path::Path,
+    ifid: &str,
+    user_dir: &std::path::Path,
+) {
+    if state.hints.is_some() {
+        return;
+    }
+
+    // Built-in HINT detection: check story dictionary for "hint"/"hints".
+    // state.dict_words is populated at startup from the story's Z-machine dictionary.
+    let builtin_hint = hints::story_supports_hint(state.dict_words.iter().cloned());
+
+    let index = hints::load_hint_index(user_dir);
+    let resolution = hints::resolve_hint_source(story_path, ifid, &index);
+
+    match resolution {
+        hints::HintResolution::File(p) => {
+            match hints::load_story_bytes(&p) {
+                Ok(bytes) => {
+                    match app::session::GameSession::new(bytes) {
+                        Ok(mut vm) => {
+                            let opening = vm.take_transcript();
+                            let transcript: Vec<String> =
+                                opening.split('\n').map(|l| l.to_owned()).collect();
+                            let label = p
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("Hints")
+                                .to_owned();
+                            state.hints = Some(app::state::HintSession {
+                                source: app::state::HintSource::Zcode(vm),
+                                transcript,
+                                scroll: 0,
+                                input: String::new(),
+                                label,
+                                builtin_hint,
+                            });
+                        }
+                        Err(e) => {
+                            state.set_status(format!("hints: failed to load hint VM: {:?}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.set_status(format!("hints: cannot read hint file: {}", e));
+                }
+            }
+        }
+        hints::HintResolution::ZipEntry { zip_path, entry } => {
+            let pred = |name: &str| name == entry;
+            match hints::read_zip_entry(&zip_path, pred) {
+                Ok(Some(bytes)) => {
+                    match app::session::GameSession::new(bytes) {
+                        Ok(mut vm) => {
+                            let opening = vm.take_transcript();
+                            let transcript: Vec<String> =
+                                opening.split('\n').map(|l| l.to_owned()).collect();
+                            let label = entry.rsplit('/').next().unwrap_or(&entry).to_owned();
+                            state.hints = Some(app::state::HintSession {
+                                source: app::state::HintSource::Zcode(vm),
+                                transcript,
+                                scroll: 0,
+                                input: String::new(),
+                                label,
+                                builtin_hint,
+                            });
+                        }
+                        Err(e) => {
+                            state.set_status(format!("hints: failed to load hint VM: {:?}", e));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    state.set_status("hints: hint entry not found in zip");
+                }
+                Err(e) => {
+                    state.set_status(format!("hints: cannot read zip entry: {}", e));
+                }
+            }
+        }
+        hints::HintResolution::AskUser => {
+            // TODO: wire the file browser to pick a hint file (.z3/.z5/.z8), then call
+            // save_hint_assoc(user_dir, ifid, &picked) and restart as File path above.
+            // For now, surface a status message so the user knows what to do.
+            state.set_status(
+                "no hint file found — place <story>.hints.z5 next to the story, or use /hints <path>",
+            );
+        }
+        hints::HintResolution::None => {
+            state.set_status("no hints found");
+        }
+    }
+}
 
 /// Return true when a quit attempt should show the "Save before quitting?" dialog.
 ///
@@ -2151,7 +2356,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_bar, is_slash, launch_dialog_key, quit_dialog_key, reset_dialog_key, scroll_for_match, should_prompt_save_on_quit, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
+    use super::{dim_area, hint_bar, hint_key_routes, is_slash, launch_dialog_key, quit_dialog_key, reset_dialog_key, scroll_for_match, should_prompt_save_on_quit, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
@@ -2748,5 +2953,14 @@ mod tests {
         assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
         s.launch_dialog = false;
         assert!(!s.any_overlay_open(), "launch_dialog false => any_overlay_open false");
+    }
+
+    // ── hint_key_routes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn hint_panel_keys_close_on_esc_else_route() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(hint_key_routes(KeyCode::Esc), HintKeyKind::Close));
+        assert!(matches!(hint_key_routes(KeyCode::Char('a')), HintKeyKind::ToSession));
     }
 }
