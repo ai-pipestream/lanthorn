@@ -32,7 +32,7 @@ use app::render::reset_dialog::draw_reset_dialog;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
-use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects};
+use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color, SOUND_PULSE_MS};
 use app::render::paneframe::{build_layer_segments, draw_pane_frame, draw_top_inset, InsetSegment};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
@@ -46,7 +46,7 @@ use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
 use app::hints;
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptFilter, TranscriptKind};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, SoundPulse, TidyJob, TranscriptFilter, TranscriptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -255,9 +255,36 @@ fn draw_frame(
             pulse_border_color(job.started.elapsed())
         });
 
+        // Resolve the story-border color: a live sound pulse overrides the fg.
+        let story_border_style = {
+            let base = state.colors.story_border;
+            match &state.sound_pulse {
+                Some(p) => {
+                    let beep_color = match p.kind {
+                        zvm::cpu::exec::Beep::High => state
+                            .colors
+                            .sound_beep_high
+                            .fg
+                            .unwrap_or(ratatui::style::Color::Rgb(255, 180, 40)),
+                        zvm::cpu::exec::Beep::Low => state
+                            .colors
+                            .sound_beep_low
+                            .fg
+                            .unwrap_or(ratatui::style::Color::Rgb(60, 140, 220)),
+                    };
+                    let normal = base.fg.unwrap_or(ratatui::style::Color::Reset);
+                    match sound_pulse_color(beep_color, normal, p.started.elapsed()) {
+                        Some(c) => base.fg(c),
+                        None => base,
+                    }
+                }
+                None => base,
+            }
+        };
+
         match state.layout {
             Layout::TranscriptFull => {
-                let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, state.colors.story_border);
+                let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, story_border_style);
                 let c = story_frame.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
@@ -308,7 +335,7 @@ fn draw_frame(
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
 
-                let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, state.colors.story_border);
+                let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, story_border_style);
                 let c = story_frame.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
@@ -804,6 +831,13 @@ fn main() {
         // Update char_mode flag so the renderer hides the prompt during read_char.
         state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
 
+        // Expire a finished sound pulse so the story border returns to normal.
+        if let Some(p) = &state.sound_pulse {
+            if p.started.elapsed().as_millis() as u64 >= SOUND_PULSE_MS {
+                state.sound_pulse = None;
+            }
+        }
+
         // Draw.
         match draw_frame(&mut terminal, &session, &mapper, &state) {
             Ok(panes) => {
@@ -818,7 +852,7 @@ fn main() {
 
         // Poll for a key event. Use a shorter timeout while a tidy job is in flight
         // so the pulsing border animates at ~30fps; otherwise use the normal 50ms.
-        let poll_ms = if state.tidy_job.is_some() { TIDY_POLL_MS } else { 50 };
+        let poll_ms = if state.tidy_job.is_some() || state.sound_pulse.is_some() { TIDY_POLL_MS } else { 50 };
         let event_ready = match poll(Duration::from_millis(poll_ms)) {
             Ok(r) => r,
             Err(e) => {
@@ -1201,6 +1235,7 @@ fn main() {
                         if let Some(byte) = key_to_zscii(*k) {
                             let result = session.submit_char(byte);
                             state.push_transcript(&result.transcript);
+                            apply_turn_events(&mut state, &result);
                             if let Some(note) = &result.info {
                                 state.push_transcript(note);
                             }
@@ -1505,6 +1540,7 @@ fn main() {
                 let result = session.submit(&cmd);
                 state.push_transcript(&format!("> {}", cmd));
                 state.push_transcript(&result.transcript);
+                apply_turn_events(&mut state, &result);
                 if let Some(note) = &result.info {
                     state.push_transcript(note);
                 }
@@ -2542,6 +2578,17 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 
 /// Map a keyboard event to a ZSCII byte for `read_char` input.
 ///
+/// Route a turn's sound/diagnostic events: diagnostics become meta transcript
+/// lines; the latest beep arms a one-shot story-border pulse.
+fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
+    for line in &result.diagnostics {
+        state.push_transcript_kind(line, app::state::TranscriptKind::Meta);
+    }
+    if let Some(kind) = result.beep {
+        state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
+    }
+}
+
 /// Returns:
 /// - `Enter`        → 13
 /// - `Backspace`    → 8

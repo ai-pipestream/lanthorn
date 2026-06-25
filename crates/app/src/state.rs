@@ -235,6 +235,15 @@ impl TidyAnim {
     }
 }
 
+// ── Sound pulse ──────────────────────────────────────────────────────────────
+
+/// An in-flight one-shot story-border flash triggered by a `sound_effect` bleep.
+#[derive(Debug)]
+pub struct SoundPulse {
+    pub kind: zvm::cpu::exec::Beep,
+    pub started: std::time::Instant,
+}
+
 // ── Background tidy job ───────────────────────────────────────────────────────
 
 /// An in-flight background tidy job. The worker thread runs the relayout on a
@@ -539,6 +548,8 @@ pub struct AppState {
     /// In-flight background tidy job, if any. The worker runs the relayout on a clone
     /// of the graph and returns the tidied clone. Driven by the run loop (spawn, poll, apply).
     pub tidy_job: Option<TidyJob>,
+    /// In-flight one-shot story-border flash, if any. Armed by a beep event; expires after SOUND_PULSE_MS.
+    pub sound_pulse: Option<SoundPulse>,
     /// Monotonically increasing generation counter. Bumped each time the real graph is mutated
     /// by an applied turn. Used to detect stale tidy results (job's gen vs current gen).
     pub graph_gen: u64,
@@ -710,6 +721,7 @@ impl Default for AppState {
             show_portal_labels: false,
             tidy_anim: None,
             tidy_job: None,
+            sound_pulse: None,
             graph_gen: 0,
             viewed_layer: None,
             show_inspector: false,
@@ -1017,6 +1029,15 @@ mod tests {
         assert_eq!(s.transcript_kinds.len(), 2);
         assert!(matches!(s.transcript_kinds[0], TranscriptKind::Story));
         assert!(matches!(s.transcript_kinds[1], TranscriptKind::Meta));
+    }
+
+    #[test]
+    fn sound_pulse_defaults_none_and_holds_kind() {
+        use zvm::cpu::exec::Beep;
+        let mut s = AppState::default();
+        assert!(s.sound_pulse.is_none(), "no pulse by default");
+        s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
+        assert!(matches!(s.sound_pulse.as_ref().map(|p| p.kind), Some(Beep::High)));
     }
 
     #[test]
