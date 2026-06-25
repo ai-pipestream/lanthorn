@@ -185,15 +185,18 @@ static CURATED: &[CuratedEntry] = &[
 
 /// Parse a slash-command body (the text AFTER the leading prefix, e.g. `/`).
 ///
+/// `prefix` is the configured command prefix character, used only in user-facing
+/// error/help display strings. Routing and matching logic is unaffected.
+///
 /// Empty body → `Error`.
 /// Token0 matched in the curated table → run its builder with remaining tokens.
 /// Token0 matched as kebab-case `Command` name → `Action(command.to_action())`.
-/// Otherwise → `Error("unknown command: /<t0> — try /help")`.
-pub fn parse(body: &str) -> SlashOutcome {
+/// Otherwise → `Error("unknown command: <prefix><t0> — try <prefix>help")`.
+pub fn parse(body: &str, prefix: char) -> SlashOutcome {
     let tokens: Vec<&str> = body.split_whitespace().collect();
 
     let Some(t0) = tokens.first().copied() else {
-        return SlashOutcome::Error("type /help for commands".into());
+        return SlashOutcome::Error(format!("type {prefix}help for commands"));
     };
 
     let args = &tokens[1..];
@@ -209,7 +212,7 @@ pub fn parse(body: &str) -> SlashOutcome {
         return SlashOutcome::Action(cmd.to_action());
     }
 
-    SlashOutcome::Error(format!("unknown command: /{t0} — try /help"))
+    SlashOutcome::Error(format!("unknown command: {prefix}{t0} — try {prefix}help"))
 }
 
 // ── slash_names ───────────────────────────────────────────────────────────────
@@ -233,18 +236,20 @@ pub fn slash_names() -> Vec<String> {
 
 // ── help_text ─────────────────────────────────────────────────────────────────
 
-/// Lines to display when the user types `/help`.
-pub fn help_text() -> Vec<String> {
+/// Lines to display when the user types the help command.
+///
+/// `prefix` is the configured command prefix character used in all display strings.
+pub fn help_text(prefix: char) -> Vec<String> {
     let mut lines = vec![
-        "Slash commands (type /<command> [args]):".to_string(),
+        format!("Slash commands (type {prefix}<command> [args]):"),
         String::new(),
     ];
     for entry in CURATED {
-        lines.push(format!("  /{}", entry.help));
+        lines.push(format!("  {prefix}{}", entry.help));
     }
     lines.push(String::new());
     lines.push(
-        "Any keymap command is also available by its kebab name (e.g. /open-config).".to_string(),
+        format!("Any keymap command is also available by its kebab name (e.g. {prefix}open-config).")
     );
     lines
 }
@@ -258,21 +263,21 @@ mod tests {
     #[test]
     fn parse_curated_and_fallback_and_errors() {
         use crate::input::Action;
-        assert!(matches!(parse("panh -1"), SlashOutcome::Action(Action::Pan(-1, 0))));
-        assert!(matches!(parse("panv 2"), SlashOutcome::Action(Action::Pan(0, 2))));
-        assert!(matches!(parse("zoom reset"), SlashOutcome::Action(Action::ZoomReset)));
-        assert!(matches!(parse("save foo"), SlashOutcome::Save(Some(_))));
-        assert!(matches!(parse("save"), SlashOutcome::Save(None)));
-        assert!(matches!(parse("reset map"), SlashOutcome::Reset { map: true }));
-        assert!(matches!(parse("reset"), SlashOutcome::Reset { map: false }));
-        assert!(matches!(parse("quit"), SlashOutcome::Quit));
-        assert!(matches!(parse("help"), SlashOutcome::Help));
+        assert!(matches!(parse("panh -1", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
+        assert!(matches!(parse("panv 2", '/'), SlashOutcome::Action(Action::Pan(0, 2))));
+        assert!(matches!(parse("zoom reset", '/'), SlashOutcome::Action(Action::ZoomReset)));
+        assert!(matches!(parse("save foo", '/'), SlashOutcome::Save(Some(_))));
+        assert!(matches!(parse("save", '/'), SlashOutcome::Save(None)));
+        assert!(matches!(parse("reset map", '/'), SlashOutcome::Reset { map: true }));
+        assert!(matches!(parse("reset", '/'), SlashOutcome::Reset { map: false }));
+        assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
+        assert!(matches!(parse("help", '/'), SlashOutcome::Help));
         // fallback by kebab name:
-        assert!(matches!(parse("open-config"), SlashOutcome::Action(_)));
+        assert!(matches!(parse("open-config", '/'), SlashOutcome::Action(_)));
         // errors:
-        assert!(matches!(parse("panh"), SlashOutcome::Error(_)));   // missing arg
-        assert!(matches!(parse("nope"), SlashOutcome::Error(_)));   // unknown
-        assert!(matches!(parse(""), SlashOutcome::Error(_)));       // bare prefix
+        assert!(matches!(parse("panh", '/'), SlashOutcome::Error(_)));   // missing arg
+        assert!(matches!(parse("nope", '/'), SlashOutcome::Error(_)));   // unknown
+        assert!(matches!(parse("", '/'), SlashOutcome::Error(_)));       // bare prefix
     }
 
     #[test]
@@ -280,5 +285,14 @@ mod tests {
         let n = slash_names();
         assert!(n.iter().any(|s| s == "panh"));
         assert!(n.iter().any(|s| s == "open-config")); // a kebab Command name
+    }
+
+    #[test]
+    fn help_text_uses_prefix() {
+        let lines = help_text('/');
+        assert!(lines[0].contains('/'));
+        let lines_semi = help_text(';');
+        assert!(lines_semi[0].contains(';'));
+        assert!(!lines_semi[0].contains('/'));
     }
 }

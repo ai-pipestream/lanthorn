@@ -4012,6 +4012,7 @@ mod tests {
         state.suggestions.clear();
         state.suggestion_idx = 0;
         state.transcript.clear();
+        state.transcript_kinds.clear();
         state.transcript_scroll = 0;
         let new_banner = new_session.take_transcript();
         state.push_transcript(&new_banner);

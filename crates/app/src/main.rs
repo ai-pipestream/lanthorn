@@ -798,7 +798,7 @@ fn main() {
                 if is_slash(&cmd, state.config.command_prefix) {
                     // Strip the leading prefix character before parsing.
                     let body = &cmd[state.config.command_prefix.len_utf8()..];
-                    match slash::parse(body) {
+                    match slash::parse(body, state.config.command_prefix) {
                         SlashOutcome::Action(a) => {
                             apply_action(a, &mut state, &mut mapper);
                         }
@@ -806,7 +806,7 @@ fn main() {
                             state.set_status(m);
                         }
                         SlashOutcome::Help => {
-                            for line in slash::help_text() {
+                            for line in slash::help_text(state.config.command_prefix) {
                                 state.push_transcript_kind(&line, TranscriptKind::Meta);
                             }
                         }
@@ -1460,6 +1460,7 @@ fn handle_saves_prompt(
                     state.suggestions.clear();
                     state.suggestion_idx = 0;
                     state.transcript.clear();
+                    state.transcript_kinds.clear();
                     state.transcript_scroll = 0;
                     // Push the new opening banner.
                     let banner = session.take_transcript();
