@@ -98,6 +98,20 @@ pub enum TranscriptKind {
     Meta,
 }
 
+// ── Transcript filter ─────────────────────────────────────────────────────────
+
+/// Which categories of transcript entries are currently visible.
+///
+/// `Both` (the default) shows all entries. `Story` shows only game output.
+/// `Meta` shows only app-generated output (slash commands, /help, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TranscriptFilter {
+    #[default]
+    Both,
+    Story,
+    Meta,
+}
+
 // ── Tidy animation ────────────────────────────────────────────────────────────
 
 /// One captured stage of the tidy pipeline, held for playback. `graph` is a clone
@@ -447,6 +461,8 @@ pub struct AppState {
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
+    /// Which categories of transcript entries are currently visible.
+    pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
     pub input: String,
     // Reserved for future status-bar messages (not yet displayed).
@@ -577,6 +593,15 @@ pub struct AppState {
     pub reset_clear_map: bool,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
+
+    // ── Search state ──────────────────────────────────────────────────────────
+
+    /// The active search query, if any. `None` means no search is active.
+    pub search_query: Option<String>,
+    /// Positions (0-based) within the visible-index list of lines that match the query.
+    pub search_matches: Vec<usize>,
+    /// Index into `search_matches` of the current match.
+    pub search_idx: usize,
 }
 
 impl Default for AppState {
@@ -590,6 +615,7 @@ impl Default for AppState {
             selected_room: None,
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
+            transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
             input: String::new(),
             status: String::new(),
@@ -630,6 +656,9 @@ impl Default for AppState {
             reset_dialog: false,
             reset_clear_map: false,
             show_room_numbers: false,
+            search_query: None,
+            search_matches: Vec::new(),
+            search_idx: 0,
         }
     }
 }
@@ -741,6 +770,23 @@ impl AppState {
         self.char_pan = (0, 0);
     }
 
+    /// Return the indices (into `self.transcript`) of entries that pass the active
+    /// `transcript_filter`, in order. `Both` returns all indices; `Story`/`Meta`
+    /// return only indices whose kind matches. Defensively tolerates any length
+    /// mismatch between `transcript` and `transcript_kinds` by defaulting to `Story`.
+    pub fn visible_transcript_indices(&self) -> Vec<usize> {
+        (0..self.transcript.len())
+            .filter(|&i| {
+                let kind = self.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
+                match self.transcript_filter {
+                    TranscriptFilter::Both => true,
+                    TranscriptFilter::Story => kind == TranscriptKind::Story,
+                    TranscriptFilter::Meta => kind == TranscriptKind::Meta,
+                }
+            })
+            .collect()
+    }
+
     /// Split `text` on `'\n'` and append each line to the transcript, tagged as `Story`.
     pub fn push_transcript(&mut self, text: &str) {
         self.push_transcript_kind(text, TranscriptKind::Story);
@@ -796,11 +842,77 @@ impl AppState {
             None => &self.input,
         }
     }
+
+    // ── Search helpers ────────────────────────────────────────────────────────
+
+    /// Run a case-insensitive substring search over the visible transcript lines.
+    ///
+    /// Fills `search_matches` with the 0-based positions (within the visible list)
+    /// of lines that contain `query`. Sets `search_idx` to the last match index
+    /// when `start_backward` is true (landing on the most recent match), or the
+    /// first (0) when false. Sets `search_query` to the query string regardless of
+    /// whether matches were found (so the status line can show "no matches").
+    /// Returns the number of matches.
+    pub fn run_search(&mut self, query: &str, start_backward: bool) -> usize {
+        let query_lower = query.to_lowercase();
+        let visible = self.visible_transcript_indices();
+        self.search_matches = visible
+            .iter()
+            .enumerate()
+            .filter(|&(_, &raw_idx)| {
+                self.transcript[raw_idx].to_lowercase().contains(&query_lower)
+            })
+            .map(|(pos, _)| pos)
+            .collect();
+        let count = self.search_matches.len();
+        self.search_idx = if start_backward && count > 0 { count - 1 } else { 0 };
+        self.search_query = Some(query.to_string());
+        count
+    }
+
+    /// Advance the current match by one step and return the new match's visible-list position.
+    ///
+    /// `forward = true` moves toward the end (newer lines); `forward = false` moves
+    /// toward the start (older lines). Both directions wrap around. Returns `None` if
+    /// there are no matches.
+    pub fn search_next(&mut self, forward: bool) -> Option<usize> {
+        let count = self.search_matches.len();
+        if count == 0 {
+            return None;
+        }
+        if forward {
+            self.search_idx = (self.search_idx + 1) % count;
+        } else {
+            self.search_idx = self.search_idx.checked_sub(1).unwrap_or(count - 1);
+        }
+        Some(self.search_matches[self.search_idx])
+    }
+
+    /// Clear all search state: query, matches, and index.
+    pub fn clear_search(&mut self) {
+        self.search_query = None;
+        self.search_matches.clear();
+        self.search_idx = 0;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_transcript_indices_respects_filter() {
+        let mut s = AppState::default();
+        s.push_transcript("story0");
+        s.push_transcript_kind("meta1", TranscriptKind::Meta);
+        s.push_transcript("story2");
+        s.transcript_filter = TranscriptFilter::Both;
+        assert_eq!(s.visible_transcript_indices(), vec![0, 1, 2]);
+        s.transcript_filter = TranscriptFilter::Story;
+        assert_eq!(s.visible_transcript_indices(), vec![0, 2]);
+        s.transcript_filter = TranscriptFilter::Meta;
+        assert_eq!(s.visible_transcript_indices(), vec![1]);
+    }
 
     #[test]
     fn transcript_tags_story_and_meta() {
@@ -1202,5 +1314,26 @@ mod tests {
         assert!(!s.any_overlay_open());
         s.reset_dialog = true;
         assert!(s.any_overlay_open(), "reset_dialog open => any_overlay_open true");
+    }
+
+    #[test]
+    fn run_search_direction_and_next_wrap() {
+        let mut s = AppState::default();
+        for t in ["alpha", "beta", "alpha again", "gamma", "ALPHA"] { s.push_transcript(t); }
+        // matches for "alpha" at visible positions 0, 2, 4 (case-insensitive)
+        let n = s.run_search("alpha", true); // start backward → last match
+        assert_eq!(n, 3);
+        assert_eq!(s.search_matches, vec![0, 2, 4]);
+        assert_eq!(s.search_idx, 2); // index into search_matches → position 4
+        // n = back
+        assert_eq!(s.search_next(false), Some(2)); // now at match position 2
+        // forward wraps from 2 → 4 → back to 0
+        let _ = s.search_next(true); // → 4
+        assert_eq!(s.search_next(true), Some(0)); // wrap to first
+        let f = s.run_search("alpha", false); // start forward → first match
+        assert_eq!(f, 3);
+        assert_eq!(s.search_idx, 0);
+        s.clear_search();
+        assert!(s.search_query.is_none() && s.search_matches.is_empty());
     }
 }

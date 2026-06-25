@@ -28,6 +28,22 @@ pub enum SlashOutcome {
     Reset { map: bool },
     /// Quit the application.
     Quit,
+    /// Search the transcript; `None` repeats the last search.
+    Search(Option<String>),
+    /// Filter the transcript by category.
+    Filter(TranscriptFilterArg),
+    /// Export the visible transcript; `None` uses the default path.
+    Export(Option<String>),
+}
+
+// ── TranscriptFilterArg ───────────────────────────────────────────────────────
+
+/// Argument for the `/filter` command. `main.rs` maps this to `state::TranscriptFilter`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TranscriptFilterArg {
+    Both,
+    Story,
+    Meta,
 }
 
 // ── Curated table ─────────────────────────────────────────────────────────────
@@ -148,6 +164,32 @@ static CURATED: &[CuratedEntry] = &[
         name: "help",
         help: "help  — show this help text",
         build: |_args| SlashOutcome::Help,
+    },
+    CuratedEntry {
+        name: "search",
+        help: "search [query]  — search transcript (case-insensitive); no query repeats last search",
+        build: |args| {
+            if args.is_empty() {
+                SlashOutcome::Search(None)
+            } else {
+                SlashOutcome::Search(Some(args.join(" ")))
+            }
+        },
+    },
+    CuratedEntry {
+        name: "filter",
+        help: "filter story|meta|both  — filter transcript by category",
+        build: |args| match args.first().copied() {
+            Some("story") => SlashOutcome::Filter(TranscriptFilterArg::Story),
+            Some("meta")  => SlashOutcome::Filter(TranscriptFilterArg::Meta),
+            Some("both")  => SlashOutcome::Filter(TranscriptFilterArg::Both),
+            _ => SlashOutcome::Error("filter: use story | meta | both".into()),
+        },
+    },
+    CuratedEntry {
+        name: "export",
+        help: "export [file]  — export visible transcript to a file (default: ~/.babelmap/exports/)",
+        build: |args| SlashOutcome::Export(args.first().map(|s| s.to_string())),
     },
     // ── Aliases ───────────────────────────────────────────────────────────────
     CuratedEntry {
@@ -294,5 +336,16 @@ mod tests {
         let lines_semi = help_text(';');
         assert!(lines_semi[0].contains(';'));
         assert!(!lines_semi[0].contains('/'));
+    }
+
+    #[test]
+    fn parse_search_filter_export() {
+        assert!(matches!(parse("search twisty maze", '/'), SlashOutcome::Search(Some(q)) if q == "twisty maze"));
+        assert!(matches!(parse("search", '/'), SlashOutcome::Search(None)));
+        assert!(matches!(parse("filter meta", '/'), SlashOutcome::Filter(TranscriptFilterArg::Meta)));
+        assert!(matches!(parse("filter both", '/'), SlashOutcome::Filter(TranscriptFilterArg::Both)));
+        assert!(matches!(parse("filter nope", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("export", '/'), SlashOutcome::Export(None)));
+        assert!(matches!(parse("export out.txt", '/'), SlashOutcome::Export(Some(f)) if f == "out.txt"));
     }
 }

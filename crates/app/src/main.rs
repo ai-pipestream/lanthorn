@@ -39,8 +39,9 @@ use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::slash::{self, SlashOutcome};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptKind};
+use app::export::export_transcript;
+use app::slash::{self, SlashOutcome, TranscriptFilterArg};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptFilter, TranscriptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -803,6 +804,54 @@ fn main() {
             continue;
         }
 
+        // ── Search-nav intercept — before normal action routing ───────────────
+        // When a search is active and no modal is open, intercept the configured
+        // back/forward keys and Esc to navigate matches.  Any other key clears
+        // the search state and then falls through to normal processing below.
+        if state.search_query.is_some() && !state.any_overlay_open() {
+            if let Event::Key(k) = &event {
+                if k.kind == KeyEventKind::Press {
+                    use crossterm::event::KeyCode;
+                    let key_back = state.config.search.key_back;
+                    let key_forward = state.config.search.key_forward;
+                    match k.code {
+                        KeyCode::Char(c) if c == key_back => {
+                            if let Some(pos) = state.search_next(false) {
+                                let total_vis = state.visible_transcript_indices().len();
+                                let pane_rows = if last_panes.story.height > 0 {
+                                    last_panes.story.height as usize
+                                } else {
+                                    24
+                                };
+                                state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
+                            }
+                            continue;
+                        }
+                        KeyCode::Char(c) if c == key_forward => {
+                            if let Some(pos) = state.search_next(true) {
+                                let total_vis = state.visible_transcript_indices().len();
+                                let pane_rows = if last_panes.story.height > 0 {
+                                    last_panes.story.height as usize
+                                } else {
+                                    24
+                                };
+                                state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
+                            }
+                            continue;
+                        }
+                        KeyCode::Esc => {
+                            state.clear_search();
+                            continue;
+                        }
+                        _ => {
+                            // Any other key: clear search, then fall through to normal processing.
+                            state.clear_search();
+                        }
+                    }
+                }
+            }
+        }
+
         // Route event to an Action.
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
@@ -967,6 +1016,65 @@ fn main() {
                             state.set_status(status_msg);
                         }
                         SlashOutcome::Quit => break,
+                        SlashOutcome::Search(q_opt) => {
+                            let query_to_run: Option<String> = match q_opt {
+                                Some(q) => Some(q),
+                                None => state.search_query.clone(),
+                            };
+                            match query_to_run {
+                                None => {
+                                    state.set_status("search: no previous search");
+                                }
+                                Some(query) => {
+                                    let count = state.run_search(&query, state.config.search.start_backward);
+                                    if count == 0 {
+                                        state.set_status("search: no matches");
+                                    } else {
+                                        state.set_status(format!("search: {} match{}", count, if count == 1 { "" } else { "es" }));
+                                        // Scroll to the current match.
+                                        let pos = state.search_matches[state.search_idx];
+                                        let total_vis = state.visible_transcript_indices().len();
+                                        let pane_rows = if last_panes.story.height > 0 {
+                                            last_panes.story.height as usize
+                                        } else {
+                                            24
+                                        };
+                                        state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
+                                    }
+                                }
+                            }
+                        }
+                        SlashOutcome::Filter(arg) => {
+                            state.transcript_filter = match arg {
+                                TranscriptFilterArg::Both  => TranscriptFilter::Both,
+                                TranscriptFilterArg::Story => TranscriptFilter::Story,
+                                TranscriptFilterArg::Meta  => TranscriptFilter::Meta,
+                            };
+                            let label = match state.transcript_filter {
+                                TranscriptFilter::Both  => "both",
+                                TranscriptFilter::Story => "story",
+                                TranscriptFilter::Meta  => "meta",
+                            };
+                            state.set_status(format!("filter: {}", label));
+                        }
+                        SlashOutcome::Export(dest) => {
+                            let lines: Vec<String> = state
+                                .visible_transcript_indices()
+                                .into_iter()
+                                .map(|i| state.transcript[i].clone())
+                                .collect();
+                            let exports_dir = state.config.user_dir.join("exports");
+                            let stamp = format_stamp(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                            );
+                            match export_transcript(&lines, dest.as_deref(), &exports_dir, &stamp) {
+                                Ok(path) => state.set_status(format!("exported: {}", path.display())),
+                                Err(e)   => state.set_status(format!("export failed: {}", e)),
+                            }
+                        }
                     }
                     continue;
                 }
@@ -1582,6 +1690,16 @@ fn handle_saves_prompt(
     }
 }
 
+/// Format a Unix timestamp (seconds since epoch) as YYYYMMDD-HHMMSS (UTC).
+fn format_stamp(secs: u64) -> String {
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (year, month, day) = days_to_ymd_main(days);
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", year, month, day, hour, min, sec)
+}
+
 /// Format a Unix timestamp (seconds since epoch) as an RFC3339 UTC string.
 fn format_rfc3339(secs: u64) -> String {
     let sec = secs % 60;
@@ -1668,6 +1786,30 @@ fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
     }
 }
 
+// ── Scroll-to-match helper ────────────────────────────────────────────────────
+
+/// Given a match at `match_visible_pos` (0-based) within `total_visible` visible rows,
+/// return the `transcript_scroll` value that brings that row to the top of the viewport
+/// (`pane_rows` high).
+///
+/// The windowing in `visible_wrapped_lines_kinded` uses:
+///   end   = total_visible - scroll
+///   start = end - pane_rows
+/// So placing the match at the top of the viewport means:
+///   end = match_visible_pos + pane_rows
+///   scroll = total_visible - end = total_visible - match_visible_pos - pane_rows
+/// Clamped to 0 when the match is near the bottom (no scrollback needed).
+///
+/// Limitation: this helper treats each logical visible line as one display row.
+/// When a line wraps into multiple display rows the match may land slightly
+/// off-screen; correct wrap-aware scrolling would require counting wrapped rows
+/// for every line above the match, which is not done here.
+fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: usize) -> u16 {
+    total_visible
+        .saturating_sub(match_visible_pos)
+        .saturating_sub(pane_rows) as u16
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1676,7 +1818,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_line, hint_line_game, is_slash, reset_dialog_key, ResetDialogAction};
+    use super::{dim_area, hint_line, hint_line_game, is_slash, reset_dialog_key, scroll_for_match, ResetDialogAction};
     use app::keymap::{Context, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
 
@@ -2039,6 +2181,29 @@ mod tests {
                 "inner tab row center cell ({cx}, {tab_row_y}) must NOT be overwritten by pulse"
             );
         }
+    }
+
+    // ── scroll_for_match ──────────────────────────────────────────────────────
+
+    #[test]
+    fn scroll_for_match_brings_row_into_view() {
+        // match at position 0 in 100 visible rows, pane is 10 rows tall.
+        // scroll = 100 - 0 - 10 = 90  (places match at the top of the viewport).
+        // Windowing check: end = 100 - 90 = 10, start = 0, match row 0 is in [0..10). OK.
+        assert_eq!(scroll_for_match(0, 100, 10), 90);
+
+        // match at position 99 (the very last row): scroll = 100 - 99 - 10 = -9 -> clamped to 0.
+        // Windowing check: end = 100, start = 90, match row 99 is in [90..100). OK.
+        assert_eq!(scroll_for_match(99, 100, 10), 0);
+
+        // match in the middle: position 50, total 100, pane 10.
+        // scroll = 100 - 50 - 10 = 40.
+        // end = 100 - 40 = 60, start = 50. Match row 50 is at the top of [50..60). OK.
+        assert_eq!(scroll_for_match(50, 100, 10), 40);
+
+        // pane larger than transcript: match at 0, total 5, pane 10.
+        // scroll = 5 - 0 - 10 = saturates to 0.
+        assert_eq!(scroll_for_match(0, 5, 10), 0);
     }
 
     // ── is_slash ──────────────────────────────────────────────────────────────
