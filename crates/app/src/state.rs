@@ -575,11 +575,11 @@ pub struct AppState {
     pub hotkey_dialog: bool,
 
     /// Resolved glyph set for the map renderer.  Defaults to today's hardcoded glyphs;
-    /// overwritten at startup via `SymbolSet::resolve(&cfg.symbols)` when a config is present.
+    /// overwritten at startup (and on `/reload`) from `style.toml` via `style::resolve`.
     pub symbols: crate::symbols::SymbolSet,
 
     /// Resolved color scheme.  Defaults to `ColorScheme::terminal_default()` (today's exact
-    /// ANSI colors); overwritten at startup via `ColorScheme::resolve(&cfg.colors, &cfg.user_dir)`.
+    /// ANSI colors); overwritten at startup (and on `/reload`) from `style.toml` via `style::resolve`.
     pub colors: crate::colors::ColorScheme,
 
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);

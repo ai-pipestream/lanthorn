@@ -864,6 +864,9 @@ fn main() {
             let mut saw = false;
             while w.rx.try_recv().is_ok() { saw = true; }
             if saw { watch_dirty = Some(std::time::Instant::now()); }
+        } else {
+            // Watch turned off: drop any pending debounce so it can't fire later.
+            watch_dirty = None;
         }
         if app::watch::due(watch_dirty, std::time::Instant::now(), Duration::from_millis(200)) {
             watch_dirty = None;
