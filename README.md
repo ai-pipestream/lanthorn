@@ -78,6 +78,12 @@ and unsupported; v1/v2 are not supported.)
   `/zoom`, `/center`, `/tidy`, `/layer`, plus every command by its kebab name.
   `/help` lists them, with Tab autocomplete over the names and quiet status-line
   feedback.
+- **Transcript search / filter / export** — `/search <query>` highlights matches
+  (case-insensitive) and lands on the most recent; `n`/`N` step back/forward
+  (configurable), `Esc` clears. `/filter story|meta|both` shows only game output,
+  only app/slash output, or both. `/export [file]` writes the visible transcript
+  to a text file (auto-named under `~/.babelmap/exports/` by default). App/slash
+  output is set off with a themeable `▏` gutter marker.
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and
