@@ -967,6 +967,16 @@ fn main() {
                             state.set_status(status_msg);
                         }
                         SlashOutcome::Quit => break,
+                        // Handled in later tasks (Task 5 / Task 6).
+                        SlashOutcome::Search(_) => {
+                            state.set_status("search: not yet implemented");
+                        }
+                        SlashOutcome::Filter(_) => {
+                            state.set_status("filter: not yet implemented");
+                        }
+                        SlashOutcome::Export(_) => {
+                            state.set_status("export: not yet implemented");
+                        }
                     }
                     continue;
                 }
