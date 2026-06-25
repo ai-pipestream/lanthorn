@@ -57,12 +57,12 @@ pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
     let rects = draw_dialog(buf, &spec, &st);
     let content = rects.content;
 
-    // ── Two-pane picker drawn into content ───────────────────────────────────
+    // ── Tabbed picker: category tabs across the top, option list + preview below ─
 
     // Footer hint row at bottom of content.
     if content.height > 1 {
         let footer_y = content.bottom() - 1;
-        let footer = "o: Output all settings";
+        let footer = "←→: category   ↑↓: option   o: Output all settings";
         let footer_style = Style::new().fg(Color::Yellow).patch(state.colors.dialog);
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }
@@ -75,38 +75,54 @@ pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         return Some(rects);
     }
 
-    // Left pane: 20 cols for categories.
-    let left_w = 20u16.min(pane_area.width / 3);
-    let left_area = Rect { x: pane_area.x, y: pane_area.y, width: left_w, height: pane_area.height };
-    let right_area = Rect {
-        x: pane_area.x + left_w,
-        y: pane_area.y,
-        width: pane_area.width.saturating_sub(left_w),
-        height: pane_area.height,
-    };
+    // Top: horizontal category tab strip (←→ moves between categories).
+    let tabs_area = Rect { x: pane_area.x, y: pane_area.y, width: pane_area.width, height: 1 };
+    draw_category_tabs(gallery, tabs_area, buf, state);
 
-    draw_category_pane(gallery, left_area, buf, state);
-    draw_preset_pane(state, gallery, right_area, buf);
+    // Body (below the tabs + one blank separator row): option list left, preview right.
+    let body_y = pane_area.y + 2;
+    if body_y < pane_area.bottom() {
+        let body = Rect {
+            x: pane_area.x,
+            y: body_y,
+            width: pane_area.width,
+            height: pane_area.bottom() - body_y,
+        };
+        let list_w = 22u16.min(body.width / 2);
+        let list_area = Rect { x: body.x, y: body.y, width: list_w, height: body.height };
+        let preview_area = Rect {
+            x: body.x + list_w,
+            y: body.y,
+            width: body.width.saturating_sub(list_w),
+            height: body.height,
+        };
+        draw_preset_list(state, gallery, list_area, buf);
+        draw_preview(state, gallery, preview_area, buf);
+    }
 
     Some(rects)
 }
 
-fn draw_category_pane(gallery: &GalleryState, area: Rect, buf: &mut Buffer, state: &AppState) {
+/// Draw the categories as a horizontal tab strip across the top; the active category is
+/// highlighted. Left/right arrows move between categories (matching the visual layout).
+fn draw_category_tabs(gallery: &GalleryState, area: Rect, buf: &mut Buffer, state: &AppState) {
     let normal = Style::new().fg(Color::White).patch(state.colors.dialog);
-    let active = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD).patch(state.colors.dialog);
+    let active = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD).patch(state.colors.dialog);
+    let mut x = area.x;
     for (i, name) in GALLERY_CATEGORY_NAMES.iter().enumerate() {
-        let y = area.y + i as u16;
-        if y >= area.bottom() {
+        if x >= area.right() {
             break;
         }
-        let style = if i == gallery.category_idx { active } else { normal };
-        let marker = if i == gallery.category_idx { ">" } else { " " };
-        let line = format!("{} {}", marker, name);
-        crate::render::draw_str_clipped(buf, area.x, y, &line, style, area);
+        let is_active = i == gallery.category_idx;
+        let label = if is_active { format!("[{}]", name) } else { format!(" {} ", name) };
+        let style = if is_active { active } else { normal };
+        crate::render::draw_str_clipped(buf, x, area.y, &label, style, area);
+        x = x.saturating_add(label.chars().count() as u16 + 1);
     }
 }
 
-fn draw_preset_pane(state: &AppState, gallery: &GalleryState, area: Rect, buf: &mut Buffer) {
+/// Draw the vertical list of preset options for the active category; up/down selects.
+fn draw_preset_list(state: &AppState, gallery: &GalleryState, area: Rect, buf: &mut Buffer) {
     let cat = gallery.category_idx;
     let preset_names: &[&str] = match cat {
         0 => BoxStyle::preset_names(),
@@ -119,16 +135,8 @@ fn draw_preset_pane(state: &AppState, gallery: &GalleryState, area: Rect, buf: &
     let normal = Style::new().fg(Color::White).patch(state.colors.dialog);
     let selected = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD).patch(state.colors.dialog);
 
-    // Category header.
-    crate::render::draw_str_clipped(
-        buf, area.x, area.y, GALLERY_CATEGORY_NAMES[cat],
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED).patch(state.colors.dialog),
-        area,
-    );
-
-    // Preset list.
     for (i, name) in preset_names.iter().enumerate() {
-        let y = area.y + 1 + i as u16;
+        let y = area.y + i as u16;
         if y >= area.bottom() {
             break;
         }
@@ -136,18 +144,6 @@ fn draw_preset_pane(state: &AppState, gallery: &GalleryState, area: Rect, buf: &
         let marker = if i == selected_idx { "[x]" } else { "[ ]" };
         let line = format!("{} {}", marker, name);
         crate::render::draw_str_clipped(buf, area.x, y, &line, style, area);
-    }
-
-    // Preview: draw a small synthetic map below the preset list.
-    let preview_y = area.y + 1 + preset_names.len() as u16 + 1;
-    if preview_y + 2 < area.bottom() && area.width > 10 {
-        let preview_area = Rect {
-            x: area.x,
-            y: preview_y,
-            width: area.width,
-            height: area.bottom() - preview_y,
-        };
-        draw_preview(state, gallery, preview_area, buf);
     }
 }
 
@@ -202,22 +198,26 @@ fn draw_preview(state: &AppState, gallery: &GalleryState, area: Rect, buf: &mut 
         }
         crate::render::draw_char_clipped(buf, bx + bw - 1, by + bh - 1, bs.br, box_style, area);
 
-        // Cardinal arrows on the box sides (overwrite border chars at mid-points).
-        let mid_x = bx + bw / 2;
-        let mid_y = by + bh / 2;
-        crate::render::draw_char_clipped(buf, mid_x, by, sym.arrows.north, arrow_style, area);
-        crate::render::draw_char_clipped(buf, mid_x, by + bh - 1, sym.arrows.south, arrow_style, area);
-        crate::render::draw_char_clipped(buf, bx, mid_y, sym.arrows.west, arrow_style, area);
-        crate::render::draw_char_clipped(buf, bx + bw - 1, mid_y, sym.arrows.east, arrow_style, area);
+        // Arrows are hidden on the Box category (index 0) so the box's own corners and
+        // edges stay visible while picking a box style; they reappear on the others.
+        if gallery.category_idx != 0 {
+            // Cardinal arrows on the box sides (overwrite border chars at mid-points).
+            let mid_x = bx + bw / 2;
+            let mid_y = by + bh / 2;
+            crate::render::draw_char_clipped(buf, mid_x, by, sym.arrows.north, arrow_style, area);
+            crate::render::draw_char_clipped(buf, mid_x, by + bh - 1, sym.arrows.south, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx, mid_y, sym.arrows.west, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx + bw - 1, mid_y, sym.arrows.east, arrow_style, area);
 
-        // Corner arrows ON the box corners (overwrite the corner glyphs), the same way
-        // the cardinals sit on the edge mid-points — matching how a diagonal exit sits on
-        // a room's corner in the map.
-        if bw >= 4 && bh >= 4 {
-            crate::render::draw_char_clipped(buf, bx, by, sym.arrows.nw, arrow_style, area);
-            crate::render::draw_char_clipped(buf, bx + bw - 1, by, sym.arrows.ne, arrow_style, area);
-            crate::render::draw_char_clipped(buf, bx, by + bh - 1, sym.arrows.sw, arrow_style, area);
-            crate::render::draw_char_clipped(buf, bx + bw - 1, by + bh - 1, sym.arrows.se, arrow_style, area);
+            // Corner arrows ON the box corners (overwrite the corner glyphs), the same way
+            // the cardinals sit on the edge mid-points — matching how a diagonal exit sits
+            // on a room's corner in the map.
+            if bw >= 4 && bh >= 4 {
+                crate::render::draw_char_clipped(buf, bx, by, sym.arrows.nw, arrow_style, area);
+                crate::render::draw_char_clipped(buf, bx + bw - 1, by, sym.arrows.ne, arrow_style, area);
+                crate::render::draw_char_clipped(buf, bx, by + bh - 1, sym.arrows.sw, arrow_style, area);
+                crate::render::draw_char_clipped(buf, bx + bw - 1, by + bh - 1, sym.arrows.se, arrow_style, area);
+            }
         }
     }
 
@@ -455,7 +455,9 @@ mod tests {
         // PathGlyphs preset_names:   ["light","heavy","dotted"]                      => heavy=1
         let mut state = AppState::default();
         state.gallery = Some(GalleryState {
-            category_idx: 0,
+            // Sit on the Arrows category (1) so the preview shows arrows (they are hidden
+            // on the Box category so the box corners stay visible while picking a box).
+            category_idx: 1,
             selections: [
                 1, // box = thick
                 4, // arrows = nf-box
