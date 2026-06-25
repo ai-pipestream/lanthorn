@@ -631,7 +631,13 @@ pub fn mouse_to_action(
         if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
             // Corner overlays (room panel, tidy panel): only intercept the [X] click;
             // all other clicks fall through to normal map/room routing below.
-            let is_corner_overlay = state.room_panel.is_some() || state.tidy_anim.is_some();
+            // But if a centered modal is also open (stacked on top), it takes
+            // priority and must swallow all outside clicks.
+            let centered_open = state.gallery.is_some() || state.config_screen.is_some()
+                || state.saves.is_some() || state.file_browser.is_some()
+                || state.verb_menu.is_some() || state.hotkey_dialog;
+            let is_corner_overlay = !centered_open
+                && (state.room_panel.is_some() || state.tidy_anim.is_some());
 
             if state.gallery.is_some() {
                 if let Some(action) = gallery_dialog_action(rects, col, row) {
@@ -679,8 +685,13 @@ pub fn mouse_to_action(
                 return Action::None;
             }
         } else {
-            // For non-left-click events while a centered modal is open: swallow.
-            let is_corner_overlay = state.room_panel.is_some() || state.tidy_anim.is_some();
+            // For non-left-click events (wheel/drag): swallow unless a corner overlay
+            // is active and no centered modal is stacked on top.
+            let centered_open = state.gallery.is_some() || state.config_screen.is_some()
+                || state.saves.is_some() || state.file_browser.is_some()
+                || state.verb_menu.is_some() || state.hotkey_dialog;
+            let is_corner_overlay = !centered_open
+                && (state.room_panel.is_some() || state.tidy_anim.is_some());
             if !is_corner_overlay {
                 return Action::None;
             }
@@ -762,6 +773,11 @@ pub fn mouse_to_action(
 /// fire the bound command action. The dialog closes itself when a sub-mode
 /// opens (handled in apply_action).
 fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
+    // ESC always closes the hotkey dialog (same as [X]).
+    if key.code == KeyCode::Esc {
+        return Action::CloseHotkeyDialog;
+    }
+
     let spec = KeySpec::from_key_event(key);
 
     // Prefix key closes the dialog.
@@ -4618,13 +4634,13 @@ mod tests {
                 "config screen [X] click should produce ConfigCancel, got {:?}", x_action);
         }
 
-        // 6. Hotkey dialog: ESC closes (via prefix or Esc), [X] → CloseHotkeyDialog
+        // 6. Hotkey dialog: ESC → CloseHotkeyDialog, [X] → CloseHotkeyDialog
         {
             let mut s = AppState::default();
             s.hotkey_dialog = true;
-            // Esc is not the prefix key by default, and hotkey_dialog_key_to_action
-            // maps prefix → close; Esc is not bound so produces None in the dialog.
-            // But the [X] click must close it.
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::CloseHotkeyDialog),
+                "hotkey dialog ESC should produce CloseHotkeyDialog, got {:?}", esc_action);
             let dialog = Some(make_rects());
             let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
             assert!(matches!(x_action, Action::CloseHotkeyDialog),
@@ -4737,5 +4753,55 @@ mod tests {
         // Click outside → swallowed (None)
         let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
         assert!(matches!(a, Action::None), "outside gallery dialog should be swallowed, got {:?}", a);
+    }
+
+    /// Regression: a centered modal (gallery) stacked on top of an open corner
+    /// overlay (room_panel) must swallow all outside-dialog clicks.  Without the
+    /// fix, is_corner_overlay was true even when a centered modal was open, so the
+    /// outside click fell through to ShowRoomInfo / ActivatePane.
+    #[test]
+    fn centered_modal_swallows_outside_clicks_even_with_room_panel_open() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::{GalleryState, RoomPanel, RoomPanelMode};
+        use crate::state::Zoom;
+
+        // Build a real map rect and room_rects so a click at (0,0) would normally
+        // produce ShowRoomInfo if the dialog were not open.
+        let map_r = map_rect();   // Rect::new(0,0,80,40)
+        let story_r = story_rect();
+        let live_room_rects = room_rects_for_compact(1, (0, 0), map_r);
+
+        // Confirm that without any dialog open, clicking (0,0) hits the room.
+        {
+            let s = AppState::default();
+            let a = mouse_to_action(&s, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &None);
+            assert!(
+                matches!(a, Action::ShowRoomInfo(1)),
+                "sanity: without dialog, click on room should be ShowRoomInfo(1), got {:?}", a
+            );
+        }
+
+        // Now open BOTH room_panel (corner overlay) AND gallery (centered modal).
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        state.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+
+        // The dialog rects represent the gallery centered dialog (not covering (0,0)).
+        let dialog = Some(DialogRects {
+            area:    Rect::new(5, 3, 70, 24),
+            content: Rect::new(6, 5, 68, 19),
+            close:   Some(Rect::new(73, 3, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(65, 26, 8, 1))],
+        });
+
+        // Click OUTSIDE the gallery dialog (at (0,0), which is on the room).
+        // Must be swallowed — NOT ShowRoomInfo or ActivatePane.
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &dialog);
+        assert!(
+            matches!(a, Action::None),
+            "outside-gallery click with room_panel also open must be swallowed (None), got {:?}", a
+        );
     }
 }

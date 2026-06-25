@@ -1087,4 +1087,36 @@ box_style = "rounded"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn write_style_full_round_trips_dialog_shadow_and_box_style() {
+        use crate::render::paneframe::BorderStyle;
+
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-shadow-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shadow-full.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.dialog_shadow_on = true;
+        cs.dialog_box_style = BorderStyle::Double;
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+
+        assert!(
+            cs2.dialog_shadow_on,
+            "dialog_shadow_on must survive write_style_full -> parse -> resolve"
+        );
+        assert!(
+            matches!(cs2.dialog_box_style, BorderStyle::Double),
+            "dialog_box_style must survive write_style_full -> parse -> resolve; got {:?}",
+            cs2.dialog_box_style
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

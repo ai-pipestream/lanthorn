@@ -1423,16 +1423,11 @@ fn map_pane_dims(area: Rect) -> (u16, u16) {
 }
 
 /// Build a `DialogStyle` from the current app colors.
-/// Uses `BorderStyle::Single` as a fallback when `dialog_box_style` is `None`.
+/// Note: `BorderStyle::None` is coerced to `Single` inside `draw_dialog`.
 fn make_dialog_style(state: &AppState) -> DialogStyle {
-    use app::render::paneframe::BorderStyle;
-    let box_style = match state.colors.dialog_box_style {
-        BorderStyle::None => BorderStyle::Single,
-        other => other,
-    };
     DialogStyle {
         frame: state.colors.dialog,
-        box_style,
+        box_style: state.colors.dialog_box_style,
         title: state.colors.dialog_title,
         button: state.colors.dialog_button,
         button_active: state.colors.dialog_button_active,

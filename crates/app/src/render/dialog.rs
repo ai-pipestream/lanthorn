@@ -73,6 +73,12 @@ pub struct DialogRects {
 // ── draw_dialog ───────────────────────────────────────────────────────────────
 
 pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> DialogRects {
+    // Coerce BorderStyle::None to Single so every modal always has a visible border.
+    let box_style = match st.box_style {
+        BorderStyle::None => BorderStyle::Single,
+        other => other,
+    };
+
     // (1) Resolve area from placement
     let buf_area = *buf.area();
     let area = match spec.placement {
@@ -117,7 +123,7 @@ pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> Dia
     }
 
     // (4) draw_pane_frame for the border
-    let pane = draw_pane_frame(buf, area, st.box_style, st.frame);
+    let pane = draw_pane_frame(buf, area, box_style, st.frame);
 
     // (5) Overlay the centered title via draw_top_inset
     let title_seg = InsetSegment { text: spec.title, active: false };
