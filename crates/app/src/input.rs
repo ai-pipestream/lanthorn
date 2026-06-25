@@ -67,6 +67,8 @@ pub enum Action {
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
     /// No-op in Manual mode (positions are user-controlled and frozen).
     Retidy,
+    /// Re-read style.toml and swap the live colors/symbols (keeps current look on error).
+    ReloadStyle,
     /// Run the tidy pipeline and start animated playback of its stages (Auto only).
     AnimateTidy,
     /// Step the tidy animation by N frames (negative = back); pauses playback.
@@ -1482,6 +1484,24 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             }
         }
 
+        Action::ReloadStyle => {
+            match crate::reload::reload_style(state) {
+                crate::reload::ReloadOutcome::Reloaded { warnings } => {
+                    for w in &warnings {
+                        state.push_transcript_kind(w, crate::state::TranscriptKind::Warning);
+                    }
+                    state.set_status("style reloaded");
+                }
+                crate::reload::ReloadOutcome::Failed { msg } => {
+                    state.push_transcript_kind(
+                        &format!("style reload failed: {}", msg),
+                        crate::state::TranscriptKind::Warning,
+                    );
+                    state.set_status("reload failed — keeping current style");
+                }
+            }
+        }
+
         Action::AnimateTidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
                 let layer = state.active_layer(&mapper.graph);
@@ -2647,6 +2667,23 @@ mod tests {
         apply_action(Action::Retidy, &mut s, &mut m);
         assert_eq!(m.graph.room(1).unwrap().pos, Some((5, 5)), "Manual: retidy must not move rooms");
         assert_eq!(m.graph.room(2).unwrap().pos, Some((0, 0)));
+    }
+
+    #[test]
+    fn reload_action_applies_style_file() {
+        let dir = std::env::temp_dir().join(format!("babelmap-reloadact-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("style.toml");
+        std::fs::write(&path, "[colors]\n\"transcript\" = { fg = \"magenta\" }\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(path.to_string_lossy().to_string());
+        let mut mapper = Mapper::default();
+
+        apply_action(Action::ReloadStyle, &mut state, &mut mapper);
+        assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Magenta));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

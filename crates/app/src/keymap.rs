@@ -35,6 +35,7 @@ pub enum Command {
     ExportDump,
     CycleLayout,
     Retidy,
+    ReloadStyle,
     AnimateTidy,
     ToggleAlignment,
     TogglePortalLabels,
@@ -125,6 +126,7 @@ impl Command {
             Command::ExportDump => Action::ExportDump,
             Command::CycleLayout => Action::CycleLayout,
             Command::Retidy => Action::Retidy,
+            Command::ReloadStyle => Action::ReloadStyle,
             Command::AnimateTidy => Action::AnimateTidy,
             Command::ToggleAlignment => Action::ToggleAlignment,
             Command::TogglePortalLabels => Action::TogglePortalLabels,
@@ -181,6 +183,7 @@ impl Command {
             Command::ExportDump => "export_dump",
             Command::CycleLayout => "cycle_layout",
             Command::Retidy => "retidy",
+            Command::ReloadStyle => "reload_style",
             Command::AnimateTidy => "animate_tidy",
             Command::ToggleAlignment => "toggle_alignment",
             Command::TogglePortalLabels => "toggle_portal_labels",
@@ -237,6 +240,7 @@ impl Command {
             Command::ExportDump => "dump map",
             Command::CycleLayout => "layout",
             Command::Retidy => "retidy",
+            Command::ReloadStyle => "reload style",
             Command::AnimateTidy => "animate tidy",
             Command::ToggleAlignment => "alignment",
             Command::TogglePortalLabels => "portals",
@@ -293,6 +297,7 @@ impl Command {
             | Command::ExportDump
             | Command::CycleLayout
             | Command::Retidy
+            | Command::ReloadStyle
             | Command::AnimateTidy
             | Command::ToggleAlignment
             | Command::TogglePortalLabels
@@ -357,6 +362,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::ExportDump,
     Command::CycleLayout,
     Command::Retidy,
+    Command::ReloadStyle,
     Command::AnimateTidy,
     Command::ToggleAlignment,
     Command::TogglePortalLabels,

@@ -276,6 +276,10 @@ pub fn parse(body: &str, prefix: char) -> SlashOutcome {
         return (entry.build)(args);
     }
 
+    if t0 == "reload" {
+        return SlashOutcome::Action(crate::keymap::Command::ReloadStyle.to_action());
+    }
+
     // Fallback: kebab-name → Command::from_name (snake_case; convert hyphens to underscores).
     let snake = t0.replace('-', "_");
     if let Some(cmd) = Command::from_name(&snake) {
