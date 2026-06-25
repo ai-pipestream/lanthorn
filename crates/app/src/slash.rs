@@ -234,12 +234,28 @@ static CURATED: &[CuratedEntry] = &[
 /// Token0 matched in the curated table → run its builder with remaining tokens.
 /// Token0 matched as kebab-case `Command` name → `Action(command.to_action())`.
 /// Otherwise → `Error("unknown command: <prefix><t0> — try <prefix>help")`.
+///
+/// Special case: `search` passes the raw remainder of the line (after the
+/// command word and its single following space) as the query, preserving any
+/// internal whitespace. Other commands still receive split tokens.
 pub fn parse(body: &str, prefix: char) -> SlashOutcome {
     let tokens: Vec<&str> = body.split_whitespace().collect();
 
     let Some(t0) = tokens.first().copied() else {
         return SlashOutcome::Error(format!("type {prefix}help for commands"));
     };
+
+    // Special-case `search`: preserve internal whitespace in the query by
+    // taking the raw remainder after the command word rather than re-joining
+    // split tokens.
+    if t0 == "search" {
+        let remainder = body[t0.len()..].trim_start_matches(' ');
+        let trimmed = remainder.trim_end();
+        if trimmed.is_empty() {
+            return SlashOutcome::Search(None);
+        }
+        return SlashOutcome::Search(Some(trimmed.to_string()));
+    }
 
     let args = &tokens[1..];
 
@@ -341,6 +357,7 @@ mod tests {
     #[test]
     fn parse_search_filter_export() {
         assert!(matches!(parse("search twisty maze", '/'), SlashOutcome::Search(Some(q)) if q == "twisty maze"));
+        assert!(matches!(parse("search a  b", '/'), SlashOutcome::Search(Some(q)) if q == "a  b"));
         assert!(matches!(parse("search", '/'), SlashOutcome::Search(None)));
         assert!(matches!(parse("filter meta", '/'), SlashOutcome::Filter(TranscriptFilterArg::Meta)));
         assert!(matches!(parse("filter both", '/'), SlashOutcome::Filter(TranscriptFilterArg::Both)));

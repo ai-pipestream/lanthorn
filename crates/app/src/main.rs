@@ -1055,6 +1055,21 @@ fn main() {
                                 TranscriptFilter::Story => "story",
                                 TranscriptFilter::Meta  => "meta",
                             };
+                            // If a search is active, recompute it against the new filter
+                            // so highlights and the [i/N] hint stay consistent.
+                            if let Some(query) = state.search_query.clone() {
+                                let count = state.run_search(&query, state.config.search.start_backward);
+                                if count > 0 {
+                                    let pos = state.search_matches[state.search_idx];
+                                    let total_vis = state.visible_transcript_indices().len();
+                                    let pane_rows = if last_panes.story.height > 0 {
+                                        last_panes.story.height as usize
+                                    } else {
+                                        24
+                                    };
+                                    state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
+                                }
+                            }
                             state.set_status(format!("filter: {}", label));
                         }
                         SlashOutcome::Export(dest) => {
