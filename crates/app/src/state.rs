@@ -596,6 +596,14 @@ pub struct AppState {
 
     /// When true, the "Save before quitting?" confirmation dialog is open.
     pub quit_dialog: bool,
+
+    // ── Launch dialog state ───────────────────────────────────────────────────
+
+    /// When true, the "Resume saved game?" dialog is shown at startup.
+    pub launch_dialog: bool,
+    /// Stashed restore data shown while the launch dialog is open.
+    /// Tuple is (save bytes, transcript lines, transcript kinds).
+    pub pending_resume: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)>,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
 
@@ -661,6 +669,8 @@ impl Default for AppState {
             reset_dialog: false,
             reset_clear_map: false,
             quit_dialog: false,
+            launch_dialog: false,
+            pending_resume: None,
             show_room_numbers: false,
             search_query: None,
             search_matches: Vec::new(),
@@ -685,6 +695,7 @@ impl AppState {
             || self.prompt.is_some()
             || self.reset_dialog
             || self.quit_dialog
+            || self.launch_dialog
     }
 
     /// Set the explicit layer override. `None` means follow the current room's layer.
@@ -1000,6 +1011,11 @@ mod tests {
         s.prompt = Some(Prompt { kind: PromptKind::SaveAs, buffer: String::new() });
         assert!(s.any_overlay_open(), "prompt active => any_overlay_open true");
         s.prompt = None;
+
+        // launch_dialog
+        s.launch_dialog = true;
+        assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
+        s.launch_dialog = false;
 
         assert!(!s.any_overlay_open(), "all cleared => any_overlay_open false again");
     }
