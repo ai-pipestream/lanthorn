@@ -153,6 +153,9 @@ pub struct HotkeysConfig {
 
 fn default_command_prefix() -> char { '/' }
 
+fn default_virtual_screen_cols() -> u16 { 80 }
+fn default_virtual_screen_rows() -> u16 { 24 }
+
 /// Deserialize a single-char string field into a `char`.  Takes the first
 /// Unicode scalar value of the string; falls back to `/` on an empty string.
 fn deserialize_char_from_str<'de, D>(d: D) -> Result<char, D::Error>
@@ -258,6 +261,12 @@ pub struct Config {
     /// Search configuration: start direction, nav keys.
     #[serde(default)]
     pub search: SearchConfig,
+    /// Virtual screen width reported to the Z-machine (chars). Default 80.
+    #[serde(default = "default_virtual_screen_cols")]
+    pub virtual_screen_cols: u16,
+    /// Virtual screen height reported to the Z-machine (lines). Default 24.
+    #[serde(default = "default_virtual_screen_rows")]
+    pub virtual_screen_rows: u16,
 }
 
 impl Default for Config {
@@ -279,6 +288,8 @@ impl Default for Config {
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
             search: SearchConfig::default(),
+            virtual_screen_cols: default_virtual_screen_cols(),
+            virtual_screen_rows: default_virtual_screen_rows(),
         }
     }
 }
@@ -323,6 +334,8 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
             cfg.search = from_file.search;
+            cfg.virtual_screen_cols = from_file.virtual_screen_cols;
+            cfg.virtual_screen_rows = from_file.virtual_screen_rows;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
@@ -365,6 +378,8 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     };
     doc["background_tidy"] = toml_edit::value(bg_str);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
+    doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
+    doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
 
     // style pointer — the only visual key written to config.toml. The actual
     // colors/symbols live in the style file ([colors]/[symbols] are no longer
@@ -390,6 +405,20 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_screen_defaults_80x24() {
+        let cfg = Config::default();
+        assert_eq!(cfg.virtual_screen_cols, 80);
+        assert_eq!(cfg.virtual_screen_rows, 24);
+    }
+
+    #[test]
+    fn virtual_screen_parses_from_toml() {
+        let cfg: Config = toml::from_str("virtual_screen_cols = 64\nvirtual_screen_rows = 20").unwrap();
+        assert_eq!(cfg.virtual_screen_cols, 64);
+        assert_eq!(cfg.virtual_screen_rows, 20);
+    }
 
     #[test]
     fn config_show_room_numbers_default_false_and_round_trips() {
@@ -587,6 +616,8 @@ mod tests {
             command_prefix: '/',
             show_room_numbers: false,
             search: SearchConfig::default(),
+            virtual_screen_cols: 80,
+            virtual_screen_rows: 24,
         };
         write_config(&dir, &cfg).unwrap();
 

@@ -565,6 +565,14 @@ fn main() {
         }
     };
 
+    // Apply the configured virtual screen dimensions to the VM. init_caps (called
+    // inside GameSession::new) seeds defaults; we override with the user's config here.
+    zvm::screen::write_screen_dims(
+        &mut session.machine.mem,
+        cfg.virtual_screen_rows as u8,
+        cfg.virtual_screen_cols as u8,
+    );
+
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
     let ifid = compute_ifid(&story_bytes);
