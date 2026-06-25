@@ -750,6 +750,11 @@ fn main() {
     let banner_line = app::session::first_banner_line(&banner);
     state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
     state.ifid = ifid.clone();
+    // Now that the IFID is known, re-resolve through reload_style so the per-game
+    // override (styles/<ifid>.toml) is merged over the global at startup — the
+    // initial resolve above is global-only (ifid wasn't set yet). On a per-game
+    // parse error the global look already set above stands.
+    let _ = app::reload::reload_style(&mut state);
     state.push_transcript(&banner);
 
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
