@@ -69,6 +69,8 @@ pub enum Action {
     Retidy,
     /// Re-read style.toml and swap the live colors/symbols (keeps current look on error).
     ReloadStyle,
+    /// Toggle the opt-in style.toml file-watcher (handled in the run loop).
+    ToggleWatch,
     /// Run the tidy pipeline and start animated playback of its stages (Auto only).
     AnimateTidy,
     /// Step the tidy animation by N frames (negative = back); pauses playback.
@@ -1501,6 +1503,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
             }
         }
+
+        Action::ToggleWatch => { /* handled in the run loop (owns the watcher) */ }
 
         Action::AnimateTidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {

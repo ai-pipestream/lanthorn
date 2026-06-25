@@ -600,6 +600,28 @@ enum FbEntryAction {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+/// Toggle the opt-in style.toml file-watcher on/off, updating the status line.
+fn toggle_style_watch(
+    state: &mut app::state::AppState,
+    watcher: &mut Option<app::watch::StyleWatcher>,
+) {
+    if watcher.is_some() {
+        *watcher = None;
+        state.set_status("style watch off");
+    } else if let Some(p) =
+        app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
+    {
+        *watcher = app::watch::start(&p);
+        state.set_status(if watcher.is_some() {
+            "style watch on"
+        } else {
+            "style watch: no file to watch"
+        });
+    } else {
+        state.set_status("style watch: no file to watch");
+    }
+}
+
 fn main() {
     // ── 1. Parse args + load config ───────────────────────────────────────────
 
@@ -825,7 +847,42 @@ fn main() {
     // Poll FPS while a background tidy is in flight.
     const TIDY_POLL_MS: u64 = 33;
 
+    // Optional style.toml file-watcher (opt-in via watch_style; toggled by /watch).
+    let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+    let mut watch_dirty: Option<std::time::Instant> = None;
+    if state.config.watch_style {
+        if let Some(p) =
+            app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
+        {
+            style_watcher = app::watch::start(&p);
+        }
+    }
+
     loop {
+        // ── Style watch: drain events, debounce, then reload ──────────────────
+        if let Some(w) = &style_watcher {
+            let mut saw = false;
+            while w.rx.try_recv().is_ok() { saw = true; }
+            if saw { watch_dirty = Some(std::time::Instant::now()); }
+        }
+        if app::watch::due(watch_dirty, std::time::Instant::now(), Duration::from_millis(200)) {
+            watch_dirty = None;
+            match app::reload::reload_style(&mut state) {
+                app::reload::ReloadOutcome::Reloaded { warnings } => {
+                    for wn in &warnings {
+                        state.push_transcript_kind(wn, TranscriptKind::Warning);
+                    }
+                    state.set_status("style reloaded (watch)");
+                }
+                app::reload::ReloadOutcome::Failed { msg } => {
+                    state.push_transcript_kind(
+                        &format!("style reload failed: {}", msg),
+                        TranscriptKind::Warning,
+                    );
+                }
+            }
+        }
+
         // ── Background tidy job: poll and apply ───────────────────────────────
         // Check whether the in-flight tidy job has finished. Do this BEFORE the
         // draw so the first fully-drawn frame after completion shows the new layout.
@@ -1321,6 +1378,12 @@ fn main() {
             _ => continue,
         };
 
+        // ToggleWatch is run-loop-only (owns the watcher): intercept before dispatch.
+        if matches!(action, Action::ToggleWatch) {
+            toggle_style_watch(&mut state, &mut style_watcher);
+            continue;
+        }
+
         // Note whether this action closes the gallery (persist the look afterward).
         let gallery_cfg_on_close = matches!(action, Action::GalleryClose | Action::GalleryApply);
 
@@ -1376,7 +1439,11 @@ fn main() {
                     let body = &cmd[state.config.command_prefix.len_utf8()..];
                     match slash::parse(body, state.config.command_prefix) {
                         SlashOutcome::Action(a) => {
-                            apply_action(a, &mut state, &mut mapper);
+                            if matches!(a, Action::ToggleWatch) {
+                                toggle_style_watch(&mut state, &mut style_watcher);
+                            } else {
+                                apply_action(a, &mut state, &mut mapper);
+                            }
                         }
                         SlashOutcome::Message(m) | SlashOutcome::Error(m) => {
                             state.set_status(m);

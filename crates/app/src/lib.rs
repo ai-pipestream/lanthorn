@@ -20,3 +20,4 @@ pub mod session;
 pub mod state;
 pub mod style;
 pub mod symbols;
+pub mod watch;
