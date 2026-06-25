@@ -663,6 +663,7 @@ fn main() {
         cfg.virtual_screen_rows as u8,
         cfg.virtual_screen_cols as u8,
     );
+    session.machine.undo_cap = cfg.undo_levels;
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
@@ -685,7 +686,7 @@ fn main() {
                 // Restore the machine from the saved game state only when auto_load is enabled.
                 // When auto_load = false the accumulated map still loads, but the game starts fresh.
                 if cfg.auto_load {
-                    if let Err(e) = session.machine.restore_quetzal(&ac.save) {
+                    if let Err(e) = session.machine.restore_file(&ac.save) {
                         eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
                     } else {
                         startup_transcript = Some((ac.transcript, ac.transcript_kinds));
@@ -1518,7 +1519,7 @@ fn main() {
                                 Some(ref path) => {
                                     match load_archive(path) {
                                         Ok(ac) => {
-                                            let restore_err = session.machine.restore_quetzal(&ac.save).map_err(|e| {
+                                            let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
                                                 match e {
                                                     zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
                                                     other => format!("restore failed: {:?}", other),
@@ -1844,7 +1845,7 @@ fn main() {
                 // Restore map + game from the .babelmap archive.
                 match load_archive(&arc_file) {
                     Ok(ac) => {
-                        let restore_err = session.machine.restore_quetzal(&ac.save).map_err(|e| {
+                        let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
                             match e {
                                 zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
                                 other => format!("restore failed: {:?}", other),
@@ -2045,7 +2046,7 @@ fn main() {
                 if let Some((path, entry_name)) = load_info {
                     match load_archive(&path) {
                         Ok(ac) => {
-                            let restore_err = session.machine.restore_quetzal(&ac.save).map_err(|e| {
+                            let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
                                 match e {
                                     zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
                                     other => format!("restore failed: {:?}", other),
@@ -2194,6 +2195,7 @@ fn reset_game(
     match GameSession::new(story_bytes.to_vec()) {
         Ok(new_session) => {
             *session = new_session;
+            session.machine.undo_cap = state.config.undo_levels;
             let start_loc = zvm::current_location(&session.machine);
             state.turns = 0;
             state.input.clear();
@@ -2473,6 +2475,7 @@ fn open_hints(
                 Ok(bytes) => {
                     match app::session::GameSession::new(bytes) {
                         Ok(mut vm) => {
+                            vm.machine.undo_cap = state.config.undo_levels;
                             let opening = vm.take_transcript();
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
@@ -2506,6 +2509,7 @@ fn open_hints(
                 Ok(Some(bytes)) => {
                     match app::session::GameSession::new(bytes) {
                         Ok(mut vm) => {
+                            vm.machine.undo_cap = state.config.undo_levels;
                             let opening = vm.take_transcript();
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
@@ -2644,7 +2648,7 @@ fn apply_launch_resume(
     state: &mut AppState,
     last_panes: &PaneRects,
 ) {
-    match session.machine.restore_quetzal(save) {
+    match session.machine.restore_file(save) {
         Ok(()) => {
             // mapper was already loaded from the archive at startup (ac.mapper);
             // only the VM machine state needs restoring via restore_quetzal above.

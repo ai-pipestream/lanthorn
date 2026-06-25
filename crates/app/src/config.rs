@@ -152,6 +152,7 @@ pub struct HotkeysConfig {
 // ── Config ────────────────────────────────────────────────────────────────────
 
 fn default_command_prefix() -> char { '/' }
+fn default_undo_levels() -> usize { 16 }
 
 fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
@@ -247,6 +248,9 @@ pub struct Config {
     /// Watch the resolved style.toml and live-reload it on change (default false).
     #[serde(default)]
     pub watch_style: bool,
+    /// Undo depth: max retained in-memory undo snapshots (default 16; 0 disables).
+    #[serde(default = "default_undo_levels")]
+    pub undo_levels: usize,
     /// The prefix character that triggers slash-command routing (default: '/').
     /// Stored as a single-character string in TOML: command_prefix = "/".
     #[serde(default = "default_command_prefix", deserialize_with = "deserialize_char_from_str")]
@@ -284,6 +288,7 @@ impl Default for Config {
             hotkeys: HotkeysConfig::default(),
             style: None,
             watch_style: false,
+            undo_levels: default_undo_levels(),
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
             show_loc_method: false,
@@ -342,6 +347,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
             cfg.watch_style = from_file.watch_style;
+            cfg.undo_levels = from_file.undo_levels;
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
             cfg.show_loc_method = from_file.show_loc_method;
@@ -418,6 +424,11 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undo_levels_defaults_to_16() {
+        assert_eq!(Config::default().undo_levels, 16);
+    }
 
     #[test]
     fn watch_style_defaults_false_and_detector_works() {
@@ -641,6 +652,7 @@ mod tests {
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),
             watch_style: false,
+            undo_levels: 16,
             command_prefix: '/',
             show_room_numbers: false,
             show_loc_method: false,
