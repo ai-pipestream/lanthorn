@@ -20,6 +20,17 @@ use zvm::location::current_location;
 use zvm::ObjectSnapshot;
 use zvm::memory::Memory;
 
+// ── InputKind ─────────────────────────────────────────────────────────────────
+
+/// Which kind of input the VM is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    /// Waiting for a full line of text (`read` / `sread` opcode).
+    Line,
+    /// Waiting for a single keypress (`read_char` opcode).
+    Char,
+}
+
 // ── CaptureSink ───────────────────────────────────────────────────────────────
 
 /// An output sink that accumulates printed text and lets the caller drain it.
@@ -66,6 +77,8 @@ pub struct TurnResult {
 pub struct GameSession {
     pub machine: Machine,
     pub quit: bool,
+    /// Which kind of input the VM is currently waiting for.
+    pending: InputKind,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -83,9 +96,9 @@ impl GameSession {
         let mut machine = Machine::with_output(mem, sink);
         machine.init_caps();
 
-        let (quit, _) = run_until_input(&mut machine);
+        let (quit, _, pending) = run_until_input(&mut machine);
 
-        Ok(GameSession { machine, quit })
+        Ok(GameSession { machine, quit, pending })
     }
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).
@@ -93,12 +106,39 @@ impl GameSession {
         strip_read_prompt(&sink_mut(&mut self.machine).take_text()).to_owned()
     }
 
+    /// Which kind of input the VM is currently waiting for.
+    pub fn pending_input(&self) -> InputKind {
+        self.pending
+    }
+
     /// Supply a player command, step until the next input request or Quit,
     /// and return the turn result.
     pub fn submit(&mut self, command: &str) -> TurnResult {
         self.machine.supply_line(command);
-        let (quit, save_restore_failed) = run_until_input(&mut self.machine);
+        let (quit, save_restore_failed, pending) = run_until_input(&mut self.machine);
         self.quit = quit;
+        self.pending = pending;
+
+        let raw = sink_mut(&mut self.machine).take_text();
+        let transcript = strip_read_prompt(&raw).to_owned();
+        let location = current_location(&self.machine);
+
+        let info = if save_restore_failed {
+            Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
+        } else {
+            None
+        };
+
+        TurnResult { transcript, location, quit, info }
+    }
+
+    /// Supply a single keypress, step until the next input request or Quit,
+    /// and return the turn result.
+    pub fn submit_char(&mut self, ch: u8) -> TurnResult {
+        self.machine.supply_char(ch);
+        let (quit, save_restore_failed, pending) = run_until_input(&mut self.machine);
+        self.quit = quit;
+        self.pending = pending;
 
         let raw = sink_mut(&mut self.machine).take_text();
         let transcript = strip_read_prompt(&raw).to_owned();
@@ -135,17 +175,20 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
 
 /// Step the machine until it pauses for input or quits.
 ///
-/// Returns `(quit, save_restore_auto_failed)` where:
+/// Returns `(quit, save_restore_auto_failed, input_kind)` where:
 /// - `quit` is `true` if the machine ended.
 /// - `save_restore_auto_failed` is `true` if a `SaveRequest` or
 ///   `RestoreRequest` was encountered and auto-rejected this run (so the
 ///   caller can surface a hint to the player).
-fn run_until_input(machine: &mut Machine) -> (bool, bool) {
+/// - `input_kind` is the kind of input the machine is now waiting for
+///   (`Line` when quit, since no input is actually pending in that case).
+fn run_until_input(machine: &mut Machine) -> (bool, bool, InputKind) {
     let mut save_restore_failed = false;
     loop {
         match machine.step() {
-            StepResult::Quit => return (true, save_restore_failed),
-            StepResult::NeedLine { .. } | StepResult::NeedChar => return (false, save_restore_failed),
+            StepResult::Quit => return (true, save_restore_failed, InputKind::Line),
+            StepResult::NeedLine { .. } => return (false, save_restore_failed, InputKind::Line),
+            StepResult::NeedChar => return (false, save_restore_failed, InputKind::Char),
             StepResult::SaveRequest => {
                 // Auto-fail saves during headless operation.
                 machine.complete_save(false);
@@ -157,7 +200,7 @@ fn run_until_input(machine: &mut Machine) -> (bool, bool) {
             }
             StepResult::Restart => {
                 // Restart is not supported in headless mode; treat as quit.
-                return (true, save_restore_failed);
+                return (true, save_restore_failed, InputKind::Line);
             }
             StepResult::Continue => {}
         }
@@ -370,6 +413,87 @@ mod tests {
 
         assert_eq!(m.graph.room(1).unwrap().pos, pos1_before, "room 1 must not move in Manual mode");
         assert_eq!(m.graph.room(2).unwrap().pos, pos2_before, "room 2 must not move in Manual mode");
+    }
+
+    // ── Task 7: InputKind / submit_char tests ─────────────────────────────────
+
+    /// Build a minimal v5 story whose program is: read_char (store→G0), quit.
+    ///
+    /// GameSession::new will step until the first NeedChar, so pending_input()
+    /// must be `Char`.  Calling submit_char advances past the read_char and
+    /// hits the quit opcode, returning a TurnResult.
+    fn read_char_story_v5() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        // Version 5
+        buf[0x00] = 5;
+        // high_mem_base = 0x0400
+        buf[0x04] = 0x04; buf[0x05] = 0x00;
+        // initial_pc = 0x0040
+        buf[0x06] = 0x00; buf[0x07] = 0x40;
+        // dictionary = 0x0080 (empty: word-sep=0, entry-size=4, entry-count=0)
+        buf[0x08] = 0x00; buf[0x09] = 0x80;
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
+        // object_table = 0x0100
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00;
+        // global_vars = 0x0300
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00;
+        // static_mem_base = 0x0400 → dynamic memory 0x0000–0x03FF
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00;
+        // abbrev_table = 0x0060
+        buf[0x18] = 0x00; buf[0x19] = 0x60;
+
+        // Program at 0x0040:
+        //   read_char (VAR opcode 0xF6)
+        //     type byte 0x7F: small-const(01), omit(11), omit(11), omit(11)
+        //     operand: 1 (keyboard device)
+        //     store: 0x10 (G0)
+        //   quit (0xBA)
+        buf[0x0040] = 0xF6; // VAR read_char
+        buf[0x0041] = 0x7F; // type: small(01), omit(11), omit(11), omit(11)
+        buf[0x0042] = 1;    // operand: device=1
+        buf[0x0043] = 0x10; // store → G0
+        buf[0x0044] = 0xBA; // quit
+
+        buf
+    }
+
+    #[test]
+    fn pending_input_is_line_after_new_on_quitting_story() {
+        // czech.z5 quits without ever requesting input; the quit path in
+        // run_until_input returns InputKind::Line, so pending_input() == Line.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture_path.exists() {
+            return; // fixture absent — skip
+        }
+        let story = std::fs::read(&fixture_path).expect("read czech.z5");
+        let session = GameSession::new(story).expect("GameSession::new with czech.z5");
+        assert_eq!(session.pending_input(), InputKind::Line,
+            "a story that quits without requesting input should leave pending == Line");
+    }
+
+    #[test]
+    fn pending_input_is_char_after_new_on_read_char_story() {
+        let story = read_char_story_v5();
+        let session = GameSession::new(story).expect("GameSession::new failed");
+        assert_eq!(session.pending_input(), InputKind::Char,
+            "GameSession::new on a read_char story should leave pending == Char");
+    }
+
+    #[test]
+    fn submit_char_returns_turn_result_and_advances() {
+        let story = read_char_story_v5();
+        let mut session = GameSession::new(story).expect("GameSession::new failed");
+        assert_eq!(session.pending_input(), InputKind::Char);
+
+        // After read_char the next instruction is quit, so submit_char drives
+        // the machine to Quit → TurnResult.quit == true.
+        let result = session.submit_char(b'x');
+        assert!(result.quit, "submit_char on a read_char→quit story should return quit=true");
+
+        // The quit path sets pending back to Line (no input pending).
+        assert_eq!(session.pending_input(), InputKind::Line,
+            "after quit, pending should be reset to Line");
     }
 
     // ── czech.z5 smoke test ───────────────────────────────────────────────────
