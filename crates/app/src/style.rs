@@ -875,6 +875,9 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
                 if let Some(bg) = &r.decl.bg { t["bg"] = toml_edit::value(bg.as_str()); }
                 if r.decl.bold == Some(true) { t["bold"] = toml_edit::value(true); }
                 if r.decl.italic == Some(true) { t["italic"] = toml_edit::value(true); }
+                if r.decl.underline == Some(true) { t["underline"] = toml_edit::value(true); }
+                if r.decl.dim == Some(true) { t["dim"] = toml_edit::value(true); }
+                if r.decl.reversed == Some(true) { t["reversed"] = toml_edit::value(true); }
                 arr.push(t);
             }
             let mut transcript = toml_edit::Table::new();
@@ -901,6 +904,9 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
                     if let Some(bg) = &seg.decl.bg { t["bg"] = toml_edit::value(bg.as_str()); }
                     if seg.decl.bold == Some(true) { t["bold"] = toml_edit::value(true); }
                     if seg.decl.italic == Some(true) { t["italic"] = toml_edit::value(true); }
+                    if seg.decl.underline == Some(true) { t["underline"] = toml_edit::value(true); }
+                    if seg.decl.dim == Some(true) { t["dim"] = toml_edit::value(true); }
+                    if seg.decl.reversed == Some(true) { t["reversed"] = toml_edit::value(true); }
                     arr.push(t);
                 }
                 table.insert("segment", toml_edit::Item::ArrayOfTables(arr));
@@ -1134,7 +1140,7 @@ align = "right"
     #[test]
     fn write_style_full_round_trips_statusbar_and_transcript_rules() {
         use crate::colors::{Align, StatusSegment, StatusBarLayout};
-        use ratatui::style::Color;
+        use ratatui::style::{Color, Modifier};
         let dir = std::env::temp_dir().join(format!("babelmap-sb-rt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("sb.toml");
@@ -1149,7 +1155,7 @@ align = "right"
         // A custom statusbar layout.
         cs.statusbar_layout = StatusBarLayout {
             segments: vec![
-                StatusSegment { text: "{location}".into(), align: Align::Left, style: Style::new().fg(Color::Cyan) },
+                StatusSegment { text: "{location}".into(), align: Align::Left, style: Style::new().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED) },
                 StatusSegment { text: "{title}".into(), align: Align::Center, style: Style::default() },
                 StatusSegment { text: "Score {score}".into(), align: Align::Right, style: Style::new().fg(Color::Yellow) },
             ],
@@ -1168,6 +1174,8 @@ align = "right"
         // Statusbar layout survived (text, align, style).
         assert_eq!(cs2.statusbar_layout.segments.len(), 3);
         assert_eq!(cs2.statusbar_layout.segments[0].text, "{location}");
+        // underline survives the export (fidelity fix for all decl modifiers).
+        assert!(cs2.statusbar_layout.segments[0].style.add_modifier.contains(Modifier::UNDERLINED));
         assert!(matches!(cs2.statusbar_layout.segments[1].align, Align::Center));
         assert_eq!(cs2.statusbar_layout.segments[2].style.fg, Some(Color::Yellow));
         let _ = std::fs::remove_dir_all(&dir);
