@@ -59,6 +59,54 @@ impl Default for SymbolConfig {
     }
 }
 
+// ── Search config ─────────────────────────────────────────────────────────────
+
+fn default_start_backward() -> bool { true }
+fn default_key_back() -> char { 'n' }
+fn default_key_forward() -> char { 'N' }
+
+/// Deserialize a single-char string field, defaulting to 'n' on empty.
+/// Used for key_back and key_forward (first char of the string).
+fn deserialize_char_key_back<'de, D>(d: D) -> Result<char, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(s.chars().next().unwrap_or('n'))
+}
+
+fn deserialize_char_key_forward<'de, D>(d: D) -> Result<char, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(s.chars().next().unwrap_or('N'))
+}
+
+/// The [search] section of config.toml.
+#[derive(Debug, Deserialize, Clone)]
+pub struct SearchConfig {
+    /// When true (default), a new /search starts backward from the bottom (most recent match).
+    #[serde(default = "default_start_backward")]
+    pub start_backward: bool,
+    /// Key to navigate backward (toward older lines). Default 'n'.
+    #[serde(default = "default_key_back", deserialize_with = "deserialize_char_key_back")]
+    pub key_back: char,
+    /// Key to navigate forward (toward newer lines). Default 'N'.
+    #[serde(default = "default_key_forward", deserialize_with = "deserialize_char_key_forward")]
+    pub key_forward: char,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            start_backward: default_start_backward(),
+            key_back: default_key_back(),
+            key_forward: default_key_forward(),
+        }
+    }
+}
+
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 /// babelmap: a Z-machine interpreter with live automapping.
@@ -201,6 +249,9 @@ pub struct Config {
     /// Default false (hidden); toggled at runtime by ToggleRoomNumbers.
     #[serde(default)]
     pub show_room_numbers: bool,
+    /// Search configuration: start direction, nav keys.
+    #[serde(default)]
+    pub search: SearchConfig,
 }
 
 impl Default for Config {
@@ -219,6 +270,7 @@ impl Default for Config {
             symbols: crate::style::StyleSymbols::default(),
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
+            search: SearchConfig::default(),
         }
     }
 }
@@ -260,6 +312,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.symbols = from_file.symbols;
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
+            cfg.search = from_file.search;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
@@ -307,6 +360,14 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     match &cfg.style {
         Some(s) => { doc["style"] = toml_edit::value(s.as_str()); }
         None => { doc.remove("style"); }
+    }
+
+    // [search] table.
+    {
+        let tbl = doc["search"].or_insert(toml_edit::table());
+        tbl["start_backward"] = toml_edit::value(cfg.search.start_backward);
+        tbl["key_back"] = toml_edit::value(cfg.search.key_back.to_string());
+        tbl["key_forward"] = toml_edit::value(cfg.search.key_forward.to_string());
     }
 
     std::fs::write(&config_path, doc.to_string())
@@ -511,6 +572,7 @@ mod tests {
             symbols: Default::default(),
             command_prefix: '/',
             show_room_numbers: false,
+            search: SearchConfig::default(),
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -539,6 +601,18 @@ mod tests {
     fn config_reads_style_pointer() {
         let cfg: Config = toml::from_str("style = \"neon\"\n").unwrap();
         assert_eq!(cfg.style.as_deref(), Some("neon"));
+    }
+
+    #[test]
+    fn search_config_defaults_and_round_trip() {
+        let d = Config::default();
+        assert_eq!(d.search.start_backward, true);
+        assert_eq!(d.search.key_back, 'n');
+        assert_eq!(d.search.key_forward, 'N');
+        let cfg: Config = toml::from_str("[search]\nstart_backward = false\nkey_forward = \"j\"\n").unwrap();
+        assert_eq!(cfg.search.start_backward, false);
+        assert_eq!(cfg.search.key_forward, 'j');
+        assert_eq!(cfg.search.key_back, 'n'); // default kept
     }
 
     #[test]
