@@ -663,6 +663,7 @@ fn main() {
         cfg.virtual_screen_rows as u8,
         cfg.virtual_screen_cols as u8,
     );
+    session.machine.undo_cap = cfg.undo_levels;
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
@@ -2194,6 +2195,7 @@ fn reset_game(
     match GameSession::new(story_bytes.to_vec()) {
         Ok(new_session) => {
             *session = new_session;
+            session.machine.undo_cap = state.config.undo_levels;
             let start_loc = zvm::current_location(&session.machine);
             state.turns = 0;
             state.input.clear();
@@ -2473,6 +2475,7 @@ fn open_hints(
                 Ok(bytes) => {
                     match app::session::GameSession::new(bytes) {
                         Ok(mut vm) => {
+                            vm.machine.undo_cap = state.config.undo_levels;
                             let opening = vm.take_transcript();
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
@@ -2506,6 +2509,7 @@ fn open_hints(
                 Ok(Some(bytes)) => {
                     match app::session::GameSession::new(bytes) {
                         Ok(mut vm) => {
+                            vm.machine.undo_cap = state.config.undo_levels;
                             let opening = vm.take_transcript();
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();

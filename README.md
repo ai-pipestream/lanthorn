@@ -195,6 +195,8 @@ and unsupported; v1/v2 are not supported.)
 - **Virtual screen size** — `virtual_screen_cols` / `virtual_screen_rows`
   (default 80 × 24) set the fixed screen dimensions reported to the game; v4+
   cursor-addressed games (forms, status displays) want a roomy story pane.
+- `undo_levels` (default 16) — how many in-memory undo states the Z-machine
+  keeps for the game's own UNDO command (0 disables undo).
 - **In-app config screen** (`F2`) — a settings modal for the common options
   with an explicit Save (writes the config file, format-preserving) and Cancel;
   changes apply live.
