@@ -163,18 +163,26 @@ impl BoxStyle {
 impl Arrows {
     /// All known preset names for Arrows, in display order.
     pub fn preset_names() -> &'static [&'static str] {
-        &["filled", "line", "nerdfont"]
+        &["filled", "line", "nerdfont", "nf-bold", "nf-box", "nf-circle", "nf-outline"]
     }
 
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
-    /// - "filled"   — filled triangle glyphs ▲▼▶◀ + diagonal arrows ↗↖↘↙ (default)
-    /// - "line"     — thin Unicode arrows ↑↓→← + diagonal ↗↖↘↙
-    /// - "nerdfont" — Nerd Font single-width arrow codepoints (requires patched font)
-    ///                Cardinal: nf-md-arrow_up (U+F0140) nf-md-arrow_down (U+F0143)
-    ///                          nf-md-arrow_right (U+F0142) nf-md-arrow_left (U+F0141)
-    ///                Diagonal: same as "line" (↗↖↘↙)
+    /// - "filled"     — filled triangle glyphs ▲▼▶◀ + diagonal arrows ↗↖↘↙ (default)
+    /// - "line"       — thin Unicode arrows ↑↓→← + diagonal ↗↖↘↙
+    /// - "nerdfont"   — Nerd Font single-width arrow codepoints (requires patched font)
+    ///                  Cardinal: nf-md-arrow_up (U+F0140) nf-md-arrow_down (U+F0143)
+    ///                            nf-md-arrow_right (U+F0142) nf-md-arrow_left (U+F0141)
+    ///                  Diagonal: same as "line" (↗↖↘↙)
+    /// - "nf-bold"    — MDI arrow-{up,down,left,right}-bold (F0737/F072E/F0731/F0734)
+    ///                  Diagonal: Unicode fallback ↖↗↙↘ (no native MDI bold diagonals)
+    /// - "nf-box"     — MDI arrow-{up,down,left,right}-bold-box (F0738/F072F/F0732/F0735)
+    ///                  Diagonal: native MDI bold-box diagonals (F1968/F196A/F1964/F1966)
+    /// - "nf-circle"  — MDI arrow-{up,down,left,right}-bold-circle (F005F/F0047/F004F/F0056)
+    ///                  Diagonal: Unicode fallback ↖↗↙↘ (no native MDI circle diagonals)
+    /// - "nf-outline" — MDI arrow-{up,down,left,right}-bold-outline (F09C7/F09BF/F09C0/F09C2)
+    ///                  Diagonal: native MDI bold-outline diagonals (F09C3/F09C5/F09B7/F09B9)
     pub fn preset(name: &str) -> Option<Arrows> {
         Some(match name {
             "filled" => Arrows {
@@ -190,6 +198,44 @@ impl Arrows {
                 north: '\u{F0140}', south: '\u{F0143}',
                 east: '\u{F0142}', west: '\u{F0141}',
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
+            },
+            "nf-bold" => Arrows {
+                // MDI arrow-up-bold F0737, arrow-down-bold F072E,
+                // arrow-left-bold F0731, arrow-right-bold F0734
+                north: '\u{F0737}', south: '\u{F072E}',
+                east: '\u{F0734}', west: '\u{F0731}',
+                // No native MDI plain-bold diagonal arrows; use Unicode fallback
+                ne: '↗', nw: '↖', se: '↘', sw: '↙',
+            },
+            "nf-box" => Arrows {
+                // MDI arrow-up-bold-box F0738, arrow-down-bold-box F072F,
+                // arrow-left-bold-box F0732, arrow-right-bold-box F0735
+                north: '\u{F0738}', south: '\u{F072F}',
+                east: '\u{F0735}', west: '\u{F0732}',
+                // Native MDI bold-box diagonal arrows (verified)
+                // arrow-top-left-bold-box F1968, arrow-top-right-bold-box F196A,
+                // arrow-bottom-left-bold-box F1964, arrow-bottom-right-bold-box F1966
+                nw: '\u{F1968}', ne: '\u{F196A}',
+                sw: '\u{F1964}', se: '\u{F1966}',
+            },
+            "nf-circle" => Arrows {
+                // MDI arrow-up-bold-circle F005F, arrow-down-bold-circle F0047,
+                // arrow-left-bold-circle F004F, arrow-right-bold-circle F0056
+                north: '\u{F005F}', south: '\u{F0047}',
+                east: '\u{F0056}', west: '\u{F004F}',
+                // No native MDI circle diagonal arrows; use Unicode fallback
+                ne: '↗', nw: '↖', se: '↘', sw: '↙',
+            },
+            "nf-outline" => Arrows {
+                // MDI arrow-up-bold-outline F09C7, arrow-down-bold-outline F09BF,
+                // arrow-left-bold-outline F09C0, arrow-right-bold-outline F09C2
+                north: '\u{F09C7}', south: '\u{F09BF}',
+                east: '\u{F09C2}', west: '\u{F09C0}',
+                // Native MDI bold-outline diagonal arrows (verified from MDI CSS)
+                // arrow-top-left-bold-outline F09C3, arrow-top-right-bold-outline F09C5,
+                // arrow-bottom-left-bold-outline F09B7, arrow-bottom-right-bold-outline F09B9
+                nw: '\u{F09C3}', ne: '\u{F09C5}',
+                sw: '\u{F09B7}', se: '\u{F09B9}',
             },
             _ => return None,
         })
@@ -232,17 +278,20 @@ impl PathGlyphs {
 impl PortalGlyphs {
     /// All known preset names for PortalGlyphs, in display order.
     pub fn preset_names() -> &'static [&'static str] {
-        &["ascii", "nerdfont"]
+        &["ascii", "nerdfont", "nerdfont-stairs"]
     }
 
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
-    /// - "ascii"    — ASCII-compatible glyphs (default): ●/↑/↓/⊙/⊗/? with ┊┄ connectors
-    /// - "nerdfont" — Nerd Font single-width icon codepoints (requires patched font)
-    ///                nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
-    ///                nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
-    ///                nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
+    /// - "ascii"            — ASCII-compatible glyphs (default): ●/↑/↓/⊙/⊗/? with ┊┄ connectors
+    /// - "nerdfont"         — Nerd Font single-width icon codepoints (requires patched font)
+    ///                        nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
+    ///                        nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
+    ///                        nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
+    /// - "nerdfont-stairs"  — Nerd Font 4 distinct direction icons (requires patched font)
+    ///                        up=mdi-stairs-up (U+F12BD), down=mdi-stairs-down (U+F12BE),
+    ///                        in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48)
     pub fn preset(name: &str) -> Option<PortalGlyphs> {
         Some(match name {
             "ascii" => PortalGlyphs {
@@ -257,6 +306,20 @@ impl PortalGlyphs {
                 // nf-fa-sign_in U+F090, nf-fa-sign_out U+F08B
                 in_: '\u{F090}', out: '\u{F08B}',
                 // nf-fa-question_circle U+F059
+                unknown: '\u{F059}',
+            },
+            "nerdfont-stairs" => PortalGlyphs {
+                // Reuse nf-fa-circle U+F111 for marker, nf-fa-question_circle U+F059 for unknown
+                marker: '\u{F111}', path: '┊', path_h: '┄',
+                // Four DISTINCT direction icons (resolved from MDI webfont CSS by name):
+                // mdi-stairs-up U+F12BD
+                up: '\u{F12BD}',
+                // mdi-stairs-down U+F12BE
+                down: '\u{F12BE}',
+                // mdi-location-enter U+F0FC4
+                in_: '\u{F0FC4}',
+                // mdi-exit-run U+F0A48
+                out: '\u{F0A48}',
                 unknown: '\u{F059}',
             },
             _ => return None,
@@ -320,7 +383,7 @@ impl SymbolSet {
 /// Rejects chars in the CJK/fullwidth/emoji-heavy ranges. The box-drawing
 /// block (U+2500..=U+257F), arrows (U+2190..=U+21FF), and BMP geometric
 /// shapes are always accepted.
-fn is_wide_estimate(c: char) -> bool {
+pub(crate) fn is_wide_estimate(c: char) -> bool {
     let cp = c as u32;
     matches!(cp,
         0x1100..=0x115F  // Hangul Jamo
@@ -488,5 +551,38 @@ mod tests {
         let expected = SymbolSet::resolve(&cfg);
         let got = SymbolSet::from_preset_names("ascii", "filled", "ascii", "light");
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn nerdfont_stairs_portal_has_four_distinct_single_width_icons() {
+        assert!(PortalGlyphs::preset_names().contains(&"nerdfont-stairs"));
+        let p = PortalGlyphs::preset("nerdfont-stairs").unwrap();
+        // four DISTINCT direction icons
+        let four = [p.up, p.down, p.in_, p.out];
+        for ch in four { assert!(!is_wide_estimate(ch)); }
+        assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
+    }
+
+    #[test]
+    fn nf_arrow_presets_exist_and_are_single_width() {
+        for name in ["nf-bold","nf-box","nf-circle","nf-outline"] {
+            assert!(Arrows::preset_names().contains(&name), "{name} missing");
+            let a = Arrows::preset(name).expect("preset");
+            for ch in [a.north,a.south,a.east,a.west,a.ne,a.nw,a.se,a.sw] {
+                assert!(!is_wide_estimate(ch), "{name}: wide char {:?}", ch);
+            }
+        }
+        // verified cardinal codepoints for nf-bold:
+        let b = Arrows::preset("nf-bold").unwrap();
+        assert_eq!(b.north, '\u{F0737}');
+        assert_eq!(b.south, '\u{F072E}');
+        assert_eq!(b.east,  '\u{F0734}');
+        assert_eq!(b.west,  '\u{F0731}');
+        // nf-box native diagonals:
+        let bx = Arrows::preset("nf-box").unwrap();
+        assert_eq!(bx.ne, '\u{F196A}');
+        assert_eq!(bx.nw, '\u{F1968}');
+        assert_eq!(bx.se, '\u{F1966}');
+        assert_eq!(bx.sw, '\u{F1964}');
     }
 }
