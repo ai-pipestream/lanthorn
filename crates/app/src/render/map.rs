@@ -478,7 +478,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // normal view the icons go on the interior right column; in portal view (show_portal_labels)
     // they move onto the border and the destination names float outside the box.
     if boxes {
-        draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
+        draw_portal_icons(rm, &placed, state, state.show_portal_labels, state.show_room_numbers, (off_x, off_y), area, buf);
     }
 
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -1179,6 +1179,7 @@ fn draw_portal_icons(
     placed: &std::collections::HashMap<RoomId, VRect>,
     state: &AppState,
     show_labels: bool,
+    show_room_numbers: bool,
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
@@ -1256,8 +1257,8 @@ fn draw_portal_icons(
                     }
                 }
             }
-        } else {
-            // Normal view: directional icons in the interior right column.
+        } else if show_room_numbers {
+            // Numbers shown: directional icons in the interior right column (rows 1-3).
             for (slot, cell) in slots.iter().enumerate() {
                 let Some((glyph_ch, _label)) = cell else { continue };
                 let gs = glyph_ch.to_string();
@@ -1266,6 +1267,22 @@ fn draw_portal_icons(
                 if slot == 0 && room.has_notes {
                     put_char(buf, bx + icon_col - 1 + off_x, row + off_y, sym_portal.marker, style, area);
                 }
+            }
+        } else {
+            // Numbers hidden: all portal icons on interior row 3, laid out horizontally,
+            // centered within the 9-wide interior and clipped to it.
+            let present: Vec<char> = slots.iter()
+                .filter_map(|cell| cell.map(|(ch, _)| ch))
+                .collect();
+            if !present.is_empty() {
+                // Build a string of glyphs separated by single spaces, then center in 9 chars.
+                let glyph_str: String = present.iter()
+                    .flat_map(|&ch| [ch, ' '])
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string();
+                let iw = (BOX_W - 2) as usize; // interior width = 9
+                put_str(buf, bx + 1 + off_x, by + 3 + off_y, &center(&glyph_str, iw), style, area);
             }
         }
     }
@@ -1310,7 +1327,7 @@ fn draw_room(
             draw_compact_room(room, sx, sy, base_style, &state.symbols, selected, area, buf);
         }
         Zoom::Boxes => {
-            draw_box_room(room, sx, sy, base_style, &state.symbols, selected, state.show_alignment, area, buf);
+            draw_box_room(room, sx, sy, base_style, &state.symbols, selected, state.show_alignment, state.show_room_numbers, area, buf);
         }
     }
 }
@@ -1414,6 +1431,7 @@ fn draw_box_room(
     sym: &SymbolSet,
     selected: bool,
     show_alignment: bool,
+    show_room_numbers: bool,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -1449,12 +1467,15 @@ fn draw_box_room(
     put_str(buf, sx + 1, sy + 2, &center(&name_lines[1], iw), style, area);
 
     // Row 3: #id (centered), with alignment diagnostics appended when enabled.
-    let mut row3 = format!("#{}", room.id);
-    if show_alignment && !room.align_code.is_empty() {
-        row3.push(' ');
-        row3.push_str(&room.align_code);
+    // Only drawn when show_room_numbers is true; when hidden, the row is freed for portal icons.
+    if show_room_numbers {
+        let mut row3 = format!("#{}", room.id);
+        if show_alignment && !room.align_code.is_empty() {
+            row3.push(' ');
+            row3.push_str(&room.align_code);
+        }
+        put_str(buf, sx + 1, sy + 3, &center(&row3, iw), style, area);
     }
-    put_str(buf, sx + 1, sy + 3, &center(&row3, iw), style, area);
 
     // Notes marker in top-right inner corner (row 1, col w-2).
     if room.has_notes {
@@ -2354,7 +2375,8 @@ mod tests {
         g.upsert_room(7, "Hall".into());
         g.set_pos(7, (0, 0));
         let rm = render(&g);
-        let state = AppState::default(); // Boxes zoom
+        let mut state = AppState::default(); // Boxes zoom
+        state.show_room_numbers = true; // enable to see #id on row 3
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
@@ -3288,7 +3310,8 @@ mod tests {
         g.upsert_room(7, "Rocky Ledge".into());
         g.set_pos(7, (0, 0));
         let rm = render(&g);
-        let state = AppState::default(); // Boxes, align off
+        let mut state = AppState::default(); // Boxes, align off
+        state.show_room_numbers = true; // enable to verify #id on row 3
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
@@ -3323,6 +3346,7 @@ mod tests {
             st.zoom = Zoom::Boxes;
             st.scroll = rm.bounds.0;
             st.show_alignment = show;
+            st.show_room_numbers = true; // alignment codes ride the #id row
             let mut buf = Buffer::empty(area);
             render_map(&rm, &st, area, &mut buf);
             buf
@@ -3362,7 +3386,8 @@ mod tests {
         g.add_edge(1, Direction::Down, 3);
         g.add_edge(1, Direction::In, 4);
         let rm = render(&g);
-        let state = AppState::default(); // Boxes, scroll (0,0), labels off
+        let mut state = AppState::default(); // Boxes, scroll (0,0), labels off
+        state.show_room_numbers = true; // right-column layout requires numbers shown
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
@@ -3389,7 +3414,8 @@ mod tests {
         g.add_edge(1, Direction::In, 2);
         g.add_edge(1, Direction::Out, 3);
         let rm = render(&g);
-        let state = AppState::default(); // Boxes zoom, scroll (0,0), labels off
+        let mut state = AppState::default(); // Boxes zoom, scroll (0,0), labels off
+        state.show_room_numbers = true; // right-column layout requires numbers shown
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
@@ -3409,7 +3435,8 @@ mod tests {
         g.set_notes(1, "stuff".into());
         g.add_edge(1, Direction::Up, 2);
         let rm = render(&g);
-        let state = AppState::default();
+        let mut state = AppState::default();
+        state.show_room_numbers = true; // right-column layout requires numbers shown
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
@@ -4356,5 +4383,79 @@ mod tests {
             reversed_in_row0 > 0,
             "with BorderStyle::None, the in-content layer strip MUST be drawn (REVERSED tab cells expected in row 0)"
         );
+    }
+
+    #[test]
+    fn room_number_visibility_toggles_id_and_icon_placement() {
+        // Build a one-room scene at Boxes zoom with a Down portal stub.
+        // With show_room_numbers=false (default): the "#<id>" text is absent and a portal icon
+        //   appears on interior row 3 (the freed row), centered horizontally.
+        // With show_room_numbers=true: "#<id>" appears on interior row 3 and the portal icon
+        //   appears on the far-right interior column (col BOX_W-2 = 9).
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1)); // placed so the Down edge becomes a stub in the render
+        g.add_edge(1, Direction::Down, 2);
+        let rm = render(&g);
+
+        // Helper: render with a given show_room_numbers value and return the buffer.
+        let render_buf = |show_room_numbers: bool| {
+            let mut st = AppState::default(); // Boxes zoom, scroll (0,0), show_portal_labels off
+            st.show_room_numbers = show_room_numbers;
+            let area = Rect::new(0, 0, 80, 40);
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &st, area, &mut buf);
+            buf
+        };
+
+        // ── show_room_numbers = false (default) ──────────────────────────────────
+        {
+            let buf = render_buf(false);
+            let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
+
+            // Interior row 3 should NOT contain "#1".
+            let row3: String = (1u16..=9).map(|x| sym(x, 3)).collect();
+            assert!(
+                !row3.contains("#1"),
+                "show_room_numbers=false: #id must be absent from row 3; got '{row3}'"
+            );
+
+            // A portal glyph (↓ for Down) should appear somewhere on interior row 3.
+            let has_down_glyph = (1u16..=9).any(|x| sym(x, 3) == "↓");
+            assert!(
+                has_down_glyph,
+                "show_room_numbers=false: portal glyph '↓' must appear on interior row 3; row3='{row3}'"
+            );
+
+            // The right interior column (col 9) on rows 1-3 should NOT have the down glyph.
+            let right_col_has_glyph = (1u16..=3).any(|y| sym(9, y) == "↓");
+            assert!(
+                !right_col_has_glyph,
+                "show_room_numbers=false: portal glyph must NOT be in the right column"
+            );
+        }
+
+        // ── show_room_numbers = true ──────────────────────────────────────────────
+        {
+            let buf = render_buf(true);
+            let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
+
+            // Interior row 3 should contain "#1".
+            let row3: String = (1u16..=9).map(|x| sym(x, 3)).collect();
+            assert!(
+                row3.contains("#1"),
+                "show_room_numbers=true: #id must appear on row 3; got '{row3}'"
+            );
+
+            // The Down portal icon should be in the far-right interior column (col 9), row 3.
+            assert_eq!(
+                sym(9, 3), "↓",
+                "show_room_numbers=true: portal glyph '↓' must be in the right interior column at row 3; got '{}'", sym(9, 3)
+            );
+        }
     }
 }

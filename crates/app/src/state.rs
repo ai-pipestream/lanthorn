@@ -262,8 +262,6 @@ pub enum PromptKind {
     SaveAs,
     /// Confirm deletion of the named save at this path.
     ConfirmDeleteSave(std::path::PathBuf),
-    /// Confirm resetting the game to its opening state (keeps the map).
-    ConfirmReset,
     /// Enter a filename for an exported Quetzal save in the given directory.
     ExportSaveName(std::path::PathBuf),
     /// Edit a config path field (user_dir or colors.scheme) from the config screen.
@@ -570,6 +568,15 @@ pub struct AppState {
     pub prev_location: Option<u16>,
     /// Objects whose parent was prev_location at the end of the previous turn.
     pub prev_objects_here: std::collections::BTreeSet<u16>,
+
+    // ── Reset dialog state ────────────────────────────────────────────────────
+
+    /// When true, the reset-confirmation dialog is open.
+    pub reset_dialog: bool,
+    /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
+    pub reset_clear_map: bool,
+    /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
+    pub show_room_numbers: bool,
 }
 
 impl Default for AppState {
@@ -620,6 +627,9 @@ impl Default for AppState {
             inventory_fallback: Vec::new(),
             prev_location: None,
             prev_objects_here: std::collections::BTreeSet::new(),
+            reset_dialog: false,
+            reset_clear_map: false,
+            show_room_numbers: false,
         }
     }
 }
@@ -638,6 +648,7 @@ impl AppState {
             || self.room_panel.is_some()
             || self.tidy_anim.is_some()
             || self.prompt.is_some()
+            || self.reset_dialog
     }
 
     /// Set the explicit layer override. `None` means follow the current room's layer.
@@ -1183,5 +1194,13 @@ mod tests {
         s.char_pan = (5, -3);
         s.recenter_on((0, 0), 80, 24);
         assert_eq!(s.char_pan, (0, 0), "recenter_on must reset char_pan to (0,0)");
+    }
+
+    #[test]
+    fn reset_dialog_counts_as_overlay() {
+        let mut s = AppState::default();
+        assert!(!s.any_overlay_open());
+        s.reset_dialog = true;
+        assert!(s.any_overlay_open(), "reset_dialog open => any_overlay_open true");
     }
 }

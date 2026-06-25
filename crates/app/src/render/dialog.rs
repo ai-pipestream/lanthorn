@@ -31,6 +31,7 @@ pub enum ButtonId {
     Ok,
     Done,
     Close,
+    Reset,
 }
 
 // ── DialogButton ──────────────────────────────────────────────────────────────

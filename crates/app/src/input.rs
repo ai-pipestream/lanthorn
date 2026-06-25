@@ -118,6 +118,8 @@ pub enum Action {
     ToggleAlignment,
     /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
     TogglePortalLabels,
+    /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
+    ToggleRoomNumbers,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
     ToggleInspector,
     /// Caller: exit the application.
@@ -1466,6 +1468,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
+        Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
@@ -1912,13 +1915,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::ResetGame => {
-            // Open a confirmation prompt; the caller (main.rs) performs the actual reset
-            // when the prompt is submitted with y/yes.
+            // Open the reset dialog; the caller (main.rs) handles confirm/cancel/clear-map.
             state.hotkey_dialog = false;
-            state.prompt = Some(crate::state::Prompt {
-                kind: crate::state::PromptKind::ConfirmReset,
-                buffer: String::new(),
-            });
+            state.reset_dialog = true;
+            state.reset_clear_map = false;
         }
 
         // Caller-handled: silently ignored.
@@ -2088,10 +2088,9 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
-        // Saves-manager, export, game-reset, and config-path prompts: return to the caller to act on.
+        // Saves-manager, export, and config-path prompts: return to the caller to act on.
         PromptKind::SaveAs
         | PromptKind::ConfirmDeleteSave(_)
-        | PromptKind::ConfirmReset
         | PromptKind::ExportSaveName(_)
         | PromptKind::ConfigEditPath { .. } => {
             return Some(prompt);
@@ -2144,8 +2143,8 @@ fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
 
 // ── Config screen helpers ─────────────────────────────────────────────────────
 
-/// Number of rows in the config screen.
-pub(crate) const CONFIG_ROW_COUNT: usize = 11;
+/// Number of rows in the config screen — derived from the row list so it cannot drift.
+pub(crate) const CONFIG_ROW_COUNT: usize = crate::render::config_screen::CONFIG_ROWS.len();
 
 /// Clone a Config (Config derives Clone, this is a convenience wrapper for tests).
 pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config {
@@ -2156,7 +2155,7 @@ pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config
 fn config_path_field(row: usize) -> Option<crate::state::ConfigPathField> {
     match row {
         0 => Some(crate::state::ConfigPathField::UserDir),
-        6 => Some(crate::state::ConfigPathField::ColorsScheme),
+        7 => Some(crate::state::ConfigPathField::ColorsScheme),
         _ => None,
     }
 }
@@ -2180,17 +2179,18 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
         3 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
         4 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
-        5 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
-        6 => {
+        5 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
+        6 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
+        7 => {
             // colors.scheme — cycle through preset names + None.
             if let Some(cs) = &mut state.config_screen {
                 config_cycle_colors_scheme(&mut cs.working.colors.scheme, 1);
             }
         }
-        7 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::BoxStyle::preset_names(), &mut cs.working.symbols.box_style, 1); } }
-        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::Arrows::preset_names(), &mut cs.working.symbols.arrow_set, 1); } }
-        9 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PortalGlyphs::preset_names(), &mut cs.working.symbols.portal_icons, 1); } }
-        10 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PathGlyphs::preset_names(), &mut cs.working.symbols.path_style, 1); } }
+        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::BoxStyle::preset_names(), &mut cs.working.symbols.box_style, 1); } }
+        9 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::Arrows::preset_names(), &mut cs.working.symbols.arrow_set, 1); } }
+        10 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PortalGlyphs::preset_names(), &mut cs.working.symbols.portal_icons, 1); } }
+        11 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PathGlyphs::preset_names(), &mut cs.working.symbols.path_style, 1); } }
         _ => {}
     }
 }
@@ -2243,12 +2243,13 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         2 => working.auto_load = !working.auto_load,
         3 => working.auto_save = !working.auto_save,
         4 => working.record_history = !working.record_history,
-        5 => config_cycle_background_tidy(&mut working.background_tidy, delta),
-        6 => config_cycle_colors_scheme(&mut working.colors.scheme, delta),
-        7 => config_cycle_preset(BoxStyle::preset_names(), &mut working.symbols.box_style, delta),
-        8 => config_cycle_preset(Arrows::preset_names(), &mut working.symbols.arrow_set, delta),
-        9 => config_cycle_preset(PortalGlyphs::preset_names(), &mut working.symbols.portal_icons, delta),
-        10 => config_cycle_preset(PathGlyphs::preset_names(), &mut working.symbols.path_style, delta),
+        5 => working.show_room_numbers = !working.show_room_numbers,
+        6 => config_cycle_background_tidy(&mut working.background_tidy, delta),
+        7 => config_cycle_colors_scheme(&mut working.colors.scheme, delta),
+        8 => config_cycle_preset(BoxStyle::preset_names(), &mut working.symbols.box_style, delta),
+        9 => config_cycle_preset(Arrows::preset_names(), &mut working.symbols.arrow_set, delta),
+        10 => config_cycle_preset(PortalGlyphs::preset_names(), &mut working.symbols.portal_icons, delta),
+        11 => config_cycle_preset(PathGlyphs::preset_names(), &mut working.symbols.path_style, delta),
         _ => {}
     }
 }
@@ -3918,47 +3919,18 @@ mod tests {
         assert!(matches!(s.layout, Layout::Split));
     }
 
-    // ── Leaf 2: ResetGame prompt open + confirm/cancel ────────────────────────
+    // ── Leaf 2: ResetGame opens the dialog ───────────────────────────────────
 
     #[test]
-    fn reset_game_action_opens_confirm_reset_prompt() {
-        use crate::state::{AppState, PromptKind};
+    fn reset_game_action_opens_reset_dialog() {
+        use crate::state::AppState;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        assert!(s.prompt.is_none());
+        assert!(!s.reset_dialog, "dialog must start closed");
         apply_action(Action::ResetGame, &mut s, &mut m);
-        assert!(s.prompt.is_some(), "ResetGame must open a prompt");
-        let p = s.prompt.as_ref().unwrap();
-        assert!(matches!(p.kind, PromptKind::ConfirmReset), "prompt kind must be ConfirmReset");
-    }
-
-    #[test]
-    fn reset_game_prompt_routing_confirm_and_cancel() {
-        use crate::state::{AppState, Prompt, PromptKind};
-        // Confirm path: Enter (SubmitCommand) → saves_prompt_submitted = Some((ConfirmReset, buf))
-        {
-            let mut s = AppState::default();
-            let mut m = Mapper::default();
-            s.prompt = Some(Prompt { kind: PromptKind::ConfirmReset, buffer: "y".to_owned() });
-            apply_action(Action::SubmitCommand(String::new()), &mut s, &mut m);
-            assert!(s.prompt.is_none(), "prompt should be cleared after submission");
-            assert!(
-                s.saves_prompt_submitted.is_some(),
-                "saves_prompt_submitted should be set on ConfirmReset submission"
-            );
-            let (kind, buf) = s.saves_prompt_submitted.take().unwrap();
-            assert!(matches!(kind, PromptKind::ConfirmReset));
-            assert_eq!(buf, "y");
-        }
-        // Cancel path: Esc (ToggleFocus) → prompt cleared, no saves_prompt_submitted
-        {
-            let mut s = AppState::default();
-            let mut m = Mapper::default();
-            s.prompt = Some(Prompt { kind: PromptKind::ConfirmReset, buffer: String::new() });
-            apply_action(Action::ToggleFocus, &mut s, &mut m);
-            assert!(s.prompt.is_none(), "Esc must cancel the prompt");
-            assert!(s.saves_prompt_submitted.is_none(), "no submission on cancel");
-        }
+        assert!(s.reset_dialog, "ResetGame must set reset_dialog = true");
+        assert!(!s.reset_clear_map, "checkbox must start unchecked");
+        assert!(s.prompt.is_none(), "no text prompt should be opened");
     }
 
     // ── Leaf 2: minizork fixture reset test ───────────────────────────────────
@@ -4857,5 +4829,17 @@ mod tests {
         let s = slash_suggestions("pa", &names, 6);
         assert!(s.contains(&"panh".to_string()) && s.contains(&"panv".to_string()));
         assert!(!s.contains(&"zoom".to_string()));
+    }
+
+    /// Regression: CONFIG_ROW_COUNT must equal CONFIG_ROWS.len() so every config row is
+    /// keyboard-reachable.  If a row is added to CONFIG_ROWS without updating this constant,
+    /// Down from the penultimate row wraps to row 0 and the last row becomes unreachable.
+    #[test]
+    fn config_row_count_matches_config_rows_len() {
+        assert_eq!(
+            CONFIG_ROW_COUNT,
+            crate::render::config_screen::CONFIG_ROWS.len(),
+            "CONFIG_ROW_COUNT must equal CONFIG_ROWS.len(); update CONFIG_ROW_COUNT when adding/removing rows"
+        );
     }
 }
