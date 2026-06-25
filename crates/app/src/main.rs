@@ -944,7 +944,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1025,7 +1025,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1081,7 +1081,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1139,7 +1139,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1282,7 +1282,8 @@ fn main() {
                 mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
             }
             // Resize: continue so the next draw uses the updated terminal size.
-            Event::Resize(_, _) => continue,
+            // Resize: force a full repaint so no stale cells survive the size change.
+            Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
             _ => continue,
         };
 
