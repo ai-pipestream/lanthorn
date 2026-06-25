@@ -2595,8 +2595,9 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 
 // ── Char-input mode helpers ────────────────────────────────────────────────────
 
-/// Route a turn's sound/diagnostic events: diagnostics become meta transcript
-/// lines; the latest beep arms a one-shot story-border pulse.
+/// Route a turn's sound/diagnostic events: diagnostics become Warning transcript
+/// lines; the latest beep arms a one-shot story-border pulse; the current room
+/// name is tracked for the built-in location story rule.
 fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     for line in &result.diagnostics {
         state.push_transcript_kind(line, app::state::TranscriptKind::Warning);

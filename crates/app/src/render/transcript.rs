@@ -151,21 +151,28 @@ pub(crate) const META_GUTTER: u16 = 2;
 /// each row's `TranscriptKind`. META lines wrap to `width - META_GUTTER` so the
 /// gutter marker has room; STORY lines use the full `width`. `kinds` parallels
 /// `transcript`; a missing/short entry defaults to `Story`.
+///
+/// `styles` parallels `transcript`: each logical line's resolved style is
+/// carried onto **every** wrapped row it produces, so a line's style is decided
+/// once (on the whole logical line) and never re-derived from a wrapped
+/// fragment. A missing/short `styles` entry defaults to `Style::default()`.
 pub(crate) fn wrap_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
+    styles: &[Style],
     width: u16,
-) -> Vec<(String, TranscriptKind)> {
+) -> Vec<(String, TranscriptKind, Style)> {
     transcript
         .iter()
         .enumerate()
         .flat_map(|(i, line)| {
             let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
+            let style = styles.get(i).copied().unwrap_or_default();
             let w = match kind {
                 TranscriptKind::Meta | TranscriptKind::Warning => width.saturating_sub(META_GUTTER),
                 TranscriptKind::Story | TranscriptKind::Input => width,
             };
-            wrap_line(line, w).into_iter().map(move |row| (row, kind))
+            wrap_line(line, w).into_iter().map(move |row| (row, kind, style))
         })
         .collect()
 }
@@ -177,14 +184,15 @@ pub(crate) fn wrap_lines_kinded(
 pub(crate) fn visible_wrapped_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
+    styles: &[Style],
     rows: usize,
     scroll: u16,
     width: u16,
-) -> Vec<(String, TranscriptKind)> {
+) -> Vec<(String, TranscriptKind, Style)> {
     if rows == 0 || transcript.is_empty() {
         return Vec::new();
     }
-    let display_rows = wrap_lines_kinded(transcript, kinds, width);
+    let display_rows = wrap_lines_kinded(transcript, kinds, styles, width);
     let n = display_rows.len();
     let scroll = scroll as usize;
     let end = n.saturating_sub(scroll);
@@ -593,9 +601,25 @@ fn render_middle(
     let visible_indices = state.visible_transcript_indices();
     let filtered_lines: Vec<String> = visible_indices.iter().map(|&i| state.transcript[i].clone()).collect();
     let filtered_kinds: Vec<TranscriptKind> = visible_indices.iter().map(|&i| state.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story)).collect();
+    // Resolve each logical line's text style ONCE, before wrapping. Story lines
+    // run through the rule list (user → location → system → base); the other
+    // kinds use their fixed per-category style. Resolving here (not per wrapped
+    // fragment) keeps whole-line matching correct when a line wraps.
+    let room_name = state.current_room_name.as_deref();
+    let filtered_styles: Vec<Style> = visible_indices
+        .iter()
+        .zip(filtered_kinds.iter())
+        .map(|(&i, kind)| match kind {
+            TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
+            TranscriptKind::Input   => state.colors.transcript_input,
+            TranscriptKind::Meta    => state.colors.transcript_meta,
+            TranscriptKind::Warning => state.colors.transcript_warning,
+        })
+        .collect();
     let lines = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
+        &filtered_styles,
         transcript_rows,
         state.transcript_scroll,
         area.width,
@@ -604,48 +628,29 @@ fn render_middle(
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
 
-    for (i, (line, kind)) in lines.iter().enumerate() {
+    for (i, (line, kind, style)) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
         }
-        match kind {
-            TranscriptKind::Story => {
-                let style = state.colors.resolve_story_style(line, state.current_room_name.as_deref());
-                if has_search {
-                    draw_str_highlighted(buf, area.x, row_y, line, style, &query_lower, search_highlight_style, area);
-                } else {
-                    draw_str_clipped(buf, area.x, row_y, line, style, area);
-                }
-            }
-            TranscriptKind::Input => {
-                let style = state.colors.transcript_input;
-                if has_search {
-                    draw_str_highlighted(buf, area.x, row_y, line, style, &query_lower, search_highlight_style, area);
-                } else {
-                    draw_str_clipped(buf, area.x, row_y, line, style, area);
-                }
-            }
-            TranscriptKind::Meta => {
-                let glyph = state.symbols.meta_gutter.to_string();
-                draw_str_clipped(buf, area.x, row_y, &glyph, state.colors.meta_marker, area);
-                let style = state.colors.transcript_meta;
-                if has_search {
-                    draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, style, &query_lower, search_highlight_style, area);
-                } else {
-                    draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, style, area);
-                }
-            }
-            TranscriptKind::Warning => {
-                let glyph = state.symbols.warning_gutter.to_string();
-                draw_str_clipped(buf, area.x, row_y, &glyph, state.colors.warning_marker, area);
-                let style = state.colors.transcript_warning;
-                if has_search {
-                    draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, style, &query_lower, search_highlight_style, area);
-                } else {
-                    draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, style, area);
-                }
-            }
+        // Meta/Warning reserve the 2-col gutter and draw their marker glyph;
+        // Story/Input draw flush left. The text style was resolved per logical
+        // line above and is carried on every wrapped row.
+        let (gutter, marker_style) = match kind {
+            TranscriptKind::Meta    => (Some(state.symbols.meta_gutter), state.colors.meta_marker),
+            TranscriptKind::Warning => (Some(state.symbols.warning_gutter), state.colors.warning_marker),
+            TranscriptKind::Story | TranscriptKind::Input => (None, Style::default()),
+        };
+        let text_x = if let Some(glyph) = gutter {
+            draw_str_clipped(buf, area.x, row_y, &glyph.to_string(), marker_style, area);
+            area.x + META_GUTTER
+        } else {
+            area.x
+        };
+        if has_search {
+            draw_str_highlighted(buf, text_x, row_y, line, *style, &query_lower, search_highlight_style, area);
+        } else {
+            draw_str_clipped(buf, text_x, row_y, line, *style, area);
         }
     }
 }
@@ -663,12 +668,13 @@ mod tests {
     #[test]
     fn input_uses_full_width_warning_wraps_like_meta() {
         let line = vec!["abcdefgh".to_string()];
+        let st = [Style::default()];
         // Input: full width 8 (no gutter) → unsplit.
-        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], 8);
-        assert_eq!(i.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, 8);
+        assert_eq!(i.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
         // Warning: wraps to width-2 = 6 like Meta.
-        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], 8);
-        assert_eq!(w.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
+        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, 8);
+        assert_eq!(w.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
     }
 
     #[test]
@@ -768,9 +774,10 @@ mod tests {
             "short".to_string(),
         ];
         let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
         // width 5: "hello" + "world" + "test" + "short"
-        let result = wrap_lines_kinded(&lines, &kinds, 5);
-        let rows: Vec<&str> = result.iter().map(|(s, _)| s.as_str()).collect();
+        let result = wrap_lines_kinded(&lines, &kinds, &styles, 5);
+        let rows: Vec<&str> = result.iter().map(|(s, _, _)| s.as_str()).collect();
         assert_eq!(rows, vec!["hello", "world", "test", "short"]);
     }
 
@@ -778,11 +785,24 @@ mod tests {
     fn meta_lines_wrap_narrower_and_carry_kind() {
         // An 8-char wordless line: STORY fits in width 8; META wraps to width-2 = 6.
         let transcript = vec!["abcdefgh".to_string()];
-        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], 8);
-        assert_eq!(m.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
-        assert!(m.iter().all(|(_, k)| matches!(k, TranscriptKind::Meta)));
-        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], 8);
-        assert_eq!(s.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        let st = [Style::default()];
+        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, 8);
+        assert_eq!(m.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
+        assert!(m.iter().all(|(_, k, _)| matches!(k, TranscriptKind::Meta)));
+        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, 8);
+        assert_eq!(s.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+    }
+
+    #[test]
+    fn wrap_carries_logical_line_style_onto_every_row() {
+        use ratatui::style::Color;
+        // One logical line that wraps to 3 rows; its style must appear on all rows.
+        let transcript = vec!["alpha beta gamma".to_string()];
+        let styles = [Style::new().fg(Color::Magenta)];
+        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, 5);
+        assert!(rows.len() >= 3, "expected wrap to >= 3 rows, got {}", rows.len());
+        assert!(rows.iter().all(|(_, _, s)| s.fg == Some(Color::Magenta)),
+            "every wrapped row must carry the logical line's style");
     }
 
     #[test]
@@ -790,7 +810,8 @@ mod tests {
         // 3 logical lines at width 10 = 3 display rows; scroll=0, rows=3
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
-        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, 3, 0, 10);
+        let styles = vec![Style::default(); 3];
+        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 3, 0, 10);
         assert_eq!(vis.len(), 3);
         assert_eq!(vis[2].0, "ghi");
     }
@@ -800,11 +821,12 @@ mod tests {
         // "hello world" wraps to ["hello", "world"] at width 5
         let transcript = vec!["hello world".to_string()];
         let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, 1, 1, 5);
+        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 1, 5);
         assert_eq!(vis[0].0, "hello");
         // scroll=0: end=2, start=1 → ["world"]
-        let vis2 = visible_wrapped_lines_kinded(&transcript, &kinds, 1, 0, 5);
+        let vis2 = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 0, 5);
         assert_eq!(vis2[0].0, "world");
     }
 
@@ -904,6 +926,39 @@ mod tests {
         let input_y = (1u16..9).find(|&y| row_text(y).starts_with("> go north"))
             .expect("input line must render at column 0");
         assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Cyan)); // transcript_input
+    }
+
+    #[test]
+    fn wrapped_system_line_keeps_style_on_all_rows() {
+        // Regression: a bracketed system line long enough to wrap must keep its
+        // transcript:system style on EVERY wrapped row. The style is resolved on
+        // the whole logical line, not the wrapped fragments (neither of which is
+        // itself fully bracketed).
+        use ratatui::style::Color;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.push_transcript("[Your score just went up by ten points.]"); // Story
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 20, 12); // narrow → the 40-char line wraps
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        let mut checked = 0;
+        for y in 1u16..10 {
+            let c0 = buf.cell((0, y)).expect("cell");
+            if c0.symbol().trim().is_empty() {
+                continue; // blank row (not part of the wrapped line)
+            }
+            assert_eq!(
+                c0.style().fg,
+                Some(Color::DarkGray),
+                "row {} must carry transcript:system (DarkGray) on a wrapped system line",
+                y
+            );
+            checked += 1;
+        }
+        assert!(checked >= 2, "system line should wrap to >= 2 rows; checked {}", checked);
     }
 
     #[test]
