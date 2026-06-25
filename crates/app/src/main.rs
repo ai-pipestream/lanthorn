@@ -40,6 +40,7 @@ use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
+use app::render::upper_window::draw_upper_window;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
@@ -257,7 +258,10 @@ fn draw_frame(
         match state.layout {
             Layout::TranscriptFull => {
                 let story_frame = draw_pane_frame(buf, main_area, state.colors.story_border_style, state.colors.story_border);
-                render_transcript(&session.machine, state, story_frame.content, buf);
+                let c = story_frame.content;
+                let used = draw_upper_window(&session.machine, &state.colors, c, buf);
+                let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
+                render_transcript(&session.machine, state, tarea, buf);
                 draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
                 story_area = story_frame.content;
                 map_area = Rect::default();
@@ -305,7 +309,10 @@ fn draw_frame(
                     .split(main_area);
 
                 let story_frame = draw_pane_frame(buf, chunks[0], state.colors.story_border_style, state.colors.story_border);
-                render_transcript(&session.machine, state, story_frame.content, buf);
+                let c = story_frame.content;
+                let used = draw_upper_window(&session.machine, &state.colors, c, buf);
+                let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
+                render_transcript(&session.machine, state, tarea, buf);
                 draw_top_inset(buf, story_frame.top_inset, &[InsetSegment { text: &state.title, active: false }], state.colors.story_title, state.colors.story_title);
                 story_area = story_frame.content;
 

@@ -1,4 +1,5 @@
 pub mod config_screen;
+pub mod upper_window;
 pub mod dialog;
 pub mod paneframe;
 pub mod filebrowser;
