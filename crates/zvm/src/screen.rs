@@ -210,6 +210,41 @@ pub fn init_header_caps(mem: &mut Memory) {
     // Standard revision (0x32 = major, 0x33 = minor): 1.2 (latest published).
     mem.write_byte(0x32, 1);
     mem.write_byte(0x33, 2);
+
+    // Screen dimensions (ZMSD §11.1). Without these the header keeps the story
+    // file's defaults (usually 0), and size-sensitive games (notably Bureaucracy)
+    // read "0 lines", print "[Screen too small.]" and abort on the first turn.
+    // Seed a generous default; the host refines it to the real pane size via
+    // `write_screen_dims` once known (and on resize).
+    write_screen_dims(mem, DEFAULT_SCREEN_ROWS, DEFAULT_SCREEN_COLS);
+}
+
+/// Default screen size seeded at header init, before the host reports the real
+/// pane size. Generous enough that size-sensitive v4+ games run.
+pub const DEFAULT_SCREEN_ROWS: u8 = 24;
+pub const DEFAULT_SCREEN_COLS: u8 = 80;
+
+/// Write the screen-dimension header fields for the loaded story's version.
+///
+/// v4+: byte 0x20 = height in lines, byte 0x21 = width in chars (ZMSD §11.1).
+/// v5+: also word 0x22 = width in units, word 0x24 = height in units, and font
+/// size bytes 0x26/0x27 = 1 (one unit per char cell, since we render a fixed
+/// character grid). `rows`/`cols` of 0 are clamped to 1 to avoid a zero size.
+pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
+    let version = mem.version();
+    if version < 4 {
+        return; // v1-3 have no settable screen-size header fields.
+    }
+    let rows = rows.max(1);
+    let cols = cols.max(1);
+    mem.write_byte(0x20, rows);
+    mem.write_byte(0x21, cols);
+    if version >= 5 {
+        mem.write_word(0x22, cols as u16); // screen width in units
+        mem.write_word(0x24, rows as u16); // screen height in units
+        mem.write_byte(0x26, 1); // font width in units
+        mem.write_byte(0x27, 1); // font height in units
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +388,47 @@ mod tests {
         // Interpreter number set.
         assert_eq!(mem.read_byte(0x1E), 6, "interpreter number = 6");
         assert_eq!(mem.read_byte(0x1F), b'A', "interpreter version = 'A'");
+    }
+
+    #[test]
+    fn header_caps_v4_seeds_nonzero_screen_dims() {
+        // Regression: without seeded screen dims the header keeps 0, and v4 games
+        // such as Bureaucracy abort with "[Screen too small.]" on the first turn.
+        let mut mem = Memory::new(sample_story(4)).unwrap();
+        init_header_caps(&mut mem);
+        assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS, "screen height (lines) seeded");
+        assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS, "screen width (chars) seeded");
+        assert_ne!(mem.read_byte(0x20), 0, "height must not be zero");
+        assert_ne!(mem.read_byte(0x21), 0, "width must not be zero");
+    }
+
+    #[test]
+    fn header_caps_v5_seeds_unit_words_and_font_size() {
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem);
+        assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS);
+        assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS);
+        assert_eq!(mem.read_word(0x22), DEFAULT_SCREEN_COLS as u16, "width in units");
+        assert_eq!(mem.read_word(0x24), DEFAULT_SCREEN_ROWS as u16, "height in units");
+        assert_eq!(mem.read_byte(0x26), 1, "font width = 1 unit");
+        assert_eq!(mem.read_byte(0x27), 1, "font height = 1 unit");
+    }
+
+    #[test]
+    fn write_screen_dims_is_noop_for_v3() {
+        // v1-3 use bytes 0x20+ for other header data; never clobber them.
+        let mut mem = Memory::new(sample_story(3)).unwrap();
+        let before = mem.read_byte(0x20);
+        write_screen_dims(&mut mem, 30, 60);
+        assert_eq!(mem.read_byte(0x20), before, "v3 header byte 0x20 must be untouched");
+    }
+
+    #[test]
+    fn write_screen_dims_clamps_zero_to_one() {
+        let mut mem = Memory::new(sample_story(4)).unwrap();
+        write_screen_dims(&mut mem, 0, 0);
+        assert_eq!(mem.read_byte(0x20), 1, "zero rows clamped to 1");
+        assert_eq!(mem.read_byte(0x21), 1, "zero cols clamped to 1");
     }
 
     #[test]
