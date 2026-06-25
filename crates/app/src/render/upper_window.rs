@@ -59,8 +59,13 @@ pub fn draw_grid(
     let content_style = colors.upper_window;
     let border_color = colors.upper_window_border;
 
-    // How many terminal rows does the border frame consume?
-    let border_overhead: u16 = if border_style != BorderStyle::None { 2 } else { 0 };
+    // How many terminal rows does the border frame consume? Derive from which
+    // horizontal sides are actually present (per-side aware), so a top/bottom-only
+    // or left/right-only frame reserves the right number of rows.
+    let sides = colors.upper_window_border_sides;
+    let border_overhead: u16 =
+        (if sides.top != BorderStyle::None { 1 } else { 0 })
+        + (if sides.bottom != BorderStyle::None { 1 } else { 0 });
 
     // Total terminal rows needed: grid rows + optional border.
     // Clamp to the available area height.

@@ -216,6 +216,16 @@ impl PaneSides {
     pub fn all(style: BorderStyle) -> PaneSides {
         PaneSides { top: style, bottom: style, left: style, right: style }
     }
+
+    /// True if any side draws a border (i.e. not all `None`). Render gates that
+    /// decide whether to box a pane MUST use this, not the base `*_style`, or a
+    /// `style="none"` + per-side config renders nothing.
+    pub fn any_on(self) -> bool {
+        self.top != BorderStyle::None
+            || self.bottom != BorderStyle::None
+            || self.left != BorderStyle::None
+            || self.right != BorderStyle::None
+    }
 }
 
 /// "Weight" used to pick a corner glyph when two adjacent sides differ:

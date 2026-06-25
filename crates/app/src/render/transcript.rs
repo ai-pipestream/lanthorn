@@ -492,8 +492,10 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let input_style_kind  = state.colors.input_line_style;
 
     // When boxed, status/input each take 3 rows; fall back to 1 if too small.
-    let status_boxed = status_style_kind != BorderStyle::None && area.height >= 5;
-    let input_boxed  = input_style_kind  != BorderStyle::None && area.height >= 5;
+    // Gate on "any side present" (base OR per-side) so a style="none" + per-side
+    // config (e.g. left/right-only) still boxes and draws its side bars.
+    let status_boxed = (status_style_kind != BorderStyle::None || state.colors.status_header_sides.any_on()) && area.height >= 5;
+    let input_boxed  = (input_style_kind  != BorderStyle::None || state.colors.input_line_sides.any_on()) && area.height >= 5;
     let status_rows: u16 = if status_boxed { 3 } else { 1 };
     let input_rows:  u16 = if input_boxed  { 3 } else { 1 };
 
@@ -1701,8 +1703,16 @@ mod tests {
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
         render_transcript(&machine, &state, area, &mut buf);
-        // A side bar should appear in column 0 somewhere in the status region (rows 0..3),
-        // and no top corner glyph at (0,0).
+        // The left side bar must actually be drawn in column 0 of the boxed status
+        // region (rows 0..3) — this is the headline left/right-only use case and
+        // must NOT be inert. (Regression guard: with the old base-only boxing gate
+        // nothing was boxed and this column was blank.)
+        let has_left_bar = (0u16..3).any(|y| buf.cell((0, y)).map(|c| c.symbol()) == Some("│"));
+        assert!(has_left_bar, "left/right-only status header must draw a side bar in column 0");
+        // The right side bar too.
+        let has_right_bar = (0u16..3).any(|y| buf.cell((39, y)).map(|c| c.symbol()) == Some("│"));
+        assert!(has_right_bar, "left/right-only status header must draw a side bar at the right edge");
+        // And no top corner glyph (top side is off).
         assert_ne!(buf.cell((0, 0)).unwrap().symbol(), "┌");
     }
 
