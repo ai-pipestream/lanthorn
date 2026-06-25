@@ -140,6 +140,8 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "dialog:shadow",
     "upper_window",
     "upper_window_border",
+    "sound_beep_high",
+    "sound_beep_low",
 ];
 
 // ── apply_color_decls ─────────────────────────────────────────────────────────
@@ -222,6 +224,8 @@ pub fn apply_color_decls(
                     cs.virtual_window_border = paneframe::parse_border_style(s);
                 }
             }
+            "sound_beep_high"    => cs.sound_beep_high = cs.sound_beep_high.patch(style),
+            "sound_beep_low"     => cs.sound_beep_low = cs.sound_beep_low.patch(style),
             _                    => warnings.push(format!("unknown selector: {}", selector)),
         }
     }
@@ -792,6 +796,8 @@ pub fn write_style_full(
         d.style = Some(paneframe::border_style_name(cs.virtual_window_border).to_string());
         doc.colors.selectors.insert("upper_window_border".to_string(), d);
     }
+    doc.colors.selectors.insert("sound_beep_high".to_string(), style_to_decl(&cs.sound_beep_high));
+    doc.colors.selectors.insert("sound_beep_low".to_string(),  style_to_decl(&cs.sound_beep_low));
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
@@ -1148,5 +1154,16 @@ box_style = "rounded"
         let doc = parse_style_toml("[colors]\n\"upper_window\" = { fg = \"cyan\" }\n").unwrap();
         let (cs2, _, _) = resolve(&doc, std::path::Path::new("."));
         assert_eq!(cs2.upper_window.fg, Some(ratatui::style::Color::Cyan));
+    }
+
+    #[test]
+    fn sound_beep_selectors_parse_and_apply() {
+        let doc = parse_style_toml(
+            "[colors]\n\"sound_beep_high\" = { fg = \"red\" }\n\"sound_beep_low\" = { fg = \"blue\" }\n"
+        ).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert!(warnings.is_empty(), "known selectors must not warn: {warnings:?}");
+        assert_eq!(cs.sound_beep_high.fg, Some(ratatui::style::Color::Red));
+        assert_eq!(cs.sound_beep_low.fg, Some(ratatui::style::Color::Blue));
     }
 }

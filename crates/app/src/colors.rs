@@ -202,6 +202,10 @@ pub struct ColorScheme {
     pub upper_window_border: Style,
     /// Resolved border style for the upper (virtual) window frame.
     pub virtual_window_border: BorderStyle,
+    /// Border pulse color for the high-pitched bleep (sound_effect #1).
+    pub sound_beep_high: Style,
+    /// Border pulse color for the low-pitched bleep (sound_effect #2).
+    pub sound_beep_low: Style,
 }
 
 impl ColorScheme {
@@ -254,6 +258,8 @@ impl ColorScheme {
             upper_window: Style::new(),
             upper_window_border: Style::new().fg(Color::Cyan),
             virtual_window_border: BorderStyle::Single,
+            sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
+            sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
         }
     }
 
@@ -380,6 +386,8 @@ impl ColorScheme {
             upper_window: Style::new().fg(fg),
             upper_window_border: Style::new().fg(scheme.palette[6]),
             virtual_window_border: BorderStyle::Single,
+            sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
+            sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
         }
     }
 
@@ -770,6 +778,13 @@ unknown-key = ignored
         overrides.insert("connector".to_string(), "cyan".to_string());
         let cs = ColorScheme::from_ghostty(&gs, &overrides);
         assert_eq!(cs.connector, Style::new().fg(Color::Cyan));
+    }
+
+    #[test]
+    fn sound_beep_defaults_are_amber_and_cyan_blue() {
+        let cs = ColorScheme::terminal_default();
+        assert_eq!(cs.sound_beep_high.fg, Some(Color::Rgb(255, 180, 40)));
+        assert_eq!(cs.sound_beep_low.fg, Some(Color::Rgb(60, 140, 220)));
     }
 
 }
