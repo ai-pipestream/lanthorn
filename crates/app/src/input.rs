@@ -516,11 +516,24 @@ fn roominfo_dialog_action(
     col: u16,
     row: u16,
 ) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
     if let Some(close_rect) = rects.close {
         if hit(close_rect, col, row) {
             return Some(Action::CloseRoomPanel);
         }
     }
+
+    // Check buttons: Ok → CloseRoomPanel
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Ok => Action::CloseRoomPanel,
+                _            => Action::None,
+            });
+        }
+    }
+
     None
 }
 
@@ -544,11 +557,24 @@ fn tidy_dialog_action(
     col: u16,
     row: u16,
 ) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
     if let Some(close_rect) = rects.close {
         if hit(close_rect, col, row) {
             return Some(Action::AnimExit);
         }
     }
+
+    // Check buttons: Ok → AnimExit
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Ok => Action::AnimExit,
+                _            => Action::None,
+            });
+        }
+    }
+
     None
 }
 
@@ -5072,5 +5098,70 @@ mod tests {
     fn verb_menu_tab_still_navigates_panes() {
         let a = verb_menu_key_to_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(a, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
+    }
+
+    #[test]
+    fn roominfo_ok_button_click_closes_panel() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::{RoomPanel, RoomPanelMode};
+
+        let rects = DialogRects {
+            area:    Rect::new(0, 0, 40, 15),
+            content: Rect::new(1, 1, 38, 12),
+            close:   Some(Rect::new(38, 0, 1, 1)),
+            buttons: vec![(ButtonId::Ok, Rect::new(30, 14, 6, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // OK button click → CloseRoomPanel
+        let a = mouse_to_action(&state, mouse_left_click(32, 14), map, story, room_rects, &dialog);
+        assert!(
+            matches!(a, Action::CloseRoomPanel),
+            "room-info [OK] click should produce CloseRoomPanel, got {:?}", a
+        );
+    }
+
+    #[test]
+    fn tidy_ok_button_click_exits_anim() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::TidyAnim;
+        use crate::state::TidyFrame;
+
+        let rects = DialogRects {
+            area:    Rect::new(0, 0, 40, 15),
+            content: Rect::new(1, 1, 38, 12),
+            close:   Some(Rect::new(38, 0, 1, 1)),
+            buttons: vec![(ButtonId::Ok, Rect::new(30, 14, 6, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {
+            label: "test".to_string(),
+            graph: mapper::graph::MapGraph::new(),
+            description: String::new(),
+            stats: mapper::layout::TidyStats::default(),
+            stage_start: false,
+        }]));
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // OK button click → AnimExit
+        let a = mouse_to_action(&state, mouse_left_click(32, 14), map, story, room_rects, &dialog);
+        assert!(
+            matches!(a, Action::AnimExit),
+            "tidy [OK] click should produce AnimExit, got {:?}", a
+        );
     }
 }
