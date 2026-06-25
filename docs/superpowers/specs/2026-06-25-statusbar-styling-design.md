@@ -1,4 +1,4 @@
-# Status Bar Styling — Simplified tmux-Style Segment Bar — Design
+# Status Bar Styling — Configurable Segment Bar — Design
 
 **Date:** 2026-06-25
 **Status:** Draft, pending user review
@@ -7,9 +7,9 @@
 ## Goal
 
 Replace the fixed reversed-video status line (one `statusbar` style for the
-whole row) with a **configurable, tmux-style segment bar**: a frame rule plus an
-ordered list of content segments, each with its own text template, placement,
-and style. Zero config reproduces today's look exactly.
+whole row) with a **configurable segment bar**: a frame rule plus an ordered
+list of content segments, each with its own text template, placement, and
+style. Zero config reproduces today's look exactly.
 
 ## Background (current state)
 
@@ -191,6 +191,31 @@ If even the right cluster cannot fit, it is clipped to the row width.
     export reproduces the same `ColorScheme`; for custom rules/segments the
     `pattern`/`text`/`align`/style decompose and re-resolve identically.
 
+### 6. User documentation
+
+The canonical user-facing styling reference is a **commented
+`style.example.toml`** at the repo root — a self-documenting, copy-paste
+starting point rather than prose. It is established by this feature (no such
+reference exists today) and documents the **full current schema**, newest part
+included:
+
+- Color-value syntax (named / `palette:N` / `#hex` / 256-index / `background`/
+  `foreground`).
+- Every `[colors]` selector, grouped and commented (room/connector/transcript:*/
+  dialog:*/statusbar/meta_marker/warning_marker/loc_indicator/borders/etc.).
+- `[symbols]` presets and per-slot `overrides` (including `gutter.meta` /
+  `gutter.warning`).
+- Border-style names and the pane border selectors.
+- `[[transcript.rule]]` regex rules.
+- The new `[statusbar]` block: `border`/`border_fg` and a worked
+  `[[statusbar.segment]]` set (the built-in default, plus a commented custom
+  example showing `align` clusters and placeholders).
+
+The README's Customization section gains a one-line pointer to
+`style.example.toml`. A test parses-and-resolves the file and asserts **zero
+warnings**, so a documented selector/option that is renamed or removed fails CI
+— the example file cannot silently drift from the code.
+
 ## Error handling
 
 - Unknown placeholder → empty string (no literal braces).
@@ -222,13 +247,15 @@ If even the right cluster cannot fit, it is clipped to the row width.
   segment list AND a custom `[[transcript.rule]]` exports, re-parses, and resolves
   back to an equal `ColorScheme` (segments, rules, and styles all preserved). The
   existing `terminal_default` round-trip stays green.
+- `style.example.toml` parses and resolves with **zero warnings** (guards the
+  documentation against drift — every documented selector/option must be valid).
 
 ## Out of scope (deferred)
 
 - Per-side borders for the bar (top/bottom/left/right) — that is sub-design #82.
 - Text-alignment *within* a fixed-width segment (segments are content-sized).
 - Dynamic/conditional segments beyond the empty-placeholder auto-hide rule
-  (no `#{?…}` conditionals like full tmux).
+  (no `#{?…}`-style conditional expressions).
 - Click targets on segments (e.g. click the filter segment to cycle filters).
 - Authoring the statusbar block from the **gallery** UI (it is exported by
   `write_style_full` and hand-editable in `style.toml`, but no live-preview editor
