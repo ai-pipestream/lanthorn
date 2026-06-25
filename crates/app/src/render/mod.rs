@@ -6,6 +6,7 @@ pub mod gallery;
 pub mod hotkeys;
 pub mod inspector;
 pub mod map;
+pub mod quit_dialog;
 pub mod reset_dialog;
 pub mod room_info;
 pub mod saves;
