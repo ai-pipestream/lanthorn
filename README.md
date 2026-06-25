@@ -50,6 +50,12 @@ and unsupported; v1/v2 are not supported.)
   themeable (`upper_window`, `upper_window_border`, `virtual_window_border`).
   During a `read_char` prompt keystrokes go to the game; the hotkey prefix
   (default `Ctrl+K`) stays reserved.
+- **Sound effects** — the `sound_effect` opcode's two built-in bleeps (high #1 /
+  low #2) flash the story-pane border in distinct, themeable colors
+  (`sound_beep_high` / `sound_beep_low`); a brief one-shot fade. (Sampled sounds
+  need Blorb audio, still on the roadmap.) Unimplemented-opcode warnings surface
+  in the transcript as meta lines (hidden by `/filter story`) rather than on
+  stderr.
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
