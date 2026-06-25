@@ -302,11 +302,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return hotkey_dialog_key_to_action(state, key);
     }
 
-    // 6.5. Room panel close: Esc or q while a panel is open.
+    // 6.5. Room panel close: Esc while a panel is open.
     // Comes after steps 2-6 (prompt/anim/gallery/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
     if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE {
-        if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+        if key.code == KeyCode::Esc {
             return Action::CloseRoomPanel;
         }
     }
@@ -384,22 +384,321 @@ fn room_at_screen(
         .map(|(id, _)| *id)
 }
 
+/// Test whether (col, row) is inside `rect`.
+fn hit(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
+/// Per-modal button-to-action mapping for the config screen.
+/// Maps a `ButtonId` click (or the close [X] hit) to the appropriate `Action`.
+fn config_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::ConfigCancel);
+        }
+    }
+
+    // Check buttons
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Save   => Action::ConfigSave,
+                ButtonId::Cancel => Action::ConfigCancel,
+                _                => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the saves manager.
+fn saves_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::SavesClose);
+        }
+    }
+
+    // Check buttons: Done → SavesClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::SavesClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the file browser.
+fn filebrowser_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::FbClose);
+        }
+    }
+
+    // Check buttons: Done → FbClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::FbClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the verb menu.
+fn verbmenu_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::VerbMenuClose);
+        }
+    }
+
+    // Check buttons: Done → VerbMenuClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::VerbMenuClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal action mapping for the room-info panel ([X] → CloseRoomPanel).
+fn roominfo_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::CloseRoomPanel);
+        }
+    }
+    None
+}
+
+/// Per-modal action mapping for the inspector panel ([X] → CloseRoomPanel).
+fn inspector_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::CloseRoomPanel);
+        }
+    }
+    None
+}
+
+/// Per-modal action mapping for the tidy panel ([X] → AnimExit).
+fn tidy_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::AnimExit);
+        }
+    }
+    None
+}
+
+/// Per-modal button-to-action mapping for the hotkey dialog.
+fn hotkeys_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::CloseHotkeyDialog);
+        }
+    }
+
+    // Check buttons: Done → CloseHotkeyDialog
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::CloseHotkeyDialog,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
+/// Per-modal button-to-action mapping for the gallery.
+fn gallery_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::GalleryClose);
+        }
+    }
+
+    // Check buttons: Done → GalleryClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::GalleryClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
-/// bounding rects of the map and story panes, and the pre-computed room screen
-/// rects (needed for pixel-accurate room hit-testing on left/right clicks).
+/// bounding rects of the map and story panes, the pre-computed room screen
+/// rects (needed for pixel-accurate room hit-testing on left/right clicks), and
+/// the active dialog chrome rects (if a dialog is open).
+///
+/// When `dialog` is `Some`, dialog hit-testing runs FIRST:
+/// - close [X] click → the active modal's close action
+/// - button click → the button's mapped action
+/// - any click OUTSIDE the dialog `area` → swallowed (Action::None)
+/// Only when no dialog is open does normal map/room routing apply.
 ///
 /// Returns `Action::None` for events outside both panes or with no binding.
 pub fn mouse_to_action(
-    _state: &AppState,
+    state: &AppState,
     m: MouseEvent,
     map: ratatui::layout::Rect,
     story: ratatui::layout::Rect,
     room_rects: &[(mapper::graph::RoomId, ratatui::layout::Rect)],
+    dialog: &Option<crate::render::dialog::DialogRects>,
 ) -> Action {
     let col = m.column;
     let row = m.row;
     let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
     let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+
+    // ── Dialog chrome hit-testing (checked FIRST) ─────────────────────────────
+    if let Some(rects) = dialog {
+        if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            // Corner overlays (room panel, tidy panel): only intercept the [X] click;
+            // all other clicks fall through to normal map/room routing below.
+            // But if a centered modal is also open (stacked on top), it takes
+            // priority and must swallow all outside clicks.
+            let centered_open = state.gallery.is_some() || state.config_screen.is_some()
+                || state.saves.is_some() || state.file_browser.is_some()
+                || state.verb_menu.is_some() || state.hotkey_dialog;
+            let is_corner_overlay = !centered_open
+                && (state.room_panel.is_some() || state.tidy_anim.is_some());
+
+            if state.gallery.is_some() {
+                if let Some(action) = gallery_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.config_screen.is_some() {
+                if let Some(action) = config_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.saves.is_some() {
+                if let Some(action) = saves_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.file_browser.is_some() {
+                if let Some(action) = filebrowser_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.verb_menu.is_some() {
+                if let Some(action) = verbmenu_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.hotkey_dialog {
+                if let Some(action) = hotkeys_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.room_panel.as_ref().map(|p| matches!(p.mode, crate::state::RoomPanelMode::Info)).unwrap_or(false) {
+                if let Some(action) = roominfo_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.room_panel.as_ref().map(|p| matches!(p.mode, crate::state::RoomPanelMode::Diagnostics)).unwrap_or(false) {
+                if let Some(action) = inspector_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.tidy_anim.is_some() {
+                if let Some(action) = tidy_dialog_action(rects, col, row) {
+                    return action;
+                }
+            }
+
+            // Corner overlays: don't swallow other clicks — let normal routing handle them.
+            if is_corner_overlay {
+                // fall through to normal routing below
+            } else {
+                // Centered modal: swallow all other clicks.
+                return Action::None;
+            }
+        } else {
+            // For non-left-click events (wheel/drag): swallow unless a corner overlay
+            // is active and no centered modal is stacked on top.
+            let centered_open = state.gallery.is_some() || state.config_screen.is_some()
+                || state.saves.is_some() || state.file_browser.is_some()
+                || state.verb_menu.is_some() || state.hotkey_dialog;
+            let is_corner_overlay = !centered_open
+                && (state.room_panel.is_some() || state.tidy_anim.is_some());
+            if !is_corner_overlay {
+                return Action::None;
+            }
+        }
+    }
+
+    // ── Normal routing (no dialog open) ──────────────────────────────────────
 
     let in_map = map.width > 0 && map.height > 0
         && col >= map.x && col < map.right()
@@ -474,15 +773,15 @@ pub fn mouse_to_action(
 /// fire the bound command action. The dialog closes itself when a sub-mode
 /// opens (handled in apply_action).
 fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
+    // ESC always closes the hotkey dialog (same as [X]).
+    if key.code == KeyCode::Esc {
+        return Action::CloseHotkeyDialog;
+    }
+
     let spec = KeySpec::from_key_event(key);
 
     // Prefix key closes the dialog.
     if spec == state.hotkeys.prefix {
-        return Action::CloseHotkeyDialog;
-    }
-
-    // 'q' with no modifiers also closes.
-    if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE {
         return Action::CloseHotkeyDialog;
     }
 
@@ -549,7 +848,6 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Enter => Action::FbEnter,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::FbChooseDir,
         KeyCode::Esc => Action::FbClose,
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::FbClose,
         _ => Action::None,
     }
 }
@@ -562,7 +860,7 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::GalleryNext,
         KeyCode::Left => Action::GalleryCategoryPrev,
         KeyCode::Right => Action::GalleryCategoryNext,
-        KeyCode::Esc | KeyCode::Enter => Action::GalleryClose,
+        KeyCode::Esc => Action::GalleryClose,
         KeyCode::Char('o') | KeyCode::Char('O') => Action::GalleryExportStyle,
         _ => Action::None,
     }
@@ -575,7 +873,7 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
 /// Tab / Right  → next pane; Shift+Tab / Left → prev pane;
 /// Up / Down    → move within pane;
 /// Enter/Space  → pick selected token;
-/// Esc / q      → close menu.
+/// Esc          → close menu (q freed).
 fn verb_menu_key_to_action(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Tab => Action::VerbMenuNav(VerbMenuNavKind::NextPane),
@@ -586,7 +884,6 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::VerbMenuClose,
         _ => Action::None,
     }
 }
@@ -604,7 +901,6 @@ fn config_screen_key_to_action(key: KeyEvent) -> Action {
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::ConfigSave,
         KeyCode::Esc => Action::ConfigCancel,
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::ConfigCancel,
         _ => Action::None,
     }
 }
@@ -2161,13 +2457,14 @@ mod tests {
     #[test]
     fn esc_closes_room_panel_when_open() {
         use crate::state::{RoomPanel, RoomPanelMode};
-        // With a room panel open, Esc and q produce CloseRoomPanel.
+        // With a room panel open, Esc produces CloseRoomPanel (q-close removed).
         let mut s = AppState::default();
         s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
             "Esc with room panel open must produce CloseRoomPanel");
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseRoomPanel),
-            "q with room panel open must produce CloseRoomPanel");
+        // q no longer closes the room panel.
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseRoomPanel),
+            "q must no longer close the room panel");
         // With no room panel, Esc does NOT produce CloseRoomPanel.
         s.room_panel = None;
         assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
@@ -2775,8 +3072,8 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
-        // 'q' closes the dialog (not gallery/open-gallery)
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
+        // 'q' no longer closes the dialog (q-close removed from hotkey dialog)
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
         s.hotkey_dialog = false;
 
         // ── Anim sub-mode ─────────────────────────────────────────────────────
@@ -2814,7 +3111,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::GalleryCategoryPrev));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::GalleryCategoryNext));
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::GalleryClose));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Enter)), Action::GalleryClose));
+        // Enter no longer closes the gallery; ESC/[X]/[Done] are the close paths.
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Enter)), Action::GalleryClose),
+            "Enter must no longer close the gallery");
     }
 
     #[test]
@@ -3035,14 +3334,17 @@ mod tests {
     }
 
     #[test]
-    fn q_closes_hotkey_dialog_action() {
-        // 'q' with no modifiers when dialog is open → CloseHotkeyDialog.
+    fn q_no_longer_closes_hotkey_dialog() {
+        // q-close removed from hotkey dialog; q now falls through to keymap lookup.
         let mut s = AppState::default();
         s.hotkey_dialog = true;
-        assert!(matches!(
-            key_to_action(&s, key(KeyCode::Char('q'))),
-            Action::CloseHotkeyDialog
-        ));
+        // 'q' is not bound to any command in the keymap, so it should produce None
+        // (not CloseHotkeyDialog).
+        let action = key_to_action(&s, key(KeyCode::Char('q')));
+        assert!(
+            !matches!(action, Action::CloseHotkeyDialog),
+            "q should no longer close the hotkey dialog"
+        );
     }
 
     #[test]
@@ -3173,7 +3475,7 @@ mod tests {
 
         // Click at (0,0) which is inside the Compact box (8x3).
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
             matches!(action, Action::ShowRoomInfo(1)),
             "left-down on room cell should produce ShowRoomInfo(1), got {:?}", action
@@ -3192,7 +3494,7 @@ mod tests {
         let rects = room_rects_for_compact(2, (0, 0), map_rect());
 
         let m = mouse_event(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
             matches!(action, Action::ShowRoomDiagnostics(2)),
             "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
@@ -3212,7 +3514,7 @@ mod tests {
         let rects = room_rects_for_compact(1, (0, 0), map_rect());
 
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
             matches!(action, Action::ActivatePane(Focus::Map)),
             "left-down on map gutter should produce ActivatePane(Map), got {:?}", action
@@ -3225,7 +3527,7 @@ mod tests {
         let s = AppState::default();
         // col 85 is inside story_rect (x=80..120).
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 85, 5, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(
             matches!(action, Action::ActivatePane(Focus::Game)),
             "left-down in story pane should produce ActivatePane(Game), got {:?}", action
@@ -3258,7 +3560,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::Pan(0, -1)), "scroll up in map without modifier -> Pan(0,-1)");
     }
 
@@ -3267,7 +3569,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollDown, 10, 10, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::Pan(0, 1)), "scroll down in map without modifier -> Pan(0,1)");
     }
 
@@ -3276,7 +3578,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::SHIFT);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::Pan(-1, 0)), "scroll up + Shift -> Pan(-1,0)");
     }
 
@@ -3285,7 +3587,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::CONTROL);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::ZoomIn), "scroll up + Ctrl -> ZoomIn");
     }
 
@@ -3295,11 +3597,11 @@ mod tests {
         let s = AppState::default();
         // col 85 is inside story_rect (x=80..120).
         let m_up = mouse_event(MouseEventKind::ScrollUp, 85, 5, KeyModifiers::NONE);
-        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &[]);
+        let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action_up, Action::TranscriptScroll(-1)), "scroll up in story -> TranscriptScroll(-1)");
 
         let m_dn = mouse_event(MouseEventKind::ScrollDown, 85, 5, KeyModifiers::NONE);
-        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &[]);
+        let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action_dn, Action::TranscriptScroll(1)), "scroll down in story -> TranscriptScroll(1)");
     }
 
@@ -3308,7 +3610,7 @@ mod tests {
         use crossterm::event::MouseEventKind;
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::Down(MouseButton::Middle), 20, 15, KeyModifiers::NONE);
-        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[]);
+        let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(matches!(action, Action::BeginDragPan(20, 15)), "middle-down -> BeginDragPan");
     }
 
@@ -3318,8 +3620,8 @@ mod tests {
         let s = AppState::default();
         let drag = mouse_event(MouseEventKind::Drag(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
         let up = mouse_event(MouseEventKind::Up(MouseButton::Middle), 25, 18, KeyModifiers::NONE);
-        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &[]), Action::DragPanTo(25, 18)));
-        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &[]), Action::EndDragPan));
+        assert!(matches!(mouse_to_action(&s, drag, map_rect(), story_rect(), &[], &None), Action::DragPanTo(25, 18)));
+        assert!(matches!(mouse_to_action(&s, up, map_rect(), story_rect(), &[], &None), Action::EndDragPan));
     }
 
     // ── Drag-pan accumulator tests ────────────────────────────────────────────
@@ -3818,15 +4120,21 @@ mod tests {
     }
 
     #[test]
-    fn verb_menu_esc_and_q_close() {
+    fn verb_menu_esc_closes() {
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
 
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::VerbMenuClose), "Esc closes the menu");
+    }
 
-        let a2 = key_to_action(&s, key(KeyCode::Char('q')));
-        assert!(matches!(a2, Action::VerbMenuClose), "q closes the menu");
+    #[test]
+    fn verb_menu_q_no_longer_closes() {
+        // q-close removed from verb menu; q now produces None in this sub-mode.
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        let a = key_to_action(&s, key(KeyCode::Char('q')));
+        assert!(matches!(a, Action::None), "q should no longer close the verb menu");
     }
 
     #[test]
@@ -3916,10 +4224,11 @@ mod tests {
     }
 
     #[test]
-    fn filebrowser_q_produces_fb_close() {
+    fn filebrowser_q_no_longer_closes() {
+        // q-close removed from file browser; q now produces None in this sub-mode.
         let s = state_with_filebrowser(crate::state::FbMode::PickDir);
         let a = key_to_action(&s, key(KeyCode::Char('q')));
-        assert!(matches!(a, Action::FbClose), "q in file browser should produce FbClose");
+        assert!(matches!(a, Action::None), "q should no longer close the file browser");
     }
 
     #[test]
@@ -4004,5 +4313,495 @@ mod tests {
         apply_action(Action::EndDragPan, &mut s, &mut m);
         assert!(s.drag.is_none(), "EndDragPan should clear drag state");
         assert_eq!(s.char_pan, (-3, 0), "EndDragPan must not reset char_pan");
+    }
+
+    /// Build a minimal MouseEvent for testing.
+    fn mouse_left_click(col: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn config_dialog_button_clicks_map_to_actions() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::ConfigScreenState;
+
+        // Build known rects:
+        // dialog area at (10, 5, 40, 15)
+        // close at (48, 5, 1, 1)  — just inside top-right
+        // Save button at (20, 19, 8, 1)
+        // Cancel button at (29, 19, 10, 1)
+        let rects = DialogRects {
+            area:    Rect::new(10, 5, 40, 15),
+            content: Rect::new(11, 7, 38, 10),
+            close:   Some(Rect::new(48, 5, 1, 1)),
+            buttons: vec![
+                (ButtonId::Save,   Rect::new(20, 19, 8,  1)),
+                (ButtonId::Cancel, Rect::new(29, 19, 10, 1)),
+            ],
+        };
+
+        // State with config_screen open (so dialog routing knows which modal).
+        let mut state = AppState::default();
+        let working = crate::input::clone_config(&state.config);
+        state.config_screen = Some(ConfigScreenState { working, selected: 0 });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → ConfigCancel
+        let a = mouse_to_action(&state, mouse_left_click(48, 5), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::ConfigCancel), "close click should produce ConfigCancel, got {:?}", a);
+
+        // Save button → ConfigSave
+        let a = mouse_to_action(&state, mouse_left_click(22, 19), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::ConfigSave), "Save button should produce ConfigSave, got {:?}", a);
+
+        // Cancel button → ConfigCancel
+        let a = mouse_to_action(&state, mouse_left_click(32, 19), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::ConfigCancel), "Cancel button should produce ConfigCancel, got {:?}", a);
+
+        // Click outside dialog area → swallowed (Action::None)
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside-dialog click should be swallowed (None), got {:?}", a);
+    }
+
+    #[test]
+    fn config_esc_maps_to_config_cancel() {
+        // ESC in config screen should produce ConfigCancel (same as [X] and Cancel button).
+        let mut s = AppState::default();
+        let working = crate::input::clone_config(&s.config);
+        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        assert!(matches!(a, Action::ConfigCancel), "ESC in config screen should produce ConfigCancel");
+    }
+
+    #[test]
+    fn saves_dialog_x_and_done_produce_saves_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::SavesState;
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+
+        let rects = DialogRects {
+            area:    Rect::new(10, 5, 40, 15),
+            content: Rect::new(11, 7, 38, 10),
+            close:   Some(Rect::new(48, 5, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(40, 19, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.saves = Some(SavesState {
+            entries: vec![SaveInfo {
+                path: PathBuf::from("/tmp/a.babelmap"),
+                name: "a".into(),
+                turns: 0,
+                saved_at: String::new(),
+                is_default: false,
+            }],
+            selected: 0,
+        });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → SavesClose
+        let a = mouse_to_action(&state, mouse_left_click(48, 5), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::SavesClose), "saves [X] click should produce SavesClose, got {:?}", a);
+
+        // Done button → SavesClose
+        let a = mouse_to_action(&state, mouse_left_click(42, 19), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::SavesClose), "saves [Done] click should produce SavesClose, got {:?}", a);
+
+        // Click outside → swallowed
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside saves dialog should be swallowed, got {:?}", a);
+    }
+
+    #[test]
+    fn filebrowser_dialog_x_and_done_produce_fb_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+
+        let rects = DialogRects {
+            area:    Rect::new(8, 4, 50, 18),
+            content: Rect::new(9, 6, 48, 13),
+            close:   Some(Rect::new(56, 4, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(48, 21, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        let tmp = std::env::temp_dir();
+        state.file_browser = Some(crate::state::FileBrowserState::build(
+            tmp,
+            crate::state::FbMode::PickFile,
+            String::new(),
+        ));
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → FbClose
+        let a = mouse_to_action(&state, mouse_left_click(56, 4), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::FbClose), "filebrowser [X] click should produce FbClose, got {:?}", a);
+
+        // Done button → FbClose
+        let a = mouse_to_action(&state, mouse_left_click(50, 21), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::FbClose), "filebrowser [Done] click should produce FbClose, got {:?}", a);
+
+        // Click outside → swallowed
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside filebrowser dialog should be swallowed, got {:?}", a);
+    }
+
+    #[test]
+    fn verbmenu_dialog_x_and_done_produce_verb_menu_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::VerbMenuState;
+
+        let rects = DialogRects {
+            area:    Rect::new(0, 0, 80, 24),
+            content: Rect::new(1, 2, 78, 20),
+            close:   Some(Rect::new(78, 0, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(70, 23, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.verb_menu = Some(VerbMenuState {
+            pane: crate::state::VerbMenuPane::Verbs,
+            verb_idx: 0,
+            noun_idx: 0,
+            prep_idx: 0,
+            nouns: vec![],
+        });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → VerbMenuClose
+        let a = mouse_to_action(&state, mouse_left_click(78, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::VerbMenuClose), "verb menu [X] click should produce VerbMenuClose, got {:?}", a);
+
+        // Done button → VerbMenuClose
+        let a = mouse_to_action(&state, mouse_left_click(72, 23), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::VerbMenuClose), "verb menu [Done] click should produce VerbMenuClose, got {:?}", a);
+    }
+
+    #[test]
+    fn hotkey_dialog_x_and_done_produce_close_hotkey_dialog() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+
+        let rects = DialogRects {
+            area:    Rect::new(10, 5, 60, 30),
+            content: Rect::new(11, 7, 58, 26),
+            close:   Some(Rect::new(68, 5, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(60, 34, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.hotkey_dialog = true;
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → CloseHotkeyDialog
+        let a = mouse_to_action(&state, mouse_left_click(68, 5), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::CloseHotkeyDialog), "hotkey dialog [X] click should produce CloseHotkeyDialog, got {:?}", a);
+
+        // Done button → CloseHotkeyDialog
+        let a = mouse_to_action(&state, mouse_left_click(62, 34), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::CloseHotkeyDialog), "hotkey dialog [Done] click should produce CloseHotkeyDialog, got {:?}", a);
+    }
+
+    // ── ESC == [X] sweep ─────────────────────────────────────────────────────────
+
+    /// Table test: for every modal, ESC and a [X] click must yield the SAME close Action.
+    ///
+    /// Each entry: (modal_name, set-up closure, ESC-Action, close-Action-from-X-click).
+    ///
+    /// We build a DialogRects with a known close rect at (99, 0) and call
+    /// key_to_action for ESC and mouse_to_action for a click at (99, 0).
+    /// Both must match the expected close action.
+    #[test]
+    fn esc_equals_x_click_for_every_modal() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::{GalleryState, SavesState, VerbMenuState};
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+
+        // Helper to build a DialogRects with [X] at (99, 0) and one Done button
+        let make_rects = || DialogRects {
+            area:    Rect::new(5, 0, 70, 24),
+            content: Rect::new(6, 1, 68, 20),
+            close:   Some(Rect::new(99, 0, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(90, 23, 8, 1))],
+        };
+
+        // 1. Gallery: ESC → GalleryClose, [X] → GalleryClose
+        {
+            let mut s = AppState::default();
+            s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::GalleryClose),
+                "gallery ESC should produce GalleryClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::GalleryClose),
+                "gallery [X] click should produce GalleryClose, got {:?}", x_action);
+        }
+
+        // 2. Saves: ESC → SavesClose, [X] → SavesClose
+        {
+            let mut s = AppState::default();
+            s.saves = Some(SavesState { entries: vec![SaveInfo {
+                path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
+                saved_at: String::new(), is_default: false,
+            }], selected: 0 });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::SavesClose),
+                "saves ESC should produce SavesClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::SavesClose),
+                "saves [X] click should produce SavesClose, got {:?}", x_action);
+        }
+
+        // 3. File browser: ESC → FbClose, [X] → FbClose
+        {
+            let mut s = AppState::default();
+            s.file_browser = Some(crate::state::FileBrowserState::build(
+                std::env::temp_dir(), crate::state::FbMode::PickFile, String::new(),
+            ));
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::FbClose),
+                "file browser ESC should produce FbClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::FbClose),
+                "file browser [X] click should produce FbClose, got {:?}", x_action);
+        }
+
+        // 4. Verb menu: ESC → VerbMenuClose, [X] → VerbMenuClose
+        {
+            let mut s = AppState::default();
+            s.verb_menu = Some(VerbMenuState {
+                pane: crate::state::VerbMenuPane::Verbs,
+                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+            });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::VerbMenuClose),
+                "verb menu ESC should produce VerbMenuClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::VerbMenuClose),
+                "verb menu [X] click should produce VerbMenuClose, got {:?}", x_action);
+        }
+
+        // 5. Config screen: ESC → ConfigCancel, [X] → ConfigCancel
+        {
+            let mut s = AppState::default();
+            let working = clone_config(&s.config);
+            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::ConfigCancel),
+                "config screen ESC should produce ConfigCancel, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::ConfigCancel),
+                "config screen [X] click should produce ConfigCancel, got {:?}", x_action);
+        }
+
+        // 6. Hotkey dialog: ESC → CloseHotkeyDialog, [X] → CloseHotkeyDialog
+        {
+            let mut s = AppState::default();
+            s.hotkey_dialog = true;
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::CloseHotkeyDialog),
+                "hotkey dialog ESC should produce CloseHotkeyDialog, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::CloseHotkeyDialog),
+                "hotkey dialog [X] click should produce CloseHotkeyDialog, got {:?}", x_action);
+        }
+    }
+
+    /// Assert no modal key handler still binds q to a close action.
+    #[test]
+    fn no_modal_binds_q_to_close() {
+        use crate::state::{GalleryState, SavesState, VerbMenuState};
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+
+        // Gallery: q → not GalleryClose
+        {
+            let mut s = AppState::default();
+            s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::GalleryClose),
+                "q must not close the gallery");
+        }
+
+        // Saves: q → not SavesClose
+        {
+            let mut s = AppState::default();
+            s.saves = Some(SavesState { entries: vec![SaveInfo {
+                path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
+                saved_at: String::new(), is_default: false,
+            }], selected: 0 });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::SavesClose),
+                "q must not close the saves modal");
+        }
+
+        // File browser: q → not FbClose
+        {
+            let mut s = AppState::default();
+            s.file_browser = Some(crate::state::FileBrowserState::build(
+                std::env::temp_dir(), crate::state::FbMode::PickFile, String::new(),
+            ));
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::FbClose),
+                "q must not close the file browser");
+        }
+
+        // Verb menu: q → not VerbMenuClose
+        {
+            let mut s = AppState::default();
+            s.verb_menu = Some(VerbMenuState {
+                pane: crate::state::VerbMenuPane::Verbs,
+                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+            });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::VerbMenuClose),
+                "q must not close the verb menu");
+        }
+
+        // Config screen: q → not ConfigCancel
+        {
+            let mut s = AppState::default();
+            let working = clone_config(&s.config);
+            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::ConfigCancel),
+                "q must not cancel the config screen");
+        }
+
+        // Room panel: q → not CloseRoomPanel
+        {
+            use crate::state::{RoomPanel, RoomPanelMode};
+            let mut s = AppState::default();
+            s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::CloseRoomPanel),
+                "q must not close the room panel");
+        }
+    }
+
+    /// Assert gallery [X] and [Done] clicks produce GalleryClose.
+    #[test]
+    fn gallery_dialog_x_and_done_produce_gallery_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::GalleryState;
+
+        let rects = DialogRects {
+            area:    Rect::new(5, 3, 70, 24),
+            content: Rect::new(6, 5, 68, 19),
+            close:   Some(Rect::new(73, 3, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(65, 26, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → GalleryClose
+        let a = mouse_to_action(&state, mouse_left_click(73, 3), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::GalleryClose), "gallery [X] click should produce GalleryClose, got {:?}", a);
+
+        // Done button → GalleryClose
+        let a = mouse_to_action(&state, mouse_left_click(67, 26), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::GalleryClose), "gallery [Done] click should produce GalleryClose, got {:?}", a);
+
+        // Click outside → swallowed (None)
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside gallery dialog should be swallowed, got {:?}", a);
+    }
+
+    /// Regression: a centered modal (gallery) stacked on top of an open corner
+    /// overlay (room_panel) must swallow all outside-dialog clicks.  Without the
+    /// fix, is_corner_overlay was true even when a centered modal was open, so the
+    /// outside click fell through to ShowRoomInfo / ActivatePane.
+    #[test]
+    fn centered_modal_swallows_outside_clicks_even_with_room_panel_open() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::{GalleryState, RoomPanel, RoomPanelMode};
+        use crate::state::Zoom;
+
+        // Build a real map rect and room_rects so a click at (0,0) would normally
+        // produce ShowRoomInfo if the dialog were not open.
+        let map_r = map_rect();   // Rect::new(0,0,80,40)
+        let story_r = story_rect();
+        let live_room_rects = room_rects_for_compact(1, (0, 0), map_r);
+
+        // Confirm that without any dialog open, clicking (0,0) hits the room.
+        {
+            let s = AppState::default();
+            let a = mouse_to_action(&s, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &None);
+            assert!(
+                matches!(a, Action::ShowRoomInfo(1)),
+                "sanity: without dialog, click on room should be ShowRoomInfo(1), got {:?}", a
+            );
+        }
+
+        // Now open BOTH room_panel (corner overlay) AND gallery (centered modal).
+        let mut state = AppState::default();
+        state.zoom = Zoom::Compact;
+        state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        state.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+
+        // The dialog rects represent the gallery centered dialog (not covering (0,0)).
+        let dialog = Some(DialogRects {
+            area:    Rect::new(5, 3, 70, 24),
+            content: Rect::new(6, 5, 68, 19),
+            close:   Some(Rect::new(73, 3, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(65, 26, 8, 1))],
+        });
+
+        // Click OUTSIDE the gallery dialog (at (0,0), which is on the room).
+        // Must be swallowed — NOT ShowRoomInfo or ActivatePane.
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &dialog);
+        assert!(
+            matches!(a, Action::None),
+            "outside-gallery click with room_panel also open must be swallowed (None), got {:?}", a
+        );
     }
 }

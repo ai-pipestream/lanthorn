@@ -180,6 +180,20 @@ pub struct ColorScheme {
     pub status_header_style: BorderStyle,
     /// Resolved border style for the input line.
     pub input_line_style: BorderStyle,
+    /// Dialog frame background/foreground style.
+    pub dialog: Style,
+    /// Dialog title text style.
+    pub dialog_title: Style,
+    /// Dialog button (normal) style.
+    pub dialog_button: Style,
+    /// Dialog button (active/focused) style.
+    pub dialog_button_active: Style,
+    /// Dialog drop-shadow style.
+    pub dialog_shadow: Style,
+    /// Resolved border style for the dialog box.
+    pub dialog_box_style: BorderStyle,
+    /// Whether the dialog drop-shadow is enabled.
+    pub dialog_shadow_on: bool,
 }
 
 impl ColorScheme {
@@ -219,6 +233,13 @@ impl ColorScheme {
             story_border_style: BorderStyle::None,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
+            dialog: Style::new().fg(Color::White).bg(Color::Black),
+            dialog_title: Style::new().fg(Color::Cyan),
+            dialog_button: Style::new().fg(Color::White),
+            dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
+            dialog_shadow: Style::new().bg(Color::DarkGray),
+            dialog_box_style: BorderStyle::None,
+            dialog_shadow_on: false,
         }
     }
 
@@ -334,6 +355,13 @@ impl ColorScheme {
             story_border_style: BorderStyle::None,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
+            dialog: Style::new().fg(fg).bg(bg),
+            dialog_title: Style::new().fg(scheme.palette[6]),
+            dialog_button: Style::new().fg(fg),
+            dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),
+            dialog_shadow: Style::new().bg(scheme.palette[8]),
+            dialog_box_style: BorderStyle::None,
+            dialog_shadow_on: false,
         }
     }
 

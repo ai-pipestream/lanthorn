@@ -2,8 +2,9 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
+use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::state::AppState;
 
 /// Draw the saves-manager modal centered over `area`.
@@ -14,61 +15,67 @@ use crate::state::AppState;
 /// key actions.
 ///
 /// Does nothing when `state.saves` is `None`.
-pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) {
-    let Some(saves) = &state.saves else { return };
+/// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
+pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+    let Some(saves) = &state.saves else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
 
-    // Target: up to 60 wide, tall enough for entries + 2 header + 1 footer.
+    // Target: up to 62 wide, tall enough for entries + 2 header + 1 footer + chrome overhead.
     let modal_w = 62u16.min(area.width.saturating_sub(4));
     let entry_rows = saves.entries.len() as u16;
-    let modal_h = (entry_rows + 4).min(area.height.saturating_sub(2)); // 2 header + 1 sep + 1 footer
-    if modal_w < 20 || modal_h < 3 {
-        return;
+    // 2 header rows + entry rows + 1 footer + border overhead (2) + button row (1) = entry_rows + 6
+    let modal_h = (entry_rows + 6).min(area.height.saturating_sub(2));
+    if modal_w < 20 || modal_h < 4 {
+        return None;
     }
 
-    let x = area.x + area.width.saturating_sub(modal_w) / 2;
-    let y = area.y + area.height.saturating_sub(modal_h) / 2;
-    let modal = Rect { x, y, width: modal_w, height: modal_h };
+    // ── Build DialogStyle from state colors ───────────────────────────────────
 
-    // ── Background fill ───────────────────────────────────────────────────────
+    let st = DialogStyle {
+        frame: state.colors.dialog,
+        box_style: state.colors.dialog_box_style,
+        title: state.colors.dialog_title,
+        button: state.colors.dialog_button,
+        button_active: state.colors.dialog_button_active,
+        shadow: state.colors.dialog_shadow,
+        shadow_on: state.colors.dialog_shadow_on,
+    };
 
-    let bg = Style::new().fg(Color::White).bg(Color::DarkGray);
-    for row in modal.y..modal.bottom() {
-        for col in modal.x..modal.right() {
-            if let Some(cell) = buf.cell_mut((col, row)) {
-                cell.set_symbol(" ").set_style(bg);
-            }
-        }
-    }
+    let buttons = &[
+        DialogButton { id: ButtonId::Done, label: "Done" },
+    ];
 
-    // ── Title row ─────────────────────────────────────────────────────────────
+    let spec = DialogSpec {
+        title: "Saves",
+        placement: Placement::Centered { w: modal_w, h: modal_h },
+        buttons,
+        show_close: true,
+    };
 
-    let title_style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    crate::render::draw_str_clipped(buf, modal.x + 1, modal.y, "Saves", title_style, modal);
+    let rects = draw_dialog(buf, &spec, &st);
+    let content = rects.content;
 
     // ── Column headers ────────────────────────────────────────────────────────
 
-    if modal_h < 3 {
-        return;
-    }
-    let hdr_style = Style::new().fg(Color::White).add_modifier(Modifier::UNDERLINED);
+    let hdr_style = Style::new().add_modifier(Modifier::UNDERLINED).patch(state.colors.dialog);
     let hdr = format!("{:<28}  {:>5}  {:<16}", "Name", "Turns", "Saved at");
-    crate::render::draw_str_clipped(buf, modal.x + 1, modal.y + 1, &hdr, hdr_style, modal);
+    if content.height > 0 {
+        crate::render::draw_str_clipped(buf, content.x, content.y, &hdr, hdr_style, content);
+    }
 
     // ── Entry rows ────────────────────────────────────────────────────────────
 
-    let normal = Style::new().fg(Color::White).bg(Color::DarkGray);
-    let selected = Style::new()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
+    let normal = state.colors.dialog;
+    let selected_style = Style::new()
+        .fg(ratatui::style::Color::Black)
+        .bg(ratatui::style::Color::Cyan)
         .add_modifier(Modifier::BOLD);
 
-    let entries_area = Rect {
-        x: modal.x,
-        y: modal.y + 2,
-        width: modal.width,
-        height: modal.height.saturating_sub(3), // leave room for footer
+    let entries_area = if content.height > 1 {
+        Rect::new(content.x, content.y + 1, content.width, content.height - 1)
+    } else {
+        Rect::new(content.x, content.y, content.width, 0)
     };
 
     for (i, entry) in saves.entries.iter().enumerate() {
@@ -77,10 +84,10 @@ pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) {
             break;
         }
 
-        let style = if i == saves.selected { selected } else { normal };
+        let style = if i == saves.selected { selected_style } else { normal };
 
         // Fill the whole row background with the row style.
-        for col in modal.x..modal.right() {
+        for col in content.x..content.right() {
             if let Some(cell) = buf.cell_mut((col, row_y)) {
                 cell.set_symbol(" ").set_style(style);
             }
@@ -94,23 +101,21 @@ pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) {
             "{} {:<27}  {:>5}  {:<16}",
             marker, name_trunc, entry.turns, short_time
         );
-        crate::render::draw_str_clipped(buf, modal.x + 1, row_y, &line, style, modal);
+        crate::render::draw_str_clipped(buf, content.x, row_y, &line, style, content);
     }
 
-    // ── Footer hint ───────────────────────────────────────────────────────────
+    // ── Footer hint (below entries) ───────────────────────────────────────────
 
-    let footer_y = modal.bottom().saturating_sub(1);
-    if footer_y > modal.y {
-        let footer_style = Style::new().fg(Color::DarkGray).bg(Color::Black);
+    let footer_y = entries_area.bottom();
+    if footer_y < content.bottom() {
+        let footer_style = Style::new()
+            .fg(ratatui::style::Color::DarkGray)
+            .patch(state.colors.dialog);
         let footer = "Enter:load  s:save-as  d:delete  e:export  i:import  Esc:close";
-        // Fill footer row.
-        for col in modal.x..modal.right() {
-            if let Some(cell) = buf.cell_mut((col, footer_y)) {
-                cell.set_symbol(" ").set_style(footer_style);
-            }
-        }
-        crate::render::draw_str_clipped(buf, modal.x + 1, footer_y, footer, footer_style, modal);
+        crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }
+
+    Some(rects)
 }
 
 /// Format an RFC3339 timestamp for compact display (show only date + HH:MM).
@@ -135,6 +140,8 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use crate::render::dialog::ButtonId;
+    use crate::render::paneframe::BorderStyle;
     use crate::state::{AppState, SavesState};
     use crate::persist_files::SaveInfo;
     use std::path::PathBuf;
@@ -254,5 +261,35 @@ mod tests {
         assert_eq!(super::format_time("2026-06-18T12:34:56Z"), "2026-06-18 12:34");
         assert_eq!(super::format_time(""), "");
         assert_eq!(super::format_time("2026-06-18T10:00:00Z"), "2026-06-18 10:00");
+    }
+
+    #[test]
+    fn draw_saves_shows_dialog_chrome() {
+        // Render test: saves shows bordered titled chrome with [X] + [Done] and dialog_* colors.
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = state_with_saves(
+            vec![dummy_save("(default)", 0, true)],
+            0,
+        );
+        state.colors.dialog_box_style = BorderStyle::Single;
+        let mut rects_out: Option<DialogRects> = None;
+        terminal.draw(|f| {
+            rects_out = draw_saves(&state, f.area(), f.buffer_mut());
+        }).unwrap();
+
+        let content: String = terminal.backend().buffer().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+
+        assert!(content.contains("Saves"), "title 'Saves' should be present");
+        assert!(content.contains("Done"), "[Done] button should be visible");
+        assert!(content.contains('✕'), "[X] close button should be visible");
+
+        let rects = rects_out.expect("draw_saves should return DialogRects when open");
+        assert!(rects.close.is_some(), "close rect should be present");
+        assert_eq!(rects.buttons.len(), 1, "should have 1 button");
+        let ids: Vec<ButtonId> = rects.buttons.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&ButtonId::Done));
     }
 }

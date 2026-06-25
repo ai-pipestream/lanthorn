@@ -22,6 +22,7 @@ use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action, ApplyTidyOutcome};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
+use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
@@ -161,6 +162,7 @@ pub fn hint_line_game(keymap: &KeyMap) -> String {
 /// `story` is `Rect::default()` when the layout hides the story (MapFull).
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
 /// `layer_tabs` pairs each visible layer tab with its hit-rect (for future click-to-switch).
+/// `dialog` holds the last-drawn dialog chrome rects for mouse hit-testing.
 struct PaneRects {
     map: Rect,
     story: Rect,
@@ -169,6 +171,8 @@ struct PaneRects {
     /// Populated but not yet consumed; reserved for a future click-to-switch feature.
     #[allow(dead_code)]
     layer_tabs: Vec<(LayerId, Rect)>,
+    /// Active dialog chrome rects (when a dialog is open).
+    pub dialog: Option<DialogRects>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -183,6 +187,7 @@ fn draw_frame(
     let mut story_area = Rect::default();
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
+    let mut dialog_rects_out: Option<DialogRects> = None;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -224,7 +229,12 @@ fn draw_frame(
                 let active_layer = state.active_layer(graph);
                 let frame = draw_pane_frame(buf, main_area, state.colors.map_border_style, state.colors.map_border);
                 render_map_layered(&rm, &mapper.graph, state, frame.content, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), frame.content, buf); }
+                if let Some(anim) = &state.tidy_anim {
+                    let tidy_ds = make_dialog_style(state);
+                    if let Some(dr) = draw_tidy_panel(anim.current(), frame.content, buf, &tidy_ds) {
+                        dialog_rects_out = Some(dr);
+                    }
+                }
                 map_area = frame.content;
                 story_area = Rect::default();
                 // Overlay layer tabs
@@ -259,7 +269,12 @@ fn draw_frame(
 
                 let map_frame = draw_pane_frame(buf, chunks[1], state.colors.map_border_style, state.colors.map_border);
                 render_map_layered(&rm, &mapper.graph, state, map_frame.content, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_frame.content, buf); }
+                if let Some(anim) = &state.tidy_anim {
+                    let tidy_ds = make_dialog_style(state);
+                    if let Some(dr) = draw_tidy_panel(anim.current(), map_frame.content, buf, &tidy_ds) {
+                        dialog_rects_out = Some(dr);
+                    }
+                }
                 map_area = map_frame.content;
                 // Overlay layer tabs
                 {
@@ -309,6 +324,7 @@ fn draw_frame(
                     Some(anim) => &anim.current().graph,
                     None => &mapper.graph,
                 };
+                let panel_ds = make_dialog_style(state);
                 match panel.mode {
                     RoomPanelMode::Info => {
                         let current_room = graph.current();
@@ -317,11 +333,15 @@ fn draw_frame(
                         } else {
                             None
                         };
-                        draw_room_info(graph, mem, panel.id, current_room, map_area, buf);
+                        if let Some(dr) = draw_room_info(graph, mem, panel.id, current_room, map_area, buf, &panel_ds) {
+                            dialog_rects_out = Some(dr);
+                        }
                     }
                     RoomPanelMode::Diagnostics => {
                         if let Some(diag) = room_diagnostics(graph, panel.id) {
-                            draw_inspector(&diag, map_area, buf);
+                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds) {
+                                dialog_rects_out = Some(dr);
+                            }
                         }
                     }
                 }
@@ -333,11 +353,11 @@ fn draw_frame(
         let help_text = if state.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
         } else if state.verb_menu.is_some() {
-            "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc/q: close".to_string()
+            "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc: close".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
-            "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc/q: cancel".to_string()
+            "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickDir).unwrap_or(false) {
-            "Export Save | \u{2191}\u{2193}: move | Enter: open dir | s: export here | Esc/q: cancel".to_string()
+            "Export Save | \u{2191}\u{2193}: move | Enter: open dir | s: export here | Esc: cancel".to_string()
         } else if state.saves.is_some() {
             "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | e: export | i: import | Esc: close".to_string()
         } else if state.gallery.is_some() {
@@ -384,32 +404,34 @@ fn draw_frame(
 
         // ── Hotkey dialog overlay — drawn over everything ─────────────────────
         if state.hotkey_dialog {
-            draw_hotkey_dialog(state, full, buf);
+            dialog_rects_out = draw_hotkey_dialog(state, full, buf);
         }
 
         // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
         if state.gallery.is_some() {
-            draw_gallery(state, full, buf);
+            if let Some(dr) = draw_gallery(state, full, buf) {
+                dialog_rects_out = Some(dr);
+            }
         }
 
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
-            draw_saves(state, full, buf);
+            dialog_rects_out = draw_saves(state, full, buf);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
         if state.file_browser.is_some() {
-            draw_file_browser(state, full, buf);
+            dialog_rects_out = draw_file_browser(state, full, buf);
         }
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
         if state.verb_menu.is_some() {
-            draw_verb_menu(state, full, buf);
+            dialog_rects_out = draw_verb_menu(state, full, buf);
         }
 
         // ── Config screen overlay — drawn after other modals ──────────────────
         if state.config_screen.is_some() {
-            draw_config_screen(state, full, buf);
+            dialog_rects_out = draw_config_screen(state, full, buf);
         }
 
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
@@ -435,7 +457,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -621,7 +643,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new() };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -722,7 +744,7 @@ fn main() {
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
             Event::Mouse(m) => {
-                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects)
+                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
             }
             // Resize: continue so the next draw uses the updated terminal size.
             Event::Resize(_, _) => continue,
@@ -1398,6 +1420,20 @@ fn map_pane_dims(area: Rect) -> (u16, u16) {
     let w = if area.width == 0 { 80 } else { area.width };
     let h = if area.height == 0 { 24 } else { area.height };
     (w, h)
+}
+
+/// Build a `DialogStyle` from the current app colors.
+/// Note: `BorderStyle::None` is coerced to `Single` inside `draw_dialog`.
+fn make_dialog_style(state: &AppState) -> DialogStyle {
+    DialogStyle {
+        frame: state.colors.dialog,
+        box_style: state.colors.dialog_box_style,
+        title: state.colors.dialog_title,
+        button: state.colors.dialog_button,
+        button_active: state.colors.dialog_button_active,
+        shadow: state.colors.dialog_shadow,
+        shadow_on: state.colors.dialog_shadow_on,
+    }
 }
 
 /// Apply `Modifier::DIM` to every cell in `area` of `buf`.

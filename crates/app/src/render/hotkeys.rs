@@ -7,9 +7,10 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
 use crate::keymap::Command;
+use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::render::{draw_str_clipped, put_str};
 use crate::state::AppState;
 
@@ -17,79 +18,87 @@ use crate::state::AppState;
 
 /// Render the hotkey dialog overlay onto `buf` using the full terminal `area`.
 ///
-/// The overlay is a centered bordered panel. Groups from state.hotkeys.groups
+/// The overlay is a centered bordered panel rendered via draw_dialog (opaque
+/// background fixes command-panel bleed, #17). Groups from state.hotkeys.groups
 /// are listed with their title and "KEY  label" rows.
-/// Footer shows "Ctrl+K / q: close".
-pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) {
+/// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
+pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
     if area.height < 6 || area.width < 30 {
-        return;
+        return None;
     }
-
-    // Center a panel that is at most 60 wide.
-    let panel_w = area.width.min(60);
-    let panel_x = area.x + (area.width - panel_w) / 2;
 
     // Build rows to determine height.
     let rows = build_rows(state);
-    // +4: top border + title + separator line + bottom border
-    let panel_h = (rows.len() as u16 + 4).min(area.height);
-    let panel_y = area.y + (area.height - panel_h) / 2;
 
-    let panel = Rect::new(panel_x, panel_y, panel_w, panel_h);
-
-    // Background fill.
-    let bg_style = Style::default().bg(Color::DarkGray).fg(Color::White);
-    for y in panel.y..panel.bottom() {
-        for x in panel.x..panel.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ").set_style(bg_style);
-            }
-        }
+    // Target: at most 60 wide; tall enough for rows + chrome overhead.
+    let panel_w = area.width.min(60);
+    // +2: border top/bottom; button row adds 1 more (draw_dialog subtracts it from content).
+    let panel_h = ((rows.len() as u16).saturating_add(2)).min(area.height);
+    if panel_w < 20 || panel_h < 4 {
+        return None;
     }
 
-    // Border.
-    let border_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-    draw_border(buf, panel, border_style);
+    // ── Build DialogStyle from state colors ───────────────────────────────────
 
-    // Title.
+    let st = DialogStyle {
+        frame: state.colors.dialog,
+        box_style: state.colors.dialog_box_style,
+        title: state.colors.dialog_title,
+        button: state.colors.dialog_button,
+        button_active: state.colors.dialog_button_active,
+        shadow: state.colors.dialog_shadow,
+        shadow_on: state.colors.dialog_shadow_on,
+    };
+
+    let buttons = &[
+        DialogButton { id: ButtonId::Done, label: "Done" },
+    ];
+
     let prefix_label = state.hotkeys.prefix.label();
-    let title = format!(" Commands ({prefix_label} / q: close) ");
-    let title_x = panel.x + 1 + (panel.width.saturating_sub(2).saturating_sub(title.len() as u16)) / 2;
-    draw_str_clipped(buf, title_x, panel.y, &title, border_style, panel);
+    let title = format!("Commands ({prefix_label}: close)");
 
-    // Content area.
-    let content_area = Rect::new(
-        panel.x + 1,
-        panel.y + 1,
-        panel.width.saturating_sub(2),
-        panel.height.saturating_sub(2),
-    );
-    let heading_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-    let key_style = Style::default().fg(Color::Cyan);
-    let label_style = Style::default().fg(Color::White);
+    let spec = DialogSpec {
+        title: title.as_str(),
+        placement: Placement::Centered { w: panel_w, h: panel_h },
+        buttons,
+        show_close: true,
+    };
 
-    let mut y = content_area.y;
+    let rects = draw_dialog(buf, &spec, &st);
+    let content = rects.content;
+
+    // ── Render rows ───────────────────────────────────────────────────────────
+
+    let heading_style = Style::default()
+        .add_modifier(Modifier::BOLD)
+        .patch(state.colors.dialog_title);
+    let key_style = state.colors.dialog;
+    let label_style = state.colors.dialog;
+
+    let mut y = content.y;
 
     for row in &rows {
-        if y >= content_area.bottom() {
+        if y >= content.bottom() {
             break;
         }
         if let Some(stripped) = row.strip_prefix("##") {
-            draw_str_clipped(buf, content_area.x, y, stripped.trim(), heading_style, content_area);
+            draw_str_clipped(buf, content.x, y, stripped.trim(), heading_style, content);
         } else if row == "---" {
             // blank separator — skip
         } else if let Some((key_part, label_part)) = row.split_once("  ") {
             let kw = key_part.len() as u16;
-            put_str(buf, content_area.x as i32, y as i32, key_part, key_style, content_area);
-            let label_x = content_area.x + kw + 2;
-            if label_x < content_area.right() {
-                draw_str_clipped(buf, label_x, y, label_part, label_style, content_area);
+            put_str(buf, content.x as i32, y as i32, key_part, key_style, content);
+            let label_x = content.x + kw + 2;
+            if label_x < content.right() {
+                draw_str_clipped(buf, label_x, y, label_part, label_style, content);
             }
         } else {
-            draw_str_clipped(buf, content_area.x, y, row, label_style, content_area);
+            draw_str_clipped(buf, content.x, y, row, label_style, content);
         }
         y += 1;
     }
+
+    Some(rects)
 }
 
 /// Build text rows for the dialog panel.
@@ -116,43 +125,16 @@ fn primary_key_label(state: &AppState, cmd: Command) -> String {
         .unwrap_or_else(|| "?".to_string())
 }
 
-fn draw_border(buf: &mut Buffer, area: Rect, style: Style) {
-    if area.height < 2 || area.width < 2 {
-        return;
-    }
-    let (x0, y0) = (area.x, area.y);
-    let (x1, y1) = (area.right() - 1, area.bottom() - 1);
-
-    draw_char(buf, x0, y0, '\u{256d}', style);
-    draw_char(buf, x1, y0, '\u{256e}', style);
-    draw_char(buf, x0, y1, '\u{2570}', style);
-    draw_char(buf, x1, y1, '\u{256f}', style);
-
-    for x in (x0 + 1)..x1 {
-        draw_char(buf, x, y0, '\u{2500}', style);
-        draw_char(buf, x, y1, '\u{2500}', style);
-    }
-    for y in (y0 + 1)..y1 {
-        draw_char(buf, x0, y, '\u{2502}', style);
-        draw_char(buf, x1, y, '\u{2502}', style);
-    }
-}
-
-fn draw_char(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        let mut s = [0u8; 4];
-        cell.set_symbol(ch.encode_utf8(&mut s)).set_style(style);
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+    use ratatui::style::{Color, Modifier};
 
     use super::draw_hotkey_dialog;
+    use crate::render::dialog::ButtonId;
     use crate::state::AppState;
 
     fn buf_text(buf: &Buffer) -> String {
@@ -192,5 +174,66 @@ mod tests {
         let text = buf_text(&buf);
         // Footer or title should show close hint
         assert!(text.contains("close") || text.contains("q"), "expected close hint");
+    }
+
+    #[test]
+    fn draw_hotkey_dialog_shows_dialog_chrome() {
+        // Render test: dialog shows [X] close button and [Done] button.
+        let mut state = AppState::default();
+        state.hotkey_dialog = true;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let rects_opt = draw_hotkey_dialog(&state, area, &mut buf);
+        let text = buf_text(&buf);
+
+        assert!(text.contains('✕'), "[X] close button should be visible");
+        assert!(text.contains("Done"), "[Done] button should be visible");
+
+        let rects = rects_opt.expect("draw_hotkey_dialog should return DialogRects");
+        assert!(rects.close.is_some(), "close rect should be present");
+        assert_eq!(rects.buttons.len(), 1);
+        let ids: Vec<ButtonId> = rects.buttons.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&ButtonId::Done));
+    }
+
+    #[test]
+    fn draw_hotkey_dialog_bg_opaque_over_map_cell() {
+        // Render test: the hotkey dialog background is OPAQUE over a pre-filled
+        // map cell (no bleed — the underlying cell's bg/REVERSED is replaced).
+        // This verifies fix for issue #17 (command-panel current-room color bleed).
+        let mut state = AppState::default();
+        state.hotkey_dialog = true;
+
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+
+        // Pre-fill a REVERSED cell with Red bg in the center where the dialog will sit.
+        // The dialog is centered at ~col 10..70, row 0..40 (panel_w=60).
+        // Place the sentinel cell near center.
+        let sentinel_col = 40u16;
+        let sentinel_row = 20u16;
+        if let Some(cell) = buf.cell_mut((sentinel_col, sentinel_row)) {
+            cell.set_symbol("M")
+                .set_style(ratatui::style::Style::new()
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::REVERSED));
+        }
+
+        draw_hotkey_dialog(&state, area, &mut buf);
+
+        // After drawing, the dialog's opaque fill should have replaced the cell.
+        let cell = buf.cell((sentinel_col, sentinel_row)).unwrap();
+        assert!(
+            !cell.modifier.contains(Modifier::REVERSED),
+            "dialog opaque bg must clear REVERSED modifier (no bleed)"
+        );
+        assert_ne!(
+            cell.bg,
+            Color::Red,
+            "dialog opaque bg must replace the Red map background (no bleed)"
+        );
+        // And [X] should appear somewhere in the buffer.
+        let text = buf_text(&buf);
+        assert!(text.contains('✕'), "[X] must be present in the dialog");
     }
 }

@@ -31,6 +31,9 @@ pub struct Decl {
     /// Only interpreted for border selectors; ignored for others.
     #[serde(default)]
     pub style: Option<String>,
+    /// Optional shadow flag. Only interpreted for the `dialog` selector.
+    #[serde(default)]
+    pub shadow: Option<bool>,
 }
 
 // ── decl_to_style ─────────────────────────────────────────────────────────────
@@ -129,6 +132,11 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "map_layer_tab_active",
     "status_header",
     "input_line",
+    "dialog",
+    "dialog:title",
+    "dialog:button",
+    "dialog:button:active",
+    "dialog:shadow",
 ];
 
 // ── apply_color_decls ─────────────────────────────────────────────────────────
@@ -190,6 +198,19 @@ pub fn apply_color_decls(
                     cs.input_line_style = paneframe::parse_border_style(s);
                 }
             }
+            "dialog" => {
+                cs.dialog = cs.dialog.patch(style);
+                if let Some(ref s) = decl.style {
+                    cs.dialog_box_style = paneframe::parse_border_style(s);
+                }
+                if let Some(shadow_on) = decl.shadow {
+                    cs.dialog_shadow_on = shadow_on;
+                }
+            }
+            "dialog:title"         => cs.dialog_title = cs.dialog_title.patch(style),
+            "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
+            "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
+            "dialog:shadow"        => cs.dialog_shadow = cs.dialog_shadow.patch(style),
             _                    => warnings.push(format!("unknown selector: {}", selector)),
         }
     }
@@ -308,6 +329,7 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
         dim:       over.dim.or(base.dim),
         reversed:  over.reversed.or(base.reversed),
         style:     over.style.clone().or(base.style.clone()),
+        shadow:    over.shadow.or(base.shadow),
     }
 }
 
@@ -377,6 +399,7 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
         dim:       t.get("dim").and_then(toml::Value::as_bool),
         reversed:  t.get("reversed").and_then(toml::Value::as_bool),
         style:     t.get("style").and_then(toml::Value::as_str).map(str::to_string),
+        shadow:    t.get("shadow").and_then(toml::Value::as_bool),
     }
 }
 
@@ -435,6 +458,11 @@ pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
 [colors]
 "map_border" = { style = "picture-frame" }
 "story_border" = { style = "picture-frame" }
+"dialog" = { style = "single", bg = "black" }
+"dialog:title" = { fg = "cyan" }
+"dialog:button" = { fg = "white" }
+"dialog:button:active" = { fg = "black", bg = "cyan" }
+"dialog:shadow" = { bg = "dark-gray" }
 
 [symbols]
 "#;
@@ -547,7 +575,8 @@ fn style_to_decl(s: &Style) -> Decl {
         underline: modifier_flag(s.add_modifier, Modifier::UNDERLINED),
         dim: modifier_flag(s.add_modifier, Modifier::DIM),
         reversed: modifier_flag(s.add_modifier, Modifier::REVERSED),
-        style: None, // color-only inverse; callers set this for border selectors
+        style: None,  // color-only inverse; callers set this for border selectors
+        shadow: None, // callers set this for the dialog selector
     }
 }
 
@@ -631,6 +660,7 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
             if decl.underline == Some(true) { itbl.insert("underline", toml_edit::Value::from(true)); }
             if decl.dim       == Some(true) { itbl.insert("dim",       toml_edit::Value::from(true)); }
             if decl.reversed  == Some(true) { itbl.insert("reversed",  toml_edit::Value::from(true)); }
+            if decl.shadow    == Some(true) { itbl.insert("shadow",    toml_edit::Value::from(true)); }
             colors[selector.as_str()] = toml_edit::Item::Value(toml_edit::Value::InlineTable(itbl));
         }
     }
@@ -731,6 +761,18 @@ pub fn write_style_full(
         }
         doc.colors.selectors.insert("input_line".to_string(), d);
     }
+    {
+        let mut d = style_to_decl(&cs.dialog);
+        d.style = Some(paneframe::border_style_name(cs.dialog_box_style).to_string());
+        if cs.dialog_shadow_on {
+            d.shadow = Some(true);
+        }
+        doc.colors.selectors.insert("dialog".to_string(), d);
+    }
+    doc.colors.selectors.insert("dialog:title".to_string(),         style_to_decl(&cs.dialog_title));
+    doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
+    doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
+    doc.colors.selectors.insert("dialog:shadow".to_string(),        style_to_decl(&cs.dialog_shadow));
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
@@ -1002,6 +1044,17 @@ box_style = "rounded"
     }
 
     #[test]
+    fn dialog_selectors_resolve_with_box_style_and_default() {
+        let doc = parse_style_toml(DEFAULT_STYLE_TOML).unwrap();
+        let (cs,_s,_w) = resolve(&doc, std::path::Path::new("."));
+        assert!(matches!(cs.dialog_box_style, crate::render::paneframe::BorderStyle::Single));
+        let d2 = parse_style_toml("[colors]\n\"dialog\" = { style = \"double\", bg = \"black\" }\n\"dialog:button\" = { fg = \"cyan\" }\n").unwrap();
+        let (cs2,_s,_w) = resolve(&d2, std::path::Path::new("."));
+        assert!(matches!(cs2.dialog_box_style, crate::render::paneframe::BorderStyle::Double));
+        assert_eq!(cs2.dialog_button.fg, Some(ratatui::style::Color::Cyan));
+    }
+
+    #[test]
     fn write_style_full_round_trips_non_none_border_styles() {
         use crate::render::paneframe::BorderStyle;
 
@@ -1031,6 +1084,38 @@ box_style = "rounded"
             matches!(cs2.story_border_style, BorderStyle::Double),
             "story_border_style must survive write_style_full -> parse -> resolve; got {:?}",
             cs2.story_border_style
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_round_trips_dialog_shadow_and_box_style() {
+        use crate::render::paneframe::BorderStyle;
+
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-shadow-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shadow-full.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.dialog_shadow_on = true;
+        cs.dialog_box_style = BorderStyle::Double;
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+
+        assert!(
+            cs2.dialog_shadow_on,
+            "dialog_shadow_on must survive write_style_full -> parse -> resolve"
+        );
+        assert!(
+            matches!(cs2.dialog_box_style, BorderStyle::Double),
+            "dialog_box_style must survive write_style_full -> parse -> resolve; got {:?}",
+            cs2.dialog_box_style
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
