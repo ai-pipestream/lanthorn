@@ -59,6 +59,18 @@ const SINGLE: Glyphs = Glyphs { tl: "┌", top: "─", tr: "┐", side: "│", b
 const DOUBLE: Glyphs = Glyphs { tl: "╔", top: "═", tr: "╗", side: "║", bl: "╚", br: "╝" };
 const THICK: Glyphs  = Glyphs { tl: "┏", top: "━", tr: "┓", side: "┃", bl: "┗", br: "┛" };
 
+// Picture-frame outer-border block glyphs.
+// `RAMP` is the lower one-eighth block series, level 1 (thin) .. 8 (full). These
+// fill from the bottom of the cell, so the painted mass hugs the inner frame
+// below — the top border ramps up to crest at the centred layer-tab strip.
+const RAMP: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+// Thin one-eighth blocks for the sides and bottom, each positioned to sit flush
+// against the inner frame: ▕ (right eighth) on the left, ▏ (left eighth) on the
+// right, ▔ (upper eighth) along the bottom.
+const PF_SIDE_L: &str = "▕";
+const PF_SIDE_R: &str = "▏";
+const PF_BOTTOM: &str = "▔";
+
 // ── draw_picture_frame ────────────────────────────────────────────────────────
 
 fn draw_picture_frame(buf: &mut Buffer, area: Rect, color: Style) -> PaneFrame {
@@ -66,92 +78,53 @@ fn draw_picture_frame(buf: &mut Buffer, area: Rect, color: Style) -> PaneFrame {
     let y = area.y;
     let w = area.width;
     let h = area.height;
-    let right = x + w - 1;   // col w-1
-    let bottom = y + h - 1;  // row h-1
+    let right = x + w - 1;   // outer right col
+    let bottom = y + h - 1;  // outer bottom row
 
-    // ── Outer heavy perimeter (THICK) ──────────────────────────────────────────
-    // Top row
-    if let Some(c) = buf.cell_mut((x, y))         { c.set_symbol("┏").set_style(color); }
-    if let Some(c) = buf.cell_mut((right, y))      { c.set_symbol("┓").set_style(color); }
-    for cx in (x + 1)..right {
-        if let Some(c) = buf.cell_mut((cx, y))     { c.set_symbol("━").set_style(color); }
+    // ── Top outer border: stepped lower-block ramp ─────────────────────────────
+    // Each cell rises one level per two cells from the nearest corner, capping at
+    // a full block. The ramp crests at the centre, where the layer-tab strip is
+    // later overlaid via `draw_top_inset` (the strip overwrites the peak cells).
+    for cx in x..=right {
+        let from_corner = (cx - x).min(right - cx) as usize;
+        let level = (1 + from_corner / 2).min(8);
+        if let Some(c) = buf.cell_mut((cx, y)) { c.set_symbol(RAMP[level - 1]).set_style(color); }
     }
-    // Bottom row
-    if let Some(c) = buf.cell_mut((x, bottom))     { c.set_symbol("┗").set_style(color); }
-    if let Some(c) = buf.cell_mut((right, bottom)) { c.set_symbol("┛").set_style(color); }
-    for cx in (x + 1)..right {
-        if let Some(c) = buf.cell_mut((cx, bottom)) { c.set_symbol("━").set_style(color); }
-    }
-    // Left and right sides (rows 1..h-2, i.e. y+1..bottom)
+
+    // ── Thin side blocks (hug the inner frame) ─────────────────────────────────
     for cy in (y + 1)..bottom {
-        if let Some(c) = buf.cell_mut((x, cy))     { c.set_symbol("┃").set_style(color); }
-        if let Some(c) = buf.cell_mut((right, cy)) { c.set_symbol("┃").set_style(color); }
+        if let Some(c) = buf.cell_mut((x, cy))     { c.set_symbol(PF_SIDE_L).set_style(color); }
+        if let Some(c) = buf.cell_mut((right, cy))  { c.set_symbol(PF_SIDE_R).set_style(color); }
     }
 
-    // ── Inner top run: row 1, cols 2..=w-3 ────────────────────────────────────
-    // (spaces at col 1 and col w-2 are already blank from buffer init)
-    let inner_top_y = y + 1;
-    let inner_bot_y = y + h - 2; // row h-2
-    let inner_l = x + 2;         // col 2
-    let inner_r = x + w - 3;     // col w-3
-    let side_l  = x + 1;         // col 1
-    let side_r  = x + w - 2;     // col w-2
-
-    // Spaces at the inset gap cells (col1 row1, col w-2 row1, col1 row h-2, col w-2 row h-2)
-    for &(cx, cy) in &[(side_l, inner_top_y), (side_r, inner_top_y),
-                       (side_l, inner_bot_y), (side_r, inner_bot_y)] {
-        if let Some(c) = buf.cell_mut((cx, cy))    { c.set_symbol(" ").set_style(color); }
+    // ── Thin bottom block ──────────────────────────────────────────────────────
+    for cx in x..=right {
+        if let Some(c) = buf.cell_mut((cx, bottom)) { c.set_symbol(PF_BOTTOM).set_style(color); }
     }
 
-    // Horizontal runs (─) at inner_top_y and inner_bot_y, cols inner_l..=inner_r
-    for cx in inner_l..=inner_r {
-        if let Some(c) = buf.cell_mut((cx, inner_top_y)) { c.set_symbol("─").set_style(color); }
-        if let Some(c) = buf.cell_mut((cx, inner_bot_y)) { c.set_symbol("─").set_style(color); }
+    // ── Inner single-line frame ────────────────────────────────────────────────
+    let il = x + 1;        // inner left col
+    let ir = right - 1;    // inner right col
+    let it = y + 1;        // inner top row
+    let ib = bottom - 1;   // inner bottom row
+    if let Some(c) = buf.cell_mut((il, it)) { c.set_symbol("┌").set_style(color); }
+    if let Some(c) = buf.cell_mut((ir, it)) { c.set_symbol("┐").set_style(color); }
+    if let Some(c) = buf.cell_mut((il, ib)) { c.set_symbol("└").set_style(color); }
+    if let Some(c) = buf.cell_mut((ir, ib)) { c.set_symbol("┘").set_style(color); }
+    for cx in (il + 1)..ir {
+        if let Some(c) = buf.cell_mut((cx, it)) { c.set_symbol("─").set_style(color); }
+        if let Some(c) = buf.cell_mut((cx, ib)) { c.set_symbol("─").set_style(color); }
     }
-
-    // ── Inner side runs: cols 1 and w-2, rows 2..=h-3 ─────────────────────────
-    let notch_top_y = y + 2;        // row 2
-    let notch_bot_y = y + h - 3;    // row h-3
-    for cy in notch_top_y..=notch_bot_y {
-        if let Some(c) = buf.cell_mut((side_l, cy)) { c.set_symbol("│").set_style(color); }
-        if let Some(c) = buf.cell_mut((side_r, cy)) { c.set_symbol("│").set_style(color); }
+    for cy in (it + 1)..ib {
+        if let Some(c) = buf.cell_mut((il, cy)) { c.set_symbol("│").set_style(color); }
+        if let Some(c) = buf.cell_mut((ir, cy)) { c.set_symbol("│").set_style(color); }
     }
-
-    // ── Corner notches ─────────────────────────────────────────────────────────
-    // Top-left notch: row1 col2 = ┌, row2 col1 = ┌, row2 col2 = ┘
-    if let Some(c) = buf.cell_mut((inner_l,   inner_top_y)) { c.set_symbol("┌").set_style(color); }
-    if let Some(c) = buf.cell_mut((side_l,    notch_top_y)) { c.set_symbol("┌").set_style(color); }
-    if let Some(c) = buf.cell_mut((inner_l,   notch_top_y)) { c.set_symbol("┘").set_style(color); }
-
-    // Top-right notch: row1 col w-3 = ┐, row2 col w-3 = └, row2 col w-2 = ┐
-    if let Some(c) = buf.cell_mut((inner_r,   inner_top_y)) { c.set_symbol("┐").set_style(color); }
-    if let Some(c) = buf.cell_mut((inner_r,   notch_top_y)) { c.set_symbol("└").set_style(color); }
-    if let Some(c) = buf.cell_mut((side_r,    notch_top_y)) { c.set_symbol("┐").set_style(color); }
-
-    // Bottom-left notch: row h-3 col1 = └, row h-3 col2 = ┐, row h-2 col2 = └
-    if let Some(c) = buf.cell_mut((side_l,    notch_bot_y)) { c.set_symbol("└").set_style(color); }
-    if let Some(c) = buf.cell_mut((inner_l,   notch_bot_y)) { c.set_symbol("┐").set_style(color); }
-    if let Some(c) = buf.cell_mut((inner_l,   inner_bot_y)) { c.set_symbol("└").set_style(color); }
-
-    // Bottom-right notch: row h-3 col w-3 = ┌, row h-3 col w-2 = ┘, row h-2 col w-3 = ┘
-    if let Some(c) = buf.cell_mut((inner_r,   notch_bot_y)) { c.set_symbol("┌").set_style(color); }
-    if let Some(c) = buf.cell_mut((side_r,    notch_bot_y)) { c.set_symbol("┘").set_style(color); }
-    if let Some(c) = buf.cell_mut((inner_r,   inner_bot_y)) { c.set_symbol("┘").set_style(color); }
 
     // ── Content and top_inset ──────────────────────────────────────────────────
-    // Content = cols 3..=w-4, rows 3..=h-4. Inset one cell further than the inner
-    // wall so the render window clears the corner-notch elbow glyphs (drawn at
-    // cols 2/w-3, rows 2/h-3); the freed ring reads as interior padding.
-    let content = Rect::new(x + 3, y + 3, w - 6, h - 6);
-
-    // top_inset = inner top horizontal run (the drawable span between notch corners)
-    // This is the ─ run at row 1, cols 3..=w-4 (between the two ┌┐ corner glyphs)
-    // But per the spec, top_inset is the top border row between the outer corners.
-    // For picture-frame, it's the inner top row (row 1) between the ┌ and ┐ notch glyphs,
-    // i.e. cols 3..=w-4 — the actual ─ cells that can be overwritten for a title.
-    let inset_x = x + 3;
-    let inset_w = if w >= 6 { w - 6 } else { 0 };
-    let top_inset = Rect::new(inset_x, y + 1, inset_w, 1);
+    // Content lives inside the inner single-line frame.
+    let content = Rect::new(x + 2, y + 2, w - 4, h - 4);
+    // The layer-tab strip crests at the top outer row, centred over the inner span.
+    let top_inset = Rect::new(x + 1, y, w.saturating_sub(2), 1);
 
     PaneFrame { area, content, top_inset }
 }
@@ -598,24 +571,27 @@ mod tests {
     #[test]
     fn picture_frame_exact_glyphs_and_content() {
         use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-        let area = Rect::new(0,0,9,8); // w=9,h=8
+        let area = Rect::new(0,0,9,8); // w=9,h=8,right=8,bottom=7
         let mut buf = Buffer::empty(area);
         let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, Style::default());
-        // outer corners
-        assert_eq!(buf.cell((0,0)).unwrap().symbol(), "┏");
-        assert_eq!(buf.cell((8,0)).unwrap().symbol(), "┓");
-        assert_eq!(buf.cell((0,7)).unwrap().symbol(), "┗");
-        assert_eq!(buf.cell((8,7)).unwrap().symbol(), "┛");
-        // inner top inset by 1 from corners (row 1: space at col1, ┌ at col2)
-        assert_eq!(buf.cell((1,1)).unwrap().symbol(), " ");
-        assert_eq!(buf.cell((2,1)).unwrap().symbol(), "┌");
-        assert_eq!(buf.cell((6,1)).unwrap().symbol(), "┐");
-        // corner notch row 2: col1 ┌, col2 ┘
-        assert_eq!(buf.cell((1,2)).unwrap().symbol(), "┌");
-        assert_eq!(buf.cell((2,2)).unwrap().symbol(), "┘");
-        // inner side flush at col1 mid-rows
-        assert_eq!(buf.cell((1,3)).unwrap().symbol(), "│");
-        assert_eq!(f.content, Rect::new(3,3,3,2)); // cols 3..=5, rows 3..=4 (clears notch corners)
+        // Top outer border: lower-block ramp, thin at the corners rising to centre.
+        assert_eq!(buf.cell((0,0)).unwrap().symbol(), "▁"); // corner, level 1
+        assert_eq!(buf.cell((8,0)).unwrap().symbol(), "▁"); // corner, level 1
+        assert_eq!(buf.cell((4,0)).unwrap().symbol(), "▃"); // centre, from_corner=4 -> level 3
+        // Thin side blocks hug the inner frame.
+        assert_eq!(buf.cell((0,3)).unwrap().symbol(), "▕"); // left side
+        assert_eq!(buf.cell((8,3)).unwrap().symbol(), "▏"); // right side
+        // Thin bottom block.
+        assert_eq!(buf.cell((4,7)).unwrap().symbol(), "▔");
+        // Inner single-line frame: corners at (1,1),(7,1),(1,6),(7,6).
+        assert_eq!(buf.cell((1,1)).unwrap().symbol(), "┌");
+        assert_eq!(buf.cell((7,1)).unwrap().symbol(), "┐");
+        assert_eq!(buf.cell((1,6)).unwrap().symbol(), "└");
+        assert_eq!(buf.cell((7,6)).unwrap().symbol(), "┘");
+        assert_eq!(buf.cell((1,3)).unwrap().symbol(), "│"); // inner side
+        assert_eq!(f.content, Rect::new(2,2,5,4)); // inside the inner frame
+        // top_inset is the top outer row (row 0), inner span.
+        assert_eq!(f.top_inset, Rect::new(1,0,7,1));
     }
 
     #[test]
@@ -662,4 +638,5 @@ mod tests {
         assert!(row.contains("1"));      // active shown
         assert!(row.contains("‹") || row.contains("…")); // overflow marker present
     }
+
 }

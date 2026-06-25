@@ -2364,8 +2364,8 @@ mod tests {
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
 
     /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
-    /// `map_border_style` as picture-frame, and that rendering it produces ┏ at
-    /// the top-left corner of the map pane area.
+    /// `map_border_style` as picture-frame, and that rendering it produces the
+    /// block outer border (ramp corner ▁, thin side ▕) and the inner-frame content.
     #[test]
     fn map_pane_default_shows_picture_frame_corner() {
         // Resolve the default look from DEFAULT_STYLE_TOML (same path as startup).
@@ -2376,15 +2376,20 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, cs.map_border);
-        // DEFAULT_STYLE_TOML sets map_border to picture-frame; top-left outer corner must be ┏
+        // DEFAULT_STYLE_TOML sets map_border to picture-frame: top outer row is the
+        // lower-block ramp (▁ at the corner), the sides are thin one-eighth blocks.
         assert_eq!(
             buf.cell((0, 0)).unwrap().symbol(),
-            "┏",
-            "default map border (from DEFAULT_STYLE_TOML) must be picture-frame (┏ at top-left)"
+            "▁",
+            "default map border (from DEFAULT_STYLE_TOML) must be picture-frame (ramp ▁ at top-left)"
         );
-        // Content area inset 3 on all sides for picture-frame so it clears the corner
-        // notches (20-6=14, 10-6=4).
-        assert_eq!(frame.content, Rect::new(3, 3, 14, 4));
+        assert_eq!(
+            buf.cell((0, 3)).unwrap().symbol(),
+            "▕",
+            "picture-frame left side must be the thin ▕ block"
+        );
+        // Content lives inside the inner frame (20-4=16, 10-4=6).
+        assert_eq!(frame.content, Rect::new(2, 2, 16, 6));
     }
 
     // ── TestBackend: story pane shows adventure title in picture-frame border ─────
@@ -2789,9 +2794,9 @@ mod tests {
     // ── Fix 4: pulse overlay only touches outer perimeter ─────────────────────
 
     /// The pulse overlay (applied during a tidy job) writes the pulse color to the
-    /// outer perimeter cells of the map pane area. For a picture-frame border with
-    /// a top_inset at row y+1, the inner tab row center cells (x in 2..=right-3,
-    /// y == area.y + 1) must NOT be overwritten by the pulse.
+    /// outer perimeter cells of the map pane area. The interior content cells (rows
+    /// y+2.. , cols x+2..) must NOT be overwritten by the pulse, so the map body and
+    /// its overlays keep their own styling.
     ///
     /// This test directly exercises the perimeter-loop invariant: identical to what
     /// draw_frame executes, extracted inline so it runs without a full render stack.
@@ -2831,17 +2836,16 @@ mod tests {
             "top-right outer perimeter cell must carry pulse color"
         );
 
-        // Inner tab row (y+1) center cells must NOT carry the pulse color.
-        // For a picture-frame border, top_inset is at y+1, cols 3..=(w-4).
-        // The pulse only writes to x==area.x and x==area.right()-1 for the side columns,
-        // so the center of the inner tab row (e.g. col area.x+5) is untouched.
-        let tab_row_y = area.y + 1;
+        // Interior content cells (row y+2, cols x+2..right-2) must NOT carry the
+        // pulse color: the pulse only writes the outer perimeter (cols x / right-1,
+        // rows y / bottom-1), so the map body is untouched.
+        let content_row_y = area.y + 2;
         for cx in (area.x + 2)..(area.right() - 2) {
-            let fg = buf.cell((cx, tab_row_y)).map(|c| c.fg).unwrap();
+            let fg = buf.cell((cx, content_row_y)).map(|c| c.fg).unwrap();
             assert_ne!(
                 fg,
                 pulse_color,
-                "inner tab row center cell ({cx}, {tab_row_y}) must NOT be overwritten by pulse"
+                "interior content cell ({cx}, {content_row_y}) must NOT be overwritten by pulse"
             );
         }
     }

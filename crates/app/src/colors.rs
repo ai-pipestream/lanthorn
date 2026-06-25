@@ -228,7 +228,9 @@ impl ColorScheme {
             map_border: Style::new().fg(Color::Cyan),
             story_border: Style::new().fg(Color::Cyan),
             story_title: Style::new().fg(Color::White),
-            map_layer_tab: Style::new().fg(Color::White),
+            // The shown layer reads brighter than the others: inactive tabs are
+            // dimmed, the active one is the bold accent colour. Both themeable.
+            map_layer_tab: Style::new().fg(Color::DarkGray),
             map_layer_tab_active: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             status_header: Style::new(),
             input_line: Style::new(),
@@ -351,7 +353,7 @@ impl ColorScheme {
             map_border: Style::new().fg(scheme.palette[6]),
             story_border: Style::new().fg(scheme.palette[6]),
             story_title: Style::new().fg(fg),
-            map_layer_tab: Style::new().fg(fg),
+            map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
             status_header: Style::new(),
             input_line: Style::new(),
