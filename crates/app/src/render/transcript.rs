@@ -476,6 +476,9 @@ fn render_status_content(
 }
 
 /// Draw the input prompt (and cursor) into `region` with `normal_style`.
+///
+/// Hidden during char-input mode (`state.char_mode == true`) because the game
+/// is awaiting a single keypress, not a typed line.
 fn render_input_content(
     _machine: &Machine,
     state: &AppState,
@@ -484,6 +487,10 @@ fn render_input_content(
     normal_style: Style,
 ) {
     if region.height == 0 || region.width == 0 {
+        return;
+    }
+    // In read_char mode the prompt is meaningless — hide it entirely.
+    if state.char_mode {
         return;
     }
     let w = region.width as usize;

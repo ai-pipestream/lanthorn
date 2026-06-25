@@ -680,6 +680,13 @@ pub struct AppState {
     /// Index of the currently focused button in an open modal dialog. Reset to
     /// a button index when a modal opens; cycled by Tab/Shift-Tab.
     pub dialog_focus: usize,
+
+    // ── Char-input mode ───────────────────────────────────────────────────────
+
+    /// True when the Z-machine is awaiting a single keypress (`read_char`).
+    /// Set each frame by the run loop from `session.pending_input()`.
+    /// Used by the renderer to hide the bottom input prompt.
+    pub char_mode: bool,
 }
 
 impl Default for AppState {
@@ -742,6 +749,7 @@ impl Default for AppState {
             search_matches: Vec::new(),
             search_idx: 0,
             dialog_focus: 0,
+            char_mode: false,
         }
     }
 }

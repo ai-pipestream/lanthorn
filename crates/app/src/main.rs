@@ -799,6 +799,9 @@ fn main() {
             }
         }
 
+        // Update char_mode flag so the renderer hides the prompt during read_char.
+        state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
+
         // Draw.
         match draw_frame(&mut terminal, &session, &mapper, &state) {
             Ok(panes) => {
@@ -1171,6 +1174,48 @@ fn main() {
                         crossterm::event::KeyCode::BackTab =>
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 1, -1),
                         _ => {}
+                    }
+                }
+            }
+        }
+
+        // ── Char-input mode gate ──────────────────────────────────────────────
+        // When the Z-machine is waiting for a single keypress (read_char) and no
+        // overlay is open, forward the keystroke directly to the VM — unless it is
+        // the hotkey-dialog prefix (Ctrl+K), which still opens the hotkey dialog.
+        if state.char_mode && !state.any_overlay_open() {
+            if let Event::Key(k) = &event {
+                if k.kind == KeyEventKind::Press {
+                    let spec = app::keymap::KeySpec::from_key_event(*k);
+                    if spec != state.hotkeys.prefix {
+                        // Map to ZSCII and forward; unknown keys are silently ignored.
+                        if let Some(byte) = key_to_zscii(*k) {
+                            let result = session.submit_char(byte);
+                            state.push_transcript(&result.transcript);
+                            if let Some(note) = &result.info {
+                                state.push_transcript(note);
+                            }
+                            // apply_turn: char-mode keypresses don't carry direction info
+                            // (no text command to parse), but we still observe any location
+                            // change so the map stays in sync.
+                            apply_turn(&mut mapper, "", &result);
+                            state.graph_gen = state.graph_gen.wrapping_add(1);
+                            // Select and recenter on the current room if it changed.
+                            if let Some(snap) = &result.location {
+                                let rid = snap.number as mapper::graph::RoomId;
+                                state.select_room(Some(rid));
+                                if let Some(room) = mapper.graph.room(rid) {
+                                    if let Some(pos) = room.pos {
+                                        let (pw, ph) = map_pane_dims(last_panes.map);
+                                        state.recenter_on(pos, pw, ph);
+                                    }
+                                }
+                            }
+                            if result.quit {
+                                break;
+                            }
+                        }
+                        continue;
                     }
                 }
             }
@@ -2472,6 +2517,27 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
         .saturating_sub(pane_rows) as u16
 }
 
+// ── Char-input mode helpers ────────────────────────────────────────────────────
+
+/// Map a keyboard event to a ZSCII byte for `read_char` input.
+///
+/// Returns:
+/// - `Enter`        → 13
+/// - `Backspace`    → 8
+/// - `Esc`          → 27
+/// - `Char(c)` where c is ASCII → `c as u8`
+/// - Any other key (non-ASCII Char, arrow keys, etc.) → `None`
+pub(crate) fn key_to_zscii(key: crossterm::event::KeyEvent) -> Option<u8> {
+    use crossterm::event::KeyCode;
+    match key.code {
+        KeyCode::Enter     => Some(13),
+        KeyCode::Backspace => Some(8),
+        KeyCode::Esc       => Some(27),
+        KeyCode::Char(c) if c.is_ascii() => Some(c as u8),
+        _ => None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2480,7 +2546,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_bar, hint_key_routes, is_slash, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
+    use super::{dim_area, hint_bar, hint_key_routes, is_slash, key_to_zscii, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
@@ -3145,5 +3211,101 @@ mod tests {
         assert_eq!(focus, 1);
         let act = launch_dialog_key_focused(KeyCode::Enter, focus);
         assert!(matches!(act, LaunchDialogAction::NewGame));
+    }
+
+    // ── key_to_zscii tests ────────────────────────────────────────────────────
+
+    fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent {
+            code,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn key_to_zscii_enter_is_13() {
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Enter)), Some(13));
+    }
+
+    #[test]
+    fn key_to_zscii_backspace_is_8() {
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Backspace)), Some(8));
+    }
+
+    #[test]
+    fn key_to_zscii_esc_is_27() {
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Esc)), Some(27));
+    }
+
+    #[test]
+    fn key_to_zscii_ascii_char_y_is_121() {
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Char('y'))), Some(121));
+    }
+
+    #[test]
+    fn key_to_zscii_non_ascii_char_returns_none() {
+        // U+00E9 'é' is not ASCII
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Char('\u{00E9}'))), None);
+    }
+
+    #[test]
+    fn key_to_zscii_arrow_key_returns_none() {
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Up)), None);
+        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Down)), None);
+    }
+
+    // ── char-mode gate predicate test ─────────────────────────────────────────
+
+    /// The gate fires iff: char_mode && !any_overlay_open && key != prefix.
+    /// Test with a default AppState (no overlays, no char_mode initially).
+    #[test]
+    fn char_mode_gate_predicate() {
+        use app::state::AppState;
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+        let mut s = AppState::default();
+        // char_mode false → gate should not fire.
+        assert!(!s.char_mode, "default state is not char_mode");
+        assert!(!s.any_overlay_open(), "default state has no overlay");
+
+        // Simulate char_mode = true (as the run loop sets it from pending_input).
+        s.char_mode = true;
+
+        // A plain 'y' key: gate should accept it (not prefix, not overlay).
+        let y_key = KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let spec = app::keymap::KeySpec::from_key_event(y_key);
+        let is_prefix = spec == s.hotkeys.prefix;
+        assert!(!is_prefix, "'y' must not be the default prefix (Ctrl+K)");
+        assert!(s.char_mode && !s.any_overlay_open() && !is_prefix,
+            "char_mode gate should fire for 'y' with no overlays");
+        assert_eq!(key_to_zscii(y_key), Some(b'y'), "'y' should map to ZSCII 121");
+
+        // Ctrl+K (the default prefix): gate must NOT fire for it (falls through
+        // to normal routing so the hotkey dialog still opens).
+        let ctrlk = KeyEvent {
+            code: KeyCode::Char('k'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let spec_k = app::keymap::KeySpec::from_key_event(ctrlk);
+        let is_prefix_k = spec_k == s.hotkeys.prefix;
+        assert!(is_prefix_k, "Ctrl+K must match the default prefix");
+        // Gate condition: char_mode && !overlay && !is_prefix → false because is_prefix = true.
+        assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_k),
+            "char_mode gate must NOT fire for the prefix key Ctrl+K");
+
+        // If an overlay is open, the gate must not fire.
+        s.hotkey_dialog = true;
+        assert!(s.any_overlay_open(), "hotkey_dialog open => overlay open");
+        assert!(!(s.char_mode && !s.any_overlay_open()),
+            "char_mode gate must not fire when overlay is open");
     }
 }
