@@ -904,6 +904,28 @@ impl Machine {
                 }
                 StepResult::Continue
             }
+            // VAR:0x1E print_table — print a rectangle of ZSCII text from the current cursor (ZMSD §15).
+            0x1E => {
+                let mut addr = ops.first().copied().unwrap_or(0) as u32;
+                let width = ops.get(1).copied().unwrap_or(0);
+                let height = ops.get(2).copied().unwrap_or(1).max(1);
+                let skip = ops.get(3).copied().unwrap_or(0) as u32;
+                let start_col = self.screen.cursor_col;
+                let start_row = self.screen.cursor_row;
+                for row in 0..height {
+                    // Position each row at the starting column, one line down (correct once the grid exists).
+                    self.screen.cursor_row = start_row + row;
+                    self.screen.cursor_col = start_col;
+                    for _ in 0..width {
+                        let ch = zscii_to_char(self.mem.read_byte(addr) as u16);
+                        let mut buf = [0u8; 4];
+                        self.print_text(ch.encode_utf8(&mut buf));
+                        addr += 1;
+                    }
+                    addr += skip;
+                }
+                StepResult::Continue
+            }
             // Unknown / unimplemented VAR — no-op seam (screen/text ops in Tasks 11–12)
             _ => StepResult::Continue,
         }
@@ -3406,5 +3428,24 @@ pub(crate) mod tests {
         m.exec_var(0x10, &[0x0200], None, None); // array at 0x0200
         assert_eq!(m.mem.read_word(0x0200), 3, "word 0 = row");
         assert_eq!(m.mem.read_word(0x0202), 7, "word 1 = col");
+    }
+
+    // print_table (VAR:0x1E)
+    fn captured_output(m: &Machine) -> String {
+        m.buffer_output().expect("default sink is BufferOutput").buf.clone()
+    }
+
+    #[test]
+    fn print_table_emits_each_row_chars() {
+        let mut m = build_test_machine(&[]);
+        // 2x2 region of ASCII at 0x0200: "AB" / "CD"
+        m.mem.write_byte(0x0200, b'A');
+        m.mem.write_byte(0x0201, b'B');
+        m.mem.write_byte(0x0202, b'C');
+        m.mem.write_byte(0x0203, b'D');
+        m.exec_var(0x1E, &[0x0200, 2, 2, 0], None, None); // width 2, height 2, skip 0
+        let out = captured_output(&m);
+        assert!(out.contains('A') && out.contains('B') && out.contains('C') && out.contains('D'),
+            "all rectangle characters are printed");
     }
 }
