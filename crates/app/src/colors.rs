@@ -13,8 +13,27 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
+use regex::Regex;
 
 use crate::render::paneframe::BorderStyle;
+
+/// A compiled user transcript-styling rule: a regex matched whole-line against
+/// Story text, plus the `Style` patched over the base `transcript` style on a
+/// match. `PartialEq` compares the source `pattern` and `style` only — the
+/// compiled `Regex` has no `PartialEq`, and two rules with the same pattern are
+/// equal by construction.
+#[derive(Debug, Clone)]
+pub struct CompiledRule {
+    pub pattern: String,
+    pub regex: Regex,
+    pub style: Style,
+}
+
+impl PartialEq for CompiledRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.style == other.style
+    }
+}
 
 // ── Built-in theme texts ──────────────────────────────────────────────────────
 
@@ -208,6 +227,20 @@ pub struct ColorScheme {
     pub sound_beep_low: Style,
     /// Room-detection-method indicator (map corner).
     pub loc_indicator: Style,
+    /// Player input echo text.
+    pub transcript_input: Style,
+    /// Meta (app/slash) text.
+    pub transcript_meta: Style,
+    /// VM warning text.
+    pub transcript_warning: Style,
+    /// Built-in story rule: room-name / location header line.
+    pub transcript_location: Style,
+    /// Built-in story rule: bracketed system line.
+    pub transcript_system: Style,
+    /// Gutter marker style for warning lines.
+    pub warning_marker: Style,
+    /// Compiled user story-styling rules, in evaluation order.
+    pub transcript_rules: Vec<CompiledRule>,
 }
 
 impl ColorScheme {
@@ -263,6 +296,13 @@ impl ColorScheme {
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             loc_indicator: Style::new().fg(Color::DarkGray),
+            transcript_input: Style::new().fg(Color::Cyan),
+            transcript_meta: Style::new().fg(Color::DarkGray),
+            transcript_warning: Style::new().fg(Color::Yellow),
+            transcript_location: Style::new().add_modifier(Modifier::BOLD),
+            transcript_system: Style::new().fg(Color::DarkGray),
+            warning_marker: Style::new().fg(Color::Yellow),
+            transcript_rules: Vec::new(),
         }
     }
 
@@ -392,6 +432,13 @@ impl ColorScheme {
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             loc_indicator: Style::new().fg(scheme.palette[8]),
+            transcript_input: Style::new().fg(scheme.palette[6]),
+            transcript_meta: Style::new().fg(scheme.palette[8]),
+            transcript_warning: Style::new().fg(scheme.palette[3]),
+            transcript_location: Style::new().add_modifier(Modifier::BOLD),
+            transcript_system: Style::new().fg(scheme.palette[8]),
+            warning_marker: Style::new().fg(scheme.palette[3]),
+            transcript_rules: Vec::new(),
         }
     }
 
@@ -596,6 +643,26 @@ pub fn parse_named_color(s: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_default_transcript_category_styles() {
+        let cs = ColorScheme::terminal_default();
+        assert_eq!(cs.transcript_input.fg, Some(Color::Cyan));
+        assert_eq!(cs.transcript_meta.fg, Some(Color::DarkGray));
+        assert_eq!(cs.transcript_warning.fg, Some(Color::Yellow));
+        assert!(cs.transcript_location.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(cs.transcript_location.fg, None); // bold-only, inherits base fg
+        assert_eq!(cs.transcript_system.fg, Some(Color::DarkGray));
+        assert_eq!(cs.warning_marker.fg, Some(Color::Yellow));
+        assert!(cs.transcript_rules.is_empty());
+    }
+
+    #[test]
+    fn compiled_rule_eq_ignores_regex_object() {
+        let a = CompiledRule { pattern: "^>".into(), regex: regex::Regex::new("^>").unwrap(), style: Style::new().fg(Color::Red) };
+        let b = CompiledRule { pattern: "^>".into(), regex: regex::Regex::new("^>").unwrap(), style: Style::new().fg(Color::Red) };
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn parse_color_value_accepts_named_colors() {
