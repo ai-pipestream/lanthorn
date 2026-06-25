@@ -98,66 +98,89 @@ fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
 
 // ── Hint bar ─────────────────────────────────────────────────────────────────
 
-use app::keymap::{Command, Context, KeyMap};
+use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
 
-/// Curated per-context shortlists for the bottom hint bar.
-/// Each element is (Command, short label override).
-const GAME_HINTS: &[(Command, &str)] = &[
-    (Command::ToggleFocus, "map"),
-    (Command::SaveGame, "save"),
-    (Command::RestoreGame, "restore"),
-    (Command::CycleLayout, "layout"),
-    (Command::Retidy, "tidy"),
-    (Command::AnimateTidy, "animate"),
+/// Priority-ordered command lists for the bottom hint bar.
+/// Commands are included only when directly available in the current context.
+/// Command::Retidy is intentionally excluded from all lists.
+const GAME_HINTS: &[Command] = &[
+    Command::ToggleFocus,
+    Command::SaveGame,
+    Command::RestoreGame,
+    Command::CycleLayout,
+    Command::AnimateTidy,
 ];
 
-const MAP_HINTS: &[(Command, &str)] = &[
-    (Command::ToggleFocus, "story"),
-    (Command::CycleLayout, "layout"),
-    (Command::ZoomIn, "zoom+"),
-    (Command::Recenter, "center"),
-    (Command::SelectNext, "next"),
-    (Command::Retidy, "tidy"),
-    (Command::OpenGallery, "gallery"),
-    (Command::ToggleInspector, "inspect"),
+const MAP_HINTS: &[Command] = &[
+    Command::ToggleFocus,
+    Command::CycleLayout,
+    Command::ZoomIn,
+    Command::Recenter,
+    Command::SelectNext,
+    Command::OpenGallery,
+    Command::ToggleInspector,
 ];
 
-const ANIM_HINTS: &[(Command, &str)] = &[
-    (Command::AnimStepFwd, "step"),
-    (Command::AnimTogglePlay, "play/pause"),
-    (Command::AnimExit, "exit"),
-    (Command::PanLeft, "pan"),
-    (Command::ZoomIn, "zoom"),
+const ANIM_HINTS: &[Command] = &[
+    Command::AnimStepFwd,
+    Command::AnimTogglePlay,
+    Command::AnimExit,
+    Command::PanLeft,
+    Command::ZoomIn,
 ];
 
-/// Build the hint bar string for the given context from the keymap.
-/// Each entry renders as "KEY: label"; entries are joined with " | ".
-pub fn hint_line(keymap: &KeyMap, ctx: Context) -> String {
-    let hints: &[(Command, &str)] = match ctx {
-        Context::Global => MAP_HINTS, // not used directly, but safe fallback
-        Context::Map => MAP_HINTS,
-        Context::Anim => ANIM_HINTS,
-    };
-    // We also have a game-focus path — the caller selects the right context.
-    let _ = GAME_HINTS; // suppress unused; caller picks via game_hint_line
-    hints
+/// Build the hint bar string for the given context from the live keymap and layout.
+///
+/// For each command in `priority`, an entry is included only if all three hold:
+/// 1. `layout.is_direct(cmd)` — the command is directly available, not dialog-only.
+/// 2. `keymap.primary_key(cmd)` returns a KeySpec `k`.
+/// 3. `keymap.lookup(&k, ctx) == Some(cmd)` — pressing `k` in `ctx` resolves to `cmd`.
+///
+/// Each surviving entry renders as "{k.label()}: {cmd.label()}"; entries join with " | ".
+/// If the joined string exceeds `width` characters, it is truncated and "…" appended.
+pub fn hint_bar(
+    keymap: &KeyMap,
+    layout: &HotkeyLayout,
+    ctx: Context,
+    priority: &[Command],
+    width: usize,
+) -> String {
+    let entries: Vec<String> = priority
         .iter()
-        .filter_map(|(cmd, lbl)| {
-            keymap.primary_key(*cmd).map(|k| format!("{}: {}", k.label(), lbl))
+        .filter_map(|&cmd| {
+            // Gate 1: command must be directly available (not dialog-only).
+            if !layout.is_direct(cmd) {
+                return None;
+            }
+            // Gate 2: command must have a primary key binding.
+            let k = keymap.primary_key(cmd)?;
+            // Gate 3: pressing that key in this context must resolve back to this command.
+            if keymap.lookup(&k, ctx) != Some(cmd) {
+                return None;
+            }
+            Some(format!("{}: {}", k.label(), cmd.label()))
         })
-        .collect::<Vec<_>>()
-        .join(" | ")
-}
+        .collect();
 
-/// Hint line for game focus.
-pub fn hint_line_game(keymap: &KeyMap) -> String {
-    GAME_HINTS
-        .iter()
-        .filter_map(|(cmd, lbl)| {
-            keymap.primary_key(*cmd).map(|k| format!("{}: {}", k.label(), lbl))
-        })
-        .collect::<Vec<_>>()
-        .join(" | ")
+    let joined = entries.join(" | ");
+
+    // Truncate to width (char-count aware), appending "…" if needed.
+    if width == 0 {
+        return String::new();
+    }
+    let char_count = joined.chars().count();
+    if char_count <= width {
+        joined
+    } else {
+        // Find the byte offset after (width - 1) chars to leave room for "…".
+        let truncate_at = width.saturating_sub(1);
+        let byte_pos = joined
+            .char_indices()
+            .nth(truncate_at)
+            .map(|(i, _)| i)
+            .unwrap_or(joined.len());
+        format!("{}…", &joined[..byte_pos])
+    }
 }
 
 // ── Draw helper ───────────────────────────────────────────────────────────────
@@ -379,15 +402,16 @@ fn draw_frame(
         } else if let Some(anim) = &state.tidy_anim {
             // Playback status: stage progress + the transport controls.
             let f = anim.current();
-            let hints = hint_line(&state.keymap, Context::Anim);
-            format!(
-                "Tidy [{}/{}] {}{} | {}",
+            let prefix = format!(
+                "Tidy [{}/{}] {}{}",
                 anim.idx + 1,
                 anim.frames.len(),
                 f.label,
                 if anim.playing { " \u{25b6}" } else { "" },
-                hints,
-            )
+            );
+            let hint_width = (help_row.width as usize).saturating_sub(prefix.chars().count() + 3);
+            let hints = hint_bar(&state.keymap, &state.hotkeys, Context::Anim, ANIM_HINTS, hint_width);
+            format!("{} | {}", prefix, hints)
         } else if let Some(prompt) = &state.prompt {
             // Show prompt label with instructions when a prompt is active.
             let label = match &prompt.kind {
@@ -402,9 +426,10 @@ fn draw_frame(
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
+            let w = help_row.width as usize;
             match state.focus {
-                Focus::Game => hint_line_game(&state.keymap),
-                Focus::Map => hint_line(&state.keymap, Context::Map),
+                Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
+                Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),
             }
         };
         // Fill help row with reversed style, then draw text.
@@ -2123,8 +2148,9 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_line, hint_line_game, is_slash, launch_dialog_key, quit_dialog_key, reset_dialog_key, scroll_for_match, should_prompt_save_on_quit, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
-    use app::keymap::{Context, KeyMap};
+    use super::{dim_area, hint_bar, is_slash, launch_dialog_key, quit_dialog_key, reset_dialog_key, scroll_for_match, should_prompt_save_on_quit, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
+    use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
+    use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
 
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
@@ -2198,22 +2224,24 @@ mod tests {
         );
     }
 
-    // ── hint_line ──────────────────────────────────────────────────────────────
+    // ── hint_bar ───────────────────────────────────────────────────────────────
 
     #[test]
     fn hint_line_map_contains_zoom_with_plus_key() {
         let km = KeyMap::default();
-        let line = hint_line(&km, Context::Map);
-        // With default keymap: ZoomIn primary key is '+', label is "zoom+"
-        assert!(line.contains("+: zoom+"), "expected '+: zoom+' in '{line}'");
+        let layout = HotkeyLayout::default();
+        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        // With default keymap: ZoomIn primary key is '+', label from Command::label() is "zoom in"
+        assert!(line.contains("+: zoom in"), "expected '+: zoom in' in '{line}'");
     }
 
     #[test]
     fn hint_line_game_contains_save_game() {
         let km = KeyMap::default();
-        let line = hint_line_game(&km);
-        // Ctrl+S → SaveGame; label is "save"
-        assert!(line.contains("Ctrl+S: save"), "expected 'Ctrl+S: save' in '{line}'");
+        let layout = HotkeyLayout::default();
+        let line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
+        // Ctrl+S → SaveGame; label from Command::label() is "save game"
+        assert!(line.contains("Ctrl+S: save game"), "expected 'Ctrl+S: save game' in '{line}'");
     }
 
     // ── Hotkey dialog tests ───────────────────────────────────────────────────
@@ -2281,11 +2309,133 @@ mod tests {
         let mut cfg = app::config::KeymapConfig::default();
         cfg.overrides.insert("zoom_in".into(), "z".into());
         let (km, _) = KeyMap::resolve(&cfg);
-        let line = hint_line(&km, Context::Map);
-        // After rebinding, 'z' is the primary key for ZoomIn
-        assert!(line.contains("Z: zoom+"), "expected 'Z: zoom+' in '{line}'");
+        let layout = HotkeyLayout::default();
+        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        // After rebinding, 'z' is the primary key for ZoomIn; label is "zoom in"
+        assert!(line.contains("Z: zoom in"), "expected 'Z: zoom in' in '{line}'");
         // The old '+' key should NOT appear as the primary
-        assert!(!line.contains("+: zoom+"), "old binding should not be primary");
+        assert!(!line.contains("+: zoom in"), "old binding should not be primary");
+    }
+
+    // ── hint_bar invariant: no dead keys, no tidy, is_direct gating, truncation ─
+
+    #[test]
+    fn hint_bar_never_contains_tidy() {
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        let map_line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        let game_line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
+        assert!(
+            !map_line.to_lowercase().contains("tidy") && !map_line.to_lowercase().contains("retidy"),
+            "map hint bar must not contain tidy/retidy; got: '{map_line}'"
+        );
+        assert!(
+            !game_line.to_lowercase().contains("tidy") && !game_line.to_lowercase().contains("retidy"),
+            "game hint bar must not contain tidy/retidy; got: '{game_line}'"
+        );
+    }
+
+    #[test]
+    fn hint_bar_no_dead_keys_all_entries_resolve_back() {
+        // Every entry shown must pass the round-trip check: lookup(primary_key(cmd), ctx) == Some(cmd).
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        for (ctx, hints) in [
+            (Context::Map, MAP_HINTS),
+            (Context::Global, GAME_HINTS),
+            (Context::Anim, ANIM_HINTS),
+        ] {
+            for &cmd in hints {
+                if !layout.is_direct(cmd) {
+                    continue;
+                }
+                if let Some(k) = km.primary_key(cmd) {
+                    let resolved = km.lookup(&k, ctx);
+                    if resolved == Some(cmd) {
+                        // This entry would be shown — verify label format.
+                        let entry = format!("{}: {}", k.label(), cmd.label());
+                        let bar = hint_bar(&km, &layout, ctx, hints, 200);
+                        assert!(
+                            bar.contains(&entry),
+                            "bar for {ctx:?} should contain '{entry}'; got: '{bar}'"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hint_bar_drops_non_direct_command() {
+        use std::collections::HashSet;
+        // Build a layout where ZoomIn is NOT direct (dialog-only), but ToggleFocus IS.
+        let mut direct: HashSet<Command> = HashSet::new();
+        direct.insert(Command::ToggleFocus);
+        direct.insert(Command::Recenter);
+        direct.insert(Command::SelectNext);
+        // ZoomIn intentionally NOT in direct set.
+        let layout = HotkeyLayout {
+            prefix: "ctrl+k".parse().unwrap(),
+            direct,
+            groups: vec![],
+        };
+        let km = KeyMap::default();
+        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        assert!(
+            !bar.contains("zoom in"),
+            "ZoomIn should be absent when not direct; got: '{bar}'"
+        );
+        // ToggleFocus IS direct, so it should appear.
+        assert!(
+            bar.contains("focus"),
+            "ToggleFocus should still appear when direct; got: '{bar}'"
+        );
+    }
+
+    #[test]
+    fn hint_bar_truncates_at_width() {
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        // Use a very narrow width (10 chars) — the full bar is much longer.
+        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 10);
+        let char_count = bar.chars().count();
+        assert!(
+            char_count <= 10,
+            "bar must not exceed width=10; got {char_count} chars: '{bar}'"
+        );
+        assert!(
+            bar.ends_with('…'),
+            "truncated bar must end with ellipsis; got: '{bar}'"
+        );
+    }
+
+    #[test]
+    fn hint_bar_no_truncation_when_wide_enough() {
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        // Use a very generous width — no truncation expected.
+        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 1000);
+        assert!(
+            !bar.ends_with('…'),
+            "bar should not be truncated at width=1000; got: '{bar}'"
+        );
+    }
+
+    #[test]
+    fn hint_bar_labels_come_from_command_label() {
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        // Command::ZoomIn.label() == "zoom in" (not the old "zoom+")
+        assert!(
+            bar.contains("zoom in"),
+            "label must come from Command::label(); expected 'zoom in', got: '{bar}'"
+        );
+        // Command::ToggleFocus.label() == "focus"
+        assert!(
+            bar.contains("focus"),
+            "ToggleFocus label should be 'focus'; got: '{bar}'"
+        );
     }
 
     // ── dim_area ──────────────────────────────────────────────────────────────
