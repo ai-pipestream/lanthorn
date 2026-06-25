@@ -460,9 +460,12 @@ fn render_middle(
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
+    let visible_indices = state.visible_transcript_indices();
+    let filtered_lines: Vec<String> = visible_indices.iter().map(|&i| state.transcript[i].clone()).collect();
+    let filtered_kinds: Vec<TranscriptKind> = visible_indices.iter().map(|&i| state.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story)).collect();
     let lines = visible_wrapped_lines_kinded(
-        &state.transcript,
-        &state.transcript_kinds,
+        &filtered_lines,
+        &filtered_kinds,
         transcript_rows,
         state.transcript_scroll,
         area.width,

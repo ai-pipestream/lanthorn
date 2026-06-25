@@ -98,6 +98,20 @@ pub enum TranscriptKind {
     Meta,
 }
 
+// ── Transcript filter ─────────────────────────────────────────────────────────
+
+/// Which categories of transcript entries are currently visible.
+///
+/// `Both` (the default) shows all entries. `Story` shows only game output.
+/// `Meta` shows only app-generated output (slash commands, /help, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TranscriptFilter {
+    #[default]
+    Both,
+    Story,
+    Meta,
+}
+
 // ── Tidy animation ────────────────────────────────────────────────────────────
 
 /// One captured stage of the tidy pipeline, held for playback. `graph` is a clone
@@ -447,6 +461,8 @@ pub struct AppState {
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
+    /// Which categories of transcript entries are currently visible.
+    pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
     pub input: String,
     // Reserved for future status-bar messages (not yet displayed).
@@ -590,6 +606,7 @@ impl Default for AppState {
             selected_room: None,
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
+            transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
             input: String::new(),
             status: String::new(),
@@ -741,6 +758,23 @@ impl AppState {
         self.char_pan = (0, 0);
     }
 
+    /// Return the indices (into `self.transcript`) of entries that pass the active
+    /// `transcript_filter`, in order. `Both` returns all indices; `Story`/`Meta`
+    /// return only indices whose kind matches. Defensively tolerates any length
+    /// mismatch between `transcript` and `transcript_kinds` by defaulting to `Story`.
+    pub fn visible_transcript_indices(&self) -> Vec<usize> {
+        (0..self.transcript.len())
+            .filter(|&i| {
+                let kind = self.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
+                match self.transcript_filter {
+                    TranscriptFilter::Both => true,
+                    TranscriptFilter::Story => kind == TranscriptKind::Story,
+                    TranscriptFilter::Meta => kind == TranscriptKind::Meta,
+                }
+            })
+            .collect()
+    }
+
     /// Split `text` on `'\n'` and append each line to the transcript, tagged as `Story`.
     pub fn push_transcript(&mut self, text: &str) {
         self.push_transcript_kind(text, TranscriptKind::Story);
@@ -801,6 +835,20 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_transcript_indices_respects_filter() {
+        let mut s = AppState::default();
+        s.push_transcript("story0");
+        s.push_transcript_kind("meta1", TranscriptKind::Meta);
+        s.push_transcript("story2");
+        s.transcript_filter = TranscriptFilter::Both;
+        assert_eq!(s.visible_transcript_indices(), vec![0, 1, 2]);
+        s.transcript_filter = TranscriptFilter::Story;
+        assert_eq!(s.visible_transcript_indices(), vec![0, 2]);
+        s.transcript_filter = TranscriptFilter::Meta;
+        assert_eq!(s.visible_transcript_indices(), vec![1]);
+    }
 
     #[test]
     fn transcript_tags_story_and_meta() {
