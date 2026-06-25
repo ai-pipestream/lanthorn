@@ -937,9 +937,20 @@ impl Machine {
                 StepResult::Continue
             }
             // 0x0E erase_line — erase from cursor to end of line in the upper window.
-            // Recognized here; the actual grid erase is implemented with the upper-window
-            // grid in the cursor-screen-model pass. No-op until then.
-            0x0E => StepResult::Continue,
+            0x0E => {
+                let value = ops.first().copied().unwrap_or(0);
+                if value == 1 {
+                    let (row, start) = (self.screen.cursor_row, self.screen.cursor_col);
+                    let cols = self.screen.upper.cols;
+                    let style = self.screen.text_style;
+                    let mut c = start;
+                    while c <= cols {
+                        self.screen.upper.put(row, c, ' ', style);
+                        c += 1;
+                    }
+                }
+                StepResult::Continue
+            }
             // Unknown / unimplemented VAR opcode: warn once, then ignore.
             _ => {
                 if self.warned_var_opcodes.insert(opcode) {
@@ -3512,6 +3523,22 @@ pub(crate) mod tests {
         // so it is NOT recorded as a warned opcode.
         assert!(!m.warned_var_opcodes.contains(&0x0E),
             "erase_line is a recognized arm, not an unimplemented fallthrough");
+    }
+
+    #[test]
+    fn erase_line_clears_to_end_of_row_in_upper() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None); // split 1 row, 5 cols
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1; m.screen.cursor_col = 1;
+        m.print_text("ABCDE");
+        // move cursor back to col 3 and erase to end of line
+        m.screen.cursor_row = 1; m.screen.cursor_col = 3;
+        m.exec_var(0x0E, &[1], None, None);
+        assert_eq!(m.screen.upper.cell(1, 2).ch, 'B', "before cursor untouched");
+        assert_eq!(m.screen.upper.cell(1, 3).ch, ' ', "from cursor cleared");
+        assert_eq!(m.screen.upper.cell(1, 5).ch, ' ', "to end of line cleared");
     }
 
     #[test]
