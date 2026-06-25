@@ -75,20 +75,15 @@ back. No existing typing behavior changes.
 | launch_dialog | `Resume`, `New game` | Resume | new game (Esc) | add focus + underline | `main.rs` `launch_dialog_key` |
 | hints | `Close` | Enter = submit hint input | close | text input; Close is the only button | `main.rs` `hint_key_routes` |
 
-## Open decision (for your review)
+## Resolved decision
 
 **Text prompts** (rename room, edit notes, relabel, rename layer, save-as,
-export-save-name, confirm-delete) are one-line editors rendered as a small inline
-field with no button row today.
-
-- **Option A (recommended):** keep them minimal — field + `Enter` submit + `Esc`
-  cancel, no button row. A one-line editor's confirm-on-Enter is universal; adding
-  an OK/Cancel button row to a single field is visual noise.
-- **Option B:** add an `OK` / `Cancel` button row beneath the field for strict
-  visual consistency with the other modals.
-
-I lean A. `ConfirmDeleteSave` is the one prompt that is a true yes/no — it could
-get `Delete` / `Cancel` buttons regardless of the choice above.
+export-save-name, confirm-delete) stay **minimal** — a one-line field with `Enter`
+submit and `Esc` cancel, no button row (**Option A**). A one-line editor's
+confirm-on-Enter is universal; an OK/Cancel row on a single field is visual noise.
+`ConfirmDeleteSave` follows the same rule: `Enter` confirms the delete, `Esc`
+cancels. Prompts are therefore the deliberate exception to the "every modal has a
+button row" rule.
 
 ## Error handling
 
