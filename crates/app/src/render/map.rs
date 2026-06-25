@@ -67,6 +67,40 @@ pub fn pulse_border_color(elapsed: std::time::Duration) -> Color {
     )
 }
 
+/// Duration of the one-shot story-border flash for a `sound_effect` bleep.
+pub const SOUND_PULSE_MS: u64 = 500;
+
+/// Extract RGB channels from a `Color`, or `None` for non-RGB colors
+/// (named/indexed/Reset have no fixed RGB to interpolate toward).
+fn rgb_of(c: Color) -> Option<(u8, u8, u8)> {
+    if let Color::Rgb(r, g, b) = c {
+        Some((r, g, b))
+    } else {
+        None
+    }
+}
+
+/// One-shot fade for a sound bleep: full `beep` color at `elapsed == 0`, lerping
+/// toward `normal` as `elapsed` approaches `SOUND_PULSE_MS`. Returns `None` once
+/// the window has elapsed (the caller then clears the pulse and the border
+/// renders normally). When `normal` is not an RGB color (e.g. a terminal/named
+/// border color), fade toward a dimmed copy of the beep color instead.
+pub fn sound_pulse_color(
+    beep: Color,
+    normal: Color,
+    elapsed: std::time::Duration,
+) -> Option<Color> {
+    let ms = elapsed.as_millis() as u64;
+    if ms >= SOUND_PULSE_MS {
+        return None;
+    }
+    let (br, bg, bb) = rgb_of(beep).unwrap_or((255, 180, 40));
+    let (nr, ng, nb) = rgb_of(normal).unwrap_or((br / 4, bg / 4, bb / 4));
+    let f = ms as f64 / SOUND_PULSE_MS as f64; // 0.0 -> 1.0 across the window
+    let lerp = |a: u8, b: u8| (a as f64 + (b as f64 - a as f64) * f).round() as u8;
+    Some(Color::Rgb(lerp(br, nr), lerp(bg, ng), lerp(bb, nb)))
+}
+
 // ── Step sizes and box dimensions ─────────────────────────────────────────────
 
 /// Returns (step_w, step_h) for the given zoom level.
@@ -4299,6 +4333,48 @@ mod tests {
             assert_ne!(idle_cell_fg, active_cell_fg,
                 "rendered border cell fg must differ when tidy_job is active");
         }).unwrap();
+    }
+
+    // ── sound_pulse_color ──────────────────────────────────────────────────────
+
+    #[test]
+    fn sound_pulse_full_color_at_start() {
+        let beep = Color::Rgb(255, 180, 40);
+        let normal = Color::Rgb(0, 0, 0);
+        let c = sound_pulse_color(beep, normal, std::time::Duration::from_millis(0));
+        assert_eq!(c, Some(Color::Rgb(255, 180, 40)), "elapsed 0 => full beep color");
+    }
+
+    #[test]
+    fn sound_pulse_fades_toward_normal_partway() {
+        let beep = Color::Rgb(200, 0, 0);
+        let normal = Color::Rgb(0, 0, 0);
+        // Halfway through the window: roughly the midpoint between beep and normal.
+        let c = sound_pulse_color(beep, normal, std::time::Duration::from_millis(SOUND_PULSE_MS / 2));
+        match c {
+            Some(Color::Rgb(r, _, _)) => assert!((90..=110).contains(&r), "expected ~100, got {r}"),
+            other => panic!("expected an Rgb mid-fade color, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sound_pulse_expires_after_window() {
+        let beep = Color::Rgb(255, 180, 40);
+        let normal = Color::Rgb(0, 0, 0);
+        let c = sound_pulse_color(beep, normal, std::time::Duration::from_millis(SOUND_PULSE_MS));
+        assert_eq!(c, None, "at/after the window the pulse is over");
+    }
+
+    #[test]
+    fn sound_pulse_non_rgb_normal_fades_toward_dim_beep() {
+        // When the border color is a named/terminal color (no RGB), fade toward a
+        // dimmed copy of the beep color instead (spec fallback).
+        let beep = Color::Rgb(200, 200, 200);
+        let c = sound_pulse_color(beep, Color::Reset, std::time::Duration::from_millis(SOUND_PULSE_MS - 1));
+        match c {
+            Some(Color::Rgb(r, _, _)) => assert!(r < 200, "must fade below full beep, got {r}"),
+            other => panic!("expected an Rgb color, got {other:?}"),
+        }
     }
 
     // ── Fix 1: render_map_layered layer-strip suppression ─────────────────────
