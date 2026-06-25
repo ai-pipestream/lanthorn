@@ -22,7 +22,7 @@ use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action, ApplyTidyOutcome};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
-use app::render::dialog::DialogRects;
+use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
 use app::render::hotkeys::draw_hotkey_dialog;
@@ -229,7 +229,12 @@ fn draw_frame(
                 let active_layer = state.active_layer(graph);
                 let frame = draw_pane_frame(buf, main_area, state.colors.map_border_style, state.colors.map_border);
                 render_map_layered(&rm, &mapper.graph, state, frame.content, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), frame.content, buf); }
+                if let Some(anim) = &state.tidy_anim {
+                    let tidy_ds = make_dialog_style(state);
+                    if let Some(dr) = draw_tidy_panel(anim.current(), frame.content, buf, &tidy_ds) {
+                        dialog_rects_out = Some(dr);
+                    }
+                }
                 map_area = frame.content;
                 story_area = Rect::default();
                 // Overlay layer tabs
@@ -264,7 +269,12 @@ fn draw_frame(
 
                 let map_frame = draw_pane_frame(buf, chunks[1], state.colors.map_border_style, state.colors.map_border);
                 render_map_layered(&rm, &mapper.graph, state, map_frame.content, buf);
-                if let Some(anim) = &state.tidy_anim { draw_tidy_panel(anim.current(), map_frame.content, buf); }
+                if let Some(anim) = &state.tidy_anim {
+                    let tidy_ds = make_dialog_style(state);
+                    if let Some(dr) = draw_tidy_panel(anim.current(), map_frame.content, buf, &tidy_ds) {
+                        dialog_rects_out = Some(dr);
+                    }
+                }
                 map_area = map_frame.content;
                 // Overlay layer tabs
                 {
@@ -314,6 +324,7 @@ fn draw_frame(
                     Some(anim) => &anim.current().graph,
                     None => &mapper.graph,
                 };
+                let panel_ds = make_dialog_style(state);
                 match panel.mode {
                     RoomPanelMode::Info => {
                         let current_room = graph.current();
@@ -322,11 +333,15 @@ fn draw_frame(
                         } else {
                             None
                         };
-                        draw_room_info(graph, mem, panel.id, current_room, map_area, buf);
+                        if let Some(dr) = draw_room_info(graph, mem, panel.id, current_room, map_area, buf, &panel_ds) {
+                            dialog_rects_out = Some(dr);
+                        }
                     }
                     RoomPanelMode::Diagnostics => {
                         if let Some(diag) = room_diagnostics(graph, panel.id) {
-                            draw_inspector(&diag, map_area, buf);
+                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds) {
+                                dialog_rects_out = Some(dr);
+                            }
                         }
                     }
                 }
@@ -1403,6 +1418,25 @@ fn map_pane_dims(area: Rect) -> (u16, u16) {
     let w = if area.width == 0 { 80 } else { area.width };
     let h = if area.height == 0 { 24 } else { area.height };
     (w, h)
+}
+
+/// Build a `DialogStyle` from the current app colors.
+/// Uses `BorderStyle::Single` as a fallback when `dialog_box_style` is `None`.
+fn make_dialog_style(state: &AppState) -> DialogStyle {
+    use app::render::paneframe::BorderStyle;
+    let box_style = match state.colors.dialog_box_style {
+        BorderStyle::None => BorderStyle::Single,
+        other => other,
+    };
+    DialogStyle {
+        frame: state.colors.dialog,
+        box_style,
+        title: state.colors.dialog_title,
+        button: state.colors.dialog_button,
+        button_active: state.colors.dialog_button_active,
+        shadow: state.colors.dialog_shadow,
+        shadow_on: state.colors.dialog_shadow_on,
+    }
 }
 
 /// Apply `Modifier::DIM` to every cell in `area` of `buf`.

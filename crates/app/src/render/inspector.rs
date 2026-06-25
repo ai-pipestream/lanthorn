@@ -12,8 +12,9 @@ use mapper::graph::{MapGraph, RoomId};
 use mapper::direction::Direction;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
+use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
 
 // ── Data ──────────────────────────────────────────────────────────────────────
@@ -80,10 +81,12 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
 
 /// Render the inspector overlay into the top-right corner of `map_area`.
 ///
-/// The panel is 36 columns wide and tall enough to hold the room's edges plus fixed header/footer
+/// The panel is 38 columns wide and tall enough to hold the room's edges plus fixed header/footer
 /// rows, capped at the pane height. It is positioned in the top-right corner so it is unlikely to
 /// fully obscure the selected room (which is typically centred in the pane).
-pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer) {
+///
+/// Returns `Some(DialogRects)` when drawn (for mouse hit-testing).
+pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, dialog_style: &DialogStyle) -> Option<DialogRects> {
     const WIDTH: u16 = 38;
     // rows: border top + id/name + layer + pos + blank + edges (≥1) + blank + summary + border bot
     const FIXED_ROWS: u16 = 9; // with at least 0 edge rows
@@ -93,7 +96,7 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer) 
     let panel_w = WIDTH.min(map_area.width);
 
     if panel_w < 4 || panel_h < 4 {
-        return;
+        return None;
     }
 
     // Top-right corner.
@@ -101,37 +104,30 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer) 
     let y = map_area.y;
     let panel = Rect::new(x, y, panel_w, panel_h);
 
-    let border_style = Style::default().fg(Color::Yellow);
-    let label_style = Style::default().fg(Color::Yellow);
+    let distorted_style = Style::default().fg(ratatui::style::Color::Red);
+    let ok_style = Style::default().fg(ratatui::style::Color::Green);
+
+    // Render via shared dialog chrome (positioned at the computed rect).
+    let spec = DialogSpec {
+        title: " Inspector ",
+        placement: Placement::Positioned(panel),
+        buttons: &[],
+        show_close: true,
+    };
+    let dr = draw_dialog(buf, &spec, dialog_style);
+
+    let content = dr.content;
+    if content.height == 0 || content.width == 0 {
+        return Some(dr);
+    }
+
+    let inner_x = content.x;
+    let clip = content;
+    let label_style = dialog_style.title;
     let value_style = Style::default();
-    let distorted_style = Style::default().fg(Color::Red);
-    let ok_style = Style::default().fg(Color::Green);
 
-    // Fill the panel with a solid opaque background so the map does not show through.
-    // Style::reset() clears all inherited attributes (fg, modifiers such as REVERSED)
-    // before applying bg(Black), preventing map connector colors and reversed-block
-    // modifiers from bleeding through.
-    let bg_style = Style::reset().bg(Color::Black);
-    for y in panel.y..panel.bottom() {
-        for x in panel.x..panel.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ").set_style(bg_style);
-            }
-        }
-    }
-
-    // Draw border.
-    draw_border(buf, panel, border_style);
-
-    let inner_x = panel.x + 1;
-    let inner_w = panel.width.saturating_sub(2);
-    let clip = Rect::new(inner_x, panel.y + 1, inner_w, panel.height.saturating_sub(2));
-    if clip.height == 0 || clip.width == 0 {
-        return;
-    }
-
-    let mut row = clip.y;
-    let max_y = clip.bottom().saturating_sub(1);
+    let mut row = content.y;
+    let max_y = content.bottom().saturating_sub(1);
 
     let pos_str = match diag.pos {
         Some((px, py)) => format!("({}, {})", px, py),
@@ -189,45 +185,8 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer) 
         );
         draw_str_clipped(buf, inner_x, row, &summary, label_style, clip);
     }
-}
 
-/// Draw a simple single-line border around `area` using `style`.
-fn draw_border(buf: &mut Buffer, area: Rect, style: Style) {
-    if area.width < 2 || area.height < 2 {
-        return;
-    }
-    let x0 = area.x;
-    let y0 = area.y;
-    let x1 = area.right() - 1;
-    let y1 = area.bottom() - 1;
-
-    // Corners.
-    set_cell(buf, x0, y0, '\u{250c}', style);
-    set_cell(buf, x1, y0, '\u{2510}', style);
-    set_cell(buf, x0, y1, '\u{2514}', style);
-    set_cell(buf, x1, y1, '\u{2518}', style);
-    // Top / bottom edges.
-    for x in (x0 + 1)..x1 {
-        set_cell(buf, x, y0, '\u{2500}', style);
-        set_cell(buf, x, y1, '\u{2500}', style);
-    }
-    // Left / right edges.
-    for y in (y0 + 1)..y1 {
-        set_cell(buf, x0, y, '\u{2502}', style);
-        set_cell(buf, x1, y, '\u{2502}', style);
-    }
-    // Title.
-    let title = " Inspector ";
-    let tx = x0 + 1;
-    let title_clip = Rect::new(x0, y0, area.width, 1);
-    draw_str_clipped(buf, tx, y0, title, style, title_clip);
-}
-
-fn set_cell(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        let mut s = [0u8; 4];
-        cell.set_symbol(ch.encode_utf8(&mut s)).set_style(style);
-    }
+    Some(dr)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -240,6 +199,21 @@ mod tests {
     use mapper::direction::Direction;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::style::{Color, Style};
+    use crate::render::dialog::DialogStyle;
+    use crate::render::paneframe::BorderStyle;
+
+    fn make_dialog_style() -> DialogStyle {
+        DialogStyle {
+            frame: Style::default().bg(Color::Black),
+            box_style: BorderStyle::Single,
+            title: Style::default().fg(Color::Yellow),
+            button: Style::default(),
+            button_active: Style::default(),
+            shadow: Style::default(),
+            shadow_on: false,
+        }
+    }
 
     // ── room_diagnostics tests ────────────────────────────────────────────────
 
@@ -368,9 +342,10 @@ mod tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let diag = make_diag(42, "Clearing", vec![]);
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut());
+            draw_inspector(&diag, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert!(buf_contains(&buf, "42"), "should contain room id");
@@ -382,10 +357,11 @@ mod tests {
         let backend = TestBackend::new(3, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         let diag = make_diag(1, "A", vec![]);
+        let ds = make_dialog_style();
         // Should not panic; the panel is silently skipped when area is too small.
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut());
+            draw_inspector(&diag, area, f.buffer_mut(), &ds);
         }).unwrap();
         // No assertions — just must not panic.
     }
@@ -401,9 +377,10 @@ mod tests {
             distorted: true,
         }];
         let diag = make_diag(1, "Start", edges);
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut());
+            draw_inspector(&diag, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // The distorted marker `!` should appear.
@@ -429,10 +406,11 @@ mod tests {
         // Pre-fill the buffer with REVERSED + fg(Cyan) to simulate map connector bleed.
         // After rendering, cells inside the panel must have no REVERSED modifier
         // and must have bg(Black).
-        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::style::Modifier;
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let diag = make_diag(1, "Start", vec![]);
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
             let bleed_style = Style::default()
@@ -445,7 +423,7 @@ mod tests {
                     }
                 }
             }
-            draw_inspector(&diag, area, f.buffer_mut());
+            draw_inspector(&diag, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         let panel_x = 80u16.saturating_sub(38);
@@ -473,9 +451,10 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let diag = make_diag(1, "Start", vec![]);
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut());
+            draw_inspector(&diag, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Panel is 38 wide, top-right corner: x = 80 - 38 = 42, y = 0.
@@ -492,5 +471,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn inspector_panel_has_close_button_and_border() {
+        // The panel must show a border and a close [X] via draw_dialog.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let diag = make_diag(1, "Start", vec![]);
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert!(buf_contains(&buf, "\u{2715}"), "inspector must show close symbol [X]");
+        assert!(buf_contains(&buf, "\u{2510}"), "inspector must show top-right border corner");
+    }
+
+    #[test]
+    fn inspector_dialog_returns_close_rect() {
+        // draw_inspector must return Some(DialogRects) with close.is_some() when drawn.
+        let area = ratatui::layout::Rect::new(0, 0, 80, 24);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let diag = make_diag(1, "Start", vec![]);
+        let ds = make_dialog_style();
+        let result = draw_inspector(&diag, area, &mut buf, &ds);
+        assert!(result.is_some(), "draw_inspector must return Some(DialogRects)");
+        let dr = result.unwrap();
+        assert!(dr.close.is_some(), "DialogRects.close must be Some (show_close=true)");
     }
 }

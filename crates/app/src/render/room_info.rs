@@ -8,8 +8,9 @@ use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 
+use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
 
 // Direction display labels (cardinal + diagonal + portal).
@@ -31,37 +32,6 @@ fn dir_label(dir: Direction) -> &'static str {
     }
 }
 
-fn draw_border(buf: &mut Buffer, area: Rect, style: Style) {
-    if area.width < 2 || area.height < 2 {
-        return;
-    }
-    let set_cell = |buf: &mut Buffer, x: u16, y: u16, ch: char| {
-        if let Some(cell) = buf.cell_mut((x, y)) {
-            let mut s = [0u8; 4];
-            cell.set_symbol(ch.encode_utf8(&mut s)).set_style(style);
-        }
-    };
-    let x0 = area.x;
-    let y0 = area.y;
-    let x1 = area.right() - 1;
-    let y1 = area.bottom() - 1;
-    set_cell(buf, x0, y0, '\u{250c}');
-    set_cell(buf, x1, y0, '\u{2510}');
-    set_cell(buf, x0, y1, '\u{2514}');
-    set_cell(buf, x1, y1, '\u{2518}');
-    for x in (x0 + 1)..x1 {
-        set_cell(buf, x, y0, '\u{2500}');
-        set_cell(buf, x, y1, '\u{2500}');
-    }
-    for y in (y0 + 1)..y1 {
-        set_cell(buf, x0, y, '\u{2502}');
-        set_cell(buf, x1, y, '\u{2502}');
-    }
-    let title = " Room Info ";
-    let title_clip = Rect::new(x0, y0, area.width, 1);
-    draw_str_clipped(buf, x0 + 1, y0, title, style, title_clip);
-}
-
 /// Render the room-info panel into the top-left corner of `map_area`.
 ///
 /// - `graph`: the mapper graph for name/notes/exits.
@@ -69,6 +39,9 @@ fn draw_border(buf: &mut Buffer, area: Rect, style: Style) {
 ///   the map is in tidy-anim mode and the live machine isn't available).
 /// - `room_id`: the room to display.
 /// - `current_room`: the player's actual current room (used to gate object listing).
+/// - `dialog_style`: dialog chrome colors from state.colors.
+///
+/// Returns `Some(DialogRects)` when the panel was drawn (for mouse hit-testing).
 pub fn draw_room_info(
     graph: &MapGraph,
     machine_mem: Option<&zvm::memory::Memory>,
@@ -76,8 +49,9 @@ pub fn draw_room_info(
     current_room: Option<RoomId>,
     map_area: Rect,
     buf: &mut Buffer,
-) {
-    let Some(room) = graph.room(room_id) else { return };
+    dialog_style: &DialogStyle,
+) -> Option<DialogRects> {
+    let Some(room) = graph.room(room_id) else { return None };
 
     // Compute exits for this room.
     let exits: Vec<_> = graph
@@ -117,41 +91,35 @@ pub fn draw_room_info(
     let panel_w = WIDTH.min(map_area.width);
 
     if panel_w < 4 || panel_h < 4 {
-        return;
+        return None;
     }
 
     // Top-left corner.
     let panel = Rect::new(map_area.x, map_area.y, panel_w, panel_h);
 
-    let border_style = Style::default().fg(Color::Cyan);
-    let label_style = Style::default().fg(Color::Cyan);
+    // Render via shared dialog chrome (positioned at the computed rect).
+    let spec = DialogSpec {
+        title: " Room Info ",
+        placement: Placement::Positioned(panel),
+        buttons: &[],
+        show_close: true,
+    };
+    let dr = draw_dialog(buf, &spec, dialog_style);
+
+    let content = dr.content;
+    if content.height == 0 || content.width == 0 {
+        return Some(dr);
+    }
+
     let value_style = Style::default();
-    let section_style = Style::default().fg(Color::DarkGray);
+    let section_style = dialog_style.frame;
+    let label_style = dialog_style.title;
 
-    // Fill the panel with a solid opaque background so the map does not show through.
-    // Style::reset() clears all inherited attributes (fg, modifiers such as REVERSED)
-    // before applying bg(Black), preventing map connector colors and reversed-block
-    // modifiers from bleeding through.
-    let bg_style = Style::reset().bg(Color::Black);
-    for y in panel.y..panel.bottom() {
-        for x in panel.x..panel.right() {
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ").set_style(bg_style);
-            }
-        }
-    }
-
-    draw_border(buf, panel, border_style);
-
-    let inner_x = panel.x + 1;
-    let inner_w = panel.width.saturating_sub(2);
-    let clip = Rect::new(inner_x, panel.y + 1, inner_w, panel.height.saturating_sub(2));
-    if clip.height == 0 || clip.width == 0 {
-        return;
-    }
-
-    let mut row = clip.y;
-    let max_y = clip.bottom().saturating_sub(1);
+    let inner_x = content.x;
+    let inner_w = content.width;
+    let clip = content;
+    let mut row = content.y;
+    let max_y = content.bottom().saturating_sub(1);
 
     // Room name.
     if row <= max_y {
@@ -199,6 +167,8 @@ pub fn draw_room_info(
             row += 1;
         }
     }
+
+    Some(dr)
 }
 
 /// List the display names of all direct children of the room object `room_id`
@@ -229,6 +199,21 @@ mod tests {
     use mapper::graph::MapGraph;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::style::{Color, Style};
+    use crate::render::dialog::DialogStyle;
+    use crate::render::paneframe::BorderStyle;
+
+    fn make_dialog_style() -> DialogStyle {
+        DialogStyle {
+            frame: Style::default().bg(Color::Black),
+            box_style: BorderStyle::Single,
+            title: Style::default().fg(Color::Cyan),
+            button: Style::default(),
+            button_active: Style::default(),
+            shadow: Style::default(),
+            shadow_on: false,
+        }
+    }
 
     fn buf_contains(buf: &ratatui::buffer::Buffer, s: &str) -> bool {
         let all: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
@@ -250,9 +235,10 @@ mod tests {
         let (g, room1, _room2) = make_graph_with_rooms();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut());
+            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert!(buf_contains(&buf, "West of House"), "should show room name");
@@ -265,10 +251,11 @@ mod tests {
         let (g, room1, room2) = make_graph_with_rooms();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
         // room2 is not the current room (current_room = Some(room1)), so no objects section.
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room2, Some(room1), area, f.buffer_mut());
+            draw_room_info(&g, None, room2, Some(room1), area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // "Here:" section should not appear for non-current rooms.
@@ -280,10 +267,11 @@ mod tests {
         let g = MapGraph::new();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
             // Room 99 does not exist; should not panic.
-            draw_room_info(&g, None, 99, None, area, f.buffer_mut());
+            draw_room_info(&g, None, 99, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         // No assertion — just must not panic.
     }
@@ -295,9 +283,10 @@ mod tests {
         let (g, room1, _) = make_graph_with_rooms();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, Some(room1), area, f.buffer_mut());
+            draw_room_info(&g, None, room1, Some(room1), area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Without machine_mem, objects list is empty, so "Here:" should not appear.
@@ -309,10 +298,11 @@ mod tests {
         // Pre-fill the buffer with REVERSED + fg(Cyan) to simulate map connector bleed.
         // After rendering, cells inside the panel must have no REVERSED modifier
         // and must have bg(Black).
-        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::style::Modifier;
         let (g, room1, _) = make_graph_with_rooms();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
             let bleed_style = Style::default()
@@ -326,14 +316,14 @@ mod tests {
                     }
                 }
             }
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut());
+            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         for y in 0..4u16 {
             for x in 0..36u16 {
                 if let Some(cell) = buf.cell((x, y)) {
                     assert!(
-                        !cell.style().add_modifier.contains(Modifier::REVERSED),
+                        !cell.style().add_modifier.contains(ratatui::style::Modifier::REVERSED),
                         "cell ({x},{y}) must not have REVERSED modifier inside panel"
                     );
                     assert_eq!(
@@ -353,9 +343,10 @@ mod tests {
         let (g, room1, _) = make_graph_with_rooms();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut());
+            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Panel is at (0,0) with width=36 (or area width if smaller).
@@ -371,5 +362,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn room_info_panel_has_close_button_and_border() {
+        // The panel must show a border (single-line box) and a close [X] via draw_dialog.
+        let (g, room1, _) = make_graph_with_rooms();
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // The dialog chrome shows the close symbol.
+        assert!(buf_contains(&buf, "\u{2715}"), "panel must show close symbol [X]");
+        // Border: top-left corner of single-line box
+        assert!(buf_contains(&buf, "\u{250c}"), "panel must show top-left border corner");
+    }
+
+    #[test]
+    fn room_info_dialog_returns_close_rect() {
+        // draw_room_info must return Some(DialogRects) with close.is_some() when drawn.
+        let (g, room1, _) = make_graph_with_rooms();
+        let area = ratatui::layout::Rect::new(0, 0, 60, 20);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        let ds = make_dialog_style();
+        let result = draw_room_info(&g, None, room1, None, area, &mut buf, &ds);
+        assert!(result.is_some(), "draw_room_info must return Some(DialogRects)");
+        let dr = result.unwrap();
+        assert!(dr.close.is_some(), "DialogRects.close must be Some (show_close=true)");
     }
 }

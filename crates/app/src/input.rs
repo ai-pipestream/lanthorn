@@ -503,6 +503,48 @@ fn verbmenu_dialog_action(
     None
 }
 
+/// Per-modal action mapping for the room-info panel ([X] → CloseRoomPanel).
+fn roominfo_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::CloseRoomPanel);
+        }
+    }
+    None
+}
+
+/// Per-modal action mapping for the inspector panel ([X] → CloseRoomPanel).
+fn inspector_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::CloseRoomPanel);
+        }
+    }
+    None
+}
+
+/// Per-modal action mapping for the tidy panel ([X] → AnimExit).
+fn tidy_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::AnimExit);
+        }
+    }
+    None
+}
+
 /// Per-modal button-to-action mapping for the hotkey dialog.
 fn hotkeys_dialog_action(
     rects: &crate::render::dialog::DialogRects,
@@ -559,7 +601,10 @@ pub fn mouse_to_action(
     // ── Dialog chrome hit-testing (checked FIRST) ─────────────────────────────
     if let Some(rects) = dialog {
         if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-            // Determine which modal is open and route button/close clicks
+            // Corner overlays (room panel, tidy panel): only intercept the [X] click;
+            // all other clicks fall through to normal map/room routing below.
+            let is_corner_overlay = state.room_panel.is_some() || state.tidy_anim.is_some();
+
             if state.config_screen.is_some() {
                 if let Some(action) = config_dialog_action(rects, col, row) {
                     return action;
@@ -580,21 +625,34 @@ pub fn mouse_to_action(
                 if let Some(action) = hotkeys_dialog_action(rects, col, row) {
                     return action;
                 }
+            } else if state.room_panel.as_ref().map(|p| matches!(p.mode, crate::state::RoomPanelMode::Info)).unwrap_or(false) {
+                if let Some(action) = roominfo_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.room_panel.as_ref().map(|p| matches!(p.mode, crate::state::RoomPanelMode::Diagnostics)).unwrap_or(false) {
+                if let Some(action) = inspector_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.tidy_anim.is_some() {
+                if let Some(action) = tidy_dialog_action(rects, col, row) {
+                    return action;
+                }
             }
 
-            // Click is inside the dialog area: swallow (no map/room routing).
-            let area = rects.area;
-            let in_dialog = col >= area.x && col < area.right()
-                && row >= area.y && row < area.bottom();
-            if in_dialog {
+            // Corner overlays: don't swallow other clicks — let normal routing handle them.
+            if is_corner_overlay {
+                // fall through to normal routing below
+            } else {
+                // Centered modal: swallow all other clicks.
                 return Action::None;
             }
-
-            // Click OUTSIDE the dialog area while dialog is open: swallow.
-            return Action::None;
+        } else {
+            // For non-left-click events while a centered modal is open: swallow.
+            let is_corner_overlay = state.room_panel.is_some() || state.tidy_anim.is_some();
+            if !is_corner_overlay {
+                return Action::None;
+            }
         }
-        // For non-left-click events while a dialog is open: swallow everything.
-        return Action::None;
     }
 
     // ── Normal routing (no dialog open) ──────────────────────────────────────
