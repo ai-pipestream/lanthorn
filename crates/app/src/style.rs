@@ -304,6 +304,8 @@ pub struct StyleDoc {
     pub symbols: StyleSymbols,
     /// User story-styling rules from `[[transcript.rule]]`, in file order.
     pub transcript_rules: Vec<RawRule>,
+    /// The status-bar block from `[statusbar]` / `[[statusbar.segment]]`.
+    pub status_bar: RawStatusBar,
 }
 
 /// A raw (uncompiled) user transcript-styling rule from `[[transcript.rule]]`.
@@ -313,6 +315,25 @@ pub struct RawRule {
     pub pattern: String,
     /// The fg/bg/bold/italic style fields applied on a match.
     pub decl: Decl,
+}
+
+/// A raw (uncompiled) status-bar segment from `[[statusbar.segment]]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawSegment {
+    /// Text template (literal text mixed with `{placeholder}` tokens).
+    pub text: String,
+    /// Cluster name: `left` | `center` | `right` (unknown → `left` at resolve).
+    pub align: String,
+    /// The fg/bg/bold/italic style fields for this segment.
+    pub decl: Decl,
+}
+
+/// A raw `[statusbar]` block: optional frame + ordered segments.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawStatusBar {
+    pub border: Option<String>,
+    pub border_fg: Option<String>,
+    pub segments: Vec<RawSegment>,
 }
 
 // ── merge ─────────────────────────────────────────────────────────────────────
@@ -358,10 +379,21 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         over.transcript_rules.clone()
     };
 
+    let status_bar = RawStatusBar {
+        border: over.status_bar.border.clone().or(base.status_bar.border.clone()),
+        border_fg: over.status_bar.border_fg.clone().or(base.status_bar.border_fg.clone()),
+        segments: if over.status_bar.segments.is_empty() {
+            base.status_bar.segments.clone()
+        } else {
+            over.status_bar.segments.clone()
+        },
+    };
+
     StyleDoc {
         colors: StyleColors { scheme, selectors },
         symbols,
         transcript_rules,
+        status_bar,
     }
 }
 
@@ -452,7 +484,23 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
         }
     }
 
-    Ok(StyleDoc { colors, symbols, transcript_rules })
+    let mut status_bar = RawStatusBar::default();
+    if let Some(toml::Value::Table(sb)) = root.get("statusbar") {
+        status_bar.border = sb.get("border").and_then(toml::Value::as_str).map(str::to_string);
+        status_bar.border_fg = sb.get("border_fg").and_then(toml::Value::as_str).map(str::to_string);
+        if let Some(toml::Value::Array(segs)) = sb.get("segment") {
+            for item in segs {
+                if let toml::Value::Table(st) = item {
+                    let text = st.get("text").and_then(toml::Value::as_str).unwrap_or("").to_string();
+                    let align = st.get("align").and_then(toml::Value::as_str).unwrap_or("left").to_string();
+                    let decl = parse_decl_from_table(st);
+                    status_bar.segments.push(RawSegment { text, align, decl });
+                }
+            }
+        }
+    }
+
+    Ok(StyleDoc { colors, symbols, transcript_rules, status_bar })
 }
 
 /// Parse a [`Decl`] from a TOML inline table (field-by-field).
@@ -478,6 +526,7 @@ pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleD
         colors: colors.clone(),
         symbols: symbols.clone(),
         transcript_rules: Vec::new(),
+        status_bar: RawStatusBar::default(),
     }
 }
 
@@ -945,6 +994,50 @@ pub fn write_style_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statusbar_block_parses_segments_and_border() {
+        let text = r##"
+[statusbar]
+border = "single"
+border_fg = "cyan"
+
+[[statusbar.segment]]
+text = "{location}"
+align = "left"
+fg = "cyan"
+bold = true
+
+[[statusbar.segment]]
+text = "Score: {score}"
+align = "right"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        assert_eq!(doc.status_bar.border.as_deref(), Some("single"));
+        assert_eq!(doc.status_bar.border_fg.as_deref(), Some("cyan"));
+        assert_eq!(doc.status_bar.segments.len(), 2);
+        assert_eq!(doc.status_bar.segments[0].text, "{location}");
+        assert_eq!(doc.status_bar.segments[0].align, "left");
+        assert_eq!(doc.status_bar.segments[0].decl.fg.as_deref(), Some("cyan"));
+        assert_eq!(doc.status_bar.segments[0].decl.bold, Some(true));
+        assert_eq!(doc.status_bar.segments[1].align, "right");
+    }
+
+    #[test]
+    fn merge_replaces_statusbar_segments_when_override_has_any() {
+        let mut base = StyleDoc::default();
+        base.status_bar.segments.push(RawSegment { text: "a".into(), align: "left".into(), decl: Decl::default() });
+        let mut over = StyleDoc::default();
+        over.status_bar.segments.push(RawSegment { text: "b".into(), align: "right".into(), decl: Decl::default() });
+        over.status_bar.border = Some("double".into());
+        let m = merge(&base, &over);
+        assert_eq!(m.status_bar.segments.len(), 1);
+        assert_eq!(m.status_bar.segments[0].text, "b");
+        assert_eq!(m.status_bar.border.as_deref(), Some("double"));
+        // Empty override keeps base segments.
+        let m2 = merge(&base, &StyleDoc::default());
+        assert_eq!(m2.status_bar.segments[0].text, "a");
+    }
 
     #[test]
     fn transcript_rules_parse_compile_in_order() {
