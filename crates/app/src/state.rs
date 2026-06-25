@@ -92,7 +92,7 @@ use mapper::layer::LayerId;
 ///
 /// `Story` covers normal game output (VM text, echoed commands).
 /// `Meta` covers app-generated content such as /help output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptKind {
     Story,
     Meta,

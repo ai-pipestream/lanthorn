@@ -522,6 +522,7 @@ fn main() {
     // Load mapper (and optionally restore the game save) from the archive.
     // Migration: if no archive exists but a legacy .map.json does, load that.
     // use_default_map = true: also fall back to legacy map when no archive.
+    let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>)> = None;
     let mut mapper = if arc_file.exists() {
         match load_archive(&arc_file) {
             Ok(ac) => {
@@ -530,6 +531,8 @@ fn main() {
                 if cfg.auto_load {
                     if let Err(e) = session.machine.restore_quetzal(&ac.save) {
                         eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
+                    } else {
+                        startup_transcript = Some((ac.transcript, ac.transcript_kinds));
                     }
                 }
                 ac.mapper
@@ -612,6 +615,12 @@ fn main() {
             40,
             24,
         );
+    }
+
+    // If an archived transcript was loaded on startup, replace the fresh one.
+    if let Some((lines, kinds)) = startup_transcript {
+        state.transcript = lines;
+        state.transcript_kinds = kinds;
     }
 
     // If the game quit immediately (e.g. czech.z5 test suite), bail without
@@ -925,7 +934,7 @@ fn main() {
                             // Named save or default archive save.
                             let result = match name_opt {
                                 Some(ref name) => {
-                                    save_named(&dir, &ifid, name, &mapper, &session.machine, state.turns)
+                                    save_named(&dir, &ifid, name, &mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds)
                                         .map(|()| format!("saved as \"{}\"", name))
                                         .map_err(|e| format!("save failed: {}", e))
                                 }
@@ -942,7 +951,7 @@ fn main() {
                                                 .unwrap_or(0),
                                         ),
                                     };
-                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta)
+                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds)
                                         .map(|()| "saved".to_string())
                                         .map_err(|e| format!("save failed: {}", e))
                                 }
@@ -980,6 +989,8 @@ fn main() {
                                             match restore_err {
                                                 Ok(()) => {
                                                     mapper = ac.mapper;
+                                                    state.transcript = ac.transcript;
+                                                    state.transcript_kinds = ac.transcript_kinds;
                                                     let loc = zvm::current_location(&session.machine);
                                                     if let Some(snap) = loc {
                                                         let rid = snap.number as mapper::graph::RoomId;
@@ -1180,7 +1191,7 @@ fn main() {
                                 .unwrap_or(0),
                         ),
                     };
-                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta) {
+                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds) {
                         state.push_transcript(&format!("[Auto-save failed: {}]", e));
                     }
                 }
@@ -1261,7 +1272,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.machine, meta) {
+                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -1287,6 +1298,8 @@ fn main() {
                         match restore_err {
                             Ok(()) => {
                                 mapper = ac.mapper;
+                                state.transcript = ac.transcript;
+                                state.transcript_kinds = ac.transcript_kinds;
                                 // After restore, re-observe current location.
                                 let loc = zvm::current_location(&session.machine);
                                 if let Some(snap) = loc {
@@ -1477,6 +1490,8 @@ fn main() {
                             match restore_err {
                                 Ok(()) => {
                                     mapper = ac.mapper;
+                                    state.transcript = ac.transcript;
+                                    state.transcript_kinds = ac.transcript_kinds;
                                     // Restore turn counter from the loaded archive.
                                     state.turns = ac.meta.turns;
                                     // Re-observe current location.
@@ -1568,7 +1583,7 @@ fn main() {
                 .unwrap_or(0),
         ),
     };
-    match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta) {
+    match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds) {
         Ok(()) => {
             eprintln!("babelmap: map saved to {}", arc_file.display());
         }
@@ -1651,7 +1666,7 @@ fn handle_saves_prompt(
                 state.push_transcript("[Save name cannot be empty]".to_string().as_str());
                 return;
             }
-            match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns) {
+            match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds) {
                 Ok(()) => {
                     state.push_transcript(&format!("[Saved as: {}]", buf));
                     // Refresh saves list.

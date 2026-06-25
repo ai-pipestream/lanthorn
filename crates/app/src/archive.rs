@@ -30,6 +30,7 @@ use mapper::persist::{from_json, to_json};
 const ENTRY_MAP: &str = "map.json";
 const ENTRY_SAVE: &str = "game.sav";
 const ENTRY_META: &str = "meta.json";
+const ENTRY_TRANSCRIPT: &str = "transcript.json";
 
 const CURRENT_FORMAT_VERSION: u32 = 1;
 
@@ -48,11 +49,22 @@ pub struct Meta {
     pub saved_at: String,
 }
 
+/// Transcript payload written to `transcript.json` inside the archive.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct TranscriptData {
+    lines: Vec<String>,
+    kinds: Vec<crate::state::TranscriptKind>,
+}
+
 #[derive(Debug)]
 pub struct ArchiveContents {
     pub mapper: Mapper,
     pub save: Vec<u8>,
     pub meta: Meta,
+    /// Console transcript lines (may be empty for archives that pre-date this field).
+    pub transcript: Vec<String>,
+    /// Parallel kind tag for each transcript entry (same length as `transcript`).
+    pub transcript_kinds: Vec<crate::state::TranscriptKind>,
 }
 
 /// Write a `.babelmap` archive containing the current map and VM save.
@@ -63,6 +75,8 @@ pub fn save_archive(
     path: &Path,
     mapper: &Mapper,
     machine: &zvm::cpu::exec::Machine,
+    transcript: &[String],
+    transcript_kinds: &[crate::state::TranscriptKind],
 ) -> io::Result<()> {
     save_archive_meta(path, mapper, machine, Meta {
         format_version: CURRENT_FORMAT_VERSION,
@@ -70,7 +84,7 @@ pub fn save_archive(
         name: None,
         turns: 0,
         saved_at: String::new(),
-    })
+    }, transcript, transcript_kinds)
 }
 
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
@@ -81,6 +95,8 @@ pub fn save_archive_meta(
     mapper: &Mapper,
     machine: &zvm::cpu::exec::Machine,
     meta: Meta,
+    transcript: &[String],
+    transcript_kinds: &[crate::state::TranscriptKind],
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -106,6 +122,16 @@ pub fn save_archive_meta(
         serde_json::to_string_pretty(&meta).expect("Meta is always serializable");
     zip.start_file(ENTRY_META, options)?;
     zip.write_all(meta_json.as_bytes())?;
+
+    // transcript.json
+    let td = TranscriptData {
+        lines: transcript.to_vec(),
+        kinds: transcript_kinds.to_vec(),
+    };
+    let transcript_json =
+        serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
+    zip.start_file(ENTRY_TRANSCRIPT, options)?;
+    zip.write_all(transcript_json.as_bytes())?;
 
     zip.finish()?;
     Ok(())
@@ -163,7 +189,20 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         buf
     };
 
-    Ok(ArchiveContents { mapper, save, meta })
+    // transcript.json — optional; older archives omit it, default to empty vecs.
+    let (transcript, transcript_kinds) = match zip.by_name(ENTRY_TRANSCRIPT) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf)?;
+            match serde_json::from_str::<TranscriptData>(&buf) {
+                Ok(td) => (td.lines, td.kinds),
+                Err(_) => (Vec::new(), Vec::new()),
+            }
+        }
+        Err(_) => (Vec::new(), Vec::new()),
+    };
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds })
 }
 
 #[cfg(test)]
@@ -208,7 +247,7 @@ mod tests {
         let expected_save = machine.save_quetzal();
 
         let path = temp_archive_path("roundtrip");
-        save_archive(&path, &mapper, &machine).expect("save_archive");
+        save_archive(&path, &mapper, &machine, &[], &[]).expect("save_archive");
 
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -300,6 +339,95 @@ mod tests {
         assert_eq!(ac.meta.turns, 0, "turns defaults to 0");
         assert_eq!(ac.meta.saved_at, "", "saved_at defaults to empty string");
         assert_eq!(ac.meta.ifid.as_deref(), Some("ZCODE-1-000000-0000"));
+    }
+
+    // -------------------------------------------------------------------------
+    // transcript round-trip: lines + kinds survive write-read cycle
+    // -------------------------------------------------------------------------
+    #[test]
+    fn transcript_round_trip() {
+        use crate::state::TranscriptKind;
+        use std::io::Write as _;
+
+        let path = temp_archive_path("transcript-rt");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+
+            // meta.json
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta_json = serde_json::to_string(&meta).unwrap();
+            zip.start_file(ENTRY_META, options).unwrap();
+            zip.write_all(meta_json.as_bytes()).unwrap();
+
+            // map.json
+            let mapper = Mapper::default();
+            let map_json = mapper::persist::to_json(&mapper);
+            zip.start_file(ENTRY_MAP, options).unwrap();
+            zip.write_all(map_json.as_bytes()).unwrap();
+
+            // game.sav
+            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.write_all(&[]).unwrap();
+
+            // transcript.json with mixed Story/Meta entries
+            let td = TranscriptData {
+                lines: vec!["West of House".to_string(), "/help".to_string(), "You are standing...".to_string()],
+                kinds: vec![TranscriptKind::Story, TranscriptKind::Meta, TranscriptKind::Story],
+            };
+            let transcript_json = serde_json::to_string(&td).unwrap();
+            zip.start_file(ENTRY_TRANSCRIPT, options).unwrap();
+            zip.write_all(transcript_json.as_bytes()).unwrap();
+
+            zip.finish().unwrap();
+        }
+
+        let ac = load_archive(&path).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(ac.transcript, vec!["West of House", "/help", "You are standing..."]);
+        assert_eq!(ac.transcript_kinds, vec![TranscriptKind::Story, TranscriptKind::Meta, TranscriptKind::Story]);
+        assert_eq!(ac.transcript.len(), ac.transcript_kinds.len(), "vecs must be equal length");
+    }
+
+    // -------------------------------------------------------------------------
+    // missing transcript entry -> empty vecs (graceful default for old archives)
+    // -------------------------------------------------------------------------
+    #[test]
+    fn missing_transcript_defaults_to_empty() {
+        use std::io::Write as _;
+
+        let path = temp_archive_path("transcript-missing");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+
+            // Write an archive with no transcript.json entry.
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta_json = serde_json::to_string(&meta).unwrap();
+            zip.start_file(ENTRY_META, options).unwrap();
+            zip.write_all(meta_json.as_bytes()).unwrap();
+
+            let mapper = Mapper::default();
+            let map_json = mapper::persist::to_json(&mapper);
+            zip.start_file(ENTRY_MAP, options).unwrap();
+            zip.write_all(map_json.as_bytes()).unwrap();
+
+            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.write_all(&[]).unwrap();
+
+            // No ENTRY_TRANSCRIPT written.
+            zip.finish().unwrap();
+        }
+
+        let ac = load_archive(&path).expect("archive without transcript must load");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(ac.transcript.is_empty(), "transcript must default to empty");
+        assert!(ac.transcript_kinds.is_empty(), "transcript_kinds must default to empty");
     }
 
     // -------------------------------------------------------------------------
