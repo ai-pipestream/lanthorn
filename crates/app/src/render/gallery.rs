@@ -153,7 +153,7 @@ fn draw_preset_pane(state: &AppState, gallery: &GalleryState, area: Rect, buf: &
 
 fn draw_preview(state: &AppState, gallery: &GalleryState, area: Rect, buf: &mut Buffer) {
     use crate::symbols::SymbolSet;
-    let _ = state; // not needed for v1 preview, kept for signature consistency
+    let _ = state; // kept for signature consistency
 
     crate::render::draw_str_clipped(buf, area.x, area.y, "Preview:", Style::new().fg(Color::DarkGray), area);
     if area.height < 2 {
@@ -162,53 +162,115 @@ fn draw_preview(state: &AppState, gallery: &GalleryState, area: Rect, buf: &mut 
 
     // Build preview symbol set from current gallery selections.
     let cfg = gallery.symbol_config();
-    let preview_symbols = SymbolSet::resolve(&cfg);
-    let bs = &preview_symbols.room_normal;
+    let sym = SymbolSet::resolve(&cfg);
+    let bs = &sym.room_normal;
 
-    // Draw a tiny room box: 7 wide x 3 tall.
-    let bw = 7u16.min(area.width.saturating_sub(2));
-    let bh = 3u16;
-    if area.height < 2 + bh {
-        return;
-    }
-
+    // ── Room box: 9 wide x 5 tall ─────────────────────────────────────────────
+    // Layout: corners at (bx,by), (bx+bw-1,by), (bx,by+bh-1), (bx+bw-1,by+bh-1).
+    // Cardinal arrows: N on top-center, S on bottom-center, E on right-center, W on left-center.
+    // Corner arrows: NW/NE/SW/SE at the four corners (overwrite box corners).
+    let bw: u16 = 9u16.min(area.width.saturating_sub(2));
+    let bh: u16 = 5u16;
+    // Minimum area needed: 1 (label) + bh (box) + 3 (path) + 1 (portals) = 10 rows.
+    // We draw what fits; each block checks before drawing.
     let bx = area.x + 1;
     let by = area.y + 1;
-    let style = Style::new().fg(Color::White);
 
-    // Top row.
-    crate::render::draw_char_clipped(buf, bx, by, bs.tl, style, area);
-    for x in (bx + 1)..(bx + bw - 1) {
-        crate::render::draw_char_clipped(buf, x, by, bs.h, style, area);
-    }
-    crate::render::draw_char_clipped(buf, bx + bw - 1, by, bs.tr, style, area);
+    let box_style = Style::new().fg(Color::White);
+    let arrow_style = Style::new().fg(Color::Cyan);
+    let path_style = Style::new().fg(Color::Yellow);
+    let portal_style = Style::new().fg(Color::Magenta);
 
-    // Middle rows.
-    for row in 1..(bh - 1) {
-        crate::render::draw_char_clipped(buf, bx, by + row, bs.v, style, area);
-        crate::render::draw_char_clipped(buf, bx + bw - 1, by + row, bs.v, style, area);
+    if bw >= 2 && area.height >= 2 + bh {
+        // Top row.
+        crate::render::draw_char_clipped(buf, bx, by, bs.tl, box_style, area);
+        for x in (bx + 1)..(bx + bw - 1) {
+            crate::render::draw_char_clipped(buf, x, by, bs.h, box_style, area);
+        }
+        crate::render::draw_char_clipped(buf, bx + bw - 1, by, bs.tr, box_style, area);
+
+        // Middle rows.
+        for row in 1..(bh - 1) {
+            crate::render::draw_char_clipped(buf, bx, by + row, bs.v, box_style, area);
+            crate::render::draw_char_clipped(buf, bx + bw - 1, by + row, bs.v, box_style, area);
+        }
+
+        // Bottom row.
+        crate::render::draw_char_clipped(buf, bx, by + bh - 1, bs.bl, box_style, area);
+        for x in (bx + 1)..(bx + bw - 1) {
+            crate::render::draw_char_clipped(buf, x, by + bh - 1, bs.h, box_style, area);
+        }
+        crate::render::draw_char_clipped(buf, bx + bw - 1, by + bh - 1, bs.br, box_style, area);
+
+        // Cardinal arrows on the box sides (overwrite border chars at mid-points).
+        let mid_x = bx + bw / 2;
+        let mid_y = by + bh / 2;
+        crate::render::draw_char_clipped(buf, mid_x, by, sym.arrows.north, arrow_style, area);
+        crate::render::draw_char_clipped(buf, mid_x, by + bh - 1, sym.arrows.south, arrow_style, area);
+        crate::render::draw_char_clipped(buf, bx, mid_y, sym.arrows.west, arrow_style, area);
+        crate::render::draw_char_clipped(buf, bx + bw - 1, mid_y, sym.arrows.east, arrow_style, area);
+
+        // Corner arrows placed just inside the box corners so the box-corner glyphs
+        // (e.g., '+' for the ascii preset) remain visible on the border.
+        // With bh>=5 and bw>=9, the inner corner offsets are always within the interior.
+        if bw >= 4 && bh >= 4 {
+            crate::render::draw_char_clipped(buf, bx + 1, by + 1, sym.arrows.nw, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx + bw - 2, by + 1, sym.arrows.ne, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx + 1, by + bh - 2, sym.arrows.sw, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx + bw - 2, by + bh - 2, sym.arrows.se, arrow_style, area);
+        }
     }
 
-    // Bottom row.
-    crate::render::draw_char_clipped(buf, bx, by + bh - 1, bs.bl, style, area);
-    for x in (bx + 1)..(bx + bw - 1) {
-        crate::render::draw_char_clipped(buf, x, by + bh - 1, bs.h, style, area);
-    }
-    crate::render::draw_char_clipped(buf, bx + bw - 1, by + bh - 1, bs.br, style, area);
+    // ── Multi-segment path ────────────────────────────────────────────────────
+    // Three-row path demonstrating >=2 straights, >=2 corners, >=1 junction.
+    // Layout (col offsets from bx):
+    //   Row 0: se ew ew ew ew ew sw
+    //   Row 1: ns                ns
+    //   Row 2: ne ew ew nesw ew ew nw
+    // That gives: 4 straights (ew x4 + ew x2 on row2), 4 corners, 1 junction (nesw).
+    let path_y = by + bh + 1; // one blank row gap after box
+    let pw = bw; // same width as box
+    if path_y + 2 < area.bottom() && pw >= 4 {
+        let px = bx;
+        let p = &sym.path;
 
-    // Show path glyph to the right of the box.
-    let arrow_x = bx + bw;
-    if arrow_x < area.right() {
-        crate::render::draw_char_clipped(buf, arrow_x, by + 1, preview_symbols.path.ew, Style::new().fg(Color::Cyan), area);
+        // Row 0: se + ew straights + sw
+        crate::render::draw_char_clipped(buf, px, path_y, p.se, path_style, area);
+        for x in (px + 1)..(px + pw - 1) {
+            crate::render::draw_char_clipped(buf, x, path_y, p.ew, path_style, area);
+        }
+        crate::render::draw_char_clipped(buf, px + pw - 1, path_y, p.sw, path_style, area);
+
+        // Row 1: ns on left and right
+        crate::render::draw_char_clipped(buf, px, path_y + 1, p.ns, path_style, area);
+        crate::render::draw_char_clipped(buf, px + pw - 1, path_y + 1, p.ns, path_style, area);
+
+        // Row 2: ne + ew + nesw (junction) + ew + nw
+        crate::render::draw_char_clipped(buf, px, path_y + 2, p.ne, path_style, area);
+        let mid_pw = pw / 2;
+        for x in (px + 1)..(px + mid_pw) {
+            crate::render::draw_char_clipped(buf, x, path_y + 2, p.ew, path_style, area);
+        }
+        crate::render::draw_char_clipped(buf, px + mid_pw, path_y + 2, p.nesw, path_style, area);
+        for x in (px + mid_pw + 1)..(px + pw - 1) {
+            crate::render::draw_char_clipped(buf, x, path_y + 2, p.ew, path_style, area);
+        }
+        crate::render::draw_char_clipped(buf, px + pw - 1, path_y + 2, p.nw, path_style, area);
     }
-    // Show portal marker inside box.
-    if bw > 2 {
-        crate::render::draw_char_clipped(buf, bx + 1, by + 1, preview_symbols.portal.marker, Style::new().fg(Color::Cyan), area);
-    }
-    // Show arrow.
-    let arrow_x2 = bx + bw + 1;
-    if arrow_x2 < area.right() {
-        crate::render::draw_char_clipped(buf, arrow_x2, by + 1, preview_symbols.arrows.east, Style::new().fg(Color::Cyan), area);
+
+    // ── All 4 portal icons ────────────────────────────────────────────────────
+    // Draw up/down/in/out in a horizontal row with a space gap between each.
+    // Layout: up ' ' down ' ' in_ ' ' out
+    let portal_y = path_y + 3;
+    if portal_y < area.bottom() {
+        let portals = [sym.portal.up, sym.portal.down, sym.portal.in_, sym.portal.out];
+        let mut px = bx;
+        for ch in portals {
+            if px < area.right() {
+                crate::render::draw_char_clipped(buf, px, portal_y, ch, portal_style, area);
+                px += 2; // glyph + space gap
+            }
+        }
     }
 }
 
@@ -222,6 +284,7 @@ mod tests {
     use crate::render::dialog::ButtonId;
     use crate::render::paneframe::BorderStyle;
     use crate::state::AppState;
+    use crate::state::GalleryState;
 
     fn make_state_with_gallery() -> AppState {
         let mut s = AppState::default();
@@ -376,5 +439,82 @@ mod tests {
             rects_out = draw_gallery(&state, f.area(), f.buffer_mut());
         }).unwrap();
         assert!(rects_out.is_none(), "draw_gallery should return None when terminal is too small");
+    }
+
+    #[test]
+    fn preview_shows_box_corner_path_arrows_and_portals() {
+        // Build a GalleryState selecting:
+        //   box=thick (index 1), arrows=nf-box (index 4),
+        //   portal=nerdfont-stairs (index 2), path=heavy (index 1)
+        // BoxStyle preset_names: ["rounded","thick","double","ascii","borderless"]  => thick=1
+        // Arrows preset_names:   ["filled","line","nerdfont","nf-bold","nf-box",..] => nf-box=4
+        // PortalGlyphs preset_names: ["ascii","nerdfont","nerdfont-stairs"]          => nerdfont-stairs=2
+        // PathGlyphs preset_names:   ["light","heavy","dotted"]                      => heavy=1
+        let mut state = AppState::default();
+        state.gallery = Some(GalleryState {
+            category_idx: 0,
+            selections: [
+                1, // box = thick
+                4, // arrows = nf-box
+                2, // portal = nerdfont-stairs
+                1, // path = heavy
+            ],
+        });
+
+        // Use a wide terminal so the dialog opens and the preview pane has room.
+        // The dialog is up to 70 wide x 24 tall; the preview is below the preset list.
+        // We use 80x40 to give ample space.
+        let backend = TestBackend::new(80, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            draw_gallery(&state, f.area(), f.buffer_mut());
+        }).unwrap();
+
+        // Collect every character in the buffer as a flat string.
+        let all_chars: String = terminal.backend().buffer().content().iter()
+            .flat_map(|c| c.symbol().chars())
+            .collect();
+
+        // Thick box corner must be present (tl = '┏').
+        assert!(
+            all_chars.contains('┏'),
+            "preview must contain thick box top-left corner '┏'"
+        );
+
+        // At least one corner arrow from nf-box: nw=F1968, ne=F196A, sw=F1964, se=F1966.
+        let corner_arrows = ['\u{F1968}', '\u{F196A}', '\u{F1964}', '\u{F1966}'];
+        assert!(
+            corner_arrows.iter().any(|&ch| all_chars.contains(ch)),
+            "preview must contain at least one nf-box corner arrow glyph"
+        );
+
+        // At least 2 distinct heavy path glyphs: ew='━', ns='┃', se='┏', sw='┓', ne='┗', nw='┛',
+        // nse='┣', nsw='┫', ews='┳', ewn='┻', nesw='╋'.
+        let heavy_path_glyphs = ['━', '┃', '┗', '┛', '┣', '┫', '┳', '┻', '╋'];
+        let found_path: Vec<char> = heavy_path_glyphs.iter().copied()
+            .filter(|&ch| all_chars.contains(ch))
+            .collect();
+        assert!(
+            found_path.len() >= 2,
+            "preview must contain >=2 distinct heavy path glyphs; found: {:?}",
+            found_path
+        );
+
+        // All 4 nerdfont-stairs portal glyphs must appear:
+        //   up=F12BD (stairs-up), down=F12BE (stairs-down),
+        //   in_=F0FC4 (location-enter), out=F0A48 (exit-run).
+        let portal_glyphs = [
+            ('\u{F12BD}', "up/stairs-up"),
+            ('\u{F12BE}', "down/stairs-down"),
+            ('\u{F0FC4}', "in/location-enter"),
+            ('\u{F0A48}', "out/exit-run"),
+        ];
+        for (ch, label) in portal_glyphs {
+            assert!(
+                all_chars.contains(ch),
+                "preview must contain portal glyph {} ({:?})",
+                label, ch
+            );
+        }
     }
 }
