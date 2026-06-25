@@ -146,8 +146,6 @@ pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
 
 /// Columns reserved at the left of a META line for the gutter marker (`▏` + space).
 pub(crate) const META_GUTTER: u16 = 2;
-/// The gutter glyph drawn beside META (app/slash) output.
-pub(crate) const META_MARKER: &str = "▏";
 
 /// Expand a slice of logical transcript lines into wrapped display rows, carrying
 /// each row's `TranscriptKind`. META lines wrap to `width - META_GUTTER` so the
@@ -516,7 +514,7 @@ fn render_middle(
     state: &AppState,
     buf: &mut Buffer,
     area: Rect,
-    normal_style: Style,
+    _normal_style: Style,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -602,8 +600,6 @@ fn render_middle(
         state.transcript_scroll,
         area.width,
     );
-    let marker_style = state.colors.meta_marker;
-
     // Search highlight style: black text on yellow background.
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
@@ -614,20 +610,40 @@ fn render_middle(
             break;
         }
         match kind {
-            // META and WARNING get the gutter marker; text indented past it.
-            TranscriptKind::Meta | TranscriptKind::Warning => {
-                draw_str_clipped(buf, area.x, row_y, META_MARKER, marker_style, area);
+            TranscriptKind::Story => {
+                let style = state.colors.resolve_story_style(line, state.current_room_name.as_deref());
                 if has_search {
-                    draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, normal_style, &query_lower, search_highlight_style, area);
+                    draw_str_highlighted(buf, area.x, row_y, line, style, &query_lower, search_highlight_style, area);
                 } else {
-                    draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, normal_style, area);
+                    draw_str_clipped(buf, area.x, row_y, line, style, area);
                 }
             }
-            TranscriptKind::Story | TranscriptKind::Input => {
+            TranscriptKind::Input => {
+                let style = state.colors.transcript_input;
                 if has_search {
-                    draw_str_highlighted(buf, area.x, row_y, line, normal_style, &query_lower, search_highlight_style, area);
+                    draw_str_highlighted(buf, area.x, row_y, line, style, &query_lower, search_highlight_style, area);
                 } else {
-                    draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
+                    draw_str_clipped(buf, area.x, row_y, line, style, area);
+                }
+            }
+            TranscriptKind::Meta => {
+                let glyph = state.symbols.meta_gutter.to_string();
+                draw_str_clipped(buf, area.x, row_y, &glyph, state.colors.meta_marker, area);
+                let style = state.colors.transcript_meta;
+                if has_search {
+                    draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, style, &query_lower, search_highlight_style, area);
+                } else {
+                    draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, style, area);
+                }
+            }
+            TranscriptKind::Warning => {
+                let glyph = state.symbols.warning_gutter.to_string();
+                draw_str_clipped(buf, area.x, row_y, &glyph, state.colors.warning_marker, area);
+                let style = state.colors.transcript_warning;
+                if has_search {
+                    draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, style, &query_lower, search_highlight_style, area);
+                } else {
+                    draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, style, area);
                 }
             }
         }
@@ -851,6 +867,63 @@ mod tests {
 
         let mem = Memory::new(buf).expect("minimal v3 story should be valid");
         Machine::new(mem)
+    }
+
+    #[test]
+    fn render_kinds_draw_their_own_styles_and_gutters() {
+        use ratatui::style::Color;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.push_transcript_kind("> go north", TranscriptKind::Input);
+        state.push_transcript_kind("app message", TranscriptKind::Meta);
+        state.push_transcript_kind("VAR 0x15 unimplemented", TranscriptKind::Warning);
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Find the row index (1..8) for each tagged line by its first glyph / content.
+        let row_text = |y: u16| -> String {
+            (0..40u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
+        };
+        // Locate the warning row by its gutter glyph '!' in column 0.
+        let warn_y = (1u16..9).find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some("!"))
+            .expect("warning gutter '!' must appear in column 0");
+        // Warning gutter cell uses warning_marker (Yellow).
+        assert_eq!(buf.cell((0, warn_y)).unwrap().style().fg, Some(Color::Yellow));
+        // Warning text is indented past the 2-col gutter and uses transcript_warning (Yellow).
+        assert_eq!(buf.cell((2, warn_y)).unwrap().style().fg, Some(Color::Yellow));
+
+        // Meta row: gutter glyph '▏' in column 0.
+        let meta_y = (1u16..9).find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some("▏"))
+            .expect("meta gutter '▏' must appear in column 0");
+        assert_eq!(buf.cell((2, meta_y)).unwrap().style().fg, Some(Color::DarkGray)); // transcript_meta
+
+        // Input row: no gutter (text at column 0), cyan fg.
+        let input_y = (1u16..9).find(|&y| row_text(y).starts_with("> go north"))
+            .expect("input line must render at column 0");
+        assert_eq!(buf.cell((0, input_y)).unwrap().style().fg, Some(Color::Cyan)); // transcript_input
+    }
+
+    #[test]
+    fn render_story_location_line_is_bold() {
+        use ratatui::style::Modifier;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.current_room_name = Some("West of House".to_string());
+        state.push_transcript("West of House"); // Story
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        let y = (1u16..9).find(|&y| {
+            let row: String = (0..40u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect();
+            row.starts_with("West of House")
+        }).expect("location line must render");
+        assert!(buf.cell((0, y)).unwrap().modifier.contains(Modifier::BOLD), "location header must be bold");
     }
 
     #[test]
