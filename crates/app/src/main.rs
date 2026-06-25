@@ -1708,16 +1708,20 @@ fn main() {
                             .filter(|&o| get_parent(&session.machine.mem, o) == current_loc)
                             .collect();
 
-                        // Try to lock the player object on a room change.
+                        // Lock the player object. Prefer the reliable name-based
+                        // lookup (the object short-named "you"/"yourself"/… — present
+                        // in most games incl. v3 Zork as obj #30) so the inventory
+                        // panel reads the LIVE object tree from turn one and reflects
+                        // take/drop immediately. Fall back to the movement heuristic
+                        // for games whose player object isn't named.
                         if state.player_obj.is_none() {
-                            if let Some(locked) = detect_player_obj(
-                                state.prev_location,
-                                &state.prev_objects_here,
-                                current_loc,
-                                &objects_here,
-                            ) {
-                                state.player_obj = Some(locked);
-                            }
+                            state.player_obj = zvm::find_player_object(&session.machine)
+                                .or_else(|| detect_player_obj(
+                                    state.prev_location,
+                                    &state.prev_objects_here,
+                                    current_loc,
+                                    &objects_here,
+                                ));
                         }
 
                         // Update tracking for next turn.

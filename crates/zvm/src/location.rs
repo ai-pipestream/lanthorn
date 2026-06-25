@@ -121,7 +121,7 @@ pub fn status_name_matches(candidate: &str, short: &str) -> bool {
 
 /// The current player object: the lowest-numbered object whose normalized short
 /// name is one of {yourself, you, me, myself, self}. None if not found.
-fn find_player_object(machine: &Machine) -> Option<u16> {
+pub fn find_player_object(machine: &Machine) -> Option<u16> {
     const NAMES: [&str; 5] = ["yourself", "you", "me", "myself", "self"];
     let n = max_object_number(&machine.mem);
     (1..=n).find(|&obj| {
@@ -360,6 +360,21 @@ mod tests {
         buf[PROP3_TBL as usize + 1..PROP3_TBL as usize + 1 + name.len()].copy_from_slice(&name);
         let machine = make_machine(buf);
         assert_eq!(find_player_object(&machine), Some(3));
+    }
+
+    #[test]
+    fn find_player_object_finds_player_in_minizork() {
+        // Real-game check: minizork's player object is #30, short name "you".
+        // This is what makes the inventory panel's name-based player lookup reliable.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/minizork.z3");
+        if !fixture.exists() {
+            eprintln!("SKIP: minizork.z3 fixture not found");
+            return;
+        }
+        let data = std::fs::read(&fixture).expect("read minizork.z3");
+        let machine = make_machine(data);
+        assert_eq!(find_player_object(&machine), Some(30), "minizork player object is #30 (\"you\")");
     }
 
     #[test]
