@@ -110,6 +110,11 @@ and unsupported; v1/v2 are not supported.)
   border shows the **adventure title** (taken from an override, the game's opening
   banner, or the filename). The status line and input prompt can be boxed too —
   all via `style.toml`.
+- **Unified dialogs** — every modal (gallery, saves, file browser, config screen,
+  verb menu, hotkey dialog, room/diagnostics panels) shares one themeable chrome:
+  a bordered, titled, opaque frame with a clickable **✕**, mouse-clickable
+  buttons, and an optional **drop-shadow**. `Esc` and **✕** always close;
+  colors/border style are configurable under the `dialog*` style selectors.
 
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
