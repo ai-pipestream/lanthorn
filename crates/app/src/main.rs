@@ -1427,6 +1427,55 @@ fn main() {
     }
 }
 
+// ── Reset helper ──────────────────────────────────────────────────────────────
+
+/// Rebuild the session from `story_bytes`, reset all ephemeral state, and
+/// re-seed the mapper with the start room.  When `clear_map` is true, the
+/// accumulated map is wiped first (same effect as `/reset map`) so only the
+/// start room remains after the re-seed.
+fn reset_game(
+    session: &mut GameSession,
+    mapper: &mut Mapper,
+    state: &mut AppState,
+    story_bytes: &[u8],
+    clear_map: bool,
+) {
+    match GameSession::new(story_bytes.to_vec()) {
+        Ok(new_session) => {
+            *session = new_session;
+            let start_loc = zvm::current_location(&session.machine);
+            state.turns = 0;
+            state.input.clear();
+            state.suggestions.clear();
+            state.suggestion_idx = 0;
+            state.transcript.clear();
+            state.transcript_kinds.clear();
+            state.transcript_scroll = 0;
+            if clear_map {
+                *mapper = Mapper::default();
+            }
+            let banner = session.take_transcript();
+            state.push_transcript(&banner);
+            if let Some(snap) = start_loc {
+                let snap_number = snap.number;
+                let seed_result = TurnResult {
+                    transcript: String::new(),
+                    location: Some(snap),
+                    quit: false,
+                    info: None,
+                };
+                apply_turn(mapper, "", &seed_result);
+                let rid = snap_number as mapper::graph::RoomId;
+                state.select_room(Some(rid));
+            }
+            state.push_transcript("[Game reset]");
+        }
+        Err(e) => {
+            state.push_transcript(&format!("[Reset failed: {:?}]", e));
+        }
+    }
+}
+
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
 /// Handle a submitted saves-manager or game-reset prompt.
@@ -1448,42 +1497,7 @@ fn handle_saves_prompt(
                 state.push_transcript("[Reset cancelled]");
                 return;
             }
-            // Rebuild the session from the original story bytes. Map is kept untouched.
-            match app::session::GameSession::new(story_bytes.to_vec()) {
-                Ok(new_session) => {
-                    *session = new_session;
-                    // Seed the starting room exactly as startup does.
-                    let start_loc = zvm::current_location(&session.machine);
-                    // Reset turn counter, input, and transcript (like startup).
-                    state.turns = 0;
-                    state.input.clear();
-                    state.suggestions.clear();
-                    state.suggestion_idx = 0;
-                    state.transcript.clear();
-                    state.transcript_kinds.clear();
-                    state.transcript_scroll = 0;
-                    // Push the new opening banner.
-                    let banner = session.take_transcript();
-                    state.push_transcript(&banner);
-                    // Re-seed the starting room in the mapper and select it.
-                    if let Some(snap) = start_loc {
-                        let snap_number = snap.number;
-                        let seed_result = TurnResult {
-                            transcript: String::new(),
-                            location: Some(snap),
-                            quit: false,
-                            info: None,
-                        };
-                        apply_turn(mapper, "", &seed_result);
-                        let rid = snap_number as mapper::graph::RoomId;
-                        state.select_room(Some(rid));
-                    }
-                    state.push_transcript("[Game reset]");
-                }
-                Err(e) => {
-                    state.push_transcript(&format!("[Reset failed: {:?}]", e));
-                }
-            }
+            reset_game(session, mapper, state, story_bytes, false);
         }
         PromptKind::SaveAs => {
             if buf.is_empty() {
