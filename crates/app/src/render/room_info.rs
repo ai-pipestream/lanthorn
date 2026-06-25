@@ -181,6 +181,11 @@ pub fn draw_room_info(
 /// of the room object (or children of containers in the room). We list only the
 /// direct children here (one level deep), which covers visible items on the floor.
 fn list_room_objects(mem: &zvm::memory::Memory, room_id: RoomId) -> Vec<String> {
+    // Name-only rooms have no backing object; never read the object table by a
+    // synthetic id (it would be outside the table).
+    if crate::roomid::is_synthetic_room(room_id) {
+        return Vec::new();
+    }
     use zvm::objects::{get_child, get_sibling, short_name};
     let mut result = Vec::new();
     let mut child = get_child(mem, room_id);
@@ -205,6 +210,25 @@ mod tests {
     use ratatui::style::{Color, Style};
     use crate::render::dialog::DialogStyle;
     use crate::render::paneframe::BorderStyle;
+
+    #[test]
+    fn list_room_objects_empty_for_synthetic_id() {
+        // A synthetic RoomId (high bit set) must not read the object table.
+        // Build a minimal v5 story in the same style as headless.rs's minimal_machine.
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 5; // version = 5
+        buf[0x04] = 0x00; buf[0x05] = 0x40; // high_mem_base = 0x0040
+        buf[0x06] = 0x00; buf[0x07] = 0x40; // initial_pc = 0x0040
+        buf[0x08] = 0x00; buf[0x09] = 0x80; // dict = 0x0080
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object table = 0x0100
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev = 0x0060
+        buf[0x0040] = 0xba; // quit opcode
+        let mem = zvm::memory::Memory::new(buf).unwrap();
+        let synth = crate::roomid::SYNTHETIC_ROOM_FLAG | 0x0123;
+        assert!(list_room_objects(&mem, synth).is_empty());
+    }
 
     fn make_dialog_style() -> DialogStyle {
         DialogStyle {
