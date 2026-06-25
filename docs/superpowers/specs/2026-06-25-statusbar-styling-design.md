@@ -176,9 +176,20 @@ If even the right cluster cannot fit, it is clipped to the row width.
     Unit-testable without a `Buffer`.
   - `render_status_content` rewritten to: short-circuit on `status_msg`
     (unchanged), else resolve each segment, drop hidden ones, pack clusters, draw.
-- `write_style_full` does **not** export the statusbar segments (authored content,
-  like `[[transcript.rule]]`); the default layout reproduces on a no-block resolve,
-  so the round-trip equality test still holds.
+- `write_style_full` **exports** the authored UI styling so the file is fully
+  self-contained:
+  - The `[statusbar]` block's **segments** (each `text` / `align` + style via
+    `style_to_decl`). The frame is NOT re-emitted here — it already round-trips
+    through the existing `status_header` selector export (onto which
+    `border`/`border_fg` map), so emitting it twice is avoided.
+  - The **`[[transcript.rule]]`** array (each rule's `match` = `pattern` + style
+    via `style_to_decl`). This corrects the currently-merged transcript-styling
+    feature, where `write_style_full` skipped the rules — a small cross-feature
+    change included here so the "self-contained export" guarantee is complete for
+    all transcript/statusbar styling at once.
+  - Round-trip holds: for `terminal_default` (empty rules, default segments) the
+    export reproduces the same `ColorScheme`; for custom rules/segments the
+    `pattern`/`text`/`align`/style decompose and re-resolve identically.
 
 ## Error handling
 
@@ -207,8 +218,10 @@ If even the right cluster cannot fit, it is clipped to the row width.
   (location left; `Score: X  Moves: Y` or `HH:MM` right; filter indicator right).
 - `status_msg` still overrides all segments.
 - Border: `border = "single"` boxes the bar (3 rows) with `border_fg`.
-- `ColorScheme` equality / `write_style_full` round-trip stays green (segments
-  not exported; default reproduces).
+- `write_style_full` round-trip: a `ColorScheme` carrying a **custom** statusbar
+  segment list AND a custom `[[transcript.rule]]` exports, re-parses, and resolves
+  back to an equal `ColorScheme` (segments, rules, and styles all preserved). The
+  existing `terminal_default` round-trip stays green.
 
 ## Out of scope (deferred)
 
@@ -217,4 +230,6 @@ If even the right cluster cannot fit, it is clipped to the row width.
 - Dynamic/conditional segments beyond the empty-placeholder auto-hide rule
   (no `#{?…}` conditionals like full tmux).
 - Click targets on segments (e.g. click the filter segment to cycle filters).
-- Exposing the statusbar block in the gallery / `write_style_full` export.
+- Authoring the statusbar block from the **gallery** UI (it is exported by
+  `write_style_full` and hand-editable in `style.toml`, but no live-preview editor
+  is added).
