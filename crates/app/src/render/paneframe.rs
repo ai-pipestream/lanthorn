@@ -200,6 +200,141 @@ pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, color: 
     PaneFrame { area, content, top_inset }
 }
 
+// ── PaneSides + per-side frame drawing ─────────────────────────────────────────
+
+/// Per-side border styles for one pane. A side of `None` is omitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneSides {
+    pub top: BorderStyle,
+    pub bottom: BorderStyle,
+    pub left: BorderStyle,
+    pub right: BorderStyle,
+}
+
+impl PaneSides {
+    /// All four sides set to one style.
+    pub fn all(style: BorderStyle) -> PaneSides {
+        PaneSides { top: style, bottom: style, left: style, right: style }
+    }
+}
+
+/// "Weight" used to pick a corner glyph when two adjacent sides differ:
+/// thick > double > single > none.
+fn border_weight(s: BorderStyle) -> u8 {
+    match s {
+        BorderStyle::Thick => 3,
+        BorderStyle::Double => 2,
+        BorderStyle::Single => 1,
+        _ => 0, // None / PictureFrame never reach the per-side corner path
+    }
+}
+
+fn glyphs_for(style: BorderStyle) -> &'static Glyphs {
+    match style {
+        BorderStyle::Double => &DOUBLE,
+        BorderStyle::Thick => &THICK,
+        _ => &SINGLE,
+    }
+}
+
+/// Which corner of the frame, for `corner_glyph`.
+#[derive(Clone, Copy)]
+enum Corner { Tl, Tr, Bl, Br }
+
+/// The glyph for one corner, given its horizontal (top/bottom) and vertical
+/// (left/right) adjacent side styles. Both present → corner glyph of the heavier
+/// style; only horizontal → that horizontal glyph; only vertical → that vertical
+/// glyph; neither → a space.
+fn corner_glyph(h: BorderStyle, v: BorderStyle, which: Corner) -> &'static str {
+    let h_on = h != BorderStyle::None;
+    let v_on = v != BorderStyle::None;
+    match (h_on, v_on) {
+        (true, true) => {
+            let g = if border_weight(h) >= border_weight(v) { glyphs_for(h) } else { glyphs_for(v) };
+            match which { Corner::Tl => g.tl, Corner::Tr => g.tr, Corner::Bl => g.bl, Corner::Br => g.br }
+        }
+        (true, false) => glyphs_for(h).top,
+        (false, true) => glyphs_for(v).side,
+        (false, false) => " ",
+    }
+}
+
+/// Draw a pane frame with independent per-side styles. Each present side draws
+/// its straight glyph; corners resolve via `corner_glyph`; `content` is inset by
+/// 1 only on sides that have a border; `top_inset` is the top row (between the
+/// left/right insets) only when the top side is present, else zero-height.
+pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, color: Style) -> PaneFrame {
+    if area.width < 2 || area.height < 2 {
+        let top_inset = Rect::new(area.x, area.y, area.width, 1.min(area.height));
+        return PaneFrame { area, content: area, top_inset };
+    }
+    let x = area.x;
+    let y = area.y;
+    let right = x + area.width - 1;
+    let bottom = y + area.height - 1;
+    let on = |s: BorderStyle| s != BorderStyle::None;
+
+    // Horizontal runs (top/bottom): straight glyph between the corners.
+    if on(sides.top) {
+        let g = glyphs_for(sides.top);
+        for cx in (x + 1)..right {
+            if let Some(c) = buf.cell_mut((cx, y)) { c.set_symbol(g.top).set_style(color); }
+        }
+    }
+    if on(sides.bottom) {
+        let g = glyphs_for(sides.bottom);
+        for cx in (x + 1)..right {
+            if let Some(c) = buf.cell_mut((cx, bottom)) { c.set_symbol(g.top).set_style(color); }
+        }
+    }
+    // Vertical runs (left/right).
+    if on(sides.left) {
+        let g = glyphs_for(sides.left);
+        for cy in (y + 1)..bottom {
+            if let Some(c) = buf.cell_mut((x, cy)) { c.set_symbol(g.side).set_style(color); }
+        }
+    }
+    if on(sides.right) {
+        let g = glyphs_for(sides.right);
+        for cy in (y + 1)..bottom {
+            if let Some(c) = buf.cell_mut((right, cy)) { c.set_symbol(g.side).set_style(color); }
+        }
+    }
+    // Corners.
+    let set = |buf: &mut Buffer, px: u16, py: u16, sym: &str| {
+        if sym != " " {
+            if let Some(c) = buf.cell_mut((px, py)) { c.set_symbol(sym).set_style(color); }
+        }
+    };
+    set(buf, x, y, corner_glyph(sides.top, sides.left, Corner::Tl));
+    set(buf, right, y, corner_glyph(sides.top, sides.right, Corner::Tr));
+    set(buf, x, bottom, corner_glyph(sides.bottom, sides.left, Corner::Bl));
+    set(buf, right, bottom, corner_glyph(sides.bottom, sides.right, Corner::Br));
+
+    // Content: inset 1 on each bordered side only.
+    let l = if on(sides.left) { 1 } else { 0 };
+    let r = if on(sides.right) { 1 } else { 0 };
+    let t = if on(sides.top) { 1 } else { 0 };
+    let b = if on(sides.bottom) { 1 } else { 0 };
+    let content = Rect::new(
+        x + l,
+        y + t,
+        area.width.saturating_sub(l + r),
+        area.height.saturating_sub(t + b),
+    );
+
+    // top_inset only valid when the top side is present.
+    let top_inset = if on(sides.top) {
+        let inset_x = x + 1;
+        let inset_w = right.saturating_sub(inset_x);
+        Rect::new(inset_x, y, inset_w, 1)
+    } else {
+        Rect::new(x, y, 0, 0)
+    };
+
+    PaneFrame { area, content, top_inset }
+}
+
 // ── InsetSegment ──────────────────────────────────────────────────────────────
 
 pub struct InsetSegment<'a> {
@@ -637,6 +772,45 @@ mod tests {
         let row: String = (0..9).map(|x| buf.cell((x,0)).unwrap().symbol().to_string()).collect();
         assert!(row.contains("1"));      // active shown
         assert!(row.contains("‹") || row.contains("…")); // overflow marker present
+    }
+
+    #[test]
+    fn pane_sides_all_and_left_right_only() {
+        let s = PaneSides::all(BorderStyle::Single);
+        assert_eq!(s.top, BorderStyle::Single);
+        assert_eq!(s.bottom, BorderStyle::Single);
+
+        // left+right only: vertical bars, no corners, content keeps full height.
+        let sides = PaneSides { top: BorderStyle::None, bottom: BorderStyle::None, left: BorderStyle::Single, right: BorderStyle::Single };
+        let area = Rect::new(0, 0, 10, 4);
+        let mut buf = Buffer::empty(area);
+        let frame = draw_pane_frame_sides(&mut buf, area, sides, Style::default());
+        // sides present on every row; corners are NOT drawn (no ┌ at 0,0).
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((9, 0)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "│");
+        // content inset 1 left + 1 right, full height (top/bottom open).
+        assert_eq!(frame.content, Rect::new(1, 0, 8, 4));
+        // no top border → top_inset has zero height.
+        assert_eq!(frame.top_inset.height, 0);
+    }
+
+    #[test]
+    fn draw_sides_corner_when_two_meet_and_heavier_wins() {
+        // top thick + left single → top-left corner uses the thick corner (heavier wins).
+        let sides = PaneSides { top: BorderStyle::Thick, bottom: BorderStyle::None, left: BorderStyle::Single, right: BorderStyle::None };
+        let area = Rect::new(0, 0, 6, 4);
+        let mut buf = Buffer::empty(area);
+        let frame = draw_pane_frame_sides(&mut buf, area, sides, Style::default());
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┏"); // thick tl corner
+        // top row interior is the thick horizontal; left side is the single vertical.
+        assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "━");
+        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "│");
+        // content inset 1 top + 1 left only.
+        assert_eq!(frame.content, Rect::new(1, 1, 5, 3));
+        // top present → top_inset spans the top row between the left inset and the right edge.
+        assert_eq!(frame.top_inset.y, 0);
+        assert_eq!(frame.top_inset.height, 1);
     }
 
 }
