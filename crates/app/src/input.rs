@@ -1343,6 +1343,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
     // ── Normal action dispatch ────────────────────────────────────────────
     match action {
         Action::InputChar(c) => {
+            // Clear any transient status message on the first keypress.
+            state.status_msg = None;
             state.push_input_char(c);
             // Recompute suggestions after every character typed in game focus.
             if state.focus == Focus::Game {

@@ -271,9 +271,9 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         // Draw a pane frame around the status region.
         let frame = draw_pane_frame(buf, status_region, status_style_kind, state.colors.status_header);
         // Render status text into the inner content row.
-        render_status_content(machine, buf, frame.content, state.colors.status_bar);
+        render_status_content(machine, buf, frame.content, state.colors.status_bar, state.status_msg.as_deref());
     } else {
-        render_status_content(machine, buf, status_region, state.colors.status_bar);
+        render_status_content(machine, buf, status_region, state.colors.status_bar, state.status_msg.as_deref());
     }
 
     if area.height < status_rows + 1 {
@@ -303,13 +303,17 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     render_middle(machine, state, buf, middle_area, normal_style);
 }
 
-/// Draw the status bar (location + score/time) into `region` with `status_style`.
+/// Draw the status bar into `region` with `status_style`.
 /// The region may be 1 row (plain) or 1 row inside a frame (boxed).
+///
+/// When `status_msg` is `Some`, it overrides the normal location/score content
+/// and renders the transient message left-aligned on the status row.
 fn render_status_content(
     machine: &Machine,
     buf: &mut Buffer,
     region: Rect,
     status_style: Style,
+    status_msg: Option<&str>,
 ) {
     if region.height == 0 || region.width == 0 {
         return;
@@ -324,15 +328,21 @@ fn render_status_content(
         }
     }
 
-    let sl = machine.status_line();
-    let (left, right) = format_status(&sl);
+    if let Some(msg) = status_msg {
+        // Transient status message: render left-aligned, overriding normal content.
+        let msg_trunc = truncate_line(msg, w);
+        draw_str_clipped(buf, region.x, status_y, msg_trunc, status_style, region);
+    } else {
+        let sl = machine.status_line();
+        let (left, right) = format_status(&sl);
 
-    let left_trunc = truncate_line(&left, w);
-    draw_str_clipped(buf, region.x, status_y, left_trunc, status_style, region);
+        let left_trunc = truncate_line(&left, w);
+        draw_str_clipped(buf, region.x, status_y, left_trunc, status_style, region);
 
-    if right.len() < w {
-        let right_x = region.x + (w - right.len()) as u16;
-        draw_str_clipped(buf, right_x, status_y, &right, status_style, region);
+        if right.len() < w {
+            let right_x = region.x + (w - right.len()) as u16;
+            draw_str_clipped(buf, right_x, status_y, &right, status_style, region);
+        }
     }
 }
 
@@ -979,6 +989,30 @@ mod tests {
         // show_inventory = false → None.
         let line3 = format_inventory_line(false, None, &items, &machine);
         assert_eq!(line3, None);
+    }
+
+    // ── Task 5: status_msg render ─────────────────────────────────────────────
+
+    #[test]
+    fn status_msg_renders_on_status_line() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.status_msg = Some("saved".to_string());
+
+        // 10-row area; status row is y=0.
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Row 0 (status line) must contain the word "saved".
+        let status_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(
+            status_row.contains("saved"),
+            "status row should contain 'saved' when status_msg is set; got: {:?}",
+            status_row
+        );
     }
 
     // ── Task 8: status-header + input-line boxing + opt-out ───────────────────

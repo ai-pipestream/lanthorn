@@ -939,6 +939,9 @@ fn main() {
                     continue;
                 }
 
+                // Clear any transient status message on a real game turn.
+                state.status_msg = None;
+
                 // Increment the session turn counter.
                 state.turns += 1;
 
