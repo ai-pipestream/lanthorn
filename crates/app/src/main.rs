@@ -39,8 +39,9 @@ use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::slash::{self, SlashOutcome};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptKind};
+use app::export::export_transcript;
+use app::slash::{self, SlashOutcome, TranscriptFilterArg};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptFilter, TranscriptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -967,15 +968,40 @@ fn main() {
                             state.set_status(status_msg);
                         }
                         SlashOutcome::Quit => break,
-                        // Handled in later tasks (Task 5 / Task 6).
+                        // Handled in Task 6.
                         SlashOutcome::Search(_) => {
                             state.set_status("search: not yet implemented");
                         }
-                        SlashOutcome::Filter(_) => {
-                            state.set_status("filter: not yet implemented");
+                        SlashOutcome::Filter(arg) => {
+                            state.transcript_filter = match arg {
+                                TranscriptFilterArg::Both  => TranscriptFilter::Both,
+                                TranscriptFilterArg::Story => TranscriptFilter::Story,
+                                TranscriptFilterArg::Meta  => TranscriptFilter::Meta,
+                            };
+                            let label = match state.transcript_filter {
+                                TranscriptFilter::Both  => "both",
+                                TranscriptFilter::Story => "story",
+                                TranscriptFilter::Meta  => "meta",
+                            };
+                            state.set_status(format!("filter: {}", label));
                         }
-                        SlashOutcome::Export(_) => {
-                            state.set_status("export: not yet implemented");
+                        SlashOutcome::Export(dest) => {
+                            let lines: Vec<String> = state
+                                .visible_transcript_indices()
+                                .into_iter()
+                                .map(|i| state.transcript[i].clone())
+                                .collect();
+                            let exports_dir = state.config.user_dir.join("exports");
+                            let stamp = format_stamp(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0),
+                            );
+                            match export_transcript(&lines, dest.as_deref(), &exports_dir, &stamp) {
+                                Ok(path) => state.set_status(format!("exported: {}", path.display())),
+                                Err(e)   => state.set_status(format!("export failed: {}", e)),
+                            }
                         }
                     }
                     continue;
@@ -1590,6 +1616,16 @@ fn handle_saves_prompt(
         }
         _ => {} // other prompt kinds are handled elsewhere
     }
+}
+
+/// Format a Unix timestamp (seconds since epoch) as YYYYMMDD-HHMMSS (UTC).
+fn format_stamp(secs: u64) -> String {
+    let sec = secs % 60;
+    let min = (secs / 60) % 60;
+    let hour = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (year, month, day) = days_to_ymd_main(days);
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", year, month, day, hour, min, sec)
 }
 
 /// Format a Unix timestamp (seconds since epoch) as an RFC3339 UTC string.
