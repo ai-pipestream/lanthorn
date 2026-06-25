@@ -38,17 +38,18 @@ hand-authored files keyed by IFID, merged over the global style.
 
 ### 2. Merge scope — what per-game can override
 
-Per-game files override the **visual theme**, not the global app chrome:
+Per-game files override **everything** `style.toml` owns, via the existing
+`merge(global, per_game)` semantics — no carve-outs:
 
-- **Overridable** (merged over global): `[colors]` selectors (per-key),
-  `[symbols]` presets + overrides, and `[[transcript.rule]]` (story-line coloring
-  is genuinely game-specific — e.g. paint "grue" red in Zork).
-- **Global-only** (per-game ignored): the **`[statusbar]`** block. The status bar
-  is consistent app-chrome across games; a per-game `[statusbar]` is dropped before
-  the merge so the global statusbar always wins.
+- `[colors]` selectors merge per-key (a per-game selector overrides just that one).
+- `[symbols]` presets merge per-field; overrides union.
+- `[[transcript.rule]]` replaces-if-present (story-line coloring is game-specific
+  — e.g. paint "grue" red in Zork).
+- `[statusbar]` replaces-if-present — a per-game status/score bar (segments,
+  border) for that adventure; absent → the global bar.
 
-Mechanically: a per-game variant of the merge forces the global `status_bar`
-(`merged.status_bar = global.status_bar`) after `merge(global, per_game)`.
+This is plain `merge(global, per_game)`; no per-game-specific merge variant is
+needed.
 
 ### 3. Scaffold command — `/game-style`
 
@@ -60,7 +61,8 @@ Mechanically: a per-game variant of the merge forces the global `status_bar`
   # Per-game style override for: <title>
   # IFID: <ifid>
   # Layers on the global style.toml. See style.example.toml for the full schema.
-  # The [statusbar] block is global-only and ignored here.
+  # Anything style.toml supports works here (colors, symbols, transcript rules,
+  # statusbar) and overrides the global value for this game only.
 
   [colors]
   # "room:current" = { fg = "yellow" }
@@ -80,7 +82,7 @@ Mechanically: a per-game variant of the merge forces the global `status_bar`
 reload_style(state, user_dir, ifid):
   global_doc = parse global style.toml (pointer in config.style)   # Failed → keep current
   per_game   = parse user_dir/styles/<ifid>.toml if it exists      # Failed → keep current
-  merged     = merge_for_game(global_doc, per_game)                # statusbar forced global
+  merged     = merge(global_doc, per_game)                         # empty per_game → global only
   (cs, set, warnings) = resolve(merged, user_dir)
   state.colors = cs; state.symbols = set
   → Reloaded { warnings }
@@ -100,9 +102,9 @@ A change to either triggers the merged `reload_style`.
 ## Architecture / components
 
 - `crates/app/src/reload.rs` (from the live-reload feature): `reload_style` gains an
-  `ifid: &str` parameter; add `merge_for_game(global, per_game) -> StyleDoc` (calls
-  `merge`, then forces `status_bar = global.status_bar`); resolve the per-game path
-  `user_dir/styles/<ifid>.toml`.
+  `ifid: &str` parameter; parse the per-game path `user_dir/styles/<ifid>.toml` (if
+  present) and `merge(global, per_game)` before `resolve`. No per-game merge variant
+  is needed — plain `merge` already does the right thing.
 - `crates/app/src/persist_files.rs` (or a small `styles.rs`): `pub fn
   per_game_style_path(user_dir, ifid) -> PathBuf` = `user_dir/styles/<ifid>.toml`;
   `pub fn scaffold_per_game_style(user_dir, ifid, title) -> io::Result<(PathBuf,
@@ -119,8 +121,6 @@ A change to either triggers the merged `reload_style`.
 - Per-game file parse error → keep current look, one Warning line (same as global).
 - `styles/` directory missing → created on scaffold; absent per-game file → global
   only (no error).
-- A per-game `[statusbar]` present → silently dropped (global statusbar wins), as
-  designed; no warning needed (documented in the scaffold header).
 - `/game-style` when the file exists → reports the path, no overwrite.
 
 ## Testing
@@ -129,9 +129,9 @@ A change to either triggers the merged `reload_style`.
 - `scaffold_per_game_style`: creates the file + `styles/` dir with the title/IFID
   header when absent (returns `created = true`); returns `created = false` and
   leaves contents intact when it already exists.
-- `merge_for_game`: a per-game `[colors]` selector overrides global per-key; a
-  per-game `[symbols]` override merges; a per-game `[[transcript.rule]]` replaces;
-  a per-game `[statusbar]` is **ignored** (global statusbar segments preserved).
+- `merge`: a per-game `[colors]` selector overrides global per-key; a per-game
+  `[symbols]` override merges; a per-game `[[transcript.rule]]` replaces; a per-game
+  `[statusbar]` replaces the global bar (segments + border) for that game.
 - `reload_style` with IFID: with a per-game file present, the resolved
   `ColorScheme` reflects global + per-game (e.g. global `transcript` fg overridden
   by the per-game file); with no per-game file, equals global-only resolution;
@@ -146,4 +146,3 @@ A change to either triggers the merged `reload_style`.
   only scaffolds; overrides are hand-authored).
 - Per-game keymap / non-style config.
 - Bundling the per-game style inside the `.babelmap` archive (separate file only).
-- Per-game override of the global statusbar (global-only by design).
