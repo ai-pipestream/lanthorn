@@ -598,33 +598,29 @@ impl KeyMap {
         // F5 → reset game (free key; opens a confirmation prompt before acting).
         bind!(plain(F(5)), Command::ResetGame, Context::Global);
 
-        // Ctrl+Arrows → Nudge
-        bind!(ctrl(Left), Command::NudgeLeft, Context::Global);
-        bind!(ctrl(Right), Command::NudgeRight, Context::Global);
-        bind!(ctrl(Up), Command::NudgeUp, Context::Global);
-        bind!(ctrl(Down), Command::NudgeDown, Context::Global);
+        // F6-F9 → Nudge (plain function keys; ctrl+arrow removed so all direct
+        // bindings remain modifier-free).
+        bind!(plain(F(6)), Command::NudgeLeft, Context::Global);
+        bind!(plain(F(7)), Command::NudgeRight, Context::Global);
+        bind!(plain(F(8)), Command::NudgeUp, Context::Global);
+        bind!(plain(F(9)), Command::NudgeDown, Context::Global);
 
         // ── Map ───────────────────────────────────────────────────────────────
-        // Pan: plain arrows + Shift+arrows + hjkl (all three sets)
+        // Pan: plain arrows + hjkl (two sets; shift-arrows removed so all
+        // direct bindings remain modifier-free).
         bind!(plain(Left), Command::PanLeft, Context::Map);
         bind!(plain(Right), Command::PanRight, Context::Map);
         bind!(plain(Up), Command::PanUp, Context::Map);
         bind!(plain(Down), Command::PanDown, Context::Map);
-
-        bind!(shift(Left), Command::PanLeft, Context::Map);
-        bind!(shift(Right), Command::PanRight, Context::Map);
-        bind!(shift(Up), Command::PanUp, Context::Map);
-        bind!(shift(Down), Command::PanDown, Context::Map);
 
         bind!(plain(Char('h')), Command::PanLeft, Context::Map);
         bind!(plain(Char('l')), Command::PanRight, Context::Map);
         bind!(plain(Char('k')), Command::PanUp, Context::Map);
         bind!(plain(Char('j')), Command::PanDown, Context::Map);
 
-        // Zoom: + / = / Shift++ (three specs for ZoomIn)
+        // Zoom: + / = (shift(+) alias removed; plain alternatives cover it).
         bind!(plain(Char('+')), Command::ZoomIn, Context::Map);
         bind!(plain(Char('=')), Command::ZoomIn, Context::Map);
-        bind!(shift(Char('+')), Command::ZoomIn, Context::Map);
         bind!(plain(Char('-')), Command::ZoomOut, Context::Map);
         // '0' (zero) resets zoom to default (Boxes) and clears char-pan offset.
         bind!(plain(Char('0')), Command::ZoomReset, Context::Map);
@@ -649,11 +645,8 @@ impl KeyMap {
         bind!(plain(Esc), Command::ToggleFocus, Context::Map);
 
         // ── Anim ──────────────────────────────────────────────────────────────
-        // Pan in anim: Shift+arrows + hjkl (plain arrows go to step)
-        bind!(shift(Left), Command::PanLeft, Context::Anim);
-        bind!(shift(Right), Command::PanRight, Context::Anim);
-        bind!(shift(Up), Command::PanUp, Context::Anim);
-        bind!(shift(Down), Command::PanDown, Context::Anim);
+        // Pan in anim: hjkl only (plain arrows are bound to step; shift-arrows
+        // removed so all direct bindings remain modifier-free).
         bind!(plain(Char('h')), Command::PanLeft, Context::Anim);
         bind!(plain(Char('l')), Command::PanRight, Context::Anim);
         bind!(plain(Char('k')), Command::PanUp, Context::Anim);
@@ -966,8 +959,10 @@ mod tests {
         assert_eq!(km.lookup(&g(Char('h'), false, false), Context::Map), Some(Command::PanLeft));
         // Map falls through to Global:
         assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some(Command::SaveGame));
-        // multi-binding default preserved:
-        assert_eq!(km.lookup(&g(Left, false, true), Context::Map), Some(Command::PanLeft));
+        // shift-arrow pan aliases were removed; plain arrow still works:
+        assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some(Command::PanLeft));
+        // shift-arrow is no longer bound in map context:
+        assert_eq!(km.lookup(&g(Left, false, true), Context::Map), None);
     }
 
     // Task 3b: resolve applies overrides and rejects conflicts
@@ -1210,5 +1205,43 @@ mod tests {
         apply_action(Action::ZoomReset, &mut state, &mut mapper);
         assert_eq!(state.zoom_level, 7, "ZoomReset must restore zoom_level to 7");
         assert!(matches!(state.zoom, Zoom::Boxes), "ZoomReset must restore Zoom::Boxes");
+    }
+
+    /// Every default binding for a DIRECT command (excluding save_game and
+    /// restore_game, which intentionally use Ctrl) must have ctrl=false and
+    /// shift=false. This invariant ensures that direct commands are reachable
+    /// with plain (unmodified) keystrokes.
+    #[test]
+    fn direct_default_bindings_have_no_modifiers() {
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+
+        // Commands excluded from this invariant by design.
+        let excluded = [Command::SaveGame, Command::RestoreGame];
+
+        let mut violations: Vec<String> = Vec::new();
+        for (spec, cmd, _ctx) in &km.bindings {
+            if excluded.contains(cmd) {
+                continue;
+            }
+            if !layout.is_direct(*cmd) {
+                continue;
+            }
+            if spec.ctrl || spec.shift {
+                violations.push(format!(
+                    "{} ({}): ctrl={} shift={}",
+                    cmd.name(),
+                    spec.label(),
+                    spec.ctrl,
+                    spec.shift,
+                ));
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "direct bindings with modifier keys found (should be plain):\n  {}",
+            violations.join("\n  ")
+        );
     }
 }
