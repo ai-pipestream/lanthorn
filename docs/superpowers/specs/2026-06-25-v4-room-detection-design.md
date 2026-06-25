@@ -141,6 +141,13 @@ fn find_player_object(machine: &Machine) -> Option<u16>;
 /// match "Hallway"). Both sides normalized.
 fn status_name_matches(candidate: &str, short: &str) -> bool;
 
+/// Walk up the parent chain from `start` (exclusive of `start` itself) and
+/// return the nearest ancestor whose short name matches `name` via
+/// `status_name_matches`, or None. Depth-bounded (cap 32) to tolerate cycles.
+/// This handles the player being inside a sub-object (bed, chair, vehicle):
+/// player -> chair -> Room, where only "Room" matches the status line.
+fn nearest_matching_ancestor(machine: &Machine, start: u16, name: &str) -> Option<ObjectSnapshot>;
+
 /// Find the object whose short name matches `name` via `status_name_matches`.
 /// Among matches, the LONGEST short name wins (most specific); ties resolve to
 /// the lowest object number. None if nothing matches.
@@ -155,12 +162,19 @@ true if `candidate == short`, or `candidate` starts with `short` and the
 character immediately after the prefix in `candidate` is not alphanumeric
 (a word boundary — whitespace, punctuation, or end of string).
 
+Detection is **stateless** (a pure function of the machine, re-run each turn).
+`find_player_object` is deterministic, so there is no cross-turn state to lock
+in; the per-turn cost is one player scan, a short ancestor walk, and a few
+string compares. The walk-up below makes player-parent robust to the player
+being inside furniture/vehicles without any remembered state.
+
 `detect_location` v4+ flow, given `name = status_line_room_name(..)`:
 - `None` → return `None`.
 - Else:
-  1. `player = find_player_object(machine)`; `P = parent(player)`. If `P != 0`
-     and `status_name_matches(name, short_name(P))` →
-     `PlayerParent(snapshot(P))`.
+  1. `player = find_player_object(machine)`. If `Some`, and
+     `nearest_matching_ancestor(machine, player, name)` is `Some(P)` →
+     `PlayerParent(P)`. (The nearest ancestor whose name matches the status
+     line is the room — direct parent, or walk past a bed/chair/vehicle.)
   2. Else `resolve_room_object(name)` → `StatusName(snapshot)` if it hits.
   3. Else `NameOnly(name)`.
 
@@ -237,9 +251,11 @@ Code that treats a `RoomId` as a VM object number must skip synthetic ids:
 - **AMFV `(undefined)`:** maps by name "(undefined)".
 - **v3 unchanged:** Zork/Planetfall/Spellbreaker keep mapping via global 0
   (method `GlobalVar0`).
-- **Player in a sub-object** (e.g. "in the bed"): the player's parent is the
-  sub-object, whose name won't match the status-line room name, so player-parent
-  validation fails and we fall through to status-name resolution — correct.
+- **Player in a sub-object** (e.g. "in the bed", "on the chair", "in a
+  vehicle"): the immediate parent is the sub-object, but `nearest_matching_ancestor`
+  walks up to the first ancestor whose name matches the status line (the room),
+  so player-parent still yields the room object. If no ancestor matches, it
+  falls through to status-name resolution.
 
 ## Testing
 
@@ -249,6 +265,9 @@ zvm:
   empty grid → None; multi-space split correctness.
 - `find_player_object`: an object named "yourself" → its number; none → None;
   tie → lowest number.
+- `nearest_matching_ancestor`: direct parent matches → that parent; player →
+  chair (no match) → room (match) returns the room (walk-up past furniture);
+  no matching ancestor → None; cycle/over-deep chain terminates (depth cap).
 - `status_name_matches`: equality ("Bedroom" ~ "Bedroom"); leading decoration
   ("Bedroom (messy)" matches "Bedroom"; "Bedroom, north end" matches "Bedroom");
   word-boundary guard ("Hallway" does NOT match "Hall"); case/whitespace
