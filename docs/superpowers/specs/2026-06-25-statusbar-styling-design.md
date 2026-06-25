@@ -1,7 +1,7 @@
 # Status Bar Styling — Configurable Segment Bar — Design
 
 **Date:** 2026-06-25
-**Status:** Draft, pending user review
+**Status:** Approved, ready for planning
 **TODO:** #76 ("Stylize score bar"), the status-bar slice of the UI-styling theme. (#82 per-side borders is a separate sub-design.)
 
 ## Goal
