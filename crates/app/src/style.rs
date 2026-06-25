@@ -123,6 +123,12 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "border:focused",
     "statusbar",
     "transcript",
+    "transcript:input",
+    "transcript:meta",
+    "transcript:warning",
+    "transcript:location",
+    "transcript:system",
+    "warning_marker",
     "suggestion",
     "meta_marker",
     "helpbar",
@@ -175,6 +181,12 @@ pub fn apply_color_decls(
             "border:focused"     => cs.focused_border = cs.focused_border.patch(style),
             "statusbar"          => cs.status_bar = cs.status_bar.patch(style),
             "transcript"         => cs.transcript = cs.transcript.patch(style),
+            "transcript:input"    => cs.transcript_input = cs.transcript_input.patch(style),
+            "transcript:meta"     => cs.transcript_meta = cs.transcript_meta.patch(style),
+            "transcript:warning"  => cs.transcript_warning = cs.transcript_warning.patch(style),
+            "transcript:location" => cs.transcript_location = cs.transcript_location.patch(style),
+            "transcript:system"   => cs.transcript_system = cs.transcript_system.patch(style),
+            "warning_marker"      => cs.warning_marker = cs.warning_marker.patch(style),
             "suggestion"         => cs.suggestion = cs.suggestion.patch(style),
             "meta_marker"        => cs.meta_marker = cs.meta_marker.patch(style),
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
@@ -749,6 +761,12 @@ pub fn write_style_full(
     doc.colors.selectors.insert("border:focused".to_string(),    style_to_decl(&cs.focused_border));
     doc.colors.selectors.insert("statusbar".to_string(),         style_to_decl(&cs.status_bar));
     doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
+    doc.colors.selectors.insert("transcript:input".to_string(),    style_to_decl(&cs.transcript_input));
+    doc.colors.selectors.insert("transcript:meta".to_string(),     style_to_decl(&cs.transcript_meta));
+    doc.colors.selectors.insert("transcript:warning".to_string(),  style_to_decl(&cs.transcript_warning));
+    doc.colors.selectors.insert("transcript:location".to_string(), style_to_decl(&cs.transcript_location));
+    doc.colors.selectors.insert("transcript:system".to_string(),   style_to_decl(&cs.transcript_system));
+    doc.colors.selectors.insert("warning_marker".to_string(),      style_to_decl(&cs.warning_marker));
     doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
     doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
@@ -874,6 +892,46 @@ pub fn write_style_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_category_selectors_parse_and_apply() {
+        let doc = parse_style_toml(
+            "[colors]\n\
+             \"transcript:input\" = { fg = \"green\" }\n\
+             \"transcript:meta\" = { fg = \"blue\" }\n\
+             \"transcript:warning\" = { fg = \"red\" }\n\
+             \"transcript:location\" = { bold = true }\n\
+             \"transcript:system\" = { fg = \"magenta\" }\n\
+             \"warning_marker\" = { fg = \"red\" }\n"
+        ).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        use ratatui::style::{Color, Modifier};
+        assert_eq!(cs.transcript_input.fg, Some(Color::Green));
+        assert_eq!(cs.transcript_meta.fg, Some(Color::Blue));
+        assert_eq!(cs.transcript_warning.fg, Some(Color::Red));
+        assert!(cs.transcript_location.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(cs.transcript_system.fg, Some(Color::Magenta));
+        assert_eq!(cs.warning_marker.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn write_style_full_round_trips_transcript_categories() {
+        use ratatui::style::Color;
+        let dir = std::env::temp_dir().join(format!("babelmap-style-tcat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tcat.toml");
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.transcript_input = Style::new().fg(Color::Green);
+        cs.transcript_warning = Style::new().fg(Color::Magenta);
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+        let doc = parse_style_toml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+        assert_eq!(cs2.transcript_input.fg, Some(Color::Green));
+        assert_eq!(cs2.transcript_warning.fg, Some(Color::Magenta));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn decl_to_style_sets_fg_and_modifiers() {
