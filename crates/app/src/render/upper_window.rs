@@ -71,8 +71,21 @@ pub fn draw_grid(
     // Clamp to the available area height.
     let needed = upper_rows.saturating_add(border_overhead).min(area.height);
 
-    // Carve out the top `needed` rows of area for the upper window.
-    let uw_area = Rect::new(area.x, area.y, area.width, needed);
+    // The upper window is the game's screen (`upper.cols` wide) — NOT the pane.
+    // Size the region to the game screen width (+ side borders) and CENTER it in
+    // the pane, so a game that centers its own content (e.g. Bureaucracy's
+    // full-width forms / status) lines up under our border instead of being
+    // stretched to the pane edge. When the pane is narrower than the game screen,
+    // use the full pane width and left-align (the col-offset scroll below handles
+    // the overflow).
+    let border_cols: u16 =
+        (if sides.left != BorderStyle::None { 1 } else { 0 })
+        + (if sides.right != BorderStyle::None { 1 } else { 0 });
+    let uw_w = upper.cols.saturating_add(border_cols).min(area.width).max(1);
+    let x_off = area.width.saturating_sub(uw_w) / 2;
+
+    // Carve out the centered top region for the upper window.
+    let uw_area = Rect::new(area.x + x_off, area.y, uw_w, needed);
 
     // Draw the optional border and get the inner content rect.
     let frame = draw_framed(buf, uw_area, border_style, colors.upper_window_border_sides, border_color, false);
@@ -221,9 +234,33 @@ mod tests {
         // Should consume exactly 2 rows (grid height, no border).
         assert_eq!(consumed, 2, "consumed rows should equal upper_window_rows");
 
-        // 'H' should appear at (0,0), 'I' at (1,0) — i.e. col 0, col 1 of row 0.
-        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "H");
-        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "I");
+        // cols=5 is centered in the 20-wide pane (no border): x_off = (20-5)/2 = 7.
+        assert_eq!(buf.cell((7, 0)).unwrap().symbol(), "H");
+        assert_eq!(buf.cell((8, 0)).unwrap().symbol(), "I");
+    }
+
+    #[test]
+    fn upper_window_centered_at_game_screen_width_not_pane_width() {
+        // Regression (bug #79): a game-screen-width upper window must render at its
+        // own width centered in a wider pane — not stretched to the pane, which
+        // made Bureaucracy's border too wide and its centered content off-place.
+        let mut upper = UpperWindow::default();
+        upper.resize(1, 10); // game screen is 10 cols wide
+        upper.put(1, 1, 'A', 0);
+        upper.put(1, 10, 'Z', 0); // content spans the full game screen
+
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+
+        // Pane is 30 wide; the 10-col upper window should center: x_off=(30-10)/2=10.
+        let area = Rect::new(0, 0, 30, 5);
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf);
+        assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "A", "left edge of the game screen at x=10");
+        assert_eq!(buf.cell((19, 0)).unwrap().symbol(), "Z", "right edge at x=19 (10..19)");
+        // Nothing drawn outside the centered 10-col region.
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), " ", "no content stretched to the pane left edge");
     }
 
     #[test]
@@ -249,9 +286,10 @@ mod tests {
 
         // 2 grid rows + 2 border rows = 4 total.
         assert_eq!(consumed, 4);
-        // Grid content starts at row 1 (inside border).
-        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "H");
-        assert_eq!(buf.cell((2, 1)).unwrap().symbol(), "I");
+        // cols=5 + 2 side borders = 7, centered in 20: x_off=(20-7)/2=6, content.x=7.
+        // Grid content starts at row 1 (inside the top border).
+        assert_eq!(buf.cell((7, 1)).unwrap().symbol(), "H");
+        assert_eq!(buf.cell((8, 1)).unwrap().symbol(), "I");
     }
 
     #[test]
@@ -274,8 +312,8 @@ mod tests {
 
         // Row offset = cursor_row-1 - (height-1) = 4 - 2 = 2.
         // 'A' is at grid row 5, displayed at terminal row 2 (0-based within content).
-        // So it should appear at buffer row 2.
-        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "A");
+        // cols=5 centered in 10 (no border): x_off=(10-5)/2=2, so col 2.
+        assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "A");
     }
 
     #[test]
@@ -294,10 +332,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf);
 
-        let x_cell = buf.cell((0, 0)).unwrap();
+        // cols=3 centered in 10 (no border): x_off=(10-3)/2=3.
+        let x_cell = buf.cell((3, 0)).unwrap();
         assert!(x_cell.modifier.contains(Modifier::BOLD), "X should be bold");
 
-        let y_cell = buf.cell((1, 0)).unwrap();
+        let y_cell = buf.cell((4, 0)).unwrap();
         assert!(y_cell.modifier.contains(Modifier::REVERSED), "Y should be reversed");
     }
 
@@ -310,19 +349,21 @@ mod tests {
         colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
         let area = Rect::new(0, 0, 10, 3);
 
+        // cols=5 centered in 10 (no border): x_off=2; cursor (row 2, col 3) →
+        // content (1,2) → buffer (4,1).
         // With show_cursor=false the cursor cell is a plain (non-reversed) space.
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf);
         assert!(
-            !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+            !buf.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "no cursor mark when show_cursor=false"
         );
 
-        // With show_cursor=true the cell under (row 2, col 3) — 0-based (2,1) — is reversed.
+        // With show_cursor=true the cell under (row 2, col 3) is reversed.
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf);
         assert!(
-            buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+            buf.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "cursor cell should be reverse-video when show_cursor=true"
         );
     }
