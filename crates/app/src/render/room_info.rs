@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
+use super::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
 
 // Direction display labels (cardinal + diagonal + portal).
@@ -78,7 +78,7 @@ pub fn draw_room_info(
 
     // Panel sizing.
     const WIDTH: u16 = 36;
-    const FIXED_ROWS: u16 = 6; // border-top + name + notes-header + (blank) + exits-header + border-bot
+    const FIXED_ROWS: u16 = 7; // border-top + name + exits-header + border-bot + OK button row + 2 spare
     let notes_lines = if room.notes.is_empty() { 0u16 } else {
         // Wrap notes to panel inner width.
         let inner_w = WIDTH.saturating_sub(2) as usize;
@@ -98,12 +98,13 @@ pub fn draw_room_info(
     let panel = Rect::new(map_area.x, map_area.y, panel_w, panel_h);
 
     // Render via shared dialog chrome (positioned at the computed rect).
+    let ok_btn = DialogButton { id: ButtonId::Ok, label: "OK" };
     let spec = DialogSpec {
         title: " Room Info ",
         placement: Placement::Positioned(panel),
-        buttons: &[],
+        buttons: &[ok_btn],
         show_close: true,
-        default: None,
+        default: Some(ButtonId::Ok),
         focus: None,
     };
     let dr = draw_dialog(buf, &spec, dialog_style);

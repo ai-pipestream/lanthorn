@@ -62,7 +62,7 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         placement: Placement::Centered { w: panel_w, h: panel_h },
         buttons,
         show_close: true,
-        default: None,
+        default: Some(ButtonId::Done),
         focus: None,
     };
 

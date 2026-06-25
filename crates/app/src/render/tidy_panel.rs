@@ -3,12 +3,12 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use crate::render::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
+use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::render::draw_str_clipped;
 use crate::state::TidyFrame;
 
 const PANEL_W: u16 = 62;
-const PANEL_H: u16 = 4;
+const PANEL_H: u16 = 5; // border-top + desc + stats + OK button row + border-bot
 
 /// Render the tidy-animation panel into the top-left corner of `area`.
 ///
@@ -20,12 +20,13 @@ pub fn draw_tidy_panel(frame: &TidyFrame, area: Rect, buf: &mut Buffer, dialog_s
     let panel_area = Rect { x: area.x, y: area.y, width: PANEL_W, height: PANEL_H };
 
     // Render via shared dialog chrome (positioned at the computed rect).
+    let ok_btn = DialogButton { id: ButtonId::Ok, label: "OK" };
     let spec = DialogSpec {
         title: " Tidy ",
         placement: Placement::Positioned(panel_area),
-        buttons: &[],
+        buttons: &[ok_btn],
         show_close: true,
-        default: None,
+        default: Some(ButtonId::Ok),
         focus: None,
     };
     let dr = draw_dialog(buf, &spec, dialog_style);

@@ -308,11 +308,12 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return hotkey_dialog_key_to_action(state, key);
     }
 
-    // 6.5. Room panel close: Esc while a panel is open.
+    // 6.5. Room panel close: Esc or Enter while a panel is open.
     // Comes after steps 2-6 (prompt/anim/gallery/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
+    // Room panel is read-only (no text input), so Enter is safe as a close key.
     if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE {
-        if key.code == KeyCode::Esc {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
             return Action::CloseRoomPanel;
         }
     }
@@ -779,8 +780,10 @@ pub fn mouse_to_action(
 /// fire the bound command action. The dialog closes itself when a sub-mode
 /// opens (handled in apply_action).
 fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
-    // ESC always closes the hotkey dialog (same as [X]).
-    if key.code == KeyCode::Esc {
+    // ESC or Enter always closes the hotkey dialog (same as [X] / [Done]).
+    // Enter is handled before lookup_any to prevent the Anim/AnimExit binding
+    // from firing when the hotkey dialog is open.
+    if matches!(key.code, KeyCode::Esc | KeyCode::Enter) && key.modifiers == KeyModifiers::NONE {
         return Action::CloseHotkeyDialog;
     }
 
@@ -5034,5 +5037,32 @@ mod tests {
         let mut m = mapper::mapper::Mapper::default();
         apply_action(Action::OpenSaves, &mut s, &mut m);
         assert_eq!(s.dialog_focus, 0, "OpenSaves must reset dialog_focus to 0");
+    }
+
+    // ── Task 5: read-only / single-button panels ──────────────────────────────
+
+    #[test]
+    fn room_panel_enter_closes() {
+        use crate::state::{RoomPanel, RoomPanelMode};
+        let mut s = AppState::default();
+        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        let a = key_to_action(&s, key(KeyCode::Enter));
+        assert!(
+            matches!(a, Action::CloseRoomPanel),
+            "Enter must close the room panel (got {:?})",
+            a
+        );
+    }
+
+    #[test]
+    fn hotkey_dialog_enter_closes() {
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        let a = key_to_action(&s, key(KeyCode::Enter));
+        assert!(
+            matches!(a, Action::CloseHotkeyDialog),
+            "Enter must close the hotkey dialog (got {:?})",
+            a
+        );
     }
 }
