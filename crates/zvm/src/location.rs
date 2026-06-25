@@ -45,7 +45,7 @@
 //   - v8 and v7 stories use the same heuristic as v4+ for location.
 
 use crate::cpu::exec::Machine;
-use crate::objects::{entries_base, entry_size, object_snapshot, prop_table_ptr_offset, ObjectSnapshot};
+use crate::objects::{entries_base, entry_size, get_parent, object_snapshot, prop_table_ptr_offset, short_name, ObjectSnapshot};
 use crate::screen::UpperWindow;
 
 /// Normalize for matching/hashing: trim, collapse whitespace, lowercase.
@@ -99,6 +99,70 @@ pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<St
     }
 
     None
+}
+
+/// True if `short` names the room shown as `candidate`: equality, or `short` is
+/// a leading prefix of `candidate` ending on a word boundary (next char
+/// non-alphanumeric, or end of string). Both normalized; `short` non-empty.
+pub fn status_name_matches(candidate: &str, short: &str) -> bool {
+    let c = normalize_name(candidate);
+    let s = normalize_name(short);
+    if s.is_empty() {
+        return false;
+    }
+    if c == s {
+        return true;
+    }
+    match c.strip_prefix(&s) {
+        Some(rest) => rest.chars().next().map_or(true, |ch| !ch.is_alphanumeric()),
+        None => false,
+    }
+}
+
+/// The current player object: the lowest-numbered object whose normalized short
+/// name is one of {yourself, you, me, myself, self}. None if not found.
+fn find_player_object(machine: &Machine) -> Option<u16> {
+    const NAMES: [&str; 5] = ["yourself", "you", "me", "myself", "self"];
+    let n = max_object_number(&machine.mem);
+    (1..=n).find(|&obj| {
+        let nm = normalize_name(&short_name(&machine.mem, obj));
+        NAMES.contains(&nm.as_str())
+    })
+}
+
+/// Nearest ancestor of `start` (exclusive) whose short name matches `name` via
+/// `status_name_matches`. Depth-bounded (32) to tolerate cycles.
+fn nearest_matching_ancestor(machine: &Machine, start: u16, name: &str) -> Option<ObjectSnapshot> {
+    let mem = &machine.mem;
+    let mut cur = get_parent(mem, start);
+    for _ in 0..32 {
+        if cur == 0 {
+            break;
+        }
+        if status_name_matches(name, &short_name(mem, cur)) {
+            return Some(object_snapshot(mem, cur));
+        }
+        cur = get_parent(mem, cur);
+    }
+    None
+}
+
+/// The object whose short name matches `name` (longest match wins; ties -> lowest
+/// number), or None.
+fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> {
+    let mem = &machine.mem;
+    let n = max_object_number(mem);
+    let mut best: Option<(usize, u16)> = None; // (normalized short-name length, object)
+    for obj in 1..=n {
+        let sn = short_name(mem, obj);
+        if status_name_matches(name, &sn) {
+            let len = normalize_name(&sn).len();
+            if best.map_or(true, |(blen, _)| len > blen) {
+                best = Some((len, obj));
+            }
+        }
+    }
+    best.map(|(_, obj)| object_snapshot(mem, obj))
 }
 
 /// Returns the object representing the player's current location, or `None` if
@@ -214,6 +278,48 @@ mod tests {
     fn status_room_name_empty_grid_is_none() {
         let u = upper_with(&["                                "]);
         assert_eq!(status_line_room_name(&u, 1), None);
+    }
+
+    #[test]
+    fn status_name_matches_rules() {
+        assert!(status_name_matches("Bedroom", "Bedroom"));            // equal
+        assert!(status_name_matches("Bedroom (messy)", "Bedroom"));    // trailing decoration
+        assert!(status_name_matches("Bedroom, north end", "Bedroom")); // (post-strip safety net)
+        assert!(!status_name_matches("Hallway", "Hall"));              // word-boundary guard
+        assert!(status_name_matches("hall  ", "Hall"));                // case + whitespace
+        assert!(!status_name_matches("Kitchen", "Bedroom"));          // unrelated
+        assert!(!status_name_matches("Bedroom", ""));                 // empty short
+    }
+
+    #[test]
+    fn find_player_object_by_name() {
+        // Rename obj3 to "you" so it is the player.
+        // "yourself" would be truncated to "yoursel" by v3 Z-char encoding (6 Z-char max),
+        // so we use "you" which is in NAMES and encodes without truncation.
+        let mut buf = build_v3_story();
+        let name = z_name("you");
+        buf[PROP3_TBL as usize] = (name.len() / 2) as u8;
+        buf[PROP3_TBL as usize + 1..PROP3_TBL as usize + 1 + name.len()].copy_from_slice(&name);
+        let machine = make_machine(buf);
+        assert_eq!(find_player_object(&machine), Some(3));
+    }
+
+    #[test]
+    fn resolve_room_object_matches_short_name() {
+        let machine = make_machine(build_v3_story()); // obj1 "west", obj2 "east", obj3 "hall"
+        let r = resolve_room_object(&machine, "hall").expect("hall resolves");
+        assert_eq!(r.number, 3);
+        assert!(resolve_room_object(&machine, "nowhere").is_none());
+    }
+
+    #[test]
+    fn nearest_matching_ancestor_walks_up() {
+        // obj tree: obj3 (parent obj1), obj2 (parent obj1), obj1 (parent 0).
+        // Searching from obj3 for "west" should walk up to obj1.
+        let machine = make_machine(build_v3_story());
+        let r = nearest_matching_ancestor(&machine, 3, "west").expect("walks up to west");
+        assert_eq!(r.number, 1);
+        assert!(nearest_matching_ancestor(&machine, 3, "nowhere").is_none());
     }
 
     // We reuse the same object-table layout as objects.rs tests:
