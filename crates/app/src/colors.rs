@@ -35,6 +35,59 @@ impl PartialEq for CompiledRule {
     }
 }
 
+/// Which alignment cluster a status-bar segment belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+impl Align {
+    /// The lowercase config name for this alignment.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Align::Left => "left",
+            Align::Center => "center",
+            Align::Right => "right",
+        }
+    }
+}
+
+/// One resolved status-bar segment: a text template, its cluster, and the style
+/// patched over the base `statusbar` style.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusSegment {
+    pub text: String,
+    pub align: Align,
+    pub style: Style,
+}
+
+/// The ordered list of status-bar segments. `Default` is the built-in layout that
+/// reproduces today's bar (location left; score/moves or clock right; filter right).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StatusBarLayout {
+    pub segments: Vec<StatusSegment>,
+}
+
+impl Default for StatusBarLayout {
+    fn default() -> Self {
+        let seg = |text: &str, align: Align| StatusSegment {
+            text: text.to_string(),
+            align,
+            style: Style::default(),
+        };
+        StatusBarLayout {
+            segments: vec![
+                seg("{location}", Align::Left),
+                seg("Score: {score}  Moves: {moves}", Align::Right),
+                seg("{time}", Align::Right),
+                seg(" {filter}", Align::Right),
+            ],
+        }
+    }
+}
+
 // ── Built-in theme texts ──────────────────────────────────────────────────────
 
 const BUILTIN_MONO: &str = include_str!("colors/mono.ghostty");
@@ -241,6 +294,8 @@ pub struct ColorScheme {
     pub warning_marker: Style,
     /// Compiled user story-styling rules, in evaluation order.
     pub transcript_rules: Vec<CompiledRule>,
+    /// The status-bar segment layout (default reproduces today's bar).
+    pub statusbar_layout: StatusBarLayout,
 }
 
 impl ColorScheme {
@@ -303,6 +358,7 @@ impl ColorScheme {
             transcript_system: Style::new().fg(Color::DarkGray),
             warning_marker: Style::new().fg(Color::Yellow),
             transcript_rules: Vec::new(),
+            statusbar_layout: StatusBarLayout::default(),
         }
     }
 
@@ -439,6 +495,7 @@ impl ColorScheme {
             transcript_system: Style::new().fg(scheme.palette[8]),
             warning_marker: Style::new().fg(scheme.palette[3]),
             transcript_rules: Vec::new(),
+            statusbar_layout: StatusBarLayout::default(),
         }
     }
 
@@ -665,6 +722,23 @@ pub fn parse_named_color(s: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statusbar_layout_default_reproduces_today() {
+        let l = StatusBarLayout::default();
+        // location (left), Score/Moves (right), time (right), filter (right).
+        assert_eq!(l.segments.len(), 4);
+        assert_eq!(l.segments[0].text, "{location}");
+        assert!(matches!(l.segments[0].align, Align::Left));
+        assert_eq!(l.segments[1].text, "Score: {score}  Moves: {moves}");
+        assert!(matches!(l.segments[1].align, Align::Right));
+        assert_eq!(l.segments[2].text, "{time}");
+        assert_eq!(l.segments[3].text, " {filter}");
+        // All built-in segments carry no per-segment override (render in base style).
+        assert!(l.segments.iter().all(|s| s.style == Style::default()));
+        // ColorScheme carries the default layout.
+        assert_eq!(ColorScheme::terminal_default().statusbar_layout, StatusBarLayout::default());
+    }
 
     #[test]
     fn terminal_default_transcript_category_styles() {

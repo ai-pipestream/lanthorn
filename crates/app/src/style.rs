@@ -304,6 +304,8 @@ pub struct StyleDoc {
     pub symbols: StyleSymbols,
     /// User story-styling rules from `[[transcript.rule]]`, in file order.
     pub transcript_rules: Vec<RawRule>,
+    /// The status-bar block from `[statusbar]` / `[[statusbar.segment]]`.
+    pub status_bar: RawStatusBar,
 }
 
 /// A raw (uncompiled) user transcript-styling rule from `[[transcript.rule]]`.
@@ -313,6 +315,25 @@ pub struct RawRule {
     pub pattern: String,
     /// The fg/bg/bold/italic style fields applied on a match.
     pub decl: Decl,
+}
+
+/// A raw (uncompiled) status-bar segment from `[[statusbar.segment]]`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawSegment {
+    /// Text template (literal text mixed with `{placeholder}` tokens).
+    pub text: String,
+    /// Cluster name: `left` | `center` | `right` (unknown → `left` at resolve).
+    pub align: String,
+    /// The fg/bg/bold/italic style fields for this segment.
+    pub decl: Decl,
+}
+
+/// A raw `[statusbar]` block: optional frame + ordered segments.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RawStatusBar {
+    pub border: Option<String>,
+    pub border_fg: Option<String>,
+    pub segments: Vec<RawSegment>,
 }
 
 // ── merge ─────────────────────────────────────────────────────────────────────
@@ -358,10 +379,21 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         over.transcript_rules.clone()
     };
 
+    let status_bar = RawStatusBar {
+        border: over.status_bar.border.clone().or(base.status_bar.border.clone()),
+        border_fg: over.status_bar.border_fg.clone().or(base.status_bar.border_fg.clone()),
+        segments: if over.status_bar.segments.is_empty() {
+            base.status_bar.segments.clone()
+        } else {
+            over.status_bar.segments.clone()
+        },
+    };
+
     StyleDoc {
         colors: StyleColors { scheme, selectors },
         symbols,
         transcript_rules,
+        status_bar,
     }
 }
 
@@ -452,7 +484,23 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
         }
     }
 
-    Ok(StyleDoc { colors, symbols, transcript_rules })
+    let mut status_bar = RawStatusBar::default();
+    if let Some(toml::Value::Table(sb)) = root.get("statusbar") {
+        status_bar.border = sb.get("border").and_then(toml::Value::as_str).map(str::to_string);
+        status_bar.border_fg = sb.get("border_fg").and_then(toml::Value::as_str).map(str::to_string);
+        if let Some(toml::Value::Array(segs)) = sb.get("segment") {
+            for item in segs {
+                if let toml::Value::Table(st) = item {
+                    let text = st.get("text").and_then(toml::Value::as_str).unwrap_or("").to_string();
+                    let align = st.get("align").and_then(toml::Value::as_str).unwrap_or("left").to_string();
+                    let decl = parse_decl_from_table(st);
+                    status_bar.segments.push(RawSegment { text, align, decl });
+                }
+            }
+        }
+    }
+
+    Ok(StyleDoc { colors, symbols, transcript_rules, status_bar })
 }
 
 /// Parse a [`Decl`] from a TOML inline table (field-by-field).
@@ -478,6 +526,7 @@ pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleD
         colors: colors.clone(),
         symbols: symbols.clone(),
         transcript_rules: Vec::new(),
+        status_bar: RawStatusBar::default(),
     }
 }
 
@@ -516,6 +565,38 @@ pub fn resolve(
                 style: decl_to_style(&r.decl, &gs),
             }),
             Err(e) => warnings.push(format!("invalid transcript rule regex '{}': {}", r.pattern, e)),
+        }
+    }
+
+    // Compile the [statusbar] block. Segments replace the default layout only when
+    // present; an empty block keeps the built-in default (today's bar).
+    if !doc.status_bar.segments.is_empty() {
+        let mut segments = Vec::with_capacity(doc.status_bar.segments.len());
+        for raw in &doc.status_bar.segments {
+            let align = match raw.align.as_str() {
+                "left" => crate::colors::Align::Left,
+                "center" => crate::colors::Align::Center,
+                "right" => crate::colors::Align::Right,
+                other => {
+                    warnings.push(format!("unknown statusbar align '{}'; using left", other));
+                    crate::colors::Align::Left
+                }
+            };
+            segments.push(crate::colors::StatusSegment {
+                text: raw.text.clone(),
+                align,
+                style: decl_to_style(&raw.decl, &gs),
+            });
+        }
+        cs.statusbar_layout = crate::colors::StatusBarLayout { segments };
+    }
+    // The frame maps onto the existing status_header fields (reuses the boxing path).
+    if let Some(b) = &doc.status_bar.border {
+        cs.status_header_style = paneframe::parse_border_style(b);
+    }
+    if let Some(c) = &doc.status_bar.border_fg {
+        if let Some(color) = colors::parse_color_value(c, &gs) {
+            cs.status_header = cs.status_header.fg(color);
         }
     }
 
@@ -781,6 +862,59 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
         }
     }
 
+    // ── [[transcript.rule]] ─────────────────────────────────────────────────────
+    {
+        // Remove any existing transcript table, then rewrite from the doc.
+        tdoc.remove("transcript");
+        if !doc.transcript_rules.is_empty() {
+            let mut arr = toml_edit::ArrayOfTables::new();
+            for r in &doc.transcript_rules {
+                let mut t = toml_edit::Table::new();
+                t["match"] = toml_edit::value(r.pattern.as_str());
+                if let Some(fg) = &r.decl.fg { t["fg"] = toml_edit::value(fg.as_str()); }
+                if let Some(bg) = &r.decl.bg { t["bg"] = toml_edit::value(bg.as_str()); }
+                if r.decl.bold == Some(true) { t["bold"] = toml_edit::value(true); }
+                if r.decl.italic == Some(true) { t["italic"] = toml_edit::value(true); }
+                if r.decl.underline == Some(true) { t["underline"] = toml_edit::value(true); }
+                if r.decl.dim == Some(true) { t["dim"] = toml_edit::value(true); }
+                if r.decl.reversed == Some(true) { t["reversed"] = toml_edit::value(true); }
+                arr.push(t);
+            }
+            let mut transcript = toml_edit::Table::new();
+            transcript.insert("rule", toml_edit::Item::ArrayOfTables(arr));
+            tdoc.insert("transcript", toml_edit::Item::Table(transcript));
+        }
+    }
+
+    // ── [statusbar] ─────────────────────────────────────────────────────────────
+    {
+        tdoc.remove("statusbar");
+        let sb = &doc.status_bar;
+        if sb.border.is_some() || sb.border_fg.is_some() || !sb.segments.is_empty() {
+            let mut table = toml_edit::Table::new();
+            if let Some(b) = &sb.border { table["border"] = toml_edit::value(b.as_str()); }
+            if let Some(c) = &sb.border_fg { table["border_fg"] = toml_edit::value(c.as_str()); }
+            if !sb.segments.is_empty() {
+                let mut arr = toml_edit::ArrayOfTables::new();
+                for seg in &sb.segments {
+                    let mut t = toml_edit::Table::new();
+                    t["text"] = toml_edit::value(seg.text.as_str());
+                    t["align"] = toml_edit::value(seg.align.as_str());
+                    if let Some(fg) = &seg.decl.fg { t["fg"] = toml_edit::value(fg.as_str()); }
+                    if let Some(bg) = &seg.decl.bg { t["bg"] = toml_edit::value(bg.as_str()); }
+                    if seg.decl.bold == Some(true) { t["bold"] = toml_edit::value(true); }
+                    if seg.decl.italic == Some(true) { t["italic"] = toml_edit::value(true); }
+                    if seg.decl.underline == Some(true) { t["underline"] = toml_edit::value(true); }
+                    if seg.decl.dim == Some(true) { t["dim"] = toml_edit::value(true); }
+                    if seg.decl.reversed == Some(true) { t["reversed"] = toml_edit::value(true); }
+                    arr.push(t);
+                }
+                table.insert("segment", toml_edit::Item::ArrayOfTables(arr));
+            }
+            tdoc.insert("statusbar", toml_edit::Item::Table(table));
+        }
+    }
+
     std::fs::write(path, tdoc.to_string())
 }
 
@@ -937,6 +1071,23 @@ pub fn write_style_full(
     ov.insert("gutter.meta".to_string(),    set.meta_gutter.to_string());
     ov.insert("gutter.warning".to_string(), set.warning_gutter.to_string());
 
+    // Export user transcript rules (CompiledRule → RawRule).
+    for rule in &cs.transcript_rules {
+        doc.transcript_rules.push(RawRule {
+            pattern: rule.pattern.clone(),
+            decl: style_to_decl(&rule.style),
+        });
+    }
+    // Export the statusbar segments (StatusSegment → RawSegment). The frame is NOT
+    // re-emitted here; it round-trips through the status_header selector export.
+    for seg in &cs.statusbar_layout.segments {
+        doc.status_bar.segments.push(RawSegment {
+            text: seg.text.clone(),
+            align: seg.align.as_str().to_string(),
+            decl: style_to_decl(&seg.style),
+        });
+    }
+
     write_style(path, &doc)
 }
 
@@ -945,6 +1096,144 @@ pub fn write_style_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statusbar_block_parses_segments_and_border() {
+        let text = r##"
+[statusbar]
+border = "single"
+border_fg = "cyan"
+
+[[statusbar.segment]]
+text = "{location}"
+align = "left"
+fg = "cyan"
+bold = true
+
+[[statusbar.segment]]
+text = "Score: {score}"
+align = "right"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        assert_eq!(doc.status_bar.border.as_deref(), Some("single"));
+        assert_eq!(doc.status_bar.border_fg.as_deref(), Some("cyan"));
+        assert_eq!(doc.status_bar.segments.len(), 2);
+        assert_eq!(doc.status_bar.segments[0].text, "{location}");
+        assert_eq!(doc.status_bar.segments[0].align, "left");
+        assert_eq!(doc.status_bar.segments[0].decl.fg.as_deref(), Some("cyan"));
+        assert_eq!(doc.status_bar.segments[0].decl.bold, Some(true));
+        assert_eq!(doc.status_bar.segments[1].align, "right");
+    }
+
+    #[test]
+    fn style_example_toml_parses_and_resolves_clean() {
+        // The repo-root style.example.toml is the user-facing reference; it must
+        // parse and resolve with zero warnings so the docs cannot drift from the code.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        let doc = parse_style_toml(&text).expect("style.example.toml must parse");
+        let (_cs, _set, warnings) = resolve(&doc, path.parent().unwrap());
+        assert!(warnings.is_empty(), "style.example.toml resolved with warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn write_style_full_round_trips_statusbar_and_transcript_rules() {
+        use crate::colors::{Align, StatusSegment, StatusBarLayout};
+        use ratatui::style::{Color, Modifier};
+        let dir = std::env::temp_dir().join(format!("babelmap-sb-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sb.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        // A custom transcript rule.
+        cs.transcript_rules.push(crate::colors::CompiledRule {
+            pattern: "(?i)grue".into(),
+            regex: regex::Regex::new("(?i)grue").unwrap(),
+            style: Style::new().fg(Color::Red),
+        });
+        // A custom statusbar layout.
+        cs.statusbar_layout = StatusBarLayout {
+            segments: vec![
+                StatusSegment { text: "{location}".into(), align: Align::Left, style: Style::new().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED) },
+                StatusSegment { text: "{title}".into(), align: Align::Center, style: Style::default() },
+                StatusSegment { text: "Score {score}".into(), align: Align::Right, style: Style::new().fg(Color::Yellow) },
+            ],
+        };
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+
+        // Transcript rule survived.
+        assert_eq!(cs2.transcript_rules.len(), 1);
+        assert_eq!(cs2.transcript_rules[0].pattern, "(?i)grue");
+        assert_eq!(cs2.transcript_rules[0].style.fg, Some(Color::Red));
+        // Statusbar layout survived (text, align, style).
+        assert_eq!(cs2.statusbar_layout.segments.len(), 3);
+        assert_eq!(cs2.statusbar_layout.segments[0].text, "{location}");
+        // underline survives the export (fidelity fix for all decl modifiers).
+        assert!(cs2.statusbar_layout.segments[0].style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(matches!(cs2.statusbar_layout.segments[1].align, Align::Center));
+        assert_eq!(cs2.statusbar_layout.segments[2].style.fg, Some(Color::Yellow));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_statusbar_segments_border_and_align() {
+        use crate::colors::Align;
+        let text = r##"
+[statusbar]
+border = "single"
+border_fg = "cyan"
+[[statusbar.segment]]
+text = "{location}"
+align = "left"
+fg = "yellow"
+[[statusbar.segment]]
+text = "{title}"
+align = "center"
+[[statusbar.segment]]
+text = "{score}"
+align = "bogus"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        // Three segments, with the unknown align defaulting to Left + a warning.
+        assert_eq!(cs.statusbar_layout.segments.len(), 3);
+        assert!(matches!(cs.statusbar_layout.segments[0].align, Align::Left));
+        assert!(matches!(cs.statusbar_layout.segments[1].align, Align::Center));
+        assert!(matches!(cs.statusbar_layout.segments[2].align, Align::Left));
+        assert_eq!(cs.statusbar_layout.segments[0].style.fg, Some(ratatui::style::Color::Yellow));
+        assert!(warnings.iter().any(|w| w.contains("align")), "unknown align warns: {warnings:?}");
+        // border maps onto the existing status_header machinery.
+        assert!(matches!(cs.status_header_style, crate::render::paneframe::BorderStyle::Single));
+        assert_eq!(cs.status_header.fg, Some(ratatui::style::Color::Cyan));
+    }
+
+    #[test]
+    fn resolve_no_statusbar_keeps_default_layout() {
+        let (cs, _set, _w) = resolve(&StyleDoc::default(), std::path::Path::new("."));
+        assert_eq!(cs.statusbar_layout, crate::colors::StatusBarLayout::default());
+    }
+
+    #[test]
+    fn merge_replaces_statusbar_segments_when_override_has_any() {
+        let mut base = StyleDoc::default();
+        base.status_bar.segments.push(RawSegment { text: "a".into(), align: "left".into(), decl: Decl::default() });
+        let mut over = StyleDoc::default();
+        over.status_bar.segments.push(RawSegment { text: "b".into(), align: "right".into(), decl: Decl::default() });
+        over.status_bar.border = Some("double".into());
+        let m = merge(&base, &over);
+        assert_eq!(m.status_bar.segments.len(), 1);
+        assert_eq!(m.status_bar.segments[0].text, "b");
+        assert_eq!(m.status_bar.border.as_deref(), Some("double"));
+        // Empty override keeps base segments.
+        let m2 = merge(&base, &StyleDoc::default());
+        assert_eq!(m2.status_bar.segments[0].text, "a");
+    }
 
     #[test]
     fn transcript_rules_parse_compile_in_order() {

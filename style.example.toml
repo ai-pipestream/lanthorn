@@ -1,0 +1,118 @@
+# babelmap style reference — copy to ~/.babelmap/style.toml and edit.
+# Point config.toml at it with:  style = "~/.babelmap/style.toml"
+#
+# Color values accept: a named color (cyan, dark-gray, light-blue, …),
+# palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index ("17"),
+# or background / foreground (the scheme's bg/fg).
+
+[colors]
+# Optional base scheme: a built-in (mono / high-contrast / tomorrow-night) or a
+# path to a Ghostty theme file. Omit to use your terminal's colors.
+# scheme = "tomorrow-night"
+
+# Each selector is an inline table of fg / bg / bold / italic / underline / dim /
+# reversed. Border selectors also take style = "<border>"; the dialog selector
+# also takes shadow = true.
+
+# ── Map ──────────────────────────────────────────────────────────────────────
+"room"                 = { fg = "white" }       # normal room
+"room:current"         = { reversed = true }    # the room you're in
+"room:selected"        = { fg = "yellow" }      # cursor-highlighted room
+"connector"            = { fg = "cyan" }        # normal connector
+"connector:distorted"  = { fg = "magenta" }     # one-way / distorted
+"connector:portal"     = { fg = "cyan" }        # up/down/in/out portals
+"map_border"           = { style = "picture-frame", fg = "cyan" }
+"map_layer_tab"        = { fg = "dark-gray" }   # inactive layer tab
+"map_layer_tab_active" = { fg = "cyan", bold = true }
+"loc_indicator"        = { fg = "dark-gray" }   # room-detection method indicator
+
+# ── Story / transcript ───────────────────────────────────────────────────────
+"transcript"           = { fg = "white" }       # base game text
+"transcript:input"     = { fg = "cyan" }        # your echoed commands
+"transcript:meta"      = { fg = "dark-gray" }   # app / slash output
+"transcript:warning"   = { fg = "yellow" }      # VM warnings
+"transcript:location"  = { bold = true }        # room-name header lines
+"transcript:system"    = { fg = "dark-gray" }   # [bracketed] system lines
+"meta_marker"          = { fg = "dark-gray" }   # meta gutter color
+"warning_marker"       = { fg = "yellow" }      # warning gutter color
+"story_border"         = { style = "single", fg = "cyan" }
+"story_title"          = { fg = "white" }
+"suggestion"           = { fg = "dark-gray" }   # autocomplete line
+
+# ── Status & input chrome ────────────────────────────────────────────────────
+"statusbar"            = { reversed = true }    # status-bar base style (see [statusbar])
+"input_line"           = { }                    # set style = "single" to box it
+"helpbar"              = { reversed = true }
+
+# ── Dialogs / overlays ───────────────────────────────────────────────────────
+"dialog"               = { style = "single", bg = "black", shadow = true }
+"dialog:title"         = { fg = "cyan" }
+"dialog:button"        = { fg = "white" }
+"dialog:button:active" = { fg = "black", bg = "cyan" }
+"dialog:shadow"        = { bg = "dark-gray" }
+"upper_window"         = { }                    # v4+ game-drawn screen
+"upper_window_border"  = { style = "single", fg = "cyan" }
+
+# ── Sound-event border pulse ─────────────────────────────────────────────────
+"sound_beep_high"      = { fg = "#ffb428" }
+"sound_beep_low"       = { fg = "#3c8cdc" }
+
+# ── Story-line styling rules ─────────────────────────────────────────────────
+# Each rule matches a Story line by regex (whole-line) and patches its style.
+# Rules are tried in order; the first match wins, ahead of the built-in
+# location/system rules.
+[[transcript.rule]]
+match = "^>.*"          # your command echo
+fg = "magenta"
+bold = true
+
+[[transcript.rule]]
+match = "(?i)\\bgrue\\b"
+fg = "red"
+
+# ── Status bar ───────────────────────────────────────────────────────────────
+# The bar is an ordered list of segments in three clusters (align = left | center
+# | right). Omit [statusbar] entirely to keep the built-in default bar.
+#
+# Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
+#   {moves} = the game's move count; {turns} = your session command count;
+#   {filter} = the active /filter indicator (empty when showing both).
+# A segment with no placeholder is always shown; a segment whose placeholders all
+# resolve empty is hidden (so score segments vanish on clock games and vice-versa).
+[statusbar]
+border = "none"          # none | single | double | thick | picture-frame
+# border_fg = "cyan"
+
+[[statusbar.segment]]
+text  = "{location}"
+align = "left"
+fg    = "cyan"
+bold  = true
+
+[[statusbar.segment]]
+text  = "Score: {score}  Moves: {moves}"
+align = "right"
+
+[[statusbar.segment]]
+text  = "{time}"
+align = "right"
+
+[[statusbar.segment]]
+text  = " {filter}"
+align = "right"
+fg    = "dark-gray"
+
+# ── Symbols ──────────────────────────────────────────────────────────────────
+# Presets per category; override individual glyphs under [symbols.overrides].
+[symbols]
+box_style    = "rounded"   # rounded | thick | double | solid | super-thick | ascii | borderless
+arrow_set    = "filled"    # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline
+portal_icons = "ascii"     # ascii | nerdfont | nerdfont-stairs
+path_style   = "light"     # light | heavy | dotted
+
+[symbols.overrides]
+# Single-char overrides for any glyph slot. Examples:
+"gutter.meta"    = "▏"     # meta transcript gutter marker
+"gutter.warning" = "!"     # warning transcript gutter marker
+# "arrow.north"  = "^"
+# "room.normal.tl" = "+"
