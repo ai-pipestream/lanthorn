@@ -10,7 +10,9 @@ use ratatui::style::{Modifier, Style};
 use zvm::cpu::exec::Machine;
 use zvm::screen::{StatusLine, StatusRight};
 
-use crate::state::{AppState, Focus, TranscriptKind};
+use ratatui::style::Color;
+
+use crate::state::{AppState, Focus, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_pane_frame, BorderStyle};
 use super::draw_str_clipped;
 
@@ -192,6 +194,50 @@ pub(crate) fn visible_wrapped_lines_kinded(
     display_rows[start..end].to_vec()
 }
 
+/// Draw `text` at `(x, y)` into `buf`, using `base_style` for normal characters
+/// and `highlight_style` for every case-insensitive occurrence of `query`.
+/// Advances `x` by the number of characters drawn. Does not exceed `clip_area`.
+fn draw_str_highlighted(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    text: &str,
+    base_style: Style,
+    query_lower: &str,
+    highlight_style: Style,
+    clip_area: ratatui::layout::Rect,
+) {
+    if query_lower.is_empty() {
+        draw_str_clipped(buf, x, y, text, base_style, clip_area);
+        return;
+    }
+    let text_lower = text.to_lowercase();
+    let mut cursor_x = x;
+    let mut start = 0usize; // byte index into text
+
+    while start < text.len() {
+        let remaining_lower = &text_lower[start..];
+        if let Some(rel) = remaining_lower.find(query_lower) {
+            // Draw the non-matching prefix.
+            let prefix = &text[start..start + rel];
+            if !prefix.is_empty() {
+                draw_str_clipped(buf, cursor_x, y, prefix, base_style, clip_area);
+                cursor_x = cursor_x.saturating_add(prefix.chars().count() as u16);
+            }
+            // Draw the matching segment.
+            let match_end = start + rel + query_lower.len();
+            let matched = &text[start + rel..match_end];
+            draw_str_clipped(buf, cursor_x, y, matched, highlight_style, clip_area);
+            cursor_x = cursor_x.saturating_add(matched.chars().count() as u16);
+            start = match_end;
+        } else {
+            // No more matches: draw the rest with the base style.
+            draw_str_clipped(buf, cursor_x, y, &text[start..], base_style, clip_area);
+            break;
+        }
+    }
+}
+
 /// Format the input prompt line: `"> " + input`.
 pub(crate) fn format_input_line(input: &str) -> String {
     format!("> {}", input)
@@ -292,9 +338,9 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         // Draw a pane frame around the status region.
         let frame = draw_pane_frame(buf, status_region, status_style_kind, state.colors.status_header);
         // Render status text into the inner content row.
-        render_status_content(machine, buf, frame.content, state.colors.status_bar, state.status_msg.as_deref());
+        render_status_content(machine, buf, frame.content, state.colors.status_bar, state.status_msg.as_deref(), state.transcript_filter);
     } else {
-        render_status_content(machine, buf, status_region, state.colors.status_bar, state.status_msg.as_deref());
+        render_status_content(machine, buf, status_region, state.colors.status_bar, state.status_msg.as_deref(), state.transcript_filter);
     }
 
     if area.height < status_rows + 1 {
@@ -329,12 +375,15 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 ///
 /// When `status_msg` is `Some`, it overrides the normal location/score content
 /// and renders the transient message left-aligned on the status row.
+/// When `transcript_filter` is not Both, a `[filter: story]`/`[filter: meta]`
+/// indicator is drawn at the right edge.
 fn render_status_content(
     machine: &Machine,
     buf: &mut Buffer,
     region: Rect,
     status_style: Style,
     status_msg: Option<&str>,
+    transcript_filter: TranscriptFilter,
 ) {
     if region.height == 0 || region.width == 0 {
         return;
@@ -348,6 +397,13 @@ fn render_status_content(
             cell.set_symbol(" ").set_style(status_style);
         }
     }
+
+    // Build the filter indicator string (empty when filter is Both).
+    let filter_indicator: String = match transcript_filter {
+        TranscriptFilter::Both => String::new(),
+        TranscriptFilter::Story => " [filter: story]".to_string(),
+        TranscriptFilter::Meta => " [filter: meta]".to_string(),
+    };
 
     if let Some(msg) = status_msg {
         // Transient status message: render left-aligned, overriding normal content.
@@ -364,6 +420,12 @@ fn render_status_content(
             let right_x = region.x + (w - right.len()) as u16;
             draw_str_clipped(buf, right_x, status_y, &right, status_style, region);
         }
+    }
+
+    // Draw the filter indicator at the far right (overwrites existing content if present).
+    if !filter_indicator.is_empty() && filter_indicator.len() < w {
+        let ind_x = region.x + (w - filter_indicator.len()) as u16;
+        draw_str_clipped(buf, ind_x, status_y, &filter_indicator, status_style, region);
     }
 }
 
@@ -395,7 +457,7 @@ fn render_input_content(
     }
 }
 
-/// Render the middle section: inventory strip, suggestion line, transcript body.
+/// Render the middle section: inventory strip, suggestion line (or search hint), transcript body.
 fn render_middle(
     machine: &Machine,
     state: &AppState,
@@ -428,12 +490,29 @@ fn render_middle(
         draw_str_clipped(buf, area.x, inventory_y, inv_trunc, inv_style, area);
     }
 
-    // ── Suggestion line: above inventory (or above middle_bottom when no strip) ─
-    let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty();
+    // ── Suggestion line or search hint: above inventory ──────────────────────
+    // When search is active, the search hint replaces the suggestion line.
     let rows_from_bottom = 0u16
         + if has_inventory && area.height >= 2 && inventory_y > area.y { 1 } else { 0 };
     let suggestion_y = middle_bottom.saturating_sub(1 + rows_from_bottom);
-    if has_suggestions && area.height >= 2 && suggestion_y > area.y {
+    let has_search = state.search_query.is_some();
+    let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty() && !has_search;
+
+    if has_search && area.height >= 2 && suggestion_y > area.y {
+        // Draw the search hint line.
+        let q = state.search_query.as_deref().unwrap_or("");
+        let match_count = state.search_matches.len();
+        let cur_idx = if match_count > 0 { state.search_idx + 1 } else { 0 };
+        let key_back = state.config.search.key_back;
+        let key_forward = state.config.search.key_forward;
+        let hint = format!(
+            "search: {}  [{}/{}]  {}:back {}:fwd  Esc:clear",
+            q, cur_idx, match_count, key_back, key_forward
+        );
+        let hint_trunc = truncate_line(&hint, w);
+        let hint_style = state.colors.suggestion;
+        draw_str_clipped(buf, area.x, suggestion_y, hint_trunc, hint_style, area);
+    } else if has_suggestions && area.height >= 2 && suggestion_y > area.y {
         let sug_line = format_suggestion_line(&state.suggestions, state.suggestion_idx);
         let sug_trunc = truncate_line(&sug_line, w);
         let sug_style = state.colors.suggestion;
@@ -447,7 +526,7 @@ fn render_middle(
     }
 
     let transcript_top = area.y;
-    let transcript_bottom = if has_suggestions && suggestion_y > area.y {
+    let transcript_bottom = if (has_search || has_suggestions) && suggestion_y > area.y {
         suggestion_y
     } else if has_inventory && area.height >= 2 && inventory_y > area.y {
         inventory_y
@@ -471,6 +550,11 @@ fn render_middle(
         area.width,
     );
     let marker_style = state.colors.meta_marker;
+
+    // Search highlight style: black text on yellow background.
+    let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
+    let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
+
     for (i, (line, kind)) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
@@ -480,10 +564,18 @@ fn render_middle(
             // META lines get a configurable gutter marker; text is indented past it.
             TranscriptKind::Meta => {
                 draw_str_clipped(buf, area.x, row_y, META_MARKER, marker_style, area);
-                draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, normal_style, area);
+                if has_search {
+                    draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, normal_style, &query_lower, search_highlight_style, area);
+                } else {
+                    draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, normal_style, area);
+                }
             }
             TranscriptKind::Story => {
-                draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
+                if has_search {
+                    draw_str_highlighted(buf, area.x, row_y, line, normal_style, &query_lower, search_highlight_style, area);
+                } else {
+                    draw_str_clipped(buf, area.x, row_y, line, normal_style, area);
+                }
             }
         }
     }
