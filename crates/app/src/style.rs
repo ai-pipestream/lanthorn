@@ -954,7 +954,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn loc_indicator_selector_parses() {
         let doc = parse_style_toml("[colors]\n\"loc_indicator\" = { fg = \"green\" }\n").unwrap();
         let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
