@@ -82,6 +82,8 @@ pub struct Machine {
     /// PRNG state for the `random` opcode (xorshift32).
     /// Initialised to a fixed nonzero constant; seeded by `random` with negative arg.
     rng_state: u32,
+    /// VAR opcodes that have hit the unimplemented fallthrough (warned once each).
+    pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -120,6 +122,7 @@ impl Machine {
             pending_save: None,
             pending_restore_store: None,
             rng_state: 0x12345678, // fixed nonzero seed
+            warned_var_opcodes: std::collections::HashSet::new(),
         }
     }
 
@@ -926,8 +929,13 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Unknown / unimplemented VAR — no-op seam (screen/text ops in Tasks 11–12)
-            _ => StepResult::Continue,
+            // Unknown / unimplemented VAR opcode: warn once, then ignore.
+            _ => {
+                if self.warned_var_opcodes.insert(opcode) {
+                    eprintln!("zvm: warning: unimplemented VAR opcode 0x{opcode:02X} (ignored)");
+                }
+                StepResult::Continue
+            }
         }
     }
 
@@ -3447,5 +3455,16 @@ pub(crate) mod tests {
         let out = captured_output(&m);
         assert!(out.contains('A') && out.contains('B') && out.contains('C') && out.contains('D'),
             "all rectangle characters are printed");
+    }
+
+    #[test]
+    fn unimplemented_var_opcode_is_warned_once() {
+        let mut m = build_test_machine(&[]);
+        // 0x15 sound_effect is intentionally unimplemented -> hits the fallthrough.
+        assert!(m.warned_var_opcodes.is_empty());
+        m.exec_var(0x15, &[], None, None);
+        assert!(m.warned_var_opcodes.contains(&0x15), "fallthrough records the opcode");
+        m.exec_var(0x15, &[], None, None); // second call must not duplicate
+        assert_eq!(m.warned_var_opcodes.len(), 1, "warned at most once per opcode");
     }
 }
