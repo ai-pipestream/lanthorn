@@ -114,7 +114,11 @@ fn main() {
     };
 
     loop {
-        match machine.step() {
+        let step = machine.step();
+        for d in machine.diagnostics.drain(..) {
+            eprintln!("zvm: warning: {d}");
+        }
+        match step {
             StepResult::Continue => {}
 
             StepResult::Quit => {
