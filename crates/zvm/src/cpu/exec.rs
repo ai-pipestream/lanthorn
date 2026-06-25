@@ -871,6 +871,32 @@ impl Machine {
                 self.do_branch(branch, found != 0);
                 StepResult::Continue
             }
+            // VAR:0x1D copy_table — copy/zero a memory region (ZMSD §15).
+            0x1D => {
+                let first = ops.first().copied().unwrap_or(0) as u32;
+                let second = ops.get(1).copied().unwrap_or(0) as u32;
+                let size = ops.get(2).copied().unwrap_or(0) as i16;
+                if second == 0 {
+                    for i in 0..size.unsigned_abs() as u32 {
+                        self.mem.write_byte(first + i, 0);
+                    }
+                } else if size < 0 {
+                    // forced forward copy; overlap corruption is intentional
+                    let n = size.unsigned_abs() as u32;
+                    for i in 0..n {
+                        let b = self.mem.read_byte(first + i);
+                        self.mem.write_byte(second + i, b);
+                    }
+                } else {
+                    // positive: copy avoiding corruption — snapshot the source first
+                    let n = size as u32;
+                    let src: Vec<u8> = (0..n).map(|i| self.mem.read_byte(first + i)).collect();
+                    for (i, &b) in src.iter().enumerate() {
+                        self.mem.write_byte(second + i as u32, b);
+                    }
+                }
+                StepResult::Continue
+            }
             // Unknown / unimplemented VAR — no-op seam (screen/text ops in Tasks 11–12)
             _ => StepResult::Continue,
         }
@@ -3330,5 +3356,38 @@ pub(crate) mod tests {
         // form=0x01 -> byte entries, step 1
         m.exec_var(0x17, &[0x0007, 0x0200, 2, 0x01], Some(16), None);
         assert_eq!(m.global(0), 0x0201, "byte form matches low byte at the second entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // copy_table (VAR:0x1D) — copy/zero memory region
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn copy_table_copies_forward() {
+        let mut m = build_test_machine(&[]);
+        for i in 0..4u32 { m.mem.write_byte(0x0200 + i, (i + 1) as u8); } // 1,2,3,4
+        m.exec_var(0x1D, &[0x0200, 0x0300, 4], None, None);
+        for i in 0..4u32 { assert_eq!(m.mem.read_byte(0x0300 + i), (i + 1) as u8); }
+    }
+
+    #[test]
+    fn copy_table_zeroes_when_second_is_zero() {
+        let mut m = build_test_machine(&[]);
+        for i in 0..3u32 { m.mem.write_byte(0x0200 + i, 0xFF); }
+        m.exec_var(0x1D, &[0x0200, 0, 3], None, None);
+        for i in 0..3u32 { assert_eq!(m.mem.read_byte(0x0200 + i), 0); }
+    }
+
+    #[test]
+    fn copy_table_positive_size_overlap_is_noncorrupting() {
+        let mut m = build_test_machine(&[]);
+        for i in 0..4u32 { m.mem.write_byte(0x0200 + i, (i + 1) as u8); } // 1,2,3,4
+        // Overlapping forward copy by 1 (dest > src). Positive size must NOT corrupt:
+        // result at 0x0201..=0x0204 should be the ORIGINAL 1,2,3,4.
+        m.exec_var(0x1D, &[0x0200, 0x0201, 4], None, None);
+        assert_eq!(m.mem.read_byte(0x0201), 1);
+        assert_eq!(m.mem.read_byte(0x0202), 2);
+        assert_eq!(m.mem.read_byte(0x0203), 3);
+        assert_eq!(m.mem.read_byte(0x0204), 4);
     }
 }
