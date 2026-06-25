@@ -62,6 +62,10 @@ pub struct DialogSpec<'a> {
     pub placement: Placement,
     pub buttons: &'a [DialogButton],
     pub show_close: bool,
+    /// The confirm button: rendered underlined; Enter triggers it by default.
+    pub default: Option<ButtonId>,
+    /// Index into `buttons` to highlight with `button_active` (Tab focus).
+    pub focus: Option<usize>,
 }
 
 // ── DialogRects ───────────────────────────────────────────────────────────────
@@ -153,7 +157,9 @@ pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> Dia
         // Each button rendered as "[ Label ]"
         // Lay out right-to-left
         let mut col = pane.content.right();
-        for btn in spec.buttons.iter().rev() {
+        let n = spec.buttons.len();
+        for (rev_i, btn) in spec.buttons.iter().rev().enumerate() {
+            let orig_i = n - 1 - rev_i;
             // "[ Label ]" = 4 + label_len chars
             let label_chars = btn.label.chars().count() as u16;
             let btn_width = 4 + label_chars; // "[ " + label + " ]"
@@ -163,14 +169,19 @@ pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> Dia
             col = col.saturating_sub(btn_width);
             let bx = col;
 
-            // Draw "[ Label ]"
+            // Focused button uses button_active; default button is underlined.
+            let mut style = if spec.focus == Some(orig_i) { st.button_active } else { st.button };
+            if spec.default == Some(btn.id) {
+                style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+            }
+
             let btn_str = format!("[ {} ]", btn.label);
             let mut draw_x = bx;
             for ch in btn_str.chars() {
                 if draw_x < pane.content.right() {
                     if let Some(cell) = buf.cell_mut((draw_x, button_row_y)) {
                         let mut tmp = [0u8; 4];
-                        cell.set_symbol(ch.encode_utf8(&mut tmp)).set_style(st.button);
+                        cell.set_symbol(ch.encode_utf8(&mut tmp)).set_style(style);
                     }
                     draw_x += 1;
                 }
@@ -212,7 +223,7 @@ mod tests {
         // pre-fill a REVERSED cell where the dialog will sit
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
         let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false };
-        let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true };
+        let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None };
         let r = draw_dialog(&mut buf, &spec, &st);
         // opaque: the covered cell no longer REVERSED
         assert!(!buf.cell((20,6)).unwrap().modifier.contains(Modifier::REVERSED));
@@ -234,10 +245,48 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style,Color}};
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
         let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true };
-        let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false };
+        let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None };
         let r = draw_dialog(&mut buf, &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
         let sx = r.area.right(); let sy = r.area.bottom();
         if sx < 40 && sy < 12 { assert_eq!(buf.cell((sx, sy)).unwrap().style().bg, Some(Color::DarkGray)); }
+    }
+
+    #[test]
+    fn dialog_underlines_default_and_highlights_focus() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Style, Modifier}};
+        let full = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            frame: Style::default(),
+            box_style: BorderStyle::Single,
+            title: Style::default(),
+            button: Style::default(),
+            button_active: Style::default().add_modifier(Modifier::REVERSED),
+            shadow: Style::default(),
+            shadow_on: false,
+        };
+        let spec = DialogSpec {
+            title: "T",
+            placement: Placement::Centered { w: 30, h: 6 },
+            buttons: &[
+                DialogButton { id: ButtonId::Save, label: "Save" },
+                DialogButton { id: ButtonId::Cancel, label: "Cancel" },
+            ],
+            show_close: true,
+            default: Some(ButtonId::Save),
+            focus: Some(1),
+        };
+        let rects = draw_dialog(&mut buf, &spec, &st);
+        // The Save (default) button label cells carry UNDERLINED.
+        let (_, save_rect) = rects.buttons.iter().find(|(id, _)| *id == ButtonId::Save).unwrap();
+        let save_cell = buf.cell((save_rect.x + 2, save_rect.y)).unwrap(); // inside "[ "
+        assert!(save_cell.style().add_modifier.contains(Modifier::UNDERLINED),
+            "default button must be underlined");
+        // The Cancel (focused idx 1) button cells carry REVERSED (button_active).
+        let (_, cancel_rect) = rects.buttons.iter().find(|(id, _)| *id == ButtonId::Cancel).unwrap();
+        let cancel_cell = buf.cell((cancel_rect.x + 2, cancel_rect.y)).unwrap();
+        assert!(cancel_cell.style().add_modifier.contains(Modifier::REVERSED),
+            "focused button must use button_active");
     }
 }

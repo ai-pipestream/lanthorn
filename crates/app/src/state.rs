@@ -674,6 +674,12 @@ pub struct AppState {
     pub search_matches: Vec<usize>,
     /// Index into `search_matches` of the current match.
     pub search_idx: usize,
+
+    // ── Dialog focus state ────────────────────────────────────────────────────
+
+    /// Index of the currently focused button in an open modal dialog. Reset to
+    /// a button index when a modal opens; cycled by Tab/Shift-Tab.
+    pub dialog_focus: usize,
 }
 
 impl Default for AppState {
@@ -735,6 +741,7 @@ impl Default for AppState {
             search_query: None,
             search_matches: Vec::new(),
             search_idx: 0,
+            dialog_focus: 0,
         }
     }
 }

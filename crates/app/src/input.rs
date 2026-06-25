@@ -938,6 +938,19 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
     }
 }
 
+// ── Focus cycling ─────────────────────────────────────────────────────────────
+
+/// Cycle a button-focus index by `delta` (+1 Tab, -1 Shift-Tab), wrapping within
+/// `0..len`. Returns 0 when `len` is 0.
+#[allow(dead_code)]
+pub(crate) fn cycle_focus(idx: usize, len: usize, delta: i32) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let next = idx as i32 + delta;
+    next.rem_euclid(len as i32) as usize
+}
+
 // ── Tidy pipeline ─────────────────────────────────────────────────────────────
 
 /// Run the auto-tidy pipeline on the given `layer`, returning a labelled snapshot of the
@@ -4890,5 +4903,13 @@ mod tests {
             crate::render::config_screen::CONFIG_ROWS.len(),
             "CONFIG_ROW_COUNT must equal CONFIG_ROWS.len(); update CONFIG_ROW_COUNT when adding/removing rows"
         );
+    }
+
+    #[test]
+    fn cycle_focus_wraps_both_ways() {
+        assert_eq!(cycle_focus(0, 3, 1), 1);
+        assert_eq!(cycle_focus(2, 3, 1), 0); // wrap forward
+        assert_eq!(cycle_focus(0, 3, -1), 2); // wrap backward
+        assert_eq!(cycle_focus(5, 0, 1), 0); // empty
     }
 }

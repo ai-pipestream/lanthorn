@@ -103,6 +103,8 @@ pub fn draw_room_info(
         placement: Placement::Positioned(panel),
         buttons: &[],
         show_close: true,
+        default: None,
+        focus: None,
     };
     let dr = draw_dialog(buf, &spec, dialog_style);
 
