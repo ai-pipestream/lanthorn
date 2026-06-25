@@ -690,6 +690,7 @@ fn main() {
         state.push_transcript(&format!("[{}]", w));
     }
     state.show_room_numbers = cfg.show_room_numbers;
+    state.show_loc_method = cfg.show_loc_method;
     state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
@@ -2602,6 +2603,7 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     if let Some(kind) = result.beep {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
+    state.loc_method = result.location_method.or(state.loc_method);
 }
 
 /// Map a keyboard event to a ZSCII byte for `read_char` input.

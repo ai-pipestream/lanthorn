@@ -258,6 +258,9 @@ pub struct Config {
     /// Default false (hidden); toggled at runtime by ToggleRoomNumbers.
     #[serde(default)]
     pub show_room_numbers: bool,
+    /// Show the room-detection-method indicator in the map corner. Default false.
+    #[serde(default)]
+    pub show_loc_method: bool,
     /// Search configuration: start direction, nav keys.
     #[serde(default)]
     pub search: SearchConfig,
@@ -287,6 +290,7 @@ impl Default for Config {
             symbols: crate::style::StyleSymbols::default(),
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
+            show_loc_method: false,
             search: SearchConfig::default(),
             virtual_screen_cols: default_virtual_screen_cols(),
             virtual_screen_rows: default_virtual_screen_rows(),
@@ -333,6 +337,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.symbols = from_file.symbols;
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
+            cfg.show_loc_method = from_file.show_loc_method;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
@@ -378,6 +383,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     };
     doc["background_tidy"] = toml_edit::value(bg_str);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
+    doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
     doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
 
@@ -425,6 +431,13 @@ mod tests {
         assert_eq!(Config::default().show_room_numbers, false);
         let cfg: Config = toml::from_str("show_room_numbers = true\n").unwrap();
         assert_eq!(cfg.show_room_numbers, true);
+    }
+
+    #[test]
+    fn config_show_loc_method_default_false_and_round_trips() {
+        assert_eq!(Config::default().show_loc_method, false);
+        let cfg: Config = toml::from_str("show_loc_method = true\n").unwrap();
+        assert_eq!(cfg.show_loc_method, true);
     }
 
     #[test]
@@ -615,6 +628,7 @@ mod tests {
             symbols: Default::default(),
             command_prefix: '/',
             show_room_numbers: false,
+            show_loc_method: false,
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,

@@ -120,6 +120,8 @@ pub enum Action {
     TogglePortalLabels,
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
+    /// Toggle the room-detection-method indicator in the map corner.
+    ToggleLocMethod,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
     ToggleInspector,
     /// Caller: exit the application.
@@ -1543,6 +1545,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
         Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
+        Action::ToggleLocMethod => state.show_loc_method = !state.show_loc_method,
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
@@ -2630,6 +2633,14 @@ mod tests {
         assert_eq!(s.focus, crate::state::Focus::Map);
         apply_action(Action::ToggleFocus, &mut s, &mut m);
         assert_eq!(s.focus, crate::state::Focus::Game);
+    }
+
+    #[test]
+    fn toggle_loc_method_flips_state() {
+        let mut s = AppState::default();
+        assert!(!s.show_loc_method);
+        apply_action(Action::ToggleLocMethod, &mut s, &mut mapper::mapper::Mapper::default());
+        assert!(s.show_loc_method);
     }
 
     #[test]

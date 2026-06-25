@@ -104,6 +104,8 @@ pub enum Command {
     // ── Room display ──────────────────────────────────────────────────────────
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
+    /// Toggle the room-detection-method indicator in the map corner.
+    ToggleLocMethod,
 
     // ── Hints ─────────────────────────────────────────────────────────────────
     /// Open the Hints panel (companion Invisiclues / hint-file mini-terminal).
@@ -163,6 +165,7 @@ impl Command {
             Command::OpenVerbMenu => Action::OpenVerbMenu,
             Command::OpenConfig => Action::OpenConfig,
             Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
+            Command::ToggleLocMethod => Action::ToggleLocMethod,
             Command::OpenHints => Action::OpenHints,
         }
     }
@@ -218,6 +221,7 @@ impl Command {
             Command::OpenVerbMenu => "open_verb_menu",
             Command::OpenConfig => "open_config",
             Command::ToggleRoomNumbers => "toggle_room_numbers",
+            Command::ToggleLocMethod => "toggle_loc_method",
             Command::OpenHints => "open_hints",
         }
     }
@@ -273,6 +277,7 @@ impl Command {
             Command::OpenVerbMenu => "verb menu",
             Command::OpenConfig => "settings",
             Command::ToggleRoomNumbers => "room numbers",
+            Command::ToggleLocMethod => "location method",
             Command::OpenHints => "hints",
         }
     }
@@ -331,6 +336,7 @@ impl Command {
             Command::OpenVerbMenu => Context::Global,
             Command::OpenConfig => Context::Global,
             Command::ToggleRoomNumbers => Context::Global,
+            Command::ToggleLocMethod => Context::Global,
             Command::OpenHints => Context::Global,
         }
     }
@@ -391,6 +397,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::OpenVerbMenu,
     Command::OpenConfig,
     Command::ToggleRoomNumbers,
+    Command::ToggleLocMethod,
     Command::OpenHints,
 ];
 
