@@ -442,6 +442,28 @@ impl ColorScheme {
         }
     }
 
+    /// Resolve the style for one Story line: first matching user rule wins, else
+    /// the built-in location rule (line matches `room_name`), else the built-in
+    /// system rule (whole line bracketed), else the base `transcript` style.
+    /// A match patches its style over `transcript` (overriding only set fields).
+    pub fn resolve_story_style(&self, line: &str, room_name: Option<&str>) -> Style {
+        for rule in &self.transcript_rules {
+            if rule.regex.is_match(line) {
+                return self.transcript.patch(rule.style);
+            }
+        }
+        if let Some(name) = room_name {
+            if zvm::location::status_name_matches(line, name) {
+                return self.transcript.patch(self.transcript_location);
+            }
+        }
+        let t = line.trim();
+        if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+            return self.transcript.patch(self.transcript_system);
+        }
+        self.transcript
+    }
+
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -655,6 +677,42 @@ mod tests {
         assert_eq!(cs.transcript_system.fg, Some(Color::DarkGray));
         assert_eq!(cs.warning_marker.fg, Some(Color::Yellow));
         assert!(cs.transcript_rules.is_empty());
+    }
+
+    #[test]
+    fn resolve_story_style_precedence_and_patch() {
+        use ratatui::style::{Color, Modifier};
+        let mut cs = ColorScheme::terminal_default(); // transcript fg = White
+        // A user rule that only sets bold (no fg) → patch keeps base fg.
+        cs.transcript_rules.push(CompiledRule {
+            pattern: "^>".into(),
+            regex: regex::Regex::new("^>").unwrap(),
+            style: Style::new().add_modifier(Modifier::BOLD),
+        });
+
+        // 1. User rule wins, patch semantics: bold added, base White fg kept.
+        let s = cs.resolve_story_style("> go north", Some("West of House"));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(s.fg, Some(Color::White));
+
+        // 2. Built-in location: line equals room name → bold (transcript_location).
+        let loc = cs.resolve_story_style("West of House", Some("West of House"));
+        assert!(loc.add_modifier.contains(Modifier::BOLD));
+
+        // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
+        let no_loc = cs.resolve_story_style("Hall", Some("Hallway"));
+        assert!(!no_loc.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(no_loc, cs.transcript); // falls through to base
+
+        // 3. Built-in system: bracketed line → transcript_system (DarkGray).
+        let sys = cs.resolve_story_style("[Your score just went up by ten points.]", None);
+        assert_eq!(sys.fg, Some(Color::DarkGray));
+
+        // 4. No match → base transcript.
+        assert_eq!(cs.resolve_story_style("plain prose", None), cs.transcript);
+
+        // 5. None room name → location never matches.
+        assert_eq!(cs.resolve_story_style("West of House", None), cs.transcript);
     }
 
     #[test]
