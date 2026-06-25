@@ -16,7 +16,7 @@ use mapper::mapper::Mapper;
 use zvm::cpu::exec::{Beep, Machine, StepResult};
 use zvm::error::ZError;
 use zvm::io::Output;
-use zvm::location::current_location;
+use zvm::location::{detect_location, Location, LocationMethod};
 use zvm::ObjectSnapshot;
 use zvm::memory::Memory;
 
@@ -75,6 +75,8 @@ pub struct TurnResult {
     pub beep: Option<Beep>,
     /// Host-facing diagnostic lines emitted this turn (drained from the VM).
     pub diagnostics: Vec<String>,
+    /// How the current room was detected this turn (drives the map indicator).
+    pub location_method: Option<LocationMethod>,
 }
 
 /// A running Z-machine game session.
@@ -125,7 +127,16 @@ impl GameSession {
 
         let raw = sink_mut(&mut self.machine).take_text();
         let transcript = strip_read_prompt(&raw).to_owned();
-        let location = current_location(&self.machine);
+        let detected = detect_location(&self.machine);
+        let location = detected.as_ref().map(|loc| match loc {
+            Location::NameOnly(name) => zvm::ObjectSnapshot {
+                number: crate::roomid::synthetic_room_id(name),
+                parent: 0,
+                name: name.clone(),
+            },
+            _ => loc.object().expect("non-NameOnly variants carry an object").clone(),
+        });
+        let location_method = detected.as_ref().map(Location::method);
 
         let info = if save_restore_failed {
             Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
@@ -137,7 +148,7 @@ impl GameSession {
         let beep = self.machine.pending_beeps.last().copied();
         self.machine.pending_beeps.clear();
 
-        TurnResult { transcript, location, quit, info, beep, diagnostics }
+        TurnResult { transcript, location, quit, info, beep, diagnostics, location_method }
     }
 
     /// Supply a single keypress, step until the next input request or Quit,
@@ -150,7 +161,16 @@ impl GameSession {
 
         let raw = sink_mut(&mut self.machine).take_text();
         let transcript = strip_read_prompt(&raw).to_owned();
-        let location = current_location(&self.machine);
+        let detected = detect_location(&self.machine);
+        let location = detected.as_ref().map(|loc| match loc {
+            Location::NameOnly(name) => zvm::ObjectSnapshot {
+                number: crate::roomid::synthetic_room_id(name),
+                parent: 0,
+                name: name.clone(),
+            },
+            _ => loc.object().expect("non-NameOnly variants carry an object").clone(),
+        });
+        let location_method = detected.as_ref().map(Location::method);
 
         let info = if save_restore_failed {
             Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
@@ -162,7 +182,7 @@ impl GameSession {
         let beep = self.machine.pending_beeps.last().copied();
         self.machine.pending_beeps.clear();
 
-        TurnResult { transcript, location, quit, info, beep, diagnostics }
+        TurnResult { transcript, location, quit, info, beep, diagnostics, location_method }
     }
 }
 
@@ -322,6 +342,7 @@ mod tests {
             info: None,
             beep: None,
             diagnostics: vec![],
+            location_method: None,
         };
         apply_turn(&mut m, "look", &first);
         assert_eq!(m.graph.current(), Some(1));
@@ -336,6 +357,7 @@ mod tests {
             info: None,
             beep: None,
             diagnostics: vec![],
+            location_method: None,
         };
         apply_turn(&mut m, "north", &second);
         assert!(m.graph.room(2).is_some());
@@ -358,6 +380,7 @@ mod tests {
             info: None,
             beep: None,
             diagnostics: vec![],
+            location_method: None,
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
@@ -379,6 +402,7 @@ mod tests {
             info: None,
             beep: None,
             diagnostics: vec![],
+            location_method: None,
         };
         assert!(r.info.is_none());
     }
@@ -394,6 +418,7 @@ mod tests {
             info: None,
             beep: None,
             diagnostics: vec![],
+            location_method: None,
         }
     }
 
@@ -516,6 +541,19 @@ mod tests {
         // The quit path sets pending back to Line (no input pending).
         assert_eq!(session.pending_input(), InputKind::Line,
             "after quit, pending should be reset to Line");
+    }
+
+    #[test]
+    fn turn_result_carries_location_method_field() {
+        // Build the same way the sibling submit test does; the field just needs to exist
+        // and default to a value. For a v3 fixture with global 0 set, method is GlobalVar0.
+        let story = read_char_story_v5();
+        let mut sess = GameSession::new(story).expect("GameSession::new failed");
+        // The story starts with a read_char; submit_char drives it to quit.
+        let r = sess.submit_char(b'x');
+        // The field exists and is an Option<LocationMethod>; on a v5 story with no
+        // location it is None — either is acceptable here.
+        let _ = r.location_method;
     }
 
     #[test]

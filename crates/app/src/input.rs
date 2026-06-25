@@ -4090,6 +4090,7 @@ mod tests {
                 info: None,
                 beep: None,
                 diagnostics: vec![],
+                location_method: None,
             };
             apply_turn(&mut mapper, "", &seed_result);
             state.select_room(Some(snap_number as mapper::graph::RoomId));
@@ -4126,6 +4127,7 @@ mod tests {
                 info: None,
                 beep: None,
                 diagnostics: vec![],
+                location_method: None,
             };
             apply_turn(&mut mapper, "", &seed_result);
             state.select_room(Some(snap_number as mapper::graph::RoomId));
