@@ -1371,11 +1371,23 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if !state.suggestions.is_empty() {
                 let idx = state.suggestion_idx % state.suggestions.len();
                 let completion = state.suggestions[idx].clone();
-                // Replace the partial word at the end of input with the completion.
-                let partial_len = state.current_partial().len();
-                let new_len = state.input.len() - partial_len;
-                state.input.truncate(new_len);
-                state.input.push_str(&completion);
+                let prefix = state.config.command_prefix;
+                // Slash-command name suggestions hold the bare command name (no
+                // prefix). When completing the first token of a slash command,
+                // rebuild input as prefix + name so the leading prefix survives.
+                if state.input.starts_with(prefix)
+                    && !state.input[prefix.len_utf8()..].contains(' ')
+                {
+                    state.input.clear();
+                    state.input.push(prefix);
+                    state.input.push_str(&completion);
+                } else {
+                    // Replace the partial word at the end of input with the completion.
+                    let partial_len = state.current_partial().len();
+                    let new_len = state.input.len() - partial_len;
+                    state.input.truncate(new_len);
+                    state.input.push_str(&completion);
+                }
                 // Advance index for next Tab press (cycles).
                 state.suggestion_idx = (idx + 1) % state.suggestions.len();
             }
@@ -2937,6 +2949,20 @@ mod tests {
         // "nor" should be replaced with "north" (index 0 suggestion).
         assert_eq!(s.input, "go north");
         // Index should advance to 1 for next Tab.
+        assert_eq!(s.suggestion_idx, 1);
+    }
+
+    #[test]
+    fn autocomplete_slash_command_preserves_prefix() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        // Slash suggestions hold the bare command name (no prefix).
+        s.input = "/sav".to_string();
+        s.suggestions = vec!["save".to_string(), "save-as".to_string()];
+        s.suggestion_idx = 0;
+        apply_action(Action::Autocomplete, &mut s, &mut m);
+        // The leading prefix must survive completion.
+        assert_eq!(s.input, "/save");
         assert_eq!(s.suggestion_idx, 1);
     }
 
