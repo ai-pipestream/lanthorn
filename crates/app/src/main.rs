@@ -82,6 +82,13 @@ fn map_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
     user_dir.join("maps")
 }
 
+/// Directory holding per-game save archives (`.babelmap`, default + named) and
+/// the default location for Quetzal import/export. Kept separate from the map
+/// directory. Defaults to `config.user_dir/saves`.
+fn saves_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
+    user_dir.join("saves")
+}
+
 /// Persist the live look (`state.colors`/`state.symbols`) to the user's personal
 /// style file and repoint `config.toml`'s `style` key at it, then re-resolve so the
 /// live look matches the self-contained file just written.
@@ -611,7 +618,8 @@ fn main() {
 
     let ifid = compute_ifid(&story_bytes);
     let dir = map_dir(&cfg.user_dir);
-    let arc_file = archive_path(&dir, &ifid);
+    let save_dir = saves_dir(&cfg.user_dir);
+    let arc_file = archive_path(&save_dir, &ifid);
     let map_file = map_path(&dir, &ifid);
 
     // Load mapper (and optionally restore the game save) from the archive.
@@ -1309,7 +1317,7 @@ fn main() {
                     // Handle any saves-manager or reset prompt that was submitted.
                     if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
                         handle_saves_prompt(
-                            kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes,
+                            kind, buf, &save_dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes,
                         );
                     }
                     continue;
@@ -1345,7 +1353,7 @@ fn main() {
                             // Named save or default archive save.
                             let result = match name_opt {
                                 Some(ref name) => {
-                                    save_named(&dir, &ifid, name, &mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds)
+                                    save_named(&save_dir, &ifid, name, &mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds)
                                         .map(|()| format!("saved as \"{}\"", name))
                                         .map_err(|e| format!("save failed: {}", e))
                                 }
@@ -1378,7 +1386,7 @@ fn main() {
                                 None => Some(arc_file.clone()),
                                 Some(ref name) => {
                                     // Find the first named save whose display name matches.
-                                    let saves = list_saves(&dir, &ifid);
+                                    let saves = list_saves(&save_dir, &ifid);
                                     saves.into_iter()
                                         .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
                                         .map(|e| e.path)
@@ -1810,7 +1818,7 @@ fn main() {
 
             Action::OpenSaves => {
                 // Populate the saves list and open the modal.
-                let entries = list_saves(&dir, &ifid);
+                let entries = list_saves(&save_dir, &ifid);
                 state.saves = Some(SavesState { entries, selected: 0 });
                 state.dialog_focus = 0;
             }
@@ -1818,7 +1826,8 @@ fn main() {
             Action::SavesExport => {
                 // Close saves modal and open file browser in PickDir mode.
                 state.saves = None;
-                let start_dir = state.config.user_dir.clone();
+                let start_dir = saves_dir(&state.config.user_dir);
+                let start_dir = if start_dir.is_dir() { start_dir } else { state.config.user_dir.clone() };
                 let default_name = format!("{}.qzl", ifid);
                 state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickDir, default_name));
             }
@@ -1826,7 +1835,8 @@ fn main() {
             Action::SavesImport => {
                 // Close saves modal and open file browser in PickFile mode.
                 state.saves = None;
-                let start_dir = state.config.user_dir.clone();
+                let start_dir = saves_dir(&state.config.user_dir);
+                let start_dir = if start_dir.is_dir() { start_dir } else { state.config.user_dir.clone() };
                 state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile, String::new()));
             }
 
@@ -1980,7 +1990,7 @@ fn main() {
         // After apply_action: check for saves-manager or reset prompt that was submitted.
         // (This covers the case where apply_action routed a saves/reset prompt submit.)
         if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
-            handle_saves_prompt(kind, buf, &dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes);
+            handle_saves_prompt(kind, buf, &save_dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes);
         }
 
         // After apply_action: if gallery was just closed, write the resolved look to
@@ -3310,6 +3320,14 @@ mod tests {
     #[test]
     fn key_to_zscii_ascii_char_y_is_121() {
         assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Char('y'))), Some(121));
+    }
+
+    #[test]
+    fn saves_dir_is_user_dir_join_saves() {
+        // Save archives live under user_dir/saves, separate from user_dir/maps.
+        let d = super::saves_dir(std::path::Path::new("/tmp/bm"));
+        assert_eq!(d, std::path::Path::new("/tmp/bm/saves"));
+        assert_ne!(d, super::map_dir(std::path::Path::new("/tmp/bm")));
     }
 
     #[test]
