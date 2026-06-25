@@ -34,6 +34,56 @@ pub struct StatusLine {
 // Screen state (window model)
 // ---------------------------------------------------------------------------
 
+/// One character cell in the upper window.
+#[derive(Debug, Clone, Copy)]
+pub struct Cell {
+    pub ch: char,
+    pub style: u8,
+}
+impl Default for Cell {
+    fn default() -> Self {
+        Cell { ch: ' ', style: 0 }
+    }
+}
+
+/// Upper (status) window character grid.
+#[derive(Debug, Default)]
+pub struct UpperWindow {
+    pub cols: u16,
+    pub rows: u16,
+    pub cells: Vec<Cell>,
+}
+impl UpperWindow {
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.rows = rows;
+        self.cols = cols;
+        self.cells = vec![Cell::default(); rows as usize * cols as usize];
+    }
+    pub fn clear(&mut self) {
+        for c in &mut self.cells {
+            *c = Cell::default();
+        }
+    }
+    fn idx(&self, row: u16, col: u16) -> Option<usize> {
+        if row == 0 || col == 0 || row > self.rows || col > self.cols {
+            return None;
+        }
+        Some(((row - 1) as usize) * self.cols as usize + (col - 1) as usize)
+    }
+    pub fn cell(&self, row: u16, col: u16) -> Cell {
+        self.idx(row, col)
+            .and_then(|i| self.cells.get(i).copied())
+            .unwrap_or_default()
+    }
+    pub fn put(&mut self, row: u16, col: u16, ch: char, style: u8) {
+        if let Some(i) = self.idx(row, col) {
+            if let Some(c) = self.cells.get_mut(i) {
+                *c = Cell { ch, style };
+            }
+        }
+    }
+}
+
 /// Structured screen model the host (TUI etc.) reads to render.
 ///
 /// For v3 the host derives the status line by calling `Machine::status_line()`.
@@ -55,6 +105,8 @@ pub struct ScreenState {
     pub buffer_mode: bool,
     /// Whether `show_status` (v3 0OP:0x0C) was requested since last read.
     pub show_status_requested: bool,
+    /// Upper window character grid (v4+).
+    pub upper: UpperWindow,
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +504,23 @@ mod tests {
         assert_eq!(s.current_window, 0);
         assert_eq!(s.text_style, 0);
         assert!(!s.buffer_mode);
+    }
+
+    // ── (f) UpperWindow: resize, put, cell, clear ───────────────────────────
+
+    #[test]
+    fn upper_window_resize_put_and_cell() {
+        let mut w = UpperWindow::default();
+        w.resize(2, 4);
+        assert_eq!(w.rows, 2);
+        assert_eq!(w.cols, 4);
+        assert_eq!(w.cell(1, 1).ch, ' ');
+        w.put(2, 3, 'X', 0b0001);
+        assert_eq!(w.cell(2, 3).ch, 'X');
+        assert_eq!(w.cell(2, 3).style, 0b0001);
+        w.put(9, 9, 'Z', 0); // out of range -> ignored, no panic
+        w.clear();
+        assert_eq!(w.cell(2, 3).ch, ' ');
     }
 
     // ── (e) StreamState: stream-3 push/pop/write ─────────────────────────────
