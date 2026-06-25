@@ -675,6 +675,8 @@ fn main() {
             location: Some(snap),
             quit: session.quit,
             info: None,
+            beep: None,
+            diagnostics: vec![],
         };
         apply_turn(&mut mapper, "", &seed_result);
         let rid = snap_number as mapper::graph::RoomId;
@@ -1373,6 +1375,8 @@ fn main() {
                                                             location: Some(snap),
                                                             quit: false,
                                                             info: None,
+                                                            beep: None,
+                                                            diagnostics: vec![],
                                                         };
                                                         apply_turn(&mut mapper, "", &restore_result);
                                                         state.set_viewed_layer(None);
@@ -1696,6 +1700,8 @@ fn main() {
                                         location: Some(snap),
                                         quit: false,
                                         info: None,
+                                        beep: None,
+                                        diagnostics: vec![],
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -1823,6 +1829,8 @@ fn main() {
                                         location: Some(snap),
                                         quit: false,
                                         info: None,
+                                        beep: None,
+                                        diagnostics: vec![],
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -1891,6 +1899,8 @@ fn main() {
                                             location: Some(snap),
                                             quit: false,
                                             info: None,
+                                            beep: None,
+                                            diagnostics: vec![],
                                         };
                                         apply_turn(&mut mapper, "", &restore_result);
                                         state.set_viewed_layer(None);
@@ -2035,6 +2045,8 @@ fn reset_game(
                     location: Some(snap),
                     quit: false,
                     info: None,
+                    beep: None,
+                    diagnostics: vec![],
                 };
                 apply_turn(mapper, "", &seed_result);
                 let rid = snap_number as mapper::graph::RoomId;
@@ -2477,6 +2489,8 @@ fn apply_launch_resume(
                     location: Some(snap),
                     quit: false,
                     info: None,
+                    beep: None,
+                    diagnostics: vec![],
                 };
                 apply_turn(mapper, "", &restore_result);
                 state.set_viewed_layer(None);

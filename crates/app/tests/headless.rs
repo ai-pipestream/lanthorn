@@ -47,6 +47,8 @@ fn turn(number: u16, name: &str) -> TurnResult {
         location: Some(ObjectSnapshot { number, parent: 0, name: name.to_owned() }),
         quit: false,
         info: None,
+        beep: None,
+        diagnostics: vec![],
     }
 }
 

@@ -13,7 +13,7 @@ use std::any::Any;
 
 use mapper::direction::parse_direction;
 use mapper::mapper::Mapper;
-use zvm::cpu::exec::{Machine, StepResult};
+use zvm::cpu::exec::{Beep, Machine, StepResult};
 use zvm::error::ZError;
 use zvm::io::Output;
 use zvm::location::current_location;
@@ -71,6 +71,10 @@ pub struct TurnResult {
     /// Optional informational note to surface to the player (e.g. when the
     /// game's own save/restore is auto-failed, hint them toward Ctrl+S/Ctrl+R).
     pub info: Option<String>,
+    /// The latest bleep emitted this turn (last wins), if any.
+    pub beep: Option<Beep>,
+    /// Host-facing diagnostic lines emitted this turn (drained from the VM).
+    pub diagnostics: Vec<String>,
 }
 
 /// A running Z-machine game session.
@@ -129,7 +133,11 @@ impl GameSession {
             None
         };
 
-        TurnResult { transcript, location, quit, info }
+        let diagnostics = std::mem::take(&mut self.machine.diagnostics);
+        let beep = self.machine.pending_beeps.last().copied();
+        self.machine.pending_beeps.clear();
+
+        TurnResult { transcript, location, quit, info, beep, diagnostics }
     }
 
     /// Supply a single keypress, step until the next input request or Quit,
@@ -150,7 +158,11 @@ impl GameSession {
             None
         };
 
-        TurnResult { transcript, location, quit, info }
+        let diagnostics = std::mem::take(&mut self.machine.diagnostics);
+        let beep = self.machine.pending_beeps.last().copied();
+        self.machine.pending_beeps.clear();
+
+        TurnResult { transcript, location, quit, info, beep, diagnostics }
     }
 }
 
@@ -308,6 +320,8 @@ mod tests {
             location: Some(ObjectSnapshot { number: 1, parent: 0, name: "Hall".into() }),
             quit: false,
             info: None,
+            beep: None,
+            diagnostics: vec![],
         };
         apply_turn(&mut m, "look", &first);
         assert_eq!(m.graph.current(), Some(1));
@@ -320,6 +334,8 @@ mod tests {
             location: Some(ObjectSnapshot { number: 2, parent: 0, name: "Attic".into() }),
             quit: false,
             info: None,
+            beep: None,
+            diagnostics: vec![],
         };
         apply_turn(&mut m, "north", &second);
         assert!(m.graph.room(2).is_some());
@@ -340,6 +356,8 @@ mod tests {
             location: None,
             quit: false,
             info: None,
+            beep: None,
+            diagnostics: vec![],
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
@@ -359,6 +377,8 @@ mod tests {
             location: None,
             quit: false,
             info: None,
+            beep: None,
+            diagnostics: vec![],
         };
         assert!(r.info.is_none());
     }
@@ -372,6 +392,8 @@ mod tests {
             location: Some(ObjectSnapshot { number, parent: 0, name: name.into() }),
             quit: false,
             info: None,
+            beep: None,
+            diagnostics: vec![],
         }
     }
 
@@ -494,6 +516,19 @@ mod tests {
         // The quit path sets pending back to Line (no input pending).
         assert_eq!(session.pending_input(), InputKind::Line,
             "after quit, pending should be reset to Line");
+    }
+
+    #[test]
+    fn turn_result_has_empty_sound_fields_by_default() {
+        let story = read_char_story_v5();
+        let mut sess = GameSession::new(story).expect("GameSession::new failed");
+        // The story starts with a read_char; submit_char drives it to quit.
+        let r = sess.submit_char(b'x');
+        assert!(r.beep.is_none(), "no beep when the game emits no sound");
+        assert!(r.diagnostics.is_empty(), "no diagnostics on a clean turn");
+        // VM queues are drained after the turn.
+        assert!(sess.machine.pending_beeps.is_empty());
+        assert!(sess.machine.diagnostics.is_empty());
     }
 
     // ── czech.z5 smoke test ───────────────────────────────────────────────────
