@@ -42,6 +42,7 @@ use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
+use app::hints;
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
 use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptFilter, TranscriptKind};
 
@@ -531,7 +532,7 @@ fn main() {
     let cfg = resolve(&cli);
     let story_path = cli.story.clone();
 
-    let story_bytes = match std::fs::read(&story_path) {
+    let story_bytes = match hints::load_story_bytes(&story_path) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("babelmap: cannot read '{}': {}", story_path.display(), e);
