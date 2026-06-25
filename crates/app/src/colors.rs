@@ -15,7 +15,7 @@ use std::path::Path;
 use ratatui::style::{Color, Modifier, Style};
 use regex::Regex;
 
-use crate::render::paneframe::BorderStyle;
+use crate::render::paneframe::{BorderStyle, PaneSides};
 
 /// A compiled user transcript-styling rule: a regex matched whole-line against
 /// Story text, plus the `Style` patched over the base `transcript` style on a
@@ -274,6 +274,15 @@ pub struct ColorScheme {
     pub upper_window_border: Style,
     /// Resolved border style for the upper (virtual) window frame.
     pub virtual_window_border: BorderStyle,
+    /// Per-side border styles (default = all of the matching base `*_style`).
+    pub map_border_sides: PaneSides,
+    pub story_border_sides: PaneSides,
+    pub status_header_sides: PaneSides,
+    pub input_line_sides: PaneSides,
+    pub upper_window_border_sides: PaneSides,
+    /// Whether the story title / map layer-tab header strip is shown.
+    pub story_header_on: bool,
+    pub map_header_on: bool,
     /// Border pulse color for the high-pitched bleep (sound_effect #1).
     pub sound_beep_high: Style,
     /// Border pulse color for the low-pitched bleep (sound_effect #2).
@@ -348,6 +357,13 @@ impl ColorScheme {
             upper_window: Style::new(),
             upper_window_border: Style::new().fg(Color::Cyan),
             virtual_window_border: BorderStyle::Single,
+            map_border_sides: PaneSides::all(BorderStyle::None),
+            story_border_sides: PaneSides::all(BorderStyle::None),
+            status_header_sides: PaneSides::all(BorderStyle::None),
+            input_line_sides: PaneSides::all(BorderStyle::None),
+            upper_window_border_sides: PaneSides::all(BorderStyle::Single),
+            story_header_on: true,
+            map_header_on: true,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             loc_indicator: Style::new().fg(Color::DarkGray),
@@ -485,6 +501,13 @@ impl ColorScheme {
             upper_window: Style::new().fg(fg),
             upper_window_border: Style::new().fg(scheme.palette[6]),
             virtual_window_border: BorderStyle::Single,
+            map_border_sides: PaneSides::all(BorderStyle::None),
+            story_border_sides: PaneSides::all(BorderStyle::None),
+            status_header_sides: PaneSides::all(BorderStyle::None),
+            input_line_sides: PaneSides::all(BorderStyle::None),
+            upper_window_border_sides: PaneSides::all(BorderStyle::Single),
+            story_header_on: true,
+            map_header_on: true,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             loc_indicator: Style::new().fg(scheme.palette[8]),
@@ -722,6 +745,21 @@ pub fn parse_named_color(s: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn border_sides_default_to_all_of_base_and_headers_on() {
+        use crate::render::paneframe::{PaneSides, BorderStyle};
+        let cs = ColorScheme::terminal_default();
+        assert_eq!(cs.map_border_sides, PaneSides::all(cs.map_border_style));
+        assert_eq!(cs.story_border_sides, PaneSides::all(cs.story_border_style));
+        assert_eq!(cs.status_header_sides, PaneSides::all(cs.status_header_style));
+        assert_eq!(cs.input_line_sides, PaneSides::all(cs.input_line_style));
+        assert_eq!(cs.upper_window_border_sides, PaneSides::all(cs.virtual_window_border));
+        assert!(cs.story_header_on);
+        assert!(cs.map_header_on);
+        // None base → all sides None.
+        assert_eq!(cs.map_border_sides, PaneSides::all(BorderStyle::None));
+    }
 
     #[test]
     fn statusbar_layout_default_reproduces_today() {
