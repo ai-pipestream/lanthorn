@@ -72,12 +72,26 @@ color separate, per the codebase's symbol/color split):
   **`warning_marker`** selector styles the warning gutter.
 - Both Meta and Warning lines reserve the 2-col gutter and indent text past it
   (today's Meta behavior, now also for Warning). Story and Input get no gutter.
-- **Wrapping honors the gutter.** A gutter line wraps its text to `width - 2`
-  and indents **every** visual row by the 2-col gutter, not just the first.
-  The gutter glyph is drawn once on the first row; continuation rows show 2
-  blank gutter columns so wrapped text stays in its column and never renders
-  under (or to the left of) the gutter. Today's code wraps Meta to `width - 2`
-  but does not re-indent continuation rows — this is the bug being fixed.
+- **Wrapping already honors the gutter.** A gutter line wraps its text to
+  `width - 2` and every visual row is indented past the 2-col gutter, with the
+  gutter glyph repeated on each wrapped row (a continuous bar). This was
+  verified correct at all widths (6–40 cols) in the current renderer; Warning
+  reuses the identical path. No change to the wrap math.
+
+### 2a. Resize redraw fix (the reported gutter artifact)
+
+The user-reported "word wrap doesn't honor the gutter space" symptom appears
+**only on dynamic terminal resize**, not in any static render. Root cause: the
+main loop handles `Event::Resize` with a bare `continue` and never forces a
+full repaint. ratatui's frame diff normally clears stale cells, but on a live
+resize (especially shrinking) old longer-line characters can linger in columns
+the new narrower frame does not overwrite — leftover text in the gutter columns
+reads exactly like the gutter being ignored.
+
+**Fix:** on `Event::Resize`, call `terminal.clear()` before `continue` so the
+next `draw` repaints every cell. This clears stale content everywhere, not just
+the gutter, and is the standard ratatui remedy. The fix is independent of the
+styling work but is bundled here because it is what the user observed.
 
 ### 3. Story sub-styling rules
 
@@ -158,9 +172,10 @@ equivalents):
   (defaults `▏` / `!`) with overrides + export.
 - `crates/app/src/render/transcript.rs` — resolve each line's style by kind,
   then (for Story) apply the rule list (user → built-in → base, first-match
-  patch); per-category gutter glyph/style for Meta and Warning. Wrap gutter
-  lines to `width - 2` and indent **every** wrapped row past the 2-col gutter
-  (glyph on row 1, blank gutter columns on continuation rows).
+  patch); per-category gutter glyph/style for Meta and Warning. Warning reuses
+  Meta's existing wrap-to-`width - 2` + per-row indent path (unchanged math).
+- `crates/app/src/main.rs` — on `Event::Resize`, call `terminal.clear()` before
+  `continue` so resize forces a full repaint (clears stale cells).
 - `crates/app/Cargo.toml` — add `regex`.
 
 ## Error handling
@@ -188,8 +203,11 @@ equivalents):
 - Render: each kind draws with its style; Meta/Warning draw their own gutter
   glyph+color; a rule-matched Story line draws the patched style.
 - Wrapping: a Meta/Warning line long enough to wrap indents every continuation
-  row past the 2-col gutter (no wrapped text in the gutter columns); the gutter
-  glyph appears only on the first row.
+  row past the 2-col gutter at all widths (no wrapped text in the gutter
+  columns); the gutter glyph repeats per wrapped row (unchanged behavior).
+- Resize redraw: covered by a focused unit test on the resize handler if
+  feasible; otherwise the `terminal.clear()`-on-resize change is verified
+  manually (resize while a wrapped meta/warning line is on screen).
 
 ## Out of scope (deferred)
 
