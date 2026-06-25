@@ -639,6 +639,82 @@ fn render_overflow(
     rects
 }
 
+// ── draw_header_plain + draw_framed ─────────────────────────────────────────────
+
+/// Draw header segments centered on a single plain row (no border brackets),
+/// returning per-segment hit-rects. Used for a borderless header (top side off).
+/// Segments are joined with two spaces; the active one uses `active` style.
+pub fn draw_header_plain(buf: &mut Buffer, row: Rect, segments: &[InsetSegment], base: Style, active: Style) -> Vec<Rect> {
+    if segments.is_empty() || row.width == 0 || row.height == 0 {
+        return segments.iter().map(|_| Rect::default()).collect();
+    }
+    let widths: Vec<usize> = segments.iter().map(|s| s.text.chars().count()).collect();
+    let sep = 2usize;
+    let total: usize = widths.iter().sum::<usize>() + sep * segments.len().saturating_sub(1);
+    let avail = row.width as usize;
+    let leading = if total <= avail { (avail - total) / 2 } else { 0 };
+    let mut cx = row.x + leading as u16;
+    let mut rects = vec![Rect::default(); segments.len()];
+    for (i, seg) in segments.iter().enumerate() {
+        if i > 0 {
+            for _ in 0..sep {
+                if let Some(c) = buf.cell_mut((cx, row.y)) { c.set_symbol(" ").set_style(base); }
+                cx += 1;
+            }
+        }
+        let style = if seg.active { active } else { base };
+        let start = cx;
+        for ch in seg.text.chars() {
+            if let Some(c) = buf.cell_mut((cx, row.y)) { c.set_symbol(&ch.to_string()).set_style(style); }
+            cx += 1;
+        }
+        rects[i] = Rect::new(start, row.y, cx - start, 1);
+    }
+    rects
+}
+
+/// The result of drawing a pane frame: where content goes, and (optionally) where
+/// the header strip should be drawn and whether that row is a border row.
+#[derive(Debug, Clone, Copy)]
+pub struct FramedPane {
+    pub content: Rect,
+    /// Where to draw the header strip, or `None` when no header is shown.
+    pub header: Option<Rect>,
+    /// True when `header` is a top border row (use `draw_top_inset`); false when it
+    /// is a reclaimed plain content row (use `draw_header_plain`).
+    pub header_bordered: bool,
+}
+
+/// Draw a pane frame choosing the composited path for `picture-frame` or the
+/// per-side path otherwise, and resolve header placement from `header_on`.
+pub fn draw_framed(buf: &mut Buffer, area: Rect, base: BorderStyle, sides: PaneSides, color: Style, header_on: bool) -> FramedPane {
+    if base == BorderStyle::PictureFrame {
+        let frame = draw_pane_frame(buf, area, BorderStyle::PictureFrame, color);
+        return FramedPane {
+            content: frame.content,
+            header: if header_on { Some(frame.top_inset) } else { None },
+            header_bordered: true,
+        };
+    }
+    let frame = draw_pane_frame_sides(buf, area, sides, color);
+    let top_present = sides.top != BorderStyle::None;
+    if !header_on {
+        FramedPane { content: frame.content, header: None, header_bordered: false }
+    } else if top_present {
+        FramedPane { content: frame.content, header: Some(frame.top_inset), header_bordered: true }
+    } else {
+        // Reclaim the first content row for a plain header; content drops one row.
+        let c = frame.content;
+        if c.height == 0 {
+            FramedPane { content: c, header: None, header_bordered: false }
+        } else {
+            let header = Rect::new(c.x, c.y, c.width, 1);
+            let content = Rect::new(c.x, c.y + 1, c.width, c.height - 1);
+            FramedPane { content, header: Some(header), header_bordered: false }
+        }
+    }
+}
+
 // ── build_layer_segments ──────────────────────────────────────────────────────
 
 /// An owned layer-tab segment, produced by `build_layer_segments`.
@@ -811,6 +887,46 @@ mod tests {
         // top present → top_inset spans the top row between the left inset and the right edge.
         assert_eq!(frame.top_inset.y, 0);
         assert_eq!(frame.top_inset.height, 1);
+    }
+
+    #[test]
+    fn draw_header_plain_centers_without_brackets() {
+        let row = Rect::new(0, 0, 11, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 11, 1));
+        let rects = draw_header_plain(&mut buf, row, &[InsetSegment { text: "AB", active: false }], Style::default(), Style::default());
+        let line: String = (0..11u16).map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect();
+        // "AB" centered, no ┫/┣/┃ brackets anywhere.
+        assert!(line.contains("AB"), "got {:?}", line);
+        assert!(!line.contains('┫') && !line.contains('┣') && !line.contains('┃'), "no brackets: {:?}", line);
+        assert_eq!(rects.len(), 1);
+    }
+
+    #[test]
+    fn draw_framed_header_placement_matrix() {
+        let area = Rect::new(0, 0, 12, 6);
+
+        // header on + top present → header is the top border row (bordered).
+        let mut b1 = Buffer::empty(area);
+        let f1 = draw_framed(&mut b1, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), Style::default(), true);
+        assert!(f1.header_bordered);
+        assert_eq!(f1.header.unwrap().y, 0);
+        assert_eq!(f1.content, Rect::new(1, 1, 10, 4));
+
+        // header on + top none → header on reclaimed first content row (plain); content drops a row.
+        let sides_no_top = PaneSides { top: BorderStyle::None, bottom: BorderStyle::Single, left: BorderStyle::Single, right: BorderStyle::Single };
+        let mut b2 = Buffer::empty(area);
+        let f2 = draw_framed(&mut b2, area, BorderStyle::None, sides_no_top, Style::default(), true);
+        assert!(!f2.header_bordered);
+        let h2 = f2.header.unwrap();
+        assert_eq!(h2.height, 1);
+        // content starts one row below the header row.
+        assert_eq!(f2.content.y, h2.y + 1);
+
+        // header off → no header; content uses the inner area.
+        let mut b3 = Buffer::empty(area);
+        let f3 = draw_framed(&mut b3, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), Style::default(), false);
+        assert!(f3.header.is_none());
+        assert_eq!(f3.content, Rect::new(1, 1, 10, 4));
     }
 
 }
