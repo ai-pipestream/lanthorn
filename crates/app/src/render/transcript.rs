@@ -8,7 +8,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use zvm::cpu::exec::Machine;
-use zvm::screen::{StatusLine, StatusRight};
+use zvm::screen::StatusRight;
 
 use ratatui::style::Color;
 
@@ -27,18 +27,133 @@ const CURSOR_STYLE: Style = Style::new()
 
 // ── Pure helpers (testable without Machine) ────────────────────────────────────
 
-/// Format a `StatusLine` into a left-part (location) and right-part (score/turns or time).
-pub(crate) fn format_status(sl: &StatusLine) -> (String, String) {
-    let left = sl.location.clone();
-    let right = match &sl.right {
-        StatusRight::ScoreTurns { score, turns } => {
-            format!("Score: {}  Moves: {}", score, turns)
+/// The field values available to status-bar segment templates for one turn.
+pub(crate) struct StatusFields {
+    pub location: String,
+    pub score: Option<String>,
+    pub moves: Option<String>,
+    pub time: Option<String>,
+    pub turns: String,
+    pub title: String,
+    pub filter: String,
+}
+
+fn status_field_value<'a>(f: &'a StatusFields, name: &str) -> &'a str {
+    match name {
+        "location" => &f.location,
+        "score" => f.score.as_deref().unwrap_or(""),
+        "moves" => f.moves.as_deref().unwrap_or(""),
+        "time" => f.time.as_deref().unwrap_or(""),
+        "turns" => &f.turns,
+        "title" => &f.title,
+        "filter" => &f.filter,
+        _ => "", // unknown token → empty
+    }
+}
+
+/// Resolve a segment's `{placeholder}` template against `f`.
+///
+/// Returns `Some(resolved)` for a pure-literal segment or one with at least one
+/// non-empty placeholder; returns `None` (hide the segment) when the template
+/// contains placeholders that ALL resolve to empty. An unterminated `{` is
+/// treated as a literal brace.
+pub(crate) fn resolve_placeholders(text: &str, f: &StatusFields) -> Option<String> {
+    let mut out = String::new();
+    let mut had_placeholder = false;
+    let mut any_nonempty = false;
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        if let Some(close) = after.find('}') {
+            let name = &after[..close];
+            had_placeholder = true;
+            let val = status_field_value(f, name);
+            if !val.is_empty() {
+                any_nonempty = true;
+            }
+            out.push_str(val);
+            rest = &after[close + 1..];
+        } else {
+            out.push('{');
+            rest = after;
         }
-        StatusRight::Time { hours, minutes } => {
-            format!("{:02}:{:02}", hours, minutes)
-        }
+    }
+    out.push_str(rest);
+    if had_placeholder && !any_nonempty {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Pack visible `(text, style, align)` segments into draw ops `(x_col, text, style)`.
+///
+/// Left cluster packs from the left edge; right cluster packs flush against the
+/// right edge; center cluster centers in the gap between them. Truncation when
+/// space runs short: drop the center cluster, then truncate the left cluster to
+/// the space before the right cluster, preserving the right cluster (clipped only
+/// if it alone exceeds the width). `x_col` is relative to the region's left edge.
+pub(crate) fn pack_status_clusters(
+    visible: &[(String, ratatui::style::Style, crate::colors::Align)],
+    width: usize,
+) -> Vec<(u16, String, ratatui::style::Style)> {
+    use crate::colors::Align;
+    let cw = |s: &str| s.chars().count();
+    let pick = |a: Align| -> Vec<&(String, ratatui::style::Style, Align)> {
+        visible.iter().filter(|(_, _, sa)| *sa == a).collect()
     };
-    (left, right)
+    let left = pick(Align::Left);
+    let center = pick(Align::Center);
+    let right = pick(Align::Right);
+    let sum = |v: &[&(String, ratatui::style::Style, Align)]| v.iter().map(|(t, _, _)| cw(t)).sum::<usize>();
+    let left_w = sum(&left);
+    let right_w = sum(&right);
+    let center_w = sum(&center);
+
+    let mut ops: Vec<(u16, String, ratatui::style::Style)> = Vec::new();
+
+    // RIGHT cluster: flush right, declared order, clipped to the row.
+    let right_start = width.saturating_sub(right_w);
+    {
+        let mut x = right_start;
+        for (t, s, _) in &right {
+            let avail = width.saturating_sub(x);
+            if avail == 0 { break; }
+            let txt = truncate_line(t, avail).to_string();
+            let adv = cw(&txt);
+            ops.push((x as u16, txt, *s));
+            x += adv;
+        }
+    }
+    // LEFT cluster: flush left, truncated to the space before the right cluster.
+    let left_budget = right_start;
+    {
+        let mut x = 0usize;
+        for (t, s, _) in &left {
+            if x >= left_budget { break; }
+            let avail = left_budget - x;
+            let txt = truncate_line(t, avail).to_string();
+            let adv = cw(&txt);
+            ops.push((x as u16, txt, *s));
+            x += adv;
+        }
+    }
+    // CENTER cluster: only when it fits in the gap; otherwise dropped.
+    let gap_start = left_w;
+    let gap_end = right_start;
+    if gap_end > gap_start && center_w <= gap_end - gap_start {
+        let mut x = gap_start + (gap_end - gap_start - center_w) / 2;
+        for (t, s, _) in &center {
+            let avail = gap_end.saturating_sub(x);
+            if avail == 0 { break; }
+            let txt = truncate_line(t, avail).to_string();
+            let adv = cw(&txt);
+            ops.push((x as u16, txt, *s));
+            x += adv;
+        }
+    }
+    ops
 }
 
 /// Return the slice of transcript lines visible in `rows` rows, honouring
@@ -390,9 +505,9 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         // Draw a pane frame around the status region.
         let frame = draw_pane_frame(buf, status_region, status_style_kind, state.colors.status_header);
         // Render status text into the inner content row.
-        render_status_content(machine, buf, frame.content, state.colors.status_bar, state.status_msg.as_deref(), state.transcript_filter);
+        render_status_content(machine, state, buf, frame.content);
     } else {
-        render_status_content(machine, buf, status_region, state.colors.status_bar, state.status_msg.as_deref(), state.transcript_filter);
+        render_status_content(machine, state, buf, status_region);
     }
 
     if area.height < status_rows + 1 {
@@ -422,62 +537,75 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     render_middle(machine, state, buf, middle_area, normal_style);
 }
 
-/// Draw the status bar into `region` with `status_style`.
-/// The region may be 1 row (plain) or 1 row inside a frame (boxed).
+/// Draw the status bar into `region`.
 ///
-/// When `status_msg` is `Some`, it overrides the normal location/score content
-/// and renders the transient message left-aligned on the status row.
-/// When `transcript_filter` is not Both, a `[filter: story]`/`[filter: meta]`
-/// indicator is drawn at the right edge.
+/// When `state.status_msg` is `Some`, it overrides all segments and renders the
+/// transient message left-aligned in the base style. Otherwise each segment in
+/// `state.colors.statusbar_layout` is resolved (placeholders substituted, empty
+/// ones hidden), styled (base patched with the segment style), and packed into
+/// left/center/right clusters.
 fn render_status_content(
     machine: &Machine,
+    state: &AppState,
     buf: &mut Buffer,
     region: Rect,
-    status_style: Style,
-    status_msg: Option<&str>,
-    transcript_filter: TranscriptFilter,
 ) {
     if region.height == 0 || region.width == 0 {
         return;
     }
-    let w = region.width as usize;
+    let base = state.colors.status_bar;
     let status_y = region.y;
+    let w = region.width as usize;
 
-    // Fill entire region with the status style (background fill).
+    // Fill the row with the base style.
     for x in region.x..region.right() {
         if let Some(cell) = buf.cell_mut((x, status_y)) {
-            cell.set_symbol(" ").set_style(status_style);
+            cell.set_symbol(" ").set_style(base);
         }
     }
 
-    // Build the filter indicator string (empty when filter is Both).
-    let filter_indicator: String = match transcript_filter {
+    // Transient status message overrides the segments.
+    if let Some(msg) = state.status_msg.as_deref() {
+        let msg_trunc = truncate_line(msg, w);
+        draw_str_clipped(buf, region.x, status_y, msg_trunc, base, region);
+        return;
+    }
+
+    // Build the field values for this turn.
+    let sl = machine.status_line();
+    let (score, moves, time) = match sl.right {
+        StatusRight::ScoreTurns { score, turns } => (Some(score.to_string()), Some(turns.to_string()), None),
+        StatusRight::Time { hours, minutes } => (None, None, Some(format!("{:02}:{:02}", hours, minutes))),
+    };
+    let filter = match state.transcript_filter {
         TranscriptFilter::Both => String::new(),
-        TranscriptFilter::Story => " [filter: story]".to_string(),
-        TranscriptFilter::Meta => " [filter: meta]".to_string(),
+        TranscriptFilter::Story => "[filter: story]".to_string(),
+        TranscriptFilter::Meta => "[filter: meta]".to_string(),
+    };
+    let fields = StatusFields {
+        location: sl.location,
+        score,
+        moves,
+        time,
+        turns: state.turns.to_string(),
+        title: state.title.clone(),
+        filter,
     };
 
-    if let Some(msg) = status_msg {
-        // Transient status message: render left-aligned, overriding normal content.
-        let msg_trunc = truncate_line(msg, w);
-        draw_str_clipped(buf, region.x, status_y, msg_trunc, status_style, region);
-    } else {
-        let sl = machine.status_line();
-        let (left, right) = format_status(&sl);
+    // Resolve + style + drop hidden segments.
+    let visible: Vec<(String, Style, crate::colors::Align)> = state
+        .colors
+        .statusbar_layout
+        .segments
+        .iter()
+        .filter_map(|seg| {
+            resolve_placeholders(&seg.text, &fields).map(|txt| (txt, base.patch(seg.style), seg.align))
+        })
+        .collect();
 
-        let left_trunc = truncate_line(&left, w);
-        draw_str_clipped(buf, region.x, status_y, left_trunc, status_style, region);
-
-        if right.len() < w {
-            let right_x = region.x + (w - right.len()) as u16;
-            draw_str_clipped(buf, right_x, status_y, &right, status_style, region);
-        }
-    }
-
-    // Draw the filter indicator at the far right (overwrites existing content if present).
-    if !filter_indicator.is_empty() && filter_indicator.len() < w {
-        let ind_x = region.x + (w - filter_indicator.len()) as u16;
-        draw_str_clipped(buf, ind_x, status_y, &filter_indicator, status_style, region);
+    // Pack into clusters and draw.
+    for (x, txt, style) in pack_status_clusters(&visible, w) {
+        draw_str_clipped(buf, region.x + x, status_y, &txt, style, region);
     }
 }
 
@@ -677,26 +805,77 @@ mod tests {
         assert_eq!(w.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
     }
 
-    #[test]
-    fn format_status_score_turns() {
-        let sl = StatusLine {
+    fn fields_score() -> StatusFields {
+        StatusFields {
             location: "West of House".into(),
-            right: StatusRight::ScoreTurns { score: 10, turns: 5 },
-        };
-        let (left, right) = format_status(&sl);
-        assert_eq!(left, "West of House");
-        assert_eq!(right, "Score: 10  Moves: 5");
+            score: Some("10".into()),
+            moves: Some("5".into()),
+            time: None,
+            turns: "7".into(),
+            title: "Zork".into(),
+            filter: String::new(),
+        }
     }
 
     #[test]
-    fn format_status_time() {
-        let sl = StatusLine {
-            location: "Hall".into(),
-            right: StatusRight::Time { hours: 9, minutes: 3 },
-        };
-        let (left, right) = format_status(&sl);
-        assert_eq!(left, "Hall");
-        assert_eq!(right, "09:03");
+    fn resolve_placeholders_substitutes_and_hides() {
+        let f = fields_score();
+        assert_eq!(resolve_placeholders("Score: {score}  Moves: {moves}", &f).as_deref(), Some("Score: 10  Moves: 5"));
+        // pure literal always shown
+        assert_eq!(resolve_placeholders(" | ", &f).as_deref(), Some(" | "));
+        // all-empty placeholder segment hides (time is None on a score game)
+        assert_eq!(resolve_placeholders("{time}", &f), None);
+        // mixed: one empty, one non-empty placeholder → shown
+        assert_eq!(resolve_placeholders("{time}{location}", &f).as_deref(), Some("West of House"));
+        // unknown token → empty; all-empty → hidden
+        assert_eq!(resolve_placeholders("{bogus}", &f), None);
+        // turns vs moves are distinct
+        assert_eq!(resolve_placeholders("{turns}/{moves}", &f).as_deref(), Some("7/5"));
+    }
+
+    #[test]
+    fn pack_clusters_positions_and_truncates() {
+        use crate::colors::Align;
+        let s = Style::default();
+        let mk = |t: &str, a: Align| (t.to_string(), s, a);
+        // width 30: left "abc"(0), right "XY"(28)
+        let ops = pack_status_clusters(&[mk("abc", Align::Left), mk("XY", Align::Right)], 30);
+        let left = ops.iter().find(|(_, t, _)| t == "abc").unwrap();
+        let right = ops.iter().find(|(_, t, _)| t == "XY").unwrap();
+        assert_eq!(left.0, 0);
+        assert_eq!(right.0, 28); // 30 - 2
+        // center centered in the gap between left end (3) and right start (28): gap 25, center "cc"(2) at 3 + (25-2)/2 = 14
+        let ops2 = pack_status_clusters(&[mk("abc", Align::Left), mk("cc", Align::Center), mk("XY", Align::Right)], 30);
+        let center = ops2.iter().find(|(_, t, _)| t == "cc").unwrap();
+        assert_eq!(center.0, 14);
+        // narrow width 6: right "XY" preserved at 4; center dropped; left "abcdef" truncated to 4 ("abcd")
+        let ops3 = pack_status_clusters(&[mk("abcdef", Align::Left), mk("cc", Align::Center), mk("XY", Align::Right)], 6);
+        assert!(ops3.iter().all(|(_, t, _)| t != "cc"), "center dropped under pressure");
+        let right3 = ops3.iter().find(|(x, _, _)| *x == 4).unwrap();
+        assert_eq!(right3.1, "XY");
+        let left3 = ops3.iter().find(|(x, _, _)| *x == 0).unwrap();
+        assert_eq!(left3.1, "abcd"); // truncated to the 4 cols before the right cluster
+    }
+
+    #[test]
+    fn render_status_default_bar_matches_today() {
+        // With no custom [statusbar], the bar shows location left and the filter
+        // indicator right; score/moves come from the (empty) minimal machine.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.transcript_filter = crate::state::TranscriptFilter::Story;
+
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        let row: String = (0..40u16)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        // filter indicator pinned right (default bar includes ` {filter}`).
+        assert!(row.contains("[filter: story]"), "default bar must show the filter indicator: {:?}", row);
+        // status row keeps the reversed-video base fill.
+        assert!(buf.cell((0, 0)).unwrap().modifier.contains(Modifier::REVERSED));
     }
 
     #[test]
