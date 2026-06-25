@@ -45,7 +45,183 @@
 //   - v8 and v7 stories use the same heuristic as v4+ for location.
 
 use crate::cpu::exec::Machine;
-use crate::objects::{entries_base, entry_size, object_snapshot, prop_table_ptr_offset, ObjectSnapshot};
+use crate::objects::{entries_base, entry_size, get_parent, object_snapshot, prop_table_ptr_offset, short_name, ObjectSnapshot};
+use crate::screen::UpperWindow;
+
+/// Normalize for matching/hashing: trim, collapse whitespace, lowercase.
+pub(crate) fn normalize_name(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// Strip the posture suffix after the first comma, then trim.
+fn clean_room_text(s: &str) -> String {
+    s.split(',').next().unwrap_or(s).trim().to_string()
+}
+
+/// Extract a candidate room name from the v4+ status-line grid, or None.
+///
+/// Scans at most the first 2 active rows. Prefers a `Location:` label segment;
+/// otherwise takes row 1's first segment (text before the first run of 2+
+/// spaces, which separates the left-justified room name from the right-aligned
+/// score/moves/time block). Strips a trailing posture suffix after a comma.
+pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<String> {
+    let scan = active_rows.min(2).min(upper.rows);
+    let row_text = |r: u16| -> String {
+        let mut s = String::new();
+        for c in 1..=upper.cols {
+            s.push(upper.cell(r, c).ch);
+        }
+        s
+    };
+
+    // 1. Label form: any scanned row containing a "Location:" segment.
+    for r in 1..=scan {
+        let line = row_text(r);
+        let lower = line.to_lowercase();
+        if let Some(idx) = lower.find("location:") {
+            let after = line[idx + "location:".len()..].trim_start();
+            let value = after.split("  ").next().unwrap_or("").trim();
+            let candidate = clean_room_text(value);
+            if !candidate.is_empty() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 2. Common form: row 1's first segment (before the first 2+ space run).
+    if scan >= 1 {
+        let line = row_text(1);
+        let first = line.split("  ").next().unwrap_or("").trim();
+        let candidate = clean_room_text(first);
+        if !candidate.is_empty() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+/// True if `short` names the room shown as `candidate`: equality, or `short` is
+/// a leading prefix of `candidate` ending on a word boundary (next char
+/// non-alphanumeric, or end of string). Both normalized; `short` non-empty.
+pub fn status_name_matches(candidate: &str, short: &str) -> bool {
+    let c = normalize_name(candidate);
+    let s = normalize_name(short);
+    if s.is_empty() {
+        return false;
+    }
+    if c == s {
+        return true;
+    }
+    match c.strip_prefix(&s) {
+        Some(rest) => rest.chars().next().map_or(true, |ch| !ch.is_alphanumeric()),
+        None => false,
+    }
+}
+
+/// The current player object: the lowest-numbered object whose normalized short
+/// name is one of {yourself, you, me, myself, self}. None if not found.
+fn find_player_object(machine: &Machine) -> Option<u16> {
+    const NAMES: [&str; 5] = ["yourself", "you", "me", "myself", "self"];
+    let n = max_object_number(&machine.mem);
+    (1..=n).find(|&obj| {
+        let nm = normalize_name(&short_name(&machine.mem, obj));
+        NAMES.contains(&nm.as_str())
+    })
+}
+
+/// Nearest ancestor of `start` (exclusive) whose short name matches `name` via
+/// `status_name_matches`. Depth-bounded (32) to tolerate cycles.
+fn nearest_matching_ancestor(machine: &Machine, start: u16, name: &str) -> Option<ObjectSnapshot> {
+    let mem = &machine.mem;
+    let mut cur = get_parent(mem, start);
+    for _ in 0..32 {
+        if cur == 0 {
+            break;
+        }
+        if status_name_matches(name, &short_name(mem, cur)) {
+            return Some(object_snapshot(mem, cur));
+        }
+        cur = get_parent(mem, cur);
+    }
+    None
+}
+
+/// The object whose short name matches `name` (longest match wins; ties -> lowest
+/// number), or None.
+fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> {
+    let mem = &machine.mem;
+    let n = max_object_number(mem);
+    let mut best: Option<(usize, u16)> = None; // (normalized short-name length, object)
+    for obj in 1..=n {
+        let sn = short_name(mem, obj);
+        if status_name_matches(name, &sn) {
+            let len = normalize_name(&sn).len();
+            if best.map_or(true, |(blen, _)| len > blen) {
+                best = Some((len, obj));
+            }
+        }
+    }
+    best.map(|(_, obj)| object_snapshot(mem, obj))
+}
+
+/// How the current room was determined (drives the map indicator label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationMethod {
+    GlobalVar0,
+    PlayerParent,
+    StatusName,
+    NameOnly,
+}
+
+/// The mapper-facing location signal for one turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Location {
+    GlobalVar0(ObjectSnapshot),
+    PlayerParent(ObjectSnapshot),
+    StatusName(ObjectSnapshot),
+    NameOnly(String),
+}
+
+impl Location {
+    /// The backing object snapshot, or None for a name-only room.
+    pub fn object(&self) -> Option<&ObjectSnapshot> {
+        match self {
+            Location::GlobalVar0(s) | Location::PlayerParent(s) | Location::StatusName(s) => Some(s),
+            Location::NameOnly(_) => None,
+        }
+    }
+    /// The detection method tag.
+    pub fn method(&self) -> LocationMethod {
+        match self {
+            Location::GlobalVar0(_) => LocationMethod::GlobalVar0,
+            Location::PlayerParent(_) => LocationMethod::PlayerParent,
+            Location::StatusName(_) => LocationMethod::StatusName,
+            Location::NameOnly(_) => LocationMethod::NameOnly,
+        }
+    }
+}
+
+/// Best-effort current room, version-gated:
+/// - v3 and below: global variable 0 -> GlobalVar0, or None.
+/// - v4+: validated player-parent -> status-name -> name-only -> None.
+///
+/// Stateless: a pure function of the machine, re-run each turn.
+pub fn detect_location(machine: &Machine) -> Option<Location> {
+    if machine.mem.version() <= 3 {
+        return current_location(machine).map(Location::GlobalVar0);
+    }
+    let name = status_line_room_name(&machine.screen.upper, machine.screen.upper_window_rows)?;
+    if let Some(player) = find_player_object(machine) {
+        if let Some(room) = nearest_matching_ancestor(machine, player, &name) {
+            return Some(Location::PlayerParent(room));
+        }
+    }
+    if let Some(obj) = resolve_room_object(machine, &name) {
+        return Some(Location::StatusName(obj));
+    }
+    Some(Location::NameOnly(name))
+}
 
 /// Returns the object representing the player's current location, or `None` if
 /// the heuristic cannot determine a plausible location.
@@ -121,6 +297,109 @@ mod tests {
     use crate::cpu::exec::{Machine, StepResult};
     use crate::header::tests_support::sample_story;
     use crate::memory::Memory;
+    use crate::screen::UpperWindow;
+
+    fn upper_with(rows: &[&str]) -> UpperWindow {
+        let cols = rows.iter().map(|r| r.chars().count()).max().unwrap_or(0) as u16;
+        let mut u = UpperWindow::default();
+        u.resize(rows.len() as u16, cols.max(1));
+        for (r, line) in rows.iter().enumerate() {
+            for (c, ch) in line.chars().enumerate() {
+                u.put((r + 1) as u16, (c + 1) as u16, ch, 0);
+            }
+        }
+        u
+    }
+
+    #[test]
+    fn status_room_name_common_form_strips_score_and_posture() {
+        let u = upper_with(&[" Bedroom, in the bed                              Score: 0     Moves: 1"]);
+        assert_eq!(status_line_room_name(&u, 1).as_deref(), Some("Bedroom"));
+    }
+
+    #[test]
+    fn status_room_name_plain() {
+        let u = upper_with(&[" Darkness                                         Score: 0     Moves: 0"]);
+        assert_eq!(status_line_room_name(&u, 1).as_deref(), Some("Darkness"));
+    }
+
+    #[test]
+    fn status_room_name_location_label_form() {
+        let u = upper_with(&[
+            " Mode:  Communications Mode                                Time:  7:07pm",
+            " Location:  Foo Bar                                        Date:  3/16/2031",
+        ]);
+        assert_eq!(status_line_room_name(&u, 2).as_deref(), Some("Foo Bar"));
+    }
+
+    #[test]
+    fn status_room_name_empty_grid_is_none() {
+        let u = upper_with(&["                                "]);
+        assert_eq!(status_line_room_name(&u, 1), None);
+    }
+
+    #[test]
+    fn status_name_matches_rules() {
+        assert!(status_name_matches("Bedroom", "Bedroom"));            // equal
+        assert!(status_name_matches("Bedroom (messy)", "Bedroom"));    // trailing decoration
+        assert!(status_name_matches("Bedroom, north end", "Bedroom")); // (post-strip safety net)
+        assert!(!status_name_matches("Hallway", "Hall"));              // word-boundary guard
+        assert!(status_name_matches("hall  ", "Hall"));                // case + whitespace
+        assert!(!status_name_matches("Kitchen", "Bedroom"));          // unrelated
+        assert!(!status_name_matches("Bedroom", ""));                 // empty short
+    }
+
+    #[test]
+    fn find_player_object_by_name() {
+        // Rename obj3 to "you" so it is the player.
+        // "yourself" would be truncated to "yoursel" by v3 Z-char encoding (6 Z-char max),
+        // so we use "you" which is in NAMES and encodes without truncation.
+        let mut buf = build_v3_story();
+        let name = z_name("you");
+        buf[PROP3_TBL as usize] = (name.len() / 2) as u8;
+        buf[PROP3_TBL as usize + 1..PROP3_TBL as usize + 1 + name.len()].copy_from_slice(&name);
+        let machine = make_machine(buf);
+        assert_eq!(find_player_object(&machine), Some(3));
+    }
+
+    #[test]
+    fn resolve_room_object_matches_short_name() {
+        let machine = make_machine(build_v3_story()); // obj1 "west", obj2 "east", obj3 "hall"
+        let r = resolve_room_object(&machine, "hall").expect("hall resolves");
+        assert_eq!(r.number, 3);
+        assert!(resolve_room_object(&machine, "nowhere").is_none());
+    }
+
+    #[test]
+    fn nearest_matching_ancestor_walks_up() {
+        // obj tree: obj3 (parent obj1), obj2 (parent obj1), obj1 (parent 0).
+        // Searching from obj3 for "west" should walk up to obj1.
+        let machine = make_machine(build_v3_story());
+        let r = nearest_matching_ancestor(&machine, 3, "west").expect("walks up to west");
+        assert_eq!(r.number, 1);
+        assert!(nearest_matching_ancestor(&machine, 3, "nowhere").is_none());
+    }
+
+    #[test]
+    fn detect_location_v3_uses_global0() {
+        let mut buf = build_v3_story();
+        put_word(&mut buf, GLOBAL_VARS as usize, 1); // global 0 = obj 1
+        let machine = make_machine(buf);
+        match detect_location(&machine) {
+            Some(Location::GlobalVar0(s)) => assert_eq!(s.number, 1),
+            other => panic!("expected GlobalVar0, got {other:?}"),
+        }
+        assert_eq!(detect_location(&machine).unwrap().method(), LocationMethod::GlobalVar0);
+    }
+
+    #[test]
+    fn location_object_and_method_accessors() {
+        let s = ObjectSnapshot { number: 5, parent: 0, name: "Hall".into() };
+        assert_eq!(Location::StatusName(s.clone()).object().map(|o| o.number), Some(5));
+        assert_eq!(Location::NameOnly("X".into()).object(), None);
+        assert_eq!(Location::NameOnly("X".into()).method(), LocationMethod::NameOnly);
+        assert_eq!(Location::PlayerParent(s).method(), LocationMethod::PlayerParent);
+    }
 
     // We reuse the same object-table layout as objects.rs tests:
     //   object_table = 0x0100, entries_base = 0x013E (v3)

@@ -60,6 +60,14 @@ and unsupported; v1/v2 are not supported.)
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
   relative to where you came from.
+- **v4+ room detection** — for v4/v5 games that don't expose the room in the
+  classic v3 status variable (Hitchhiker, Bureaucracy, A Mind Forever Voyaging),
+  the room is read from the status line and resolved to a game object — preferring
+  the player object's room when the game re-parents the player (Inform), falling
+  back to a name-only room otherwise. A hideable indicator in the map's
+  bottom-right corner shows how the current room was found (`toggle-loc-method`,
+  persisted via `show_loc_method`; styled by `loc_indicator`): `via player
+  object`, `via name match`, `via name (unlinked)`, or `via status variable`.
 - **Connection routing** between rooms with overlap removal, so the map stays
   readable as it grows.
 - **Layered maps** for multi-level areas, with manual layer controls.

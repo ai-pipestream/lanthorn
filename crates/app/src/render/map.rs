@@ -603,6 +603,17 @@ pub fn draw_layer_strip(
 /// Tests that call [`render_map`] directly are unaffected.
 ///
 /// The in-content strip is suppressed when `state.colors.map_border_style != BorderStyle::None`,
+/// Descriptive label for the room-detection method shown in the map corner.
+pub(crate) fn loc_method_label(m: zvm::location::LocationMethod) -> &'static str {
+    use zvm::location::LocationMethod::*;
+    match m {
+        GlobalVar0 => "via status variable",
+        PlayerParent => "via player object",
+        StatusName => "via name match",
+        NameOnly => "via name (unlinked)",
+    }
+}
+
 /// because in that case the border carries layer tabs via `draw_top_inset` and drawing the
 /// in-content strip would produce a double indicator and consume a content row.
 pub fn render_map_layered(
@@ -619,6 +630,30 @@ pub fn render_map_layered(
         area
     };
     render_map(rm, state, body_area, buf);
+
+    // Detection-method indicator: bottom-right corner, hidden by default.
+    if state.show_loc_method {
+        if let Some(m) = state.loc_method {
+            let label = loc_method_label(m);
+            let w = label.chars().count() as u16;
+            if area.width >= 1 && area.height >= 1 {
+                let y = area.bottom() - 1;
+                let x = area.right().saturating_sub(w.min(area.width));
+                let style = state.colors.loc_indicator;
+                let mut cx = x;
+                for ch in label.chars() {
+                    if cx >= area.right() {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut((cx, y)) {
+                        let mut b = [0u8; 4];
+                        cell.set_symbol(ch.encode_utf8(&mut b)).set_style(style);
+                    }
+                    cx += 1;
+                }
+            }
+        }
+    }
 }
 
 // ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
@@ -2195,6 +2230,32 @@ mod tests {
     use mapper::render::render;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn loc_method_label_strings() {
+        use zvm::location::LocationMethod::*;
+        assert_eq!(loc_method_label(GlobalVar0), "via status variable");
+        assert_eq!(loc_method_label(PlayerParent), "via player object");
+        assert_eq!(loc_method_label(StatusName), "via name match");
+        assert_eq!(loc_method_label(NameOnly), "via name (unlinked)");
+    }
+
+    #[test]
+    fn indicator_drawn_bottom_right_when_enabled() {
+        use mapper::graph::MapGraph;
+        let g = MapGraph::default();
+        let rm = mapper::render::render(&g);
+        let mut state = AppState::default();
+        state.show_loc_method = true;
+        state.loc_method = Some(zvm::location::LocationMethod::StatusName);
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_map_layered(&rm, &g, &state, area, &mut buf);
+        // The label "via name match" ends at the bottom-right; check its last char.
+        let row = area.bottom() - 1;
+        let last = buf.cell((area.right() - 1, row)).unwrap().symbol().to_string();
+        assert_eq!(last, "h", "expected the 'h' of 'via name match' in the corner");
+    }
 
     #[test]
     fn cleanup_clears_overlaps_without_knocking_aligned_rooms_off_row() {

@@ -690,6 +690,7 @@ fn main() {
         state.push_transcript(&format!("[{}]", w));
     }
     state.show_room_numbers = cfg.show_room_numbers;
+    state.show_loc_method = cfg.show_loc_method;
     state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
@@ -712,6 +713,7 @@ fn main() {
             info: None,
             beep: None,
             diagnostics: vec![],
+            location_method: None,
         };
         apply_turn(&mut mapper, "", &seed_result);
         let rid = snap_number as mapper::graph::RoomId;
@@ -1420,6 +1422,7 @@ fn main() {
                                                             info: None,
                                                             beep: None,
                                                             diagnostics: vec![],
+                                                            location_method: None,
                                                         };
                                                         apply_turn(&mut mapper, "", &restore_result);
                                                         state.set_viewed_layer(None);
@@ -1746,6 +1749,7 @@ fn main() {
                                         info: None,
                                         beep: None,
                                         diagnostics: vec![],
+                                        location_method: None,
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -1877,6 +1881,7 @@ fn main() {
                                         info: None,
                                         beep: None,
                                         diagnostics: vec![],
+                                        location_method: None,
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -1947,6 +1952,7 @@ fn main() {
                                             info: None,
                                             beep: None,
                                             diagnostics: vec![],
+                                            location_method: None,
                                         };
                                         apply_turn(&mut mapper, "", &restore_result);
                                         state.set_viewed_layer(None);
@@ -2093,6 +2099,7 @@ fn reset_game(
                     info: None,
                     beep: None,
                     diagnostics: vec![],
+                    location_method: None,
                 };
                 apply_turn(mapper, "", &seed_result);
                 let rid = snap_number as mapper::graph::RoomId;
@@ -2537,6 +2544,7 @@ fn apply_launch_resume(
                     info: None,
                     beep: None,
                     diagnostics: vec![],
+                    location_method: None,
                 };
                 apply_turn(mapper, "", &restore_result);
                 state.set_viewed_layer(None);
@@ -2595,6 +2603,7 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     if let Some(kind) = result.beep {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
+    state.loc_method = result.location_method.or(state.loc_method);
 }
 
 /// Map a keyboard event to a ZSCII byte for `read_char` input.

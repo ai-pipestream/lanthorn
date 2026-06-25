@@ -142,6 +142,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "upper_window_border",
     "sound_beep_high",
     "sound_beep_low",
+    "loc_indicator",
 ];
 
 // ── apply_color_decls ─────────────────────────────────────────────────────────
@@ -226,6 +227,7 @@ pub fn apply_color_decls(
             }
             "sound_beep_high"    => cs.sound_beep_high = cs.sound_beep_high.patch(style),
             "sound_beep_low"     => cs.sound_beep_low = cs.sound_beep_low.patch(style),
+            "loc_indicator"      => cs.loc_indicator = cs.loc_indicator.patch(style),
             _                    => warnings.push(format!("unknown selector: {}", selector)),
         }
     }
@@ -798,6 +800,7 @@ pub fn write_style_full(
     }
     doc.colors.selectors.insert("sound_beep_high".to_string(), style_to_decl(&cs.sound_beep_high));
     doc.colors.selectors.insert("sound_beep_low".to_string(),  style_to_decl(&cs.sound_beep_low));
+    doc.colors.selectors.insert("loc_indicator".to_string(), style_to_decl(&cs.loc_indicator));
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
@@ -948,6 +951,15 @@ mod tests {
         let m = merge(&base, &over);
         assert_eq!(m.colors.selectors["room"].fg.as_deref(), Some("red")); // over wins
         assert_eq!(m.colors.selectors["room"].bold, Some(true));            // base bold kept
+    }
+
+    #[test]
+    #[test]
+    fn loc_indicator_selector_parses() {
+        let doc = parse_style_toml("[colors]\n\"loc_indicator\" = { fg = \"green\" }\n").unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cs.loc_indicator.fg, Some(ratatui::style::Color::Green));
     }
 
     #[test]

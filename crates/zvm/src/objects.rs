@@ -349,6 +349,7 @@ pub fn get_next_prop(mem: &Memory, obj: u16, prop: u8) -> u8 {
 // ── Mapper snapshot ───────────────────────────────────────────────────────────
 
 /// Stable per-object identity for the automapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectSnapshot {
     pub number: u16,
     pub parent: u16,

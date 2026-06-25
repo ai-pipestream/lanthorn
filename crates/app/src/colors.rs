@@ -206,6 +206,8 @@ pub struct ColorScheme {
     pub sound_beep_high: Style,
     /// Border pulse color for the low-pitched bleep (sound_effect #2).
     pub sound_beep_low: Style,
+    /// Room-detection-method indicator (map corner).
+    pub loc_indicator: Style,
 }
 
 impl ColorScheme {
@@ -260,6 +262,7 @@ impl ColorScheme {
             virtual_window_border: BorderStyle::Single,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
+            loc_indicator: Style::new().fg(Color::DarkGray),
         }
     }
 
@@ -388,6 +391,7 @@ impl ColorScheme {
             virtual_window_border: BorderStyle::Single,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
+            loc_indicator: Style::new().fg(scheme.palette[8]),
         }
     }
 
@@ -785,6 +789,12 @@ unknown-key = ignored
         let cs = ColorScheme::terminal_default();
         assert_eq!(cs.sound_beep_high.fg, Some(Color::Rgb(255, 180, 40)));
         assert_eq!(cs.sound_beep_low.fg, Some(Color::Rgb(60, 140, 220)));
+    }
+
+    #[test]
+    fn loc_indicator_default_is_dim() {
+        let cs = ColorScheme::terminal_default();
+        assert_eq!(cs.loc_indicator.fg, Some(Color::DarkGray));
     }
 
 }

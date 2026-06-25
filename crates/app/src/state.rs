@@ -671,6 +671,11 @@ pub struct AppState {
     pub pending_resume: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)>,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
+    /// How the current room was detected (for the map indicator). Retained
+    /// across turns; updated when a turn reports a method.
+    pub loc_method: Option<zvm::location::LocationMethod>,
+    /// Whether the detection-method indicator is shown. Default false.
+    pub show_loc_method: bool,
 
     // ── Hints panel state ─────────────────────────────────────────────────────
 
@@ -756,6 +761,8 @@ impl Default for AppState {
             launch_dialog: false,
             pending_resume: None,
             show_room_numbers: false,
+            loc_method: None,
+            show_loc_method: false,
             hints: None,
             search_query: None,
             search_matches: Vec::new(),

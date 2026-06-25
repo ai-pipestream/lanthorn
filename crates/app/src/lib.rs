@@ -14,6 +14,7 @@ pub mod keymap;
 pub mod map_dump;
 pub mod persist_files;
 pub mod render;
+pub mod roomid;
 pub mod session;
 pub mod state;
 pub mod style;
