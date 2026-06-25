@@ -2576,8 +2576,6 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 
 // ── Char-input mode helpers ────────────────────────────────────────────────────
 
-/// Map a keyboard event to a ZSCII byte for `read_char` input.
-///
 /// Route a turn's sound/diagnostic events: diagnostics become meta transcript
 /// lines; the latest beep arms a one-shot story-border pulse.
 fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
@@ -2589,6 +2587,8 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }
 }
 
+/// Map a keyboard event to a ZSCII byte for `read_char` input.
+///
 /// Returns:
 /// - `Enter`        → 13
 /// - `Backspace`    → 8
