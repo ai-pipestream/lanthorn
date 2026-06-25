@@ -1348,6 +1348,17 @@ impl Machine {
         crate::quetzal::restore_quetzal(self, data)
     }
 
+    /// Restore from an external save file/archive. Like `restore_quetzal`, but also
+    /// clears the in-memory undo stack on success — a file restore invalidates the
+    /// undo history (snapshots taken after the save point are no longer coherent
+    /// with the restored state). Use this for the host's file/restore paths;
+    /// `restore_undo` keeps using `restore_quetzal` directly.
+    pub fn restore_file(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
+        crate::quetzal::restore_quetzal(self, data)?;
+        self.undo_stack.clear();
+        Ok(())
+    }
+
     /// Signal that a restore operation failed (no data / invalid data).
     ///
     /// v3: fall through (no branch taken); v4+: store 0 into the restore's
@@ -1396,18 +1407,35 @@ pub(crate) mod tests {
         m.state.pc = 0x0040;
         m.do_store(Some(0x11), 1); // G1 = 1 (pre-save value)
 
-        // save_undo storing to G0: snapshot taken, G0 := 1, one stack entry.
+        // save_undo storing to G0: snapshot taken (PC 0x0040), G0 := 1, one entry.
         m.do_save_undo(Some(0x10));
         assert_eq!(m.global(0), 1, "save_undo stores 1");
         assert_eq!(m.undo_stack.len(), 1);
 
+        // Move the PC AWAY before restoring, so the PC assertion isolates
+        // restore_quetzal's PC write (not a value the snapshot already held).
+        m.state.pc = 0x00AB;
         // Mutate G1, then restore_undo storing to G2.
         m.do_store(Some(0x11), 0x99);
         m.do_restore_undo(Some(0x12));
         assert_eq!(m.global(1), 1, "G1 reverted to the snapshot value");
         assert_eq!(m.global(0), 2, "the original save_undo 'returns' 2");
-        assert_eq!(m.state.pc, 0x0040, "PC resumed at the post-save_undo address");
+        assert_eq!(m.state.pc, 0x0040, "restore_undo restored the snapshot PC (0x0040, not 0x00AB)");
         assert!(m.undo_stack.is_empty(), "snapshot consumed");
+    }
+
+    #[test]
+    fn restore_file_clears_undo_stack() {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.undo_cap = 4;
+        m.do_save_undo(Some(0x10));
+        m.do_save_undo(Some(0x10));
+        assert_eq!(m.undo_stack.len(), 2);
+        // A file restore (using one of our own blobs as data) clears the undo stack.
+        let blob = m.save_quetzal();
+        m.restore_file(&blob).unwrap();
+        assert!(m.undo_stack.is_empty(), "file restore invalidates and clears undo history");
     }
 
     #[test]
