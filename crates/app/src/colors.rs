@@ -13,8 +13,27 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use ratatui::style::{Color, Modifier, Style};
+use regex::Regex;
 
 use crate::render::paneframe::BorderStyle;
+
+/// A compiled user transcript-styling rule: a regex matched whole-line against
+/// Story text, plus the `Style` patched over the base `transcript` style on a
+/// match. `PartialEq` compares the source `pattern` and `style` only — the
+/// compiled `Regex` has no `PartialEq`, and two rules with the same pattern are
+/// equal by construction.
+#[derive(Debug, Clone)]
+pub struct CompiledRule {
+    pub pattern: String,
+    pub regex: Regex,
+    pub style: Style,
+}
+
+impl PartialEq for CompiledRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.style == other.style
+    }
+}
 
 // ── Built-in theme texts ──────────────────────────────────────────────────────
 
@@ -208,6 +227,20 @@ pub struct ColorScheme {
     pub sound_beep_low: Style,
     /// Room-detection-method indicator (map corner).
     pub loc_indicator: Style,
+    /// Player input echo text.
+    pub transcript_input: Style,
+    /// Meta (app/slash) text.
+    pub transcript_meta: Style,
+    /// VM warning text.
+    pub transcript_warning: Style,
+    /// Built-in story rule: room-name / location header line.
+    pub transcript_location: Style,
+    /// Built-in story rule: bracketed system line.
+    pub transcript_system: Style,
+    /// Gutter marker style for warning lines.
+    pub warning_marker: Style,
+    /// Compiled user story-styling rules, in evaluation order.
+    pub transcript_rules: Vec<CompiledRule>,
 }
 
 impl ColorScheme {
@@ -263,6 +296,13 @@ impl ColorScheme {
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             loc_indicator: Style::new().fg(Color::DarkGray),
+            transcript_input: Style::new().fg(Color::Cyan),
+            transcript_meta: Style::new().fg(Color::DarkGray),
+            transcript_warning: Style::new().fg(Color::Yellow),
+            transcript_location: Style::new().add_modifier(Modifier::BOLD),
+            transcript_system: Style::new().fg(Color::DarkGray),
+            warning_marker: Style::new().fg(Color::Yellow),
+            transcript_rules: Vec::new(),
         }
     }
 
@@ -392,7 +432,36 @@ impl ColorScheme {
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             loc_indicator: Style::new().fg(scheme.palette[8]),
+            transcript_input: Style::new().fg(scheme.palette[6]),
+            transcript_meta: Style::new().fg(scheme.palette[8]),
+            transcript_warning: Style::new().fg(scheme.palette[3]),
+            transcript_location: Style::new().add_modifier(Modifier::BOLD),
+            transcript_system: Style::new().fg(scheme.palette[8]),
+            warning_marker: Style::new().fg(scheme.palette[3]),
+            transcript_rules: Vec::new(),
         }
+    }
+
+    /// Resolve the style for one Story line: first matching user rule wins, else
+    /// the built-in location rule (line matches `room_name`), else the built-in
+    /// system rule (whole line bracketed), else the base `transcript` style.
+    /// A match patches its style over `transcript` (overriding only set fields).
+    pub fn resolve_story_style(&self, line: &str, room_name: Option<&str>) -> Style {
+        for rule in &self.transcript_rules {
+            if rule.regex.is_match(line) {
+                return self.transcript.patch(rule.style);
+            }
+        }
+        if let Some(name) = room_name {
+            if zvm::location::status_name_matches(line, name) {
+                return self.transcript.patch(self.transcript_location);
+            }
+        }
+        let t = line.trim();
+        if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
+            return self.transcript.patch(self.transcript_system);
+        }
+        self.transcript
     }
 
 }
@@ -596,6 +665,62 @@ pub fn parse_named_color(s: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_default_transcript_category_styles() {
+        let cs = ColorScheme::terminal_default();
+        assert_eq!(cs.transcript_input.fg, Some(Color::Cyan));
+        assert_eq!(cs.transcript_meta.fg, Some(Color::DarkGray));
+        assert_eq!(cs.transcript_warning.fg, Some(Color::Yellow));
+        assert!(cs.transcript_location.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(cs.transcript_location.fg, None); // bold-only, inherits base fg
+        assert_eq!(cs.transcript_system.fg, Some(Color::DarkGray));
+        assert_eq!(cs.warning_marker.fg, Some(Color::Yellow));
+        assert!(cs.transcript_rules.is_empty());
+    }
+
+    #[test]
+    fn resolve_story_style_precedence_and_patch() {
+        use ratatui::style::{Color, Modifier};
+        let mut cs = ColorScheme::terminal_default(); // transcript fg = White
+        // A user rule that only sets bold (no fg) → patch keeps base fg.
+        cs.transcript_rules.push(CompiledRule {
+            pattern: "^>".into(),
+            regex: regex::Regex::new("^>").unwrap(),
+            style: Style::new().add_modifier(Modifier::BOLD),
+        });
+
+        // 1. User rule wins, patch semantics: bold added, base White fg kept.
+        let s = cs.resolve_story_style("> go north", Some("West of House"));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(s.fg, Some(Color::White));
+
+        // 2. Built-in location: line equals room name → bold (transcript_location).
+        let loc = cs.resolve_story_style("West of House", Some("West of House"));
+        assert!(loc.add_modifier.contains(Modifier::BOLD));
+
+        // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
+        let no_loc = cs.resolve_story_style("Hall", Some("Hallway"));
+        assert!(!no_loc.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(no_loc, cs.transcript); // falls through to base
+
+        // 3. Built-in system: bracketed line → transcript_system (DarkGray).
+        let sys = cs.resolve_story_style("[Your score just went up by ten points.]", None);
+        assert_eq!(sys.fg, Some(Color::DarkGray));
+
+        // 4. No match → base transcript.
+        assert_eq!(cs.resolve_story_style("plain prose", None), cs.transcript);
+
+        // 5. None room name → location never matches.
+        assert_eq!(cs.resolve_story_style("West of House", None), cs.transcript);
+    }
+
+    #[test]
+    fn compiled_rule_eq_ignores_regex_object() {
+        let a = CompiledRule { pattern: "^>".into(), regex: regex::Regex::new("^>").unwrap(), style: Style::new().fg(Color::Red) };
+        let b = CompiledRule { pattern: "^>".into(), regex: regex::Regex::new("^>").unwrap(), style: Style::new().fg(Color::Red) };
+        assert_eq!(a, b);
+    }
 
     #[test]
     fn parse_color_value_accepts_named_colors() {

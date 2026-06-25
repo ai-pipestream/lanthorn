@@ -144,12 +144,15 @@ use mapper::layer::LayerId;
 
 /// Category tag for each transcript entry.
 ///
-/// `Story` covers normal game output (VM text, echoed commands).
-/// `Meta` covers app-generated content such as /help output.
+/// `Story` = game output. `Input` = the player's echoed command. `Meta` =
+/// app/slash output. `Warning` = VM diagnostics. The `/filter` view is coarse
+/// (story = Story+Input, meta = Meta+Warning); the styling is per-variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TranscriptKind {
     Story,
+    Input,
     Meta,
+    Warning,
 }
 
 // ── Transcript filter ─────────────────────────────────────────────────────────
@@ -674,6 +677,9 @@ pub struct AppState {
     /// How the current room was detected (for the map indicator). Retained
     /// across turns; updated when a turn reports a method.
     pub loc_method: Option<zvm::location::LocationMethod>,
+    /// The current room's display name (from `TurnResult.location`), retained
+    /// across turns. Drives the built-in `transcript:location` story rule.
+    pub current_room_name: Option<String>,
     /// Whether the detection-method indicator is shown. Default false.
     pub show_loc_method: bool,
 
@@ -762,6 +768,7 @@ impl Default for AppState {
             pending_resume: None,
             show_room_numbers: false,
             loc_method: None,
+            current_room_name: None,
             show_loc_method: false,
             hints: None,
             search_query: None,
@@ -893,8 +900,8 @@ impl AppState {
                 let kind = self.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
                 match self.transcript_filter {
                     TranscriptFilter::Both => true,
-                    TranscriptFilter::Story => kind == TranscriptKind::Story,
-                    TranscriptFilter::Meta => kind == TranscriptKind::Meta,
+                    TranscriptFilter::Story => matches!(kind, TranscriptKind::Story | TranscriptKind::Input),
+                    TranscriptFilter::Meta => matches!(kind, TranscriptKind::Meta | TranscriptKind::Warning),
                 }
             })
             .collect()
@@ -1012,6 +1019,27 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_maps_input_with_story_and_warning_with_meta() {
+        let mut s = AppState::default();
+        s.push_transcript("story0");
+        s.push_transcript_kind("> go north", TranscriptKind::Input);
+        s.push_transcript_kind("meta", TranscriptKind::Meta);
+        s.push_transcript_kind("warn", TranscriptKind::Warning);
+        s.transcript_filter = TranscriptFilter::Story;
+        assert_eq!(s.visible_transcript_indices(), vec![0, 1]); // Story + Input
+        s.transcript_filter = TranscriptFilter::Meta;
+        assert_eq!(s.visible_transcript_indices(), vec![2, 3]); // Meta + Warning
+        s.transcript_filter = TranscriptFilter::Both;
+        assert_eq!(s.visible_transcript_indices(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn current_room_name_defaults_none() {
+        let s = AppState::default();
+        assert_eq!(s.current_room_name, None);
+    }
 
     #[test]
     fn visible_transcript_indices_respects_filter() {

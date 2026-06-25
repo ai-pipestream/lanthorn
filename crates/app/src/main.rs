@@ -944,7 +944,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1025,7 +1025,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1081,7 +1081,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1139,7 +1139,7 @@ fn main() {
                         }
                     }
                 }
-                Event::Resize(_, _) => { continue; }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
             }
             continue;
@@ -1282,7 +1282,8 @@ fn main() {
                 mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
             }
             // Resize: continue so the next draw uses the updated terminal size.
-            Event::Resize(_, _) => continue,
+            // Resize: force a full repaint so no stale cells survive the size change.
+            Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
             _ => continue,
         };
 
@@ -1549,7 +1550,7 @@ fn main() {
                 state.turns += 1;
 
                 let result = session.submit(&cmd);
-                state.push_transcript(&format!("> {}", cmd));
+                state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
                 state.push_transcript(&result.transcript);
                 apply_turn_events(&mut state, &result);
                 if let Some(note) = &result.info {
@@ -2594,16 +2595,21 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 
 // ── Char-input mode helpers ────────────────────────────────────────────────────
 
-/// Route a turn's sound/diagnostic events: diagnostics become meta transcript
-/// lines; the latest beep arms a one-shot story-border pulse.
+/// Route a turn's sound/diagnostic events: diagnostics become Warning transcript
+/// lines; the latest beep arms a one-shot story-border pulse; the current room
+/// name is tracked for the built-in location story rule.
 fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     for line in &result.diagnostics {
-        state.push_transcript_kind(line, app::state::TranscriptKind::Meta);
+        state.push_transcript_kind(line, app::state::TranscriptKind::Warning);
     }
     if let Some(kind) = result.beep {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
     state.loc_method = result.location_method.or(state.loc_method);
+    // Retain the previous name when this turn has no location signal.
+    if let Some(loc) = &result.location {
+        state.current_room_name = Some(loc.name.clone());
+    }
 }
 
 /// Map a keyboard event to a ZSCII byte for `read_char` input.

@@ -85,6 +85,10 @@ pub struct SymbolSet {
     pub arrows: Arrows,
     pub path: PathGlyphs,
     pub portal: PortalGlyphs,
+    /// Gutter marker glyph for META transcript lines.
+    pub meta_gutter: char,
+    /// Gutter marker glyph for WARNING transcript lines.
+    pub warning_gutter: char,
 }
 
 impl Default for SymbolSet {
@@ -128,6 +132,8 @@ impl Default for SymbolSet {
                 out: '⊗',
                 unknown: '?',
             },
+            meta_gutter: '▏',
+            warning_gutter: '!',
         }
     }
 }
@@ -356,6 +362,8 @@ impl SymbolSet {
             arrows: Arrows::preset(&cfg.arrow_set).unwrap_or_else(|| SymbolSet::default().arrows),
             path: PathGlyphs::preset(&cfg.path_style).unwrap_or_else(|| SymbolSet::default().path),
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
+            meta_gutter: SymbolSet::default().meta_gutter,
+            warning_gutter: SymbolSet::default().warning_gutter,
         };
 
         for (key, val) in &cfg.overrides {
@@ -475,6 +483,8 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "portal.unknown"   => s.portal.unknown = ch,
         "portal.path"      => s.portal.path = ch,
         "portal.marker"    => s.portal.marker = ch,
+        "gutter.meta"      => s.meta_gutter = ch,
+        "gutter.warning"   => s.warning_gutter = ch,
         _ => {} // unknown key — ignored
     }
 }
@@ -484,6 +494,22 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gutter_glyph_defaults_and_overrides() {
+        let s = SymbolSet::default();
+        assert_eq!(s.meta_gutter, '▏');
+        assert_eq!(s.warning_gutter, '!');
+        // resolve(default) keeps defaults.
+        assert_eq!(SymbolSet::resolve(&crate::config::SymbolConfig::default()), SymbolSet::default());
+        // overrides apply.
+        let mut cfg = crate::config::SymbolConfig::default();
+        cfg.overrides.insert("gutter.meta".into(), "|".into());
+        cfg.overrides.insert("gutter.warning".into(), "*".into());
+        let r = SymbolSet::resolve(&cfg);
+        assert_eq!(r.meta_gutter, '|');
+        assert_eq!(r.warning_gutter, '*');
+    }
 
     #[test]
     fn default_matches_todays_glyphs() {
