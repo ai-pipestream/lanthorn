@@ -1294,6 +1294,8 @@ fn main() {
                                 Err(e)   => state.set_status(format!("export failed: {}", e)),
                             }
                         }
+                        // TODO Task D: open the Hints panel (discovery + sub-session).
+                        SlashOutcome::OpenHints => {}
                     }
                     continue;
                 }

@@ -1,5 +1,59 @@
 use std::time::{Duration, Instant};
 
+// ── Hint system state ─────────────────────────────────────────────────────────
+
+/// The source driving the open Hints panel.
+///
+/// `Zcode` wraps a second Z-machine session running the companion Invisiclues
+/// (or any hint `.z5`) file.  The enum is a seam for future sources (e.g. UHS).
+pub enum HintSource {
+    /// A companion Invisiclues / hint program run as a second Z-machine session.
+    Zcode(crate::session::GameSession),
+}
+
+// GameSession does not implement Debug, so we implement Debug manually for HintSource.
+impl std::fmt::Debug for HintSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HintSource::Zcode(_) => write!(f, "HintSource::Zcode(<GameSession>)"),
+        }
+    }
+}
+
+/// Transient state for the Hints panel modal.
+///
+/// Held in `AppState.hints: Option<HintSession>` — `Some` while the panel is
+/// open, `None` when closed.  The session is NOT persisted into the `.babelmap`
+/// archive; only the per-IFID hint-file association is saved (Task A).
+pub struct HintSession {
+    /// The active hint source (currently always `Zcode`).
+    pub source: HintSource,
+    /// The hint program's own output (its scrollback transcript).
+    pub transcript: Vec<String>,
+    /// Scroll offset within the hint transcript.
+    pub scroll: u16,
+    /// The hint panel's own input line (typed by the player).
+    pub input: String,
+    /// Dialog title, e.g. "Invisiclues: Zork I".
+    pub label: String,
+    /// When true, show the suggestion "This game has its own hints — type HINT".
+    pub builtin_hint: bool,
+}
+
+// GameSession does not implement Debug, so we implement Debug manually for HintSession.
+impl std::fmt::Debug for HintSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HintSession")
+            .field("source", &self.source)
+            .field("transcript", &self.transcript)
+            .field("scroll", &self.scroll)
+            .field("input", &self.input)
+            .field("label", &self.label)
+            .field("builtin_hint", &self.builtin_hint)
+            .finish()
+    }
+}
+
 // ── Room panel ────────────────────────────────────────────────────────────────
 
 /// Which display mode the room panel is in.
@@ -607,6 +661,11 @@ pub struct AppState {
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
 
+    // ── Hints panel state ─────────────────────────────────────────────────────
+
+    /// Active Hints panel session. `None` means the panel is closed.
+    pub hints: Option<HintSession>,
+
     // ── Search state ──────────────────────────────────────────────────────────
 
     /// The active search query, if any. `None` means no search is active.
@@ -672,6 +731,7 @@ impl Default for AppState {
             launch_dialog: false,
             pending_resume: None,
             show_room_numbers: false,
+            hints: None,
             search_query: None,
             search_matches: Vec::new(),
             search_idx: 0,
@@ -696,6 +756,7 @@ impl AppState {
             || self.reset_dialog
             || self.quit_dialog
             || self.launch_dialog
+            || self.hints.is_some()
     }
 
     /// Set the explicit layer override. `None` means follow the current room's layer.
@@ -1347,6 +1408,33 @@ mod tests {
         assert!(s.any_overlay_open(), "quit_dialog open => any_overlay_open true");
         s.quit_dialog = false;
         assert!(!s.any_overlay_open(), "quit_dialog false => any_overlay_open false");
+    }
+
+    #[test]
+    fn hints_panel_counts_as_overlay() {
+        let mut s = AppState::default();
+        assert!(!s.any_overlay_open());
+
+        // Build a minimal HintSession using the minizork fixture (same approach as
+        // the reset test in input.rs). If the fixture is absent we skip.
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture_path.exists() {
+            return; // fixture absent — skip
+        }
+        let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
+        let session = crate::session::GameSession::new(story_bytes).expect("GameSession::new");
+        s.hints = Some(HintSession {
+            source: HintSource::Zcode(session),
+            transcript: vec![],
+            scroll: 0,
+            input: String::new(),
+            label: "Hints: Test".to_string(),
+            builtin_hint: false,
+        });
+        assert!(s.any_overlay_open(), "hints open => any_overlay_open true");
+        s.hints = None;
+        assert!(!s.any_overlay_open(), "hints closed => any_overlay_open false");
     }
 
     #[test]

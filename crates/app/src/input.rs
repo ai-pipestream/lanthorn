@@ -225,6 +225,8 @@ pub enum Action {
     EndDragPan,
     /// Scroll the transcript by delta lines (positive = down, negative = up).
     TranscriptScroll(i32),
+    /// Open the Hints panel. Real behavior wired in Task D; stub here keeps match exhaustive.
+    OpenHints,
 }
 
 // ── key_to_action ─────────────────────────────────────────────────────────────
@@ -1935,6 +1937,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::FbChooseDir
         | Action::GalleryExportStyle
         | Action::Quit => {}
+
+        // TODO Task D: wire the real open/discover/sub-session behavior.
+        Action::OpenHints => {}
 
         Action::None => {}
         // Note: OpenHotkeyDialog and CloseHotkeyDialog are handled above.
