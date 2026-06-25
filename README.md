@@ -71,8 +71,13 @@ and unsupported; v1/v2 are not supported.)
 - **Tab autocomplete** from the story's dictionary plus nouns mentioned in the
   current room, with a live suggestion line.
 - **Inventory panel** — a toggleable strip of carried items.
-- **Reset** — restart the story from the beginning (with confirmation) while
-  keeping the accumulated map.
+- **Reset** — restart the story from the beginning via a confirmation dialog with
+  an opt-in "also clear the map" checkbox (the map is kept by default).
+- **Slash commands** — type a leading prefix (default `/`, configurable) to run
+  app commands by name: `/save`, `/load`, `/reset [map]`, `/panh`, `/panv`,
+  `/zoom`, `/center`, `/tidy`, `/layer`, plus every command by its kebab name.
+  `/help` lists them, with Tab autocomplete over the names and quiet status-line
+  feedback.
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and
@@ -88,10 +93,16 @@ and unsupported; v1/v2 are not supported.)
 
 ### Customization
 - **Configurable symbols** — room outlines, arrows, portal icons, path glyphs,
-  and box styles (thin / thick / double / ascii / borderless). Pick presets or
-  override individual glyphs.
+  and box styles (rounded / thick / double / **solid** / **super-thick** block
+  frames / ascii / borderless). Arrow presets include Nerd Font Material Design
+  families (bold / box / circle / outline, with corner arrows) and portals include
+  a distinct 4-icon stairs set. Pick presets or override individual glyphs.
 - **Symbol gallery** — a live-preview modal for browsing and combining symbol
-  presets, saved back to your config.
+  presets: category tabs across the top (←→), the options list below (↑↓), and a
+  rendered preview of the current combination; saved back to your config.
+- **Room numbers** — room id numbers are hidden by default (portal icons take the
+  freed bottom row); toggle them with the `toggle-room-numbers` command, persisted
+  via the `show_room_numbers` setting.
 - **Color schemes** — recolor rooms, connectors, and chrome from a
   [Ghostty](https://ghostty.org) theme file or a built-in (mono / high-contrast /
   tomorrow-night), with per-element overrides. Defaults to your terminal colors.
@@ -105,7 +116,8 @@ and unsupported; v1/v2 are not supported.)
   the gallery or config screen writes your personal `~/.babelmap/style.toml`, and
   the gallery can export a self-contained style file to hand to someone else.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
-  `thick`/a notched **picture-frame**, the default). The map's top border carries
+  `thick`/a notched **picture-frame**). The map defaults to the picture-frame; the
+  story pane defaults to a single-line border. The map's top border carries
   a centered **layer-tab strip** (active layer highlighted); the story's top
   border shows the **adventure title** (taken from an override, the game's opening
   banner, or the filename). The status line and input prompt can be boxed too —
