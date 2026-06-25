@@ -62,7 +62,7 @@ back. No existing typing behavior changes.
 | Overlay | Buttons (Tab ring) | Default (underlined, Enter) | Esc | Notes / change | Handler |
 |---|---|---|---|---|---|
 | gallery | `OK` | OK = persist selection to config + close | close (keep live session changes) | replace `Done` with `OK`; Enter currently just closes | `input.rs` `gallery_key_to_action` |
-| saves | `Load`, `Save as`, `Delete`, `Done` | Load selected slot | close | promote the row actions into a Tab ring; today they are letter/loose keys | `input.rs` `saves_key_to_action` |
+| saves | `Done` (minimal ring — see note) | Load selected slot (Enter, unchanged) | close | RESOLVED: kept the minimal `Done` ring; Load/Save-as/Delete stay as slot keys (the full 4-button ring was deferred by decision) | `input.rs` `saves_key_to_action` |
 | file_browser | `Select`, `Cancel` | Select = current entry (file → choose; dir → open) | close | Enter still opens dirs / selects files; add Tab-reachable `Cancel` | `input.rs` `filebrowser_key_to_action` |
 | config_screen | `Save`, `Cancel` | Save | cancel | already has Save/Cancel; add focus + underline | `input.rs` `config_screen_key_to_action` |
 | verb_menu | `OK`, `Done` | OK = apply built command | close | Enter/Space still pick tokens; OK applies | `input.rs` `verb_menu_key_to_action` |
