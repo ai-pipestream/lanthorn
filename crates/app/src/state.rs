@@ -262,8 +262,6 @@ pub enum PromptKind {
     SaveAs,
     /// Confirm deletion of the named save at this path.
     ConfirmDeleteSave(std::path::PathBuf),
-    /// Confirm resetting the game to its opening state (keeps the map).
-    ConfirmReset,
     /// Enter a filename for an exported Quetzal save in the given directory.
     ExportSaveName(std::path::PathBuf),
     /// Edit a config path field (user_dir or colors.scheme) from the config screen.

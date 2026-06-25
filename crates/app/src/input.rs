@@ -1912,13 +1912,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::ResetGame => {
-            // Open a confirmation prompt; the caller (main.rs) performs the actual reset
-            // when the prompt is submitted with y/yes.
+            // Open the reset dialog; the caller (main.rs) handles confirm/cancel/clear-map.
             state.hotkey_dialog = false;
-            state.prompt = Some(crate::state::Prompt {
-                kind: crate::state::PromptKind::ConfirmReset,
-                buffer: String::new(),
-            });
+            state.reset_dialog = true;
+            state.reset_clear_map = false;
         }
 
         // Caller-handled: silently ignored.
@@ -2088,10 +2085,9 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
-        // Saves-manager, export, game-reset, and config-path prompts: return to the caller to act on.
+        // Saves-manager, export, and config-path prompts: return to the caller to act on.
         PromptKind::SaveAs
         | PromptKind::ConfirmDeleteSave(_)
-        | PromptKind::ConfirmReset
         | PromptKind::ExportSaveName(_)
         | PromptKind::ConfigEditPath { .. } => {
             return Some(prompt);
@@ -3918,47 +3914,18 @@ mod tests {
         assert!(matches!(s.layout, Layout::Split));
     }
 
-    // ── Leaf 2: ResetGame prompt open + confirm/cancel ────────────────────────
+    // ── Leaf 2: ResetGame opens the dialog ───────────────────────────────────
 
     #[test]
-    fn reset_game_action_opens_confirm_reset_prompt() {
-        use crate::state::{AppState, PromptKind};
+    fn reset_game_action_opens_reset_dialog() {
+        use crate::state::AppState;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        assert!(s.prompt.is_none());
+        assert!(!s.reset_dialog, "dialog must start closed");
         apply_action(Action::ResetGame, &mut s, &mut m);
-        assert!(s.prompt.is_some(), "ResetGame must open a prompt");
-        let p = s.prompt.as_ref().unwrap();
-        assert!(matches!(p.kind, PromptKind::ConfirmReset), "prompt kind must be ConfirmReset");
-    }
-
-    #[test]
-    fn reset_game_prompt_routing_confirm_and_cancel() {
-        use crate::state::{AppState, Prompt, PromptKind};
-        // Confirm path: Enter (SubmitCommand) → saves_prompt_submitted = Some((ConfirmReset, buf))
-        {
-            let mut s = AppState::default();
-            let mut m = Mapper::default();
-            s.prompt = Some(Prompt { kind: PromptKind::ConfirmReset, buffer: "y".to_owned() });
-            apply_action(Action::SubmitCommand(String::new()), &mut s, &mut m);
-            assert!(s.prompt.is_none(), "prompt should be cleared after submission");
-            assert!(
-                s.saves_prompt_submitted.is_some(),
-                "saves_prompt_submitted should be set on ConfirmReset submission"
-            );
-            let (kind, buf) = s.saves_prompt_submitted.take().unwrap();
-            assert!(matches!(kind, PromptKind::ConfirmReset));
-            assert_eq!(buf, "y");
-        }
-        // Cancel path: Esc (ToggleFocus) → prompt cleared, no saves_prompt_submitted
-        {
-            let mut s = AppState::default();
-            let mut m = Mapper::default();
-            s.prompt = Some(Prompt { kind: PromptKind::ConfirmReset, buffer: String::new() });
-            apply_action(Action::ToggleFocus, &mut s, &mut m);
-            assert!(s.prompt.is_none(), "Esc must cancel the prompt");
-            assert!(s.saves_prompt_submitted.is_none(), "no submission on cancel");
-        }
+        assert!(s.reset_dialog, "ResetGame must set reset_dialog = true");
+        assert!(!s.reset_clear_map, "checkbox must start unchecked");
+        assert!(s.prompt.is_none(), "no text prompt should be opened");
     }
 
     // ── Leaf 2: minizork fixture reset test ───────────────────────────────────

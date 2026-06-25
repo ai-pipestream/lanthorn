@@ -25,6 +25,7 @@ use app::render::config_screen::draw_config_screen;
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
+use app::render::reset_dialog::draw_reset_dialog;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
@@ -174,6 +175,8 @@ struct PaneRects {
     layer_tabs: Vec<(LayerId, Rect)>,
     /// Active dialog chrome rects (when a dialog is open).
     pub dialog: Option<DialogRects>,
+    /// Hit-rects for the reset dialog (when open).
+    pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -189,6 +192,7 @@ fn draw_frame(
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
+    let mut reset_dialog_rects_out: Option<app::render::reset_dialog::ResetDialogRects> = None;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -384,7 +388,6 @@ fn draw_frame(
                 PromptKind::RenameLayer(_) => "Layer name",
                 PromptKind::SaveAs => "Save name",
                 PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
-                PromptKind::ConfirmReset => "Reset game? (y/n)",
                 PromptKind::ExportSaveName(_) => "Export filename",
                 PromptKind::ConfigEditPath { .. } => "Config path",
             };
@@ -435,6 +438,11 @@ fn draw_frame(
             dialog_rects_out = draw_config_screen(state, full, buf);
         }
 
+        // ── Reset dialog overlay — drawn over everything ───────────────────────
+        if state.reset_dialog {
+            reset_dialog_rects_out = draw_reset_dialog(state, full, buf);
+        }
+
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
         if let Some(prompt) = &state.prompt {
             let overlay_area = if map_area.height > 0 { map_area } else { main_area };
@@ -447,7 +455,6 @@ fn draw_frame(
                     PromptKind::RenameLayer(_) => "Layer:  ",
                     PromptKind::SaveAs => "Name:   ",
                     PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
-                    PromptKind::ConfirmReset => "Reset?  ",
                     PromptKind::ExportSaveName(_) => "Export: ",
                     PromptKind::ConfigEditPath { .. } => "Path:   ",
                 };
@@ -458,7 +465,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -644,7 +651,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -740,6 +747,60 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+        // ── Reset dialog intercept — before normal action routing ─────────────
+        // When the reset dialog is open, route keyboard/mouse directly here and
+        // continue (swallowing events the dialog does not handle).
+        if state.reset_dialog {
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    match reset_dialog_key(k.code) {
+                        ResetDialogAction::Confirm => {
+                            let clear = state.reset_clear_map;
+                            state.reset_dialog = false;
+                            reset_game(&mut session, &mut mapper, &mut state, &story_bytes, clear);
+                        }
+                        ResetDialogAction::Cancel => {
+                            state.reset_dialog = false;
+                        }
+                        ResetDialogAction::ToggleClear => {
+                            state.reset_clear_map = !state.reset_clear_map;
+                        }
+                        ResetDialogAction::None => {}
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseEventKind, MouseButton};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let col = m.column;
+                        let row = m.row;
+                        let pt = ratatui::layout::Position { x: col, y: row };
+                        if let Some(rd) = &last_panes.reset_dialog {
+                            // Check buttons and close in order: close > reset > cancel > checkbox.
+                            let in_close = rd.close.map_or(false, |r| r.contains(pt));
+                            let in_reset = rd.reset.map_or(false, |r| r.contains(pt));
+                            let in_cancel = rd.cancel.map_or(false, |r| r.contains(pt));
+                            let in_checkbox = rd.checkbox.contains(pt);
+                            let in_dialog = rd.area.contains(pt);
+                            if in_close || in_cancel {
+                                state.reset_dialog = false;
+                            } else if in_reset {
+                                let clear = state.reset_clear_map;
+                                state.reset_dialog = false;
+                                reset_game(&mut session, &mut mapper, &mut state, &story_bytes, clear);
+                            } else if in_checkbox {
+                                state.reset_clear_map = !state.reset_clear_map;
+                            } else if !in_dialog {
+                                // Click outside the dialog: swallow (do nothing, keep dialog open).
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { continue; }
+                _ => {}
+            }
+            continue;
+        }
 
         // Route event to an Action.
         let action = match event {
@@ -900,39 +961,9 @@ fn main() {
                         }
                         SlashOutcome::Reset { map: reset_map } => {
                             // Immediate reset: no dialog (keybinding path has the dialog; slash is instant).
-                            match app::session::GameSession::new(story_bytes.clone()) {
-                                Ok(new_session) => {
-                                    session = new_session;
-                                    let start_loc = zvm::current_location(&session.machine);
-                                    state.turns = 0;
-                                    state.input.clear();
-                                    state.suggestions.clear();
-                                    state.suggestion_idx = 0;
-                                    state.transcript.clear();
-                                    state.transcript_kinds.clear();
-                                    state.transcript_scroll = 0;
-                                    if reset_map {
-                                        mapper = Mapper::default();
-                                    }
-                                    let banner = session.take_transcript();
-                                    state.push_transcript(&banner);
-                                    if let Some(snap) = start_loc {
-                                        let snap_number = snap.number;
-                                        let seed_result = TurnResult {
-                                            transcript: String::new(),
-                                            location: Some(snap),
-                                            quit: false,
-                                            info: None,
-                                        };
-                                        apply_turn(&mut mapper, "", &seed_result);
-                                        let rid = snap_number as mapper::graph::RoomId;
-                                        state.select_room(Some(rid));
-                                    }
-                                    let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
-                                    state.set_status(status_msg);
-                                }
-                                Err(e) => state.set_status(format!("reset failed: {:?}", e)),
-                            }
+                            reset_game(&mut session, &mut mapper, &mut state, &story_bytes, reset_map);
+                            let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
+                            state.set_status(status_msg);
                         }
                         SlashOutcome::Quit => break,
                     }
@@ -1488,17 +1519,9 @@ fn handle_saves_prompt(
     mapper: &mut Mapper,
     session: &mut app::session::GameSession,
     state: &mut AppState,
-    story_bytes: &[u8],
+    _story_bytes: &[u8],
 ) {
     match kind {
-        PromptKind::ConfirmReset => {
-            let confirmed = matches!(buf.trim().to_lowercase().as_str(), "y" | "yes");
-            if !confirmed {
-                state.push_transcript("[Reset cancelled]");
-                return;
-            }
-            reset_game(session, mapper, state, story_bytes, false);
-        }
         PromptKind::SaveAs => {
             if buf.is_empty() {
                 state.push_transcript("[Save name cannot be empty]".to_string().as_str());
@@ -1622,6 +1645,28 @@ fn is_slash(input: &str, prefix: char) -> bool {
     input.starts_with(prefix)
 }
 
+// ── Reset dialog keyboard routing ─────────────────────────────────────────────
+
+/// Action to take when a key is pressed while the reset dialog is open.
+enum ResetDialogAction {
+    None,
+    ToggleClear,
+    Confirm,
+    Cancel,
+}
+
+/// Map a key code to a ResetDialogAction.
+/// Esc and 'c' cancel; Enter and 'r' confirm; Space toggles the checkbox.
+fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
+        KeyCode::Enter | KeyCode::Char('r') => ResetDialogAction::Confirm,
+        KeyCode::Char(' ') => ResetDialogAction::ToggleClear,
+        _ => ResetDialogAction::None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1630,7 +1675,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_line, hint_line_game, is_slash};
+    use super::{dim_area, hint_line, hint_line_game, is_slash, reset_dialog_key, ResetDialogAction};
     use app::keymap::{Context, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
 
@@ -2003,5 +2048,17 @@ mod tests {
         assert!(!is_slash("look", '/'));
         assert!(is_slash(";help", ';'));
         assert!(!is_slash("/help", ';'));
+    }
+
+    // ── reset_dialog_key_mapping ──────────────────────────────────────────────
+
+    #[test]
+    fn reset_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(reset_dialog_key(KeyCode::Esc), ResetDialogAction::Cancel));
+        assert!(matches!(reset_dialog_key(KeyCode::Char('c')), ResetDialogAction::Cancel));
+        assert!(matches!(reset_dialog_key(KeyCode::Enter), ResetDialogAction::Confirm));
+        assert!(matches!(reset_dialog_key(KeyCode::Char('r')), ResetDialogAction::Confirm));
+        assert!(matches!(reset_dialog_key(KeyCode::Char(' ')), ResetDialogAction::ToggleClear));
     }
 }
