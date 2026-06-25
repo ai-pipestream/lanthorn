@@ -849,6 +849,28 @@ impl Machine {
                 }
                 StepResult::Continue
             }
+            // VAR:0x17 scan_table — search a table for x; store match address (0 if none), branch if found.
+            0x17 => {
+                let x = ops.first().copied().unwrap_or(0);
+                let table = ops.get(1).copied().unwrap_or(0) as u32;
+                let len = ops.get(2).copied().unwrap_or(0);
+                let form = ops.get(3).copied().unwrap_or(0x82);
+                let is_word = form & 0x80 != 0;
+                let step = ((form & 0x7F) as u32).max(1);
+                let mut found: u16 = 0;
+                for i in 0..len as u32 {
+                    let addr = table + i * step;
+                    let val = if is_word { self.mem.read_word(addr) } else { self.mem.read_byte(addr) as u16 };
+                    let target = if is_word { x } else { x & 0xFF };
+                    if val == target {
+                        found = addr as u16;
+                        break;
+                    }
+                }
+                self.do_store(store, found);
+                self.do_branch(branch, found != 0);
+                StepResult::Continue
+            }
             // Unknown / unimplemented VAR — no-op seam (screen/text ops in Tasks 11–12)
             _ => StepResult::Continue,
         }
@@ -3274,5 +3296,39 @@ pub(crate) mod tests {
         m.state.pc = 0x10;
         run_until_quit(&mut m);
         assert_eq!(m.global(0), 30, "pull sp: final value pulled into G0 should be 30");
+    }
+
+    // -----------------------------------------------------------------------
+    // scan_table (VAR:0x17) — search table for value, store address, branch if found
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_table_word_finds_and_stores_address() {
+        let mut m = build_test_machine(&[]);
+        // Word table at 0x0200: [0x1111, 0x2222, 0x3333]
+        m.mem.write_word(0x0200, 0x1111);
+        m.mem.write_word(0x0202, 0x2222);
+        m.mem.write_word(0x0204, 0x3333);
+        // scan_table 0x2222, table=0x0200, len=3, form=0x82 (word, step 2) -> G0
+        m.exec_var(0x17, &[0x2222, 0x0200, 3, 0x82], Some(16), None);
+        assert_eq!(m.global(0), 0x0202, "address of the matching word entry");
+    }
+
+    #[test]
+    fn scan_table_not_found_stores_zero() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_word(0x0200, 0x1111);
+        m.exec_var(0x17, &[0x9999, 0x0200, 1, 0x82], Some(16), None);
+        assert_eq!(m.global(0), 0, "no match -> store 0");
+    }
+
+    #[test]
+    fn scan_table_byte_form_compares_low_byte() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x0200, 0x05);
+        m.mem.write_byte(0x0201, 0x07);
+        // form=0x01 -> byte entries, step 1
+        m.exec_var(0x17, &[0x0007, 0x0200, 2, 0x01], Some(16), None);
+        assert_eq!(m.global(0), 0x0201, "byte form matches low byte at the second entry");
     }
 }
