@@ -576,6 +576,7 @@ fn main() {
     for w in hotkey_warnings {
         state.push_transcript(&format!("[{}]", w));
     }
+    state.show_room_numbers = cfg.show_room_numbers;
     state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).

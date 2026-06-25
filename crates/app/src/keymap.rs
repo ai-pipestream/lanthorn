@@ -100,6 +100,10 @@ pub enum Command {
     // ── Config screen ─────────────────────────────────────────────────────────
     /// Open the in-app config screen modal (default: F2).
     OpenConfig,
+
+    // ── Room display ──────────────────────────────────────────────────────────
+    /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
+    ToggleRoomNumbers,
 }
 
 impl Command {
@@ -154,6 +158,7 @@ impl Command {
             Command::ResetGame => Action::ResetGame,
             Command::OpenVerbMenu => Action::OpenVerbMenu,
             Command::OpenConfig => Action::OpenConfig,
+            Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
         }
     }
 
@@ -207,6 +212,7 @@ impl Command {
             Command::ResetGame => "reset_game",
             Command::OpenVerbMenu => "open_verb_menu",
             Command::OpenConfig => "open_config",
+            Command::ToggleRoomNumbers => "toggle_room_numbers",
         }
     }
 
@@ -260,6 +266,7 @@ impl Command {
             Command::ResetGame => "reset game",
             Command::OpenVerbMenu => "verb menu",
             Command::OpenConfig => "settings",
+            Command::ToggleRoomNumbers => "room numbers",
         }
     }
 
@@ -316,6 +323,7 @@ impl Command {
             Command::ResetGame => Context::Global,
             Command::OpenVerbMenu => Context::Global,
             Command::OpenConfig => Context::Global,
+            Command::ToggleRoomNumbers => Context::Global,
         }
     }
 
@@ -374,6 +382,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::ResetGame,
     Command::OpenVerbMenu,
     Command::OpenConfig,
+    Command::ToggleRoomNumbers,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────

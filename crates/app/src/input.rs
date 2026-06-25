@@ -118,6 +118,8 @@ pub enum Action {
     ToggleAlignment,
     /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
     TogglePortalLabels,
+    /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
+    ToggleRoomNumbers,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
     ToggleInspector,
     /// Caller: exit the application.
@@ -1466,6 +1468,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
+        Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.

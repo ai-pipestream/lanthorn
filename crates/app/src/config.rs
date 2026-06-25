@@ -197,6 +197,10 @@ pub struct Config {
     /// Stored as a single-character string in TOML: command_prefix = "/".
     #[serde(default = "default_command_prefix", deserialize_with = "deserialize_char_from_str")]
     pub command_prefix: char,
+    /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
+    /// Default false (hidden); toggled at runtime by ToggleRoomNumbers.
+    #[serde(default)]
+    pub show_room_numbers: bool,
 }
 
 impl Default for Config {
@@ -214,6 +218,7 @@ impl Default for Config {
             colors: crate::style::StyleColors::default(),
             symbols: crate::style::StyleSymbols::default(),
             command_prefix: default_command_prefix(),
+            show_room_numbers: false,
         }
     }
 }
@@ -254,6 +259,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.colors = from_file.colors;
             cfg.symbols = from_file.symbols;
             cfg.command_prefix = from_file.command_prefix;
+            cfg.show_room_numbers = from_file.show_room_numbers;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
@@ -293,6 +299,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         BackgroundTidy::Debounced => "debounced",
     };
     doc["background_tidy"] = toml_edit::value(bg_str);
+    doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
 
     // style pointer — the only visual key written to config.toml. The actual
     // colors/symbols live in the style file ([colors]/[symbols] are no longer
@@ -310,6 +317,13 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_show_room_numbers_default_false_and_round_trips() {
+        assert_eq!(Config::default().show_room_numbers, false);
+        let cfg: Config = toml::from_str("show_room_numbers = true\n").unwrap();
+        assert_eq!(cfg.show_room_numbers, true);
+    }
 
     #[test]
     fn config_reads_command_prefix() {
@@ -496,6 +510,7 @@ mod tests {
             colors: Default::default(),
             symbols: Default::default(),
             command_prefix: '/',
+            show_room_numbers: false,
         };
         write_config(&dir, &cfg).unwrap();
 
