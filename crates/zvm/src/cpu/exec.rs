@@ -849,6 +849,13 @@ impl Machine {
                 }
                 StepResult::Continue
             }
+            // VAR:0x10 get_cursor — write (row, col) of the upper-window cursor into a 2-word array.
+            0x10 => {
+                let array = ops.first().copied().unwrap_or(0) as u32;
+                self.mem.write_word(array, self.screen.cursor_row);
+                self.mem.write_word(array + 2, self.screen.cursor_col);
+                StepResult::Continue
+            }
             // VAR:0x17 scan_table — search a table for x; store match address (0 if none), branch if found.
             0x17 => {
                 let x = ops.first().copied().unwrap_or(0);
@@ -3389,5 +3396,15 @@ pub(crate) mod tests {
         assert_eq!(m.mem.read_byte(0x0202), 2);
         assert_eq!(m.mem.read_byte(0x0203), 3);
         assert_eq!(m.mem.read_byte(0x0204), 4);
+    }
+
+    #[test]
+    fn get_cursor_writes_row_and_col() {
+        let mut m = build_test_machine(&[]);
+        m.screen.cursor_row = 3;
+        m.screen.cursor_col = 7;
+        m.exec_var(0x10, &[0x0200], None, None); // array at 0x0200
+        assert_eq!(m.mem.read_word(0x0200), 3, "word 0 = row");
+        assert_eq!(m.mem.read_word(0x0202), 7, "word 1 = col");
     }
 }
