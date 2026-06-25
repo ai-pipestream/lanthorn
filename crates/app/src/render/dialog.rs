@@ -32,6 +32,8 @@ pub enum ButtonId {
     Done,
     Close,
     Reset,
+    Resume,
+    NewGame,
 }
 
 // ── DialogButton ──────────────────────────────────────────────────────────────

@@ -2155,7 +2155,7 @@ pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config
 fn config_path_field(row: usize) -> Option<crate::state::ConfigPathField> {
     match row {
         0 => Some(crate::state::ConfigPathField::UserDir),
-        7 => Some(crate::state::ConfigPathField::ColorsScheme),
+        9 => Some(crate::state::ConfigPathField::ColorsScheme),
         _ => None,
     }
 }
@@ -2178,19 +2178,21 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         1 => { if let Some(cs) = &mut state.config_screen { cs.working.use_default_map = !cs.working.use_default_map; } }
         2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
         3 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
-        4 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
-        5 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
-        6 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
-        7 => {
+        4 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_save_on_quit = !cs.working.prompt_save_on_quit; } }
+        5 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_load_on_launch = !cs.working.prompt_load_on_launch; } }
+        6 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
+        7 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
+        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
+        9 => {
             // colors.scheme — cycle through preset names + None.
             if let Some(cs) = &mut state.config_screen {
                 config_cycle_colors_scheme(&mut cs.working.colors.scheme, 1);
             }
         }
-        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::BoxStyle::preset_names(), &mut cs.working.symbols.box_style, 1); } }
-        9 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::Arrows::preset_names(), &mut cs.working.symbols.arrow_set, 1); } }
-        10 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PortalGlyphs::preset_names(), &mut cs.working.symbols.portal_icons, 1); } }
-        11 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PathGlyphs::preset_names(), &mut cs.working.symbols.path_style, 1); } }
+        10 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::BoxStyle::preset_names(), &mut cs.working.symbols.box_style, 1); } }
+        11 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::Arrows::preset_names(), &mut cs.working.symbols.arrow_set, 1); } }
+        12 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PortalGlyphs::preset_names(), &mut cs.working.symbols.portal_icons, 1); } }
+        13 => { if let Some(cs) = &mut state.config_screen { config_cycle_preset(crate::symbols::PathGlyphs::preset_names(), &mut cs.working.symbols.path_style, 1); } }
         _ => {}
     }
 }
@@ -2242,14 +2244,16 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         1 => working.use_default_map = !working.use_default_map,
         2 => working.auto_load = !working.auto_load,
         3 => working.auto_save = !working.auto_save,
-        4 => working.record_history = !working.record_history,
-        5 => working.show_room_numbers = !working.show_room_numbers,
-        6 => config_cycle_background_tidy(&mut working.background_tidy, delta),
-        7 => config_cycle_colors_scheme(&mut working.colors.scheme, delta),
-        8 => config_cycle_preset(BoxStyle::preset_names(), &mut working.symbols.box_style, delta),
-        9 => config_cycle_preset(Arrows::preset_names(), &mut working.symbols.arrow_set, delta),
-        10 => config_cycle_preset(PortalGlyphs::preset_names(), &mut working.symbols.portal_icons, delta),
-        11 => config_cycle_preset(PathGlyphs::preset_names(), &mut working.symbols.path_style, delta),
+        4 => working.prompt_save_on_quit = !working.prompt_save_on_quit,
+        5 => working.prompt_load_on_launch = !working.prompt_load_on_launch,
+        6 => working.record_history = !working.record_history,
+        7 => working.show_room_numbers = !working.show_room_numbers,
+        8 => config_cycle_background_tidy(&mut working.background_tidy, delta),
+        9 => config_cycle_colors_scheme(&mut working.colors.scheme, delta),
+        10 => config_cycle_preset(BoxStyle::preset_names(), &mut working.symbols.box_style, delta),
+        11 => config_cycle_preset(Arrows::preset_names(), &mut working.symbols.arrow_set, delta),
+        12 => config_cycle_preset(PortalGlyphs::preset_names(), &mut working.symbols.portal_icons, delta),
+        13 => config_cycle_preset(PathGlyphs::preset_names(), &mut working.symbols.path_style, delta),
         _ => {}
     }
 }

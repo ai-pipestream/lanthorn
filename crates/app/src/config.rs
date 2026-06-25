@@ -218,6 +218,12 @@ pub struct Config {
     /// exit-save and Ctrl+S quick-save). Default false.
     #[serde(default)]
     pub auto_save: bool,
+    /// When true (default) and auto_save is off, prompt the user to save on quit.
+    #[serde(default = "default_true")]
+    pub prompt_save_on_quit: bool,
+    /// When true (default) and auto_load is off, prompt the user to resume a found save on launch.
+    #[serde(default = "default_true")]
+    pub prompt_load_on_launch: bool,
     /// When true (default), record command history across sessions. Set false to disable.
     #[serde(default = "default_true")]
     pub record_history: bool,
@@ -261,6 +267,8 @@ impl Default for Config {
             use_default_map: false,
             auto_load: true,
             auto_save: false,
+            prompt_save_on_quit: true,
+            prompt_load_on_launch: true,
             record_history: true,
             background_tidy: BackgroundTidy::EveryRoom,
             keymap: KeymapConfig::default(),
@@ -303,6 +311,8 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.use_default_map = from_file.use_default_map;
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
+            cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
+            cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_history = from_file.record_history;
             cfg.background_tidy = from_file.background_tidy;
             cfg.keymap = from_file.keymap;
@@ -344,6 +354,8 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["use_default_map"] = toml_edit::value(cfg.use_default_map);
     doc["auto_load"] = toml_edit::value(cfg.auto_load);
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
+    doc["prompt_save_on_quit"] = toml_edit::value(cfg.prompt_save_on_quit);
+    doc["prompt_load_on_launch"] = toml_edit::value(cfg.prompt_load_on_launch);
     doc["record_history"] = toml_edit::value(cfg.record_history);
     let bg_str = match cfg.background_tidy {
         BackgroundTidy::Off => "off",
@@ -563,6 +575,8 @@ mod tests {
             use_default_map: true,
             auto_load: false,
             auto_save: true,
+            prompt_save_on_quit: true,
+            prompt_load_on_launch: true,
             record_history: false,
             background_tidy: BackgroundTidy::OnOverlap,
             keymap: KeymapConfig::default(),
@@ -601,6 +615,16 @@ mod tests {
     fn config_reads_style_pointer() {
         let cfg: Config = toml::from_str("style = \"neon\"\n").unwrap();
         assert_eq!(cfg.style.as_deref(), Some("neon"));
+    }
+
+    #[test]
+    fn prompt_flags_default_true_and_round_trip() {
+        assert_eq!(Config::default().prompt_save_on_quit, true);
+        assert_eq!(Config::default().prompt_load_on_launch, true);
+        // Setting one to false parses correctly, other keeps default true.
+        let cfg: Config = toml::from_str("prompt_save_on_quit = false\n").unwrap();
+        assert_eq!(cfg.prompt_save_on_quit, false);
+        assert_eq!(cfg.prompt_load_on_launch, true);
     }
 
     #[test]

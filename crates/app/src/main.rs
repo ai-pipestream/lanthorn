@@ -25,6 +25,8 @@ use app::render::config_screen::draw_config_screen;
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
+use app::render::launch_dialog::draw_launch_dialog;
+use app::render::quit_dialog::draw_quit_dialog;
 use app::render::reset_dialog::draw_reset_dialog;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
@@ -178,6 +180,10 @@ struct PaneRects {
     pub dialog: Option<DialogRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
+    /// Hit-rects for the quit dialog (when open).
+    pub quit_dialog: Option<app::render::quit_dialog::QuitDialogRects>,
+    /// Hit-rects for the launch dialog (when open).
+    pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -194,6 +200,8 @@ fn draw_frame(
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
     let mut reset_dialog_rects_out: Option<app::render::reset_dialog::ResetDialogRects> = None;
+    let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
+    let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -444,6 +452,16 @@ fn draw_frame(
             reset_dialog_rects_out = draw_reset_dialog(state, full, buf);
         }
 
+        // ── Quit dialog overlay — drawn over everything ────────────────────────
+        if state.quit_dialog {
+            quit_dialog_rects_out = draw_quit_dialog(state, full, buf);
+        }
+
+        // ── Launch dialog overlay — drawn over everything ──────────────────────
+        if state.launch_dialog {
+            launch_dialog_rects_out = draw_launch_dialog(state, full, buf);
+        }
+
         // ── Prompt overlay — drawn over the map area (or full screen) ─────────
         if let Some(prompt) = &state.prompt {
             let overlay_area = if map_area.height > 0 { map_area } else { main_area };
@@ -466,7 +484,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -523,6 +541,9 @@ fn main() {
     // Migration: if no archive exists but a legacy .map.json does, load that.
     // use_default_map = true: also fall back to legacy map when no archive.
     let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>)> = None;
+    // When auto_load is false but a save exists and prompt_load_on_launch is true,
+    // stash the save for the launch dialog instead of discarding it.
+    let mut pending_resume_stash: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)> = None;
     let mut mapper = if arc_file.exists() {
         match load_archive(&arc_file) {
             Ok(ac) => {
@@ -534,6 +555,9 @@ fn main() {
                     } else {
                         startup_transcript = Some((ac.transcript, ac.transcript_kinds));
                     }
+                } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
+                    // Save present, auto_load off, prompt enabled: stash for launch dialog.
+                    pending_resume_stash = Some((ac.save, ac.transcript, ac.transcript_kinds));
                 }
                 ac.mapper
             }
@@ -623,6 +647,13 @@ fn main() {
         state.transcript_kinds = kinds;
     }
 
+    // If a save was found but auto_load is off and prompt_load_on_launch is on,
+    // open the launch dialog so the user can choose to resume or start fresh.
+    if let Some(stash) = pending_resume_stash {
+        state.pending_resume = Some(stash);
+        state.launch_dialog = true;
+    }
+
     // If the game quit immediately (e.g. czech.z5 test suite), bail without
     // entering raw mode.
     if session.quit {
@@ -662,7 +693,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -813,6 +844,131 @@ fn main() {
             continue;
         }
 
+        // ── Quit dialog intercept — before normal action routing ──────────────
+        // When the quit dialog is open, route keyboard/mouse directly here and
+        // continue (swallowing events the dialog does not handle).
+        if state.quit_dialog {
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    match quit_dialog_key(k.code) {
+                        QuitDialogAction::Save => {
+                            state.quit_dialog = false;
+                            let meta = app::archive::Meta {
+                                format_version: 1,
+                                ifid: Some(ifid.clone()),
+                                name: None,
+                                turns: state.turns,
+                                saved_at: format_rfc3339(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.as_secs())
+                                        .unwrap_or(0),
+                                ),
+                            };
+                            let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                            break;
+                        }
+                        QuitDialogAction::Quit => {
+                            break;
+                        }
+                        QuitDialogAction::Cancel => {
+                            state.quit_dialog = false;
+                        }
+                        QuitDialogAction::None => {}
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(qd) = &last_panes.quit_dialog {
+                            let in_close = qd.close.map_or(false, |r| r.contains(pt));
+                            let in_save = qd.save.map_or(false, |r| r.contains(pt));
+                            let in_quit = qd.quit.map_or(false, |r| r.contains(pt));
+                            let in_cancel = qd.cancel.map_or(false, |r| r.contains(pt));
+                            let in_dialog = qd.area.contains(pt);
+                            if in_save {
+                                state.quit_dialog = false;
+                                let meta = app::archive::Meta {
+                                    format_version: 1,
+                                    ifid: Some(ifid.clone()),
+                                    name: None,
+                                    turns: state.turns,
+                                    saved_at: format_rfc3339(
+                                        std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|d| d.as_secs())
+                                            .unwrap_or(0),
+                                    ),
+                                };
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                                break;
+                            } else if in_quit {
+                                break;
+                            } else if in_close || in_cancel {
+                                state.quit_dialog = false;
+                            } else if !in_dialog {
+                                // Click outside: swallow (keep dialog open).
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { continue; }
+                _ => {}
+            }
+            continue;
+        }
+
+        // ── Launch dialog intercept — before normal action routing ────────────
+        // When the launch dialog is open, route keyboard/mouse directly here and
+        // continue (swallowing events the dialog does not handle).
+        if state.launch_dialog {
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    match launch_dialog_key(k.code) {
+                        LaunchDialogAction::Resume => {
+                            if let Some((save, lines, kinds)) = state.pending_resume.take() {
+                                state.launch_dialog = false;
+                                apply_launch_resume(&save, lines, kinds, &mut session, &mut mapper, &mut state, &last_panes);
+                            }
+                        }
+                        LaunchDialogAction::NewGame => {
+                            state.launch_dialog = false;
+                            state.pending_resume = None;
+                        }
+                        LaunchDialogAction::None => {}
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(ld) = &last_panes.launch_dialog {
+                            let in_resume = ld.resume.map_or(false, |r| r.contains(pt));
+                            let in_new_game = ld.new_game.map_or(false, |r| r.contains(pt));
+                            let in_close = ld.close.map_or(false, |r| r.contains(pt));
+                            let in_dialog = ld.area.contains(pt);
+                            if in_resume {
+                                if let Some((save, lines, kinds)) = state.pending_resume.take() {
+                                    state.launch_dialog = false;
+                                    apply_launch_resume(&save, lines, kinds, &mut session, &mut mapper, &mut state, &last_panes);
+                                }
+                            } else if in_new_game || in_close {
+                                // [X] (close) and [New game] both discard the save.
+                                state.launch_dialog = false;
+                                state.pending_resume = None;
+                            } else if !in_dialog {
+                                // Click outside: swallow (keep dialog open).
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { continue; }
+                _ => {}
+            }
+            continue;
+        }
+
         // ── Search-nav intercept — before normal action routing ───────────────
         // When a search is active and no modal is open, intercept the configured
         // back/forward keys and Esc to navigate matches.  Any other key clears
@@ -888,7 +1044,13 @@ fn main() {
         match action {
             // ── Caller-handled actions ─────────────────────────────────────────
 
-            Action::Quit => break,
+            Action::Quit => {
+                if should_prompt_save_on_quit(&state) {
+                    state.quit_dialog = true;
+                } else {
+                    break;
+                }
+            }
 
             Action::SubmitCommand(cmd) => {
                 // When a prompt is active, SubmitCommand is the Enter sentinel;
@@ -1026,7 +1188,13 @@ fn main() {
                             let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
                             state.set_status(status_msg);
                         }
-                        SlashOutcome::Quit => break,
+                        SlashOutcome::Quit => {
+                            if should_prompt_save_on_quit(&state) {
+                                state.quit_dialog = true;
+                            } else {
+                                break;
+                            }
+                        }
                         SlashOutcome::Search(q_opt) => {
                             let query_to_run: Option<String> = match q_opt {
                                 Some(q) => Some(q),
@@ -1816,6 +1984,107 @@ fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
     }
 }
 
+// ── Quit dialog helpers ───────────────────────────────────────────────────────
+
+/// Return true when a quit attempt should show the "Save before quitting?" dialog.
+///
+/// Conditions: auto_save is off AND prompt_save_on_quit is on AND the session has
+/// at least one turn (unsaved progress exists).
+fn should_prompt_save_on_quit(state: &AppState) -> bool {
+    !state.config.auto_save && state.config.prompt_save_on_quit && state.turns > 0
+}
+
+/// Action to take when a key is pressed while the quit dialog is open.
+enum QuitDialogAction {
+    None,
+    Save,
+    Quit,
+    Cancel,
+}
+
+/// Map a key code to a QuitDialogAction.
+/// 's' or Enter → Save & quit; 'q' → Quit without saving; Esc or 'c' → Cancel.
+fn quit_dialog_key(code: crossterm::event::KeyCode) -> QuitDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Char('s') | KeyCode::Enter => QuitDialogAction::Save,
+        KeyCode::Char('q') => QuitDialogAction::Quit,
+        KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
+        _ => QuitDialogAction::None,
+    }
+}
+
+// ── Launch dialog helpers ─────────────────────────────────────────────────────
+
+/// Action to take when a key is pressed while the launch dialog is open.
+enum LaunchDialogAction {
+    None,
+    Resume,
+    NewGame,
+}
+
+/// Map a key code to a LaunchDialogAction.
+/// 'r' or Enter → Resume; 'n' or Esc → New game.
+fn launch_dialog_key(code: crossterm::event::KeyCode) -> LaunchDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Char('r') | KeyCode::Enter => LaunchDialogAction::Resume,
+        KeyCode::Char('n') | KeyCode::Esc => LaunchDialogAction::NewGame,
+        _ => LaunchDialogAction::None,
+    }
+}
+
+/// Apply a pending resume: restore the VM save, set transcript, re-observe location.
+///
+/// Mirrors the Action::RestoreGame path exactly (restore_quetzal, set transcript,
+/// apply_turn to re-observe current room, set_viewed_layer(None), select_room, recenter).
+fn apply_launch_resume(
+    save: &[u8],
+    lines: Vec<String>,
+    kinds: Vec<TranscriptKind>,
+    session: &mut app::session::GameSession,
+    mapper: &mut Mapper,
+    state: &mut AppState,
+    last_panes: &PaneRects,
+) {
+    match session.machine.restore_quetzal(save) {
+        Ok(()) => {
+            // mapper was already loaded from the archive at startup (ac.mapper);
+            // only the VM machine state needs restoring via restore_quetzal above.
+            state.transcript = lines;
+            state.transcript_kinds = kinds;
+            // Re-observe current location (same as Action::RestoreGame).
+            let loc = zvm::current_location(&session.machine);
+            if let Some(snap) = loc {
+                let rid = snap.number as mapper::graph::RoomId;
+                let restore_result = TurnResult {
+                    transcript: String::new(),
+                    location: Some(snap),
+                    quit: false,
+                    info: None,
+                };
+                apply_turn(mapper, "", &restore_result);
+                state.set_viewed_layer(None);
+                state.select_room(Some(rid));
+                if let Some(room) = mapper.graph.room(rid) {
+                    if let Some(pos) = room.pos {
+                        let (pw, ph) = map_pane_dims(last_panes.map);
+                        state.recenter_on(pos, pw, ph);
+                    }
+                }
+            }
+            state.push_transcript("[Game resumed from save.]");
+        }
+        Err(e) => {
+            let msg = match e {
+                zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+                other => format!("restore failed: {:?}", other),
+            };
+            state.push_transcript(&format!("[Resume failed: {}]", msg));
+        }
+    }
+}
+
 // ── Scroll-to-match helper ────────────────────────────────────────────────────
 
 /// Given a match at `match_visible_pos` (0-based) within `total_visible` visible rows,
@@ -1848,7 +2117,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_line, hint_line_game, is_slash, reset_dialog_key, scroll_for_match, ResetDialogAction};
+    use super::{dim_area, hint_line, hint_line_game, is_slash, launch_dialog_key, quit_dialog_key, reset_dialog_key, scroll_for_match, should_prompt_save_on_quit, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use app::keymap::{Context, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
 
@@ -2256,5 +2525,69 @@ mod tests {
         assert!(matches!(reset_dialog_key(KeyCode::Enter), ResetDialogAction::Confirm));
         assert!(matches!(reset_dialog_key(KeyCode::Char('r')), ResetDialogAction::Confirm));
         assert!(matches!(reset_dialog_key(KeyCode::Char(' ')), ResetDialogAction::ToggleClear));
+    }
+
+    // ── should_prompt_save_on_quit ────────────────────────────────────────────
+
+    #[test]
+    fn prompt_save_on_quit_all_conditions_required() {
+        use app::state::AppState;
+
+        let mut s = AppState::default();
+        // Default: auto_save = false, prompt_save_on_quit = true, turns = 0
+        // No prompt when turns == 0 (no unsaved progress).
+        assert!(!should_prompt_save_on_quit(&s), "turns=0 => no prompt");
+
+        s.turns = 5;
+        // Now: auto_save=false, prompt_save_on_quit=true, turns=5 => prompt
+        assert!(should_prompt_save_on_quit(&s), "auto_save=false, prompt=true, turns>0 => prompt");
+
+        s.config.auto_save = true;
+        // auto_save=true => no prompt (game already saves automatically)
+        assert!(!should_prompt_save_on_quit(&s), "auto_save=true => no prompt");
+
+        s.config.auto_save = false;
+        s.config.prompt_save_on_quit = false;
+        // prompt_save_on_quit=false => no prompt (user opted out)
+        assert!(!should_prompt_save_on_quit(&s), "prompt_save_on_quit=false => no prompt");
+    }
+
+    // ── quit_dialog_key ───────────────────────────────────────────────────────
+
+    #[test]
+    fn quit_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(quit_dialog_key(KeyCode::Char('s')), QuitDialogAction::Save));
+        assert!(matches!(quit_dialog_key(KeyCode::Enter), QuitDialogAction::Save));
+        assert!(matches!(quit_dialog_key(KeyCode::Char('q')), QuitDialogAction::Quit));
+        assert!(matches!(quit_dialog_key(KeyCode::Esc), QuitDialogAction::Cancel));
+        assert!(matches!(quit_dialog_key(KeyCode::Char('c')), QuitDialogAction::Cancel));
+        assert!(matches!(quit_dialog_key(KeyCode::Char('x')), QuitDialogAction::None));
+        assert!(matches!(quit_dialog_key(KeyCode::Left), QuitDialogAction::None));
+    }
+
+    // ── launch_dialog_key ─────────────────────────────────────────────────────
+
+    #[test]
+    fn launch_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(launch_dialog_key(KeyCode::Char('r')), LaunchDialogAction::Resume));
+        assert!(matches!(launch_dialog_key(KeyCode::Enter), LaunchDialogAction::Resume));
+        assert!(matches!(launch_dialog_key(KeyCode::Char('n')), LaunchDialogAction::NewGame));
+        assert!(matches!(launch_dialog_key(KeyCode::Esc), LaunchDialogAction::NewGame));
+        assert!(matches!(launch_dialog_key(KeyCode::Char('x')), LaunchDialogAction::None));
+        assert!(matches!(launch_dialog_key(KeyCode::Left), LaunchDialogAction::None));
+    }
+
+    // ── launch_dialog counts as overlay ──────────────────────────────────────
+
+    #[test]
+    fn launch_dialog_counts_as_overlay() {
+        let mut s = app::state::AppState::default();
+        assert!(!s.any_overlay_open(), "default state has no overlay");
+        s.launch_dialog = true;
+        assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
+        s.launch_dialog = false;
+        assert!(!s.any_overlay_open(), "launch_dialog false => any_overlay_open false");
     }
 }

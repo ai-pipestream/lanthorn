@@ -591,6 +591,19 @@ pub struct AppState {
     pub reset_dialog: bool,
     /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
     pub reset_clear_map: bool,
+
+    // ── Quit dialog state ─────────────────────────────────────────────────────
+
+    /// When true, the "Save before quitting?" confirmation dialog is open.
+    pub quit_dialog: bool,
+
+    // ── Launch dialog state ───────────────────────────────────────────────────
+
+    /// When true, the "Resume saved game?" dialog is shown at startup.
+    pub launch_dialog: bool,
+    /// Stashed restore data shown while the launch dialog is open.
+    /// Tuple is (save bytes, transcript lines, transcript kinds).
+    pub pending_resume: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)>,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
 
@@ -655,6 +668,9 @@ impl Default for AppState {
             prev_objects_here: std::collections::BTreeSet::new(),
             reset_dialog: false,
             reset_clear_map: false,
+            quit_dialog: false,
+            launch_dialog: false,
+            pending_resume: None,
             show_room_numbers: false,
             search_query: None,
             search_matches: Vec::new(),
@@ -678,6 +694,8 @@ impl AppState {
             || self.tidy_anim.is_some()
             || self.prompt.is_some()
             || self.reset_dialog
+            || self.quit_dialog
+            || self.launch_dialog
     }
 
     /// Set the explicit layer override. `None` means follow the current room's layer.
@@ -993,6 +1011,11 @@ mod tests {
         s.prompt = Some(Prompt { kind: PromptKind::SaveAs, buffer: String::new() });
         assert!(s.any_overlay_open(), "prompt active => any_overlay_open true");
         s.prompt = None;
+
+        // launch_dialog
+        s.launch_dialog = true;
+        assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
+        s.launch_dialog = false;
 
         assert!(!s.any_overlay_open(), "all cleared => any_overlay_open false again");
     }
@@ -1314,6 +1337,16 @@ mod tests {
         assert!(!s.any_overlay_open());
         s.reset_dialog = true;
         assert!(s.any_overlay_open(), "reset_dialog open => any_overlay_open true");
+    }
+
+    #[test]
+    fn quit_dialog_counts_as_overlay() {
+        let mut s = AppState::default();
+        assert!(!s.any_overlay_open());
+        s.quit_dialog = true;
+        assert!(s.any_overlay_open(), "quit_dialog open => any_overlay_open true");
+        s.quit_dialog = false;
+        assert!(!s.any_overlay_open(), "quit_dialog false => any_overlay_open false");
     }
 
     #[test]
