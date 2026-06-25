@@ -165,6 +165,8 @@ and unsupported; v1/v2 are not supported.)
   See `style.example.toml` at the repo root for a fully-commented reference of
   every selector, the `[[transcript.rule]]` story rules, the `[statusbar]`
   segment bar, and the `[symbols]` overrides.
+  Changes apply live: `/reload` re-reads `style.toml`, and `watch_style = true`
+  in `config.toml` auto-reloads on save (`/watch` toggles it at runtime).
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/a notched **picture-frame**). The map defaults to the picture-frame; the
   story pane defaults to a single-line border. The map's top border carries

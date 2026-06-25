@@ -4,6 +4,10 @@
 # Color values accept: a named color (cyan, dark-gray, light-blue, …),
 # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index ("17"),
 # or background / foreground (the scheme's bg/fg).
+#
+# Edit this file and run /reload in-app to apply changes live, or set
+# watch_style = true in config.toml to auto-reload on save. A syntax error
+# keeps your current look and shows a warning.
 
 [colors]
 # Optional base scheme: a built-in (mono / high-contrast / tomorrow-night) or a
