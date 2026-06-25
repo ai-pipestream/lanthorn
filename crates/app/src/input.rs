@@ -1343,6 +1343,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
     // ── Normal action dispatch ────────────────────────────────────────────
     match action {
         Action::InputChar(c) => {
+            // Clear any transient status message on the first keypress.
+            state.status_msg = None;
             state.push_input_char(c);
             // Recompute suggestions after every character typed in game focus.
             if state.focus == Focus::Game {
@@ -1993,11 +1995,52 @@ fn build_verb_menu_nouns(state: &AppState, _mapper: &Mapper) -> Vec<String> {
     nouns
 }
 
+/// Return up to `limit` slash command names from `names` whose prefix matches
+/// `body_token` (case-insensitive). Results are sorted alphabetically.
+pub(crate) fn slash_suggestions(body_token: &str, names: &[String], limit: usize) -> Vec<String> {
+    if body_token.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let lower = body_token.to_lowercase();
+    let mut matches: Vec<String> = names
+        .iter()
+        .filter(|n| n.to_lowercase().starts_with(&lower) && n.to_lowercase() != lower)
+        .cloned()
+        .collect();
+    matches.sort_unstable();
+    matches.dedup();
+    matches.truncate(limit);
+    matches
+}
+
 /// Recompute `state.suggestions` from `state.dict_words`, the room words
 /// extracted from `state.transcript`, and the current partial word being typed.
 /// Called internally after every input character change in game focus.
+///
+/// When the input starts with `state.config.command_prefix`, completes the
+/// first token after the prefix from `slash::slash_names()` instead of the
+/// dictionary.
 pub(crate) fn recompute_suggestions(state: &mut AppState) {
     const SUGGESTION_LIMIT: usize = 6;
+    let prefix = state.config.command_prefix;
+    // Check if the whole input starts with the command prefix.
+    if state.input.starts_with(prefix) {
+        // Extract the body (everything after the prefix).
+        let body = &state.input[prefix.len_utf8()..];
+        // Complete only the first token (before any space).
+        let first_token = body.split_whitespace().next().unwrap_or("");
+        // Only offer completions while the user is still on the first token
+        // (no space yet in the body, or trailing chars still form the first word).
+        let body_has_space = body.contains(' ');
+        if body_has_space {
+            // Command name already chosen; no further name completions.
+            state.suggestions.clear();
+            return;
+        }
+        let names = crate::slash::slash_names();
+        state.suggestions = slash_suggestions(first_token, &names, SUGGESTION_LIMIT);
+        return;
+    }
     let partial = state.current_partial().to_owned();
     if partial.is_empty() {
         state.suggestions.clear();
@@ -3969,6 +4012,7 @@ mod tests {
         state.suggestions.clear();
         state.suggestion_idx = 0;
         state.transcript.clear();
+        state.transcript_kinds.clear();
         state.transcript_scroll = 0;
         let new_banner = new_session.take_transcript();
         state.push_transcript(&new_banner);
@@ -4803,5 +4847,15 @@ mod tests {
             matches!(a, Action::None),
             "outside-gallery click with room_panel also open must be swallowed (None), got {:?}", a
         );
+    }
+
+    // ── slash_suggestions tests ───────────────────────────────────────────────
+
+    #[test]
+    fn slash_suggestions_filter_by_prefix() {
+        let names = vec!["panh".to_string(),"panv".to_string(),"zoom".to_string(),"open-config".to_string()];
+        let s = slash_suggestions("pa", &names, 6);
+        assert!(s.contains(&"panh".to_string()) && s.contains(&"panv".to_string()));
+        assert!(!s.contains(&"zoom".to_string()));
     }
 }

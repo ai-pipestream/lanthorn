@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::Parser;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 // ── Keymap config ─────────────────────────────────────────────────────────────
 
@@ -103,6 +103,18 @@ pub struct HotkeysConfig {
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+fn default_command_prefix() -> char { '/' }
+
+/// Deserialize a single-char string field into a `char`.  Takes the first
+/// Unicode scalar value of the string; falls back to `/` on an empty string.
+fn deserialize_char_from_str<'de, D>(d: D) -> Result<char, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(s.chars().next().unwrap_or('/'))
+}
+
 fn default_user_dir() -> PathBuf {
     let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(base).join(".babelmap")
@@ -181,6 +193,10 @@ pub struct Config {
     /// Symbol override layer (style-file format): optional presets + per-glyph overrides.
     #[serde(default)]
     pub symbols: crate::style::StyleSymbols,
+    /// The prefix character that triggers slash-command routing (default: '/').
+    /// Stored as a single-character string in TOML: command_prefix = "/".
+    #[serde(default = "default_command_prefix", deserialize_with = "deserialize_char_from_str")]
+    pub command_prefix: char,
 }
 
 impl Default for Config {
@@ -197,6 +213,7 @@ impl Default for Config {
             style: None,
             colors: crate::style::StyleColors::default(),
             symbols: crate::style::StyleSymbols::default(),
+            command_prefix: default_command_prefix(),
         }
     }
 }
@@ -236,6 +253,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.style = from_file.style;
             cfg.colors = from_file.colors;
             cfg.symbols = from_file.symbols;
+            cfg.command_prefix = from_file.command_prefix;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
@@ -292,6 +310,13 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_reads_command_prefix() {
+        let cfg: Config = toml::from_str("command_prefix = \";\"\n").unwrap();
+        assert_eq!(cfg.command_prefix, ';');
+        assert_eq!(Config::default().command_prefix, '/');
+    }
     use std::io::Write;
 
     /// Write a temp config file and return its path.  Uses a unique filename
@@ -470,6 +495,7 @@ mod tests {
             style: Some("neon".into()),
             colors: Default::default(),
             symbols: Default::default(),
+            command_prefix: '/',
         };
         write_config(&dir, &cfg).unwrap();
 
