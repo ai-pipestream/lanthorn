@@ -137,8 +137,13 @@ and unsupported; v1/v2 are not supported.)
 - **Unified dialogs** — every modal (gallery, saves, file browser, config screen,
   verb menu, hotkey dialog, room/diagnostics panels) shares one themeable chrome:
   a bordered, titled, opaque frame with a clickable **✕**, mouse-clickable
-  buttons, and an optional **drop-shadow**. `Esc` and **✕** always close;
-  colors/border style are configurable under the `dialog*` style selectors.
+  buttons, and an optional **drop-shadow**. The confirm button (OK / Save) is
+  **underlined** and starts focused, so **Enter** triggers it; **Tab** / **Shift-Tab**
+  cycle focus through the other buttons (the focused one is highlighted) and Enter
+  then fires whichever is focused. `Esc` and **✕** always close. Text-entry modals
+  keep **Enter** = submit the field; the navigation panels (verb menu, file browser)
+  keep their own keys and just show the default button underlined. Colors/border
+  style are configurable under the `dialog*` style selectors.
 
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
