@@ -164,8 +164,8 @@ pub(crate) fn wrap_lines_kinded(
         .flat_map(|(i, line)| {
             let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
             let w = match kind {
-                TranscriptKind::Meta => width.saturating_sub(META_GUTTER),
-                TranscriptKind::Story => width,
+                TranscriptKind::Meta | TranscriptKind::Warning => width.saturating_sub(META_GUTTER),
+                TranscriptKind::Story | TranscriptKind::Input => width,
             };
             wrap_line(line, w).into_iter().map(move |row| (row, kind))
         })
@@ -614,8 +614,8 @@ fn render_middle(
             break;
         }
         match kind {
-            // META lines get a configurable gutter marker; text is indented past it.
-            TranscriptKind::Meta => {
+            // META and WARNING get the gutter marker; text indented past it.
+            TranscriptKind::Meta | TranscriptKind::Warning => {
                 draw_str_clipped(buf, area.x, row_y, META_MARKER, marker_style, area);
                 if has_search {
                     draw_str_highlighted(buf, area.x + META_GUTTER, row_y, line, normal_style, &query_lower, search_highlight_style, area);
@@ -623,7 +623,7 @@ fn render_middle(
                     draw_str_clipped(buf, area.x + META_GUTTER, row_y, line, normal_style, area);
                 }
             }
-            TranscriptKind::Story => {
+            TranscriptKind::Story | TranscriptKind::Input => {
                 if has_search {
                     draw_str_highlighted(buf, area.x, row_y, line, normal_style, &query_lower, search_highlight_style, area);
                 } else {
@@ -643,6 +643,17 @@ mod tests {
     use ratatui::layout::Rect;
 
     // ── Pure helper tests (no Machine required) ──────────────────────────────
+
+    #[test]
+    fn input_uses_full_width_warning_wraps_like_meta() {
+        let line = vec!["abcdefgh".to_string()];
+        // Input: full width 8 (no gutter) → unsplit.
+        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], 8);
+        assert_eq!(i.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        // Warning: wraps to width-2 = 6 like Meta.
+        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], 8);
+        assert_eq!(w.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
+    }
 
     #[test]
     fn format_status_score_turns() {

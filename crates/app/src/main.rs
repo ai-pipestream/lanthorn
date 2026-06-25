@@ -1549,7 +1549,7 @@ fn main() {
                 state.turns += 1;
 
                 let result = session.submit(&cmd);
-                state.push_transcript(&format!("> {}", cmd));
+                state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
                 state.push_transcript(&result.transcript);
                 apply_turn_events(&mut state, &result);
                 if let Some(note) = &result.info {
@@ -2598,12 +2598,16 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 /// lines; the latest beep arms a one-shot story-border pulse.
 fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     for line in &result.diagnostics {
-        state.push_transcript_kind(line, app::state::TranscriptKind::Meta);
+        state.push_transcript_kind(line, app::state::TranscriptKind::Warning);
     }
     if let Some(kind) = result.beep {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
     state.loc_method = result.location_method.or(state.loc_method);
+    // Retain the previous name when this turn has no location signal.
+    if let Some(loc) = &result.location {
+        state.current_room_name = Some(loc.name.clone());
+    }
 }
 
 /// Map a keyboard event to a ZSCII byte for `read_char` input.
