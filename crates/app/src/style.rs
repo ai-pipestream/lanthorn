@@ -568,6 +568,38 @@ pub fn resolve(
         }
     }
 
+    // Compile the [statusbar] block. Segments replace the default layout only when
+    // present; an empty block keeps the built-in default (today's bar).
+    if !doc.status_bar.segments.is_empty() {
+        let mut segments = Vec::with_capacity(doc.status_bar.segments.len());
+        for raw in &doc.status_bar.segments {
+            let align = match raw.align.as_str() {
+                "left" => crate::colors::Align::Left,
+                "center" => crate::colors::Align::Center,
+                "right" => crate::colors::Align::Right,
+                other => {
+                    warnings.push(format!("unknown statusbar align '{}'; using left", other));
+                    crate::colors::Align::Left
+                }
+            };
+            segments.push(crate::colors::StatusSegment {
+                text: raw.text.clone(),
+                align,
+                style: decl_to_style(&raw.decl, &gs),
+            });
+        }
+        cs.statusbar_layout = crate::colors::StatusBarLayout { segments };
+    }
+    // The frame maps onto the existing status_header fields (reuses the boxing path).
+    if let Some(b) = &doc.status_bar.border {
+        cs.status_header_style = paneframe::parse_border_style(b);
+    }
+    if let Some(c) = &doc.status_bar.border_fg {
+        if let Some(color) = colors::parse_color_value(c, &gs) {
+            cs.status_header = cs.status_header.fg(color);
+        }
+    }
+
     // Step 4: resolve symbols.
     let set = crate::symbols::SymbolSet::resolve(&finalize_symbols(&doc.symbols));
 
@@ -1021,6 +1053,44 @@ align = "right"
         assert_eq!(doc.status_bar.segments[0].decl.fg.as_deref(), Some("cyan"));
         assert_eq!(doc.status_bar.segments[0].decl.bold, Some(true));
         assert_eq!(doc.status_bar.segments[1].align, "right");
+    }
+
+    #[test]
+    fn resolve_statusbar_segments_border_and_align() {
+        use crate::colors::Align;
+        let text = r##"
+[statusbar]
+border = "single"
+border_fg = "cyan"
+[[statusbar.segment]]
+text = "{location}"
+align = "left"
+fg = "yellow"
+[[statusbar.segment]]
+text = "{title}"
+align = "center"
+[[statusbar.segment]]
+text = "{score}"
+align = "bogus"
+"##;
+        let doc = parse_style_toml(text).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        // Three segments, with the unknown align defaulting to Left + a warning.
+        assert_eq!(cs.statusbar_layout.segments.len(), 3);
+        assert!(matches!(cs.statusbar_layout.segments[0].align, Align::Left));
+        assert!(matches!(cs.statusbar_layout.segments[1].align, Align::Center));
+        assert!(matches!(cs.statusbar_layout.segments[2].align, Align::Left));
+        assert_eq!(cs.statusbar_layout.segments[0].style.fg, Some(ratatui::style::Color::Yellow));
+        assert!(warnings.iter().any(|w| w.contains("align")), "unknown align warns: {warnings:?}");
+        // border maps onto the existing status_header machinery.
+        assert!(matches!(cs.status_header_style, crate::render::paneframe::BorderStyle::Single));
+        assert_eq!(cs.status_header.fg, Some(ratatui::style::Color::Cyan));
+    }
+
+    #[test]
+    fn resolve_no_statusbar_keeps_default_layout() {
+        let (cs, _set, _w) = resolve(&StyleDoc::default(), std::path::Path::new("."));
+        assert_eq!(cs.statusbar_layout, crate::colors::StatusBarLayout::default());
     }
 
     #[test]
