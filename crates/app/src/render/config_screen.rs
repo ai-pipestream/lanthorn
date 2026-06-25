@@ -15,6 +15,7 @@ const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("auto_load",            ConfigRowKind::Bool),
     ("auto_save",            ConfigRowKind::Bool),
     ("record_history",       ConfigRowKind::Bool),
+    ("show_room_numbers",    ConfigRowKind::Bool),
     ("background_tidy",      ConfigRowKind::Enum),
     ("colors.scheme",        ConfigRowKind::Choice),
     ("symbols.box_style",    ConfigRowKind::Enum),
@@ -131,17 +132,18 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         2 => bool_str(cfg.auto_load),
         3 => bool_str(cfg.auto_save),
         4 => bool_str(cfg.record_history),
-        5 => match cfg.background_tidy {
+        5 => bool_str(cfg.show_room_numbers),
+        6 => match cfg.background_tidy {
             BackgroundTidy::Off => "off".to_string(),
             BackgroundTidy::EveryRoom => "every_room".to_string(),
             BackgroundTidy::OnOverlap => "on_overlap".to_string(),
             BackgroundTidy::Debounced => "debounced".to_string(),
         },
-        6 => cfg.colors.scheme.clone().unwrap_or_else(|| "(none)".to_string()),
-        7 => cfg.symbols.box_style.clone().unwrap_or_else(crate::config::default_box_style),
-        8 => cfg.symbols.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
-        9 => cfg.symbols.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
-        10 => cfg.symbols.path_style.clone().unwrap_or_else(crate::config::default_path_style),
+        7 => cfg.colors.scheme.clone().unwrap_or_else(|| "(none)".to_string()),
+        8 => cfg.symbols.box_style.clone().unwrap_or_else(crate::config::default_box_style),
+        9 => cfg.symbols.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
+        10 => cfg.symbols.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
+        11 => cfg.symbols.path_style.clone().unwrap_or_else(crate::config::default_path_style),
         _ => String::new(),
     }
 }

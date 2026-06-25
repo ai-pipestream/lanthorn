@@ -77,9 +77,11 @@ fn ascii_map(graph: &MapGraph) -> String {
     let area = Rect::new(0, 0, area_w as u16, area_h as u16);
 
     // Render at Boxes zoom (AppState default) with scroll set to pad the map.
+    // Always show room numbers in the dump (diagnostic context).
     let mut state = AppState::default();
     state.zoom = Zoom::Boxes;
     state.scroll = (min_col - 2, min_row - 2);
+    state.show_room_numbers = true;
 
     let mut buf = Buffer::empty(area);
     render_map(&rm, &state, area, &mut buf);
