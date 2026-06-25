@@ -133,19 +133,33 @@ Display name keeps original case (`Bedroom`).
 /// matching object number, or None.
 fn find_player_object(machine: &Machine) -> Option<u16>;
 
-/// Find the object whose short name matches `name` (normalized), or None.
-/// Ties resolve to the lowest object number.
+/// True if `short` names the room shown as `candidate`. The status-line room
+/// name is left-justified and leads the candidate, so a match is equality OR
+/// `short` being a leading prefix of `candidate` ending on a word boundary —
+/// this allows trailing decoration ("Bedroom (messy)", "Bedroom, north end")
+/// while preventing short names from matching longer words ("Hall" must NOT
+/// match "Hallway"). Both sides normalized.
+fn status_name_matches(candidate: &str, short: &str) -> bool;
+
+/// Find the object whose short name matches `name` via `status_name_matches`.
+/// Among matches, the LONGEST short name wins (most specific); ties resolve to
+/// the lowest object number. None if nothing matches.
 fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot>;
 ```
 
 **Normalization** (matching only): trim, collapse internal whitespace to single
 spaces, lowercase.
 
+**`status_name_matches(candidate, short)`** (both normalized; `short` non-empty):
+true if `candidate == short`, or `candidate` starts with `short` and the
+character immediately after the prefix in `candidate` is not alphanumeric
+(a word boundary — whitespace, punctuation, or end of string).
+
 `detect_location` v4+ flow, given `name = status_line_room_name(..)`:
 - `None` → return `None`.
 - Else:
   1. `player = find_player_object(machine)`; `P = parent(player)`. If `P != 0`
-     and `normalize(short_name(P)) == normalize(name)` →
+     and `status_name_matches(name, short_name(P))` →
      `PlayerParent(snapshot(P))`.
   2. Else `resolve_room_object(name)` → `StatusName(snapshot)` if it hits.
   3. Else `NameOnly(name)`.
@@ -235,8 +249,14 @@ zvm:
   empty grid → None; multi-space split correctness.
 - `find_player_object`: an object named "yourself" → its number; none → None;
   tie → lowest number.
-- `resolve_room_object`: matching short name → snapshot; non-matching → None;
-  tie → lowest number.
+- `status_name_matches`: equality ("Bedroom" ~ "Bedroom"); leading decoration
+  ("Bedroom (messy)" matches "Bedroom"; "Bedroom, north end" matches "Bedroom");
+  word-boundary guard ("Hallway" does NOT match "Hall"); case/whitespace
+  normalization; non-matching ("Kitchen" vs "Bedroom") false.
+- `resolve_room_object`: matching short name → snapshot; longest match wins when
+  several short names are prefixes (e.g. "West of House" over "West"); the
+  word-boundary guard prevents a too-short name from matching; non-matching →
+  None; tie → lowest number.
 - `detect_location`: v3 → `GlobalVar0` from global 0 (existing behavior);
   v4+ player-parent validated → `PlayerParent`; v4+ name match → `StatusName`;
   v4+ unmatched → `NameOnly`; no status line → `None`.
