@@ -38,7 +38,8 @@ use app::render::saves::draw_saves;
 use app::render::transcript::render_transcript;
 use app::render::draw_str_clipped;
 use app::session::{apply_turn, GameSession, TurnResult};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob};
+use app::slash::{self, SlashOutcome};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TidyJob, TranscriptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -790,6 +791,154 @@ fn main() {
                     continue;
                 }
 
+                // ── Slash-command interception ────────────────────────────────
+                // If the input starts with the configured prefix, route it as an
+                // app command; do NOT call session.submit, increment turns, or
+                // push a "> cmd" story line.
+                if is_slash(&cmd, state.config.command_prefix) {
+                    // Strip the leading prefix character before parsing.
+                    let body = &cmd[state.config.command_prefix.len_utf8()..];
+                    match slash::parse(body) {
+                        SlashOutcome::Action(a) => {
+                            apply_action(a, &mut state, &mut mapper);
+                        }
+                        SlashOutcome::Message(m) | SlashOutcome::Error(m) => {
+                            state.set_status(m);
+                        }
+                        SlashOutcome::Help => {
+                            for line in slash::help_text() {
+                                state.push_transcript_kind(&line, TranscriptKind::Meta);
+                            }
+                        }
+                        SlashOutcome::Save(name_opt) => {
+                            // Named save or default archive save.
+                            let result = match name_opt {
+                                Some(ref name) => {
+                                    save_named(&dir, &ifid, name, &mapper, &session.machine, state.turns)
+                                        .map(|()| format!("saved as \"{}\"", name))
+                                        .map_err(|e| format!("save failed: {}", e))
+                                }
+                                None => {
+                                    let meta = app::archive::Meta {
+                                        format_version: 1,
+                                        ifid: Some(ifid.clone()),
+                                        name: None,
+                                        turns: state.turns,
+                                        saved_at: format_rfc3339(
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0),
+                                        ),
+                                    };
+                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta)
+                                        .map(|()| "saved".to_string())
+                                        .map_err(|e| format!("save failed: {}", e))
+                                }
+                            };
+                            match result {
+                                Ok(msg) => state.set_status(msg),
+                                Err(e) => state.set_status(e),
+                            }
+                        }
+                        SlashOutcome::Load(name_opt) => {
+                            // Named-slot load or default archive load.
+                            let archive_to_load = match name_opt {
+                                None => Some(arc_file.clone()),
+                                Some(ref name) => {
+                                    // Find the first named save whose display name matches.
+                                    let saves = list_saves(&dir, &ifid);
+                                    saves.into_iter()
+                                        .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
+                                        .map(|e| e.path)
+                                }
+                            };
+                            match archive_to_load {
+                                None => {
+                                    state.set_status("load failed: no save found with that name");
+                                }
+                                Some(ref path) => {
+                                    match load_archive(path) {
+                                        Ok(ac) => {
+                                            let restore_err = session.machine.restore_quetzal(&ac.save).map_err(|e| {
+                                                match e {
+                                                    zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+                                                    other => format!("restore failed: {:?}", other),
+                                                }
+                                            });
+                                            match restore_err {
+                                                Ok(()) => {
+                                                    mapper = ac.mapper;
+                                                    let loc = zvm::current_location(&session.machine);
+                                                    if let Some(snap) = loc {
+                                                        let rid = snap.number as mapper::graph::RoomId;
+                                                        let restore_result = TurnResult {
+                                                            transcript: String::new(),
+                                                            location: Some(snap),
+                                                            quit: false,
+                                                            info: None,
+                                                        };
+                                                        apply_turn(&mut mapper, "", &restore_result);
+                                                        state.set_viewed_layer(None);
+                                                        state.select_room(Some(rid));
+                                                        if let Some(room) = mapper.graph.room(rid) {
+                                                            if let Some(pos) = room.pos {
+                                                                let (pw, ph) = map_pane_dims(last_panes.map);
+                                                                state.recenter_on(pos, pw, ph);
+                                                            }
+                                                        }
+                                                    }
+                                                    state.set_status("loaded");
+                                                }
+                                                Err(e) => state.set_status(format!("load failed: {}", e)),
+                                            }
+                                        }
+                                        Err(e) => state.set_status(format!("load failed: {}", e)),
+                                    }
+                                }
+                            }
+                        }
+                        SlashOutcome::Reset { map: reset_map } => {
+                            // Immediate reset: no dialog (keybinding path has the dialog; slash is instant).
+                            match app::session::GameSession::new(story_bytes.clone()) {
+                                Ok(new_session) => {
+                                    session = new_session;
+                                    let start_loc = zvm::current_location(&session.machine);
+                                    state.turns = 0;
+                                    state.input.clear();
+                                    state.suggestions.clear();
+                                    state.suggestion_idx = 0;
+                                    state.transcript.clear();
+                                    state.transcript_kinds.clear();
+                                    state.transcript_scroll = 0;
+                                    if reset_map {
+                                        mapper = Mapper::default();
+                                    }
+                                    let banner = session.take_transcript();
+                                    state.push_transcript(&banner);
+                                    if let Some(snap) = start_loc {
+                                        let snap_number = snap.number;
+                                        let seed_result = TurnResult {
+                                            transcript: String::new(),
+                                            location: Some(snap),
+                                            quit: false,
+                                            info: None,
+                                        };
+                                        apply_turn(&mut mapper, "", &seed_result);
+                                        let rid = snap_number as mapper::graph::RoomId;
+                                        state.select_room(Some(rid));
+                                    }
+                                    let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
+                                    state.set_status(status_msg);
+                                }
+                                Err(e) => state.set_status(format!("reset failed: {:?}", e)),
+                            }
+                        }
+                        SlashOutcome::Quit => break,
+                    }
+                    continue;
+                }
+
                 // Increment the session turn counter.
                 state.turns += 1;
 
@@ -1448,6 +1597,13 @@ fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
     }
 }
 
+// ── Slash-command helper ──────────────────────────────────────────────────────
+
+/// Return true when `input` starts with the configured command `prefix` char.
+fn is_slash(input: &str, prefix: char) -> bool {
+    input.starts_with(prefix)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1456,7 +1612,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_line, hint_line_game};
+    use super::{dim_area, hint_line, hint_line_game, is_slash};
     use app::keymap::{Context, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
 
@@ -1818,5 +1974,15 @@ mod tests {
                 "inner tab row center cell ({cx}, {tab_row_y}) must NOT be overwritten by pulse"
             );
         }
+    }
+
+    // ── is_slash ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn is_slash_uses_prefix() {
+        assert!(is_slash("/save", '/'));
+        assert!(!is_slash("look", '/'));
+        assert!(is_slash(";help", ';'));
+        assert!(!is_slash("/help", ';'));
     }
 }
