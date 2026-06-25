@@ -137,7 +137,7 @@ impl Default for SymbolSet {
 impl BoxStyle {
     /// All known preset names for BoxStyle, in display order.
     pub fn preset_names() -> &'static [&'static str] {
-        &["rounded", "thick", "double", "ascii", "borderless"]
+        &["rounded", "thick", "double", "solid", "super-thick", "ascii", "borderless"]
     }
 
     /// Return a named preset, or `None` for an unknown name.
@@ -146,6 +146,9 @@ impl BoxStyle {
     /// - "rounded"    — rounded corners (default, matches `SymbolSet::default().room_normal`)
     /// - "thick"      — heavy box-drawing (matches `room_current`)
     /// - "double"     — double-line box-drawing (matches `room_portal`)
+    /// - "solid"      — full-block walls: every edge/corner is `█` (single-width)
+    /// - "super-thick" — full-block edges `█` with quadrant-block corners `▛▜▙▟`
+    ///                   (heavy block frame with beveled inner corners)
     /// - "ascii"      — ASCII-only: corners `+`, horizontal `-`, vertical `|`
     /// - "borderless" — all spaces (invisible walls)
     pub fn preset(name: &str) -> Option<BoxStyle> {
@@ -153,6 +156,8 @@ impl BoxStyle {
             "rounded" => BoxStyle { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' },
             "thick" => BoxStyle { tl: '┏', tr: '┓', bl: '┗', br: '┛', h: '━', v: '┃' },
             "double" => BoxStyle { tl: '╔', tr: '╗', bl: '╚', br: '╝', h: '═', v: '║' },
+            "solid" => BoxStyle { tl: '█', tr: '█', bl: '█', br: '█', h: '█', v: '█' },
+            "super-thick" => BoxStyle { tl: '▛', tr: '▜', bl: '▙', br: '▟', h: '█', v: '█' },
             "ascii" => BoxStyle { tl: '+', tr: '+', bl: '+', br: '+', h: '-', v: '|' },
             "borderless" => BoxStyle { tl: ' ', tr: ' ', bl: ' ', br: ' ', h: ' ', v: ' ' },
             _ => return None,
@@ -171,9 +176,9 @@ impl Arrows {
     /// Presets:
     /// - "filled"     — filled triangle glyphs ▲▼▶◀ + diagonal arrows ↗↖↘↙ (default)
     /// - "line"       — thin Unicode arrows ↑↓→← + diagonal ↗↖↘↙
-    /// - "nerdfont"   — Nerd Font single-width arrow codepoints (requires patched font)
-    ///                  Cardinal: nf-md-arrow_up (U+F0140) nf-md-arrow_down (U+F0143)
-    ///                            nf-md-arrow_right (U+F0142) nf-md-arrow_left (U+F0141)
+    /// - "nerdfont"   — Nerd Font single-width chevron codepoints (requires patched font)
+    ///                  Cardinal: chevron-up (U+F0143) chevron-down (U+F0140)
+    ///                            chevron-right (U+F0142) chevron-left (U+F0141)
     ///                  Diagonal: same as "line" (↗↖↘↙)
     /// - "nf-bold"    — MDI arrow-{up,down,left,right}-bold (F0737/F072E/F0731/F0734)
     ///                  Diagonal: Unicode fallback ↖↗↙↘ (no native MDI bold diagonals)
@@ -194,8 +199,9 @@ impl Arrows {
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
             },
             "nerdfont" => Arrows {
-                // nf-md-arrow_{up,down,right,left}: U+F0140..U+F0143 — single-width in patched fonts
-                north: '\u{F0140}', south: '\u{F0143}',
+                // MDI chevron glyphs (single-width in patched fonts):
+                // chevron-up F0143, chevron-down F0140, chevron-right F0142, chevron-left F0141.
+                north: '\u{F0143}', south: '\u{F0140}',
                 east: '\u{F0142}', west: '\u{F0141}',
                 ne: '↗', nw: '↖', se: '↘', sw: '↙',
             },

@@ -210,14 +210,14 @@ fn draw_preview(state: &AppState, gallery: &GalleryState, area: Rect, buf: &mut 
         crate::render::draw_char_clipped(buf, bx, mid_y, sym.arrows.west, arrow_style, area);
         crate::render::draw_char_clipped(buf, bx + bw - 1, mid_y, sym.arrows.east, arrow_style, area);
 
-        // Corner arrows placed just inside the box corners so the box-corner glyphs
-        // (e.g., '+' for the ascii preset) remain visible on the border.
-        // With bh>=5 and bw>=9, the inner corner offsets are always within the interior.
+        // Corner arrows ON the box corners (overwrite the corner glyphs), the same way
+        // the cardinals sit on the edge mid-points — matching how a diagonal exit sits on
+        // a room's corner in the map.
         if bw >= 4 && bh >= 4 {
-            crate::render::draw_char_clipped(buf, bx + 1, by + 1, sym.arrows.nw, arrow_style, area);
-            crate::render::draw_char_clipped(buf, bx + bw - 2, by + 1, sym.arrows.ne, arrow_style, area);
-            crate::render::draw_char_clipped(buf, bx + 1, by + bh - 2, sym.arrows.sw, arrow_style, area);
-            crate::render::draw_char_clipped(buf, bx + bw - 2, by + bh - 2, sym.arrows.se, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx, by, sym.arrows.nw, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx + bw - 1, by, sym.arrows.ne, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx, by + bh - 1, sym.arrows.sw, arrow_style, area);
+            crate::render::draw_char_clipped(buf, bx + bw - 1, by + bh - 1, sym.arrows.se, arrow_style, area);
         }
     }
 
@@ -395,10 +395,12 @@ mod tests {
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::default();
-        // Select ascii box style (index 3 in rounded,thick,double,ascii,borderless).
+        // Select the ascii box style (look up its index so preset reordering can't break this).
+        let ascii_idx = crate::symbols::BoxStyle::preset_names()
+            .iter().position(|&n| n == "ascii").expect("ascii preset exists");
         state.gallery = Some(crate::state::GalleryState {
             category_idx: 0,
-            selections: [3, 0, 0, 0],
+            selections: [ascii_idx, 0, 0, 0],
         });
         terminal.draw(|f| {
             draw_gallery(&state, f.area(), f.buffer_mut());
@@ -407,8 +409,9 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("ascii"), "should show ascii preset");
-        // ascii preset preview should show + corners.
-        assert!(content.contains('+'), "ascii box style preview should show + corners");
+        // ascii preset preview shows '|'/'-' walls (the box corners are overwritten by
+        // the diagonal corner arrows, matching how a diagonal exit sits on a room corner).
+        assert!(content.contains('|'), "ascii box style preview should show | walls");
     }
 
     #[test]
