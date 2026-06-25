@@ -485,7 +485,8 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       border it sits on (replacing the box-edge glyph, pointing outward).
     // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
     if !state.show_portal_labels {
-        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room);
+        let current_room = rm.rooms.iter().find(|r| r.is_current).map(|r| r.id);
+        draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room, current_room);
     }
 }
 
@@ -864,6 +865,10 @@ fn render_lane_connectors(
 /// room the cell is painted with a reset background so no prior selection highlight bleeds
 /// through.  For the currently selected room the arrowhead cell gets the selected room's
 /// background color so the arrow reads as part of the highlighted room border.
+///
+/// A room that is BOTH current AND selected is drawn REVERSED (see `room_style`), so its
+/// visible background is `room_selected.fg`, not `.bg`.  The arrow background mirrors that
+/// swap so it matches the room box in every case.
 fn draw_connector_arrows(
     arrowheads: &[((i32, i32), String, bool, RoomId)],
     offset: (i32, i32),
@@ -871,6 +876,7 @@ fn draw_connector_arrows(
     buf: &mut Buffer,
     colors: &crate::colors::ColorScheme,
     selected_room: Option<RoomId>,
+    current_room: Option<RoomId>,
 ) {
     let (off_x, off_y) = offset;
     for (pos, glyph, distorted, room_id) in arrowheads {
@@ -880,10 +886,13 @@ fn draw_connector_arrows(
             let connector_style = if *distorted { colors.connector_distorted } else { colors.connector };
             let connector_fg = connector_style.fg;
             let style = if selected_room == Some(*room_id) {
-                // Selected room: paint bg = room_selected background so the arrow cell
-                // reads as part of the highlighted room border.
+                // Selected room: paint bg = the room box's VISIBLE background so the arrow
+                // cell reads as part of the highlighted room border. When the room is also
+                // the current room it renders REVERSED, so its visible bg is room_selected.fg.
+                let reversed = current_room == Some(*room_id);
+                let room_bg = if reversed { colors.room_selected.fg } else { colors.room_selected.bg };
                 let mut s = Style::reset();
-                if let Some(bg) = colors.room_selected.bg {
+                if let Some(bg) = room_bg {
                     s = s.bg(bg);
                 }
                 if let Some(fg) = connector_fg {
@@ -4054,7 +4063,7 @@ mod tests {
         // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
         let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 10)];
         let colors = ColorScheme::terminal_default();
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None);
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, None);
 
         let after_bg = buf.cell((5, 5)).unwrap().bg;
         assert_ne!(
@@ -4082,9 +4091,9 @@ mod tests {
         // connector fg is Green so we can check it independently.
         colors.connector = Style::new().fg(Color::Green);
 
-        // Arrow at (5, 5) belongs to room 7; room 7 is the selected room.
+        // Arrow at (5, 5) belongs to room 7; room 7 is the selected room (not current).
         let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7));
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();
         assert_eq!(
@@ -4096,6 +4105,37 @@ mod tests {
             Color::Green,
             "selected-room arrow glyph fg must be the connector color"
         );
+    }
+
+    /// When the arrow belongs to a room that is BOTH current AND selected, the room box is
+    /// drawn REVERSED, so its visible background is room_selected.FG. The arrow background
+    /// must mirror that swap (use the fg, not the bg) so it matches the room box.
+    #[test]
+    fn arrow_style_current_and_selected_uses_reversed_bg() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Style};
+        use crate::colors::ColorScheme;
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+
+        let mut colors = ColorScheme::terminal_default();
+        // Distinct fg/bg so the reversed-swap is observable.
+        colors.room_selected = Style::new().fg(Color::Magenta).bg(Color::Cyan);
+        colors.connector = Style::new().fg(Color::Green);
+
+        // Arrow at (5, 5) belongs to room 7; room 7 is BOTH selected AND current.
+        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), Some(7));
+
+        let cell = buf.cell((5, 5)).unwrap();
+        assert_eq!(
+            cell.bg,
+            Color::Magenta,
+            "current+selected arrow bg must use room_selected.fg (the reversed visible bg)"
+        );
+        assert_eq!(cell.fg, Color::Green, "arrow glyph fg must still be the connector color");
     }
 
     /// draw_connector_arrows must NOT apply the selected room's bg to an arrow belonging
@@ -4116,7 +4156,7 @@ mod tests {
 
         // Arrow belongs to room 5; selected room is 7 — different rooms.
         let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 5)];
-        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7));
+        draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();
         assert_ne!(
