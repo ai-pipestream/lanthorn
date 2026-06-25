@@ -165,6 +165,64 @@ fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> 
     best.map(|(_, obj)| object_snapshot(mem, obj))
 }
 
+/// How the current room was determined (drives the map indicator label).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocationMethod {
+    GlobalVar0,
+    PlayerParent,
+    StatusName,
+    NameOnly,
+}
+
+/// The mapper-facing location signal for one turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Location {
+    GlobalVar0(ObjectSnapshot),
+    PlayerParent(ObjectSnapshot),
+    StatusName(ObjectSnapshot),
+    NameOnly(String),
+}
+
+impl Location {
+    /// The backing object snapshot, or None for a name-only room.
+    pub fn object(&self) -> Option<&ObjectSnapshot> {
+        match self {
+            Location::GlobalVar0(s) | Location::PlayerParent(s) | Location::StatusName(s) => Some(s),
+            Location::NameOnly(_) => None,
+        }
+    }
+    /// The detection method tag.
+    pub fn method(&self) -> LocationMethod {
+        match self {
+            Location::GlobalVar0(_) => LocationMethod::GlobalVar0,
+            Location::PlayerParent(_) => LocationMethod::PlayerParent,
+            Location::StatusName(_) => LocationMethod::StatusName,
+            Location::NameOnly(_) => LocationMethod::NameOnly,
+        }
+    }
+}
+
+/// Best-effort current room, version-gated:
+/// - v3 and below: global variable 0 -> GlobalVar0, or None.
+/// - v4+: validated player-parent -> status-name -> name-only -> None.
+///
+/// Stateless: a pure function of the machine, re-run each turn.
+pub fn detect_location(machine: &Machine) -> Option<Location> {
+    if machine.mem.version() <= 3 {
+        return current_location(machine).map(Location::GlobalVar0);
+    }
+    let name = status_line_room_name(&machine.screen.upper, machine.screen.upper_window_rows)?;
+    if let Some(player) = find_player_object(machine) {
+        if let Some(room) = nearest_matching_ancestor(machine, player, &name) {
+            return Some(Location::PlayerParent(room));
+        }
+    }
+    if let Some(obj) = resolve_room_object(machine, &name) {
+        return Some(Location::StatusName(obj));
+    }
+    Some(Location::NameOnly(name))
+}
+
 /// Returns the object representing the player's current location, or `None` if
 /// the heuristic cannot determine a plausible location.
 ///
@@ -320,6 +378,27 @@ mod tests {
         let r = nearest_matching_ancestor(&machine, 3, "west").expect("walks up to west");
         assert_eq!(r.number, 1);
         assert!(nearest_matching_ancestor(&machine, 3, "nowhere").is_none());
+    }
+
+    #[test]
+    fn detect_location_v3_uses_global0() {
+        let mut buf = build_v3_story();
+        put_word(&mut buf, GLOBAL_VARS as usize, 1); // global 0 = obj 1
+        let machine = make_machine(buf);
+        match detect_location(&machine) {
+            Some(Location::GlobalVar0(s)) => assert_eq!(s.number, 1),
+            other => panic!("expected GlobalVar0, got {other:?}"),
+        }
+        assert_eq!(detect_location(&machine).unwrap().method(), LocationMethod::GlobalVar0);
+    }
+
+    #[test]
+    fn location_object_and_method_accessors() {
+        let s = ObjectSnapshot { number: 5, parent: 0, name: "Hall".into() };
+        assert_eq!(Location::StatusName(s.clone()).object().map(|o| o.number), Some(5));
+        assert_eq!(Location::NameOnly("X".into()).object(), None);
+        assert_eq!(Location::NameOnly("X".into()).method(), LocationMethod::NameOnly);
+        assert_eq!(Location::PlayerParent(s).method(), LocationMethod::PlayerParent);
     }
 
     // We reuse the same object-table layout as objects.rs tests:
