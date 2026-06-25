@@ -86,6 +86,18 @@ use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
 use mapper::layer::LayerId;
 
+// ── Transcript kind ───────────────────────────────────────────────────────────
+
+/// Category tag for each transcript entry.
+///
+/// `Story` covers normal game output (VM text, echoed commands).
+/// `Meta` covers app-generated content such as /help output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptKind {
+    Story,
+    Meta,
+}
+
 // ── Tidy animation ────────────────────────────────────────────────────────────
 
 /// One captured stage of the tidy pipeline, held for playback. `graph` is a clone
@@ -435,11 +447,15 @@ pub struct AppState {
     pub scroll: (i32, i32),
     pub selected_room: Option<RoomId>,
     pub transcript: Vec<String>,
+    /// Parallel kind tag for each entry in `transcript` (always same length).
+    pub transcript_kinds: Vec<TranscriptKind>,
     pub transcript_scroll: u16,
     pub input: String,
     // Reserved for future status-bar messages (not yet displayed).
     #[allow(dead_code)]
     pub status: String,
+    /// Transient status message shown on the status line (cleared on next keypress/turn).
+    pub status_msg: Option<String>,
     /// Active text-entry prompt, if any.  While set, key events are routed to
     /// the prompt buffer instead of the normal map or game bindings.
     pub prompt: Option<Prompt>,
@@ -566,9 +582,11 @@ impl Default for AppState {
             scroll: (0, 0),
             selected_room: None,
             transcript: Vec::new(),
+            transcript_kinds: Vec::new(),
             transcript_scroll: 0,
             input: String::new(),
             status: String::new(),
+            status_msg: None,
             prompt: None,
             show_alignment: false,
             show_portal_labels: false,
@@ -712,11 +730,22 @@ impl AppState {
         self.char_pan = (0, 0);
     }
 
-    /// Split `text` on `'\n'` and append each line to the transcript.
+    /// Split `text` on `'\n'` and append each line to the transcript, tagged as `Story`.
     pub fn push_transcript(&mut self, text: &str) {
+        self.push_transcript_kind(text, TranscriptKind::Story);
+    }
+
+    /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
+    pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
+            self.transcript_kinds.push(kind);
         }
+    }
+
+    /// Set the transient status message (displayed on the status line until cleared).
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status_msg = Some(msg.into());
     }
 
     /// Set the selected room.
@@ -761,6 +790,17 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_tags_story_and_meta() {
+        let mut s = AppState::default();
+        s.push_transcript("West of House");
+        s.push_transcript_kind("/help line", TranscriptKind::Meta);
+        // last entry is Meta, prior is Story
+        assert_eq!(s.transcript_kinds.len(), 2);
+        assert!(matches!(s.transcript_kinds[0], TranscriptKind::Story));
+        assert!(matches!(s.transcript_kinds[1], TranscriptKind::Meta));
+    }
 
     #[test]
     fn any_overlay_open_reflects_state() {
