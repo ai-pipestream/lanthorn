@@ -1735,31 +1735,37 @@ fn main() {
         }
     }
 
-    // ── 6. Exit: restore terminal + autosave ──────────────────────────────────
+    // ── 6. Exit: restore terminal + (optional) autosave ───────────────────────
 
     restore_terminal();
 
-    let exit_meta = app::archive::Meta {
-        format_version: 1,
-        ifid: Some(ifid.clone()),
-        name: None,
-        turns: state.turns,
-        saved_at: format_rfc3339(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        ),
-    };
-    match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds) {
-        Ok(()) => {
-            eprintln!("babelmap: map saved to {}", arc_file.display());
-        }
-        Err(e) => {
-            eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
-            // Fall back to legacy map-only save so data is not lost.
-            if let Err(map_err) = save_map(&map_file, &mapper) {
-                eprintln!("babelmap: warning: fallback map save also failed: {}", map_err);
+    // Save on exit ONLY when auto_save is enabled. With auto_save off (the default),
+    // nothing is saved automatically — the user controls saving via the quit prompt's
+    // "Save & quit", the /save command, or named save slots. This keeps "Quit without
+    // saving" honest and avoids silently overwriting an explicit save point on exit.
+    if state.config.auto_save {
+        let exit_meta = app::archive::Meta {
+            format_version: 1,
+            ifid: Some(ifid.clone()),
+            name: None,
+            turns: state.turns,
+            saved_at: format_rfc3339(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            ),
+        };
+        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds) {
+            Ok(()) => {
+                eprintln!("babelmap: map saved to {}", arc_file.display());
+            }
+            Err(e) => {
+                eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
+                // Fall back to legacy map-only save so data is not lost.
+                if let Err(map_err) = save_map(&map_file, &mapper) {
+                    eprintln!("babelmap: warning: fallback map save also failed: {}", map_err);
+                }
             }
         }
     }
