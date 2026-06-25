@@ -929,6 +929,10 @@ impl Machine {
                 }
                 StepResult::Continue
             }
+            // 0x0E erase_line — erase from cursor to end of line in the upper window.
+            // Recognized here; the actual grid erase is implemented with the upper-window
+            // grid in the cursor-screen-model pass. No-op until then.
+            0x0E => StepResult::Continue,
             // Unknown / unimplemented VAR opcode: warn once, then ignore.
             _ => {
                 if self.warned_var_opcodes.insert(opcode) {
@@ -3466,5 +3470,16 @@ pub(crate) mod tests {
         assert!(m.warned_var_opcodes.contains(&0x15), "fallthrough records the opcode");
         m.exec_var(0x15, &[], None, None); // second call must not duplicate
         assert_eq!(m.warned_var_opcodes.len(), 1, "warned at most once per opcode");
+    }
+
+    #[test]
+    fn erase_line_is_recognized_noop_without_warning() {
+        let mut m = build_test_machine(&[]);
+        let r = m.exec_var(0x0E, &[1], None, None);
+        assert!(matches!(r, StepResult::Continue));
+        // It must be an explicit arm, not the unknown-opcode fallthrough (Task 6),
+        // so it is NOT recorded as a warned opcode.
+        assert!(!m.warned_var_opcodes.contains(&0x0E),
+            "erase_line is a recognized arm, not an unimplemented fallthrough");
     }
 }
