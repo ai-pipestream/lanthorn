@@ -104,6 +104,10 @@ pub enum Command {
     // ── Room display ──────────────────────────────────────────────────────────
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
+
+    // ── Hints ─────────────────────────────────────────────────────────────────
+    /// Open the Hints panel (companion Invisiclues / hint-file mini-terminal).
+    OpenHints,
 }
 
 impl Command {
@@ -159,6 +163,7 @@ impl Command {
             Command::OpenVerbMenu => Action::OpenVerbMenu,
             Command::OpenConfig => Action::OpenConfig,
             Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
+            Command::OpenHints => Action::OpenHints,
         }
     }
 
@@ -213,6 +218,7 @@ impl Command {
             Command::OpenVerbMenu => "open_verb_menu",
             Command::OpenConfig => "open_config",
             Command::ToggleRoomNumbers => "toggle_room_numbers",
+            Command::OpenHints => "open_hints",
         }
     }
 
@@ -267,6 +273,7 @@ impl Command {
             Command::OpenVerbMenu => "verb menu",
             Command::OpenConfig => "settings",
             Command::ToggleRoomNumbers => "room numbers",
+            Command::OpenHints => "hints",
         }
     }
 
@@ -324,6 +331,7 @@ impl Command {
             Command::OpenVerbMenu => Context::Global,
             Command::OpenConfig => Context::Global,
             Command::ToggleRoomNumbers => Context::Global,
+            Command::OpenHints => Context::Global,
         }
     }
 
@@ -383,6 +391,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::OpenVerbMenu,
     Command::OpenConfig,
     Command::ToggleRoomNumbers,
+    Command::OpenHints,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────

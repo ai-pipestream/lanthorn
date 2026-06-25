@@ -34,6 +34,8 @@ pub enum SlashOutcome {
     Filter(TranscriptFilterArg),
     /// Export the visible transcript; `None` uses the default path.
     Export(Option<String>),
+    /// Open the Hints panel (caller-handled, like Save/Load). Task D wires the real behavior.
+    OpenHints,
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -190,6 +192,16 @@ static CURATED: &[CuratedEntry] = &[
         name: "export",
         help: "export [file]  — export visible transcript to a file (default: ~/.babelmap/exports/)",
         build: |args| SlashOutcome::Export(args.first().map(|s| s.to_string())),
+    },
+    CuratedEntry {
+        name: "hint",
+        help: "hint  — open the Hints panel (companion Invisiclues / hint-file mini-terminal)",
+        build: |_args| SlashOutcome::OpenHints,
+    },
+    CuratedEntry {
+        name: "hints",
+        help: "hints  — alias for hint",
+        build: |_args| SlashOutcome::OpenHints,
     },
     // ── Aliases ───────────────────────────────────────────────────────────────
     CuratedEntry {
@@ -352,6 +364,12 @@ mod tests {
         let lines_semi = help_text(';');
         assert!(lines_semi[0].contains(';'));
         assert!(!lines_semi[0].contains('/'));
+    }
+
+    #[test]
+    fn slash_hint_parses_to_open_hints() {
+        assert!(matches!(crate::slash::parse("hint", '/'), crate::slash::SlashOutcome::OpenHints));
+        assert!(matches!(crate::slash::parse("hints", '/'), crate::slash::SlashOutcome::OpenHints));
     }
 
     #[test]
