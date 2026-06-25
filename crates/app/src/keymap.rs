@@ -36,6 +36,7 @@ pub enum Command {
     CycleLayout,
     Retidy,
     ReloadStyle,
+    GameStyle,
     ToggleWatch,
     AnimateTidy,
     ToggleAlignment,
@@ -128,6 +129,7 @@ impl Command {
             Command::CycleLayout => Action::CycleLayout,
             Command::Retidy => Action::Retidy,
             Command::ReloadStyle => Action::ReloadStyle,
+            Command::GameStyle => Action::GameStyle,
             Command::ToggleWatch => Action::ToggleWatch,
             Command::AnimateTidy => Action::AnimateTidy,
             Command::ToggleAlignment => Action::ToggleAlignment,
@@ -186,6 +188,7 @@ impl Command {
             Command::CycleLayout => "cycle_layout",
             Command::Retidy => "retidy",
             Command::ReloadStyle => "reload_style",
+            Command::GameStyle => "game_style",
             Command::ToggleWatch => "toggle_watch",
             Command::AnimateTidy => "animate_tidy",
             Command::ToggleAlignment => "toggle_alignment",
@@ -244,6 +247,7 @@ impl Command {
             Command::CycleLayout => "layout",
             Command::Retidy => "retidy",
             Command::ReloadStyle => "reload style",
+            Command::GameStyle => "game style",
             Command::ToggleWatch => "watch style",
             Command::AnimateTidy => "animate tidy",
             Command::ToggleAlignment => "alignment",
@@ -302,6 +306,7 @@ impl Command {
             | Command::CycleLayout
             | Command::Retidy
             | Command::ReloadStyle
+            | Command::GameStyle
             | Command::ToggleWatch
             | Command::AnimateTidy
             | Command::ToggleAlignment
@@ -368,6 +373,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::CycleLayout,
     Command::Retidy,
     Command::ReloadStyle,
+    Command::GameStyle,
     Command::ToggleWatch,
     Command::AnimateTidy,
     Command::ToggleAlignment,

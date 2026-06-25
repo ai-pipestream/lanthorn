@@ -69,6 +69,8 @@ pub enum Action {
     Retidy,
     /// Re-read style.toml and swap the live colors/symbols (keeps current look on error).
     ReloadStyle,
+    /// Scaffold the per-game style file (user_dir/styles/<ifid>.toml) for this game.
+    GameStyle,
     /// Toggle the opt-in style.toml file-watcher (handled in the run loop).
     ToggleWatch,
     /// Run the tidy pipeline and start animated playback of its stages (Auto only).
@@ -1504,6 +1506,21 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             }
         }
 
+        Action::GameStyle => {
+            if state.ifid.is_empty() {
+                state.set_status("no game loaded");
+            } else {
+                let user_dir = state.config.user_dir.clone();
+                let ifid = state.ifid.clone();
+                let title = state.title.clone();
+                match crate::styles::scaffold_per_game_style(&user_dir, &ifid, &title) {
+                    Ok((path, true))  => state.set_status(format!("created {}", path.display())),
+                    Ok((path, false)) => state.set_status(format!("per-game style: {}", path.display())),
+                    Err(e)            => state.set_status(format!("game-style failed: {}", e)),
+                }
+            }
+        }
+
         Action::ToggleWatch => { /* handled in the run loop (owns the watcher) */ }
 
         Action::AnimateTidy => {
@@ -2687,6 +2704,24 @@ mod tests {
 
         apply_action(Action::ReloadStyle, &mut state, &mut mapper);
         assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Magenta));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn game_style_action_scaffolds_file() {
+        let dir = std::env::temp_dir().join(format!("babelmap-gamestyle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.ifid = "ZCODE-1-GS-0001".to_string();
+        state.title = "Zork I".to_string();
+        let mut mapper = Mapper::default();
+
+        apply_action(Action::GameStyle, &mut state, &mut mapper);
+        let path = crate::styles::per_game_style_path(&dir, &state.ifid);
+        assert!(path.is_file(), "scaffold created the per-game file");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("Zork I"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

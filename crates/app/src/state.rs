@@ -637,6 +637,10 @@ pub struct AppState {
     /// Set once at startup; used by pane chrome to label the story pane.
     pub title: String,
 
+    /// The current story's IFID (set at session creation). Keys the per-game
+    /// style override (`user_dir/styles/<ifid>.toml`). Empty until set.
+    pub ifid: String,
+
     // ── Inventory panel state ─────────────────────────────────────────────────
 
     /// When true, the inventory strip is shown above the input line.
@@ -755,6 +759,7 @@ impl Default for AppState {
             suggestions: Vec::new(),
             suggestion_idx: 0,
             title: String::new(),
+            ifid: String::new(),
             show_inventory: false,
             player_obj: None,
             inventory_fallback: Vec::new(),

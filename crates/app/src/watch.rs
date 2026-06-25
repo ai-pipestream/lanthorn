@@ -24,6 +24,13 @@ pub fn start(file: &Path) -> Option<StyleWatcher> {
     Some(StyleWatcher { _watcher: watcher, rx })
 }
 
+impl StyleWatcher {
+    /// Also watch `dir` (non-recursively) on this watcher; ignored on error.
+    pub fn also_watch(&mut self, dir: &std::path::Path) {
+        let _ = self._watcher.watch(dir, RecursiveMode::NonRecursive);
+    }
+}
+
 /// True when a pending change has settled: dirty and at least `window` elapsed.
 pub fn due(dirty_since: Option<Instant>, now: Instant, window: Duration) -> bool {
     match dirty_since {
