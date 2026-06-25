@@ -1,7 +1,22 @@
+# Dependencies / build output
 /node_modules/
 /package-lock.json
 /package.json
 /test_output.txt
-/todo.md
-/.worktrees/
 /target/
+
+# Local-only project files
+/TODO.md
+/stories/
+
+# Internal tooling / agent workspaces (machine-local, never committed)
+/.claude/
+/.worktrees/
+
+# OS / editor junk (ignored anywhere in the tree)
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
