@@ -575,17 +575,6 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
     }
 }
 
-// ── style_from_config ─────────────────────────────────────────────────────────
-
-/// Wrap already-parsed config-override sections into a [`StyleDoc`] for merging.
-pub fn style_from_config(colors: &StyleColors, symbols: &StyleSymbols) -> StyleDoc {
-    StyleDoc {
-        colors: colors.clone(),
-        symbols: symbols.clone(),
-        transcript_rules: Vec::new(),
-        status_bar: RawStatusBar::default(),
-    }
-}
 
 // ── resolve ───────────────────────────────────────────────────────────────────
 

@@ -324,7 +324,6 @@ pub enum Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigPathField {
     UserDir,
-    ColorsScheme,
 }
 
 /// What triggered the prompt, carrying the target room (and edge direction where

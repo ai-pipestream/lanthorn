@@ -98,10 +98,9 @@ fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
     state.config.style = Some(style_path.to_string_lossy().into_owned());
     let _ = app::config::write_config(user_dir, &state.config);
 
-    // Re-resolve from the now-self-contained style file (+ any config overrides).
+    // Re-resolve from the now-self-contained style file (style.toml is the single source).
     let (base, _w1) = app::style::load_style(state.config.style.as_deref(), user_dir);
-    let over = app::style::style_from_config(&state.config.colors, &state.config.symbols);
-    let (cs, set, _w2) = app::style::resolve(&app::style::merge(&base, &over), user_dir);
+    let (cs, set, _w2) = app::style::resolve(&base, user_dir);
     state.colors = cs;
     state.symbols = set;
 }
@@ -695,10 +694,9 @@ fn main() {
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
     let mut state = AppState::default();
-    // Resolve the look from the style file (base) ⊕ config override sections.
+    // Resolve the look from style.toml (the single styling source).
     let (base, w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let over = app::style::style_from_config(&cfg.colors, &cfg.symbols);
-    let (cs, set, w2) = app::style::resolve(&app::style::merge(&base, &over), &cfg.user_dir);
+    let (cs, set, w2) = app::style::resolve(&base, &cfg.user_dir);
     state.colors = cs;
     state.symbols = set;
     for w in w1.into_iter().chain(w2) {
@@ -727,6 +725,16 @@ fn main() {
     let banner_line = app::session::first_banner_line(&banner);
     state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
     state.push_transcript(&banner);
+
+    // One-time notice: config.toml no longer carries style — those moved to style.toml.
+    if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(&cli)) {
+        if app::config::config_has_style_sections(&raw_cfg) {
+            state.push_transcript_kind(
+                "config.toml [colors]/[symbols] are no longer used — move them into style.toml",
+                app::state::TranscriptKind::Warning,
+            );
+        }
+    }
 
     // Observe the starting room so it appears on the map immediately.
     let start_loc = zvm::current_location(&session.machine);

@@ -19,11 +19,6 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("record_history",       ConfigRowKind::Bool),
     ("show_room_numbers",    ConfigRowKind::Bool),
     ("background_tidy",      ConfigRowKind::Enum),
-    ("colors.scheme",        ConfigRowKind::Choice),
-    ("symbols.box_style",    ConfigRowKind::Enum),
-    ("symbols.arrow_set",    ConfigRowKind::Enum),
-    ("symbols.portal_icons", ConfigRowKind::Enum),
-    ("symbols.path_style",   ConfigRowKind::Enum),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,7 +26,6 @@ pub(crate) enum ConfigRowKind {
     Path,
     Bool,
     Enum,
-    Choice,
 }
 
 /// Draw the config-screen modal centered over `area`.
@@ -145,11 +139,6 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             BackgroundTidy::OnOverlap => "on_overlap".to_string(),
             BackgroundTidy::Debounced => "debounced".to_string(),
         },
-        9 => cfg.colors.scheme.clone().unwrap_or_else(|| "(none)".to_string()),
-        10 => cfg.symbols.box_style.clone().unwrap_or_else(crate::config::default_box_style),
-        11 => cfg.symbols.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
-        12 => cfg.symbols.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
-        13 => cfg.symbols.path_style.clone().unwrap_or_else(crate::config::default_path_style),
         _ => String::new(),
     }
 }
