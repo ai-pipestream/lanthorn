@@ -139,8 +139,10 @@ fn draw_picture_frame(buf: &mut Buffer, area: Rect, color: Style) -> PaneFrame {
     if let Some(c) = buf.cell_mut((inner_r,   inner_bot_y)) { c.set_symbol("┘").set_style(color); }
 
     // ── Content and top_inset ──────────────────────────────────────────────────
-    // Content = cols 2..=w-3, rows 2..=h-3
-    let content = Rect::new(x + 2, y + 2, w - 4, h - 4);
+    // Content = cols 3..=w-4, rows 3..=h-4. Inset one cell further than the inner
+    // wall so the render window clears the corner-notch elbow glyphs (drawn at
+    // cols 2/w-3, rows 2/h-3); the freed ring reads as interior padding.
+    let content = Rect::new(x + 3, y + 3, w - 6, h - 6);
 
     // top_inset = inner top horizontal run (the drawable span between notch corners)
     // This is the ─ run at row 1, cols 3..=w-4 (between the two ┌┐ corner glyphs)
@@ -613,7 +615,7 @@ mod tests {
         assert_eq!(buf.cell((2,2)).unwrap().symbol(), "┘");
         // inner side flush at col1 mid-rows
         assert_eq!(buf.cell((1,3)).unwrap().symbol(), "│");
-        assert_eq!(f.content, Rect::new(2,2,5,4)); // cols 2..=6, rows 2..=5
+        assert_eq!(f.content, Rect::new(3,3,3,2)); // cols 3..=5, rows 3..=4 (clears notch corners)
     }
 
     #[test]

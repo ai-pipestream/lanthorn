@@ -449,15 +449,16 @@ pub fn resolve(
 
 /// The embedded built-in `default` style.
 ///
-/// Sets picture-frame borders for both panes as the default look.
+/// Sets a picture-frame map border and a single-line story border as the default look.
 /// An empty `[symbols]` means all presets resolve to their factory defaults via finalize_symbols.
 pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
-# map_border/story_border set picture-frame; other selectors use terminal defaults.
+# map_border = picture-frame; story_border = single (titled book header without the
+# ornate frame); other selectors use terminal defaults.
 # Empty [symbols] means all presets resolve to their factory defaults via finalize_symbols.
 
 [colors]
 "map_border" = { style = "picture-frame" }
-"story_border" = { style = "picture-frame" }
+"story_border" = { style = "single" }
 "dialog" = { style = "single", bg = "black" }
 "dialog:title" = { fg = "cyan" }
 "dialog:button" = { fg = "white" }
@@ -1010,11 +1011,11 @@ box_style = "rounded"
 
     #[test]
     fn resolve_sets_border_style_and_default_is_picture_frame() {
-        // default doc (DEFAULT_STYLE_TOML) => picture-frame for both panes
+        // default doc (DEFAULT_STYLE_TOML) => picture-frame map, single story
         let doc = parse_style_toml(DEFAULT_STYLE_TOML).unwrap();
         let (cs, _set, _w) = resolve(&doc, std::path::Path::new("."));
         assert!(matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::PictureFrame));
-        assert!(matches!(cs.story_border_style, crate::render::paneframe::BorderStyle::PictureFrame));
+        assert!(matches!(cs.story_border_style, crate::render::paneframe::BorderStyle::Single));
     }
 
     #[test]

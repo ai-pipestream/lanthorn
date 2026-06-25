@@ -1481,14 +1481,15 @@ mod tests {
             "┏",
             "default map border (from DEFAULT_STYLE_TOML) must be picture-frame (┏ at top-left)"
         );
-        // Content area must be inset by 2 on all sides for picture-frame (20-4=16, 10-4=6)
-        assert_eq!(frame.content, Rect::new(2, 2, 16, 6));
+        // Content area inset 3 on all sides for picture-frame so it clears the corner
+        // notches (20-6=14, 10-6=4).
+        assert_eq!(frame.content, Rect::new(3, 3, 14, 4));
     }
 
     // ── TestBackend: story pane shows adventure title in picture-frame border ─────
 
     /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
-    /// story_border_style as picture-frame, that rendering it produces the ┏ outer
+    /// story_border_style as single, that rendering it produces the ┌ outer
     /// corner at top-left, and that the adventure title appears in the top border row.
     #[test]
     fn story_pane_shows_title_in_border_by_default() {
@@ -1512,16 +1513,16 @@ mod tests {
             cs.story_title,
         );
 
-        // DEFAULT_STYLE_TOML sets story_border to picture-frame; top-left outer corner must be ┏
+        // DEFAULT_STYLE_TOML sets story_border to single; top-left outer corner must be ┌
         assert_eq!(
             buf.cell((0, 0)).unwrap().symbol(),
-            "┏",
-            "default story border must be picture-frame (┏ at top-left)"
+            "┌",
+            "default story border must be single (┌ at top-left)"
         );
 
-        // The title "ZORK I" must appear somewhere in the top border row (row 1 for picture-frame).
+        // The title "ZORK I" must appear somewhere in the top border row (row 0 for single).
         let title_row: String = (0..40u16)
-            .map(|x| buf.cell((x, 1)).unwrap().symbol().to_string())
+            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
             .collect();
         assert!(
             title_row.contains("ZORK I"),
