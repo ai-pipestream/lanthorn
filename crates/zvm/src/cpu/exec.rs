@@ -64,6 +64,14 @@ struct PendingInput {
     parse_buf: u32,
 }
 
+/// One in-memory undo snapshot: the Quetzal state blob plus the `save_undo`
+/// instruction's store target, so `restore_undo` can write 2 back into it.
+#[derive(Debug, Clone)]
+pub struct UndoSnapshot {
+    pub blob: Vec<u8>,
+    pub store: Option<u8>,
+}
+
 /// The Z-machine interpreter — ties memory and CPU state together.
 /// Fields are `pub` so Tasks 11+ can attach I/O channels.
 pub struct Machine {
@@ -81,6 +89,11 @@ pub struct Machine {
     /// at construction time.  Used by Quetzal CMem encoding (XOR diff).
     /// Story files are small (< 256 KB) so the memory cost is acceptable.
     pub original_dynamic: Vec<u8>,
+    /// In-memory undo snapshots (newest last). Session-only; not saved.
+    pub undo_stack: Vec<UndoSnapshot>,
+    /// Max retained undo snapshots; 0 disables undo. Default 16; the app sets it
+    /// from `config.undo_levels`.
+    pub undo_cap: usize,
     /// Pending save-request context: branch/store info from the save opcode so
     /// complete_save() can deliver the version-appropriate result.
     pending_save: Option<PendingSave>,
@@ -132,6 +145,8 @@ impl Machine {
             screen: ScreenState::default(),
             streams: StreamState::new(),
             original_dynamic,
+            undo_stack: Vec::new(),
+            undo_cap: 16,
             pending_save: None,
             pending_restore_store: None,
             rng_state: 0x12345678, // fixed nonzero seed
@@ -1057,14 +1072,14 @@ impl Machine {
                 self.do_store(store, 0);
                 StepResult::Continue
             }
-            // EXT:0x09 save_undo — unsupported; store -1 (0xFFFF)
+            // EXT:0x09 save_undo — in-memory undo snapshot.
             0x09 => {
-                self.do_store(store, 0xFFFF);
+                self.do_save_undo(store);
                 StepResult::Continue
             }
-            // EXT:0x0A restore_undo — unsupported; store -1 (0xFFFF)
+            // EXT:0x0A restore_undo — restore the newest in-memory undo snapshot.
             0x0A => {
-                self.do_store(store, 0xFFFF);
+                self.do_restore_undo(store);
                 StepResult::Continue
             }
             // Other EXT opcodes: no-op
@@ -1111,6 +1126,34 @@ impl Machine {
     pub fn do_store(&mut self, var: Option<u8>, val: u16) {
         if let Some(v) = var {
             write_var(&mut self.state, &mut self.mem, v, val);
+        }
+    }
+
+    /// `save_undo` (EXT:0x09): push an in-memory snapshot and store the result.
+    /// Stores -1 (0xFFFF) when undo is disabled (`undo_cap == 0`).
+    pub(crate) fn do_save_undo(&mut self, store: Option<u8>) {
+        if self.undo_cap == 0 {
+            self.do_store(store, 0xFFFF);
+            return;
+        }
+        let blob = self.save_quetzal();
+        self.undo_stack.push(UndoSnapshot { blob, store });
+        if self.undo_stack.len() > self.undo_cap {
+            self.undo_stack.remove(0); // drop oldest
+        }
+        self.do_store(store, 1);
+    }
+
+    /// `restore_undo` (EXT:0x0A): restore the newest snapshot and resume, storing 2
+    /// into the original `save_undo`'s target. Stores 0 (into this instruction's
+    /// target) when the stack is empty or a restore fails.
+    pub(crate) fn do_restore_undo(&mut self, store: Option<u8>) {
+        match self.undo_stack.pop() {
+            Some(snap) => match self.restore_quetzal(&snap.blob) {
+                Ok(()) => self.do_store(snap.store, 2),
+                Err(_) => self.do_store(store, 0),
+            },
+            None => self.do_store(store, 0),
         }
     }
 
@@ -1344,6 +1387,52 @@ impl Memory {
 pub(crate) mod tests {
     use super::*;
     use crate::header::tests_support::sample_story;
+
+    #[test]
+    fn undo_save_restore_round_trip() {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.undo_cap = 4;
+        m.state.pc = 0x0040;
+        m.do_store(Some(0x11), 1); // G1 = 1 (pre-save value)
+
+        // save_undo storing to G0: snapshot taken, G0 := 1, one stack entry.
+        m.do_save_undo(Some(0x10));
+        assert_eq!(m.global(0), 1, "save_undo stores 1");
+        assert_eq!(m.undo_stack.len(), 1);
+
+        // Mutate G1, then restore_undo storing to G2.
+        m.do_store(Some(0x11), 0x99);
+        m.do_restore_undo(Some(0x12));
+        assert_eq!(m.global(1), 1, "G1 reverted to the snapshot value");
+        assert_eq!(m.global(0), 2, "the original save_undo 'returns' 2");
+        assert_eq!(m.state.pc, 0x0040, "PC resumed at the post-save_undo address");
+        assert!(m.undo_stack.is_empty(), "snapshot consumed");
+    }
+
+    #[test]
+    fn undo_empty_and_disabled_and_cap() {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+
+        // Empty stack: restore_undo stores 0 into its own target, no state change.
+        m.undo_cap = 4;
+        m.do_restore_undo(Some(0x10));
+        assert_eq!(m.global(0), 0);
+
+        // Disabled (cap 0): save_undo stores -1 (0xFFFF) and pushes nothing.
+        m.undo_cap = 0;
+        m.do_save_undo(Some(0x11));
+        assert_eq!(m.global(1), 0xFFFF, "cap 0 => -1 (unsupported)");
+        assert!(m.undo_stack.is_empty());
+
+        // Cap drop: with cap 2, three saves keep the newest two.
+        m.undo_cap = 2;
+        m.do_save_undo(Some(0x10));
+        m.do_save_undo(Some(0x10));
+        m.do_save_undo(Some(0x10));
+        assert_eq!(m.undo_stack.len(), 2, "oldest dropped past the cap");
+    }
 
     // -----------------------------------------------------------------------
     // Tiny assembler for test programs
