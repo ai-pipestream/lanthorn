@@ -71,6 +71,12 @@ and unsupported; v1/v2 are not supported.)
 - **Tab autocomplete** from the story's dictionary plus nouns mentioned in the
   current room, with a live suggestion line.
 - **Inventory panel** — a toggleable strip of carried items.
+- **In-game hints** — `/hint` opens a modal that runs a companion *Invisiclues*
+  `.z5` in a second Z-machine session (the main game pauses): navigate its
+  progressive hint menu, `Esc` to close. The hint file is auto-detected next to
+  the story (or inside a sibling `.zip`) and remembered per game; if the story
+  has its own `HINT` command, the panel suggests that too. (Adventures and hint
+  files packaged in `.zip` archives are supported.)
 - **Reset** — restart the story from the beginning via a confirmation dialog with
   an opt-in "also clear the map" checkbox (the map is kept by default).
 - **Slash commands** — type a leading prefix (default `/`, configurable) to run
