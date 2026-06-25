@@ -278,17 +278,20 @@ impl PathGlyphs {
 impl PortalGlyphs {
     /// All known preset names for PortalGlyphs, in display order.
     pub fn preset_names() -> &'static [&'static str] {
-        &["ascii", "nerdfont"]
+        &["ascii", "nerdfont", "nerdfont-stairs"]
     }
 
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
-    /// - "ascii"    — ASCII-compatible glyphs (default): ●/↑/↓/⊙/⊗/? with ┊┄ connectors
-    /// - "nerdfont" — Nerd Font single-width icon codepoints (requires patched font)
-    ///                nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
-    ///                nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
-    ///                nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
+    /// - "ascii"            — ASCII-compatible glyphs (default): ●/↑/↓/⊙/⊗/? with ┊┄ connectors
+    /// - "nerdfont"         — Nerd Font single-width icon codepoints (requires patched font)
+    ///                        nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
+    ///                        nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
+    ///                        nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
+    /// - "nerdfont-stairs"  — Nerd Font 4 distinct direction icons (requires patched font)
+    ///                        up=mdi-stairs-up (U+F12BD), down=mdi-stairs-down (U+F12BE),
+    ///                        in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48)
     pub fn preset(name: &str) -> Option<PortalGlyphs> {
         Some(match name {
             "ascii" => PortalGlyphs {
@@ -303,6 +306,20 @@ impl PortalGlyphs {
                 // nf-fa-sign_in U+F090, nf-fa-sign_out U+F08B
                 in_: '\u{F090}', out: '\u{F08B}',
                 // nf-fa-question_circle U+F059
+                unknown: '\u{F059}',
+            },
+            "nerdfont-stairs" => PortalGlyphs {
+                // Reuse nf-fa-circle U+F111 for marker, nf-fa-question_circle U+F059 for unknown
+                marker: '\u{F111}', path: '┊', path_h: '┄',
+                // Four DISTINCT direction icons (resolved from MDI webfont CSS by name):
+                // mdi-stairs-up U+F12BD
+                up: '\u{F12BD}',
+                // mdi-stairs-down U+F12BE
+                down: '\u{F12BE}',
+                // mdi-location-enter U+F0FC4
+                in_: '\u{F0FC4}',
+                // mdi-exit-run U+F0A48
+                out: '\u{F0A48}',
                 unknown: '\u{F059}',
             },
             _ => return None,
@@ -534,6 +551,16 @@ mod tests {
         let expected = SymbolSet::resolve(&cfg);
         let got = SymbolSet::from_preset_names("ascii", "filled", "ascii", "light");
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn nerdfont_stairs_portal_has_four_distinct_single_width_icons() {
+        assert!(PortalGlyphs::preset_names().contains(&"nerdfont-stairs"));
+        let p = PortalGlyphs::preset("nerdfont-stairs").unwrap();
+        // four DISTINCT direction icons
+        let four = [p.up, p.down, p.in_, p.out];
+        for ch in four { assert!(!is_wide_estimate(ch)); }
+        assert_eq!(four.iter().collect::<std::collections::HashSet<_>>().len(), 4, "up/down/in/out must differ");
     }
 
     #[test]
