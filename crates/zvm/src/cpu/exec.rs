@@ -788,6 +788,10 @@ impl Machine {
             0x0A => {
                 let rows = ops.first().copied().unwrap_or(0);
                 self.screen.upper_window_rows = rows;
+                let cols = self.mem.read_byte(0x21) as u16;
+                self.screen.upper.resize(rows, cols.max(1));
+                self.screen.cursor_row = 1;
+                self.screen.cursor_col = 1;
                 StepResult::Continue
             }
             // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+)
@@ -799,10 +803,13 @@ impl Machine {
             // 0x0D erase_window — clear window (state-tracking only; no render)
             0x0D => {
                 // Erase window: -1 = all windows + unsplit, -2 = all without unsplit,
-                // 0 = lower, 1 = upper. We just update upper_window_rows if -1.
+                // 0 = lower, 1 = upper.
                 let win = ops.first().copied().unwrap_or(0) as i16;
                 if win == -1 {
                     self.screen.upper_window_rows = 0;
+                    self.screen.upper.resize(0, self.screen.upper.cols);
+                } else if win == 1 {
+                    self.screen.upper.clear();
                 }
                 StepResult::Continue
             }
@@ -1070,6 +1077,27 @@ impl Machine {
         // return, never above it.
         if self.streams.stream3_active() {
             self.streams.write_stream3(s);
+            return;
+        }
+        // Window 1 (upper): write chars into the grid, do not stream.
+        if self.screen.current_window == 1 {
+            let style = self.screen.text_style;
+            let cols = self.screen.upper.cols.max(1);
+            for ch in s.chars() {
+                if ch == '\n' {
+                    self.screen.cursor_row += 1;
+                    self.screen.cursor_col = 1;
+                    continue;
+                }
+                let (r, c) = (self.screen.cursor_row, self.screen.cursor_col);
+                self.screen.upper.put(r, c, ch, style);
+                if self.screen.cursor_col >= cols {
+                    self.screen.cursor_row += 1;
+                    self.screen.cursor_col = 1;
+                } else {
+                    self.screen.cursor_col += 1;
+                }
+            }
             return;
         }
         // Stream 3 is inactive; streams 1/2/4 apply.
@@ -3484,5 +3512,37 @@ pub(crate) mod tests {
         // so it is NOT recorded as a warned opcode.
         assert!(!m.warned_var_opcodes.contains(&0x0E),
             "erase_line is a recognized arm, not an unimplemented fallthrough");
+    }
+
+    #[test]
+    fn print_to_upper_window_lands_in_grid_not_stream() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 10); // screen width = 10 cols
+        m.exec_var(0x0A, &[2], None, None);     // split_window 2
+        m.exec_var(0x0B, &[1], None, None);     // set_window 1 (upper)
+        m.screen.cursor_row = 1; m.screen.cursor_col = 1;
+        m.print_text("Hi");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'H');
+        assert_eq!(m.screen.upper.cell(1, 2).ch, 'i');
+        assert_eq!(m.screen.cursor_col, 3, "cursor advanced past the text");
+        // Nothing went to the lower-window output sink:
+        assert_eq!(m.buffer_output().expect("sink").buf, "");
+    }
+
+    #[test]
+    fn lower_window_still_streams() {
+        let mut m = build_test_machine(&[]);
+        m.screen.current_window = 0;
+        m.print_text("ok");
+        assert_eq!(m.buffer_output().expect("sink").buf, "ok");
+    }
+
+    #[test]
+    fn split_window_sizes_grid_from_header_cols() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 12);
+        m.exec_var(0x0A, &[3], None, None);
+        assert_eq!(m.screen.upper.rows, 3);
+        assert_eq!(m.screen.upper.cols, 12);
     }
 }
