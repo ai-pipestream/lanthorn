@@ -21,6 +21,14 @@ use crate::text::decode::{decode_string, zscii_to_char};
 // Public types
 // ---------------------------------------------------------------------------
 
+/// A built-in Z-machine bleep recorded by `sound_effect` (ZMSD §9.4):
+/// sound #1 is the high-pitched bleep, #2 the low-pitched bleep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Beep {
+    High,
+    Low,
+}
+
 /// Result of executing one instruction.
 #[derive(Debug, PartialEq)]
 pub enum StepResult {
@@ -84,6 +92,11 @@ pub struct Machine {
     rng_state: u32,
     /// VAR opcodes that have hit the unimplemented fallthrough (warned once each).
     pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
+    /// Bleeps recorded by `sound_effect` since the host last drained them.
+    pub pending_beeps: Vec<Beep>,
+    /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
+    /// recorded since the host last drained them. The engine never prints.
+    pub diagnostics: Vec<String>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -123,6 +136,8 @@ impl Machine {
             pending_restore_store: None,
             rng_state: 0x12345678, // fixed nonzero seed
             warned_var_opcodes: std::collections::HashSet::new(),
+            pending_beeps: Vec::new(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -951,10 +966,32 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Unknown / unimplemented VAR opcode: warn once, then ignore.
+            // 0x15 sound_effect — number effect volume routine (ZMSD §9.4).
+            // We render bleeps visually (host shows a border pulse); sampled
+            // sounds (number >= 3) need a Blorb resource we do not yet load.
+            // effect/volume/routine are accepted but unused until audio lands.
+            0x15 => {
+                let number = ops.first().copied().unwrap_or(0);
+                match number {
+                    1 => self.pending_beeps.push(Beep::High),
+                    2 => self.pending_beeps.push(Beep::Low),
+                    0 => {} // not a defined bleep
+                    n => {
+                        if self.warned_var_opcodes.insert(0x15) {
+                            self.diagnostics.push(format!(
+                                "sampled sound #{n} not supported (needs Blorb)"
+                            ));
+                        }
+                    }
+                }
+                StepResult::Continue
+            }
+            // Unknown / unimplemented VAR opcode: record once, then ignore.
             _ => {
                 if self.warned_var_opcodes.insert(opcode) {
-                    eprintln!("zvm: warning: unimplemented VAR opcode 0x{opcode:02X} (ignored)");
+                    self.diagnostics.push(format!(
+                        "unimplemented VAR opcode 0x{opcode:02X} (ignored)"
+                    ));
                 }
                 StepResult::Continue
             }
@@ -3504,13 +3541,55 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn sound_effect_records_high_and_low_beeps() {
+        let mut m = build_test_machine(&[]);
+        // number 1 = high bleep
+        m.exec_var(0x15, &[1], None, None);
+        assert_eq!(m.pending_beeps, vec![Beep::High]);
+        // number 2 = low bleep
+        m.exec_var(0x15, &[2], None, None);
+        assert_eq!(m.pending_beeps, vec![Beep::High, Beep::Low]);
+        // no diagnostics for plain bleeps
+        assert!(m.diagnostics.is_empty(), "bleeps must not record diagnostics");
+    }
+
+    #[test]
+    fn sound_effect_sampled_sound_records_diagnostic_no_beep() {
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x15, &[3], None, None); // sampled sound -> needs Blorb
+        assert!(m.pending_beeps.is_empty(), "sampled sound is not a bleep");
+        assert_eq!(m.diagnostics.len(), 1, "sampled sound records one diagnostic");
+        assert!(m.diagnostics[0].contains("sampled sound"));
+    }
+
+    #[test]
+    fn sound_effect_zero_records_nothing() {
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x15, &[0], None, None);
+        assert!(m.pending_beeps.is_empty());
+        assert!(m.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn unimplemented_var_opcode_records_diagnostic_not_stderr() {
+        let mut m = build_test_machine(&[]);
+        // 0x14 has no arm in exec_var -> hits the unimplemented fallthrough.
+        assert!(m.diagnostics.is_empty());
+        m.exec_var(0x14, &[], None, None);
+        assert_eq!(m.diagnostics.len(), 1, "fallthrough records one diagnostic line");
+        assert!(m.diagnostics[0].contains("0x14"), "diagnostic names the opcode");
+        m.exec_var(0x14, &[], None, None); // second call must not duplicate
+        assert_eq!(m.diagnostics.len(), 1, "warn-once: no duplicate diagnostic");
+    }
+
+    #[test]
     fn unimplemented_var_opcode_is_warned_once() {
         let mut m = build_test_machine(&[]);
-        // 0x15 sound_effect is intentionally unimplemented -> hits the fallthrough.
+        // 0x14 is an undefined/unimplemented VAR opcode
         assert!(m.warned_var_opcodes.is_empty());
-        m.exec_var(0x15, &[], None, None);
-        assert!(m.warned_var_opcodes.contains(&0x15), "fallthrough records the opcode");
-        m.exec_var(0x15, &[], None, None); // second call must not duplicate
+        m.exec_var(0x14, &[], None, None);
+        assert!(m.warned_var_opcodes.contains(&0x14), "fallthrough records the opcode");
+        m.exec_var(0x14, &[], None, None); // second call must not duplicate
         assert_eq!(m.warned_var_opcodes.len(), 1, "warned at most once per opcode");
     }
 
