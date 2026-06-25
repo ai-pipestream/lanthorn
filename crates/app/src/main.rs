@@ -612,6 +612,9 @@ fn toggle_style_watch(
         app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
     {
         *watcher = app::watch::start(&p);
+        if let Some(w) = watcher.as_mut() {
+            w.also_watch(&state.config.user_dir.join("styles"));
+        }
         state.set_status(if watcher.is_some() {
             "style watch on"
         } else {
@@ -746,6 +749,7 @@ fn main() {
     let banner = session.take_transcript();
     let banner_line = app::session::first_banner_line(&banner);
     state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
+    state.ifid = ifid.clone();
     state.push_transcript(&banner);
 
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
@@ -855,6 +859,9 @@ fn main() {
             app::reload::resolved_style_path(state.config.style.as_deref(), &state.config.user_dir)
         {
             style_watcher = app::watch::start(&p);
+            if let Some(w) = style_watcher.as_mut() {
+                w.also_watch(&state.config.user_dir.join("styles"));
+            }
         }
     }
 
