@@ -934,6 +934,8 @@ pub fn write_style_full(
     ov.insert("portal.unknown".to_string(), set.portal.unknown.to_string());
     ov.insert("portal.path".to_string(),    set.portal.path.to_string());
     ov.insert("portal.marker".to_string(),  set.portal.marker.to_string());
+    ov.insert("gutter.meta".to_string(),    set.meta_gutter.to_string());
+    ov.insert("gutter.warning".to_string(), set.warning_gutter.to_string());
 
     write_style(path, &doc)
 }
