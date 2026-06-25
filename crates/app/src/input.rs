@@ -302,11 +302,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
         return hotkey_dialog_key_to_action(state, key);
     }
 
-    // 6.5. Room panel close: Esc or q while a panel is open.
+    // 6.5. Room panel close: Esc while a panel is open.
     // Comes after steps 2-6 (prompt/anim/gallery/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
     if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE {
-        if key.code == KeyCode::Esc || key.code == KeyCode::Char('q') {
+        if key.code == KeyCode::Esc {
             return Action::CloseRoomPanel;
         }
     }
@@ -573,6 +573,34 @@ fn hotkeys_dialog_action(
     None
 }
 
+/// Per-modal button-to-action mapping for the gallery.
+fn gallery_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::GalleryClose);
+        }
+    }
+
+    // Check buttons: Done → GalleryClose
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Done => Action::GalleryClose,
+                _              => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
 /// bounding rects of the map and story panes, the pre-computed room screen
 /// rects (needed for pixel-accurate room hit-testing on left/right clicks), and
@@ -605,7 +633,11 @@ pub fn mouse_to_action(
             // all other clicks fall through to normal map/room routing below.
             let is_corner_overlay = state.room_panel.is_some() || state.tidy_anim.is_some();
 
-            if state.config_screen.is_some() {
+            if state.gallery.is_some() {
+                if let Some(action) = gallery_dialog_action(rects, col, row) {
+                    return action;
+                }
+            } else if state.config_screen.is_some() {
                 if let Some(action) = config_dialog_action(rects, col, row) {
                     return action;
                 }
@@ -812,7 +844,7 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::GalleryNext,
         KeyCode::Left => Action::GalleryCategoryPrev,
         KeyCode::Right => Action::GalleryCategoryNext,
-        KeyCode::Esc | KeyCode::Enter => Action::GalleryClose,
+        KeyCode::Esc => Action::GalleryClose,
         KeyCode::Char('o') | KeyCode::Char('O') => Action::GalleryExportStyle,
         _ => Action::None,
     }
@@ -853,7 +885,6 @@ fn config_screen_key_to_action(key: KeyEvent) -> Action {
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::ConfigSave,
         KeyCode::Esc => Action::ConfigCancel,
-        KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => Action::ConfigCancel,
         _ => Action::None,
     }
 }
@@ -2410,13 +2441,14 @@ mod tests {
     #[test]
     fn esc_closes_room_panel_when_open() {
         use crate::state::{RoomPanel, RoomPanelMode};
-        // With a room panel open, Esc and q produce CloseRoomPanel.
+        // With a room panel open, Esc produces CloseRoomPanel (q-close removed).
         let mut s = AppState::default();
         s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
             "Esc with room panel open must produce CloseRoomPanel");
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseRoomPanel),
-            "q with room panel open must produce CloseRoomPanel");
+        // q no longer closes the room panel.
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseRoomPanel),
+            "q must no longer close the room panel");
         // With no room panel, Esc does NOT produce CloseRoomPanel.
         s.room_panel = None;
         assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
@@ -3063,7 +3095,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::GalleryCategoryPrev));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::GalleryCategoryNext));
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::GalleryClose));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Enter)), Action::GalleryClose));
+        // Enter no longer closes the gallery; ESC/[X]/[Done] are the close paths.
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Enter)), Action::GalleryClose),
+            "Enter must no longer close the gallery");
     }
 
     #[test]
@@ -4479,5 +4513,229 @@ mod tests {
         // Done button → CloseHotkeyDialog
         let a = mouse_to_action(&state, mouse_left_click(62, 34), map, story, room_rects, &dialog);
         assert!(matches!(a, Action::CloseHotkeyDialog), "hotkey dialog [Done] click should produce CloseHotkeyDialog, got {:?}", a);
+    }
+
+    // ── ESC == [X] sweep ─────────────────────────────────────────────────────────
+
+    /// Table test: for every modal, ESC and a [X] click must yield the SAME close Action.
+    ///
+    /// Each entry: (modal_name, set-up closure, ESC-Action, close-Action-from-X-click).
+    ///
+    /// We build a DialogRects with a known close rect at (99, 0) and call
+    /// key_to_action for ESC and mouse_to_action for a click at (99, 0).
+    /// Both must match the expected close action.
+    #[test]
+    fn esc_equals_x_click_for_every_modal() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::{GalleryState, SavesState, VerbMenuState};
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+
+        // Helper to build a DialogRects with [X] at (99, 0) and one Done button
+        let make_rects = || DialogRects {
+            area:    Rect::new(5, 0, 70, 24),
+            content: Rect::new(6, 1, 68, 20),
+            close:   Some(Rect::new(99, 0, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(90, 23, 8, 1))],
+        };
+
+        // 1. Gallery: ESC → GalleryClose, [X] → GalleryClose
+        {
+            let mut s = AppState::default();
+            s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::GalleryClose),
+                "gallery ESC should produce GalleryClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::GalleryClose),
+                "gallery [X] click should produce GalleryClose, got {:?}", x_action);
+        }
+
+        // 2. Saves: ESC → SavesClose, [X] → SavesClose
+        {
+            let mut s = AppState::default();
+            s.saves = Some(SavesState { entries: vec![SaveInfo {
+                path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
+                saved_at: String::new(), is_default: false,
+            }], selected: 0 });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::SavesClose),
+                "saves ESC should produce SavesClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::SavesClose),
+                "saves [X] click should produce SavesClose, got {:?}", x_action);
+        }
+
+        // 3. File browser: ESC → FbClose, [X] → FbClose
+        {
+            let mut s = AppState::default();
+            s.file_browser = Some(crate::state::FileBrowserState::build(
+                std::env::temp_dir(), crate::state::FbMode::PickFile, String::new(),
+            ));
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::FbClose),
+                "file browser ESC should produce FbClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::FbClose),
+                "file browser [X] click should produce FbClose, got {:?}", x_action);
+        }
+
+        // 4. Verb menu: ESC → VerbMenuClose, [X] → VerbMenuClose
+        {
+            let mut s = AppState::default();
+            s.verb_menu = Some(VerbMenuState {
+                pane: crate::state::VerbMenuPane::Verbs,
+                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+            });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::VerbMenuClose),
+                "verb menu ESC should produce VerbMenuClose, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::VerbMenuClose),
+                "verb menu [X] click should produce VerbMenuClose, got {:?}", x_action);
+        }
+
+        // 5. Config screen: ESC → ConfigCancel, [X] → ConfigCancel
+        {
+            let mut s = AppState::default();
+            let working = clone_config(&s.config);
+            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            let esc_action = key_to_action(&s, key(KeyCode::Esc));
+            assert!(matches!(esc_action, Action::ConfigCancel),
+                "config screen ESC should produce ConfigCancel, got {:?}", esc_action);
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::ConfigCancel),
+                "config screen [X] click should produce ConfigCancel, got {:?}", x_action);
+        }
+
+        // 6. Hotkey dialog: ESC closes (via prefix or Esc), [X] → CloseHotkeyDialog
+        {
+            let mut s = AppState::default();
+            s.hotkey_dialog = true;
+            // Esc is not the prefix key by default, and hotkey_dialog_key_to_action
+            // maps prefix → close; Esc is not bound so produces None in the dialog.
+            // But the [X] click must close it.
+            let dialog = Some(make_rects());
+            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
+            assert!(matches!(x_action, Action::CloseHotkeyDialog),
+                "hotkey dialog [X] click should produce CloseHotkeyDialog, got {:?}", x_action);
+        }
+    }
+
+    /// Assert no modal key handler still binds q to a close action.
+    #[test]
+    fn no_modal_binds_q_to_close() {
+        use crate::state::{GalleryState, SavesState, VerbMenuState};
+        use crate::persist_files::SaveInfo;
+        use std::path::PathBuf;
+
+        // Gallery: q → not GalleryClose
+        {
+            let mut s = AppState::default();
+            s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::GalleryClose),
+                "q must not close the gallery");
+        }
+
+        // Saves: q → not SavesClose
+        {
+            let mut s = AppState::default();
+            s.saves = Some(SavesState { entries: vec![SaveInfo {
+                path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
+                saved_at: String::new(), is_default: false,
+            }], selected: 0 });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::SavesClose),
+                "q must not close the saves modal");
+        }
+
+        // File browser: q → not FbClose
+        {
+            let mut s = AppState::default();
+            s.file_browser = Some(crate::state::FileBrowserState::build(
+                std::env::temp_dir(), crate::state::FbMode::PickFile, String::new(),
+            ));
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::FbClose),
+                "q must not close the file browser");
+        }
+
+        // Verb menu: q → not VerbMenuClose
+        {
+            let mut s = AppState::default();
+            s.verb_menu = Some(VerbMenuState {
+                pane: crate::state::VerbMenuPane::Verbs,
+                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+            });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::VerbMenuClose),
+                "q must not close the verb menu");
+        }
+
+        // Config screen: q → not ConfigCancel
+        {
+            let mut s = AppState::default();
+            let working = clone_config(&s.config);
+            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::ConfigCancel),
+                "q must not cancel the config screen");
+        }
+
+        // Room panel: q → not CloseRoomPanel
+        {
+            use crate::state::{RoomPanel, RoomPanelMode};
+            let mut s = AppState::default();
+            s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+            let a = key_to_action(&s, key(KeyCode::Char('q')));
+            assert!(!matches!(a, Action::CloseRoomPanel),
+                "q must not close the room panel");
+        }
+    }
+
+    /// Assert gallery [X] and [Done] clicks produce GalleryClose.
+    #[test]
+    fn gallery_dialog_x_and_done_produce_gallery_close() {
+        use ratatui::layout::Rect;
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use crate::state::GalleryState;
+
+        let rects = DialogRects {
+            area:    Rect::new(5, 3, 70, 24),
+            content: Rect::new(6, 5, 68, 19),
+            close:   Some(Rect::new(73, 3, 1, 1)),
+            buttons: vec![(ButtonId::Done, Rect::new(65, 26, 8, 1))],
+        };
+
+        let mut state = AppState::default();
+        state.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+
+        let map   = Rect::default();
+        let story = Rect::default();
+        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
+        let dialog = Some(rects);
+
+        // Close [X] → GalleryClose
+        let a = mouse_to_action(&state, mouse_left_click(73, 3), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::GalleryClose), "gallery [X] click should produce GalleryClose, got {:?}", a);
+
+        // Done button → GalleryClose
+        let a = mouse_to_action(&state, mouse_left_click(67, 26), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::GalleryClose), "gallery [Done] click should produce GalleryClose, got {:?}", a);
+
+        // Click outside → swallowed (None)
+        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
+        assert!(matches!(a, Action::None), "outside gallery dialog should be swallowed, got {:?}", a);
     }
 }

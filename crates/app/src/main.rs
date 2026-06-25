@@ -409,7 +409,9 @@ fn draw_frame(
 
         // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
         if state.gallery.is_some() {
-            draw_gallery(state, full, buf);
+            if let Some(dr) = draw_gallery(state, full, buf) {
+                dialog_rects_out = Some(dr);
+            }
         }
 
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
