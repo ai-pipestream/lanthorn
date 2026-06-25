@@ -31,6 +31,19 @@ pub struct Decl {
     /// Only interpreted for border selectors; ignored for others.
     #[serde(default)]
     pub style: Option<String>,
+    /// Per-side border overrides (border selectors only): each names a line style
+    /// (none/single/double/thick). A side falls back to `style` when unset.
+    #[serde(default)]
+    pub style_top: Option<String>,
+    #[serde(default)]
+    pub style_bottom: Option<String>,
+    #[serde(default)]
+    pub style_left: Option<String>,
+    #[serde(default)]
+    pub style_right: Option<String>,
+    /// Whether the pane's header strip is shown (story_border / map_border only).
+    #[serde(default)]
+    pub header: Option<bool>,
     /// Optional shadow flag. Only interpreted for the `dialog` selector.
     #[serde(default)]
     pub shadow: Option<bool>,
@@ -161,6 +174,33 @@ pub const SELECTOR_FIELDS: &[&str] = &[
 /// For `map_border` and `story_border`, an optional `style` key in the `Decl`
 /// also sets `cs.map_border_style`/`cs.story_border_style`.
 /// Unknown selectors are collected into the returned warnings vec.
+/// Resolve a base border style + per-side overrides into a `PaneSides`. Each side
+/// uses its `style_<side>` override (parsed as a line style) or falls back to
+/// `base`. A per-side value of `picture-frame` is invalid → warns, uses `base`.
+fn resolve_sides(base: paneframe::BorderStyle, decl: &Decl) -> (paneframe::PaneSides, Vec<String>) {
+    let mut warnings = Vec::new();
+    let side = |ov: &Option<String>, warnings: &mut Vec<String>| -> paneframe::BorderStyle {
+        match ov {
+            None => base,
+            Some(s) => {
+                if s == "picture-frame" {
+                    warnings.push(format!("per-side 'picture-frame' is invalid; using base style"));
+                    base
+                } else {
+                    paneframe::parse_border_style(s)
+                }
+            }
+        }
+    };
+    let sides = paneframe::PaneSides {
+        top: side(&decl.style_top, &mut warnings),
+        bottom: side(&decl.style_bottom, &mut warnings),
+        left: side(&decl.style_left, &mut warnings),
+        right: side(&decl.style_right, &mut warnings),
+    };
+    (sides, warnings)
+}
+
 pub fn apply_color_decls(
     cs: &mut ColorScheme,
     decls: &BTreeMap<String, Decl>,
@@ -192,30 +232,36 @@ pub fn apply_color_decls(
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
             "map_border" => {
                 cs.map_border = cs.map_border.patch(style);
-                if let Some(ref s) = decl.style {
-                    cs.map_border_style = paneframe::parse_border_style(s);
-                }
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.map_border_style);
+                cs.map_border_style = base;
+                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                cs.map_border_sides = sides;
+                if let Some(h) = decl.header { cs.map_header_on = h; }
             }
             "story_border" => {
                 cs.story_border = cs.story_border.patch(style);
-                if let Some(ref s) = decl.style {
-                    cs.story_border_style = paneframe::parse_border_style(s);
-                }
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.story_border_style);
+                cs.story_border_style = base;
+                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                cs.story_border_sides = sides;
+                if let Some(h) = decl.header { cs.story_header_on = h; }
             }
             "story_title"        => cs.story_title = cs.story_title.patch(style),
             "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
             "map_layer_tab_active" => cs.map_layer_tab_active = cs.map_layer_tab_active.patch(style),
             "status_header" => {
                 cs.status_header = cs.status_header.patch(style);
-                if let Some(ref s) = decl.style {
-                    cs.status_header_style = paneframe::parse_border_style(s);
-                }
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.status_header_style);
+                cs.status_header_style = base;
+                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                cs.status_header_sides = sides;
             }
             "input_line" => {
                 cs.input_line = cs.input_line.patch(style);
-                if let Some(ref s) = decl.style {
-                    cs.input_line_style = paneframe::parse_border_style(s);
-                }
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.input_line_style);
+                cs.input_line_style = base;
+                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                cs.input_line_sides = sides;
             }
             "dialog" => {
                 cs.dialog = cs.dialog.patch(style);
@@ -233,9 +279,10 @@ pub fn apply_color_decls(
             "upper_window"         => cs.upper_window = cs.upper_window.patch(style),
             "upper_window_border" => {
                 cs.upper_window_border = cs.upper_window_border.patch(style);
-                if let Some(ref s) = decl.style {
-                    cs.virtual_window_border = paneframe::parse_border_style(s);
-                }
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.virtual_window_border);
+                cs.virtual_window_border = base;
+                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                cs.upper_window_border_sides = sides;
             }
             "sound_beep_high"    => cs.sound_beep_high = cs.sound_beep_high.patch(style),
             "sound_beep_low"     => cs.sound_beep_low = cs.sound_beep_low.patch(style),
@@ -408,6 +455,11 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
         dim:       over.dim.or(base.dim),
         reversed:  over.reversed.or(base.reversed),
         style:     over.style.clone().or(base.style.clone()),
+        style_top:    over.style_top.clone().or(base.style_top.clone()),
+        style_bottom: over.style_bottom.clone().or(base.style_bottom.clone()),
+        style_left:   over.style_left.clone().or(base.style_left.clone()),
+        style_right:  over.style_right.clone().or(base.style_right.clone()),
+        header:       over.header.or(base.header),
         shadow:    over.shadow.or(base.shadow),
     }
 }
@@ -514,6 +566,11 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
         dim:       t.get("dim").and_then(toml::Value::as_bool),
         reversed:  t.get("reversed").and_then(toml::Value::as_bool),
         style:     t.get("style").and_then(toml::Value::as_str).map(str::to_string),
+        style_top:    t.get("style_top").and_then(toml::Value::as_str).map(str::to_string),
+        style_bottom: t.get("style_bottom").and_then(toml::Value::as_str).map(str::to_string),
+        style_left:   t.get("style_left").and_then(toml::Value::as_str).map(str::to_string),
+        style_right:  t.get("style_right").and_then(toml::Value::as_str).map(str::to_string),
+        header:       t.get("header").and_then(toml::Value::as_bool),
         shadow:    t.get("shadow").and_then(toml::Value::as_bool),
     }
 }
@@ -738,6 +795,11 @@ fn style_to_decl(s: &Style) -> Decl {
         dim: modifier_flag(s.add_modifier, Modifier::DIM),
         reversed: modifier_flag(s.add_modifier, Modifier::REVERSED),
         style: None,  // color-only inverse; callers set this for border selectors
+        style_top: None,
+        style_bottom: None,
+        style_left: None,
+        style_right: None,
+        header: None,
         shadow: None, // callers set this for the dialog selector
     }
 }
@@ -815,6 +877,11 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
         for (selector, decl) in &doc.colors.selectors {
             let mut itbl = toml_edit::InlineTable::new();
             if let Some(st) = &decl.style  { itbl.insert("style",     toml_edit::Value::from(st.as_str())); }
+            if let Some(st) = &decl.style_top    { itbl.insert("style_top",    toml_edit::Value::from(st.as_str())); }
+            if let Some(st) = &decl.style_bottom { itbl.insert("style_bottom", toml_edit::Value::from(st.as_str())); }
+            if let Some(st) = &decl.style_left   { itbl.insert("style_left",   toml_edit::Value::from(st.as_str())); }
+            if let Some(st) = &decl.style_right  { itbl.insert("style_right",  toml_edit::Value::from(st.as_str())); }
+            if decl.header == Some(false)        { itbl.insert("header",       toml_edit::Value::from(false)); }
             if let Some(fg) = &decl.fg { itbl.insert("fg", toml_edit::Value::from(fg.as_str())); }
             if let Some(bg) = &decl.bg { itbl.insert("bg", toml_edit::Value::from(bg.as_str())); }
             if decl.bold      == Some(true) { itbl.insert("bold",      toml_edit::Value::from(true)); }
@@ -956,14 +1023,26 @@ pub fn write_style_full(
     doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
     // New pane border/title/tab/header/input selectors.
+    // Helper: set style_<side> on a Decl for any side that differs from `base`.
+    fn decorate_sides(d: &mut Decl, base: crate::render::paneframe::BorderStyle, sides: crate::render::paneframe::PaneSides) {
+        use crate::render::paneframe::border_style_name;
+        if sides.top != base    { d.style_top    = Some(border_style_name(sides.top).to_string()); }
+        if sides.bottom != base { d.style_bottom = Some(border_style_name(sides.bottom).to_string()); }
+        if sides.left != base   { d.style_left   = Some(border_style_name(sides.left).to_string()); }
+        if sides.right != base  { d.style_right  = Some(border_style_name(sides.right).to_string()); }
+    }
     {
         let mut d = style_to_decl(&cs.map_border);
         d.style = Some(paneframe::border_style_name(cs.map_border_style).to_string());
+        decorate_sides(&mut d, cs.map_border_style, cs.map_border_sides);
+        if !cs.map_header_on { d.header = Some(false); }
         doc.colors.selectors.insert("map_border".to_string(), d);
     }
     {
         let mut d = style_to_decl(&cs.story_border);
         d.style = Some(paneframe::border_style_name(cs.story_border_style).to_string());
+        decorate_sides(&mut d, cs.story_border_style, cs.story_border_sides);
+        if !cs.story_header_on { d.header = Some(false); }
         doc.colors.selectors.insert("story_border".to_string(), d);
     }
     doc.colors.selectors.insert("story_title".to_string(),        style_to_decl(&cs.story_title));
@@ -974,6 +1053,7 @@ pub fn write_style_full(
         if cs.status_header_style != paneframe::BorderStyle::None {
             d.style = Some(paneframe::border_style_name(cs.status_header_style).to_string());
         }
+        decorate_sides(&mut d, cs.status_header_style, cs.status_header_sides);
         doc.colors.selectors.insert("status_header".to_string(), d);
     }
     {
@@ -981,6 +1061,7 @@ pub fn write_style_full(
         if cs.input_line_style != paneframe::BorderStyle::None {
             d.style = Some(paneframe::border_style_name(cs.input_line_style).to_string());
         }
+        decorate_sides(&mut d, cs.input_line_style, cs.input_line_sides);
         doc.colors.selectors.insert("input_line".to_string(), d);
     }
     {
@@ -999,6 +1080,7 @@ pub fn write_style_full(
     {
         let mut d = style_to_decl(&cs.upper_window_border);
         d.style = Some(paneframe::border_style_name(cs.virtual_window_border).to_string());
+        decorate_sides(&mut d, cs.virtual_window_border, cs.upper_window_border_sides);
         doc.colors.selectors.insert("upper_window_border".to_string(), d);
     }
     doc.colors.selectors.insert("sound_beep_high".to_string(), style_to_decl(&cs.sound_beep_high));
@@ -1096,6 +1178,38 @@ pub fn write_style_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_side_overrides_and_header_apply() {
+        use crate::render::paneframe::BorderStyle;
+        let doc = parse_style_toml(
+            "[colors]\n\
+             \"map_border\" = { style = \"none\", style_left = \"single\", style_right = \"single\" }\n\
+             \"story_border\" = { style = \"single\", style_top = \"thick\", header = false }\n"
+        ).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // map: base none, left/right single.
+        assert_eq!(cs.map_border_sides.top, BorderStyle::None);
+        assert_eq!(cs.map_border_sides.left, BorderStyle::Single);
+        assert_eq!(cs.map_border_sides.right, BorderStyle::Single);
+        // story: base single, top thick, header off.
+        assert_eq!(cs.story_border_sides.top, BorderStyle::Thick);
+        assert_eq!(cs.story_border_sides.left, BorderStyle::Single);
+        assert!(!cs.story_header_on);
+    }
+
+    #[test]
+    fn per_side_picture_frame_warns_and_falls_back() {
+        let doc = parse_style_toml(
+            "[colors]\n\"map_border\" = { style = \"single\", style_top = \"picture-frame\" }\n"
+        ).unwrap();
+        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        use crate::render::paneframe::BorderStyle;
+        // invalid per-side picture-frame → falls back to base (single) + warns.
+        assert_eq!(cs.map_border_sides.top, BorderStyle::Single);
+        assert!(warnings.iter().any(|w| w.contains("picture-frame")), "{warnings:?}");
+    }
 
     #[test]
     fn statusbar_block_parses_segments_and_border() {
@@ -1579,6 +1693,34 @@ box_style = "rounded"
             "story_border_style must survive write_style_full -> parse -> resolve; got {:?}",
             cs2.story_border_style
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_round_trips_per_side_and_header() {
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        let dir = std::env::temp_dir().join(format!("babelmap-ps-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ps.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        // map: base none, left/right single.
+        cs.map_border_style = BorderStyle::None;
+        cs.map_border_sides = PaneSides { top: BorderStyle::None, bottom: BorderStyle::None, left: BorderStyle::Single, right: BorderStyle::Single };
+        // story: base single, top thick, header off.
+        cs.story_border_style = BorderStyle::Single;
+        cs.story_border_sides = PaneSides { top: BorderStyle::Thick, bottom: BorderStyle::Single, left: BorderStyle::Single, right: BorderStyle::Single };
+        cs.story_header_on = false;
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+        let doc = parse_style_toml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+
+        assert_eq!(cs2.map_border_sides.left, BorderStyle::Single);
+        assert_eq!(cs2.map_border_sides.top, BorderStyle::None);
+        assert_eq!(cs2.story_border_sides.top, BorderStyle::Thick);
+        assert!(!cs2.story_header_on);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

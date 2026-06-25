@@ -13,7 +13,7 @@ use zvm::screen::StatusRight;
 use ratatui::style::Color;
 
 use crate::state::{AppState, Focus, TranscriptFilter, TranscriptKind};
-use crate::render::paneframe::{draw_pane_frame, BorderStyle};
+use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
@@ -492,8 +492,10 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let input_style_kind  = state.colors.input_line_style;
 
     // When boxed, status/input each take 3 rows; fall back to 1 if too small.
-    let status_boxed = status_style_kind != BorderStyle::None && area.height >= 5;
-    let input_boxed  = input_style_kind  != BorderStyle::None && area.height >= 5;
+    // Gate on "any side present" (base OR per-side) so a style="none" + per-side
+    // config (e.g. left/right-only) still boxes and draws its side bars.
+    let status_boxed = (status_style_kind != BorderStyle::None || state.colors.status_header_sides.any_on()) && area.height >= 5;
+    let input_boxed  = (input_style_kind  != BorderStyle::None || state.colors.input_line_sides.any_on()) && area.height >= 5;
     let status_rows: u16 = if status_boxed { 3 } else { 1 };
     let input_rows:  u16 = if input_boxed  { 3 } else { 1 };
 
@@ -503,7 +505,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 
     if status_boxed {
         // Draw a pane frame around the status region.
-        let frame = draw_pane_frame(buf, status_region, status_style_kind, state.colors.status_header);
+        let frame = draw_framed(buf, status_region, status_style_kind, state.colors.status_header_sides, state.colors.status_header, false);
         // Render status text into the inner content row.
         render_status_content(machine, state, buf, frame.content);
     } else {
@@ -520,7 +522,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let input_region = Rect::new(area.x, input_region_top, area.width, input_rows.min(area.height));
 
     if input_boxed {
-        let frame = draw_pane_frame(buf, input_region, input_style_kind, state.colors.input_line);
+        let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, state.colors.input_line, false);
         render_input_content(machine, state, buf, frame.content, normal_style);
     } else {
         render_input_content(machine, state, buf, input_region, normal_style);
@@ -1574,6 +1576,7 @@ mod tests {
         {
             let mut state = AppState::default();
             state.colors.status_header_style = BorderStyle::Single;
+            state.colors.status_header_sides = crate::render::paneframe::PaneSides::all(BorderStyle::Single);
 
             // Use a large enough area so boxing is not suppressed (needs >= 5 rows).
             let area = Rect::new(0, 0, 40, 12);
@@ -1683,6 +1686,34 @@ mod tests {
         let mut buf_story = Buffer::empty(area);
         let story_frame = draw_pane_frame(&mut buf_story, area, BorderStyle::None, Style::default());
         assert_eq!(story_frame.content, area, "story pane None border must also have content == area");
+    }
+
+    #[test]
+    fn status_header_left_right_only_draws_side_bars_no_top() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        // base none, left/right single, large enough to box.
+        state.colors.status_header_style = crate::render::paneframe::BorderStyle::None;
+        state.colors.status_header_sides = crate::render::paneframe::PaneSides {
+            top: crate::render::paneframe::BorderStyle::None,
+            bottom: crate::render::paneframe::BorderStyle::None,
+            left: crate::render::paneframe::BorderStyle::Single,
+            right: crate::render::paneframe::BorderStyle::Single,
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+        // The left side bar must actually be drawn in column 0 of the boxed status
+        // region (rows 0..3) — this is the headline left/right-only use case and
+        // must NOT be inert. (Regression guard: with the old base-only boxing gate
+        // nothing was boxed and this column was blank.)
+        let has_left_bar = (0u16..3).any(|y| buf.cell((0, y)).map(|c| c.symbol()) == Some("│"));
+        assert!(has_left_bar, "left/right-only status header must draw a side bar in column 0");
+        // The right side bar too.
+        let has_right_bar = (0u16..3).any(|y| buf.cell((39, y)).map(|c| c.symbol()) == Some("│"));
+        assert!(has_right_bar, "left/right-only status header must draw a side bar at the right edge");
+        // And no top corner glyph (top side is off).
+        assert_ne!(buf.cell((0, 0)).unwrap().symbol(), "┌");
     }
 
     // ── draw_str_highlighted regression tests ────────────────────────────────
