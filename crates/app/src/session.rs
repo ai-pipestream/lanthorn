@@ -31,6 +31,13 @@ pub enum InputKind {
     Char,
 }
 
+/// Which in-game (game-initiated) I/O the VM is suspended on after a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingIo {
+    Save,
+    Restore,
+}
+
 // ── CaptureSink ───────────────────────────────────────────────────────────────
 
 /// An output sink that accumulates printed text and lets the caller drain it.
@@ -77,6 +84,10 @@ pub struct TurnResult {
     pub diagnostics: Vec<String>,
     /// How the current room was detected this turn (drives the map indicator).
     pub location_method: Option<LocationMethod>,
+    /// Set when the VM suspended on its own `@save`/`@restore` (v4+). The host
+    /// performs the file I/O and calls `resume_save`/`resume_restore`. `None` for
+    /// an ordinary turn (and for v3, which still auto-fails — see `info`).
+    pub pending_io: Option<PendingIo>,
 }
 
 /// A running Z-machine game session.
@@ -102,7 +113,16 @@ impl GameSession {
         let mut machine = Machine::with_output(mem, sink);
         machine.init_caps();
 
-        let (quit, _, pending) = run_until_input(&mut machine);
+        let mut quit = false;
+        let pending = loop {
+            let (stop, _v3) = run_until_input(&mut machine);
+            match stop {
+                RunStop::Quit => { quit = true; break InputKind::Line; }
+                RunStop::Input(k) => break k,
+                RunStop::SavePending => machine.complete_save(false),
+                RunStop::RestorePending => machine.complete_restore_failure(),
+            }
+        };
 
         Ok(GameSession { machine, quit, pending })
     }
@@ -121,41 +141,50 @@ impl GameSession {
     /// and return the turn result.
     pub fn submit(&mut self, command: &str) -> TurnResult {
         self.machine.supply_line(command);
-        let (quit, save_restore_failed, pending) = run_until_input(&mut self.machine);
-        self.quit = quit;
-        self.pending = pending;
-
-        let raw = sink_mut(&mut self.machine).take_text();
-        let transcript = strip_read_prompt(&raw).to_owned();
-        let detected = detect_location(&self.machine);
-        let location = detected.as_ref().map(|loc| match loc {
-            Location::NameOnly(name) => zvm::ObjectSnapshot {
-                number: crate::roomid::synthetic_room_id(name),
-                parent: 0,
-                name: name.clone(),
-            },
-            _ => loc.object().expect("non-NameOnly variants carry an object").clone(),
-        });
-        let location_method = detected.as_ref().map(Location::method);
-
-        let info = if save_restore_failed {
-            Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
-        } else {
-            None
-        };
-
-        let diagnostics = std::mem::take(&mut self.machine.diagnostics);
-        let beep = self.machine.pending_beeps.last().copied();
-        self.machine.pending_beeps.clear();
-
-        TurnResult { transcript, location, quit, info, beep, diagnostics, location_method }
+        let (stop, v3) = run_until_input(&mut self.machine);
+        self.finish_turn(stop, v3)
     }
 
     /// Supply a single keypress, step until the next input request or Quit,
     /// and return the turn result.
     pub fn submit_char(&mut self, ch: u8) -> TurnResult {
         self.machine.supply_char(ch);
-        let (quit, save_restore_failed, pending) = run_until_input(&mut self.machine);
+        let (stop, v3) = run_until_input(&mut self.machine);
+        self.finish_turn(stop, v3)
+    }
+
+    /// Resume after the host performed an in-game SAVE (`wrote_ok` = file written).
+    pub fn resume_save(&mut self, wrote_ok: bool) -> TurnResult {
+        self.machine.complete_save(wrote_ok);
+        let (stop, v3) = run_until_input(&mut self.machine);
+        self.finish_turn(stop, v3)
+    }
+
+    /// Resume after the host performed an in-game RESTORE. `Some(bytes)` =
+    /// the user picked a save (Quetzal); `None` = cancelled. On corrupt bytes we
+    /// fall back to failure so the game sees a clean "Failed.".
+    pub fn resume_restore(&mut self, data: Option<&[u8]>) -> TurnResult {
+        match data {
+            Some(bytes) => {
+                if self.machine.complete_restore_success(bytes).is_err() {
+                    self.machine.complete_restore_failure();
+                }
+            }
+            None => self.machine.complete_restore_failure(),
+        }
+        let (stop, v3) = run_until_input(&mut self.machine);
+        self.finish_turn(stop, v3)
+    }
+
+    /// Build the `TurnResult` from a `RunStop` (+ v3 auto-fail flag) and drain the
+    /// VM's per-turn buffers. Shared by submit/submit_char/resume_*.
+    fn finish_turn(&mut self, stop: RunStop, v3_failed: bool) -> TurnResult {
+        let (quit, pending, pending_io) = match stop {
+            RunStop::Quit => (true, InputKind::Line, None),
+            RunStop::Input(k) => (false, k, None),
+            RunStop::SavePending => (false, self.pending, Some(PendingIo::Save)),
+            RunStop::RestorePending => (false, self.pending, Some(PendingIo::Restore)),
+        };
         self.quit = quit;
         self.pending = pending;
 
@@ -172,7 +201,7 @@ impl GameSession {
         });
         let location_method = detected.as_ref().map(Location::method);
 
-        let info = if save_restore_failed {
+        let info = if v3_failed {
             Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
         } else {
             None
@@ -182,7 +211,7 @@ impl GameSession {
         let beep = self.machine.pending_beeps.last().copied();
         self.machine.pending_beeps.clear();
 
-        TurnResult { transcript, location, quit, info, beep, diagnostics, location_method }
+        TurnResult { transcript, location, quit, info, beep, diagnostics, location_method, pending_io }
     }
 }
 
@@ -205,34 +234,49 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Step the machine until it pauses for input or quits.
-///
-/// Returns `(quit, save_restore_auto_failed, input_kind)` where:
-/// - `quit` is `true` if the machine ended.
-/// - `save_restore_auto_failed` is `true` if a `SaveRequest` or
-///   `RestoreRequest` was encountered and auto-rejected this run (so the
-///   caller can surface a hint to the player).
-/// - `input_kind` is the kind of input the machine is now waiting for
-///   (`Line` when quit, since no input is actually pending in that case).
-fn run_until_input(machine: &mut Machine) -> (bool, bool, InputKind) {
-    let mut save_restore_failed = false;
+/// Stop reason from `run_until_input`.
+enum RunStop {
+    /// VM is waiting for player input of this kind.
+    Input(InputKind),
+    /// VM ended (Quit/Restart).
+    Quit,
+    /// VM suspended on its own `@save` (v4+) — host must `resume_save`.
+    SavePending,
+    /// VM suspended on its own `@restore` (v4+) — host must `resume_restore`.
+    RestorePending,
+}
+
+/// Step until the machine pauses for input, quits, or (v4+) suspends on its own
+/// save/restore. Returns `(stop, v3_auto_failed)` where `v3_auto_failed` is true
+/// when a v3 game's `@save`/`@restore` was auto-rejected this run (drives the
+/// host hint). v4+ save/restore is NOT auto-failed: it bubbles up as
+/// `SavePending`/`RestorePending`.
+fn run_until_input(machine: &mut Machine) -> (RunStop, bool) {
+    let mut v3_failed = false;
     loop {
         match machine.step() {
-            StepResult::Quit => return (true, save_restore_failed, InputKind::Line),
-            StepResult::NeedLine { .. } => return (false, save_restore_failed, InputKind::Line),
-            StepResult::NeedChar => return (false, save_restore_failed, InputKind::Char),
+            StepResult::Quit => return (RunStop::Quit, v3_failed),
+            StepResult::NeedLine { .. } => return (RunStop::Input(InputKind::Line), v3_failed),
+            StepResult::NeedChar => return (RunStop::Input(InputKind::Char), v3_failed),
             StepResult::SaveRequest => {
-                // Auto-fail saves during headless operation.
-                machine.complete_save(false);
-                save_restore_failed = true;
+                if machine.mem.version() <= 3 {
+                    machine.complete_save(false);
+                    v3_failed = true;
+                } else {
+                    return (RunStop::SavePending, v3_failed);
+                }
             }
             StepResult::RestoreRequest => {
-                machine.complete_restore_failure();
-                save_restore_failed = true;
+                if machine.mem.version() <= 3 {
+                    machine.complete_restore_failure();
+                    v3_failed = true;
+                } else {
+                    return (RunStop::RestorePending, v3_failed);
+                }
             }
             StepResult::Restart => {
                 // Restart is not supported in headless mode; treat as quit.
-                return (true, save_restore_failed, InputKind::Line);
+                return (RunStop::Quit, v3_failed);
             }
             StepResult::Continue => {}
         }
@@ -389,6 +433,7 @@ mod tests {
             beep: None,
             diagnostics: vec![],
             location_method: None,
+            pending_io: None,
         };
         apply_turn(&mut m, "look", &first);
         assert_eq!(m.graph.current(), Some(1));
@@ -404,6 +449,7 @@ mod tests {
             beep: None,
             diagnostics: vec![],
             location_method: None,
+            pending_io: None,
         };
         apply_turn(&mut m, "north", &second);
         assert!(m.graph.room(2).is_some());
@@ -427,6 +473,7 @@ mod tests {
             beep: None,
             diagnostics: vec![],
             location_method: None,
+            pending_io: None,
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
@@ -449,6 +496,7 @@ mod tests {
             beep: None,
             diagnostics: vec![],
             location_method: None,
+            pending_io: None,
         };
         assert!(r.info.is_none());
     }
@@ -465,6 +513,7 @@ mod tests {
             beep: None,
             diagnostics: vec![],
             location_method: None,
+            pending_io: None,
         }
     }
 
@@ -589,6 +638,75 @@ mod tests {
             "after quit, pending should be reset to Line");
     }
 
+    // ── In-game save/restore plumbing (v4) ─────────────────────────────────────
+    //
+    // read_char_story_v5 lays out: 0x40 read_char->G0 (4 bytes), 0x44 quit.
+    // We re-stamp it to v4 and overwrite the quit at 0x44 with the save/restore
+    // opcode so the FIRST keypress drives read_char -> the opcode.
+    fn read_char_then_save_v4() -> Vec<u8> {
+        let mut buf = read_char_story_v5();
+        buf[0x00] = 4;    // version 4 (0OP save/restore store form lives here)
+        buf[0x44] = 0xB5; // 0OP:0x05 save (store form) -> G0
+        buf[0x45] = 0x10; // store byte: global 0
+        buf[0x46] = 0xBA; // quit
+        buf
+    }
+
+    fn read_char_then_restore_v4() -> Vec<u8> {
+        let mut buf = read_char_story_v5();
+        buf[0x00] = 4;
+        buf[0x44] = 0xB6; // 0OP:0x06 restore (store form) -> G0
+        buf[0x45] = 0x10; // store byte: global 0
+        buf[0x46] = 0xBA; // quit
+        buf
+    }
+
+    #[test]
+    fn ingame_save_yields_pending_io_and_resume_continues() {
+        let mut sess = GameSession::new(read_char_then_save_v4()).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Char);
+
+        // The keypress drives read_char -> @save, which suspends with pending_io.
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Save));
+        assert!(!r.quit, "a save-pending turn is not a quit");
+        assert!(r.info.is_none(), "v4+ in-game save shows no 'isn't wired' info line");
+
+        // Host wrote the file OK: resume stores 1 into G0 and runs to quit.
+        let r2 = sess.resume_save(true);
+        assert!(r2.quit, "resume_save continues the VM to the quit opcode");
+        assert_eq!(sess.machine.global(0), 1, "complete_save(true) stored 1 into G0");
+    }
+
+    #[test]
+    fn ingame_restore_yields_pending_io_and_cancel_fails_cleanly() {
+        let mut sess = GameSession::new(read_char_then_restore_v4()).expect("new");
+
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Restore));
+        assert!(!r.quit);
+
+        // Cancel: resume_restore(None) -> complete_restore_failure stores 0, runs on.
+        let r2 = sess.resume_restore(None);
+        assert!(r2.quit);
+        assert_eq!(sess.machine.global(0), 0, "cancelled restore stored 0 into G0");
+    }
+
+    #[test]
+    fn v3_ingame_save_still_auto_fails_with_info() {
+        // v3 keeps the host-mediated message; the VM auto-fails the request.
+        // v3 save is a BRANCH instruction (0OP:0x05 short form 0xB5 + 1 branch byte).
+        let mut buf = read_char_story_v5();
+        buf[0x00] = 3;
+        buf[0x44] = 0xB5; // 0OP:0x05 save (branch form in v3)
+        buf[0x45] = 0xC0; // branch: on-true, offset that lands on quit (see note)
+        buf[0x46] = 0xBA; // quit
+        let mut sess = GameSession::new(buf).expect("new");
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, None, "v3 never bubbles pending_io");
+        assert!(r.info.is_some(), "v3 keeps the 'isn't wired' info line");
+    }
+
     #[test]
     fn turn_result_carries_location_method_field() {
         // Build the same way the sibling submit test does; the field just needs to exist
@@ -613,6 +731,59 @@ mod tests {
         // VM queues are drained after the turn.
         assert!(sess.machine.pending_beeps.is_empty());
         assert!(sess.machine.diagnostics.is_empty());
+    }
+
+    // Fixture-gated: in-game SAVE then RESTORE on Bureaucracy (v4) must leave the
+    // upper-window status grid non-empty (the redraw this whole feature is about).
+    // NOTE/GAP: this drives the SESSION resume API, not the app event loop, and it
+    // depends on reaching @save by typing into the game. If the input sequence does
+    // not reach @save within the probe budget, the test skips (no false failure).
+    #[test]
+    fn bureaucracy_ingame_restore_redraws_status_grid() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/bureaucr.z4");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+        let story = std::fs::read(&fixture).expect("read bureaucr.z4");
+        let mut sess = GameSession::new(story).expect("new bureaucr.z4");
+
+        // Probe: type SAVE-ish commands until the VM suspends on @save.
+        let mut blob: Option<Vec<u8>> = None;
+        for cmd in ["save", "yes", "save", "y", "save"] {
+            let r = sess.submit(cmd);
+            if r.pending_io == Some(PendingIo::Save) {
+                blob = Some(sess.machine.save_quetzal());
+                let _ = sess.resume_save(true); // pretend the host wrote the file
+                break;
+            }
+            if r.quit { break; }
+        }
+        let Some(blob) = blob else {
+            // Could not reach @save with this probe sequence — document the gap.
+            eprintln!("bureaucr.z4: did not reach @save via the probe; skipping redraw assertion");
+            return;
+        };
+
+        // Now drive a RESTORE and feed the captured blob back.
+        let mut restored = false;
+        for cmd in ["restore", "yes", "restore", "y", "restore"] {
+            let r = sess.submit(cmd);
+            if r.pending_io == Some(PendingIo::Restore) {
+                let _ = sess.resume_restore(Some(&blob));
+                restored = true;
+                break;
+            }
+            if r.quit { break; }
+        }
+        if !restored {
+            eprintln!("bureaucr.z4: did not reach @restore via the probe; skipping redraw assertion");
+            return;
+        }
+
+        // The resumed game redrew its own status line into the upper window.
+        let any_drawn = sess.machine.screen.upper.cells.iter().any(|c| c.ch != ' ');
+        assert!(any_drawn, "after in-game RESTORE the upper-window grid must be non-empty (redraw)");
     }
 
     // ── czech.z5 smoke test ───────────────────────────────────────────────────

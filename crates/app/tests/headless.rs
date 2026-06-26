@@ -50,6 +50,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
         beep: None,
         diagnostics: vec![],
         location_method: None,
+        pending_io: None,
     }
 }
 

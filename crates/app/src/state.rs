@@ -648,6 +648,16 @@ pub struct AppState {
     /// Active saves-manager modal state. `None` means the modal is closed.
     pub saves: Option<SavesState>,
 
+    /// Set while a game-initiated (v4+) `@save`/`@restore` is awaiting the host's
+    /// file I/O. The saves dialog runs in "in-game" mode: its confirm/cancel call
+    /// `session.resume_save`/`resume_restore` instead of the Ctrl+S/Ctrl+R path.
+    pub ingame_io: Option<crate::session::PendingIo>,
+
+    /// Flag-hop: set by `handle_saves_prompt` after a successful in-game SAVE so
+    /// the run loop (where `session`/`mapper`/`last_panes` are in scope) performs
+    /// the VM resume + recenter. `Some(true)` = file written. Cleared on resume.
+    pub ingame_resume_save: Option<bool>,
+
     /// Active file-browser modal state. `None` means the browser is closed.
     pub file_browser: Option<FileBrowserState>,
 
@@ -808,6 +818,8 @@ impl Default for AppState {
             hotkeys: crate::keymap::HotkeyLayout::default(),
             gallery: None,
             saves: None,
+            ingame_io: None,
+            ingame_resume_save: None,
             file_browser: None,
             verb_menu: None,
             config: crate::config::Config::default(),

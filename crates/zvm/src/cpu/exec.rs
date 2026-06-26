@@ -1538,6 +1538,28 @@ impl Machine {
             }
         }
     }
+
+    /// Complete a game-initiated restore (v4+) with the supplied Quetzal bytes.
+    ///
+    /// On success the machine state (dynamic memory, frames, eval stack, PC) is
+    /// replaced with the saved state, and the ORIGINAL `@save` "returns 2": the
+    /// saved PC is post-instruction, so the v4+ `@save`'s store byte is the last
+    /// byte of that instruction, at `state.pc - 1`. We store 2 there. A restore
+    /// invalidates undo history (like `restore_file`), and the `@restore`'s own
+    /// store target is unused on success, so both are cleared.
+    ///
+    /// On `Err` the machine is untouched (the `restore_quetzal` contract); the
+    /// caller should then call `complete_restore_failure()`.
+    pub fn complete_restore_success(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
+        self.restore_quetzal(data)?;
+        if self.mem.version() >= 4 {
+            let store_var = self.mem.read_byte(self.state.pc.saturating_sub(1));
+            self.do_store(Some(store_var), 2);
+        }
+        self.undo_stack.clear();
+        self.pending_restore_store = None;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,6 +1581,59 @@ impl Memory {
 pub(crate) mod tests {
     use super::*;
     use crate::header::tests_support::sample_story;
+
+    // ── In-game restore-success: the original @save "returns 2" on restore ─────
+    //
+    // v4 story at 0x40:  save -> G0 (0xB5, store byte 0x10), then quit (0xBA).
+    // After step() the @save suspends with SaveRequest and state.pc == 0x42, so the
+    // store byte lives at mem[0x41]. complete_restore_success(blob) must restore the
+    // saved state (PC back to 0x42) and store 2 into G0.
+    fn save_v4_into_g0_story() -> Vec<u8> {
+        let mut buf = sample_story(4);
+        buf[0x40] = 0xB5; // 0OP:0x05 save (store form, v4+)
+        buf[0x41] = 0x10; // store -> global 0 (var 0x10)
+        buf[0x42] = 0xBA; // quit
+        buf
+    }
+
+    #[test]
+    fn complete_restore_success_stores_2_and_resumes_pc() {
+        let mem = Memory::new(save_v4_into_g0_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+
+        // Execute @save -> SaveRequest; PC is now past the store byte (0x42).
+        let r = m.step();
+        assert_eq!(r, StepResult::SaveRequest, "save opcode suspends with SaveRequest");
+        assert_eq!(m.state.pc, 0x42, "PC is post-instruction (store byte at 0x41)");
+
+        // Host captures the Quetzal at the @save point, then completes the save.
+        let blob = m.save_quetzal();
+        m.complete_save(true);
+        assert_eq!(m.global(0), 1, "save success stores 1 into G0");
+
+        // Clobber G0 and move the PC away so the restore must reset BOTH.
+        m.do_store(Some(0x10), 0x99);
+        m.state.pc = 0x00AB;
+
+        // Restore success: the ORIGINAL @save returns 2; PC resumes at 0x42.
+        m.complete_restore_success(&blob).expect("restore must succeed");
+        assert_eq!(m.global(0), 2, "restore makes the original @save 'return' 2");
+        assert_eq!(m.state.pc, 0x42, "PC resumed at the post-@save address");
+    }
+
+    #[test]
+    fn complete_restore_success_err_on_corrupt_blob_leaves_state() {
+        let mem = Memory::new(save_v4_into_g0_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x42;
+        m.do_store(Some(0x10), 0x77); // sentinel
+
+        let err = m.complete_restore_success(b"not a quetzal blob");
+        assert!(err.is_err(), "corrupt blob must return Err");
+        assert_eq!(m.global(0), 0x77, "state untouched on restore failure");
+        assert_eq!(m.state.pc, 0x42, "pc untouched on restore failure");
+    }
 
     #[test]
     fn undo_save_restore_round_trip() {

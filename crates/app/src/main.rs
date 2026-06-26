@@ -811,6 +811,7 @@ fn main() {
             beep: None,
             diagnostics: vec![],
             location_method: None,
+            pending_io: None,
         };
         apply_turn(&mut mapper, "", &seed_result);
         let rid = snap_number as mapper::graph::RoomId;
@@ -1397,6 +1398,12 @@ fn main() {
                             // (no text command to parse), but we still observe any location
                             // change so the map stays in sync.
                             apply_turn(&mut mapper, "", &result);
+                            // Game-initiated (v4+) save/restore: open the saves
+                            // dialog in in-game mode and defer the rest of the turn.
+                            if let Some(io) = result.pending_io {
+                                open_ingame_saves(io, &save_dir, &ifid, &mut state);
+                                continue;
+                            }
                             state.graph_gen = state.graph_gen.wrapping_add(1);
                             // Select and recenter on the current room if it changed.
                             if let Some(snap) = &result.location {
@@ -1472,6 +1479,10 @@ fn main() {
                         handle_saves_prompt(
                             kind, buf, &save_dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes,
                         );
+                    }
+                    // Resume an in-game save/restore if this prompt resolved it.
+                    if resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map) {
+                        break;
                     }
                     continue;
                 }
@@ -1579,6 +1590,7 @@ fn main() {
                                                             beep: None,
                                                             diagnostics: vec![],
                                                             location_method: None,
+                                                            pending_io: None,
                                                         };
                                                         apply_turn(&mut mapper, "", &restore_result);
                                                         state.set_viewed_layer(None);
@@ -1722,6 +1734,14 @@ fn main() {
 
                 // Bump the graph generation so any in-flight tidy result is detected as stale.
                 state.graph_gen = state.graph_gen.wrapping_add(1);
+
+                // Game-initiated (v4+) save/restore: open the saves dialog in
+                // in-game mode and defer auto-save/history capture until the
+                // resume completes (the turn is still in flight).
+                if let Some(io) = result.pending_io {
+                    open_ingame_saves(io, &save_dir, &ifid, &mut state);
+                    continue;
+                }
 
                 // ── Rewind/replay capture (opt-in) ────────────────────────────
                 if state.config.record_turn_history {
@@ -1933,6 +1953,7 @@ fn main() {
                                         beep: None,
                                         diagnostics: vec![],
                                         location_method: None,
+                                        pending_io: None,
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -2065,6 +2086,7 @@ fn main() {
                                         beep: None,
                                         diagnostics: vec![],
                                         location_method: None,
+                                        pending_io: None,
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -2108,6 +2130,36 @@ fn main() {
                 let load_info = state.saves.as_ref().and_then(|s| {
                     s.entries.get(s.selected).map(|e| (e.path.clone(), e.name.clone()))
                 });
+
+                // In-game restore: feed Quetzal bytes back into the suspended VM
+                // (mirrors the snapshot restore re-observe/recenter, swapping
+                // restore_file for resume_restore).
+                if state.ingame_io == Some(app::session::PendingIo::Restore) {
+                    let Some((path, entry_name)) = load_info else { continue };
+                    state.saves = None;
+                    state.ingame_io = None;
+                    let result = match app::archive::read_quetzal_from_file(&path) {
+                        Ok(bytes) => {
+                            // For a .babelmap, also load its map (as Ctrl+R does).
+                            if let Ok(ac) = load_archive(&path) {
+                                mapper = ac.mapper;
+                            }
+                            state.push_transcript(&format!("[Restored: {}]", entry_name));
+                            session.resume_restore(Some(&bytes))
+                        }
+                        Err(e) => {
+                            state.push_transcript(&format!("[Restore failed: {}]", e));
+                            session.resume_restore(None)
+                        }
+                    };
+                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, last_panes.map);
+                    if let Some(io) = state.ingame_io {
+                        open_ingame_saves(io, &save_dir, &ifid, &mut state);
+                    }
+                    if quit { break; }
+                    continue;
+                }
+
                 if let Some((path, entry_name)) = load_info {
                     match load_archive(&path) {
                         Ok(ac) => {
@@ -2137,6 +2189,7 @@ fn main() {
                                             beep: None,
                                             diagnostics: vec![],
                                             location_method: None,
+                                            pending_io: None,
                                         };
                                         apply_turn(&mut mapper, "", &restore_result);
                                         state.set_viewed_layer(None);
@@ -2194,6 +2247,7 @@ fn main() {
                                         beep: None,
                                         diagnostics: vec![],
                                         location_method: None,
+                                        pending_io: None,
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -2227,6 +2281,12 @@ fn main() {
         // (This covers the case where apply_action routed a saves/reset prompt submit.)
         if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
             handle_saves_prompt(kind, buf, &save_dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes);
+        }
+
+        // After dispatch: resume an in-game (v4+) save/restore whose dialog was
+        // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
+        if resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map) {
+            break;
         }
 
         // After apply_action: if gallery was just closed, write the resolved look to
@@ -2331,6 +2391,7 @@ fn reset_game(
                     beep: None,
                     diagnostics: vec![],
                     location_method: None,
+                    pending_io: None,
                 };
                 apply_turn(mapper, "", &seed_result);
                 let rid = snap_number as mapper::graph::RoomId;
@@ -2360,8 +2421,16 @@ fn handle_saves_prompt(
 ) {
     match kind {
         PromptKind::SaveAs => {
+            let ingame = state.ingame_io == Some(app::session::PendingIo::Save);
             if buf.is_empty() {
                 state.push_transcript("[Save name cannot be empty]".to_string().as_str());
+                // In-game: stay pending — re-open the prompt so the user can retry.
+                if ingame {
+                    state.prompt = Some(app::state::Prompt {
+                        kind: PromptKind::SaveAs,
+                        buffer: String::new(),
+                    });
+                }
                 return;
             }
             match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds) {
@@ -2371,9 +2440,21 @@ fn handle_saves_prompt(
                     if let Some(s) = &mut state.saves {
                         s.entries = list_saves(dir, ifid);
                     }
+                    // In-game SAVE: flag-hop so the run loop resumes the VM
+                    // (resume + recenter need session/mapper/last_panes scope).
+                    if ingame {
+                        state.ingame_resume_save = Some(true);
+                    }
                 }
                 Err(e) => {
                     state.push_transcript(&format!("[Save failed: {}]", e));
+                    // In-game: stay pending — re-open the prompt so the user can retry.
+                    if ingame {
+                        state.prompt = Some(app::state::Prompt {
+                            kind: PromptKind::SaveAs,
+                            buffer: String::new(),
+                        });
+                    }
                 }
             }
         }
@@ -2416,6 +2497,138 @@ fn handle_saves_prompt(
         }
         _ => {} // other prompt kinds are handled elsewhere
     }
+}
+
+/// Open the saves dialog in "in-game" mode for a game-initiated save/restore.
+/// SAVE: prompt for a save name (reuses the SaveAs prompt). RESTORE: open the
+/// saves list, including plain *.qzl files alongside *.babelmap saves.
+fn open_ingame_saves(
+    io: app::session::PendingIo,
+    save_dir: &std::path::Path,
+    ifid: &str,
+    state: &mut AppState,
+) {
+    use app::session::PendingIo;
+    state.ingame_io = Some(io);
+    state.dialog_focus = 0;
+    match io {
+        PendingIo::Save => {
+            // The game asked to SAVE: ask where. On submit -> resume_save(true);
+            // on cancel -> resume_save(false) (handled in the cancel resolver).
+            state.prompt = Some(app::state::Prompt {
+                kind: PromptKind::SaveAs,
+                buffer: String::new(),
+            });
+        }
+        PendingIo::Restore => {
+            // The game asked to RESTORE: list babelmap saves + plain .qzl files.
+            let mut entries = list_saves(save_dir, ifid);
+            entries.extend(list_qzl(save_dir));
+            state.saves = Some(SavesState { entries, selected: 0 });
+        }
+    }
+}
+
+/// List plain `*.qzl` Quetzal files in `dir` as SaveInfo rows (for the in-game
+/// restore picker). Mirrors the SaveInfo shape used by `list_saves`.
+fn list_qzl(dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("qzl") {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("save.qzl").to_string();
+                out.push(app::persist_files::SaveInfo {
+                    path: p, name, turns: 0, saved_at: String::new(), is_default: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Post-process a TurnResult produced by `session.resume_*`: render output,
+/// re-observe the location, recenter, and record a *chained* in-game I/O if the
+/// resume itself suspended on another `@save`/`@restore`. Returns true if the
+/// app should quit. Mirrors the post-turn block in the `submit` path.
+fn finish_resumed_turn(
+    result: TurnResult,
+    mapper: &mut Mapper,
+    state: &mut AppState,
+    map_area: Rect,
+) -> bool {
+    state.push_transcript(&result.transcript);
+    apply_turn_events(state, &result);
+    if let Some(note) = &result.info {
+        state.push_transcript(note);
+    }
+    apply_turn(mapper, "", &result);
+    state.graph_gen = state.graph_gen.wrapping_add(1);
+    state.set_viewed_layer(None);
+    if let Some(snap) = &result.location {
+        let rid = snap.number as mapper::graph::RoomId;
+        state.select_room(Some(rid));
+        if let Some(room) = mapper.graph.room(rid) {
+            if let Some(pos) = room.pos {
+                let (pw, ph) = map_pane_dims(map_area);
+                state.recenter_on(pos, pw, ph);
+            }
+        }
+    }
+    // A chained request: the resumed turn suspended on another @save/@restore.
+    if let Some(io) = result.pending_io {
+        state.ingame_io = Some(io);
+    }
+    result.quit
+}
+
+/// Resolve a pending in-game save/restore after the dialog interaction:
+/// (1) a flag-hopped successful SAVE resumes the VM; (2) an in-game overlay that
+/// closed without a confirm is treated as a cancel and resumes with failure.
+/// Re-opens the dialog for a chained request. Returns true if the app should quit.
+fn resolve_ingame_dialog(
+    session: &mut GameSession,
+    mapper: &mut Mapper,
+    state: &mut AppState,
+    save_dir: &std::path::Path,
+    ifid: &str,
+    map_area: Rect,
+) -> bool {
+    use app::session::PendingIo;
+
+    // (1) SAVE confirmed in handle_saves_prompt (flag-hop): resume here.
+    if let Some(wrote_ok) = state.ingame_resume_save.take() {
+        state.ingame_io = None;
+        let result = session.resume_save(wrote_ok);
+        let quit = finish_resumed_turn(result, mapper, state, map_area);
+        if let Some(io) = state.ingame_io {
+            open_ingame_saves(io, save_dir, ifid, state);
+        }
+        return quit;
+    }
+
+    // (2) Cancel: an in-game overlay closed without a confirm.
+    if let Some(io) = state.ingame_io {
+        let overlay_open = match io {
+            PendingIo::Save => matches!(&state.prompt, Some(p) if matches!(p.kind, PromptKind::SaveAs)),
+            PendingIo::Restore => state.saves.is_some(),
+        };
+        if !overlay_open {
+            state.ingame_io = None;
+            let result = match io {
+                PendingIo::Save => session.resume_save(false),
+                PendingIo::Restore => session.resume_restore(None),
+            };
+            state.push_transcript("[In-game save/restore cancelled]");
+            let quit = finish_resumed_turn(result, mapper, state, map_area);
+            if let Some(io) = state.ingame_io {
+                open_ingame_saves(io, save_dir, ifid, state);
+            }
+            return quit;
+        }
+    }
+
+    false
 }
 
 /// Format a Unix timestamp (seconds since epoch) as YYYYMMDD-HHMMSS (UTC).
@@ -2778,6 +2991,7 @@ fn apply_launch_resume(
                     beep: None,
                     diagnostics: vec![],
                     location_method: None,
+                    pending_io: None,
                 };
                 apply_turn(mapper, "", &restore_result);
                 state.set_viewed_layer(None);
