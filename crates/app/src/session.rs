@@ -280,23 +280,63 @@ fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
 
 // ── Adventure-title helpers ───────────────────────────────────────────────────
 
-/// Return the first non-empty, non-`>`-prompt line from the game's opening
-/// banner, trimmed and capped at 40 characters.  Returns `None` if no such
-/// line exists.
-pub fn first_banner_line(intro_text: &str) -> Option<String> {
-    for line in intro_text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == ">" {
-            continue;
-        }
-        // Skip pure prompt lines (just ">" possibly with whitespace).
-        if trimmed.starts_with('>') && trimmed.trim_start_matches('>').trim().is_empty() {
-            continue;
-        }
-        let capped: String = trimmed.chars().take(40).collect();
-        return Some(capped);
+/// Canonical titles for well-known games, keyed by the release+serial prefix of
+/// the IFID (`ZCODE-<release>-<serial>`, WITHOUT the trailing byte-checksum). This
+/// is robust to different file copies of the same release and can be populated
+/// from the documented Infocom serial catalog without needing each story file.
+/// Used when the opening banner doesn't reliably yield the title (a game opening
+/// with copyright/epigraph/narration) or to prefer a clean canonical name.
+/// Checked before the banner heuristic.
+const KNOWN_TITLES: &[(&str, &str)] = &[
+    ("ZCODE-77-850814", "A Mind Forever Voyaging"),
+    ("ZCODE-116-870602", "Bureaucracy"),
+    ("ZCODE-31-871119", "The Hitchhiker's Guide to the Galaxy"),
+    ("ZCODE-37-851003", "Planetfall"),
+    ("ZCODE-87-860904", "Spellbreaker"),
+    ("ZCODE-393-890714", "Zork Zero: The Revenge of Megaboz"),
+    ("ZCODE-88-840726", "Zork I: The Great Underground Empire"),
+    ("ZCODE-16-970828", "Zork: The Undiscovered Underground"),
+];
+
+/// The canonical title for a known game, matched on the release+serial prefix of
+/// the IFID (the trailing `-<checksum>` is ignored).
+pub fn known_title(ifid: &str) -> Option<&'static str> {
+    // Strip the trailing checksum segment: "ZCODE-88-840726-A129" → "ZCODE-88-840726".
+    let key = ifid.rsplit_once('-').map_or(ifid, |(prefix, _)| prefix);
+    KNOWN_TITLES.iter().find(|(id, _)| *id == key).map(|(_, t)| *t)
+}
+
+/// Extract the adventure title from the opening banner by anchoring on the
+/// Infocom-style boilerplate: the title is the non-blank line immediately ABOVE
+/// the first line that looks like copyright / "interactive fiction|fantasy" /
+/// "Serial number" / trademark text. Returns the trimmed title (capped at 40
+/// chars), or `None` when the banner opens with boilerplate (no title above it)
+/// or has no such anchor (e.g. an epigraph or story narration) — the caller then
+/// falls back to the filename. This avoids grabbing copyright/quote/narration
+/// lines as the title.
+pub fn title_from_banner(intro_text: &str) -> Option<String> {
+    let lines: Vec<&str> = intro_text
+        .lines()
+        .map(str::trim)
+        .filter(|l| {
+            !l.is_empty() && !(l.starts_with('>') && l.trim_start_matches('>').trim().is_empty())
+        })
+        .collect();
+
+    let is_anchor = |l: &str| {
+        let lower = l.to_lowercase();
+        lower.contains("copyright")
+            || lower.contains("interactive fiction")
+            || lower.contains("interactive fantasy")
+            || lower.contains("serial number")
+            || lower.contains("trademark")
+    };
+
+    let anchor = lines.iter().position(|l| is_anchor(l))?;
+    if anchor == 0 {
+        return None; // banner opens with boilerplate; no title line above it
     }
-    None
+    Some(lines[anchor - 1].chars().take(40).collect())
 }
 
 /// Resolve the adventure title using a three-tier priority:
@@ -305,11 +345,17 @@ pub fn first_banner_line(intro_text: &str) -> Option<String> {
 /// 3. The story file's stem (filename without extension).
 pub fn resolve_title(
     override_name: Option<&str>,
+    ifid: &str,
     banner: Option<&str>,
     story_path: &std::path::Path,
 ) -> String {
     if let Some(name) = override_name {
         return name.to_owned();
+    }
+    // Known-game lookup table wins over the banner heuristic (it is exact, and
+    // covers games whose banner doesn't yield the title).
+    if let Some(t) = known_title(ifid) {
+        return t.to_owned();
     }
     if let Some(b) = banner {
         return b.to_owned();
@@ -592,18 +638,38 @@ mod tests {
     // ── Task 4: first_banner_line + resolve_title tests ──────────────────────
 
     #[test]
-    fn first_banner_line_skips_blank_and_prompt() {
-        assert_eq!(first_banner_line("\n\nZORK I: The Great Underground Empire\nCopyright...\n> ").as_deref(),
+    fn title_from_banner_anchors_on_boilerplate() {
+        // Title is the line above the copyright/boilerplate anchor.
+        assert_eq!(title_from_banner("\n\nZORK I: The Great Underground Empire\nCopyright...\n> ").as_deref(),
                    Some("ZORK I: The Great Underground Empire"));
-        assert_eq!(first_banner_line("\n\n").as_deref(), None);
+        // "interactive fiction" / "interactive fantasy" also anchor.
+        assert_eq!(title_from_banner("SPELLBREAKER\nAn Interactive Fantasy\nCopyright (c) 1985").as_deref(),
+                   Some("SPELLBREAKER"));
+        // Banner opens WITH boilerplate (no title above) → None (caller → filename).
+        assert_eq!(title_from_banner("Copyright (C) 1987 Infocom, Inc.\nType RESTORE...").as_deref(), None);
+        // No anchor (epigraph / narration) → None.
+        assert_eq!(title_from_banner("\"Tomorrow never yet\nOn any human being rose or set.").as_deref(), None);
+        assert_eq!(title_from_banner("\n\n").as_deref(), None);
     }
 
     #[test]
-    fn resolve_title_prefers_override_then_banner_then_filename() {
+    fn known_title_looks_up_table() {
+        assert_eq!(known_title("ZCODE-116-870602-FC65"), Some("Bureaucracy"));
+        assert_eq!(known_title("ZCODE-77-850814-5031"), Some("A Mind Forever Voyaging"));
+        assert_eq!(known_title("ZCODE-0-000000-0000"), None);
+    }
+
+    #[test]
+    fn resolve_title_override_then_table_then_banner_then_filename() {
         use std::path::Path;
-        assert_eq!(resolve_title(Some("My Game"), Some("ZORK I"), Path::new("/x/zork1.z3")), "My Game");
-        assert_eq!(resolve_title(None, Some("ZORK I"), Path::new("/x/zork1.z3")), "ZORK I");
-        assert_eq!(resolve_title(None, None, Path::new("/x/zork1.z3")), "zork1");
+        // override wins over everything.
+        assert_eq!(resolve_title(Some("My Game"), "ZCODE-116-870602-FC65", Some("X"), Path::new("/x/zork1.z3")), "My Game");
+        // table wins over the banner heuristic (e.g. Bureaucracy, whose banner is just copyright).
+        assert_eq!(resolve_title(None, "ZCODE-116-870602-FC65", None, Path::new("/x/bureaucr.z4")), "Bureaucracy");
+        // unknown IFID → banner heuristic.
+        assert_eq!(resolve_title(None, "UNKNOWN", Some("ZORK I"), Path::new("/x/zork1.z3")), "ZORK I");
+        // unknown IFID + no banner title → filename.
+        assert_eq!(resolve_title(None, "UNKNOWN", None, Path::new("/x/zork1.z3")), "zork1");
     }
 
     // ── strip_read_prompt unit tests ──────────────────────────────────────────

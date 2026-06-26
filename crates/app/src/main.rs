@@ -748,8 +748,8 @@ fn main() {
 
     // Push the game's opening banner and capture the title from it.
     let banner = session.take_transcript();
-    let banner_line = app::session::first_banner_line(&banner);
-    state.title = app::session::resolve_title(None, banner_line.as_deref(), &story_path);
+    let banner_title = app::session::title_from_banner(&banner);
+    state.title = app::session::resolve_title(None, &ifid, banner_title.as_deref(), &story_path);
     state.ifid = ifid.clone();
     // Now that the IFID is known, re-resolve through reload_style so the per-game
     // override (styles/<ifid>.toml) is merged over the global at startup — the
