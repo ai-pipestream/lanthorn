@@ -1084,6 +1084,22 @@ impl Machine {
             }
             // EXT:0x05 set_true_colour — we render with our own styling; accept and ignore.
             0x05 => StepResult::Continue,
+            // EXT:0x0B print_unicode — output an arbitrary Unicode codepoint.
+            0x0B => {
+                let cp = ops.first().copied().unwrap_or(0) as u32;
+                let ch = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                let mut b = [0u8; 4];
+                self.print_text(ch.encode_utf8(&mut b));
+                StepResult::Continue
+            }
+            // EXT:0x0C check_unicode — bit0: can print, bit1: can input. We render and
+            // read UTF-8, so any valid scalar value is both (3); invalid -> 0.
+            0x0C => {
+                let cp = ops.first().copied().unwrap_or(0) as u32;
+                let val = if char::from_u32(cp).is_some() { 3 } else { 0 };
+                self.do_store(store, val);
+                StepResult::Continue
+            }
             // EXT:0x09 save_undo — in-memory undo snapshot.
             0x09 => {
                 self.do_save_undo(store);
@@ -3888,5 +3904,37 @@ pub(crate) mod tests {
         assert_eq!(m.global(0), 5, "execution continued past set_colour/set_true_colour");
         assert!(m.diagnostics.iter().all(|d| !d.contains("0x1B") && !d.contains("0x05")),
             "graceful arms must not emit unimplemented diagnostics");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3: print_unicode + check_unicode (EXT:0x0B / 0x0C)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn print_unicode_outputs_codepoint() {
+        let mut buf = sample_story(5);
+        // print_unicode 0x00E9 ('é'): EXT:0x0B, [Large operand 0x00E9]
+        // type byte 0b00_11_11_11 = 0x3F ([Large, omit, omit, omit]); large = 2 bytes.
+        buf[0x10]=0xBE; buf[0x11]=0x0B; buf[0x12]=0x3F; buf[0x13]=0x00; buf[0x14]=0xE9;
+        buf[0x15]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let out = m.buffer_output().expect("default sink");
+        assert!(out.buf.contains('é'), "é reached the output sink: {:?}", out.buf);
+    }
+
+    #[test]
+    fn check_unicode_reports_printable_and_receivable() {
+        let mut buf = sample_story(5);
+        // check_unicode 0x00E9 -> G0  (EXT:0x0C, [Large], store)
+        buf[0x10]=0xBE; buf[0x11]=0x0C; buf[0x12]=0x3F; buf[0x13]=0x00; buf[0x14]=0xE9; buf[0x15]=0x10;
+        buf[0x16]=0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 3, "valid scalar: printable|receivable = 3");
     }
 }
