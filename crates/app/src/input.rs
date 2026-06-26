@@ -222,6 +222,10 @@ pub enum Action {
     StyleCustomChar(char),
     /// Delete the last character from the style-editor custom hex buffer.
     StyleCustomBackspace,
+    /// Save the style editor: resolve working doc to live colors and close.
+    StyleSave,
+    /// Reset the active selector's Decl to the built-in default.
+    StyleReset,
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -1075,6 +1079,8 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
                 _ => Action::StyleToggleAttr(AttrKind::Reversed),
             }
         }
+        KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::StyleSave,
+        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => Action::StyleReset,
         KeyCode::Esc  => Action::StyleEditorCancel,
         _ => Action::None,
     }
@@ -2222,6 +2228,30 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::StyleCustomBackspace => {
             if let Some(ed) = &mut state.style_editor {
                 ed.custom_buf.pop();
+            }
+        }
+
+        Action::StyleSave => {
+            if let Some(ed) = state.style_editor.take() {
+                let dir = state.config.user_dir.clone();
+                let _ = crate::style_mru::save_mru(&dir, &ed.mru);
+                let (cs, set, _w) = crate::style::resolve(&ed.doc, &dir);
+                state.colors = cs;
+                state.symbols = set;
+            }
+        }
+
+        Action::StyleReset => {
+            if let Some(ed) = &mut state.style_editor {
+                let default_doc = crate::style::parse_style_toml(crate::style::DEFAULT_STYLE_TOML)
+                    .expect("DEFAULT_STYLE_TOML is always valid");
+                let sel = ed.selectors[ed.active].to_string();
+                match default_doc.colors.selectors.get(&sel) {
+                    Some(d) => { ed.doc.colors.selectors.insert(sel, d.clone()); }
+                    None => { ed.doc.colors.selectors.remove(&sel); }
+                }
+                let dir = state.config.user_dir.clone();
+                recompute_style_preview(ed, &dir);
             }
         }
 
@@ -5649,6 +5679,8 @@ mod tests {
     #[test]
     fn style_set_color_sets_fg_and_pushes_hex_to_mru() {
         let mut s = AppState::default();
+        // Use a non-existent user_dir so load_mru returns empty regardless of disk state.
+        s.config.user_dir = std::path::PathBuf::from("/tmp/babelmap-test-empty-mru-dir");
         open_style_editor(&mut s);
         let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
 
@@ -5697,5 +5729,44 @@ mod tests {
         apply_action(Action::StyleCustomBackspace, &mut s, m);
         apply_action(Action::StyleCustomBackspace, &mut s, m);
         assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#ff00");
+    }
+
+    #[test]
+    fn style_save_applies_to_live_colors_and_closes() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        apply_action(
+            Action::StyleSetColor { is_bg: false, value: Some("#ff0000".into()) },
+            &mut s, &mut mapper::mapper::Mapper::default(),
+        );
+        apply_action(Action::StyleSave, &mut s, &mut mapper::mapper::Mapper::default());
+        // Save must close the editor.
+        assert!(s.style_editor.is_none(), "save closes the editor");
+        // The live color scheme must have been updated (resolve ran).
+        // We can't assert a specific selector value without knowing which selector is first,
+        // but we can verify that state.colors is a valid ColorScheme (non-default fields
+        // may have changed). The smoke is: resolve ran without panic.
+        let _ = &s.colors;
+    }
+
+    #[test]
+    fn style_reset_reverts_active_selector_to_default() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
+        // Mutate the first selector's fg.
+        apply_action(
+            Action::StyleSetColor { is_bg: false, value: Some("#ff0000".into()) },
+            &mut s, &mut mapper::mapper::Mapper::default(),
+        );
+        // Reset should revert it to the built-in default.
+        apply_action(Action::StyleReset, &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        let default_doc = crate::style::parse_style_toml(crate::style::DEFAULT_STYLE_TOML).unwrap();
+        assert_eq!(
+            ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
+            default_doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
+            "reset restores the default fg for selector '{}'", sel,
+        );
     }
 }

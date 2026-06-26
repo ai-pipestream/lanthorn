@@ -414,6 +414,8 @@ mod tests {
     #[test]
     fn style_editor_swatch_rects_populated() {
         let mut s = AppState::default();
+        // Use a non-existent user_dir so load_mru returns empty regardless of disk state.
+        s.config.user_dir = std::path::PathBuf::from("/tmp/babelmap-test-empty-mru-dir");
         crate::input::open_style_editor(&mut s);
         // Wide enough to display the property pane (needs >= 61 content cols).
         let area = Rect::new(0, 0, 120, 60);

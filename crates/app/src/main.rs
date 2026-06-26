@@ -1171,7 +1171,7 @@ fn main() {
         }
     }
 
-    loop {
+    'event_loop: loop {
         // ── Style watch: drain events, debounce, then reload ──────────────────
         if let Some(w) = &style_watcher {
             let mut saw = false;
@@ -1776,24 +1776,83 @@ fn main() {
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
             Event::Mouse(m) => {
-                // Style-editor board: intercept left-clicks on sample rows.
+                // Style-editor board: intercept left-clicks on sample rows and property pane.
                 if state.style_editor.is_some() {
                     if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
                         if let Some(rects) = &last_panes.style_editor {
-                            let mut handled = false;
-                            for (idx, rect) in &rects.samples {
-                                if m.column >= rect.x && m.column < rect.right()
+                            // Helper: is the cursor inside a rect?
+                            let hit = |rect: &ratatui::layout::Rect| {
+                                rect.width > 0 && rect.height > 0
+                                    && m.column >= rect.x && m.column < rect.right()
                                     && m.row >= rect.y && m.row < rect.bottom()
-                                {
+                            };
+
+                            // Sample board: set active selector.
+                            for (idx, rect) in &rects.samples {
+                                if hit(rect) {
                                     if let Some(ed) = &mut state.style_editor {
                                         ed.active = *idx;
                                     }
-                                    handled = true;
-                                    break;
+                                    continue 'event_loop;
                                 }
                             }
-                            if handled {
-                                continue;
+
+                            // Attribute chips.
+                            for (kind, rect) in &rects.attr_chips {
+                                if hit(rect) {
+                                    let kind = *kind;
+                                    apply_action(Action::StyleToggleAttr(kind), &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+
+                            // Fg swatch row (17 rects: 0-15 = ANSI, 16 = default).
+                            for (i, rect) in rects.fg_swatches.iter().enumerate() {
+                                if hit(rect) {
+                                    let value = if i < app::style_mru::ANSI_NAMES.len() {
+                                        Some(app::style_mru::ANSI_NAMES[i].to_string())
+                                    } else {
+                                        None
+                                    };
+                                    apply_action(Action::StyleSetColor { is_bg: false, value }, &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+
+                            // Bg swatch row.
+                            for (i, rect) in rects.bg_swatches.iter().enumerate() {
+                                if hit(rect) {
+                                    let value = if i < app::style_mru::ANSI_NAMES.len() {
+                                        Some(app::style_mru::ANSI_NAMES[i].to_string())
+                                    } else {
+                                        None
+                                    };
+                                    apply_action(Action::StyleSetColor { is_bg: true, value }, &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+
+                            // MRU row.
+                            for (i, rect) in rects.mru_rects.iter().enumerate() {
+                                if hit(rect) {
+                                    let hex = state.style_editor.as_ref()
+                                        .and_then(|ed| ed.mru.get(i).cloned());
+                                    if let Some(hex) = hex {
+                                        apply_action(Action::StyleSetColor { is_bg: false, value: Some(hex) }, &mut state, &mut mapper);
+                                    }
+                                    continue 'event_loop;
+                                }
+                            }
+
+                            // Custom hex entry cell → switch focus to Custom.
+                            if let Some(rect) = &rects.custom_rect {
+                                if hit(rect) {
+                                    use app::state::StyleFocus;
+                                    if let Some(ed) = &mut state.style_editor {
+                                        ed.focus = StyleFocus::Custom;
+                                    }
+                                    continue 'event_loop;
+                                }
                             }
                         }
                     }
@@ -1820,6 +1879,9 @@ fn main() {
 
         // Note whether this action is the on-demand "Output all settings" export.
         let export_style_now = matches!(action, Action::GalleryExportStyle);
+
+        // Note whether this action is a style-editor save (for post-apply disk write).
+        let style_save = matches!(action, Action::StyleSave);
 
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
@@ -2635,6 +2697,13 @@ fn main() {
         // to the personal style file and repoint config.toml at it.
         if let Some(cfg_to_write) = config_to_save {
             let user_dir = cfg_to_write.user_dir.clone();
+            save_style_and_repoint(&mut state, &user_dir);
+        }
+
+        // After apply_action: if the style editor was just saved, write the live
+        // colors (already set by the handler) to the personal style file and repoint.
+        if style_save {
+            let user_dir = state.config.user_dir.clone();
             save_style_and_repoint(&mut state, &user_dir);
         }
     }
