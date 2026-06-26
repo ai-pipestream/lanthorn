@@ -1786,96 +1786,11 @@ fn main() {
                     continue;
                 }
 
-                // ── Rewind/replay capture (opt-in) ────────────────────────────
-                // Skip the quit turn: the VM has terminated, so its snapshot has
-                // no replayable state — recording it just adds a junk final turn.
-                if state.config.record_turn_history && !result.quit {
-                    let map_changed = mapper.graph.rooms().count() != rooms_before
-                        || mapper.graph.connections().len() != conns_before;
-                    app::history::record_turn(
-                        &mut state.history,
-                        state.turns,
-                        &cmd,
-                        session.machine.save_quetzal(),
-                        &mapper,
-                        map_changed,
-                        &result.transcript,
-                    );
-                }
-
-                // ── Inventory tracking ────────────────────────────────────────
-                {
-                    use app::inventory::{detect_player_obj, parse_inventory_output};
-                    use zvm::objects::get_parent;
-
-                    let current_loc = zvm::current_location(&session.machine)
-                        .map(|s| s.number)
-                        .unwrap_or(0);
-
-                    if current_loc != 0 {
-                        // Compute objects whose parent is the current room.
-                        let max_obj = {
-                            // Infer max by scanning (same approach as location.rs).
-                            // We stop at the first entry whose prop-table ptr is before the entry.
-                            // Quick safe upper bound: iterate until parent==0 fails.
-                            // We use zvm::object_tree_view to avoid duplicating the logic.
-                            zvm::object_tree_view(&session.machine)
-                                .into_iter()
-                                .map(|s| s.number)
-                                .max()
-                                .unwrap_or(0)
-                        };
-                        let objects_here: std::collections::BTreeSet<u16> = (1..=max_obj)
-                            .filter(|&o| get_parent(&session.machine.mem, o) == current_loc)
-                            .collect();
-
-                        // Lock the player object. Prefer the reliable name-based
-                        // lookup (the object short-named "you"/"yourself"/… — present
-                        // in most games incl. v3 Zork as obj #30) so the inventory
-                        // panel reads the LIVE object tree from turn one and reflects
-                        // take/drop immediately. Fall back to the movement heuristic
-                        // for games whose player object isn't named.
-                        if state.player_obj.is_none() {
-                            state.player_obj = zvm::find_player_object(&session.machine)
-                                .or_else(|| detect_player_obj(
-                                    state.prev_location,
-                                    &state.prev_objects_here,
-                                    current_loc,
-                                    &objects_here,
-                                ));
-                        }
-
-                        // Update tracking for next turn.
-                        state.prev_location = Some(current_loc);
-                        state.prev_objects_here = objects_here;
-                    }
-
-                    // If the submitted command was an inventory command, parse the output.
-                    let cmd_norm = cmd.trim().to_lowercase();
-                    if cmd_norm == "i" || cmd_norm == "inv" || cmd_norm == "inventory" {
-                        state.inventory_fallback = parse_inventory_output(&result.transcript);
-                    }
-                }
-
-                // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
-                // transcript status line so the player is aware but the loop continues.
-                if state.config.auto_save {
-                    let meta = app::archive::Meta {
-                        format_version: app::archive::CURRENT_FORMAT_VERSION,
-                        ifid: Some(ifid.clone()),
-                        name: None,
-                        turns: state.turns,
-                        saved_at: format_rfc3339(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                        ),
-                    };
-                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
-                        state.push_transcript(&format!("[Auto-save failed: {}]", e));
-                    }
-                }
+                // ── Post-turn bookkeeping (history / inventory / auto-save) ──
+                post_turn_bookkeeping(
+                    &mut state, &mapper, &session, &result, &cmd,
+                    rooms_before, conns_before, &ifid, &arc_file,
+                );
 
                 // Background tidy: silently re-tidy the active layer when the
                 // configured mode calls for it. Only runs in Auto layout mode.
@@ -2198,7 +2113,7 @@ fn main() {
                             session.resume_restore(None)
                         }
                     };
-                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, last_panes.map);
+                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, &session, &save_dir, &ifid, last_panes.map);
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &save_dir, &ifid, &mut state);
                     }
@@ -2594,14 +2509,126 @@ fn list_qzl(dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
     out
 }
 
+/// Post-turn bookkeeping shared by the normal `submit` path and the resumed
+/// in-game save/restore path: opt-in rewind/replay capture, inventory tracking,
+/// and per-turn auto-save. `rooms_before`/`conns_before` are the graph sizes
+/// captured before this turn's `apply_turn` (to detect a map change). `cmd` is
+/// the player's command (empty string for a resumed in-game I/O turn).
+fn post_turn_bookkeeping(
+    state: &mut AppState,
+    mapper: &Mapper,
+    session: &GameSession,
+    result: &TurnResult,
+    cmd: &str,
+    rooms_before: usize,
+    conns_before: usize,
+    ifid: &str,
+    arc_file: &std::path::Path,
+) {
+    // ── Rewind/replay capture (opt-in) ────────────────────────────
+    // Skip the quit turn: the VM has terminated, so its snapshot has
+    // no replayable state — recording it just adds a junk final turn.
+    if state.config.record_turn_history && !result.quit {
+        let map_changed = mapper.graph.rooms().count() != rooms_before
+            || mapper.graph.connections().len() != conns_before;
+        app::history::record_turn(
+            &mut state.history,
+            state.turns,
+            cmd,
+            session.machine.save_quetzal(),
+            mapper,
+            map_changed,
+            &result.transcript,
+        );
+    }
+
+    // ── Inventory tracking ────────────────────────────────────────
+    {
+        use app::inventory::{detect_player_obj, parse_inventory_output};
+        use zvm::objects::get_parent;
+
+        let current_loc = zvm::current_location(&session.machine)
+            .map(|s| s.number)
+            .unwrap_or(0);
+
+        if current_loc != 0 {
+            // Compute objects whose parent is the current room.
+            let max_obj = {
+                // Infer max by scanning (same approach as location.rs).
+                // We stop at the first entry whose prop-table ptr is before the entry.
+                // Quick safe upper bound: iterate until parent==0 fails.
+                // We use zvm::object_tree_view to avoid duplicating the logic.
+                zvm::object_tree_view(&session.machine)
+                    .into_iter()
+                    .map(|s| s.number)
+                    .max()
+                    .unwrap_or(0)
+            };
+            let objects_here: std::collections::BTreeSet<u16> = (1..=max_obj)
+                .filter(|&o| get_parent(&session.machine.mem, o) == current_loc)
+                .collect();
+
+            // Lock the player object. Prefer the reliable name-based
+            // lookup (the object short-named "you"/"yourself"/… — present
+            // in most games incl. v3 Zork as obj #30) so the inventory
+            // panel reads the LIVE object tree from turn one and reflects
+            // take/drop immediately. Fall back to the movement heuristic
+            // for games whose player object isn't named.
+            if state.player_obj.is_none() {
+                state.player_obj = zvm::find_player_object(&session.machine)
+                    .or_else(|| detect_player_obj(
+                        state.prev_location,
+                        &state.prev_objects_here,
+                        current_loc,
+                        &objects_here,
+                    ));
+            }
+
+            // Update tracking for next turn.
+            state.prev_location = Some(current_loc);
+            state.prev_objects_here = objects_here;
+        }
+
+        // If the submitted command was an inventory command, parse the output.
+        let cmd_norm = cmd.trim().to_lowercase();
+        if cmd_norm == "i" || cmd_norm == "inv" || cmd_norm == "inventory" {
+            state.inventory_fallback = parse_inventory_output(&result.transcript);
+        }
+    }
+
+    // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
+    // transcript status line so the player is aware but the loop continues.
+    if state.config.auto_save {
+        let meta = app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: Some(ifid.to_string()),
+            name: None,
+            turns: state.turns,
+            saved_at: format_rfc3339(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            ),
+        };
+        if let Err(e) = save_archive_meta(arc_file, mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
+            state.push_transcript(&format!("[Auto-save failed: {}]", e));
+        }
+    }
+}
+
 /// Post-process a TurnResult produced by `session.resume_*`: render output,
-/// re-observe the location, recenter, and record a *chained* in-game I/O if the
-/// resume itself suspended on another `@save`/`@restore`. Returns true if the
-/// app should quit. Mirrors the post-turn block in the `submit` path.
+/// re-observe the location, recenter, run post-turn bookkeeping, and record a
+/// *chained* in-game I/O if the resume itself suspended on another
+/// `@save`/`@restore`. Returns true if the app should quit. Mirrors the
+/// post-turn block in the `submit` path.
 fn finish_resumed_turn(
     result: TurnResult,
     mapper: &mut Mapper,
     state: &mut AppState,
+    session: &GameSession,
+    save_dir: &std::path::Path,
+    ifid: &str,
     map_area: Rect,
 ) -> bool {
     state.push_transcript(&result.transcript);
@@ -2609,6 +2636,9 @@ fn finish_resumed_turn(
     if let Some(note) = &result.info {
         state.push_transcript(note);
     }
+    // Capture graph sizes before apply_turn so bookkeeping can detect a change.
+    let rooms_before = mapper.graph.rooms().count();
+    let conns_before = mapper.graph.connections().len();
     apply_turn(mapper, "", &result);
     state.graph_gen = state.graph_gen.wrapping_add(1);
     state.set_viewed_layer(None);
@@ -2623,8 +2653,13 @@ fn finish_resumed_turn(
         }
     }
     // A chained request: the resumed turn suspended on another @save/@restore.
+    // Mirror the submit path, which defers bookkeeping until the chain resolves;
+    // run bookkeeping only when this turn finished without chaining.
     if let Some(io) = result.pending_io {
         state.ingame_io = Some(io);
+    } else {
+        let arc_file = archive_path(save_dir, ifid);
+        post_turn_bookkeeping(state, mapper, session, &result, "", rooms_before, conns_before, ifid, &arc_file);
     }
     result.quit
 }
@@ -2647,7 +2682,7 @@ fn resolve_ingame_dialog(
     if let Some(wrote_ok) = state.ingame_resume_save.take() {
         state.ingame_io = None;
         let result = session.resume_save(wrote_ok);
-        let quit = finish_resumed_turn(result, mapper, state, map_area);
+        let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
         if let Some(io) = state.ingame_io {
             open_ingame_saves(io, save_dir, ifid, state);
         }
@@ -2667,7 +2702,7 @@ fn resolve_ingame_dialog(
                 PendingIo::Restore => session.resume_restore(None),
             };
             state.push_transcript("[In-game save/restore cancelled]");
-            let quit = finish_resumed_turn(result, mapper, state, map_area);
+            let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
             if let Some(io) = state.ingame_io {
                 open_ingame_saves(io, save_dir, ifid, state);
             }
