@@ -742,7 +742,7 @@ fn main() {
     let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
-    let mut pending_resume_stash: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)> = None;
+    let mut pending_resume_stash: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)> = None;
     let mut mapper = if arc_file.exists() {
         match load_archive(&arc_file) {
             Ok(ac) => {
@@ -760,7 +760,7 @@ fn main() {
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
                     // Save present, auto_load off, prompt enabled: stash for launch dialog.
-                    pending_resume_stash = Some((ac.save, ac.transcript, ac.transcript_kinds));
+                    pending_resume_stash = Some((ac.save, ac.transcript, ac.transcript_kinds, ac.screen));
                 }
                 ac.mapper
             }
@@ -1225,9 +1225,9 @@ fn main() {
                             state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
                         code => match launch_dialog_key_focused(code, state.dialog_focus) {
                             LaunchDialogAction::Resume => {
-                                if let Some((save, lines, kinds)) = state.pending_resume.take() {
+                                if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
                                     state.launch_dialog = false;
-                                    apply_launch_resume(&save, lines, kinds, &mut session, &mut mapper, &mut state, &last_panes);
+                                    apply_launch_resume(&save, lines, kinds, screen, &mut session, &mut mapper, &mut state, &last_panes);
                                 }
                             }
                             LaunchDialogAction::NewGame => {
@@ -1248,9 +1248,9 @@ fn main() {
                             let in_close = ld.close.map_or(false, |r| r.contains(pt));
                             let in_dialog = ld.area.contains(pt);
                             if in_resume {
-                                if let Some((save, lines, kinds)) = state.pending_resume.take() {
+                                if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
                                     state.launch_dialog = false;
-                                    apply_launch_resume(&save, lines, kinds, &mut session, &mut mapper, &mut state, &last_panes);
+                                    apply_launch_resume(&save, lines, kinds, screen, &mut session, &mut mapper, &mut state, &last_panes);
                                 }
                             } else if in_new_game || in_close {
                                 // [X] (close) and [New game] both discard the save.
@@ -3007,6 +3007,7 @@ fn apply_launch_resume(
     save: &[u8],
     lines: Vec<String>,
     kinds: Vec<TranscriptKind>,
+    screen: Option<zvm::screen::ScreenState>,
     session: &mut app::session::GameSession,
     mapper: &mut Mapper,
     state: &mut AppState,
@@ -3016,6 +3017,9 @@ fn apply_launch_resume(
         Ok(()) => {
             // mapper was already loaded from the archive at startup (ac.mapper);
             // only the VM machine state needs restoring via restore_quetzal above.
+            // Restore the saved screen too (mirrors the auto-load path), so a
+            // once-split game's upper window/status line shows after resuming.
+            if let Some(scr) = screen { session.machine.screen = scr; }
             state.transcript = lines;
             state.transcript_kinds = kinds;
             // Re-observe current location (same as Action::RestoreGame).

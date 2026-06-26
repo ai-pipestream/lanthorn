@@ -743,7 +743,7 @@ pub struct AppState {
     pub launch_dialog: bool,
     /// Stashed restore data shown while the launch dialog is open.
     /// Tuple is (save bytes, transcript lines, transcript kinds).
-    pub pending_resume: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)>,
+    pub pending_resume: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
     /// How the current room was detected (for the map indicator). Retained
