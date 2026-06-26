@@ -495,6 +495,38 @@ impl FileBrowserState {
     }
 }
 
+// ── Style editor state ────────────────────────────────────────────────────────
+
+/// Which sub-widget has keyboard focus inside the style editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StyleFocus {
+    Board,
+    Fg,
+    Bg,
+    Custom,
+    Attrs,
+}
+
+/// Transient state for the live style-editor full-screen mode.
+/// `None` in `AppState.style_editor` = editor closed.
+#[derive(Debug)]
+pub struct StyleEditorState {
+    /// Working copy of the loaded style doc (edited in place; dropped on cancel).
+    pub doc: crate::style::StyleDoc,
+    /// Cached resolved preview scheme (rebuilt from `doc` on every change).
+    pub preview: crate::colors::ColorScheme,
+    /// Ordered list of all known CSS-ish selector names.
+    pub selectors: Vec<&'static str>,
+    /// Index of the currently-active selector row.
+    pub active: usize,
+    /// Which sub-widget has keyboard focus.
+    pub focus: StyleFocus,
+    /// Buffer for a user-typed custom hex/name color value.
+    pub custom_buf: String,
+    /// Most-recently-used color list (populated by Task 5).
+    pub mru: Vec<String>,
+}
+
 // ── Config screen state ───────────────────────────────────────────────────────
 
 /// Transient state for the config-screen modal.
@@ -673,6 +705,9 @@ pub struct AppState {
     /// Active config-screen modal state. `None` means the screen is closed.
     pub config_screen: Option<ConfigScreenState>,
 
+    /// Active style-editor full-screen state. `None` means the editor is closed.
+    pub style_editor: Option<StyleEditorState>,
+
     /// Session turn counter; incremented on each non-empty `SubmitCommand`.
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
@@ -837,6 +872,7 @@ impl Default for AppState {
             verb_menu: None,
             config: crate::config::Config::default(),
             config_screen: None,
+            style_editor: None,
             turns: 0,
             history: Vec::new(),
             replay: None,
@@ -881,6 +917,7 @@ impl AppState {
             || self.saves.is_some()
             || self.file_browser.is_some()
             || self.config_screen.is_some()
+            || self.style_editor.is_some()
             || self.verb_menu.is_some()
             || self.hotkey_dialog
             || self.room_panel.is_some()

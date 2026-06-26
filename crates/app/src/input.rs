@@ -191,6 +191,10 @@ pub enum Action {
     VerbMenuPick,
     /// Close the verb menu, leaving `state.input` intact.
     VerbMenuClose,
+    /// Open the live style editor full-screen mode.
+    OpenStyleEditor,
+    /// Cancel the style editor without saving (drops the working doc).
+    StyleEditorCancel,
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -326,6 +330,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // 5.5. Verb-menu sub-mode: when the token palette is open, route to verb-menu keys.
     if state.verb_menu.is_some() {
         return verb_menu_key_to_action(key);
+    }
+
+    // 5.6. Style-editor sub-mode: when the style editor is open, route to its keys.
+    if state.style_editor.is_some() {
+        return style_editor_key_to_action(key, state);
     }
 
     // 5.7. Config-screen sub-mode: when config screen is open, route to config keys.
@@ -986,6 +995,17 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
+        _ => Action::None,
+    }
+}
+
+// ── Internal: style-editor key routing ───────────────────────────────────────
+
+/// Minimal key dispatch for the style-editor full-screen mode.
+/// Expanded in later tasks; for now only Esc cancels.
+fn style_editor_key_to_action(key: KeyEvent, _state: &crate::state::AppState) -> Action {
+    match key.code {
+        KeyCode::Esc => Action::StyleEditorCancel,
         _ => Action::None,
     }
 }
@@ -2046,6 +2066,16 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.verb_menu = None;
         }
 
+        // ── Style editor actions ──────────────────────────────────────────────
+
+        Action::OpenStyleEditor => {
+            open_style_editor(state);
+        }
+
+        Action::StyleEditorCancel => {
+            state.style_editor = None;
+        }
+
         // ── Config screen actions ─────────────────────────────────────────────
 
         Action::OpenConfig => {
@@ -2382,6 +2412,26 @@ pub(crate) const CONFIG_ROW_COUNT: usize = crate::render::config_screen::CONFIG_
 /// Clone a Config (Config derives Clone, this is a convenience wrapper for tests).
 pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config {
     cfg.clone()
+}
+
+/// Open the live style editor: load the current style doc, resolve a preview
+/// ColorScheme, and seed the StyleEditorState on `state.style_editor`.
+///
+/// Does not touch `state.colors` — the live theme is untouched until Save.
+pub fn open_style_editor(state: &mut AppState) {
+    let user_dir = state.config.user_dir.clone();
+    let (doc, _warnings) = crate::style::load_style(state.config.style.as_deref(), &user_dir);
+    let (preview, _set, _w2) = crate::style::resolve(&doc, &user_dir);
+    let selectors: Vec<&'static str> = crate::style::SELECTOR_FIELDS.to_vec();
+    state.style_editor = Some(crate::state::StyleEditorState {
+        doc,
+        preview,
+        selectors,
+        active: 0,
+        focus: crate::state::StyleFocus::Board,
+        custom_buf: String::new(),
+        mru: Vec::new(),
+    });
 }
 
 /// Return the ConfigPathField for a row, if the row is a path type.
@@ -5410,5 +5460,17 @@ mod tests {
             matches!(a, Action::AnimExit),
             "tidy [OK] click should produce AnimExit, got {:?}", a
         );
+    }
+
+    #[test]
+    fn open_style_editor_seeds_doc_and_preview() {
+        let mut s = AppState::default();
+        apply_action(Action::OpenStyleEditor, &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().expect("editor open");
+        assert_eq!(ed.active, 0);
+        assert!(!ed.selectors.is_empty(), "selector list seeded");
+        // Cancel closes it.
+        apply_action(Action::StyleEditorCancel, &mut s, &mut mapper::mapper::Mapper::default());
+        assert!(s.style_editor.is_none());
     }
 }

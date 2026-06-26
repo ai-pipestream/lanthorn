@@ -100,6 +100,10 @@ pub enum Command {
     /// Open the verb/item token-palette modal (default: m).
     OpenVerbMenu,
 
+    // ── Style editor ──────────────────────────────────────────────────────────
+    /// Open the live style editor full-screen mode (default: F3).
+    OpenStyleEditor,
+
     // ── Config screen ─────────────────────────────────────────────────────────
     /// Open the in-app config screen modal (default: F2).
     OpenConfig,
@@ -175,6 +179,7 @@ impl Command {
             Command::CycleLayoutReverse => Action::CycleLayoutReverse,
             Command::ResetGame => Action::ResetGame,
             Command::OpenVerbMenu => Action::OpenVerbMenu,
+            Command::OpenStyleEditor => Action::OpenStyleEditor,
             Command::OpenConfig => Action::OpenConfig,
             Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
             Command::ToggleLocMethod => Action::ToggleLocMethod,
@@ -236,6 +241,7 @@ impl Command {
             Command::CycleLayoutReverse => "cycle_layout_reverse",
             Command::ResetGame => "reset_game",
             Command::OpenVerbMenu => "open_verb_menu",
+            Command::OpenStyleEditor => "open_style_editor",
             Command::OpenConfig => "open_config",
             Command::ToggleRoomNumbers => "toggle_room_numbers",
             Command::ToggleLocMethod => "toggle_loc_method",
@@ -297,6 +303,7 @@ impl Command {
             Command::CycleLayoutReverse => "layout back",
             Command::ResetGame => "reset game",
             Command::OpenVerbMenu => "verb menu",
+            Command::OpenStyleEditor => "style editor",
             Command::OpenConfig => "settings",
             Command::ToggleRoomNumbers => "room numbers",
             Command::ToggleLocMethod => "location method",
@@ -361,6 +368,7 @@ impl Command {
             Command::CycleLayoutReverse => Context::Global,
             Command::ResetGame => Context::Global,
             Command::OpenVerbMenu => Context::Global,
+            Command::OpenStyleEditor => Context::Global,
             Command::OpenConfig => Context::Global,
             Command::ToggleRoomNumbers => Context::Global,
             Command::ToggleLocMethod => Context::Global,
@@ -427,6 +435,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::CycleLayoutReverse,
     Command::ResetGame,
     Command::OpenVerbMenu,
+    Command::OpenStyleEditor,
     Command::OpenConfig,
     Command::ToggleRoomNumbers,
     Command::ToggleLocMethod,
@@ -642,6 +651,8 @@ impl KeyMap {
         bind!(plain(Char('m')), Command::OpenVerbMenu, Context::Global);
         // F2 → open config screen.
         bind!(plain(F(2)), Command::OpenConfig, Context::Global);
+        // F3 → open style editor (F3 is unbound; F2/F4–F9 are taken).
+        bind!(plain(F(3)), Command::OpenStyleEditor, Context::Global);
         // Shift+Tab (BackTab) → cycle layout in reverse (inverse of Ctrl+L forward cycle).
         // BackTab is delivered by crossterm as KeyCode::BackTab, typically with no SHIFT modifier.
         bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, Command::CycleLayoutReverse, Context::Global);
