@@ -5,6 +5,7 @@ pub mod paneframe;
 pub mod filebrowser;
 pub mod gallery;
 pub mod hints_panel;
+pub mod history;
 pub mod hotkeys;
 pub mod inspector;
 pub mod launch_dialog;

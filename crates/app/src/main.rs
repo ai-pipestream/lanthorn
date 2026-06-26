@@ -39,6 +39,7 @@ use mapper::graph::RoomId;
 use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
+use app::render::history::draw_history;
 use app::render::transcript::render_transcript;
 use app::render::upper_window::draw_upper_window;
 use app::render::draw_str_clipped;
@@ -240,10 +241,21 @@ fn draw_frame(
     terminal.draw(|f| {
         let full = f.area();
         let buf = f.buffer_mut();
+        // During replay the map shows the reconstructed snapshot for the selected turn.
+        let replay_graph: Option<mapper::graph::MapGraph> = state.replay.as_ref().and_then(|r| {
+            let turn = state.history.get(r.idx).map(|rec| rec.turn)?;
+            let json = app::history::map_at_turn(&state.history, turn)?;
+            mapper::persist::from_json(json).ok().map(|m| m.graph)
+        });
+
         // During tidy-animation playback the map shows the current captured stage, not the live graph.
-        let rm = match &state.tidy_anim {
-            Some(anim) => render_layer(&anim.current().graph, state.active_layer(&anim.current().graph)),
-            None => render_layer(&mapper.graph, state.active_layer(&mapper.graph)),
+        let rm = if let Some(g) = &replay_graph {
+            render_layer(g, state.active_layer(g))
+        } else {
+            match &state.tidy_anim {
+                Some(anim) => render_layer(&anim.current().graph, state.active_layer(&anim.current().graph)),
+                None => render_layer(&mapper.graph, state.active_layer(&mapper.graph)),
+            }
         };
 
         // ── Change 2: reserve bottom 1 row for help bar ───────────────────────
@@ -306,9 +318,13 @@ fn draw_frame(
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                let graph = match &state.tidy_anim {
-                    Some(anim) => &anim.current().graph,
-                    None => &mapper.graph,
+                let graph = if let Some(g) = &replay_graph {
+                    g
+                } else {
+                    match &state.tidy_anim {
+                        Some(anim) => &anim.current().graph,
+                        None => &mapper.graph,
+                    }
                 };
                 let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                 let active_layer = state.active_layer(graph);
@@ -379,9 +395,13 @@ fn draw_frame(
                 map_area = map_fp.content;
                 // Overlay layer tabs
                 {
-                    let graph = match &state.tidy_anim {
-                        Some(anim) => &anim.current().graph,
-                        None => &mapper.graph,
+                    let graph = if let Some(g) = &replay_graph {
+                        g
+                    } else {
+                        match &state.tidy_anim {
+                            Some(anim) => &anim.current().graph,
+                            None => &mapper.graph,
+                        }
                     };
                     let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                     let active_layer = state.active_layer(graph);
@@ -427,9 +447,13 @@ fn draw_frame(
         // ── Room panel overlay ────────────────────────────────────────────────
         if map_area.height > 0 {
             if let Some(panel) = state.room_panel {
-                let graph = match &state.tidy_anim {
-                    Some(anim) => &anim.current().graph,
-                    None => &mapper.graph,
+                let graph = if let Some(g) = &replay_graph {
+                    g
+                } else {
+                    match &state.tidy_anim {
+                        Some(anim) => &anim.current().graph,
+                        None => &mapper.graph,
+                    }
                 };
                 let panel_ds = make_dialog_style(state);
                 match panel.mode {
@@ -525,6 +549,11 @@ fn draw_frame(
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
             dialog_rects_out = draw_saves(state, full, buf);
+        }
+
+        // ── Replay/rewind overlay ─────────────────────────────────────────────
+        if state.replay.is_some() {
+            dialog_rects_out = draw_history(state, full, buf);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
@@ -989,6 +1018,9 @@ fn main() {
             // iteration redraws, so an advanced frame appears without waiting for input.
             if let Some(anim) = &mut state.tidy_anim {
                 anim.tick(Duration::from_millis(700));
+            }
+            if let Some(r) = &mut state.replay {
+                r.tick(Duration::from_millis(700), state.history.len());
             }
             continue;
         }
@@ -2126,6 +2158,52 @@ fn main() {
                         }
                         Err(e) => {
                             state.push_transcript(&format!("[Load failed: {}]", e));
+                        }
+                    }
+                }
+            }
+
+            // ── Replay/rewind: linear resume from the selected turn ────────────
+            Action::ReplayResume => {
+                if let Some(r) = state.replay.take() {
+                    if r.idx < state.history.len() {
+                        let plan = app::history::resume_plan(&state.history, r.idx);
+                        match session.machine.restore_quetzal(&plan.save) {
+                            Ok(()) => {
+                                if let Some(json) = &plan.map_json {
+                                    if let Ok(m) = mapper::persist::from_json(json) {
+                                        mapper = m;
+                                    }
+                                }
+                                // Linear: discard later turns.
+                                state.history.truncate(r.idx + 1);
+                                let (lines, kinds) =
+                                    app::history::rebuild_transcript(&state.history, r.idx);
+                                state.transcript = lines;
+                                state.transcript_kinds = kinds;
+                                state.turns = plan.turn;
+                                state.graph_gen = state.graph_gen.wrapping_add(1);
+                                // Re-observe current location (mirror the restore path).
+                                if let Some(snap) = zvm::current_location(&session.machine) {
+                                    let rid = snap.number as mapper::graph::RoomId;
+                                    let restore_result = TurnResult {
+                                        transcript: String::new(),
+                                        location: Some(snap),
+                                        quit: false,
+                                        info: None,
+                                        beep: None,
+                                        diagnostics: vec![],
+                                        location_method: None,
+                                    };
+                                    apply_turn(&mut mapper, "", &restore_result);
+                                    state.set_viewed_layer(None);
+                                    state.select_room(Some(rid));
+                                }
+                                state.push_transcript(&format!("[Resumed from turn {}]", plan.turn));
+                            }
+                            Err(e) => {
+                                state.push_transcript(&format!("[Resume failed: {:?}]", e));
+                            }
                         }
                     }
                 }
