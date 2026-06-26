@@ -401,6 +401,9 @@ impl Machine {
                 call_routine(&mut self.state, &mut self.mem, a, &[b], None);
                 StepResult::Continue
             }
+            // 2OP:0x1B set_colour — game-driven colour is not applied (babelmap styling
+            // owns the look); accept and ignore.
+            0x1B => StepResult::Continue,
             // Unknown / unimplemented 2OP — no-op seam for Tasks 10+ (object/text ops)
             _ => StepResult::Continue,
         }
@@ -1071,11 +1074,16 @@ impl Machine {
                 self.do_store(store, result as u16);
                 StepResult::Continue
             }
-            // EXT:0x04 set_font — return 0 (font change unsupported)
+            // EXT:0x04 set_font — one fixed font (id 1). font 1 or 0(query) -> previous (1);
+            // any other requested font is unavailable -> 0. No actual font change.
             0x04 => {
-                self.do_store(store, 0);
+                let requested = ops.first().copied().unwrap_or(0);
+                let result = if requested == 0 || requested == 1 { 1 } else { 0 };
+                self.do_store(store, result);
                 StepResult::Continue
             }
+            // EXT:0x05 set_true_colour — we render with our own styling; accept and ignore.
+            0x05 => StepResult::Continue,
             // EXT:0x09 save_undo — in-memory undo snapshot.
             0x09 => {
                 self.do_save_undo(store);
@@ -3839,5 +3847,46 @@ pub(crate) mod tests {
         m.state.pc = 0x10;
         run_until_quit(&mut m);
         assert_eq!(m.global(0), 7, "verify branched false (ran the add)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2: set_font + set_colour + set_true_colour (graceful)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_font_reports_current_or_unavailable() {
+        // EXT:0x04 set_font font -> (store). font 1 (or 0=query) -> 1; other -> 0.
+        let mut buf = sample_story(5);
+        // set_font 1 -> G0
+        buf[0x10]=0xBE; buf[0x11]=0x04; buf[0x12]=0x7F; buf[0x13]=1; buf[0x14]=0x10;
+        // set_font 4 -> G1
+        buf[0x15]=0xBE; buf[0x16]=0x04; buf[0x17]=0x7F; buf[0x18]=4; buf[0x19]=0x11;
+        buf[0x1A]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 1, "font 1 available -> 1");
+        assert_eq!(m.global(1), 0, "font 4 unavailable -> 0");
+    }
+
+    #[test]
+    fn set_colour_and_true_colour_are_graceful_noops() {
+        // Neither stores nor branches; just must not warn/crash and must Continue.
+        let mut buf = sample_story(5);
+        // set_colour 2,3 (2OP:0x1B long form, both small)
+        buf[0x10]=0x1B; buf[0x11]=2; buf[0x12]=3;
+        // set_true_colour 0,0 (EXT:0x05, [Small,Small])
+        buf[0x13]=0xBE; buf[0x14]=0x05; buf[0x15]=0x5F; buf[0x16]=0; buf[0x17]=0;
+        // add 0,5 -> G0 (proves execution continued)
+        buf[0x18]=0x14; buf[0x19]=0x00; buf[0x1A]=0x05; buf[0x1B]=0x10;
+        buf[0x1C]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 5, "execution continued past set_colour/set_true_colour");
+        assert!(m.diagnostics.iter().all(|d| !d.contains("0x1B") && !d.contains("0x05")),
+            "graceful arms must not emit unimplemented diagnostics");
     }
 }
