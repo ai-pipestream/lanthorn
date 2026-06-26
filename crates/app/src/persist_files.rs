@@ -106,7 +106,7 @@ pub fn save_named(
 
     let saved_at = rfc3339_now();
     let meta = crate::archive::Meta {
-        format_version: 1,
+        format_version: crate::archive::CURRENT_FORMAT_VERSION,
         ifid: Some(ifid.to_string()),
         name: Some(name.to_string()),
         turns,

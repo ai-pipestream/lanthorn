@@ -1109,7 +1109,7 @@ fn main() {
                             QuitDialogAction::Save => {
                                 state.quit_dialog = false;
                                 let meta = app::archive::Meta {
-                                    format_version: 1,
+                                    format_version: app::archive::CURRENT_FORMAT_VERSION,
                                     ifid: Some(ifid.clone()),
                                     name: None,
                                     turns: state.turns,
@@ -1146,7 +1146,7 @@ fn main() {
                             if in_save {
                                 state.quit_dialog = false;
                                 let meta = app::archive::Meta {
-                                    format_version: 1,
+                                    format_version: app::archive::CURRENT_FORMAT_VERSION,
                                     ifid: Some(ifid.clone()),
                                     name: None,
                                     turns: state.turns,
@@ -1516,7 +1516,7 @@ fn main() {
                                 }
                                 None => {
                                     let meta = app::archive::Meta {
-                                        format_version: 1,
+                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
                                         ifid: Some(ifid.clone()),
                                         name: None,
                                         turns: state.turns,
@@ -1796,7 +1796,7 @@ fn main() {
                 // transcript status line so the player is aware but the loop continues.
                 if state.config.auto_save {
                     let meta = app::archive::Meta {
-                        format_version: 1,
+                        format_version: app::archive::CURRENT_FORMAT_VERSION,
                         ifid: Some(ifid.clone()),
                         name: None,
                         turns: state.turns,
@@ -1877,7 +1877,7 @@ fn main() {
             Action::SaveGame => {
                 // Bundle map + game into a single .babelmap archive, with turn metadata.
                 let meta = app::archive::Meta {
-                    format_version: 1,
+                    format_version: app::archive::CURRENT_FORMAT_VERSION,
                     ifid: Some(ifid.clone()),
                     name: None,
                     turns: state.turns,
@@ -2168,7 +2168,7 @@ fn main() {
                 if let Some(r) = state.replay.take() {
                     if r.idx < state.history.len() {
                         let plan = app::history::resume_plan(&state.history, r.idx);
-                        match session.machine.restore_quetzal(&plan.save) {
+                        match session.machine.restore_file(&plan.save) {
                             Ok(()) => {
                                 if let Some(json) = &plan.map_json {
                                     if let Ok(m) = mapper::persist::from_json(json) {
@@ -2265,7 +2265,7 @@ fn main() {
     // saving" honest and avoids silently overwriting an explicit save point on exit.
     if state.config.auto_save {
         let exit_meta = app::archive::Meta {
-            format_version: 1,
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: Some(ifid.clone()),
             name: None,
             turns: state.turns,

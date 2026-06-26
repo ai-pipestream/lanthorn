@@ -17,8 +17,10 @@
 //! Archive path convention (mirrors `ifid::map_path`): `<base_dir>/<ifid>.babelmap`
 //!
 //! The `meta.ifid` field is currently populated by the caller; pass `None` until
-//! IFID computation is wired in. `format_version` must equal 1 or `load_archive`
-//! returns an error.
+//! IFID computation is wired in. `load_archive` rejects only archives whose
+//! `format_version` is GREATER than `CURRENT_FORMAT_VERSION`; older versions load
+//! (history is read only when a `history/` index is present), so v1 archives load
+//! with empty history.
 
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -181,8 +183,8 @@ pub fn save_archive_meta(
 /// Read a `.babelmap` archive.
 ///
 /// Returns `Err` if the file is missing, corrupt, an entry is absent, or
-/// `meta.format_version` is not 1. The caller restores the VM save via:
-/// `machine.restore_quetzal(&contents.save)`.
+/// `meta.format_version` is greater than `CURRENT_FORMAT_VERSION`. The caller
+/// restores the VM save via `machine.restore_file(&contents.save)`.
 pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(file)
