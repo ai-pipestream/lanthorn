@@ -11,6 +11,7 @@ use zvm::cpu::exec::Machine;
 use zvm::screen::StatusRight;
 
 use ratatui::style::Color;
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::state::{AppState, Focus, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_framed, BorderStyle};
@@ -296,6 +297,8 @@ pub(crate) fn wrap_lines_kinded(
 /// honouring `scroll` (0 = newest at bottom; higher = further back in history).
 ///
 /// The returned vec is ordered oldest-first so the caller can draw top-to-bottom.
+/// Returns the visible window of wrapped rows AND the total wrapped-row count
+/// (so callers can size a scrollbar without re-wrapping).
 pub(crate) fn visible_wrapped_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
@@ -303,16 +306,16 @@ pub(crate) fn visible_wrapped_lines_kinded(
     rows: usize,
     scroll: u16,
     width: u16,
-) -> Vec<(String, TranscriptKind, Style)> {
+) -> (Vec<(String, TranscriptKind, Style)>, usize) {
     if rows == 0 || transcript.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let display_rows = wrap_lines_kinded(transcript, kinds, styles, width);
     let n = display_rows.len();
     let scroll = scroll as usize;
     let end = n.saturating_sub(scroll);
     let start = end.saturating_sub(rows);
-    display_rows[start..end].to_vec()
+    (display_rows[start..end].to_vec(), n)
 }
 
 /// Draw `text` at `(x, y)` into `buf`, using `base_style` for normal characters
@@ -746,13 +749,20 @@ fn render_middle(
             TranscriptKind::Warning => state.colors.transcript_warning,
         })
         .collect();
-    let lines = visible_wrapped_lines_kinded(
+    // Reserve the rightmost column of the body as the scrollbar gutter so text
+    // never collides with the scrollbar. Wrap and clip to this narrower body.
+    let body_area = if area.width >= 2 {
+        Rect { width: area.width - 1, ..area }
+    } else {
+        area
+    };
+    let (lines, total_rows) = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
         &filtered_styles,
         transcript_rows,
         state.transcript_scroll,
-        area.width,
+        body_area.width,
     );
     // Search highlight style: black text on yellow background.
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
@@ -772,16 +782,40 @@ fn render_middle(
             TranscriptKind::Story | TranscriptKind::Input => (None, Style::default()),
         };
         let text_x = if let Some(glyph) = gutter {
-            draw_str_clipped(buf, area.x, row_y, &glyph.to_string(), marker_style, area);
-            area.x + META_GUTTER
+            draw_str_clipped(buf, body_area.x, row_y, &glyph.to_string(), marker_style, body_area);
+            body_area.x + META_GUTTER
         } else {
-            area.x
+            body_area.x
         };
         if has_search {
-            draw_str_highlighted(buf, text_x, row_y, line, *style, &query_lower, search_highlight_style, area);
+            draw_str_highlighted(buf, text_x, row_y, line, *style, &query_lower, search_highlight_style, body_area);
         } else {
-            draw_str_clipped(buf, text_x, row_y, line, *style, area);
+            draw_str_clipped(buf, text_x, row_y, line, *style, body_area);
         }
+    }
+
+    // ── Scrollbar (only when the content overflows the viewport) ──────────────
+    if total_rows > transcript_rows && area.width >= 2 && transcript_bottom > transcript_top {
+        let start = total_rows
+            .saturating_sub(state.transcript_scroll as usize)
+            .saturating_sub(transcript_rows);
+        let sb_area = Rect {
+            x: area.right() - 1,
+            y: transcript_top,
+            width: 1,
+            height: transcript_bottom - transcript_top,
+        };
+        let mut sb_state = ScrollbarState::new(total_rows)
+            .viewport_content_length(transcript_rows)
+            .position(start);
+        StatefulWidget::render(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            sb_area,
+            buf,
+            &mut sb_state,
+        );
     }
 }
 
@@ -992,8 +1026,9 @@ mod tests {
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
         let styles = vec![Style::default(); 3];
-        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 3, 0, 10);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 3, 0, 10);
         assert_eq!(vis.len(), 3);
+        assert_eq!(total, 3, "total wrapped rows reported");
         assert_eq!(vis[2].0, "ghi");
     }
 
@@ -1004,10 +1039,11 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let vis = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 1, 5);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 1, 5);
         assert_eq!(vis[0].0, "hello");
+        assert_eq!(total, 2, "both wrapped rows counted");
         // scroll=0: end=2, start=1 → ["world"]
-        let vis2 = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 0, 5);
+        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 0, 5);
         assert_eq!(vis2[0].0, "world");
     }
 
@@ -1275,6 +1311,40 @@ mod tests {
             top_cell.modifier.contains(Modifier::REVERSED),
             "top row should have REVERSED modifier for status line"
         );
+    }
+
+    #[test]
+    fn render_transcript_shows_scrollbar_when_overflowing() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        // Far more lines than the viewport → scrollbar must appear.
+        state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // The scrollbar gutter is the rightmost column; its thumb glyph is '█'.
+        let gutter: String = (0..area.height)
+            .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(gutter.contains('█'), "scrollbar thumb should render in the rightmost column: {:?}", gutter);
+    }
+
+    #[test]
+    fn render_transcript_no_scrollbar_when_fits() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.transcript = vec!["only one line".to_string()];
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        let gutter: String = (0..area.height)
+            .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(!gutter.contains('█'), "no scrollbar when content fits: {:?}", gutter);
     }
 
     #[test]
