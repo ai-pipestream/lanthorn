@@ -1553,7 +1553,7 @@ impl Machine {
     pub fn complete_restore_success(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
         self.restore_quetzal(data)?;
         if self.mem.version() >= 4 {
-            let store_var = self.mem.read_byte(self.state.pc - 1);
+            let store_var = self.mem.read_byte(self.state.pc.saturating_sub(1));
             self.do_store(Some(store_var), 2);
         }
         self.undo_stack.clear();
