@@ -226,6 +226,10 @@ pub struct ColorScheme {
     pub transcript: Style,
     /// Autocomplete suggestion line.
     pub suggestion: Style,
+    /// Live input line: the typed command text (patched over the transcript style).
+    pub input_text: Style,
+    /// Live input line: the leading prompt character (e.g. `>`).
+    pub input_prompt: Style,
     /// Gutter marker drawn beside META (app/slash) transcript output.
     pub meta_marker: Style,
     /// Focused-pane border.
@@ -329,6 +333,8 @@ impl ColorScheme {
             status_bar: Style::new().add_modifier(Modifier::REVERSED),
             transcript: Style::new().fg(Color::White),
             suggestion: Style::new().fg(Color::DarkGray),
+            input_text: Style::new(),
+            input_prompt: Style::new(),
             meta_marker: Style::new().fg(Color::DarkGray),
             focused_border: Style::new()
                 .fg(Color::Cyan)
@@ -475,6 +481,8 @@ impl ColorScheme {
             status_bar,
             transcript: Style::new().fg(transcript_fg),
             suggestion: Style::new().fg(suggestion_fg),
+            input_text: Style::new(),
+            input_prompt: Style::new(),
             meta_marker: Style::new().fg(suggestion_fg),
             focused_border: Style::new()
                 .fg(focused_border_fg)

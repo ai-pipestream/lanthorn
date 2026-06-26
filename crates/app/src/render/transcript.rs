@@ -635,12 +635,20 @@ fn render_input_content(
     let w = region.width as usize;
     let input_y = region.y;
 
-    let prompt = format_input_line(&state.input);
-    let prompt_trunc = truncate_line(&prompt, w);
-    draw_str_clipped(buf, region.x, input_y, prompt_trunc, normal_style, region);
+    // The "> " prompt and the typed text are separately styleable (patched over
+    // the normal style, so an unset selector renders identically to before).
+    let prompt_style = normal_style.patch(state.colors.input_prompt);
+    let text_style = normal_style.patch(state.colors.input_text);
+    let prefix = format_input_line(""); // "> "
+    let prefix_trunc = truncate_line(&prefix, w);
+    draw_str_clipped(buf, region.x, input_y, prefix_trunc, prompt_style, region);
+    let text_x = region.x + prefix_trunc.chars().count() as u16;
+    let text_w = w.saturating_sub(prefix_trunc.chars().count());
+    let input_trunc = truncate_line(&state.input, text_w);
+    draw_str_clipped(buf, text_x, input_y, input_trunc, text_style, region);
 
     if state.focus == Focus::Game && !state.any_overlay_open() {
-        let cursor_x = region.x + prompt_trunc.chars().count() as u16;
+        let cursor_x = text_x + input_trunc.chars().count() as u16;
         if cursor_x < region.right() {
             if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
                 cell.set_symbol("_").set_style(CURSOR_STYLE);
@@ -1311,6 +1319,37 @@ mod tests {
             top_cell.modifier.contains(Modifier::REVERSED),
             "top row should have REVERSED modifier for status line"
         );
+    }
+
+    #[test]
+    fn render_transcript_applies_input_text_and_prompt_styles() {
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.focus = Focus::Game;
+        state.input = "zq".to_string();
+        state.colors.input_prompt = Style::new().fg(Color::Green);
+        state.colors.input_text = Style::new().fg(Color::Red);
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        // Find the '>' prompt cell and the typed 'z' cell; check their fg.
+        let mut prompt_fg = None;
+        let mut text_fg = None;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    match c.symbol() {
+                        ">" if prompt_fg.is_none() => prompt_fg = Some(c.fg),
+                        "z" if text_fg.is_none() => text_fg = Some(c.fg),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert_eq!(prompt_fg, Some(Color::Green), "'>' uses input_prompt style");
+        assert_eq!(text_fg, Some(Color::Red), "typed text uses input_text style");
     }
 
     #[test]
