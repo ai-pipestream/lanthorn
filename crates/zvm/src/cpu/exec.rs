@@ -600,12 +600,16 @@ impl Machine {
                 self.print_text("\n");
                 StepResult::Continue
             }
-            // 0x0D verify — branch always true (stub; real checksum in Task 16)
+            // 0OP:0x0D verify — checksum the story and branch on match.
             0x0D => {
-                self.do_branch(branch, true);
+                let header_ck = self.mem.read_word(0x1C);
+                // If the header records no checksum (some dev builds), treat as genuine.
+                let ok = header_ck == 0 || self.story_checksum() == header_ck;
+                self.do_branch(branch, ok);
                 StepResult::Continue
             }
-            // 0x0F piracy — branch always true (ZMSD: treat as legit copy)
+            // 0OP:0x0F piracy — the standard says interpreters should behave as if the
+            // game is genuine: always take the branch.
             0x0F => {
                 self.do_branch(branch, true);
                 StepResult::Continue
@@ -1120,6 +1124,33 @@ impl Machine {
                 }
             }
         }
+    }
+
+    /// Sum (mod 0x10000) of the story bytes [0x40, file_length) — every byte
+    /// past the header up to the declared file length (ZMSD §11.1.6). file_length =
+    /// header word 0x1A * scale (2 for v3, 4 for v4-5, 8 for v6+).
+    pub fn story_checksum(&self) -> u16 {
+        let scale: u32 = match self.mem.version() {
+            1..=3 => 2,
+            4 | 5 => 4,
+            _ => 8,
+        };
+        let file_length = self.mem.read_word(0x1A) as u32 * scale;
+        let end = file_length.min(self.mem.len() as u32);
+        // Checksum the ORIGINAL story image: the dynamic region [0..static_mem_base)
+        // may have been mutated by the running game, so read it from the snapshot
+        // captured at load; the static region never changes, so read it from `mem`.
+        let dyn_end = self.original_dynamic.len() as u32;
+        let mut sum: u16 = 0;
+        for addr in 0x40..end {
+            let b = if addr < dyn_end {
+                self.original_dynamic[addr as usize]
+            } else {
+                self.mem.read_byte(addr)
+            };
+            sum = sum.wrapping_add(b as u16);
+        }
+        sum
     }
 
     /// Store `val` into variable `var` if `var` is Some.
@@ -3767,5 +3798,46 @@ pub(crate) mod tests {
         m.exec_var(0x0A, &[3], None, None);
         assert_eq!(m.screen.upper.rows, 3);
         assert_eq!(m.screen.upper.cols, 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 1: verify (real checksum) + piracy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_branches_true_on_correct_checksum() {
+        let mut buf = sample_story(5);
+        // Give the story a non-empty checksum region so the match path is real.
+        buf[0x1A] = 0x00; buf[0x1B] = 0x20; // file-length word = 0x20 -> 0x80 bytes (v5 *4)
+        buf[0x40] = 0xAB;                   // a marker byte inside [0x40, 0x80)
+        // 0x10: verify (0OP:0x0D = 0xBD), branch on_true offset 6 -> skip the add.
+        buf[0x10] = 0xBD;
+        buf[0x11] = 0xC6; // branch: on_true (bit7), short (bit6), offset 6
+        // add 0,7 -> G0 (2OP:0x14 long form, two small consts), skipped if branch taken.
+        buf[0x12] = 0x14; buf[0x13] = 0x00; buf[0x14] = 0x07; buf[0x15] = 0x10;
+        buf[0x16] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let ck = m.story_checksum();
+        assert_ne!(ck, 0, "checksum region non-empty so the compare path is exercised");
+        m.mem.write_word(0x1C, ck); // header checksum = computed -> verify must branch true
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 0, "verify branched true (skipped the add)");
+    }
+
+    #[test]
+    fn verify_branches_false_on_bad_checksum() {
+        let mut buf = sample_story(5);
+        buf[0x1A] = 0x00; buf[0x1B] = 0x20; buf[0x40] = 0xAB;
+        buf[0x10] = 0xBD; buf[0x11] = 0xC6;
+        buf[0x12] = 0x14; buf[0x13] = 0x00; buf[0x14] = 0x07; buf[0x15] = 0x10;
+        buf[0x16] = 0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.mem.write_word(0x1C, 0x0001); // deliberately wrong checksum
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 7, "verify branched false (ran the add)");
     }
 }
