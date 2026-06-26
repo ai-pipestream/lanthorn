@@ -1297,9 +1297,19 @@ pub fn should_bg_tidy(
     mode: crate::config::BackgroundTidy,
     new_room: bool,
     overlap: bool,
+    changed: bool,
     counter: &mut u32,
 ) -> bool {
     use crate::config::BackgroundTidy;
+    // A turn that did not change the graph (look, examine, inventory, a failed
+    // move, …) must never auto-tidy. `overlap` is a state predicate — true
+    // whenever the layout currently has any overlap/distortion — so without this
+    // gate a persistent overlap re-triggered a tidy on EVERY turn, making the map
+    // border pulse on a bare "look". Re-tidying an unchanged graph is also
+    // deterministically pointless (same input → same layout).
+    if !changed {
+        return false;
+    }
     match mode {
         BackgroundTidy::Off => false,
         BackgroundTidy::EveryRoom => new_room || overlap,
@@ -3920,8 +3930,22 @@ mod tests {
     fn should_bg_tidy_off_always_false() {
         use crate::config::BackgroundTidy;
         let mut c = 0u32;
-        assert!(!should_bg_tidy(BackgroundTidy::Off, true, true, &mut c));
-        assert!(!should_bg_tidy(BackgroundTidy::Off, false, false, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::Off, true, true, true, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::Off, false, false, false, &mut c));
+    }
+
+    #[test]
+    fn should_bg_tidy_no_change_never_fires() {
+        use crate::config::BackgroundTidy;
+        // Regression (bug: "look pulses tidy"): a turn that did not change the
+        // graph must NOT auto-tidy, even with a persistent layout overlap.
+        let mut c = 0u32;
+        for mode in [BackgroundTidy::EveryRoom, BackgroundTidy::OnOverlap, BackgroundTidy::Debounced] {
+            assert!(!should_bg_tidy(mode, false, true, false, &mut c),
+                "{:?}: overlap without a graph change must not fire", mode);
+            assert!(!should_bg_tidy(mode, true, true, false, &mut c),
+                "{:?}: changed=false must override new_room/overlap", mode);
+        }
     }
 
     #[test]
@@ -3929,19 +3953,19 @@ mod tests {
         use crate::config::BackgroundTidy;
         let mut c = 0u32;
         // Fires on new room.
-        assert!(should_bg_tidy(BackgroundTidy::EveryRoom, true, false, &mut c));
-        // Fires on overlap even without a new room.
-        assert!(should_bg_tidy(BackgroundTidy::EveryRoom, false, true, &mut c));
+        assert!(should_bg_tidy(BackgroundTidy::EveryRoom, true, false, true, &mut c));
+        // Fires on overlap even without a new room (the change added a connection).
+        assert!(should_bg_tidy(BackgroundTidy::EveryRoom, false, true, true, &mut c));
         // No new room and no overlap: no fire.
-        assert!(!should_bg_tidy(BackgroundTidy::EveryRoom, false, false, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::EveryRoom, false, false, false, &mut c));
     }
 
     #[test]
     fn should_bg_tidy_on_overlap_follows_overlap() {
         use crate::config::BackgroundTidy;
         let mut c = 0u32;
-        assert!(should_bg_tidy(BackgroundTidy::OnOverlap, false, true, &mut c));
-        assert!(!should_bg_tidy(BackgroundTidy::OnOverlap, true, false, &mut c));
+        assert!(should_bg_tidy(BackgroundTidy::OnOverlap, false, true, true, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::OnOverlap, true, false, true, &mut c));
     }
 
     #[test]
@@ -3950,13 +3974,13 @@ mod tests {
         let mut c = 0u32;
         // First K-1 new rooms should not fire.
         for _ in 0..BG_TIDY_DEBOUNCE - 1 {
-            assert!(!should_bg_tidy(BackgroundTidy::Debounced, true, false, &mut c));
+            assert!(!should_bg_tidy(BackgroundTidy::Debounced, true, false, true, &mut c));
         }
         // K-th new room fires and resets counter.
-        assert!(should_bg_tidy(BackgroundTidy::Debounced, true, false, &mut c));
+        assert!(should_bg_tidy(BackgroundTidy::Debounced, true, false, true, &mut c));
         assert_eq!(c, 0, "counter resets after Debounced fires");
         // No new room: never fires.
-        assert!(!should_bg_tidy(BackgroundTidy::Debounced, false, false, &mut c));
+        assert!(!should_bg_tidy(BackgroundTidy::Debounced, false, false, false, &mut c));
     }
 
     #[test]
@@ -3964,13 +3988,13 @@ mod tests {
         use crate::config::BackgroundTidy;
         // Overlap fires immediately regardless of debounce counter value.
         let mut c = 0u32;
-        assert!(should_bg_tidy(BackgroundTidy::Debounced, false, true, &mut c),
+        assert!(should_bg_tidy(BackgroundTidy::Debounced, false, true, true, &mut c),
             "overlap should fire immediately even without a new room");
         assert_eq!(c, 0, "counter is reset when overlap fires");
 
         // Even with a partially-accumulated counter, overlap fires immediately.
         let mut c = 2u32;
-        assert!(should_bg_tidy(BackgroundTidy::Debounced, false, true, &mut c),
+        assert!(should_bg_tidy(BackgroundTidy::Debounced, false, true, true, &mut c),
             "overlap fires even with a non-zero counter");
         assert_eq!(c, 0, "counter is reset when overlap fires");
     }

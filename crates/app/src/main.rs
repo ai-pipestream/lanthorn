@@ -1673,8 +1673,11 @@ fn main() {
                     state.push_transcript(note);
                 }
 
-                // Capture room count before apply_turn for new-room detection.
+                // Capture room + connection counts before apply_turn, to detect
+                // whether THIS turn actually changed the graph (a non-mutating
+                // command like "look" leaves both unchanged).
                 let rooms_before = mapper.graph.rooms().count();
+                let conns_before = mapper.graph.connections().len();
 
                 apply_turn(&mut mapper, &cmd, &result);
 
@@ -1771,7 +1774,11 @@ fn main() {
                             && mapper.graph.layer_of(c.dest) == active_layer
                     });
                     let overlap = has_overlap || has_distorted;
-                    if should_bg_tidy(state.config.background_tidy, new_room, overlap, &mut bg_tidy_counter) {
+                    // Only auto-tidy on turns that actually changed the graph, so a
+                    // bare "look" (overlap persists, graph unchanged) doesn't pulse.
+                    let new_conn = mapper.graph.connections().len() > conns_before;
+                    let changed = new_room || new_conn;
+                    if should_bg_tidy(state.config.background_tidy, new_room, overlap, changed, &mut bg_tidy_counter) {
                         // Spawn a worker thread only if no job is currently in flight (coalesce).
                         if state.tidy_job.is_none() {
                             let graph_clone = mapper.graph.clone();
