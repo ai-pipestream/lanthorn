@@ -22,7 +22,7 @@ use super::draw_str_clipped;
 // render time.  The CURSOR style remains a local constant as it is structural
 // (REVERSED only, no color content mapped by ColorScheme).
 
-const CURSOR_STYLE: Style = Style::new()
+pub const CURSOR_STYLE: Style = Style::new()
     .add_modifier(Modifier::REVERSED);
 
 // ── Pure helpers (testable without Machine) ────────────────────────────────────
@@ -406,7 +406,7 @@ fn draw_str_highlighted(
 }
 
 /// Format the input prompt line: `"> " + input`.
-pub(crate) fn format_input_line(input: &str) -> String {
+pub fn format_input_line(input: &str) -> String {
     format!("> {}", input)
 }
 

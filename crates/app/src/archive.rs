@@ -196,11 +196,17 @@ pub fn save_archive_meta(
     zip.start_file(ENTRY_META, options)?;
     zip.write_all(meta_json.as_bytes())?;
 
-    // transcript.json
-    let td = TranscriptData {
-        lines: transcript.to_vec(),
-        kinds: transcript_kinds.to_vec(),
-    };
+    // transcript.json — persist only the story text the player saw (Story + the
+    // player's own Input), dropping Meta/Warning lines (slash-command output,
+    // diagnostics) that aren't part of the game's narrative.
+    use crate::state::TranscriptKind;
+    let (lines, kinds): (Vec<String>, Vec<TranscriptKind>) = transcript
+        .iter()
+        .zip(transcript_kinds.iter())
+        .filter(|(_, &k)| matches!(k, TranscriptKind::Story | TranscriptKind::Input))
+        .map(|(line, &k)| (line.clone(), k))
+        .unzip();
+    let td = TranscriptData { lines, kinds };
     let transcript_json =
         serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
@@ -468,6 +474,50 @@ mod tests {
         assert_eq!(scr.cursor_col, 3, "cursor round-trips");
         assert_eq!(scr.upper.cell(1, 2).ch, 'Z', "grid glyph round-trips");
         assert_eq!(scr.upper.cell(1, 2).style, 2, "grid style round-trips");
+    }
+
+    #[test]
+    fn save_drops_meta_and_warning_transcript_lines() {
+        use crate::state::TranscriptKind;
+
+        let transcript = vec![
+            "West of House".to_string(),
+            "> open mailbox".to_string(),
+            "/help".to_string(),
+            "save failed".to_string(),
+            "You open the mailbox.".to_string(),
+        ];
+        let kinds = vec![
+            TranscriptKind::Story,
+            TranscriptKind::Input,
+            TranscriptKind::Meta,
+            TranscriptKind::Warning,
+            TranscriptKind::Story,
+        ];
+
+        let path = temp_archive_path("transcript-filter");
+        save_archive_meta(
+            &path,
+            &small_mapper(),
+            &dummy_machine(),
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new() },
+            &transcript,
+            &kinds,
+            &[],
+        )
+        .expect("save_archive_meta");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        // Only Story + Input survive; Meta/Warning are dropped.
+        assert_eq!(
+            ac.transcript,
+            vec!["West of House", "> open mailbox", "You open the mailbox."]
+        );
+        assert_eq!(
+            ac.transcript_kinds,
+            vec![TranscriptKind::Story, TranscriptKind::Input, TranscriptKind::Story]
+        );
     }
 
     #[test]
