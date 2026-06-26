@@ -221,6 +221,10 @@ struct PaneRects {
     /// Text under the active story-pane selection, captured from THIS frame's
     /// buffer (clamped to story columns). Read on mouse-release to copy.
     pub selection_text: Option<String>,
+    /// Largest meaningful `transcript_scroll` this frame (total wrapped rows −
+    /// viewport). The loop clamps `state.transcript_scroll` to this so the view
+    /// can't over-scroll past the top.
+    pub transcript_max_scroll: u16,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -242,6 +246,7 @@ fn draw_frame(
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
     let mut selection_text_out: Option<String> = None;
     let mut story_scrollbar = false;
+    let mut transcript_max_scroll: u16 = 0;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -316,7 +321,9 @@ fn draw_frame(
                 let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                story_scrollbar = render_transcript(&session.machine, state, tarea, buf);
+                let (sb_, ms_) = render_transcript(&session.machine, state, tarea, buf);
+                story_scrollbar = sb_;
+                transcript_max_scroll = ms_;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -384,7 +391,9 @@ fn draw_frame(
                 let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                story_scrollbar = render_transcript(&session.machine, state, tarea, buf);
+                let (sb_, ms_) = render_transcript(&session.machine, state, tarea, buf);
+                story_scrollbar = sb_;
+                transcript_max_scroll = ms_;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -672,7 +681,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, selection_text: selection_text_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, selection_text: selection_text_out, transcript_max_scroll })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -946,7 +955,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, selection_text: None };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, selection_text: None, transcript_max_scroll: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1055,6 +1064,10 @@ fn main() {
         // Draw.
         match draw_frame(&mut terminal, &session, &mapper, &state) {
             Ok(panes) => {
+                // Clamp scrollback to what the frame can actually show, so an
+                // over-scroll past the top doesn't accumulate (and lag on the
+                // way back down).
+                state.transcript_scroll = state.transcript_scroll.min(panes.transcript_max_scroll);
                 last_panes = panes;
             }
             Err(e) => {

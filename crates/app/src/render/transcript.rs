@@ -312,7 +312,10 @@ pub(crate) fn visible_wrapped_lines_kinded(
     }
     let display_rows = wrap_lines_kinded(transcript, kinds, styles, width);
     let n = display_rows.len();
-    let scroll = scroll as usize;
+    // Clamp scroll so it never exceeds the top: past `n - rows` the window would
+    // otherwise shrink from the bottom, blanking viewport rows.
+    let max_scroll = n.saturating_sub(rows);
+    let scroll = (scroll as usize).min(max_scroll);
     let end = n.saturating_sub(scroll);
     let start = end.saturating_sub(rows);
     (display_rows[start..end].to_vec(), n)
@@ -482,11 +485,12 @@ pub(crate) fn format_inventory_line(
 /// - Bottom row(s): `"> " + state.input`; cursor indicator `_` when `state.focus == Focus::Game`.
 ///   When `state.colors.input_line_style != None`, the input line is wrapped in a box
 ///   (3 rows total).  Falls back to plain when the area is too small.
-/// Renders the GAME pane. Returns `true` when the transcript drew a scrollbar
-/// gutter (rightmost column), so the caller can exclude it from text selection.
-pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &mut Buffer) -> bool {
+/// Renders the GAME pane. Returns `(scrollbar_drawn, max_scroll)`: whether the
+/// transcript drew a scrollbar gutter (so the caller can exclude that column
+/// from text selection) and the largest meaningful `transcript_scroll` value.
+pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &mut Buffer) -> (bool, u16) {
     if area.height == 0 || area.width == 0 {
-        return false;
+        return (false, 0);
     }
 
     let normal_style = state.colors.transcript;
@@ -518,7 +522,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     }
 
     if area.height < status_rows + 1 {
-        return false;
+        return (false, 0);
     }
 
     // ── Bottom row(s): input line ─────────────────────────────────────────────
@@ -538,7 +542,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let middle_top = area.y + status_rows;
     let middle_bottom = input_region_top;
     if middle_top >= middle_bottom {
-        return false;
+        return (false, 0);
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
     render_middle(machine, state, buf, middle_area, normal_style)
@@ -660,17 +664,18 @@ fn render_input_content(
 }
 
 /// Render the middle section: inventory strip, suggestion line (or search hint), transcript body.
-/// Renders the transcript body (plus inventory/suggestion lines). Returns
-/// `true` when a scrollbar gutter was drawn in the rightmost column.
+/// Returns `(scrollbar_drawn, max_scroll)` — whether a scrollbar gutter was
+/// drawn in the rightmost column, and the largest meaningful `transcript_scroll`
+/// value (total wrapped rows minus the viewport) so the caller can clamp it.
 fn render_middle(
     machine: &Machine,
     state: &AppState,
     buf: &mut Buffer,
     area: Rect,
     _normal_style: Style,
-) -> bool {
+) -> (bool, u16) {
     if area.height == 0 || area.width == 0 {
-        return false;
+        return (false, 0);
     }
     let w = area.width as usize;
 
@@ -726,7 +731,7 @@ fn render_middle(
     // ── Transcript body ───────────────────────────────────────────────────────
     if area.height < 2 {
         // Not enough room for transcript when there's an inventory/suggestion row.
-        return false;
+        return (false, 0);
     }
 
     let transcript_top = area.y;
@@ -739,7 +744,7 @@ fn render_middle(
     };
 
     if transcript_top >= transcript_bottom {
-        return false;
+        return (false, 0);
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
@@ -830,7 +835,8 @@ fn render_middle(
             &mut sb_state,
         );
     }
-    drew_scrollbar
+    let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
+    (drew_scrollbar, max_scroll)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1059,6 +1065,20 @@ mod tests {
         // scroll=0: end=2, start=1 → ["world"]
         let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 0, 5);
         assert_eq!(vis2[0].0, "world");
+    }
+
+    #[test]
+    fn visible_wrapped_lines_kinded_over_scroll_clamps_to_top() {
+        // 5 logical lines, viewport 3 rows. Over-scrolling past the top must
+        // keep showing the TOP 3 lines, not shrink the window from the bottom.
+        let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
+        let kinds = vec![TranscriptKind::Story; 5];
+        let styles = vec![Style::default(); 5];
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 3, 999, 10);
+        assert_eq!(total, 5);
+        assert_eq!(vis.len(), 3, "over-scroll still fills the viewport");
+        assert_eq!(vis[0].0, "L0", "top line stays at the top");
+        assert_eq!(vis[2].0, "L2");
     }
 
     #[test]
