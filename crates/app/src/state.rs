@@ -525,6 +525,9 @@ pub struct StyleEditorState {
     pub custom_buf: String,
     /// Most-recently-used color list (populated by Task 5).
     pub mru: Vec<String>,
+    /// Which attribute chip (0-4) is selected when focus == Attrs.
+    /// Order: Bold=0, Italic=1, Underline=2, Dim=3, Reversed=4.
+    pub attr_cursor: usize,
 }
 
 // ── Config screen state ───────────────────────────────────────────────────────

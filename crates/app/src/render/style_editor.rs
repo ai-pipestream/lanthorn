@@ -9,16 +9,27 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 
+use crate::input::AttrKind;
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
-use crate::state::AppState;
+use crate::state::{AppState, StyleFocus};
 use crate::style::{SELECTOR_GROUPS, style_for_selector};
+
+/// The five attribute chips in display order.
+const ATTR_KINDS: [(AttrKind, &str); 5] = [
+    (AttrKind::Bold,      "[B]  "),
+    (AttrKind::Italic,    "[I]  "),
+    (AttrKind::Underline, "[U]  "),
+    (AttrKind::Dim,       "[dim]"),
+    (AttrKind::Reversed,  "[rev]"),
+];
 
 /// Hit-rects returned from `draw_style_editor`.
 ///
 /// `samples` maps each drawn sample to `(global_selector_index, Rect)`.
-/// Later tasks extend this struct with property-pane rects.
+/// `attr_chips` maps each attribute chip to its `(AttrKind, Rect)`.
 pub struct StyleEditorRects {
     pub samples: Vec<(usize, Rect)>,
+    pub attr_chips: Vec<(AttrKind, Rect)>,
     pub dialog: DialogRects,
 }
 
@@ -72,6 +83,19 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let dialog_rects = draw_dialog(buf, &spec, &ds);
     let content = dialog_rects.content;
 
+    // Split content into board (left) and property pane (right) if wide enough.
+    // Property pane is 24 cols wide with a 1-col gap; board gets the rest.
+    const PROP_W: u16 = 24;
+    const GAP: u16 = 1;
+    let (board_area, prop_area) = if content.width >= PROP_W + GAP + 20 {
+        let board_w = content.width.saturating_sub(PROP_W + GAP);
+        let board = Rect::new(content.x, content.y, board_w, content.height);
+        let prop = Rect::new(content.x + board_w + GAP, content.y, PROP_W, content.height);
+        (board, Some(prop))
+    } else {
+        (content, None)
+    };
+
     // Styles for group headers and row highlight.
     let header_style = state.colors.dialog_title
         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
@@ -81,23 +105,23 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let active_style = state.colors.dialog_button_active
         .add_modifier(Modifier::BOLD);
 
-    // Walk groups and draw samples.
+    // Walk groups and draw samples in the board area.
     let mut samples: Vec<(usize, Rect)> = Vec::new();
     let mut global_idx: usize = 0;
-    let mut row_y = content.y;
+    let mut row_y = board_area.y;
 
     for (group_label, selectors) in SELECTOR_GROUPS {
-        if row_y >= content.bottom() {
+        if row_y >= board_area.bottom() {
             break;
         }
 
         // Group header line.
         let hdr = format!(" {}", group_label);
-        crate::render::draw_str_clipped(buf, content.x, row_y, &hdr, header_style, content);
+        crate::render::draw_str_clipped(buf, board_area.x, row_y, &hdr, header_style, board_area);
         row_y += 1;
 
         for sel in *selectors {
-            if row_y >= content.bottom() {
+            if row_y >= board_area.bottom() {
                 break;
             }
 
@@ -105,7 +129,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let label_style = if is_active { active_style } else { normal_style };
 
             // Fill row background.
-            for col in content.x..content.right() {
+            for col in board_area.x..board_area.right() {
                 if let Some(cell) = buf.cell_mut((col, row_y)) {
                     cell.set_symbol(" ").set_style(label_style);
                 }
@@ -116,19 +140,19 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let marker = if is_active { ">" } else { " " };
             let name_trunc: String = sel.chars().take(name_w).collect();
             let label = format!("{} {:<width$}", marker, name_trunc, width = name_w);
-            crate::render::draw_str_clipped(buf, content.x, row_y, &label, label_style, content);
+            crate::render::draw_str_clipped(buf, board_area.x, row_y, &label, label_style, board_area);
 
             // Sample swatch: render a short styled text after the name.
-            let swatch_x = content.x + label.chars().count() as u16 + 1;
+            let swatch_x = board_area.x + label.chars().count() as u16 + 1;
             let sample_style = style_for_selector(&ed.preview, sel);
             let swatch_text = " Sample ";
-            if swatch_x < content.right() {
-                let swatch_area = Rect::new(swatch_x, row_y, content.right().saturating_sub(swatch_x), 1);
+            if swatch_x < board_area.right() {
+                let swatch_area = Rect::new(swatch_x, row_y, board_area.right().saturating_sub(swatch_x), 1);
                 crate::render::draw_str_clipped(buf, swatch_x, row_y, swatch_text, sample_style, swatch_area);
             }
 
             // Record the full row rect as the hit-rect for this selector.
-            let row_rect = Rect::new(content.x, row_y, content.width, 1);
+            let row_rect = Rect::new(board_area.x, row_y, board_area.width, 1);
             samples.push((global_idx, row_rect));
 
             global_idx += 1;
@@ -136,7 +160,86 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         }
     }
 
-    Some(StyleEditorRects { samples, dialog: dialog_rects })
+    // ── Property pane ─────────────────────────────────────────────────────────
+
+    let mut attr_chips: Vec<(AttrKind, Rect)> = Vec::new();
+
+    if let Some(prop) = prop_area {
+        // Clear the property pane background.
+        for py in prop.y..prop.bottom() {
+            for px in prop.x..prop.right() {
+                if let Some(cell) = buf.cell_mut((px, py)) {
+                    cell.set_symbol(" ").set_style(normal_style);
+                }
+            }
+        }
+
+        let prop_focused = ed.focus == StyleFocus::Attrs;
+        let label_style = if prop_focused { active_style } else { normal_style };
+
+        // "Property" header.
+        let sel_name = ed.selectors[ed.active];
+        let trunc: String = sel_name.chars().take(PROP_W as usize).collect();
+        let hdr_text = format!(" {}", trunc);
+        crate::render::draw_str_clipped(buf, prop.x, prop.y, &hdr_text, header_style, prop);
+
+        // Look up the active Decl (may be absent if user hasn't edited this selector).
+        let active_decl = ed.doc.colors.selectors.get(sel_name);
+
+        // fg / bg rows.
+        let fg_str = active_decl.and_then(|d| d.fg.as_deref()).unwrap_or("default");
+        let bg_str = active_decl.and_then(|d| d.bg.as_deref()).unwrap_or("default");
+        if prop.height > 1 {
+            let fg_line = format!(" fg:  {}", fg_str);
+            crate::render::draw_str_clipped(buf, prop.x, prop.y + 1, &fg_line, normal_style, prop);
+        }
+        if prop.height > 2 {
+            let bg_line = format!(" bg:  {}", bg_str);
+            crate::render::draw_str_clipped(buf, prop.x, prop.y + 2, &bg_line, normal_style, prop);
+        }
+
+        // Attribute chips row (row 4 within the prop pane).
+        if prop.height > 4 {
+            let chip_y = prop.y + 4;
+            let mut chip_x = prop.x + 1;
+
+            for (ci, (kind, label)) in ATTR_KINDS.iter().enumerate() {
+                let flag_on = active_decl
+                    .and_then(|d| match kind {
+                        AttrKind::Bold      => d.bold,
+                        AttrKind::Italic    => d.italic,
+                        AttrKind::Underline => d.underline,
+                        AttrKind::Dim       => d.dim,
+                        AttrKind::Reversed  => d.reversed,
+                    })
+                    .unwrap_or(false);
+
+                let is_chip_cursor = prop_focused && ci == ed.attr_cursor;
+
+                let chip_style = if flag_on {
+                    // Attribute is ON: use active (highlighted) style.
+                    active_style
+                } else if is_chip_cursor {
+                    // Cursor on this chip but not active: use label style (slightly highlighted).
+                    label_style
+                } else {
+                    normal_style
+                };
+
+                let chip_text = label.trim_end();
+                let chip_w = chip_text.chars().count() as u16;
+
+                if chip_x + chip_w <= prop.right() {
+                    let chip_rect = Rect::new(chip_x, chip_y, chip_w, 1);
+                    attr_chips.push((*kind, chip_rect));
+                    crate::render::draw_str_clipped(buf, chip_x, chip_y, chip_text, chip_style, prop);
+                    chip_x += chip_w + 1;
+                }
+            }
+        }
+    }
+
+    Some(StyleEditorRects { samples, attr_chips, dialog: dialog_rects })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

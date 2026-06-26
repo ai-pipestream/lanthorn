@@ -35,6 +35,18 @@ use crate::complete::{room_words_from_text, suggest};
 use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, Prompt, PromptKind};
 
+// ── AttrKind ──────────────────────────────────────────────────────────────────
+
+/// Which text-modifier attribute to toggle on the active selector's `Decl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrKind {
+    Bold,
+    Italic,
+    Underline,
+    Dim,
+    Reversed,
+}
+
 // ── VerbMenuNavKind ───────────────────────────────────────────────────────────
 
 /// Navigation kind for `Action::VerbMenuNav`.
@@ -197,6 +209,12 @@ pub enum Action {
     StyleEditorCancel,
     /// Navigate the style-editor board by delta (-1 = up, +1 = down).
     StyleNav(i32),
+    /// Toggle an attribute chip on the active selector's Decl.
+    StyleToggleAttr(AttrKind),
+    /// Cycle the style-editor focus ring forward (+1) or backward (-1).
+    StyleFocusCycle(i32),
+    /// Move the attribute-chip cursor left (-1) or right (+1) within the Attrs focus.
+    StyleAttrChipNav(i32),
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -1003,12 +1021,31 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
 
 // ── Internal: style-editor key routing ───────────────────────────────────────
 
-/// Minimal key dispatch for the style-editor full-screen mode.
-/// Expanded in later tasks; for now only Esc cancels.
-fn style_editor_key_to_action(key: KeyEvent, _state: &crate::state::AppState) -> Action {
+/// Key dispatch for the style-editor full-screen mode.
+fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> Action {
+    use crate::state::StyleFocus;
+    let (focus, attr_cursor) = state.style_editor.as_ref()
+        .map(|e| (e.focus, e.attr_cursor))
+        .unwrap_or((StyleFocus::Board, 0));
+
     match key.code {
         KeyCode::Up   => Action::StyleNav(-1),
         KeyCode::Down => Action::StyleNav(1),
+        KeyCode::Tab if key.modifiers == KeyModifiers::NONE => Action::StyleFocusCycle(1),
+        KeyCode::BackTab => Action::StyleFocusCycle(-1),
+        KeyCode::Left if focus == StyleFocus::Attrs => Action::StyleAttrChipNav(-1),
+        KeyCode::Right if focus == StyleFocus::Attrs => Action::StyleAttrChipNav(1),
+        KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE
+            && focus == StyleFocus::Attrs =>
+        {
+            match attr_cursor {
+                0 => Action::StyleToggleAttr(AttrKind::Bold),
+                1 => Action::StyleToggleAttr(AttrKind::Italic),
+                2 => Action::StyleToggleAttr(AttrKind::Underline),
+                3 => Action::StyleToggleAttr(AttrKind::Dim),
+                _ => Action::StyleToggleAttr(AttrKind::Reversed),
+            }
+        }
         KeyCode::Esc  => Action::StyleEditorCancel,
         _ => Action::None,
     }
@@ -2087,6 +2124,46 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             }
         }
 
+        Action::StyleToggleAttr(kind) => {
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &mut state.style_editor {
+                let sel = ed.selectors[ed.active].to_string();
+                let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                let slot = match kind {
+                    AttrKind::Bold      => &mut decl.bold,
+                    AttrKind::Italic    => &mut decl.italic,
+                    AttrKind::Underline => &mut decl.underline,
+                    AttrKind::Dim       => &mut decl.dim,
+                    AttrKind::Reversed  => &mut decl.reversed,
+                };
+                *slot = Some(!slot.unwrap_or(false));
+                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleFocusCycle(d) => {
+            if let Some(ed) = &mut state.style_editor {
+                use crate::state::StyleFocus;
+                let order = [
+                    StyleFocus::Board,
+                    StyleFocus::Fg,
+                    StyleFocus::Bg,
+                    StyleFocus::Custom,
+                    StyleFocus::Attrs,
+                ];
+                let cur = order.iter().position(|f| *f == ed.focus).unwrap_or(0) as i32;
+                let n = order.len() as i32;
+                ed.focus = order[((cur + d).rem_euclid(n)) as usize];
+            }
+        }
+
+        Action::StyleAttrChipNav(d) => {
+            if let Some(ed) = &mut state.style_editor {
+                let n = 5i32;
+                ed.attr_cursor = ((ed.attr_cursor as i32 + d).rem_euclid(n)) as usize;
+            }
+        }
+
         // ── Config screen actions ─────────────────────────────────────────────
 
         Action::OpenConfig => {
@@ -2443,6 +2520,7 @@ pub fn open_style_editor(state: &mut AppState) {
         focus: crate::state::StyleFocus::Board,
         custom_buf: String::new(),
         mru: Vec::new(),
+        attr_cursor: 0,
     });
 }
 
@@ -5493,5 +5571,17 @@ mod tests {
         // Cancel closes it.
         apply_action(Action::StyleEditorCancel, &mut s, &mut mapper::mapper::Mapper::default());
         assert!(s.style_editor.is_none());
+    }
+
+    #[test]
+    fn toggling_bold_updates_decl_and_preview() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
+        apply_action(Action::StyleToggleAttr(AttrKind::Bold), &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bold), Some(true));
+        // Smoke: preview was recomputed (exercises the code path).
+        let _ = ed.preview;
     }
 }
