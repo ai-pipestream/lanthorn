@@ -591,9 +591,21 @@ fn draw_frame(
             hints_panel_rects_out = draw_hints_panel(state, full, buf);
         }
 
-        // ── Prompt overlay — drawn over the map area (or full screen) ─────────
+        // ── Prompt overlay — map-editing prompts overlay the map; save/file-name
+        // prompts (a game-driven SAVE or a .qzl export) belong with the story/game
+        // interaction, so they render over the story pane instead. ──────────────
         if let Some(prompt) = &state.prompt {
-            let overlay_area = if map_area.height > 0 { map_area } else { main_area };
+            let prefer_story =
+                matches!(prompt.kind, PromptKind::SaveAs | PromptKind::ExportSaveName(_));
+            let overlay_area = if prefer_story && story_area.height > 0 {
+                story_area
+            } else if map_area.height > 0 {
+                map_area
+            } else if story_area.height > 0 {
+                story_area
+            } else {
+                main_area
+            };
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
                 let label = match &prompt.kind {
