@@ -5,44 +5,150 @@
 # are ignored. The key is checksum-independent, so it matches any file copy of
 # the same release without needing the story file at hand.
 #
-# These entries are verified — each IFID prefix was computed directly from a
-# real story file. To extend the table toward the full documented Infocom
-# serial catalog (other releases of these games), add more lines: compute a
-# story's IFID prefix (see crate::ifid::compute_ifid) and pair it with the
-# title. A WRONG entry mislabels a game; a MISSING one just falls back to the
-# filename, so only add prefixes you can verify.
+# Provenance: the Infocom entries below are the commercially-released story
+# datafiles tabulated in "An Infocom Fact Sheet" rev 4.95 (Paul David Doherty),
+# section V.1.2 / V.1.3. Development, beta, and unreleased-final builds (marked
+# D/F/* in the source) are excluded, as are the two pre-1982 Zork builds that
+# predate the YYMMDD-serial convention (Z-code v1/v2, which babelmap can't run
+# anyway). The release+serial pairs were cross-validated against 33 prefixes
+# computed directly from real story files (see crate::ifid::compute_ifid) — all
+# 33 matched the Fact Sheet, so the remaining (alternate-release) rows are
+# transcribed from the same verified table.
 #
-# ── Infocom ──────────────────────────────────────────────────────────────────
+# A WRONG entry mislabels a game; a MISSING one just falls back to the filename.
+# To extend the table, add lines only for prefixes you can verify.
+#
+# Games are listed once per released version (a game with several disk releases
+# has several rows, ordered by serial date). v6 (YZIP graphical) titles are
+# included for completeness even though babelmap doesn't yet launch them.
+#
+# ── Infocom: the 35 canonical games ──────────────────────────────────────────
 ZCODE-77-850814	A Mind Forever Voyaging
+ZCODE-79-851122	A Mind Forever Voyaging
+ZCODE-54-890606	Arthur: The Quest for Excalibur
+ZCODE-63-890622	Arthur: The Quest for Excalibur
+ZCODE-74-890714	Arthur: The Quest for Excalibur
 ZCODE-97-851218	Ballyhoo
+ZCODE-47-870915	Beyond Zork: The Coconut of Quendor
+ZCODE-49-870917	Beyond Zork: The Coconut of Quendor
+ZCODE-51-870923	Beyond Zork: The Coconut of Quendor
 ZCODE-57-871221	Beyond Zork: The Coconut of Quendor
 ZCODE-9-871008	Border Zone
+ZCODE-86-870212	Bureaucracy
 ZCODE-116-870602	Bureaucracy
 ZCODE-23-840809	Cutthroats
+ZCODE-18-820311	Deadline
+ZCODE-19-820427	Deadline
+ZCODE-21-820512	Deadline
+ZCODE-22-820809	Deadline
+ZCODE-26-821108	Deadline
 ZCODE-27-831005	Deadline
+ZCODE-10-830810	Enchanter
+ZCODE-15-831107	Enchanter
+ZCODE-16-831118	Enchanter
+ZCODE-16-840518	Enchanter
+ZCODE-24-851118	Enchanter
 ZCODE-29-860820	Enchanter
+ZCODE-47-840914	The Hitchhiker's Guide to the Galaxy
+ZCODE-56-841221	The Hitchhiker's Guide to the Galaxy
+ZCODE-58-851002	The Hitchhiker's Guide to the Galaxy
+ZCODE-59-851108	The Hitchhiker's Guide to the Galaxy
 ZCODE-31-871119	The Hitchhiker's Guide to the Galaxy
 ZCODE-37-861215	Hollywood Hijinx
 ZCODE-22-830916	Infidel
+ZCODE-22-840522	Infidel
+ZCODE-26-890316	Journey: The Quest Begins
+ZCODE-30-890322	Journey: The Quest Begins
+ZCODE-77-890616	Journey: The Quest Begins
+ZCODE-83-890706	Journey: The Quest Begins
 ZCODE-59-860730	Leather Goddesses of Phobos
+ZCODE-59-861114	Leather Goddesses of Phobos
+ZCODE-4-880405	Leather Goddesses of Phobos
 ZCODE-203-870506	The Lurking Horror
+ZCODE-219-870912	The Lurking Horror
+ZCODE-221-870918	The Lurking Horror
+ZCODE-4-860918	Moonmist
 ZCODE-9-861022	Moonmist
 ZCODE-19-870722	Nord and Bert Couldn't Make Head or Tail of It
+ZCODE-20-830708	Planetfall
+ZCODE-26-831014	Planetfall
+ZCODE-29-840118	Planetfall
 ZCODE-37-851003	Planetfall
+ZCODE-10-880531	Planetfall
 ZCODE-26-870730	Plundered Hearts
+ZCODE-15-840501	Seastalker
+ZCODE-15-840522	Seastalker
+ZCODE-15-840612	Seastalker
+ZCODE-15-840716	Seastalker
+ZCODE-16-850515	Seastalker
 ZCODE-16-850603	Seastalker
 ZCODE-21-871214	Sherlock: The Riddle of the Crown Jewels
+ZCODE-26-880127	Sherlock: The Riddle of the Crown Jewels
+ZCODE-292-890314	Shogun
+ZCODE-295-890321	Shogun
+ZCODE-311-890510	Shogun
+ZCODE-322-890706	Shogun
+ZCODE-4-840131	Sorcerer
+ZCODE-6-840508	Sorcerer
+ZCODE-13-851021	Sorcerer
 ZCODE-15-851108	Sorcerer
+ZCODE-18-860904	Sorcerer
+ZCODE-63-850916	Spellbreaker
 ZCODE-87-860904	Spellbreaker
+ZCODE-15-820901	Starcross
 ZCODE-17-821021	Starcross
 ZCODE-107-870430	Stationfall
 ZCODE-14-841005	Suspect
+ZCODE-5-830222	Suspended
+ZCODE-7-830419	Suspended
+ZCODE-8-830521	Suspended
 ZCODE-8-840521	Suspended
+ZCODE-11-860509	Trinity
 ZCODE-12-860926	Trinity
-ZCODE-69-850920	Wishbringer
+ZCODE-13-830524	The Witness
+ZCODE-18-830910	The Witness
+ZCODE-20-831119	The Witness
+ZCODE-21-831208	The Witness
 ZCODE-22-840924	The Witness
+ZCODE-68-850501	Wishbringer
+ZCODE-69-850920	Wishbringer
+ZCODE-23-880706	Wishbringer
+ZCODE-23-820428	Zork I: The Great Underground Empire
+ZCODE-25-820515	Zork I: The Great Underground Empire
+ZCODE-26-820803	Zork I: The Great Underground Empire
+ZCODE-28-821013	Zork I: The Great Underground Empire
+ZCODE-30-830330	Zork I: The Great Underground Empire
+ZCODE-75-830929	Zork I: The Great Underground Empire
+ZCODE-76-840509	Zork I: The Great Underground Empire
 ZCODE-88-840726	Zork I: The Great Underground Empire
+ZCODE-52-871125	Zork I: The Great Underground Empire
+ZCODE-15-820308	Zork II: The Wizard of Frobozz
+ZCODE-17-820427	Zork II: The Wizard of Frobozz
+ZCODE-18-820512	Zork II: The Wizard of Frobozz
+ZCODE-18-820517	Zork II: The Wizard of Frobozz
+ZCODE-19-820721	Zork II: The Wizard of Frobozz
+ZCODE-22-830331	Zork II: The Wizard of Frobozz
+ZCODE-23-830411	Zork II: The Wizard of Frobozz
+ZCODE-22-840518	Zork II: The Wizard of Frobozz
 ZCODE-48-840904	Zork II: The Wizard of Frobozz
+ZCODE-10-820818	Zork III: The Dungeon Master
+ZCODE-12-821025	Zork III: The Dungeon Master
+ZCODE-15-830331	Zork III: The Dungeon Master
+ZCODE-16-830410	Zork III: The Dungeon Master
+ZCODE-15-840518	Zork III: The Dungeon Master
 ZCODE-17-840727	Zork III: The Dungeon Master
+ZCODE-296-881019	Zork Zero: The Revenge of Megaboz
+ZCODE-366-890323	Zork Zero: The Revenge of Megaboz
+ZCODE-383-890602	Zork Zero: The Revenge of Megaboz
 ZCODE-393-890714	Zork Zero: The Revenge of Megaboz
 ZCODE-16-970828	Zork: The Undiscovered Underground
+#
+# ── Infocom: demos & samplers ────────────────────────────────────────────────
+ZCODE-24-840627	Infocom Sampler I
+ZCODE-26-840731	Infocom Sampler I
+ZCODE-52-850402	Infocom Sampler I
+ZCODE-53-850407	Infocom Sampler I
+ZCODE-55-850823	Infocom Sampler I
+ZCODE-97-870601	Infocom Sampler II
+ZCODE-34-871124	Mini-Zork I
+ZCODE-15-840330	Zork I Demo

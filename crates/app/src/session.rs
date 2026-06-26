@@ -836,6 +836,11 @@ mod tests {
         assert_eq!(known_title("ZCODE-27-831005-X"), Some("Deadline"));
         assert_eq!(known_title("ZCODE-48-840904-X"), Some("Zork II: The Wizard of Frobozz"));
         assert_eq!(known_title("ZCODE-29-860820-X"), Some("Enchanter"));
+        // Alternate releases (not the copy we own) resolve from the full catalog.
+        assert_eq!(known_title("ZCODE-23-820428-X"), Some("Zork I: The Great Underground Empire"));
+        assert_eq!(known_title("ZCODE-15-840612-X"), Some("Seastalker"));
+        // v6 reference entries resolve even though babelmap can't launch them yet.
+        assert_eq!(known_title("ZCODE-296-881019-X"), Some("Zork Zero: The Revenge of Megaboz"));
     }
 
     #[test]
