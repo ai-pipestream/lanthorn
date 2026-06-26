@@ -275,13 +275,21 @@ fn max_object_number(mem: &crate::memory::Memory) -> u16 {
     for candidate in 1u16..=2000 {
         // Address of this candidate's entry.
         let entry_addr = base + (candidate as u32 - 1) * esize;
+        // Stop if this entry would extend past the end of the story file: a
+        // malformed or over-counted table can run off the end, and the
+        // property-pointer word we read below must itself be in bounds.
+        if (entry_addr + esize) as usize > mem.len() {
+            break;
+        }
         // Property-table pointer is the last word of the entry.
         let prop_ptr_offset = prop_table_ptr_offset(version);
         let ptbl_addr = mem.read_word(entry_addr + prop_ptr_offset) as u32;
 
-        // If the pointer is zero or points at or before the start of this entry,
-        // we've gone past the real object table.
-        if ptbl_addr == 0 || ptbl_addr <= entry_addr {
+        // A valid property-table pointer is nonzero, points after this entry,
+        // and lies within the story file (its name-length byte must be
+        // readable). Anything else means we've walked past the real object
+        // table into unrelated data that merely looks like an entry.
+        if ptbl_addr == 0 || ptbl_addr <= entry_addr || ptbl_addr as usize >= mem.len() {
             break;
         }
         n = candidate;
