@@ -1,0 +1,48 @@
+# Canonical Z-machine game titles, keyed by the release+serial prefix of the
+# IFID ("ZCODE-<release>-<serial>", WITHOUT the trailing byte-checksum).
+#
+# Format: <IFID-prefix><TAB><Title>. Blank lines and lines starting with '#'
+# are ignored. The key is checksum-independent, so it matches any file copy of
+# the same release without needing the story file at hand.
+#
+# These entries are verified — each IFID prefix was computed directly from a
+# real story file. To extend the table toward the full documented Infocom
+# serial catalog (other releases of these games), add more lines: compute a
+# story's IFID prefix (see crate::ifid::compute_ifid) and pair it with the
+# title. A WRONG entry mislabels a game; a MISSING one just falls back to the
+# filename, so only add prefixes you can verify.
+#
+# ── Infocom ──────────────────────────────────────────────────────────────────
+ZCODE-77-850814	A Mind Forever Voyaging
+ZCODE-97-851218	Ballyhoo
+ZCODE-57-871221	Beyond Zork: The Coconut of Quendor
+ZCODE-9-871008	Border Zone
+ZCODE-116-870602	Bureaucracy
+ZCODE-23-840809	Cutthroats
+ZCODE-27-831005	Deadline
+ZCODE-29-860820	Enchanter
+ZCODE-31-871119	The Hitchhiker's Guide to the Galaxy
+ZCODE-37-861215	Hollywood Hijinx
+ZCODE-22-830916	Infidel
+ZCODE-59-860730	Leather Goddesses of Phobos
+ZCODE-203-870506	The Lurking Horror
+ZCODE-9-861022	Moonmist
+ZCODE-19-870722	Nord and Bert Couldn't Make Head or Tail of It
+ZCODE-37-851003	Planetfall
+ZCODE-26-870730	Plundered Hearts
+ZCODE-16-850603	Seastalker
+ZCODE-21-871214	Sherlock: The Riddle of the Crown Jewels
+ZCODE-15-851108	Sorcerer
+ZCODE-87-860904	Spellbreaker
+ZCODE-17-821021	Starcross
+ZCODE-107-870430	Stationfall
+ZCODE-14-841005	Suspect
+ZCODE-8-840521	Suspended
+ZCODE-12-860926	Trinity
+ZCODE-69-850920	Wishbringer
+ZCODE-22-840924	The Witness
+ZCODE-88-840726	Zork I: The Great Underground Empire
+ZCODE-48-840904	Zork II: The Wizard of Frobozz
+ZCODE-17-840727	Zork III: The Dungeon Master
+ZCODE-393-890714	Zork Zero: The Revenge of Megaboz
+ZCODE-16-970828	Zork: The Undiscovered Underground

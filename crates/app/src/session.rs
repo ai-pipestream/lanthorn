@@ -325,29 +325,33 @@ fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
 // ── Adventure-title helpers ───────────────────────────────────────────────────
 
 /// Canonical titles for well-known games, keyed by the release+serial prefix of
-/// the IFID (`ZCODE-<release>-<serial>`, WITHOUT the trailing byte-checksum). This
-/// is robust to different file copies of the same release and can be populated
-/// from the documented Infocom serial catalog without needing each story file.
-/// Used when the opening banner doesn't reliably yield the title (a game opening
-/// with copyright/epigraph/narration) or to prefer a clean canonical name.
-/// Checked before the banner heuristic.
-const KNOWN_TITLES: &[(&str, &str)] = &[
-    ("ZCODE-77-850814", "A Mind Forever Voyaging"),
-    ("ZCODE-116-870602", "Bureaucracy"),
-    ("ZCODE-31-871119", "The Hitchhiker's Guide to the Galaxy"),
-    ("ZCODE-37-851003", "Planetfall"),
-    ("ZCODE-87-860904", "Spellbreaker"),
-    ("ZCODE-393-890714", "Zork Zero: The Revenge of Megaboz"),
-    ("ZCODE-88-840726", "Zork I: The Great Underground Empire"),
-    ("ZCODE-16-970828", "Zork: The Undiscovered Underground"),
-];
+/// the IFID (`ZCODE-<release>-<serial>`, WITHOUT the trailing byte-checksum),
+/// bundled in `known_titles.tsv` (`include_str!`d at build time). The key is
+/// robust to different file copies of the same release. Used to prefer a clean
+/// canonical name over the opening-banner heuristic, and by the story picker.
+fn known_titles() -> &'static std::collections::HashMap<&'static str, &'static str> {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<std::collections::HashMap<&'static str, &'static str>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        include_str!("known_titles.tsv")
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_end();
+                if line.is_empty() || line.starts_with('#') {
+                    return None;
+                }
+                line.split_once('\t').map(|(k, v)| (k.trim(), v.trim()))
+            })
+            .collect()
+    })
+}
 
 /// The canonical title for a known game, matched on the release+serial prefix of
 /// the IFID (the trailing `-<checksum>` is ignored).
 pub fn known_title(ifid: &str) -> Option<&'static str> {
     // Strip the trailing checksum segment: "ZCODE-88-840726-A129" → "ZCODE-88-840726".
     let key = ifid.rsplit_once('-').map_or(ifid, |(prefix, _)| prefix);
-    KNOWN_TITLES.iter().find(|(id, _)| *id == key).map(|(_, t)| *t)
+    known_titles().get(key).copied()
 }
 
 /// Extract the adventure title from the opening banner by anchoring on the
@@ -828,6 +832,23 @@ mod tests {
         assert_eq!(known_title("ZCODE-116-870602-FC65"), Some("Bureaucracy"));
         assert_eq!(known_title("ZCODE-77-850814-5031"), Some("A Mind Forever Voyaging"));
         assert_eq!(known_title("ZCODE-0-000000-0000"), None);
+        // Entries added when the table moved to the bundled known_titles.tsv.
+        assert_eq!(known_title("ZCODE-27-831005-X"), Some("Deadline"));
+        assert_eq!(known_title("ZCODE-48-840904-X"), Some("Zork II: The Wizard of Frobozz"));
+        assert_eq!(known_title("ZCODE-29-860820-X"), Some("Enchanter"));
+    }
+
+    #[test]
+    fn known_titles_file_parses_without_dupes() {
+        let table = known_titles();
+        assert!(table.len() >= 30, "bundled table has the verified entries: {}", table.len());
+        // Keys are unique IFID prefixes (HashMap would silently dedupe; assert the
+        // line count matches the entry count so a duplicate prefix is caught).
+        let lines = include_str!("known_titles.tsv")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+            .count();
+        assert_eq!(lines, table.len(), "no duplicate IFID prefixes in known_titles.tsv");
     }
 
     #[test]
