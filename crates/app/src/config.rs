@@ -222,6 +222,10 @@ pub struct Config {
     /// exit-save and Ctrl+S quick-save). Default false.
     #[serde(default)]
     pub auto_save: bool,
+    /// When true, invert mouse-wheel scroll direction (for terminals reporting
+    /// "natural" scrolling). Default false = conventional direction.
+    #[serde(default)]
+    pub mouse_wheel_invert: bool,
     /// When true (default) and auto_save is off, prompt the user to save on quit.
     #[serde(default = "default_true")]
     pub prompt_save_on_quit: bool,
@@ -285,6 +289,7 @@ impl Default for Config {
             use_default_map: false,
             auto_load: true,
             auto_save: false,
+            mouse_wheel_invert: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: true,
@@ -345,6 +350,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.use_default_map = from_file.use_default_map;
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
+            cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
             cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_history = from_file.record_history;
@@ -392,6 +398,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["use_default_map"] = toml_edit::value(cfg.use_default_map);
     doc["auto_load"] = toml_edit::value(cfg.auto_load);
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
+    doc["mouse_wheel_invert"] = toml_edit::value(cfg.mouse_wheel_invert);
     doc["prompt_save_on_quit"] = toml_edit::value(cfg.prompt_save_on_quit);
     doc["prompt_load_on_launch"] = toml_edit::value(cfg.prompt_load_on_launch);
     doc["record_history"] = toml_edit::value(cfg.record_history);
@@ -658,6 +665,7 @@ mod tests {
             use_default_map: true,
             auto_load: false,
             auto_save: true,
+            mouse_wheel_invert: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: false,

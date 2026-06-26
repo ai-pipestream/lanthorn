@@ -763,7 +763,15 @@ pub fn mouse_to_action(
         && col >= story.x && col < story.right()
         && row >= story.y && row < story.bottom();
 
-    match m.kind {
+    // Honor the user's wheel-direction preference: when mouse_wheel_invert is
+    // set, swap scroll up/down (some terminals report "natural" scrolling).
+    let kind = match (m.kind, state.config.mouse_wheel_invert) {
+        (MouseEventKind::ScrollUp, true) => MouseEventKind::ScrollDown,
+        (MouseEventKind::ScrollDown, true) => MouseEventKind::ScrollUp,
+        (k, _) => k,
+    };
+
+    match kind {
         // ── Left-click in story: activate game pane ───────────────────────────
         MouseEventKind::Down(MouseButton::Left) if in_story => {
             Action::ActivatePane(crate::state::Focus::Game)
@@ -3759,6 +3767,26 @@ mod tests {
 
         let rm = render_layer(&g, MAIN_LAYER);
         room_screen_rects(&rm, &s, area)
+    }
+
+    #[test]
+    fn mouse_wheel_invert_swaps_story_scroll_direction() {
+        use crossterm::event::MouseEventKind;
+
+        let mut s = AppState::default();
+        // Default (conventional): wheel up in the story scrolls toward older text.
+        let m = mouse_event(MouseEventKind::ScrollUp, 90, 10, KeyModifiers::NONE);
+        assert!(matches!(
+            mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None),
+            Action::TranscriptScroll(-1)
+        ));
+        // Inverted: wheel up scrolls the other way.
+        s.config.mouse_wheel_invert = true;
+        let m2 = mouse_event(MouseEventKind::ScrollUp, 90, 10, KeyModifiers::NONE);
+        assert!(matches!(
+            mouse_to_action(&s, m2, map_rect(), story_rect(), &[], &None),
+            Action::TranscriptScroll(1)
+        ));
     }
 
     #[test]
