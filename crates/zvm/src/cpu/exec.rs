@@ -110,6 +110,15 @@ pub struct Machine {
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
+    /// In-memory auxiliary save table for the v5 `save/restore table` opcodes,
+    /// keyed by the game-supplied name string. The host persists/repopulates it
+    /// (in the `.babelmap` archive or a per-game global file); the engine itself
+    /// never touches the filesystem.
+    pub aux_data: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Set true whenever an aux `save table` writes the table. The host clears it
+    /// after persisting; correctness does not depend on the flag (every archive
+    /// write embeds the latest table) — it is a "data changed" notification.
+    pub aux_dirty: bool,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -153,6 +162,8 @@ impl Machine {
             warned_var_opcodes: std::collections::HashSet::new(),
             pending_beeps: Vec::new(),
             diagnostics: Vec::new(),
+            aux_data: std::collections::BTreeMap::new(),
+            aux_dirty: false,
         }
     }
 
@@ -1060,19 +1071,59 @@ impl Machine {
 
     fn exec_ext(&mut self, opcode: u8, ops: &[u16], store: Option<u8>) -> StepResult {
         match opcode {
-            // EXT:0x00 save — like 0OP save but store-only (v5+)
+            // EXT:0x00 save — 0 operands: full game-state save (suspend).
+            // ≥3 operands: v5 auxiliary "save table bytes name [prompt]".
             0x00 => {
-                let dest = match store {
-                    Some(sv) => SaveDest::Store(sv),
-                    None => SaveDest::Store(0),
-                };
-                self.pending_save = Some(PendingSave { result_dest: dest });
-                StepResult::SaveRequest
+                if ops.len() >= 3 {
+                    let table = ops[0] as u32;
+                    let len = ops[1] as u32;
+                    let name = self.read_aux_name(ops[2] as u32);
+                    let mut data = Vec::with_capacity(len.min(self.mem.len() as u32) as usize);
+                    for i in 0..len {
+                        let a = table + i;
+                        if a as usize >= self.mem.len() { break; }
+                        data.push(self.mem.read_byte(a));
+                    }
+                    self.aux_data.insert(name, data);
+                    self.aux_dirty = true;
+                    self.do_store(store, 1);
+                    StepResult::Continue
+                } else {
+                    let dest = match store {
+                        Some(sv) => SaveDest::Store(sv),
+                        None => SaveDest::Store(0),
+                    };
+                    self.pending_save = Some(PendingSave { result_dest: dest });
+                    StepResult::SaveRequest
+                }
             }
-            // EXT:0x01 restore — like 0OP restore but store-only (v5+)
+            // EXT:0x01 restore — 0 operands: full restore (suspend). ≥3 operands:
+            // v5 auxiliary "restore table bytes name [prompt]" (stores bytes read).
             0x01 => {
-                self.pending_restore_store = store;
-                StepResult::RestoreRequest
+                if ops.len() >= 3 {
+                    let table = ops[0] as u32;
+                    let len = ops[1] as u32;
+                    let name = self.read_aux_name(ops[2] as u32);
+                    let written = match self.aux_data.get(&name).cloned() {
+                        Some(data) => {
+                            let n = (data.len() as u32).min(len);
+                            let mut w = 0u16;
+                            for i in 0..n {
+                                let a = table + i;
+                                if a as usize >= self.mem.len() { break; }
+                                self.mem.write_byte(a, data[i as usize]);
+                                w += 1;
+                            }
+                            w
+                        }
+                        None => 0,
+                    };
+                    self.do_store(store, written);
+                    StepResult::Continue
+                } else {
+                    self.pending_restore_store = store;
+                    StepResult::RestoreRequest
+                }
             }
             // EXT:0x02 log_shift — logical (unsigned) shift
             // places > 0 → left shift; places < 0 → right shift (zero-fill)
@@ -1147,6 +1198,23 @@ impl Machine {
             // Other EXT opcodes: no-op
             _ => StepResult::Continue,
         }
+    }
+
+    /// Read the length-prefixed ASCII filename string for the v5 aux opcodes:
+    /// byte 0 is the length, followed by that many ASCII bytes. Bounds-safe --
+    /// returns an empty string (a valid table key) for a 0 / out-of-range addr.
+    fn read_aux_name(&self, addr: u32) -> String {
+        if addr == 0 || addr as usize >= self.mem.len() {
+            return String::new();
+        }
+        let len = self.mem.read_byte(addr) as u32;
+        let mut s = String::with_capacity(len as usize);
+        for i in 0..len {
+            let a = addr + 1 + i;
+            if a as usize >= self.mem.len() { break; }
+            s.push(self.mem.read_byte(a) as char);
+        }
+        s
     }
 
     // -----------------------------------------------------------------------
@@ -4191,5 +4259,76 @@ pub(crate) mod tests {
         assert!(m.is_terminator(13), "Enter always terminates");
         assert!(m.is_terminator(0x81), "listed function key terminates");
         assert!(!m.is_terminator(b'a' as u16), "ordinary char does not terminate");
+    }
+
+    // ── v5 auxiliary save/restore table form (EXT:0x00 / EXT:0x01, ≥3 operands) ──
+    //
+    // Lays a name string at 0x300 ("AB", length-prefixed) and a 4-byte data region
+    // at 0x310, then drives exec_ext directly. The in-memory table round-trips and
+    // the game-visible store values follow the spec (save→1, restore→bytes-read).
+    fn aux_machine() -> Machine {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        // name string "AB" at 0x280: [len=2]['A']['B']
+        // (0x280 is safely below global_vars=0x300, avoiding a collision
+        // when the store variable 0x10 = G0 writes to 0x300.)
+        m.mem.write_byte(0x280, 2);
+        m.mem.write_byte(0x281, b'A');
+        m.mem.write_byte(0x282, b'B');
+        // data region at 0x310: 0xDE 0xAD 0xBE 0xEF
+        for (i, b) in [0xDE, 0xAD, 0xBE, 0xEF].into_iter().enumerate() {
+            m.mem.write_byte(0x310 + i as u32, b);
+        }
+        m
+    }
+
+    #[test]
+    fn aux_save_table_stores_one_and_fills_table() {
+        let mut m = aux_machine();
+        // save table=0x310 bytes=4 name=0x280 -> store G0
+        let r = m.exec_ext(0x00, &[0x310, 4, 0x280], Some(0x10));
+        assert_eq!(r, StepResult::Continue, "aux save never suspends");
+        assert_eq!(m.global(0), 1, "aux save stores 1 (success)");
+        assert!(m.aux_dirty, "aux save marks the table dirty");
+        assert_eq!(m.aux_data.get("AB").map(|v| v.as_slice()), Some(&[0xDE,0xAD,0xBE,0xEF][..]));
+    }
+
+    #[test]
+    fn aux_restore_table_round_trips_and_stores_count() {
+        let mut m = aux_machine();
+        m.exec_ext(0x00, &[0x310, 4, 0x280], Some(0x10)); // save first
+        // clobber the region
+        for i in 0..4 { m.mem.write_byte(0x310 + i, 0); }
+        // restore table=0x310 bytes=4 name=0x280 -> store G0
+        let r = m.exec_ext(0x01, &[0x310, 4, 0x280], Some(0x10));
+        assert_eq!(r, StepResult::Continue);
+        assert_eq!(m.global(0), 4, "restore stores the number of bytes read");
+        assert_eq!(m.mem.read_byte(0x310), 0xDE);
+        assert_eq!(m.mem.read_byte(0x313), 0xEF);
+    }
+
+    #[test]
+    fn aux_restore_missing_name_stores_zero() {
+        let mut m = aux_machine();
+        let r = m.exec_ext(0x01, &[0x310, 4, 0x280], Some(0x10));
+        assert_eq!(r, StepResult::Continue);
+        assert_eq!(m.global(0), 0, "restoring an unsaved name stores 0");
+    }
+
+    #[test]
+    fn aux_save_out_of_bounds_does_not_panic() {
+        let mut m = aux_machine();
+        let huge = (m.mem.len() as u16).wrapping_sub(2);
+        // table near EOF, bytes huge, name near EOF -- must clamp, not panic.
+        let r = m.exec_ext(0x00, &[huge, 0xFFFF, huge], Some(0x10));
+        assert_eq!(r, StepResult::Continue);
+        assert_eq!(m.global(0), 1);
+    }
+
+    #[test]
+    fn ext_save_restore_zero_operands_still_suspend() {
+        let mut m = aux_machine();
+        assert_eq!(m.exec_ext(0x00, &[], Some(0x10)), StepResult::SaveRequest);
+        assert_eq!(m.exec_ext(0x01, &[], Some(0x10)), StepResult::RestoreRequest);
     }
 }
