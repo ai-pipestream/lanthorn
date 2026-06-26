@@ -238,6 +238,58 @@ impl TidyAnim {
     }
 }
 
+// ── Replay / rewind ───────────────────────────────────────────────────────────
+
+/// Transient state for the rewind/replay modal. While `Some`, the map pane
+/// renders the reconstructed snapshot for `idx` instead of the live graph
+/// (like `TidyAnim`). `Esc`/`q` clears it back to the live game with no change.
+#[derive(Debug)]
+pub struct ReplayState {
+    /// Selected turn index into `AppState.history`.
+    pub idx: usize,
+    pub playing: bool,
+    last_advance: Instant,
+}
+
+impl ReplayState {
+    /// Open seeded at the last turn (`last_idx`), paused.
+    pub fn new(last_idx: usize) -> Self {
+        Self { idx: last_idx, playing: false, last_advance: Instant::now() }
+    }
+
+    /// Step `delta` turns (clamped to `[0, len-1]`) and pause.
+    pub fn step(&mut self, delta: isize, len: usize) {
+        if len == 0 { self.idx = 0; self.playing = false; return; }
+        let last = (len - 1) as isize;
+        self.idx = (self.idx as isize + delta).clamp(0, last) as usize;
+        self.playing = false;
+    }
+
+    /// Toggle auto-play; resuming restarts the dwell clock.
+    pub fn toggle_play(&mut self) {
+        self.playing = !self.playing;
+        self.last_advance = Instant::now();
+    }
+
+    /// Advance one turn if playing and `dwell` elapsed; holds at the last turn.
+    /// Returns true if `idx` changed.
+    pub fn tick(&mut self, dwell: Duration, len: usize) -> bool {
+        if !self.playing || len == 0 || self.idx + 1 >= len {
+            self.playing = false;
+            return false;
+        }
+        if self.last_advance.elapsed() < dwell {
+            return false;
+        }
+        self.idx += 1;
+        self.last_advance = Instant::now();
+        if self.idx + 1 >= len {
+            self.playing = false;
+        }
+        true
+    }
+}
+
 // ── Sound pulse ──────────────────────────────────────────────────────────────
 
 /// An in-flight one-shot story-border flash triggered by a `sound_effect` bleep.
@@ -612,6 +664,13 @@ pub struct AppState {
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
 
+    /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
+    /// is on; persisted into the `.babelmap` archive. Empty otherwise.
+    pub history: Vec<crate::history::TurnRecord>,
+
+    /// Active rewind/replay modal state. `None` means the modal is closed.
+    pub replay: Option<ReplayState>,
+
     /// Set by apply_action when a saves-manager prompt (SaveAs or ConfirmDeleteSave)
     /// is submitted. The caller (main.rs) reads this to perform the I/O operation,
     /// then clears it. The tuple is (kind, user_input_buffer).
@@ -754,6 +813,8 @@ impl Default for AppState {
             config: crate::config::Config::default(),
             config_screen: None,
             turns: 0,
+            history: Vec::new(),
+            replay: None,
             saves_prompt_submitted: None,
             dict_words: Vec::new(),
             suggestions: Vec::new(),
@@ -802,6 +863,7 @@ impl AppState {
             || self.quit_dialog
             || self.launch_dialog
             || self.hints.is_some()
+            || self.replay.is_some()
     }
 
     /// Set the explicit layer override. `None` means follow the current room's layer.
@@ -1023,6 +1085,33 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appstate_history_defaults_empty() {
+        let s = AppState::default();
+        assert!(s.history.is_empty(), "history starts empty");
+    }
+
+    #[test]
+    fn replay_state_step_clamps_and_pauses() {
+        let mut r = ReplayState::new(4); // start at last idx
+        assert_eq!(r.idx, 4);
+        r.step(-1, 5);
+        assert_eq!(r.idx, 3);
+        assert!(!r.playing, "manual step pauses");
+        r.step(-10, 5);
+        assert_eq!(r.idx, 0, "clamped at 0");
+        r.step(10, 5);
+        assert_eq!(r.idx, 4, "clamped at len-1");
+    }
+
+    #[test]
+    fn replay_counts_as_overlay() {
+        let mut s = AppState::default();
+        assert!(!s.any_overlay_open());
+        s.replay = Some(ReplayState::new(0));
+        assert!(s.any_overlay_open(), "replay open => any_overlay_open true");
+    }
 
     #[test]
     fn filter_maps_input_with_story_and_warning_with_meta() {

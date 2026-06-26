@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod export;
+pub mod history;
 pub mod hints;
 pub mod slash;
 pub mod colors;

@@ -113,6 +113,10 @@ pub enum Command {
     // ── Hints ─────────────────────────────────────────────────────────────────
     /// Open the Hints panel (companion Invisiclues / hint-file mini-terminal).
     OpenHints,
+
+    // ── History ───────────────────────────────────────────────────────────────
+    /// Open the rewind/replay history modal.
+    OpenHistory,
 }
 
 impl Command {
@@ -173,6 +177,7 @@ impl Command {
             Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
             Command::ToggleLocMethod => Action::ToggleLocMethod,
             Command::OpenHints => Action::OpenHints,
+            Command::OpenHistory => Action::OpenHistory,
         }
     }
 
@@ -232,6 +237,7 @@ impl Command {
             Command::ToggleRoomNumbers => "toggle_room_numbers",
             Command::ToggleLocMethod => "toggle_loc_method",
             Command::OpenHints => "open_hints",
+            Command::OpenHistory => "open_history",
         }
     }
 
@@ -291,6 +297,7 @@ impl Command {
             Command::ToggleRoomNumbers => "room numbers",
             Command::ToggleLocMethod => "location method",
             Command::OpenHints => "hints",
+            Command::OpenHistory => "history",
         }
     }
 
@@ -353,6 +360,7 @@ impl Command {
             Command::ToggleRoomNumbers => Context::Global,
             Command::ToggleLocMethod => Context::Global,
             Command::OpenHints => Context::Global,
+            Command::OpenHistory => Context::Global,
         }
     }
 
@@ -417,6 +425,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::ToggleRoomNumbers,
     Command::ToggleLocMethod,
     Command::OpenHints,
+    Command::OpenHistory,
 ];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
@@ -631,6 +640,8 @@ impl KeyMap {
         bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, Command::CycleLayoutReverse, Context::Global);
         // F5 → reset game (free key; opens a confirmation prompt before acting).
         bind!(plain(F(5)), Command::ResetGame, Context::Global);
+        // F4 → open rewind/replay history modal (free function key).
+        bind!(plain(F(4)), Command::OpenHistory, Context::Global);
 
         // F6-F9 → Nudge (plain function keys; ctrl+arrow removed so all direct
         // bindings remain modifier-free).
@@ -856,7 +867,7 @@ const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
     ("Layout", &["retidy", "animate_tidy", "cycle_layout"]),
     ("Layers", &["peel_layer", "merge_layer", "cycle_layer_next", "cycle_layer_prev", "rename_layer"]),
     ("Edit", &["rename_room", "edit_notes", "delete_selected_connection", "relabel_selected_edge"]),
-    ("Files", &["open_saves", "reset_game", "export_svg", "export_dot", "export_dump"]),
+    ("Files", &["open_saves", "open_history", "reset_game", "export_svg", "export_dot", "export_dump"]),
     ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery", "toggle_inventory", "open_verb_menu", "open_config"]),
 ];
 
@@ -1150,6 +1161,22 @@ mod tests {
         let km = KeyMap::default();
         let f5 = KeySpec { code: KeyCode::F(5), ctrl: false, shift: false, alt: false };
         assert_eq!(km.lookup(&f5, Context::Global), Some(Command::ResetGame));
+    }
+
+    #[test]
+    fn open_history_command_wiring() {
+        assert_eq!(Command::OpenHistory.name(), "open_history");
+        assert_eq!(Command::OpenHistory.label(), "history");
+        assert_eq!(Command::OpenHistory.context(), Context::Global);
+        assert!(matches!(Command::OpenHistory.to_action(), Action::OpenHistory));
+        // F4 is the default key.
+        let km = KeyMap::default();
+        let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
+        assert_eq!(km.lookup(&f4, Context::Global), Some(Command::OpenHistory));
+        // It appears in the Files hotkey group.
+        let layout = HotkeyLayout::default();
+        let files = layout.groups.iter().find(|(t, _)| t == "Files").expect("Files group");
+        assert!(files.1.contains(&Command::OpenHistory), "OpenHistory in Files group");
     }
 
     #[test]

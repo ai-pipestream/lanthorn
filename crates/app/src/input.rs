@@ -237,6 +237,16 @@ pub enum Action {
     TranscriptScroll(i32),
     /// Open the Hints panel. Real behavior wired in Task D; stub here keeps match exhaustive.
     OpenHints,
+    /// Open the rewind/replay history modal (seeds `replay` at the last turn).
+    OpenHistory,
+    /// Step the replay selection by delta turns (-1 left, +1 right).
+    ReplayStep(isize),
+    /// Toggle replay auto-play.
+    ReplayTogglePlay,
+    /// Close the replay modal (back to live, no change).
+    ReplayClose,
+    /// Resume the live game from the selected turn (caller-handled in main.rs).
+    ReplayResume,
 }
 
 // ── key_to_action ─────────────────────────────────────────────────────────────
@@ -294,6 +304,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // 5. Saves-manager sub-mode: when saves modal is open, route to saves keys.
     if state.saves.is_some() {
         return saves_key_to_action(key, state.dialog_focus);
+    }
+
+    // Replay/rewind sub-mode: when the history modal is open, route to replay keys.
+    if state.replay.is_some() {
+        return history_key_to_action(key);
     }
 
     // 5.1. File-browser sub-mode: when the browser is open, route to browser keys.
@@ -884,6 +899,18 @@ fn saves_key_to_action(key: KeyEvent, _focus: usize) -> Action {
         KeyCode::Char('e') if key.modifiers == KeyModifiers::NONE => Action::SavesExport,
         KeyCode::Char('i') if key.modifiers == KeyModifiers::NONE => Action::SavesImport,
         KeyCode::Esc => Action::SavesClose,
+        _ => Action::None,
+    }
+}
+
+/// Hardwired replay/rewind sub-mode keys (not rebindable, like saves/anim).
+fn history_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Left => Action::ReplayStep(-1),
+        KeyCode::Right => Action::ReplayStep(1),
+        KeyCode::Char(' ') => Action::ReplayTogglePlay,
+        KeyCode::Enter | KeyCode::Char('r') => Action::ReplayResume,
+        KeyCode::Esc | KeyCode::Char('q') => Action::ReplayClose,
         _ => Action::None,
     }
 }
@@ -2068,6 +2095,36 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // TODO Task D: wire the real open/discover/sub-session behavior.
         Action::OpenHints => {}
 
+        // ── Replay / rewind actions ───────────────────────────────────────────
+
+        Action::OpenHistory => {
+            // Seed at the last turn; no-op when there is no history.
+            state.hotkey_dialog = false;
+            if !state.history.is_empty() {
+                state.replay = Some(crate::state::ReplayState::new(state.history.len() - 1));
+            }
+        }
+
+        Action::ReplayStep(delta) => {
+            let len = state.history.len();
+            if let Some(r) = &mut state.replay {
+                r.step(delta, len);
+            }
+        }
+
+        Action::ReplayTogglePlay => {
+            if let Some(r) = &mut state.replay {
+                r.toggle_play();
+            }
+        }
+
+        Action::ReplayClose => {
+            state.replay = None;
+        }
+
+        // ReplayResume is caller-handled in main.rs (needs the live session/VM).
+        Action::ReplayResume => {}
+
         Action::None => {}
         // Note: OpenHotkeyDialog and CloseHotkeyDialog are handled above.
     }
@@ -2592,6 +2649,37 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus(); // → Map
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
+    }
+
+    #[test]
+    fn history_keys_step_resume_and_close() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let plain = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        assert!(matches!(history_key_to_action(plain(KeyCode::Left)), Action::ReplayStep(-1)));
+        assert!(matches!(history_key_to_action(plain(KeyCode::Right)), Action::ReplayStep(1)));
+        assert!(matches!(history_key_to_action(plain(KeyCode::Char(' '))), Action::ReplayTogglePlay));
+        assert!(matches!(history_key_to_action(plain(KeyCode::Enter)), Action::ReplayResume));
+        assert!(matches!(history_key_to_action(plain(KeyCode::Char('r'))), Action::ReplayResume));
+        assert!(matches!(history_key_to_action(plain(KeyCode::Esc)), Action::ReplayClose));
+        assert!(matches!(history_key_to_action(plain(KeyCode::Char('q'))), Action::ReplayClose));
+    }
+
+    #[test]
+    fn replay_step_moves_idx_and_close_clears() {
+        use crate::state::{AppState, ReplayState};
+        use mapper::mapper::Mapper;
+        let mut s = AppState::default();
+        // Three records so idx 0..=2 are valid.
+        let m = Mapper::default();
+        for t in 1..=3 {
+            crate::history::record_turn(&mut s.history, t, "x", vec![t as u8], &m, false, "");
+        }
+        s.replay = Some(ReplayState::new(2));
+        apply_action(Action::ReplayStep(-1), &mut s, &mut Mapper::default());
+        assert_eq!(s.replay.as_ref().unwrap().idx, 1);
+        apply_action(Action::ReplayClose, &mut s, &mut Mapper::default());
+        assert!(s.replay.is_none(), "Esc closes without change");
+        assert_eq!(s.history.len(), 3, "close leaves history intact");
     }
 
     #[test]

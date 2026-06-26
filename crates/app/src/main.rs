@@ -39,6 +39,7 @@ use mapper::graph::RoomId;
 use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
+use app::render::history::draw_history;
 use app::render::transcript::render_transcript;
 use app::render::upper_window::draw_upper_window;
 use app::render::draw_str_clipped;
@@ -240,10 +241,21 @@ fn draw_frame(
     terminal.draw(|f| {
         let full = f.area();
         let buf = f.buffer_mut();
+        // During replay the map shows the reconstructed snapshot for the selected turn.
+        let replay_graph: Option<mapper::graph::MapGraph> = state.replay.as_ref().and_then(|r| {
+            let turn = state.history.get(r.idx).map(|rec| rec.turn)?;
+            let json = app::history::map_at_turn(&state.history, turn)?;
+            mapper::persist::from_json(json).ok().map(|m| m.graph)
+        });
+
         // During tidy-animation playback the map shows the current captured stage, not the live graph.
-        let rm = match &state.tidy_anim {
-            Some(anim) => render_layer(&anim.current().graph, state.active_layer(&anim.current().graph)),
-            None => render_layer(&mapper.graph, state.active_layer(&mapper.graph)),
+        let rm = if let Some(g) = &replay_graph {
+            render_layer(g, state.active_layer(g))
+        } else {
+            match &state.tidy_anim {
+                Some(anim) => render_layer(&anim.current().graph, state.active_layer(&anim.current().graph)),
+                None => render_layer(&mapper.graph, state.active_layer(&mapper.graph)),
+            }
         };
 
         // ── Change 2: reserve bottom 1 row for help bar ───────────────────────
@@ -306,9 +318,13 @@ fn draw_frame(
                 map_area = Rect::default();
             }
             Layout::MapFull => {
-                let graph = match &state.tidy_anim {
-                    Some(anim) => &anim.current().graph,
-                    None => &mapper.graph,
+                let graph = if let Some(g) = &replay_graph {
+                    g
+                } else {
+                    match &state.tidy_anim {
+                        Some(anim) => &anim.current().graph,
+                        None => &mapper.graph,
+                    }
                 };
                 let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                 let active_layer = state.active_layer(graph);
@@ -379,9 +395,13 @@ fn draw_frame(
                 map_area = map_fp.content;
                 // Overlay layer tabs
                 {
-                    let graph = match &state.tidy_anim {
-                        Some(anim) => &anim.current().graph,
-                        None => &mapper.graph,
+                    let graph = if let Some(g) = &replay_graph {
+                        g
+                    } else {
+                        match &state.tidy_anim {
+                            Some(anim) => &anim.current().graph,
+                            None => &mapper.graph,
+                        }
                     };
                     let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                     let active_layer = state.active_layer(graph);
@@ -427,9 +447,13 @@ fn draw_frame(
         // ── Room panel overlay ────────────────────────────────────────────────
         if map_area.height > 0 {
             if let Some(panel) = state.room_panel {
-                let graph = match &state.tidy_anim {
-                    Some(anim) => &anim.current().graph,
-                    None => &mapper.graph,
+                let graph = if let Some(g) = &replay_graph {
+                    g
+                } else {
+                    match &state.tidy_anim {
+                        Some(anim) => &anim.current().graph,
+                        None => &mapper.graph,
+                    }
                 };
                 let panel_ds = make_dialog_style(state);
                 match panel.mode {
@@ -525,6 +549,11 @@ fn draw_frame(
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
             dialog_rects_out = draw_saves(state, full, buf);
+        }
+
+        // ── Replay/rewind overlay ─────────────────────────────────────────────
+        if state.replay.is_some() {
+            dialog_rects_out = draw_history(state, full, buf);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
@@ -676,6 +705,8 @@ fn main() {
     // Migration: if no archive exists but a legacy .map.json does, load that.
     // use_default_map = true: also fall back to legacy map when no archive.
     let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>)> = None;
+    // Rewind/replay history carried from the archive when the game is auto-restored.
+    let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
     let mut pending_resume_stash: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)> = None;
@@ -689,6 +720,7 @@ fn main() {
                         eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
                     } else {
                         startup_transcript = Some((ac.transcript, ac.transcript_kinds));
+                        startup_history = ac.history;
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
                     // Save present, auto_load off, prompt enabled: stash for launch dialog.
@@ -799,6 +831,9 @@ fn main() {
     if let Some((lines, kinds)) = startup_transcript {
         state.transcript = lines;
         state.transcript_kinds = kinds;
+    }
+    if !startup_history.is_empty() {
+        state.history = startup_history;
     }
 
     // If a save was found but auto_load is off and prompt_load_on_launch is on,
@@ -984,6 +1019,9 @@ fn main() {
             if let Some(anim) = &mut state.tidy_anim {
                 anim.tick(Duration::from_millis(700));
             }
+            if let Some(r) = &mut state.replay {
+                r.tick(Duration::from_millis(700), state.history.len());
+            }
             continue;
         }
 
@@ -1071,7 +1109,7 @@ fn main() {
                             QuitDialogAction::Save => {
                                 state.quit_dialog = false;
                                 let meta = app::archive::Meta {
-                                    format_version: 1,
+                                    format_version: app::archive::CURRENT_FORMAT_VERSION,
                                     ifid: Some(ifid.clone()),
                                     name: None,
                                     turns: state.turns,
@@ -1082,7 +1120,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history);
                                 break;
                             }
                             QuitDialogAction::Quit => {
@@ -1108,7 +1146,7 @@ fn main() {
                             if in_save {
                                 state.quit_dialog = false;
                                 let meta = app::archive::Meta {
-                                    format_version: 1,
+                                    format_version: app::archive::CURRENT_FORMAT_VERSION,
                                     ifid: Some(ifid.clone()),
                                     name: None,
                                     turns: state.turns,
@@ -1119,7 +1157,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history);
                                 break;
                             } else if in_quit {
                                 break;
@@ -1478,7 +1516,7 @@ fn main() {
                                 }
                                 None => {
                                     let meta = app::archive::Meta {
-                                        format_version: 1,
+                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
                                         ifid: Some(ifid.clone()),
                                         name: None,
                                         turns: state.turns,
@@ -1489,7 +1527,7 @@ fn main() {
                                                 .unwrap_or(0),
                                         ),
                                     };
-                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds)
+                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history)
                                         .map(|()| "saved".to_string())
                                         .map_err(|e| format!("save failed: {}", e))
                                 }
@@ -1529,6 +1567,7 @@ fn main() {
                                                     mapper = ac.mapper;
                                                     state.transcript = ac.transcript;
                                                     state.transcript_kinds = ac.transcript_kinds;
+                                                    state.history = ac.history;
                                                     let loc = zvm::current_location(&session.machine);
                                                     if let Some(snap) = loc {
                                                         let rid = snap.number as mapper::graph::RoomId;
@@ -1684,6 +1723,21 @@ fn main() {
                 // Bump the graph generation so any in-flight tidy result is detected as stale.
                 state.graph_gen = state.graph_gen.wrapping_add(1);
 
+                // ── Rewind/replay capture (opt-in) ────────────────────────────
+                if state.config.record_turn_history {
+                    let map_changed = mapper.graph.rooms().count() != rooms_before
+                        || mapper.graph.connections().len() != conns_before;
+                    app::history::record_turn(
+                        &mut state.history,
+                        state.turns,
+                        &cmd,
+                        session.machine.save_quetzal(),
+                        &mapper,
+                        map_changed,
+                        &result.transcript,
+                    );
+                }
+
                 // ── Inventory tracking ────────────────────────────────────────
                 {
                     use app::inventory::{detect_player_obj, parse_inventory_output};
@@ -1742,7 +1796,7 @@ fn main() {
                 // transcript status line so the player is aware but the loop continues.
                 if state.config.auto_save {
                     let meta = app::archive::Meta {
-                        format_version: 1,
+                        format_version: app::archive::CURRENT_FORMAT_VERSION,
                         ifid: Some(ifid.clone()),
                         name: None,
                         turns: state.turns,
@@ -1753,7 +1807,7 @@ fn main() {
                                 .unwrap_or(0),
                         ),
                     };
-                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds) {
+                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
                         state.push_transcript(&format!("[Auto-save failed: {}]", e));
                     }
                 }
@@ -1823,7 +1877,7 @@ fn main() {
             Action::SaveGame => {
                 // Bundle map + game into a single .babelmap archive, with turn metadata.
                 let meta = app::archive::Meta {
-                    format_version: 1,
+                    format_version: app::archive::CURRENT_FORMAT_VERSION,
                     ifid: Some(ifid.clone()),
                     name: None,
                     turns: state.turns,
@@ -1838,7 +1892,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds) {
+                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -1866,6 +1920,7 @@ fn main() {
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
                                 state.transcript_kinds = ac.transcript_kinds;
+                                state.history = ac.history;
                                 // After restore, re-observe current location.
                                 let loc = zvm::current_location(&session.machine);
                                 if let Some(snap) = loc {
@@ -2067,6 +2122,7 @@ fn main() {
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
+                                    state.history = ac.history;
                                     // Restore turn counter from the loaded archive.
                                     state.turns = ac.meta.turns;
                                     // Re-observe current location.
@@ -2102,6 +2158,52 @@ fn main() {
                         }
                         Err(e) => {
                             state.push_transcript(&format!("[Load failed: {}]", e));
+                        }
+                    }
+                }
+            }
+
+            // ── Replay/rewind: linear resume from the selected turn ────────────
+            Action::ReplayResume => {
+                if let Some(r) = state.replay.take() {
+                    if r.idx < state.history.len() {
+                        let plan = app::history::resume_plan(&state.history, r.idx);
+                        match session.machine.restore_file(&plan.save) {
+                            Ok(()) => {
+                                if let Some(json) = &plan.map_json {
+                                    if let Ok(m) = mapper::persist::from_json(json) {
+                                        mapper = m;
+                                    }
+                                }
+                                // Linear: discard later turns.
+                                state.history.truncate(r.idx + 1);
+                                let (lines, kinds) =
+                                    app::history::rebuild_transcript(&state.history, r.idx);
+                                state.transcript = lines;
+                                state.transcript_kinds = kinds;
+                                state.turns = plan.turn;
+                                state.graph_gen = state.graph_gen.wrapping_add(1);
+                                // Re-observe current location (mirror the restore path).
+                                if let Some(snap) = zvm::current_location(&session.machine) {
+                                    let rid = snap.number as mapper::graph::RoomId;
+                                    let restore_result = TurnResult {
+                                        transcript: String::new(),
+                                        location: Some(snap),
+                                        quit: false,
+                                        info: None,
+                                        beep: None,
+                                        diagnostics: vec![],
+                                        location_method: None,
+                                    };
+                                    apply_turn(&mut mapper, "", &restore_result);
+                                    state.set_viewed_layer(None);
+                                    state.select_room(Some(rid));
+                                }
+                                state.push_transcript(&format!("[Resumed from turn {}]", plan.turn));
+                            }
+                            Err(e) => {
+                                state.push_transcript(&format!("[Resume failed: {:?}]", e));
+                            }
                         }
                     }
                 }
@@ -2163,7 +2265,7 @@ fn main() {
     // saving" honest and avoids silently overwriting an explicit save point on exit.
     if state.config.auto_save {
         let exit_meta = app::archive::Meta {
-            format_version: 1,
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: Some(ifid.clone()),
             name: None,
             turns: state.turns,
@@ -2174,7 +2276,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds) {
+        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }

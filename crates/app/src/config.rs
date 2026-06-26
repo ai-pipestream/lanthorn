@@ -231,6 +231,11 @@ pub struct Config {
     /// When true (default), record command history across sessions. Set false to disable.
     #[serde(default = "default_true")]
     pub record_history: bool,
+    /// When true, record a per-turn rewind/replay history (Quetzal save + map
+    /// snapshots) into the `.babelmap` archive. Default false (opt-in: it grows
+    /// the archive and keeps per-turn blobs in memory).
+    #[serde(default)]
+    pub record_turn_history: bool,
     /// Controls automatic background re-tidy when new rooms are discovered.
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
@@ -283,6 +288,7 @@ impl Default for Config {
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: true,
+            record_turn_history: false,
             background_tidy: BackgroundTidy::EveryRoom,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
@@ -342,6 +348,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_history = from_file.record_history;
+            cfg.record_turn_history = from_file.record_turn_history;
             cfg.background_tidy = from_file.background_tidy;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
@@ -428,6 +435,13 @@ mod tests {
     #[test]
     fn undo_levels_defaults_to_16() {
         assert_eq!(Config::default().undo_levels, 16);
+    }
+
+    #[test]
+    fn record_turn_history_defaults_false_and_round_trips() {
+        assert_eq!(Config::default().record_turn_history, false);
+        let cfg: Config = toml::from_str("record_turn_history = true\n").unwrap();
+        assert!(cfg.record_turn_history);
     }
 
     #[test]
@@ -647,6 +661,7 @@ mod tests {
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: false,
+            record_turn_history: false,
             background_tidy: BackgroundTidy::OnOverlap,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
