@@ -237,6 +237,8 @@ pub enum Action {
     TranscriptScroll(i32),
     /// Open the Hints panel. Real behavior wired in Task D; stub here keeps match exhaustive.
     OpenHints,
+    /// Open the rewind/replay history modal (seeds `replay` at the last turn).
+    OpenHistory,
 }
 
 // ── key_to_action ─────────────────────────────────────────────────────────────
@@ -2067,6 +2069,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         // TODO Task D: wire the real open/discover/sub-session behavior.
         Action::OpenHints => {}
+
+        // Replay/rewind seed; real behavior wired in the replay-actions task.
+        Action::OpenHistory => {}
 
         Action::None => {}
         // Note: OpenHotkeyDialog and CloseHotkeyDialog are handled above.
