@@ -39,7 +39,12 @@ the game continues — and, on restore, **redraws itself**.
 ## Decisions (settled with the user)
 
 - **Save format:** in-game SAVE always writes babelmap's `.babelmap` archive
-  (map + transcript + Quetzal), even when the map is empty.
+  (map + transcript + Quetzal), even when the map is empty. **The game's own SAVE
+  command therefore also saves the map** — because babelmap intercepts `@save` at
+  the interpreter level, it writes a full archive rather than a bare Quetzal, with
+  no awareness needed from the game. RESTORE of a `.babelmap` loads that map back
+  into the mapper alongside restoring the VM, so the map round-trips through the
+  game's own SAVE/RESTORE.
 - **Restore sources:** the restore picker lists **both** `.babelmap` and plain
   **`.qzl`** (standard Quetzal) files; either can be restored.
 - **UI:** reuse babelmap's existing **saves-manager dialog** (save mode / restore
