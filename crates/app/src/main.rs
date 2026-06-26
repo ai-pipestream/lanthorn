@@ -962,6 +962,9 @@ fn main() {
                     // Save present, auto_load off, prompt enabled: stash for launch dialog.
                     pending_resume_stash = Some((ac.save, ac.transcript, ac.transcript_kinds, ac.screen));
                 }
+                if cfg.aux_storage != app::config::AuxStorage::Global {
+                    session.machine.aux_data = ac.aux.clone();
+                }
                 ac.mapper
             }
             Err(e) => {
@@ -978,6 +981,13 @@ fn main() {
     } else {
         Mapper::default()
     };
+
+    // Startup: pre-load the per-game aux table from the global file when in
+    // global mode.  In archive mode the table was populated above from the
+    // loaded archive (if any).
+    if cfg.aux_storage == app::config::AuxStorage::Global {
+        session.machine.aux_data = app::aux_store::read_global_aux(&save_dir, &ifid);
+    }
 
     // Export paths (fixed per IFID).
     let svg_path = dir.join(format!("{}.svg", ifid));
@@ -1739,9 +1749,9 @@ fn main() {
                         );
                     }
                     // Resume an in-game save/restore if this prompt resolved it.
-                    if resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map) {
-                        break;
-                    }
+                    let quit = resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
+                    if quit { break; }
                     continue;
                 }
 
@@ -1834,6 +1844,9 @@ fn main() {
                                             match restore_err {
                                                 Ok(()) => {
                                                     if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                                    if state.config.aux_storage != app::config::AuxStorage::Global {
+                                                        session.machine.aux_data = ac.aux.clone();
+                                                    }
                                                     mapper = ac.mapper;
                                                     state.transcript = ac.transcript;
                                                     state.transcript_kinds = ac.transcript_kinds;
@@ -2007,6 +2020,7 @@ fn main() {
                     &mut state, &mapper, &session, &result, &cmd,
                     rooms_before, conns_before, &ifid, &arc_file,
                 );
+                persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
 
                 // Background tidy: silently re-tidy the active layer when the
                 // configured mode calls for it. Only runs in Auto layout mode.
@@ -2114,6 +2128,9 @@ fn main() {
                         match restore_err {
                             Ok(()) => {
                                 if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                if state.config.aux_storage != app::config::AuxStorage::Global {
+                                    session.machine.aux_data = ac.aux.clone();
+                                }
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
                                 state.transcript_kinds = ac.transcript_kinds;
@@ -2319,6 +2336,9 @@ fn main() {
                         Ok(bytes) => {
                             // For a .babelmap, also load its map (as Ctrl+R does).
                             if let Ok(ac) = load_archive(&path) {
+                                if state.config.aux_storage != app::config::AuxStorage::Global {
+                                    session.machine.aux_data = ac.aux.clone();
+                                }
                                 mapper = ac.mapper;
                             }
                             state.push_transcript(&format!("[Game restored from {}]", entry_name));
@@ -2330,6 +2350,7 @@ fn main() {
                         }
                     };
                     let quit = finish_resumed_turn(result, &mut mapper, &mut state, &session, &save_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &save_dir, &ifid, &mut state);
                     }
@@ -2349,6 +2370,9 @@ fn main() {
                             match restore_err {
                                 Ok(()) => {
                                     if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                    if state.config.aux_storage != app::config::AuxStorage::Global {
+                                        session.machine.aux_data = ac.aux.clone();
+                                    }
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
@@ -2463,7 +2487,9 @@ fn main() {
 
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was
         // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
-        if resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map) {
+        let quit = resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
+        persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
+        if quit {
             break;
         }
 
@@ -2831,6 +2857,25 @@ fn post_turn_bookkeeping(
             state.push_transcript(&format!("[Auto-save failed: {}]", e));
         }
     }
+}
+
+/// After a turn, persist the VM's aux table if it changed.  Archive mode is
+/// already covered by the per-turn auto-save (`save_archive_meta` embeds it);
+/// global mode writes the per-game file here.  `Ask` is treated as `Archive`
+/// until the first-use prompt (Task 6) resolves it.
+fn persist_aux_after_turn(
+    session: &mut app::session::GameSession,
+    cfg: &app::config::Config,
+    save_dir: &std::path::Path,
+    ifid: &str,
+) {
+    if !session.machine.aux_dirty {
+        return;
+    }
+    if cfg.aux_storage == app::config::AuxStorage::Global {
+        let _ = app::aux_store::write_global_aux(save_dir, ifid, &session.machine.aux_data);
+    }
+    session.machine.aux_dirty = false;
 }
 
 /// Post-process a TurnResult produced by `session.resume_*`: render output,
