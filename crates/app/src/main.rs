@@ -597,6 +597,22 @@ fn draw_frame(
             hints_panel_rects_out = draw_hints_panel(state, full, buf);
         }
 
+        // ── Story-pane text-selection highlight (during a left-drag) ──────────
+        if let Some(sel) = state.selection {
+            if story_area.width > 0 && story_area.height > 0 {
+                for y in story_area.y..story_area.bottom() {
+                    for x in story_area.x..story_area.right() {
+                        if app::clipboard::contains(story_area, sel, x, y) {
+                            if let Some(cell) = buf.cell_mut((x, y)) {
+                                let s = cell.style();
+                                cell.set_style(s.add_modifier(Modifier::REVERSED));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Prompt overlay — map-editing prompts overlay the map; save/file-name
         // prompts (a game-driven SAVE or a .qzl export) belong with the story/game
         // interaction, so they render over the story pane instead. ──────────────
@@ -1509,6 +1525,27 @@ fn main() {
                 } else {
                     break;
                 }
+            }
+
+            // Story-pane selection released: copy the selected text (read from the
+            // last rendered frame, clamped to the story columns) via OSC 52.
+            Action::EndSelection => {
+                if let Some(sel) = state.selection.take() {
+                    if !sel.is_empty() && last_panes.story.width > 0 {
+                        let text = app::clipboard::extract(
+                            terminal.current_buffer_mut(), last_panes.story, sel,
+                        );
+                        if !text.trim().is_empty() {
+                            use std::io::Write;
+                            let seq = app::clipboard::osc52_copy_sequence(&text);
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(seq.as_bytes());
+                            let _ = out.flush();
+                            state.set_status(format!("Copied {} chars to clipboard", text.chars().count()));
+                        }
+                    }
+                }
+                continue;
             }
 
             Action::SubmitCommand(cmd) => {

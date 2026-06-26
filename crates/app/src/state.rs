@@ -618,6 +618,9 @@ pub struct AppState {
     pub room_panel: Option<RoomPanel>,
     /// Middle-button drag-pan state. `Some` while a drag gesture is in progress.
     pub drag: Option<DragState>,
+    /// Story-pane text selection (left-drag). `Some` while selecting; the
+    /// highlight is shown during the drag and copied on release.
+    pub selection: Option<crate::clipboard::Selection>,
     /// Sub-character pan offset in terminal columns/rows, applied on top of `scroll`.
     /// Allows 1-character precision drag panning without changing the cell-unit scroll.
     /// Cleared by `recenter_on`.
@@ -810,6 +813,7 @@ impl Default for AppState {
             show_inspector: false,
             room_panel: None,
             drag: None,
+            selection: None,
             char_pan: (0, 0),
             hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),

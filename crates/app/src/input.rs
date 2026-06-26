@@ -233,6 +233,12 @@ pub enum Action {
     DragPanTo(u16, u16),
     /// End a middle-button drag-pan gesture.
     EndDragPan,
+    /// Begin a story-pane text selection at terminal cell (col, row).
+    StartSelection(u16, u16),
+    /// Extend the story-pane text selection to terminal cell (col, row).
+    ExtendSelection(u16, u16),
+    /// End the story-pane text selection (copies it to the clipboard).
+    EndSelection,
     /// Scroll the transcript by delta lines (positive = down, negative = up).
     TranscriptScroll(i32),
     /// Open the Hints panel. Real behavior wired in Task D; stub here keeps match exhaustive.
@@ -772,9 +778,17 @@ pub fn mouse_to_action(
     };
 
     match kind {
-        // ── Left-click in story: activate game pane ───────────────────────────
+        // ── Left-down in story: activate game pane + begin text selection ─────
         MouseEventKind::Down(MouseButton::Left) if in_story => {
-            Action::ActivatePane(crate::state::Focus::Game)
+            Action::StartSelection(col, row)
+        }
+        // ── Left-drag: extend an in-progress story selection ──────────────────
+        MouseEventKind::Drag(MouseButton::Left) => {
+            Action::ExtendSelection(col, row)
+        }
+        // ── Left-up: finish a story selection (copy on release) ───────────────
+        MouseEventKind::Up(MouseButton::Left) => {
+            Action::EndSelection
         }
         // ── Left-click in map ─────────────────────────────────────────────────
         MouseEventKind::Down(MouseButton::Left) if in_map => {
@@ -1903,6 +1917,24 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::EndDragPan => {
             state.drag = None;
+        }
+
+        Action::StartSelection(col, row) => {
+            // Left-down in the story also activates the game pane.
+            state.focus = crate::state::Focus::Game;
+            state.selection = Some(crate::clipboard::Selection::new((col, row)));
+        }
+
+        Action::ExtendSelection(col, row) => {
+            if let Some(sel) = &mut state.selection {
+                sel.head = (col, row);
+            }
+        }
+
+        // The copy is performed by the run loop (it needs the rendered buffer);
+        // if this reaches apply_action directly, just drop the selection.
+        Action::EndSelection => {
+            state.selection = None;
         }
 
         // ── Transcript scroll ─────────────────────────────────────────────────
@@ -3850,16 +3882,39 @@ mod tests {
     }
 
     #[test]
-    fn left_down_in_story_produces_activate_game_pane() {
+    fn left_down_in_story_starts_selection_and_activates_game() {
         use crossterm::event::MouseEventKind;
-        let s = AppState::default();
+        let mut s = AppState::default();
         // col 85 is inside story_rect (x=80..120).
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 85, 5, KeyModifiers::NONE);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
         assert!(
-            matches!(action, Action::ActivatePane(Focus::Game)),
-            "left-down in story pane should produce ActivatePane(Game), got {:?}", action
+            matches!(action, Action::StartSelection(85, 5)),
+            "left-down in story pane should start a selection, got {:?}", action
         );
+        // Applying it activates the game pane and sets the selection anchor.
+        apply_action(action, &mut s, &mut Mapper::default());
+        assert_eq!(s.focus, Focus::Game);
+        assert_eq!(s.selection.map(|sel| sel.anchor), Some((85, 5)));
+    }
+
+    #[test]
+    fn left_drag_then_up_extends_and_ends_selection() {
+        use crossterm::event::MouseEventKind;
+        let mut s = AppState::default();
+        apply_action(Action::StartSelection(85, 5), &mut s, &mut Mapper::default());
+
+        let drag = mouse_event(MouseEventKind::Drag(MouseButton::Left), 90, 7, KeyModifiers::NONE);
+        let a = mouse_to_action(&s, drag, map_rect(), story_rect(), &[], &None);
+        assert!(matches!(a, Action::ExtendSelection(90, 7)));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert_eq!(s.selection.map(|sel| sel.head), Some((90, 7)));
+
+        let up = mouse_event(MouseEventKind::Up(MouseButton::Left), 90, 7, KeyModifiers::NONE);
+        assert!(matches!(
+            mouse_to_action(&s, up, map_rect(), story_rect(), &[], &None),
+            Action::EndSelection
+        ));
     }
 
     #[test]
