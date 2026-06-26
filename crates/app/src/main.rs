@@ -731,6 +731,9 @@ fn main() {
                     if let Err(e) = session.machine.restore_file(&ac.save) {
                         eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
                     } else {
+                        // Restore the saved screen so a once-split game's upper
+                        // window (status line) shows after auto-load.
+                        if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
                         startup_transcript = Some((ac.transcript, ac.transcript_kinds));
                         startup_history = ac.history;
                     }
@@ -1587,6 +1590,7 @@ fn main() {
                                             });
                                             match restore_err {
                                                 Ok(()) => {
+                                                    if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
                                                     mapper = ac.mapper;
                                                     state.transcript = ac.transcript;
                                                     state.transcript_kinds = ac.transcript_kinds;
@@ -1949,6 +1953,7 @@ fn main() {
                         });
                         match restore_err {
                             Ok(()) => {
+                                if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
                                 state.transcript_kinds = ac.transcript_kinds;
@@ -2183,6 +2188,7 @@ fn main() {
                             });
                             match restore_err {
                                 Ok(()) => {
+                                    if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;

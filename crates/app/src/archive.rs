@@ -33,6 +33,7 @@ const ENTRY_MAP: &str = "map.json";
 const ENTRY_SAVE: &str = "game.sav";
 const ENTRY_META: &str = "meta.json";
 const ENTRY_TRANSCRIPT: &str = "transcript.json";
+const ENTRY_SCREEN: &str = "screen.json";
 const HISTORY_INDEX: &str = "history/index.json";
 
 pub const CURRENT_FORMAT_VERSION: u32 = 2;
@@ -59,6 +60,59 @@ struct TranscriptData {
     kinds: Vec<crate::state::TranscriptKind>,
 }
 
+/// Z-machine screen state written to `screen.json` (zvm has no serde, so we
+/// mirror the public fields here). Restored on the host-mediated restore paths
+/// (Ctrl+R / auto-load) so a once-split game's upper window shows after restore.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ScreenDto {
+    upper_window_rows: u16,
+    current_window: u8,
+    text_style: u8,
+    cursor_row: u16,
+    cursor_col: u16,
+    buffer_mode: bool,
+    show_status_requested: bool,
+    cols: u16,
+    rows: u16,
+    cells: Vec<(char, u8)>, // upper-window grid (ch, style) in row-major order
+}
+
+impl ScreenDto {
+    fn from_screen(s: &zvm::screen::ScreenState) -> Self {
+        ScreenDto {
+            upper_window_rows: s.upper_window_rows,
+            current_window: s.current_window,
+            text_style: s.text_style,
+            cursor_row: s.cursor_row,
+            cursor_col: s.cursor_col,
+            buffer_mode: s.buffer_mode,
+            show_status_requested: s.show_status_requested,
+            cols: s.upper.cols,
+            rows: s.upper.rows,
+            cells: s.upper.cells.iter().map(|c| (c.ch, c.style)).collect(),
+        }
+    }
+
+    fn to_screen(&self) -> zvm::screen::ScreenState {
+        let mut s = zvm::screen::ScreenState::default();
+        s.upper_window_rows = self.upper_window_rows;
+        s.current_window = self.current_window;
+        s.text_style = self.text_style;
+        s.cursor_row = self.cursor_row;
+        s.cursor_col = self.cursor_col;
+        s.buffer_mode = self.buffer_mode;
+        s.show_status_requested = self.show_status_requested;
+        s.upper.cols = self.cols;
+        s.upper.rows = self.rows;
+        s.upper.cells = self
+            .cells
+            .iter()
+            .map(|&(ch, style)| zvm::screen::Cell { ch, style })
+            .collect();
+        s
+    }
+}
+
 /// One row of `history/index.json`: per-turn metadata + ordering. The bytes,
 /// map JSON, and transcript live in sibling `turn-NNNN.*` entries.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -79,6 +133,9 @@ pub struct ArchiveContents {
     pub transcript_kinds: Vec<crate::state::TranscriptKind>,
     /// Per-turn rewind/replay history (empty for archives without `history/`).
     pub history: Vec<crate::history::TurnRecord>,
+    /// Saved Z-machine screen state (None for archives without `screen.json`).
+    /// Applied on the host-mediated restore paths so the upper window is restored.
+    pub screen: Option<zvm::screen::ScreenState>,
 }
 
 /// Write a `.babelmap` archive containing the current map and VM save.
@@ -148,6 +205,12 @@ pub fn save_archive_meta(
         serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
     zip.write_all(transcript_json.as_bytes())?;
+
+    // screen.json — Z-machine screen state (for host-mediated restore redraw).
+    let screen_json = serde_json::to_string(&ScreenDto::from_screen(&machine.screen))
+        .expect("ScreenDto is always serializable");
+    zip.start_file(ENTRY_SCREEN, options)?;
+    zip.write_all(screen_json.as_bytes())?;
 
     // history/ — per-turn rewind/replay records (only when non-empty).
     if !history.is_empty() {
@@ -295,7 +358,21 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         None => Vec::new(),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history })
+    // screen.json — saved Z-machine screen state (absent in pre-screen archives).
+    let screen = {
+        let mut b = Vec::new();
+        if let Ok(mut z) = zip.by_name(ENTRY_SCREEN) {
+            if z.read_to_end(&mut b).is_ok() {
+                serde_json::from_slice::<ScreenDto>(&b).ok().map(|d| d.to_screen())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history, screen })
 }
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
@@ -369,6 +446,28 @@ mod tests {
         let mut m = zvm::cpu::exec::Machine::new(mem);
         m.init_caps();
         m
+    }
+
+    #[test]
+    fn screen_state_round_trips_through_archive() {
+        let mut machine = dummy_machine();
+        machine.screen.upper_window_rows = 1;
+        machine.screen.upper.resize(1, 6);
+        machine.screen.upper.put(1, 2, 'Z', 2);
+        machine.screen.current_window = 1;
+        machine.screen.cursor_col = 3;
+
+        let path = temp_archive_path("screen-roundtrip");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        let scr = ac.screen.expect("screen.json present and restored");
+        assert_eq!(scr.upper_window_rows, 1, "split height round-trips");
+        assert_eq!(scr.current_window, 1, "current window round-trips");
+        assert_eq!(scr.cursor_col, 3, "cursor round-trips");
+        assert_eq!(scr.upper.cell(1, 2).ch, 'Z', "grid glyph round-trips");
+        assert_eq!(scr.upper.cell(1, 2).style, 2, "grid style round-trips");
     }
 
     #[test]

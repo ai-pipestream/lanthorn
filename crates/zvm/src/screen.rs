@@ -47,7 +47,7 @@ impl Default for Cell {
 }
 
 /// Upper (status) window character grid.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct UpperWindow {
     pub cols: u16,
     pub rows: u16,
@@ -89,7 +89,7 @@ impl UpperWindow {
 /// For v3 the host derives the status line by calling `Machine::status_line()`.
 /// For v4+ the host reads `upper_window_rows`, `current_window`, `text_style`,
 /// and `cursor` to manage windows.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ScreenState {
     /// Number of rows in the upper (status) window; 0 means no upper window.
     pub upper_window_rows: u16,
