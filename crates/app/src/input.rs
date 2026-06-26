@@ -2433,7 +2433,8 @@ pub fn open_style_editor(state: &mut AppState) {
     let user_dir = state.config.user_dir.clone();
     let (doc, _warnings) = crate::style::load_style(state.config.style.as_deref(), &user_dir);
     let (preview, _set, _w2) = crate::style::resolve(&doc, &user_dir);
-    let selectors: Vec<&'static str> = crate::style::SELECTOR_FIELDS.to_vec();
+    let selectors: Vec<&'static str> =
+        crate::style::SELECTOR_GROUPS.iter().flat_map(|(_, s)| s.iter().copied()).collect();
     state.style_editor = Some(crate::state::StyleEditorState {
         doc,
         preview,

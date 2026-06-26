@@ -7,7 +7,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::state::AppState;
@@ -73,16 +73,12 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let content = dialog_rects.content;
 
     // Styles for group headers and row highlight.
-    let header_style = Style::new()
-        .fg(ratatui::style::Color::White)
-        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
-        .patch(state.colors.dialog);
+    let header_style = state.colors.dialog_title
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
     let normal_style = state.colors.dialog;
 
-    let active_style = Style::new()
-        .fg(ratatui::style::Color::Black)
-        .bg(ratatui::style::Color::Cyan)
+    let active_style = state.colors.dialog_button_active
         .add_modifier(Modifier::BOLD);
 
     // Walk groups and draw samples.
@@ -155,12 +151,24 @@ mod tests {
     fn style_editor_board_renders_samples_and_highlights_active() {
         let mut s = AppState::default();
         crate::input::open_style_editor(&mut s);
-        let area = Rect::new(0, 0, 80, 30);
+        // Use a large area so all selectors fit and get drawn.
+        let area = Rect::new(0, 0, 120, 60);
         let mut buf = Buffer::empty(area);
         let rects = draw_style_editor(&s, area, &mut buf).expect("drawn");
         assert!(!rects.samples.is_empty(), "samples have hit-rects");
         // The active selector's sample rect maps to index 0.
         assert!(rects.samples.iter().any(|(i, _)| *i == 0));
+
+        // Board order must match ed.selectors order: every selector has exactly
+        // one sample at its own index (proves board order == ed.selectors).
+        let ed = s.style_editor.as_ref().unwrap();
+        let mut idxs: Vec<usize> = rects.samples.iter().map(|(i, _)| *i).collect();
+        idxs.sort_unstable();
+        assert_eq!(
+            idxs,
+            (0..ed.selectors.len()).collect::<Vec<_>>(),
+            "every selector has exactly one sample at its own index (board order == ed.selectors)"
+        );
     }
 
     #[test]
