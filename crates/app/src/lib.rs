@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod aux_store;
 pub mod clipboard;
 pub mod export;
 pub mod history;
