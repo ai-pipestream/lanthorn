@@ -167,6 +167,93 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "loc_indicator",
 ];
 
+// ── SELECTOR_GROUPS ───────────────────────────────────────────────────────────
+
+/// Selectors grouped into labeled sections for the style-editor board.
+///
+/// Every entry in [`SELECTOR_FIELDS`] appears in exactly one group.
+/// `"border"` is reserved and non-visual (accepted silently, no color field);
+/// it is placed in Chrome so the completeness test passes without needing a
+/// special exclusion.
+pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
+    ("Map", &[
+        "room", "room:current", "room:selected",
+        "connector", "connector:distorted", "connector:portal",
+        "map_border", "map_layer_tab", "map_layer_tab_active", "loc_indicator",
+    ]),
+    ("Transcript", &[
+        "transcript", "transcript:input", "transcript:meta", "transcript:warning",
+        "transcript:location", "transcript:system",
+        "suggestion", "input:text", "input:prompt",
+        "warning_marker", "meta_marker", "scrollbar",
+    ]),
+    ("Chrome", &[
+        "statusbar", "helpbar", "story_border", "story_title",
+        "status_header", "input_line", "border:focused", "border",
+    ]),
+    ("Dialogs", &[
+        "dialog", "dialog:title", "dialog:button", "dialog:button:active", "dialog:shadow",
+    ]),
+    ("Upper window", &["upper_window", "upper_window_border"]),
+    ("Sound", &["sound_beep_high", "sound_beep_low"]),
+];
+
+// ── style_for_selector ────────────────────────────────────────────────────────
+
+/// Read-accessor inverse of [`apply_color_decls`]: return the `ColorScheme`
+/// field that corresponds to `selector`.
+///
+/// Composite selectors (`map_border`, `story_border`, `dialog`, `status_header`,
+/// `input_line`, `upper_window_border`) return their color-bearing `Style` field.
+/// The reserved `"border"` selector has no single color field and returns
+/// [`Style::default()`].  Unknown selectors also return [`Style::default()`].
+pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
+    match selector {
+        "room"                 => cs.room_normal,
+        "room:current"         => cs.room_current,
+        "room:selected"        => cs.room_selected,
+        "connector"            => cs.connector,
+        "connector:distorted"  => cs.connector_distorted,
+        "connector:portal"     => cs.portal_connector,
+        "border:focused"       => cs.focused_border,
+        "statusbar"            => cs.status_bar,
+        "transcript"           => cs.transcript,
+        "transcript:input"     => cs.transcript_input,
+        "transcript:meta"      => cs.transcript_meta,
+        "transcript:warning"   => cs.transcript_warning,
+        "transcript:location"  => cs.transcript_location,
+        "transcript:system"    => cs.transcript_system,
+        "warning_marker"       => cs.warning_marker,
+        "suggestion"           => cs.suggestion,
+        "input:text"           => cs.input_text,
+        "input:prompt"         => cs.input_prompt,
+        "scrollbar"            => cs.scrollbar,
+        "meta_marker"          => cs.meta_marker,
+        "helpbar"              => cs.help_bar,
+        "story_title"          => cs.story_title,
+        "map_layer_tab"        => cs.map_layer_tab,
+        "map_layer_tab_active" => cs.map_layer_tab_active,
+        "dialog:title"         => cs.dialog_title,
+        "dialog:button"        => cs.dialog_button,
+        "dialog:button:active" => cs.dialog_button_active,
+        "dialog:shadow"        => cs.dialog_shadow,
+        "upper_window"         => cs.upper_window,
+        "sound_beep_high"      => cs.sound_beep_high,
+        "sound_beep_low"       => cs.sound_beep_low,
+        "loc_indicator"        => cs.loc_indicator,
+        // Composite selectors: each has a single color-bearing Style field.
+        // Confirmed by reading apply_color_decls arms (style.rs lines 239-293).
+        "map_border"           => cs.map_border,
+        "story_border"         => cs.story_border,
+        "dialog"               => cs.dialog,
+        "status_header"        => cs.status_header,
+        "input_line"           => cs.input_line,
+        "upper_window_border"  => cs.upper_window_border,
+        // "border" is reserved/non-visual: accepted silently, no color field.
+        _ => Style::default(),
+    }
+}
+
 // ── apply_color_decls ─────────────────────────────────────────────────────────
 
 /// Apply a map of selector→[`Decl`] declarations onto a [`ColorScheme`].
@@ -1774,5 +1861,23 @@ box_style = "rounded"
         assert!(warnings.is_empty(), "known selectors must not warn: {warnings:?}");
         assert_eq!(cs.sound_beep_high.fg, Some(ratatui::style::Color::Red));
         assert_eq!(cs.sound_beep_low.fg, Some(ratatui::style::Color::Blue));
+    }
+
+    #[test]
+    fn style_for_selector_reads_the_right_field() {
+        let mut cs = colors::ColorScheme::terminal_default();
+        cs.room_current = ratatui::style::Style::new().fg(ratatui::style::Color::Green);
+        assert_eq!(style_for_selector(&cs, "room:current").fg, Some(ratatui::style::Color::Green));
+        // Unknown selector → default (empty) style, no panic.
+        assert_eq!(style_for_selector(&cs, "nope"), ratatui::style::Style::default());
+    }
+
+    #[test]
+    fn selector_groups_cover_all_selector_fields() {
+        use std::collections::BTreeSet;
+        let grouped: BTreeSet<&str> = SELECTOR_GROUPS.iter().flat_map(|(_, s)| s.iter().copied()).collect();
+        for sel in SELECTOR_FIELDS {
+            assert!(grouped.contains(sel), "selector {sel} missing from SELECTOR_GROUPS");
+        }
     }
 }
