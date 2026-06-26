@@ -925,6 +925,24 @@ impl Machine {
                 self.do_branch(branch, found != 0);
                 StepResult::Continue
             }
+            // VAR:0x1C encode_text zscii-text length from coded-text — encode `length`
+            // ZSCII bytes at zscii-text+from to the packed dictionary form at coded-text.
+            0x1C => {
+                let src = ops.first().copied().unwrap_or(0) as u32;
+                let length = ops.get(1).copied().unwrap_or(0) as u32;
+                let from = ops.get(2).copied().unwrap_or(0) as u32;
+                let coded = ops.get(3).copied().unwrap_or(0) as u32;
+                let mut s = String::new();
+                for i in 0..length {
+                    let b = self.mem.read_byte(src + from + i);
+                    s.push(zscii_to_char(b as u16)); // mirror the read path's ZSCII decode
+                }
+                let packed = crate::text::encode::encode_word(&s, self.mem.version());
+                for (i, b) in packed.iter().enumerate() {
+                    self.mem.write_byte(coded + i as u32, *b);
+                }
+                StepResult::Continue
+            }
             // VAR:0x1D copy_table — copy/zero a memory region (ZMSD §15).
             0x1D => {
                 let first = ops.first().copied().unwrap_or(0) as u32;
@@ -3936,5 +3954,29 @@ pub(crate) mod tests {
         m.state.pc = 0x10;
         run_until_quit(&mut m);
         assert_eq!(m.global(0), 3, "valid scalar: printable|receivable = 3");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4: encode_text (VAR:0x1C)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_text_writes_packed_word() {
+        let mut buf = sample_story(5);
+        // Lay out a ZSCII source word "sword" at 0x40 (dynamic memory), and a 6-byte
+        // coded-text buffer at 0x50. encode_text 0x40, 5, 0, 0x50.
+        for (i, b) in b"sword".iter().enumerate() { buf[0x40 + i] = *b; }
+        // encode_text (VAR:0x1C). opcode byte = 0xE0 | 0x1C = 0xFC.
+        // 4 operands [text,length,from,coded]: type byte 0b01_01_01_01 = 0x55.
+        buf[0x10]=0xFC; buf[0x11]=0x55; buf[0x12]=0x40; buf[0x13]=5; buf[0x14]=0; buf[0x15]=0x50;
+        buf[0x16]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let expected = crate::text::encode::encode_word("sword", 5);
+        for (i, b) in expected.iter().enumerate() {
+            assert_eq!(m.mem.read_byte(0x50 + i as u32), *b, "coded byte {i}");
+        }
     }
 }
