@@ -482,9 +482,11 @@ pub(crate) fn format_inventory_line(
 /// - Bottom row(s): `"> " + state.input`; cursor indicator `_` when `state.focus == Focus::Game`.
 ///   When `state.colors.input_line_style != None`, the input line is wrapped in a box
 ///   (3 rows total).  Falls back to plain when the area is too small.
-pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &mut Buffer) {
+/// Renders the GAME pane. Returns `true` when the transcript drew a scrollbar
+/// gutter (rightmost column), so the caller can exclude it from text selection.
+pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &mut Buffer) -> bool {
     if area.height == 0 || area.width == 0 {
-        return;
+        return false;
     }
 
     let normal_style = state.colors.transcript;
@@ -516,7 +518,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     }
 
     if area.height < status_rows + 1 {
-        return;
+        return false;
     }
 
     // ── Bottom row(s): input line ─────────────────────────────────────────────
@@ -536,10 +538,10 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let middle_top = area.y + status_rows;
     let middle_bottom = input_region_top;
     if middle_top >= middle_bottom {
-        return;
+        return false;
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
-    render_middle(machine, state, buf, middle_area, normal_style);
+    render_middle(machine, state, buf, middle_area, normal_style)
 }
 
 /// Draw the status bar into `region`.
@@ -658,15 +660,17 @@ fn render_input_content(
 }
 
 /// Render the middle section: inventory strip, suggestion line (or search hint), transcript body.
+/// Renders the transcript body (plus inventory/suggestion lines). Returns
+/// `true` when a scrollbar gutter was drawn in the rightmost column.
 fn render_middle(
     machine: &Machine,
     state: &AppState,
     buf: &mut Buffer,
     area: Rect,
     _normal_style: Style,
-) {
+) -> bool {
     if area.height == 0 || area.width == 0 {
-        return;
+        return false;
     }
     let w = area.width as usize;
 
@@ -722,7 +726,7 @@ fn render_middle(
     // ── Transcript body ───────────────────────────────────────────────────────
     if area.height < 2 {
         // Not enough room for transcript when there's an inventory/suggestion row.
-        return;
+        return false;
     }
 
     let transcript_top = area.y;
@@ -735,7 +739,7 @@ fn render_middle(
     };
 
     if transcript_top >= transcript_bottom {
-        return;
+        return false;
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
@@ -803,7 +807,8 @@ fn render_middle(
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
-    if total_rows > transcript_rows && area.width >= 2 && transcript_bottom > transcript_top {
+    let drew_scrollbar = total_rows > transcript_rows && area.width >= 2 && transcript_bottom > transcript_top;
+    if drew_scrollbar {
         let start = total_rows
             .saturating_sub(state.transcript_scroll as usize)
             .saturating_sub(transcript_rows);
@@ -825,6 +830,7 @@ fn render_middle(
             &mut sb_state,
         );
     }
+    drew_scrollbar
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

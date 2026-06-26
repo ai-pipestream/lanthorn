@@ -241,6 +241,7 @@ fn draw_frame(
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
     let mut selection_text_out: Option<String> = None;
+    let mut story_scrollbar = false;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -315,7 +316,7 @@ fn draw_frame(
                 let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                render_transcript(&session.machine, state, tarea, buf);
+                story_scrollbar = render_transcript(&session.machine, state, tarea, buf);
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -383,7 +384,7 @@ fn draw_frame(
                 let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                render_transcript(&session.machine, state, tarea, buf);
+                story_scrollbar = render_transcript(&session.machine, state, tarea, buf);
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -606,7 +607,14 @@ fn draw_frame(
         // mouse-release copy reads the displayed text (the terminal's own
         // back-buffer is reset after draw and can't be read post-hoc).
         if let Some(sel) = state.selection {
-            selection_text_out = app::clipboard::highlight_and_extract(buf, story_area, sel);
+            // Exclude the scrollbar gutter column (rightmost) from selection so
+            // it isn't highlighted or copied when the transcript overflows.
+            let sel_area = if story_scrollbar && story_area.width > 0 {
+                Rect { width: story_area.width - 1, ..story_area }
+            } else {
+                story_area
+            };
+            selection_text_out = app::clipboard::highlight_and_extract(buf, sel_area, sel);
         }
 
         // ── Prompt overlay — map-editing prompts overlay the map; save/file-name
