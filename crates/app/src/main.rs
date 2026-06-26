@@ -843,6 +843,7 @@ fn main() {
     }
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_loc_method = cfg.show_loc_method;
+    state.show_status_bar = cfg.show_status_bar;
     state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).

@@ -271,6 +271,12 @@ pub struct Config {
     /// Show the room-detection-method indicator in the map corner. Default false.
     #[serde(default)]
     pub show_loc_method: bool,
+    /// Show the status/score bar (top row of the story pane). Default true.
+    /// The v3 status line (location/score/moves) is only meaningful for v3
+    /// games; for v4+ (which draw their own upper-window status) it reads
+    /// garbage globals, so this can be toggled off (ToggleStatusBar).
+    #[serde(default = "default_true")]
+    pub show_status_bar: bool,
     /// Search configuration: start direction, nav keys.
     #[serde(default)]
     pub search: SearchConfig,
@@ -303,6 +309,7 @@ impl Default for Config {
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
             show_loc_method: false,
+            show_status_bar: true,
             search: SearchConfig::default(),
             virtual_screen_cols: default_virtual_screen_cols(),
             virtual_screen_rows: default_virtual_screen_rows(),
@@ -364,6 +371,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
             cfg.show_loc_method = from_file.show_loc_method;
+            cfg.show_status_bar = from_file.show_status_bar;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
@@ -411,6 +419,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["background_tidy"] = toml_edit::value(bg_str);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
+    doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
     doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
     doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
 
@@ -486,6 +495,13 @@ mod tests {
         assert_eq!(Config::default().show_loc_method, false);
         let cfg: Config = toml::from_str("show_loc_method = true\n").unwrap();
         assert_eq!(cfg.show_loc_method, true);
+    }
+
+    #[test]
+    fn config_show_status_bar_default_true_and_round_trips() {
+        assert_eq!(Config::default().show_status_bar, true);
+        let cfg: Config = toml::from_str("show_status_bar = false\n").unwrap();
+        assert_eq!(cfg.show_status_bar, false);
     }
 
     #[test]
@@ -679,6 +695,7 @@ mod tests {
             command_prefix: '/',
             show_room_numbers: false,
             show_loc_method: false,
+            show_status_bar: true,
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,

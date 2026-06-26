@@ -757,6 +757,10 @@ pub struct AppState {
     pub current_room_name: Option<String>,
     /// Whether the detection-method indicator is shown. Default false.
     pub show_loc_method: bool,
+    /// Whether the status/score bar (top row of the story pane) is shown.
+    /// Default true; toggled by ToggleStatusBar. Hidden, the row collapses into
+    /// the transcript but still pops up briefly for a transient status message.
+    pub show_status_bar: bool,
 
     // ── Hints panel state ─────────────────────────────────────────────────────
 
@@ -851,6 +855,7 @@ impl Default for AppState {
             loc_method: None,
             current_room_name: None,
             show_loc_method: false,
+            show_status_bar: true,
             hints: None,
             search_query: None,
             search_matches: Vec::new(),

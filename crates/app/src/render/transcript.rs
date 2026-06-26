@@ -500,12 +500,20 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let status_style_kind = state.colors.status_header_style;
     let input_style_kind  = state.colors.input_line_style;
 
+    // The status bar always shows for v3 (its automatic status line is valid).
+    // For v4+ it's hidable (ToggleStatusBar / config show_status_bar) because
+    // the v3 globals are garbage there — but it still pops up for a transient
+    // status message so copy/slash feedback isn't lost.
+    let status_visible = machine.mem.version() <= 3
+        || state.show_status_bar
+        || state.status_msg.is_some();
+
     // When boxed, status/input each take 3 rows; fall back to 1 if too small.
     // Gate on "any side present" (base OR per-side) so a style="none" + per-side
     // config (e.g. left/right-only) still boxes and draws its side bars.
-    let status_boxed = (status_style_kind != BorderStyle::None || state.colors.status_header_sides.any_on()) && area.height >= 5;
+    let status_boxed = status_visible && (status_style_kind != BorderStyle::None || state.colors.status_header_sides.any_on()) && area.height >= 5;
     let input_boxed  = (input_style_kind  != BorderStyle::None || state.colors.input_line_sides.any_on()) && area.height >= 5;
-    let status_rows: u16 = if status_boxed { 3 } else { 1 };
+    let status_rows: u16 = if !status_visible { 0 } else if status_boxed { 3 } else { 1 };
     let input_rows:  u16 = if input_boxed  { 3 } else { 1 };
 
     // ── Top row(s): status line ──────────────────────────────────────────────
@@ -582,7 +590,33 @@ fn render_status_content(
         return;
     }
 
-    // Build the field values for this turn.
+    // v4+ games have no automatic status line — the globals are not location /
+    // score / turns, so the v3 status_line() reads garbage. Show babelmap-owned
+    // info instead: the DETECTED room (left); turn counter, detection method,
+    // and the filter indicator (right).
+    if machine.mem.version() >= 4 {
+        let loc = state.current_room_name.clone().unwrap_or_default();
+        let mut right = format!("turn {}", state.turns);
+        if let Some(m) = state.loc_method {
+            right.push_str("  ");
+            right.push_str(crate::render::map::loc_method_label(m));
+        }
+        match state.transcript_filter {
+            TranscriptFilter::Both => {}
+            TranscriptFilter::Story => right.push_str("  [filter: story]"),
+            TranscriptFilter::Meta => right.push_str("  [filter: meta]"),
+        }
+        let visible: Vec<(String, Style, crate::colors::Align)> = vec![
+            (loc, base, crate::colors::Align::Left),
+            (right, base, crate::colors::Align::Right),
+        ];
+        for (x, txt, style) in pack_status_clusters(&visible, w) {
+            draw_str_clipped(buf, region.x + x, status_y, &txt, style, region);
+        }
+        return;
+    }
+
+    // Build the field values for this turn (v3 automatic status line).
     let sl = machine.status_line();
     let (score, moves, time) = match sl.right {
         StatusRight::ScoreTurns { score, turns } => (Some(score.to_string()), Some(turns.to_string()), None),
@@ -1146,6 +1180,69 @@ mod tests {
 
         let mem = Memory::new(buf).expect("minimal v3 story should be valid");
         Machine::new(mem)
+    }
+
+    /// Minimal v4 story (same minimal header as minimal_machine, version byte 4)
+    /// so version() >= 4 — used to exercise the v4+ status-bar path.
+    fn minimal_machine_v4() -> Machine {
+        use zvm::memory::Memory;
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 4; // version = 4
+        buf[0x04] = 0x00; buf[0x05] = 0x40; // high mem
+        buf[0x06] = 0x00; buf[0x07] = 0x40; // initial pc
+        buf[0x0A] = 0x00; buf[0x0B] = 0x80; // dict
+        buf[0x0C] = 0x01; buf[0x0D] = 0x00; // object table
+        buf[0x0E] = 0x03; buf[0x0F] = 0x00; // globals
+        buf[0x08] = 0x04; buf[0x09] = 0x00; // static base
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev table
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0; // dict
+        let mem = Memory::new(buf).expect("minimal v4 story should be valid");
+        Machine::new(mem)
+    }
+
+    #[test]
+    fn v4_status_bar_shows_detected_location_not_globals() {
+        let machine = minimal_machine_v4();
+        let mut state = AppState::default();
+        state.current_room_name = Some("Outside".to_string());
+        state.turns = 7;
+
+        let area = Rect::new(0, 0, 60, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+
+        let top: String = (0..area.width)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(top.contains("Outside"), "v4 status bar shows the detected room: {:?}", top);
+        assert!(top.contains("turn 7"), "v4 status bar shows the turn counter: {:?}", top);
+    }
+
+    #[test]
+    fn v4_status_bar_hidden_collapses_row_but_v3_always_shows() {
+        let area = Rect::new(0, 0, 60, 5);
+
+        // v4 + hidden + no message → top row is the transcript, not the status bar.
+        let mv4 = minimal_machine_v4();
+        let mut s = AppState::default();
+        s.show_status_bar = false;
+        s.current_room_name = Some("Outside".to_string());
+        s.transcript = vec!["FIRSTLINE".to_string()];
+        let mut buf = Buffer::empty(area);
+        render_transcript(&mv4, &s, area, &mut buf);
+        let top: String = (0..area.width)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(!top.contains("Outside"), "hidden v4 status bar must not render: {:?}", top);
+
+        // v3 ignores show_status_bar = false (its status line is always shown).
+        let mv3 = minimal_machine();
+        let mut s3 = AppState::default();
+        s3.show_status_bar = false;
+        let mut buf3 = Buffer::empty(area);
+        render_transcript(&mv3, &s3, area, &mut buf3);
+        let top3_reversed = buf3.cell((0, 0)).map(|c| c.modifier.contains(Modifier::REVERSED)).unwrap_or(false);
+        assert!(top3_reversed, "v3 status bar always renders (reversed status row) regardless of toggle");
     }
 
     #[test]

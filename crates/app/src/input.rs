@@ -126,6 +126,7 @@ pub enum Action {
     TogglePortalLabels,
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
+    ToggleStatusBar,
     /// Toggle the room-detection-method indicator in the map corner.
     ToggleLocMethod,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
@@ -1640,6 +1641,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
         Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
         Action::ToggleLocMethod => state.show_loc_method = !state.show_loc_method,
+        Action::ToggleStatusBar => state.show_status_bar = !state.show_status_bar,
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.

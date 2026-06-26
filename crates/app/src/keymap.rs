@@ -109,6 +109,8 @@ pub enum Command {
     ToggleRoomNumbers,
     /// Toggle the room-detection-method indicator in the map corner.
     ToggleLocMethod,
+    /// Toggle the status/score bar (top row of the story pane).
+    ToggleStatusBar,
 
     // ── Hints ─────────────────────────────────────────────────────────────────
     /// Open the Hints panel (companion Invisiclues / hint-file mini-terminal).
@@ -176,6 +178,7 @@ impl Command {
             Command::OpenConfig => Action::OpenConfig,
             Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
             Command::ToggleLocMethod => Action::ToggleLocMethod,
+            Command::ToggleStatusBar => Action::ToggleStatusBar,
             Command::OpenHints => Action::OpenHints,
             Command::OpenHistory => Action::OpenHistory,
         }
@@ -236,6 +239,7 @@ impl Command {
             Command::OpenConfig => "open_config",
             Command::ToggleRoomNumbers => "toggle_room_numbers",
             Command::ToggleLocMethod => "toggle_loc_method",
+            Command::ToggleStatusBar => "toggle_status_bar",
             Command::OpenHints => "open_hints",
             Command::OpenHistory => "open_history",
         }
@@ -296,6 +300,7 @@ impl Command {
             Command::OpenConfig => "settings",
             Command::ToggleRoomNumbers => "room numbers",
             Command::ToggleLocMethod => "location method",
+            Command::ToggleStatusBar => "status bar",
             Command::OpenHints => "hints",
             Command::OpenHistory => "history",
         }
@@ -359,6 +364,7 @@ impl Command {
             Command::OpenConfig => Context::Global,
             Command::ToggleRoomNumbers => Context::Global,
             Command::ToggleLocMethod => Context::Global,
+            Command::ToggleStatusBar => Context::Global,
             Command::OpenHints => Context::Global,
             Command::OpenHistory => Context::Global,
         }
@@ -424,6 +430,7 @@ pub const ALL_COMMANDS: &[Command] = &[
     Command::OpenConfig,
     Command::ToggleRoomNumbers,
     Command::ToggleLocMethod,
+    Command::ToggleStatusBar,
     Command::OpenHints,
     Command::OpenHistory,
 ];
