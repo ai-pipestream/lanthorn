@@ -29,14 +29,24 @@ approach (iOS Frotz / Glk autosave persist window state alongside the VM).
 
 ## Design
 
-### 1. zvm — make the screen state serializable
+### 1. App-side serializable DTO (zvm stays dependency-free)
 
-`crates/zvm/src/screen.rs`: derive `serde::{Serialize, Deserialize}` on `Cell`,
-`UpperWindow`, and `ScreenState` (currently `#[derive(Debug, ...)]` only). `zvm`
-already depends on `serde` (used elsewhere); add the derives (and the dep if a
-feature gate is needed). `ScreenState` fields: `upper_window_rows`,
-`current_window`, `text_style`, `cursor_row`, `cursor_col`, `buffer_mode`,
-`show_status_requested`, `upper: UpperWindow { cols, rows, cells: Vec<Cell> }`.
+`zvm` has **zero dependencies** (a deliberately pure VM crate), so do NOT add
+serde to it. Instead, in `crates/app/src/archive.rs` define a serde DTO mirroring
+the screen's (all-public) fields and convert to/from `zvm::screen::ScreenState`:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct ScreenDto {
+    upper_window_rows: u16, current_window: u8, text_style: u8,
+    cursor_row: u16, cursor_col: u16, buffer_mode: bool, show_status_requested: bool,
+    cols: u16, rows: u16, cells: Vec<(char, u8)>, // upper grid (ch, style) per cell
+}
+```
+
+Convert via the public fields; rebuild `ScreenState` from `ScreenState::default()`
++ field assignment (robust to any field we don't mirror). `Cell { ch, style }`,
+`UpperWindow { cols, rows, cells }`, and `ScreenState`'s fields are all public.
 
 ### 2. archive — persist + load `screen.json`
 
