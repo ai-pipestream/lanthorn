@@ -834,7 +834,8 @@ fn render_middle(
         StatefulWidget::render(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
-                .end_symbol(None),
+                .end_symbol(None)
+                .style(state.colors.scrollbar),
             sb_area,
             buf,
             &mut sb_state,
@@ -1389,16 +1390,25 @@ mod tests {
         let mut state = AppState::default();
         // Far more lines than the viewport → scrollbar must appear.
         state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
+        state.colors.scrollbar = Style::new().fg(Color::Magenta);
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
         render_transcript(&machine, &state, area, &mut buf);
 
         // The scrollbar gutter is the rightmost column; its thumb glyph is '█'.
+        let mut thumb_fg = None;
         let gutter: String = (0..area.height)
-            .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .map(|y| {
+                let c = buf.cell((area.width - 1, y));
+                if let Some(cell) = c {
+                    if cell.symbol().starts_with('█') { thumb_fg = Some(cell.fg); }
+                }
+                c.map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')
+            })
             .collect();
         assert!(gutter.contains('█'), "scrollbar thumb should render in the rightmost column: {:?}", gutter);
+        assert_eq!(thumb_fg, Some(Color::Magenta), "scrollbar is styleable via the `scrollbar` selector");
     }
 
     #[test]

@@ -145,6 +145,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "suggestion",
     "input:text",
     "input:prompt",
+    "scrollbar",
     "meta_marker",
     "helpbar",
     "map_border",
@@ -232,6 +233,7 @@ pub fn apply_color_decls(
             "suggestion"         => cs.suggestion = cs.suggestion.patch(style),
             "input:text"         => cs.input_text = cs.input_text.patch(style),
             "input:prompt"       => cs.input_prompt = cs.input_prompt.patch(style),
+            "scrollbar"          => cs.scrollbar = cs.scrollbar.patch(style),
             "meta_marker"        => cs.meta_marker = cs.meta_marker.patch(style),
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
             "map_border" => {
@@ -1015,6 +1017,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
     doc.colors.selectors.insert("input:text".to_string(),        style_to_decl(&cs.input_text));
     doc.colors.selectors.insert("input:prompt".to_string(),      style_to_decl(&cs.input_prompt));
+    doc.colors.selectors.insert("scrollbar".to_string(),         style_to_decl(&cs.scrollbar));
     doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
     // New pane border/title/tab/header/input selectors.
