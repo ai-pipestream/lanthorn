@@ -329,10 +329,24 @@ pub fn help_text(prefix: char) -> Vec<String> {
     for entry in CURATED {
         lines.push(format!("  {prefix}{}", entry.help));
     }
-    lines.push(String::new());
-    lines.push(
-        format!("Any keymap command is also available by its kebab name (e.g. {prefix}open-config).")
-    );
+
+    // Keymap commands, available by their kebab name. Deduped against the
+    // curated names above — the same union slash_names() builds for Tab
+    // autocomplete — so /help and the actual command set stay in sync, and a
+    // new keymap command shows up here automatically.
+    let curated: Vec<&str> = CURATED.iter().map(|e| e.name).collect();
+    let mut extras: Vec<String> = Vec::new();
+    for cmd in ALL_COMMANDS {
+        let kebab = cmd.name().replace('_', "-");
+        if !curated.contains(&kebab.as_str()) {
+            extras.push(format!("  {prefix}{kebab}  — {}", cmd.label()));
+        }
+    }
+    if !extras.is_empty() {
+        lines.push(String::new());
+        lines.push("Keymap commands (also available by kebab name):".to_string());
+        lines.extend(extras);
+    }
     lines
 }
 
@@ -376,6 +390,19 @@ mod tests {
         let lines_semi = help_text(';');
         assert!(lines_semi[0].contains(';'));
         assert!(!lines_semi[0].contains('/'));
+    }
+
+    #[test]
+    fn help_text_lists_keymap_kebab_commands() {
+        // /help must enumerate the keymap fallback commands, not just the
+        // curated ones — every name slash_names() offers should be findable.
+        let lines = help_text('/');
+        assert!(
+            lines.iter().any(|l| l.contains("/open-config")),
+            "a keymap kebab command (open-config) should appear in /help"
+        );
+        // Curated commands are still present.
+        assert!(lines.iter().any(|l| l.contains("/panh")));
     }
 
     #[test]
