@@ -34,6 +34,7 @@ const ENTRY_SAVE: &str = "game.sav";
 const ENTRY_META: &str = "meta.json";
 const ENTRY_TRANSCRIPT: &str = "transcript.json";
 const ENTRY_SCREEN: &str = "screen.json";
+const ENTRY_AUX: &str = "aux.dat";
 const HISTORY_INDEX: &str = "history/index.json";
 
 pub const CURRENT_FORMAT_VERSION: u32 = 2;
@@ -136,6 +137,8 @@ pub struct ArchiveContents {
     /// Saved Z-machine screen state (None for archives without `screen.json`).
     /// Applied on the host-mediated restore paths so the upper window is restored.
     pub screen: Option<zvm::screen::ScreenState>,
+    /// Auxiliary key/value data from the machine (empty for archives without `aux.dat`).
+    pub aux: std::collections::BTreeMap<String, Vec<u8>>,
 }
 
 /// Write a `.babelmap` archive containing the current map and VM save.
@@ -217,6 +220,12 @@ pub fn save_archive_meta(
         .expect("ScreenDto is always serializable");
     zip.start_file(ENTRY_SCREEN, options)?;
     zip.write_all(screen_json.as_bytes())?;
+
+    // aux.dat — machine aux_data (only when non-empty).
+    if !machine.aux_data.is_empty() {
+        zip.start_file(ENTRY_AUX, options)?;
+        zip.write_all(&crate::aux_store::encode_aux(&machine.aux_data))?;
+    }
 
     // history/ — per-turn rewind/replay records (only when non-empty).
     if !history.is_empty() {
@@ -378,7 +387,17 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         }
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history, screen })
+    // aux.dat — optional; absent in pre-aux archives → empty map.
+    let aux = match zip.by_name(ENTRY_AUX) {
+        Ok(mut entry) => {
+            let mut buf = Vec::new();
+            let _ = entry.read_to_end(&mut buf);
+            crate::aux_store::decode_aux(&buf)
+        }
+        Err(_) => std::collections::BTreeMap::new(),
+    };
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history, screen, aux })
 }
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
@@ -805,5 +824,26 @@ mod tests {
         assert!(result.is_err(), "unknown format_version must return Err");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("99"), "error should mention the bad version: {msg}");
+    }
+
+    #[test]
+    fn archive_round_trips_aux_data() {
+        let mut machine = dummy_machine();
+        machine.aux_data.insert("hints".to_string(), vec![1, 2, 3]);
+        let path = temp_archive_path("aux");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.aux.get("hints").map(|v| v.as_slice()), Some(&[1, 2, 3][..]));
+    }
+
+    #[test]
+    fn archive_without_aux_loads_empty_map() {
+        let machine = dummy_machine(); // empty aux_data
+        let path = temp_archive_path("noaux");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert!(ac.aux.is_empty());
     }
 }
