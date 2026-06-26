@@ -1911,10 +1911,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 let dx = col as i32 - drag.last.0 as i32;
                 let dy = row as i32 - drag.last.1 as i32;
                 drag.last = (col, row);
-                // Grab-and-drag: dragging right scrolls left (subtract delta).
-                // Accumulate directly into char_pan for 1-character precision panning.
-                state.char_pan.0 -= dx;
-                state.char_pan.1 -= dy;
+                // Grab-and-drag: the content follows the cursor (dragging right
+                // moves the map right). char_pan is added to the draw offset, so
+                // add the delta directly. 1-character precision.
+                state.char_pan.0 += dx;
+                state.char_pan.1 += dy;
             }
         }
 
@@ -4025,14 +4026,14 @@ mod tests {
         assert!(s.drag.is_some(), "drag state should be set after BeginDragPan");
 
         // New behavior: drag goes directly into char_pan at 1-char precision.
-        // Drag 11 columns right: char_pan.0 = -11, scroll unchanged.
+        // Grab-and-drag: drag 11 columns right → char_pan.0 = +11, scroll unchanged.
         apply_action(Action::DragPanTo(21, 10), &mut s, &mut m); // dx=11
-        assert_eq!(s.char_pan.0, -11, "11-col drag should set char_pan.0 to -11");
+        assert_eq!(s.char_pan.0, 11, "11-col drag right should set char_pan.0 to +11");
         assert_eq!(s.scroll, (0, 0), "scroll should not change during drag");
 
-        // Drag 1 more column right: char_pan.0 = -12, scroll still unchanged.
+        // Drag 1 more column right: char_pan.0 = +12, scroll still unchanged.
         apply_action(Action::DragPanTo(22, 10), &mut s, &mut m); // dx=1
-        assert_eq!(s.char_pan.0, -12, "additional 1-col drag should set char_pan.0 to -12");
+        assert_eq!(s.char_pan.0, 12, "additional 1-col drag should set char_pan.0 to +12");
         assert_eq!(s.scroll, (0, 0), "scroll must remain unchanged (char_pan handles it)");
     }
 
@@ -4048,12 +4049,12 @@ mod tests {
         // Move 5 cols right: goes into char_pan, scroll unchanged.
         apply_action(Action::DragPanTo(5, 0), &mut s, &mut m);
         assert_eq!(s.scroll, (0, 0), "scroll must not change; char_pan absorbs the delta");
-        assert_eq!(s.char_pan.0, -5, "char_pan.0 should be -5 after 5-col drag");
+        assert_eq!(s.char_pan.0, 5, "char_pan.0 should be +5 after 5-col drag right (grab)");
     }
 
     #[test]
     fn drag_pan_grab_and_drag_direction() {
-        // Drag LEFT should move content right: char_pan.0 increases (positive).
+        // Grab-and-drag: dragging LEFT moves content left → char_pan.0 negative.
         use crate::state::Zoom;
 
         let mut s = AppState::default();
@@ -4061,9 +4062,9 @@ mod tests {
         let mut m = Mapper::default();
 
         apply_action(Action::BeginDragPan(20, 0), &mut s, &mut m);
-        // Drag left by 12 columns: dx = -12, char_pan.0 = -(-12) = 12.
+        // Drag left by 12 columns: dx = -12, char_pan.0 += dx = -12.
         apply_action(Action::DragPanTo(8, 0), &mut s, &mut m);
-        assert_eq!(s.char_pan.0, 12, "dragging left should set char_pan.0 positive (content follows grab)");
+        assert_eq!(s.char_pan.0, -12, "dragging left moves content left (grab): char_pan.0 = -12");
         assert_eq!(s.scroll.0, 0, "scroll must not change; char_pan handles the delta");
     }
 
@@ -4666,19 +4667,19 @@ mod tests {
         let mut m = Mapper::default();
         // Start drag at (10, 10).
         apply_action(Action::BeginDragPan(10, 10), &mut s, &mut m);
-        // Drag 5 columns right, 3 rows down.
+        // Drag 5 columns right, 3 rows down (grab: content follows cursor).
         apply_action(Action::DragPanTo(15, 13), &mut s, &mut m);
         assert_eq!(
             s.char_pan,
-            (-5, -3),
-            "drag right+down by (5,3) should set char_pan to (-5,-3)"
+            (5, 3),
+            "drag right+down by (5,3) should set char_pan to (5,3)"
         );
         // Continue dragging 2 columns left.
         apply_action(Action::DragPanTo(13, 13), &mut s, &mut m);
         assert_eq!(
             s.char_pan,
-            (-3, -3),
-            "additional drag left by 2 should update char_pan to (-3,-3)"
+            (3, 3),
+            "additional drag left by 2 should update char_pan to (3,3)"
         );
     }
 
@@ -4689,10 +4690,10 @@ mod tests {
         let mut m = Mapper::default();
         apply_action(Action::BeginDragPan(5, 5), &mut s, &mut m);
         apply_action(Action::DragPanTo(8, 5), &mut s, &mut m);
-        assert_eq!(s.char_pan, (-3, 0));
+        assert_eq!(s.char_pan, (3, 0));
         apply_action(Action::EndDragPan, &mut s, &mut m);
         assert!(s.drag.is_none(), "EndDragPan should clear drag state");
-        assert_eq!(s.char_pan, (-3, 0), "EndDragPan must not reset char_pan");
+        assert_eq!(s.char_pan, (3, 0), "EndDragPan must not reset char_pan");
     }
 
     /// Build a minimal MouseEvent for testing.
