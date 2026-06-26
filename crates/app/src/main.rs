@@ -676,6 +676,8 @@ fn main() {
     // Migration: if no archive exists but a legacy .map.json does, load that.
     // use_default_map = true: also fall back to legacy map when no archive.
     let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>)> = None;
+    // Rewind/replay history carried from the archive when the game is auto-restored.
+    let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
     let mut pending_resume_stash: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>)> = None;
@@ -689,6 +691,7 @@ fn main() {
                         eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
                     } else {
                         startup_transcript = Some((ac.transcript, ac.transcript_kinds));
+                        startup_history = ac.history;
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
                     // Save present, auto_load off, prompt enabled: stash for launch dialog.
@@ -799,6 +802,9 @@ fn main() {
     if let Some((lines, kinds)) = startup_transcript {
         state.transcript = lines;
         state.transcript_kinds = kinds;
+    }
+    if !startup_history.is_empty() {
+        state.history = startup_history;
     }
 
     // If a save was found but auto_load is off and prompt_load_on_launch is on,
@@ -1082,7 +1088,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history);
                                 break;
                             }
                             QuitDialogAction::Quit => {
@@ -1119,7 +1125,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history);
                                 break;
                             } else if in_quit {
                                 break;
@@ -1489,7 +1495,7 @@ fn main() {
                                                 .unwrap_or(0),
                                         ),
                                     };
-                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds)
+                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history)
                                         .map(|()| "saved".to_string())
                                         .map_err(|e| format!("save failed: {}", e))
                                 }
@@ -1529,6 +1535,7 @@ fn main() {
                                                     mapper = ac.mapper;
                                                     state.transcript = ac.transcript;
                                                     state.transcript_kinds = ac.transcript_kinds;
+                                                    state.history = ac.history;
                                                     let loc = zvm::current_location(&session.machine);
                                                     if let Some(snap) = loc {
                                                         let rid = snap.number as mapper::graph::RoomId;
@@ -1768,7 +1775,7 @@ fn main() {
                                 .unwrap_or(0),
                         ),
                     };
-                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds) {
+                    if let Err(e) = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
                         state.push_transcript(&format!("[Auto-save failed: {}]", e));
                     }
                 }
@@ -1853,7 +1860,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds) {
+                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -1881,6 +1888,7 @@ fn main() {
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
                                 state.transcript_kinds = ac.transcript_kinds;
+                                state.history = ac.history;
                                 // After restore, re-observe current location.
                                 let loc = zvm::current_location(&session.machine);
                                 if let Some(snap) = loc {
@@ -2082,6 +2090,7 @@ fn main() {
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
+                                    state.history = ac.history;
                                     // Restore turn counter from the loaded archive.
                                     state.turns = ac.meta.turns;
                                     // Re-observe current location.
@@ -2189,7 +2198,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds) {
+        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }

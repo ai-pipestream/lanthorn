@@ -112,7 +112,7 @@ pub fn save_named(
         turns,
         saved_at,
     };
-    crate::archive::save_archive_meta(&path, mapper, machine, meta, transcript, transcript_kinds)
+    crate::archive::save_archive_meta(&path, mapper, machine, meta, transcript, transcript_kinds, &[])
 }
 
 /// Remove a save file.
@@ -374,7 +374,7 @@ mod tests {
 
         // Write a default archive.
         let default_path = dir.join(format!("{}.babelmap", ifid));
-        crate::archive::save_archive(&default_path, &mapper, &machine, &[], &[])
+        crate::archive::save_archive(&default_path, &mapper, &machine, &[], &[], &[])
             .expect("default save ok");
 
         // Write two named saves.

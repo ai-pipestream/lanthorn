@@ -31,8 +31,9 @@ const ENTRY_MAP: &str = "map.json";
 const ENTRY_SAVE: &str = "game.sav";
 const ENTRY_META: &str = "meta.json";
 const ENTRY_TRANSCRIPT: &str = "transcript.json";
+const HISTORY_INDEX: &str = "history/index.json";
 
-const CURRENT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
@@ -56,6 +57,15 @@ struct TranscriptData {
     kinds: Vec<crate::state::TranscriptKind>,
 }
 
+/// One row of `history/index.json`: per-turn metadata + ordering. The bytes,
+/// map JSON, and transcript live in sibling `turn-NNNN.*` entries.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct HistoryIndexEntry {
+    turn: u32,
+    command: String,
+    has_map: bool,
+}
+
 #[derive(Debug)]
 pub struct ArchiveContents {
     pub mapper: Mapper,
@@ -65,6 +75,8 @@ pub struct ArchiveContents {
     pub transcript: Vec<String>,
     /// Parallel kind tag for each transcript entry (same length as `transcript`).
     pub transcript_kinds: Vec<crate::state::TranscriptKind>,
+    /// Per-turn rewind/replay history (empty for archives without `history/`).
+    pub history: Vec<crate::history::TurnRecord>,
 }
 
 /// Write a `.babelmap` archive containing the current map and VM save.
@@ -77,6 +89,7 @@ pub fn save_archive(
     machine: &zvm::cpu::exec::Machine,
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
+    history: &[crate::history::TurnRecord],
 ) -> io::Result<()> {
     save_archive_meta(path, mapper, machine, Meta {
         format_version: CURRENT_FORMAT_VERSION,
@@ -84,7 +97,7 @@ pub fn save_archive(
         name: None,
         turns: 0,
         saved_at: String::new(),
-    }, transcript, transcript_kinds)
+    }, transcript, transcript_kinds, history)
 }
 
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
@@ -97,6 +110,7 @@ pub fn save_archive_meta(
     meta: Meta,
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
+    history: &[crate::history::TurnRecord],
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -133,6 +147,33 @@ pub fn save_archive_meta(
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
     zip.write_all(transcript_json.as_bytes())?;
 
+    // history/ — per-turn rewind/replay records (only when non-empty).
+    if !history.is_empty() {
+        let index: Vec<HistoryIndexEntry> = history
+            .iter()
+            .map(|r| HistoryIndexEntry {
+                turn: r.turn,
+                command: r.command.clone(),
+                has_map: r.map_snapshot.is_some(),
+            })
+            .collect();
+        let index_json =
+            serde_json::to_string_pretty(&index).expect("history index serializable");
+        zip.start_file(HISTORY_INDEX, options)?;
+        zip.write_all(index_json.as_bytes())?;
+
+        for r in history {
+            zip.start_file(format!("history/turn-{:04}.sav", r.turn), options)?;
+            zip.write_all(&r.save)?;
+            if let Some(map) = &r.map_snapshot {
+                zip.start_file(format!("history/turn-{:04}.map.json", r.turn), options)?;
+                zip.write_all(map.as_bytes())?;
+            }
+            zip.start_file(format!("history/turn-{:04}.txt", r.turn), options)?;
+            zip.write_all(r.transcript.as_bytes())?;
+        }
+    }
+
     zip.finish()?;
     Ok(())
 }
@@ -158,11 +199,11 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("corrupt {ENTRY_META}: {e}")))?
     };
 
-    if meta.format_version != CURRENT_FORMAT_VERSION {
+    if meta.format_version > CURRENT_FORMAT_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "unsupported archive format_version {}; expected {}",
+                "unsupported archive format_version {}; expected <= {}",
                 meta.format_version, CURRENT_FORMAT_VERSION
             ),
         ));
@@ -202,7 +243,57 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => (Vec::new(), Vec::new()),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds })
+    // history/ — optional; absent in archives that pre-date this feature.
+    // Read the index first (releasing its borrow before the per-turn reads).
+    let history_index: Option<Vec<HistoryIndexEntry>> = match zip.by_name(HISTORY_INDEX) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf)?;
+            Some(serde_json::from_str(&buf).unwrap_or_default())
+        }
+        Err(_) => None,
+    };
+    let history: Vec<crate::history::TurnRecord> = match history_index {
+        Some(index) => {
+            let mut out = Vec::with_capacity(index.len());
+            for e in index {
+                let save = {
+                    let mut b = Vec::new();
+                    if let Ok(mut z) = zip.by_name(&format!("history/turn-{:04}.sav", e.turn)) {
+                        let _ = z.read_to_end(&mut b);
+                    }
+                    b
+                };
+                let map_snapshot = if e.has_map {
+                    let mut b = Vec::new();
+                    if let Ok(mut z) = zip.by_name(&format!("history/turn-{:04}.map.json", e.turn)) {
+                        let _ = z.read_to_end(&mut b);
+                    }
+                    String::from_utf8(b).ok()
+                } else {
+                    None
+                };
+                let transcript = {
+                    let mut b = Vec::new();
+                    if let Ok(mut z) = zip.by_name(&format!("history/turn-{:04}.txt", e.turn)) {
+                        let _ = z.read_to_end(&mut b);
+                    }
+                    String::from_utf8(b).unwrap_or_default()
+                };
+                out.push(crate::history::TurnRecord {
+                    turn: e.turn,
+                    command: e.command,
+                    save,
+                    map_snapshot,
+                    transcript,
+                });
+            }
+            out
+        }
+        None => Vec::new(),
+    };
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history })
 }
 
 #[cfg(test)]
@@ -222,6 +313,70 @@ mod tests {
         m.observe(1, "West of House", None);
         m.observe(2, "Forest", Some(Direction::N));
         m
+    }
+
+    fn dummy_machine() -> zvm::cpu::exec::Machine {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let story = std::fs::read(&fixture).expect("czech.z5 fixture for archive tests");
+        let mem = zvm::memory::Memory::new(story).unwrap();
+        let mut m = zvm::cpu::exec::Machine::new(mem);
+        m.init_caps();
+        m
+    }
+
+    #[test]
+    fn history_round_trips_in_archive() {
+        use crate::history::TurnRecord;
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+
+        let mapper = small_mapper();
+        let map_json = mapper::persist::to_json(&mapper);
+        let history = vec![
+            TurnRecord { turn: 1, command: "look".into(), save: vec![1, 2, 3],
+                map_snapshot: Some(map_json.clone()), transcript: "West of House".into() },
+            TurnRecord { turn: 2, command: "wait".into(), save: vec![4, 5, 6, 7],
+                map_snapshot: None, transcript: "Time passes.".into() },
+        ];
+
+        let path = temp_archive_path("history-rt");
+        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &history)
+            .expect("save_archive");
+        let ac = load_archive(&path).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(ac.history.len(), 2);
+        assert_eq!(ac.history[0].turn, 1);
+        assert_eq!(ac.history[0].command, "look");
+        assert_eq!(ac.history[0].save, vec![1, 2, 3], "save bytes byte-identical");
+        assert_eq!(ac.history[0].map_snapshot.as_deref(), Some(map_json.as_str()));
+        assert_eq!(ac.history[0].transcript, "West of House");
+        assert_eq!(ac.history[1].save, vec![4, 5, 6, 7]);
+        assert!(ac.history[1].map_snapshot.is_none(), "no-change turn has no map");
+        assert_eq!(ac.history[1].transcript, "Time passes.");
+    }
+
+    #[test]
+    fn v1_archive_loads_with_empty_history() {
+        // An archive with no history/ entries (e.g. written before this feature)
+        // loads with an empty history and unchanged behavior.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+        let mapper = small_mapper();
+        let path = temp_archive_path("history-v1");
+        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[])
+            .expect("save_archive without history");
+        let ac = load_archive(&path).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+        assert!(ac.history.is_empty(), "archive without history/ → empty history");
     }
 
     // -------------------------------------------------------------------------
@@ -247,7 +402,7 @@ mod tests {
         let expected_save = machine.save_quetzal();
 
         let path = temp_archive_path("roundtrip");
-        save_archive(&path, &mapper, &machine, &[], &[]).expect("save_archive");
+        save_archive(&path, &mapper, &machine, &[], &[], &[]).expect("save_archive");
 
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -259,7 +414,7 @@ mod tests {
         assert_eq!(ac.save, expected_save, "save bytes must be identical");
 
         // Meta
-        assert_eq!(ac.meta.format_version, 1);
+        assert_eq!(ac.meta.format_version, CURRENT_FORMAT_VERSION);
         assert!(ac.meta.ifid.is_none());
     }
 
