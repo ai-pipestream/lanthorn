@@ -298,6 +298,22 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history })
 }
 
+/// Read raw Quetzal bytes from a save file for an in-game RESTORE.
+///
+/// If `path` is a `.babelmap` ZIP archive, returns its `game.sav` entry;
+/// otherwise returns the file's raw bytes (a plain `.qzl` Quetzal save).
+pub fn read_quetzal_from_file(path: &Path) -> io::Result<Vec<u8>> {
+    let bytes = std::fs::read(path)?;
+    if let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(&bytes)) {
+        if let Ok(mut entry) = zip.by_name(ENTRY_SAVE) {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            return Ok(buf);
+        }
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +331,34 @@ mod tests {
         m.observe(1, "West of House", None);
         m.observe(2, "Forest", Some(Direction::N));
         m
+    }
+
+    #[test]
+    fn read_quetzal_extracts_game_sav_from_babelmap() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+        let machine = dummy_machine();
+        let expected = machine.save_quetzal();
+
+        let path = temp_archive_path("qzl-from-babelmap");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save_archive");
+        let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(got, expected, "game.sav bytes extracted from the .babelmap");
+    }
+
+    #[test]
+    fn read_quetzal_returns_raw_bytes_for_plain_qzl() {
+        // A non-zip file (a plain .qzl) returns its raw bytes unchanged.
+        let path = temp_archive_path("plain-qzl");
+        std::fs::write(&path, b"FORM\x00\x00fake-quetzal").unwrap();
+        let got = read_quetzal_from_file(&path).expect("read raw");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(got, b"FORM\x00\x00fake-quetzal");
     }
 
     fn dummy_machine() -> zvm::cpu::exec::Machine {
