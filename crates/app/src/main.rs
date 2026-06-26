@@ -721,12 +721,177 @@ fn toggle_style_watch(
     }
 }
 
+/// Run the pre-game story picker for a directory passed at launch. Returns the
+/// chosen story path, or `None` if the user quit. Exits the process with a
+/// message when the directory contains no launchable stories.
+fn run_story_picker(
+    dir: &std::path::Path,
+    cfg: &app::config::Config,
+) -> Option<std::path::PathBuf> {
+    let stories = app::picker::scan_stories(dir);
+    if stories.is_empty() {
+        eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
+        std::process::exit(1);
+    }
+
+    // Resolve themed colors the same way the game does, so the picker matches.
+    let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
+    let (cs, _set, _w2) = app::style::resolve(&base, &cfg.user_dir);
+
+    // Terminal setup mirrors the game loop. If any step fails we can't be
+    // interactive — fall back to the first story rather than abort.
+    if enable_raw_mode().is_err() {
+        return Some(stories[0].path.clone());
+    }
+    if execute!(stdout(), EnterAlternateScreen, EnableMouseCapture).is_err() {
+        let _ = disable_raw_mode();
+        return Some(stories[0].path.clone());
+    }
+    let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
+        Ok(t) => t,
+        Err(_) => {
+            restore_terminal();
+            return Some(stories[0].path.clone());
+        }
+    };
+
+    let mut selected: usize = 0;
+    let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+
+    let chosen: Option<std::path::PathBuf> = loop {
+        let _ = terminal.draw(|f| {
+            let area = f.area();
+            let buf = f.buffer_mut();
+            row_rects = draw_story_picker(&stories, selected, dir, &cs, area, buf);
+        });
+
+        match read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                use crossterm::event::KeyCode::*;
+                match k.code {
+                    Up | Char('k') => selected = selected.saturating_sub(1),
+                    Down | Char('j') => {
+                        if selected + 1 < stories.len() {
+                            selected += 1;
+                        }
+                    }
+                    Home => selected = 0,
+                    End => selected = stories.len() - 1,
+                    Enter => break Some(stories[selected].path.clone()),
+                    Esc | Char('q') => break None,
+                    _ => {}
+                }
+            }
+            Ok(Event::Mouse(m)) => {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                match m.kind {
+                    MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
+                    MouseEventKind::ScrollDown => {
+                        if selected + 1 < stories.len() {
+                            selected += 1;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
+                            break Some(stories[*idx].path.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Resize(_, _)) => {
+                let _ = terminal.clear();
+            }
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+
+    restore_terminal();
+    chosen
+}
+
+/// Draw the story-picker screen. Returns the per-row hit-rects (index, rect) for
+/// mouse selection.
+fn draw_story_picker(
+    stories: &[app::picker::StoryEntry],
+    selected: usize,
+    dir: &std::path::Path,
+    cs: &app::colors::ColorScheme,
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) -> Vec<(usize, Rect)> {
+    use ratatui::style::{Color, Style};
+    let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+
+    // Background fill.
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_symbol(" ").set_style(cs.dialog);
+            }
+        }
+    }
+
+    // Header.
+    let header = format!(
+        " babelmap — choose a story  ({} found in {})",
+        stories.len(),
+        dir.display()
+    );
+    draw_str_clipped(buf, area.x, area.y, &header, cs.dialog_title, area);
+
+    // List region (header + blank row at top, footer at bottom).
+    let list_top = area.y + 2;
+    let list_bottom = area.bottom().saturating_sub(1);
+    if list_bottom <= list_top {
+        return row_rects;
+    }
+    let rows = (list_bottom - list_top) as usize;
+    let first = if selected >= rows { selected + 1 - rows } else { 0 };
+
+    for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
+        let y = list_top + (i - first) as u16;
+        let row_rect = Rect::new(area.x, y, area.width, 1);
+        row_rects.push((i, row_rect));
+        let sel = i == selected;
+        let style = if sel { cs.dialog_button_active } else { cs.dialog };
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_symbol(" ").set_style(style);
+            }
+        }
+        let marker = if sel { "▸ " } else { "  " };
+        let line = format!("{}{}   ({})", marker, entry.title, entry.filename);
+        draw_str_clipped(buf, area.x, y, &line, style, row_rect);
+    }
+
+    // Footer hint.
+    let footer = " ↑/↓ or j/k: move   Enter / click: open   q / Esc: quit";
+    let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
+    draw_str_clipped(buf, area.x, list_bottom, footer, fstyle, area);
+
+    row_rects
+}
+
 fn main() {
     // ── 1. Parse args + load config ───────────────────────────────────────────
 
     let cli = Cli::parse();
     let cfg = resolve(&cli);
     let story_path = cli.story.clone();
+
+    // If a directory was passed instead of a story file, run the pre-game story
+    // picker and continue with the chosen file (or exit if the user quits).
+    let story_path = if story_path.is_dir() {
+        match run_story_picker(&story_path, &cfg) {
+            Some(p) => p,
+            None => std::process::exit(0),
+        }
+    } else {
+        story_path
+    };
 
     let story_bytes = match hints::load_story_bytes(&story_path) {
         Ok(b) => b,

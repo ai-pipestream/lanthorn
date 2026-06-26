@@ -15,6 +15,7 @@ pub mod input;
 pub mod keymap;
 pub mod map_dump;
 pub mod persist_files;
+pub mod picker;
 pub mod reload;
 pub mod render;
 pub mod roomid;
