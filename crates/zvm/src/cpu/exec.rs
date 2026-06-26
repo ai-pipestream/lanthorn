@@ -953,7 +953,7 @@ impl Machine {
                     let b = self.mem.read_byte(src + from + i);
                     s.push(zscii_to_char(b as u16)); // mirror the read path's ZSCII decode
                 }
-                let packed = crate::text::encode::encode_word(&s, self.mem.version());
+                let packed = crate::text::encode::encode_word_mem(&s, &self.mem);
                 for (i, b) in packed.iter().enumerate() {
                     self.mem.write_byte(coded + i as u32, *b);
                 }

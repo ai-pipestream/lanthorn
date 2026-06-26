@@ -9,7 +9,7 @@
 // The first 4 (v3) or 6 (v4+) bytes of each entry are the encoded word key.
 
 use crate::memory::Memory;
-use crate::text::encode::encode_word;
+use crate::text::encode::encode_word_mem;
 
 pub struct Dictionary {
     pub entry_length: u8,
@@ -88,7 +88,7 @@ impl Dictionary {
     /// 0 if not found. Encodes `word` with `encode_word` (which truncates to
     /// the key length) and compares against stored keys.
     pub fn lookup(&self, mem: &Memory, word: &str) -> u16 {
-        let key = encode_word(word, if self.key_len == 4 { 3 } else { 5 });
+        let key = encode_word_mem(word, mem);
         let klen = self.key_len as usize;
         let elen = self.entry_length as u32;
 

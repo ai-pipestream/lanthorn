@@ -15,4 +15,4 @@ pub mod decode;
 pub use decode::decode_string;
 
 pub mod encode;
-pub use encode::encode_word;
+pub use encode::{encode_word, encode_word_mem};

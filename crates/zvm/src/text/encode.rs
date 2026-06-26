@@ -9,18 +9,59 @@
 // 10-bit ZSCII escapes are not implemented (real dictionary words are letters).
 
 use super::{A0, A2};
+use crate::memory::Memory;
 
-/// Encode `text` to its dictionary-resolution Z-character form.
+/// Encode `text` to its dictionary-resolution Z-character form using the
+/// **default** alphabets.
 ///
 /// Returns 4 bytes (6 Z-chars) for v3, 6 bytes (9 Z-chars) for v4+.
 /// The input is lower-cased before encoding. Characters longer than the
 /// Z-char limit are truncated; shorter strings are padded with Z-char 5.
 pub fn encode_word(text: &str, version: u8) -> Vec<u8> {
+    encode_word_impl(text, version, None)
+}
+
+/// Encode `text` honouring the story's custom alphabet table (v5+, header
+/// word 0x34) when one is present; otherwise identical to `encode_word`.
+///
+/// Used on the dictionary-resolution and `encode_text` paths so player input is
+/// encoded with the same alphabet the story's dictionary was built with — a
+/// game that remaps A0/A2 would otherwise never match its own dictionary.
+pub fn encode_word_mem(text: &str, mem: &Memory) -> Vec<u8> {
+    let custom = read_custom_alphabet(mem);
+    encode_word_impl(text, mem.version(), custom.as_ref())
+}
+
+/// Read the 78-byte custom alphabet table (three 26-byte rows: A0, A1, A2) when
+/// the story defines one (v5+, header 0x34 nonzero). Mirrors the decode side.
+fn read_custom_alphabet(mem: &Memory) -> Option<[u8; 78]> {
+    if mem.version() < 5 {
+        return None;
+    }
+    let p = mem.read_word(0x34) as u32;
+    if p == 0 {
+        return None;
+    }
+    let mut rows = [0u8; 78];
+    for (i, slot) in rows.iter_mut().enumerate() {
+        *slot = mem.read_byte(p + i as u32);
+    }
+    Some(rows)
+}
+
+/// Shared encoder. `custom`, when present, supplies the A0 (rows 0..26) and A2
+/// (rows 52..78) glyphs in place of the defaults; A2 positions 0 and 1 (escape
+/// and newline) are never matched, matching the decode side.
+fn encode_word_impl(text: &str, version: u8, custom: Option<&[u8; 78]>) -> Vec<u8> {
     let zchar_limit: usize = if version <= 3 { 6 } else { 9 };
 
     // Lower-case the input and build Z-char sequence.
     let lower = text.to_lowercase();
     let mut zchars: Vec<u8> = Vec::with_capacity(zchar_limit);
+
+    // Alphabet glyph rows: the story's custom table, or the defaults.
+    let a0: &[u8] = custom.map(|r| &r[0..26]).unwrap_or(&A0[..]);
+    let a2: &[u8] = custom.map(|r| &r[52..78]).unwrap_or(&A2[..]);
 
     'outer: for ch in lower.chars() {
         if zchars.len() >= zchar_limit {
@@ -28,14 +69,14 @@ pub fn encode_word(text: &str, version: u8) -> Vec<u8> {
         }
         let byte = ch as u8;
 
-        // Try A0 (lowercase letters a-z).
-        if let Some(pos) = A0.iter().position(|&b| b == byte) {
+        // Try A0 (lowercase letters a-z by default).
+        if let Some(pos) = a0.iter().position(|&b| b == byte) {
             zchars.push((pos + 6) as u8); // A0 Z-char = index + 6
             continue;
         }
 
         // Try A2 (digits, punctuation, etc.) — emits shift-5 then A2 Z-char.
-        for (i, &b) in A2.iter().enumerate() {
+        for (i, &b) in a2.iter().enumerate() {
             if b == byte && i >= 2 {
                 // Need 2 Z-chars; only emit if both fit.
                 if zchars.len() + 2 > zchar_limit {
@@ -136,6 +177,46 @@ mod tests {
         let enc = encode_word("abcdefghij", 3);
         assert_eq!(enc.len(), 4);
         assert_eq!(encode_word("abcdefghij", 3), encode_word("abcdef", 3));
+    }
+
+    #[test]
+    fn custom_alphabet_table_is_honoured_on_encode() {
+        // v5 story with a custom alphabet table (header 0x34) whose A0 row swaps
+        // 'a' and 'b' (A0[0]='b', A0[1]='a'); A1/A2 stay default.
+        let tbl: usize = 0x0200;
+        let a0 = b"bacdefghijklmnopqrstuvwxyz";
+        let a1 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let a2 = b"\x00\n0123456789.,!?_#'\"/\\-:()";
+        let with_table = |word_bytes: &[u8]| {
+            let mut bytes = sample_story(5);
+            bytes[0x34] = (tbl >> 8) as u8;
+            bytes[0x35] = (tbl & 0xFF) as u8;
+            for (i, &c) in a0.iter().enumerate() { bytes[tbl + i] = c; }
+            for (i, &c) in a1.iter().enumerate() { bytes[tbl + 26 + i] = c; }
+            for (i, &c) in a2.iter().enumerate() { bytes[tbl + 52 + i] = c; }
+            // Place the encoded word at 0x0100 for a decode round-trip.
+            for (i, &b) in word_bytes.iter().enumerate() { bytes[0x0100 + i] = b; }
+            Memory::new(bytes).unwrap()
+        };
+
+        // With the swap, "ab" must encode differently than the default alphabet…
+        let m = with_table(&[]);
+        let custom = encode_word_mem("ab", &m);
+        assert_ne!(custom, encode_word("ab", 5), "custom A0 swap must change the encoding");
+
+        // …and it must round-trip through the custom-aware decoder back to "ab".
+        let m2 = with_table(&custom);
+        let (decoded, _) = decode_string(&m2, 0x0100);
+        assert!(decoded.starts_with("ab"), "custom round-trip decoded: {:?}", decoded);
+    }
+
+    #[test]
+    fn custom_alphabet_absent_matches_default() {
+        // A v5 story with no custom table (header 0x34 == 0) encodes identically
+        // to the default-alphabet path.
+        let m = Memory::new(sample_story(5)).unwrap();
+        assert_eq!(m.read_word(0x34), 0, "fixture has no custom alphabet table");
+        assert_eq!(encode_word_mem("north", &m), encode_word("north", 5));
     }
 
     #[test]
