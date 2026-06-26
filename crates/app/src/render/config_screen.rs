@@ -19,6 +19,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("record_history",       ConfigRowKind::Bool),
     ("show_room_numbers",    ConfigRowKind::Bool),
     ("background_tidy",      ConfigRowKind::Enum),
+    ("aux_storage",          ConfigRowKind::Enum),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,6 +139,11 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             BackgroundTidy::EveryRoom => "every_room".to_string(),
             BackgroundTidy::OnOverlap => "on_overlap".to_string(),
             BackgroundTidy::Debounced => "debounced".to_string(),
+        },
+        9 => match cfg.aux_storage {
+            crate::config::AuxStorage::Ask => "ask".to_string(),
+            crate::config::AuxStorage::Archive => "archive".to_string(),
+            crate::config::AuxStorage::Global => "global".to_string(),
         },
         _ => String::new(),
     }

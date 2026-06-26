@@ -2415,6 +2415,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         6 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
         7 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
         8 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
+        9 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
         _ => {}
     }
 }
@@ -2428,6 +2429,13 @@ fn config_cycle_background_tidy(val: &mut crate::config::BackgroundTidy, delta: 
     *val = variants[((pos + delta).rem_euclid(n)) as usize];
 }
 
+fn config_cycle_aux_storage(val: &mut crate::config::AuxStorage, delta: i32) {
+    use crate::config::AuxStorage::*;
+    let variants = [Ask, Archive, Global];
+    let pos = variants.iter().position(|v| v == val).unwrap_or(0) as i32;
+    let n = variants.len() as i32;
+    *val = variants[((pos + delta).rem_euclid(n)) as usize];
+}
 
 /// Apply ConfigCycle to the selected row.
 fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
@@ -2441,6 +2449,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         6 => working.record_history = !working.record_history,
         7 => working.show_room_numbers = !working.show_room_numbers,
         8 => config_cycle_background_tidy(&mut working.background_tidy, delta),
+        9 => config_cycle_aux_storage(&mut working.aux_storage, delta),
         _ => {}
     }
 }

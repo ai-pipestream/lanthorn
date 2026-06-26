@@ -200,6 +200,19 @@ pub enum BackgroundTidy {
 /// Number of new rooms that must accumulate before a `Debounced` background tidy fires.
 pub const BG_TIDY_DEBOUNCE: u32 = 5;
 
+/// Where to persist v5 auxiliary save data (the `save/restore table` opcodes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxStorage {
+    /// Ask the user on first use, then store the choice in config.
+    #[default]
+    Ask,
+    /// Inside each `.babelmap` save archive.
+    Archive,
+    /// In one per-game file in the save directory (shared across playthroughs).
+    Global,
+}
+
 /// User preferences loaded from TOML.  Every field has a default so a missing
 /// config file (or a file with only some fields) is always valid.
 #[derive(Debug, Deserialize, Clone)]
@@ -244,6 +257,9 @@ pub struct Config {
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
     pub background_tidy: BackgroundTidy,
+    /// Where to persist v5 auxiliary save data. Default: Ask.
+    #[serde(default)]
+    pub aux_storage: AuxStorage,
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
@@ -301,6 +317,7 @@ impl Default for Config {
             record_history: true,
             record_turn_history: false,
             background_tidy: BackgroundTidy::EveryRoom,
+            aux_storage: AuxStorage::Ask,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: None,
@@ -363,6 +380,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.record_history = from_file.record_history;
             cfg.record_turn_history = from_file.record_turn_history;
             cfg.background_tidy = from_file.background_tidy;
+            cfg.aux_storage = from_file.aux_storage;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
@@ -417,6 +435,12 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         BackgroundTidy::Debounced => "debounced",
     };
     doc["background_tidy"] = toml_edit::value(bg_str);
+    let aux_str = match cfg.aux_storage {
+        AuxStorage::Ask => "ask",
+        AuxStorage::Archive => "archive",
+        AuxStorage::Global => "global",
+    };
+    doc["aux_storage"] = toml_edit::value(aux_str);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
@@ -655,6 +679,19 @@ mod tests {
     }
 
     #[test]
+    fn aux_storage_defaults_to_ask() {
+        assert_eq!(Config::default().aux_storage, AuxStorage::Ask);
+    }
+
+    #[test]
+    fn aux_storage_parses_variants_from_toml() {
+        let c: Config = toml::from_str("aux_storage = \"archive\"").unwrap();
+        assert_eq!(c.aux_storage, AuxStorage::Archive);
+        let c: Config = toml::from_str("aux_storage = \"global\"").unwrap();
+        assert_eq!(c.aux_storage, AuxStorage::Global);
+    }
+
+    #[test]
     fn flat_keymap_resolve_binds_override() {
         let toml = "[keymap]\nzoom_in = \"z\"";
         let cfg: Config = toml::from_str(toml).unwrap();
@@ -687,6 +724,7 @@ mod tests {
             record_history: false,
             record_turn_history: false,
             background_tidy: BackgroundTidy::OnOverlap,
+            aux_storage: AuxStorage::Ask,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),
