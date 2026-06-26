@@ -7,6 +7,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 
 /// A text selection in absolute screen coordinates (x, y).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +87,31 @@ pub fn extract(buf: &Buffer, area: Rect, sel: Selection) -> String {
         y += 1;
     }
     rows.join("\n")
+}
+
+/// Highlight the selection in `buf` (reversed video) and return the selected
+/// text, clamped to `area`. Returns `None` for an empty (single-cell)
+/// selection. Used during render so the copy reads THIS frame's buffer (the
+/// terminal's back-buffer is reset after draw and can't be read afterwards).
+pub fn highlight_and_extract(buf: &mut Buffer, area: Rect, sel: Selection) -> Option<String> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if contains(area, sel, x, y) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    let s = cell.style();
+                    cell.set_style(s.add_modifier(Modifier::REVERSED));
+                }
+            }
+        }
+    }
+    if sel.is_empty() {
+        None
+    } else {
+        Some(extract(buf, area, sel))
+    }
 }
 
 /// Standard base64 (RFC 4648) with padding.
@@ -168,6 +194,26 @@ mod tests {
         assert_eq!(lines[0], "aaaaaaa", "first row from col 13 to story right edge");
         assert_eq!(lines[1], "bbbbbbbbbb", "middle row is full story width");
         assert_eq!(lines[2], "ccccc", "last row from story left to col 14");
+    }
+
+    #[test]
+    fn highlight_and_extract_returns_text_and_marks_cells() {
+        let area = Rect::new(10, 0, 10, 2);
+        let mut buf = buf_with(&["HELLOWORLD", "secondrowX"], area);
+        let sel = Selection { anchor: (12, 0), head: (15, 0) }; // "LLOW"
+        let text = highlight_and_extract(&mut buf, area, sel);
+        assert_eq!(text.as_deref(), Some("LLOW"));
+        // Selected cells are reversed; an in-area but unselected cell is not.
+        assert!(buf.cell((12, 0)).unwrap().modifier.contains(Modifier::REVERSED));
+        assert!(!buf.cell((16, 0)).unwrap().modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn highlight_and_extract_empty_selection_is_none() {
+        let area = Rect::new(10, 0, 10, 2);
+        let mut buf = buf_with(&["HELLOWORLD"], area);
+        let sel = Selection::new((12, 0)); // anchor == head
+        assert_eq!(highlight_and_extract(&mut buf, area, sel), None);
     }
 
     #[test]

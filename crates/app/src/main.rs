@@ -218,6 +218,9 @@ struct PaneRects {
     pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
     /// Hit-rects for the hints panel (when open).
     pub hints_panel: Option<HintsPanelRects>,
+    /// Text under the active story-pane selection, captured from THIS frame's
+    /// buffer (clamped to story columns). Read on mouse-release to copy.
+    pub selection_text: Option<String>,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -237,6 +240,7 @@ fn draw_frame(
     let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
+    let mut selection_text_out: Option<String> = None;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -598,19 +602,11 @@ fn draw_frame(
         }
 
         // ── Story-pane text-selection highlight (during a left-drag) ──────────
+        // Capture the selected text from THIS frame's buffer too, so the
+        // mouse-release copy reads the displayed text (the terminal's own
+        // back-buffer is reset after draw and can't be read post-hoc).
         if let Some(sel) = state.selection {
-            if story_area.width > 0 && story_area.height > 0 {
-                for y in story_area.y..story_area.bottom() {
-                    for x in story_area.x..story_area.right() {
-                        if app::clipboard::contains(story_area, sel, x, y) {
-                            if let Some(cell) = buf.cell_mut((x, y)) {
-                                let s = cell.style();
-                                cell.set_style(s.add_modifier(Modifier::REVERSED));
-                            }
-                        }
-                    }
-                }
-            }
+            selection_text_out = app::clipboard::highlight_and_extract(buf, story_area, sel);
         }
 
         // ── Prompt overlay — map-editing prompts overlay the map; save/file-name
@@ -668,7 +664,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, selection_text: selection_text_out })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -942,7 +938,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, selection_text: None };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1527,22 +1523,18 @@ fn main() {
                 }
             }
 
-            // Story-pane selection released: copy the selected text (read from the
-            // last rendered frame, clamped to the story columns) via OSC 52.
+            // Story-pane selection released: copy the text captured from the last
+            // rendered frame (clamped to story columns) via OSC 52.
             Action::EndSelection => {
-                if let Some(sel) = state.selection.take() {
-                    if !sel.is_empty() && last_panes.story.width > 0 {
-                        let text = app::clipboard::extract(
-                            terminal.current_buffer_mut(), last_panes.story, sel,
-                        );
-                        if !text.trim().is_empty() {
-                            use std::io::Write;
-                            let seq = app::clipboard::osc52_copy_sequence(&text);
-                            let mut out = std::io::stdout();
-                            let _ = out.write_all(seq.as_bytes());
-                            let _ = out.flush();
-                            state.set_status(format!("Copied {} chars to clipboard", text.chars().count()));
-                        }
+                state.selection = None;
+                if let Some(text) = last_panes.selection_text.take() {
+                    if !text.trim().is_empty() {
+                        use std::io::Write;
+                        let seq = app::clipboard::osc52_copy_sequence(&text);
+                        let mut out = std::io::stdout();
+                        let _ = out.write_all(seq.as_bytes());
+                        let _ = out.flush();
+                        state.set_status(format!("Copied {} chars to clipboard", text.chars().count()));
                     }
                 }
                 continue;
