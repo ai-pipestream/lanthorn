@@ -1262,6 +1262,36 @@ impl Machine {
         }
     }
 
+    /// v5+: does `ch` terminate line input? Enter (13) always does; otherwise, if a
+    /// terminating-characters table (header 0x2E) is present, any listed char does
+    /// (255 in the table = any function key, i.e. ch >= 129). ZMSD §10.7.
+    pub fn is_terminator(&self, ch: u16) -> bool {
+        if ch == 13 {
+            return true;
+        }
+        if self.mem.version() < 5 {
+            return false;
+        }
+        let mut p = self.mem.read_word(0x2E) as u32;
+        if p == 0 {
+            return false;
+        }
+        loop {
+            let t = self.mem.read_byte(p) as u16;
+            if t == 0 {
+                return false;
+            }
+            if t == 255 {
+                if ch >= 129 {
+                    return true;
+                }
+            } else if t == ch {
+                return true;
+            }
+            p += 1;
+        }
+    }
+
     /// Store `val` into variable `var` if `var` is Some.
     pub fn do_store(&mut self, var: Option<u8>, val: u16) {
         if let Some(v) = var {
@@ -1410,9 +1440,17 @@ impl Machine {
             self.write_parse_buffer(parse_buf, &tokens, text_data_start, false);
         }
 
-        // v5+: store the terminating character (13 = newline/Enter).
+        // v5+: store the terminating character. The host's `supply_line` only ever
+        // delivers Enter-terminated lines today, so the terminator is 13 (which
+        // `is_terminator` always accepts). A future host that supplies a function-key
+        // terminator (per the header 0x2E table) should thread that ZSCII code here
+        // and store it instead of 13.
+        // TODO function-key terminator threading: pass the actual terminating char
+        // into supply_line and store `term` when is_terminator(term) holds.
         if version >= 5 {
-            self.do_store(pending.store_var, 13);
+            let term: u16 = 13;
+            debug_assert!(self.is_terminator(term));
+            self.do_store(pending.store_var, term);
         }
     }
 
@@ -4060,5 +4098,23 @@ pub(crate) mod tests {
         let pb = parse_buf as u32;
         assert!(m.mem.read_byte(pb + 1) >= 1, "at least one token parsed");
         assert_eq!(m.mem.read_word(pb + 2), addr_north, "known word resolved to its dict entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 7: terminating-characters table (header 0x2E, v5+)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn terminating_chars_table_is_honoured() {
+        // Build a v5 story with header 0x2E -> a table [0x81, 0x00] (function key 129).
+        let mut buf = sample_story(5);
+        let tbl: u32 = 0x0200;
+        buf[0x2E] = (tbl >> 8) as u8; buf[0x2F] = (tbl & 0xFF) as u8;
+        buf[tbl as usize] = 0x81; buf[tbl as usize + 1] = 0x00;
+        let mem = Memory::new(buf).unwrap();
+        let m = Machine::new(mem);
+        assert!(m.is_terminator(13), "Enter always terminates");
+        assert!(m.is_terminator(0x81), "listed function key terminates");
+        assert!(!m.is_terminator(b'a' as u16), "ordinary char does not terminate");
     }
 }
