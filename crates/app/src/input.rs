@@ -838,8 +838,9 @@ pub fn mouse_to_action(
         MouseEventKind::ScrollLeft if in_map => Action::Pan(-1, 0),
         MouseEventKind::ScrollRight if in_map => Action::Pan(1, 0),
         // ── Wheel in story: scroll transcript ────────────────────────────────
-        MouseEventKind::ScrollUp if in_story => Action::TranscriptScroll(-1),
-        MouseEventKind::ScrollDown if in_story => Action::TranscriptScroll(1),
+        // Wheel up = scroll up into older history; wheel down = toward newest.
+        MouseEventKind::ScrollUp if in_story => Action::TranscriptScroll(1),
+        MouseEventKind::ScrollDown if in_story => Action::TranscriptScroll(-1),
         // ── Everything else ───────────────────────────────────────────────────
         _ => Action::None,
     }
@@ -3806,18 +3807,18 @@ mod tests {
         use crossterm::event::MouseEventKind;
 
         let mut s = AppState::default();
-        // Default (conventional): wheel up in the story scrolls toward older text.
+        // Default (conventional): wheel up scrolls up into older text (+1).
         let m = mouse_event(MouseEventKind::ScrollUp, 90, 10, KeyModifiers::NONE);
         assert!(matches!(
             mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None),
-            Action::TranscriptScroll(-1)
+            Action::TranscriptScroll(1)
         ));
         // Inverted: wheel up scrolls the other way.
         s.config.mouse_wheel_invert = true;
         let m2 = mouse_event(MouseEventKind::ScrollUp, 90, 10, KeyModifiers::NONE);
         assert!(matches!(
             mouse_to_action(&s, m2, map_rect(), story_rect(), &[], &None),
-            Action::TranscriptScroll(1)
+            Action::TranscriptScroll(-1)
         ));
     }
 
@@ -3981,11 +3982,11 @@ mod tests {
         // col 85 is inside story_rect (x=80..120).
         let m_up = mouse_event(MouseEventKind::ScrollUp, 85, 5, KeyModifiers::NONE);
         let action_up = mouse_to_action(&s, m_up, map_rect(), story_rect(), &[], &None);
-        assert!(matches!(action_up, Action::TranscriptScroll(-1)), "scroll up in story -> TranscriptScroll(-1)");
+        assert!(matches!(action_up, Action::TranscriptScroll(1)), "scroll up in story -> TranscriptScroll(1) (older)");
 
         let m_dn = mouse_event(MouseEventKind::ScrollDown, 85, 5, KeyModifiers::NONE);
         let action_dn = mouse_to_action(&s, m_dn, map_rect(), story_rect(), &[], &None);
-        assert!(matches!(action_dn, Action::TranscriptScroll(1)), "scroll down in story -> TranscriptScroll(1)");
+        assert!(matches!(action_dn, Action::TranscriptScroll(-1)), "scroll down in story -> TranscriptScroll(-1) (newer)");
     }
 
     #[test]

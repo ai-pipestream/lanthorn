@@ -823,7 +823,12 @@ fn render_middle(
             width: 1,
             height: transcript_bottom - transcript_top,
         };
-        let mut sb_state = ScrollbarState::new(total_rows)
+        // ratatui places the thumb at the track bottom only when position ==
+        // content_length - 1. Our top-line index `start` ranges 0..=max_scroll,
+        // so content_length must be max_scroll + 1 for the thumb to span the
+        // full track (viewport_content_length keeps the thumb proportional).
+        let content_len = total_rows.saturating_sub(transcript_rows) + 1;
+        let mut sb_state = ScrollbarState::new(content_len)
             .viewport_content_length(transcript_rows)
             .position(start);
         StatefulWidget::render(
