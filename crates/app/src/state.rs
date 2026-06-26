@@ -612,6 +612,10 @@ pub struct AppState {
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
 
+    /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
+    /// is on; persisted into the `.babelmap` archive. Empty otherwise.
+    pub history: Vec<crate::history::TurnRecord>,
+
     /// Set by apply_action when a saves-manager prompt (SaveAs or ConfirmDeleteSave)
     /// is submitted. The caller (main.rs) reads this to perform the I/O operation,
     /// then clears it. The tuple is (kind, user_input_buffer).
@@ -754,6 +758,7 @@ impl Default for AppState {
             config: crate::config::Config::default(),
             config_screen: None,
             turns: 0,
+            history: Vec::new(),
             saves_prompt_submitted: None,
             dict_words: Vec::new(),
             suggestions: Vec::new(),
@@ -1023,6 +1028,12 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appstate_history_defaults_empty() {
+        let s = AppState::default();
+        assert!(s.history.is_empty(), "history starts empty");
+    }
 
     #[test]
     fn filter_maps_input_with_story_and_warning_with_meta() {

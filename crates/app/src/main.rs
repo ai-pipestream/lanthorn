@@ -1684,6 +1684,21 @@ fn main() {
                 // Bump the graph generation so any in-flight tidy result is detected as stale.
                 state.graph_gen = state.graph_gen.wrapping_add(1);
 
+                // ── Rewind/replay capture (opt-in) ────────────────────────────
+                if state.config.record_turn_history {
+                    let map_changed = mapper.graph.rooms().count() != rooms_before
+                        || mapper.graph.connections().len() != conns_before;
+                    app::history::record_turn(
+                        &mut state.history,
+                        state.turns,
+                        &cmd,
+                        session.machine.save_quetzal(),
+                        &mapper,
+                        map_changed,
+                        &result.transcript,
+                    );
+                }
+
                 // ── Inventory tracking ────────────────────────────────────────
                 {
                     use app::inventory::{detect_player_obj, parse_inventory_output};
