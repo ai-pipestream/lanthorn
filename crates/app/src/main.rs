@@ -242,10 +242,16 @@ fn draw_frame(
         let full = f.area();
         let buf = f.buffer_mut();
         // During replay the map shows the reconstructed snapshot for the selected turn.
-        let replay_graph: Option<mapper::graph::MapGraph> = state.replay.as_ref().and_then(|r| {
-            let turn = state.history.get(r.idx).map(|rec| rec.turn)?;
-            let json = app::history::map_at_turn(&state.history, turn)?;
-            mapper::persist::from_json(json).ok().map(|m| m.graph)
+        let replay_graph: Option<mapper::graph::MapGraph> = state.replay.as_ref().map(|r| {
+            let snap = state
+                .history
+                .get(r.idx)
+                .map(|rec| rec.turn)
+                .and_then(|turn| app::history::map_at_turn(&state.history, turn))
+                .and_then(|json| mapper::persist::from_json(json).ok());
+            // Replaying a turn before the first map snapshot has no recorded
+            // map — show an empty map, never the live (future) graph.
+            snap.map(|m| m.graph).unwrap_or_default()
         });
 
         // During tidy-animation playback the map shows the current captured stage, not the live graph.
@@ -1781,7 +1787,9 @@ fn main() {
                 }
 
                 // ── Rewind/replay capture (opt-in) ────────────────────────────
-                if state.config.record_turn_history {
+                // Skip the quit turn: the VM has terminated, so its snapshot has
+                // no replayable state — recording it just adds a junk final turn.
+                if state.config.record_turn_history && !result.quit {
                     let map_changed = mapper.graph.rooms().count() != rooms_before
                         || mapper.graph.connections().len() != conns_before;
                     app::history::record_turn(
