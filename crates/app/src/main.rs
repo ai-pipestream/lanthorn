@@ -609,11 +609,15 @@ fn draw_frame(
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
                 if prefer_story {
-                    // Save/export name entry reuses the story input line's look:
-                    // a "> " prefix in the normal transcript style with a reversed
-                    // block cursor, so it reads as part of the game interaction
-                    // rather than a map-editor overlay bar.
-                    let line = app::render::transcript::format_input_line(&prompt.buffer);
+                    // Save/export name entry reuses the story input line's look —
+                    // the normal transcript style with a reversed block cursor —
+                    // under a descriptive label, so it reads as part of the game
+                    // interaction rather than a map-editor overlay bar.
+                    let label = match &prompt.kind {
+                        PromptKind::ExportSaveName(_) => "Export Filename: ",
+                        _ => "Save Filename: ",
+                    };
+                    let line = format!("{}{}", label, prompt.buffer);
                     let normal_style = state.colors.transcript;
                     draw_str_clipped(buf, overlay_area.x, y, &line, normal_style, overlay_area);
                     let cursor_x = overlay_area.x + line.chars().count() as u16;

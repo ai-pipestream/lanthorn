@@ -406,7 +406,7 @@ fn draw_str_highlighted(
 }
 
 /// Format the input prompt line: `"> " + input`.
-pub fn format_input_line(input: &str) -> String {
+pub(crate) fn format_input_line(input: &str) -> String {
     format!("> {}", input)
 }
 
