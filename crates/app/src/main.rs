@@ -117,7 +117,6 @@ const GAME_HINTS: &[Command] = &[
     Command::SaveGame,
     Command::RestoreGame,
     Command::CycleLayout,
-    Command::AnimateTidy,
 ];
 
 const MAP_HINTS: &[Command] = &[
@@ -2853,6 +2852,22 @@ mod tests {
         let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
         // With default keymap: ZoomIn primary key is '+', label from Command::label() is "zoom in"
         assert!(line.contains("+: zoom in"), "expected '+: zoom in' in '{line}'");
+    }
+
+    #[test]
+    fn map_hint_bar_excludes_dialog_only_commands() {
+        // Regression (#11): gallery/inspector/layout moved to the Ctrl+K dialog
+        // after the leader-key change; the hint bar must NOT advertise their dead
+        // direct keys. The is_direct filter excludes them (they are dialog-only).
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        assert!(!line.contains("gallery"), "must not advertise gallery (dialog-only): {line}");
+        assert!(!line.contains("inspector"), "must not advertise inspector (dialog-only): {line}");
+        assert!(!line.contains("layout"), "must not advertise cycle-layout (dialog-only): {line}");
+        // The working direct keys ARE present.
+        assert!(line.contains("Tab: focus"), "focus toggle present: {line}");
+        assert!(line.contains("+: zoom in"), "zoom present: {line}");
     }
 
     #[test]
