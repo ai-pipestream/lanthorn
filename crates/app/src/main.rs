@@ -22,6 +22,7 @@ use app::ifid::{archive_path, compute_ifid, map_path};
 use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action, ApplyTidyOutcome};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
+use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::filebrowser::draw_file_browser;
 use app::render::gallery::draw_gallery;
@@ -221,6 +222,8 @@ struct PaneRects {
     pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
     /// Hit-rects for the hints panel (when open).
     pub hints_panel: Option<HintsPanelRects>,
+    /// Hit-rects for the style-editor board (when open).
+    pub style_editor: Option<StyleEditorRects>,
     /// Text under the active story-pane selection, captured from THIS frame's
     /// buffer (clamped to story columns). Read on mouse-release to copy.
     pub selection_text: Option<String>,
@@ -248,6 +251,7 @@ fn draw_frame(
     let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
+    let mut style_editor_rects_out: Option<StyleEditorRects> = None;
     let mut selection_text_out: Option<String> = None;
     let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
@@ -595,6 +599,11 @@ fn draw_frame(
             dialog_rects_out = draw_config_screen(state, full, buf);
         }
 
+        // ── Style editor overlay — full-screen, drawn after config screen ──────
+        if state.style_editor.is_some() {
+            style_editor_rects_out = draw_style_editor(state, full, buf);
+        }
+
         // ── Aux-storage prompt — drawn over everything ────────────────────────
         if state.aux_prompt {
             aux_dialog_rects_out = draw_aux_dialog(state, full, buf);
@@ -690,7 +699,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, selection_text: selection_text_out, transcript_max_scroll })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, selection_text: selection_text_out, transcript_max_scroll })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1140,7 +1149,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, selection_text: None, transcript_max_scroll: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, selection_text: None, transcript_max_scroll: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1767,7 +1776,32 @@ fn main() {
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
             Event::Mouse(m) => {
-                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
+                // Style-editor board: intercept left-clicks on sample rows.
+                if state.style_editor.is_some() {
+                    if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
+                        if let Some(rects) = &last_panes.style_editor {
+                            let mut handled = false;
+                            for (idx, rect) in &rects.samples {
+                                if m.column >= rect.x && m.column < rect.right()
+                                    && m.row >= rect.y && m.row < rect.bottom()
+                                {
+                                    if let Some(ed) = &mut state.style_editor {
+                                        ed.active = *idx;
+                                    }
+                                    handled = true;
+                                    break;
+                                }
+                            }
+                            if handled {
+                                continue;
+                            }
+                        }
+                    }
+                    // Swallow all other mouse events while style editor is open.
+                    Action::None
+                } else {
+                    mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
+                }
             }
             // Resize: continue so the next draw uses the updated terminal size.
             // Resize: force a full repaint so no stale cells survive the size change.

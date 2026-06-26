@@ -13,6 +13,7 @@ pub mod launch_dialog;
 pub mod map;
 pub mod quit_dialog;
 pub mod reset_dialog;
+pub mod style_editor;
 pub mod room_info;
 pub mod saves;
 pub mod tidy_panel;

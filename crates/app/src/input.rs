@@ -195,6 +195,8 @@ pub enum Action {
     OpenStyleEditor,
     /// Cancel the style editor without saving (drops the working doc).
     StyleEditorCancel,
+    /// Navigate the style-editor board by delta (-1 = up, +1 = down).
+    StyleNav(i32),
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -1005,7 +1007,9 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
 /// Expanded in later tasks; for now only Esc cancels.
 fn style_editor_key_to_action(key: KeyEvent, _state: &crate::state::AppState) -> Action {
     match key.code {
-        KeyCode::Esc => Action::StyleEditorCancel,
+        KeyCode::Up   => Action::StyleNav(-1),
+        KeyCode::Down => Action::StyleNav(1),
+        KeyCode::Esc  => Action::StyleEditorCancel,
         _ => Action::None,
     }
 }
@@ -2076,6 +2080,13 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.style_editor = None;
         }
 
+        Action::StyleNav(d) => {
+            if let Some(ed) = &mut state.style_editor {
+                let n = ed.selectors.len() as i32;
+                ed.active = ((ed.active as i32 + d).rem_euclid(n.max(1))) as usize;
+            }
+        }
+
         // ── Config screen actions ─────────────────────────────────────────────
 
         Action::OpenConfig => {
@@ -2432,6 +2443,15 @@ pub fn open_style_editor(state: &mut AppState) {
         custom_buf: String::new(),
         mru: Vec::new(),
     });
+}
+
+/// Re-resolve `ed.preview` from the current `ed.doc` + `user_dir`.
+///
+/// Called from edit handlers (Tasks 4-6) whenever the doc changes.
+/// Nav doesn't change the doc, so it skips this call.
+pub fn recompute_style_preview(ed: &mut crate::state::StyleEditorState, user_dir: &std::path::Path) {
+    let (cs, _set, _w) = crate::style::resolve(&ed.doc, user_dir);
+    ed.preview = cs;
 }
 
 /// Return the ConfigPathField for a row, if the row is a path type.
