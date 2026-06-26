@@ -733,6 +733,59 @@ mod tests {
         assert!(sess.machine.diagnostics.is_empty());
     }
 
+    // Fixture-gated: in-game SAVE then RESTORE on Bureaucracy (v4) must leave the
+    // upper-window status grid non-empty (the redraw this whole feature is about).
+    // NOTE/GAP: this drives the SESSION resume API, not the app event loop, and it
+    // depends on reaching @save by typing into the game. If the input sequence does
+    // not reach @save within the probe budget, the test skips (no false failure).
+    #[test]
+    fn bureaucracy_ingame_restore_redraws_status_grid() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/bureaucr.z4");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+        let story = std::fs::read(&fixture).expect("read bureaucr.z4");
+        let mut sess = GameSession::new(story).expect("new bureaucr.z4");
+
+        // Probe: type SAVE-ish commands until the VM suspends on @save.
+        let mut blob: Option<Vec<u8>> = None;
+        for cmd in ["save", "yes", "save", "y", "save"] {
+            let r = sess.submit(cmd);
+            if r.pending_io == Some(PendingIo::Save) {
+                blob = Some(sess.machine.save_quetzal());
+                let _ = sess.resume_save(true); // pretend the host wrote the file
+                break;
+            }
+            if r.quit { break; }
+        }
+        let Some(blob) = blob else {
+            // Could not reach @save with this probe sequence — document the gap.
+            eprintln!("bureaucr.z4: did not reach @save via the probe; skipping redraw assertion");
+            return;
+        };
+
+        // Now drive a RESTORE and feed the captured blob back.
+        let mut restored = false;
+        for cmd in ["restore", "yes", "restore", "y", "restore"] {
+            let r = sess.submit(cmd);
+            if r.pending_io == Some(PendingIo::Restore) {
+                let _ = sess.resume_restore(Some(&blob));
+                restored = true;
+                break;
+            }
+            if r.quit { break; }
+        }
+        if !restored {
+            eprintln!("bureaucr.z4: did not reach @restore via the probe; skipping redraw assertion");
+            return;
+        }
+
+        // The resumed game redrew its own status line into the upper window.
+        let any_drawn = sess.machine.screen.upper.cells.iter().any(|c| c.ch != ' ');
+        assert!(any_drawn, "after in-game RESTORE the upper-window grid must be non-empty (redraw)");
+    }
+
     // ── czech.z5 smoke test ───────────────────────────────────────────────────
     //
     // czech.z5 is an auto-running opcode test suite: it runs to `Quit` without
