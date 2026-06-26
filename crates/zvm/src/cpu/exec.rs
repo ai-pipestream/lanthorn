@@ -925,6 +925,22 @@ impl Machine {
                 self.do_branch(branch, found != 0);
                 StepResult::Continue
             }
+            // VAR:0x1B tokenise text parse [dictionary] [flag] — lex the text buffer
+            // into the parse buffer, like the lexing half of `read`.
+            0x1B => {
+                let text_buf = ops.first().copied().unwrap_or(0) as u32;
+                let parse = ops.get(1).copied().unwrap_or(0) as u32;
+                // TODO custom dict addr: dictionary::load targets the standard
+                // dictionary; a non-zero `dictionary` operand is not yet honoured.
+                let _dict_addr = ops.get(2).copied().unwrap_or(0);
+                let flag = ops.get(3).copied().unwrap_or(0) != 0;
+                let text = self.read_text_buffer(text_buf);
+                let text_data_start: u8 = if self.mem.version() <= 4 { 1 } else { 2 };
+                let dict = dictionary::load(&self.mem);
+                let tokens = dict.tokenise(&self.mem, &text);
+                self.write_parse_buffer(parse, &tokens, text_data_start, flag);
+                StepResult::Continue
+            }
             // VAR:0x1C encode_text zscii-text length from coded-text — encode `length`
             // ZSCII bytes at zscii-text+from to the packed dictionary form at coded-text.
             0x1C => {
@@ -1195,6 +1211,57 @@ impl Machine {
         sum
     }
 
+    /// Write tokens into a parse buffer in the standard format (ZMSD §15):
+    /// [byte0 = max words][byte1 = count]; then per word: 2-byte dict address,
+    /// 1-byte length, 1-byte text-buffer position (1-based: `text_data_start +
+    /// token.text_pos`). When `flag` is set, slots for words not in the dictionary
+    /// (dict_addr == 0) are left untouched.
+    fn write_parse_buffer(
+        &mut self,
+        parse: u32,
+        tokens: &[dictionary::Token],
+        text_data_start: u8,
+        flag: bool,
+    ) {
+        let max = self.mem.read_byte(parse) as usize;
+        let n = tokens.len().min(max);
+        self.mem.write_byte(parse + 1, n as u8);
+        for (i, t) in tokens.iter().take(max).enumerate() {
+            if flag && t.dict_addr == 0 {
+                continue;
+            }
+            let base = parse + 2 + (i as u32) * 4;
+            self.mem.write_word(base, t.dict_addr);
+            self.mem.write_byte(base + 2, t.len);
+            self.mem.write_byte(base + 3, text_data_start + t.text_pos);
+        }
+    }
+
+    /// Read the already-entered line out of a text buffer (the inverse of the
+    /// write done by `supply_line`). Layout (ZMSD §15):
+    ///   v1–4: byte 0 = max; text starts at byte 1, 0-terminated.
+    ///   v5+:  byte 0 = max; byte 1 = char count; text starts at byte 2.
+    fn read_text_buffer(&self, text_buf: u32) -> String {
+        if self.mem.version() <= 4 {
+            let mut s = String::new();
+            let mut addr = text_buf + 1;
+            loop {
+                let b = self.mem.read_byte(addr);
+                if b == 0 {
+                    break;
+                }
+                s.push(b as char);
+                addr += 1;
+            }
+            s
+        } else {
+            let count = self.mem.read_byte(text_buf + 1) as u32;
+            (0..count)
+                .map(|i| self.mem.read_byte(text_buf + 2 + i) as char)
+                .collect()
+        }
+    }
+
     /// Store `val` into variable `var` if `var` is Some.
     pub fn do_store(&mut self, var: Option<u8>, val: u16) {
         if let Some(v) = var {
@@ -1336,28 +1403,11 @@ impl Machine {
         }
 
         // Tokenise and fill the parse buffer (skip if parse_buf == 0 in v5+).
-        let should_parse = parse_buf != 0 || version <= 4;
-        if should_parse && parse_buf != 0 {
+        if parse_buf != 0 {
             let text_data_start: u8 = if version <= 4 { 1 } else { 2 };
-            let max_tokens = self.mem.read_byte(parse_buf) as usize;
-
             let dict = dictionary::load(&self.mem);
             let tokens = dict.tokenise(&self.mem, text);
-
-            let count = tokens.len().min(max_tokens);
-            self.mem.write_byte(parse_buf + 1, count as u8);
-
-            for (i, tok) in tokens.iter().take(max_tokens).enumerate() {
-                let entry = parse_buf + 2 + i as u32 * 4;
-                // 2-byte dict address.
-                self.mem.write_word(entry, tok.dict_addr);
-                // 1-byte token length.
-                self.mem.write_byte(entry + 2, tok.len);
-                // 1-byte text-buffer position: convert 0-based text_pos to
-                // 1-based index from start of text buffer.
-                let buf_pos = text_data_start + tok.text_pos;
-                self.mem.write_byte(entry + 3, buf_pos);
-            }
+            self.write_parse_buffer(parse_buf, &tokens, text_data_start, false);
         }
 
         // v5+: store the terminating character (13 = newline/Enter).
@@ -3978,5 +4028,37 @@ pub(crate) mod tests {
         for (i, b) in expected.iter().enumerate() {
             assert_eq!(m.mem.read_byte(0x50 + i as u32), *b, "coded byte {i}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5: tokenise (VAR:0x1B)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tokenise_parses_a_dictionary_word_into_parse_buffer() {
+        // build_input_story embeds a dict containing "north" at addr_north.
+        let (mut buf, addr_north, _open, _mailbox) = build_input_story(5);
+        // v5 text buffer at 0x0250: [max][count][chars...]. "north" already entered.
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10;     // max chars
+        buf[text_buf as usize + 1] = 5;  // current length
+        for (i, b) in b"north".iter().enumerate() {
+            buf[text_buf as usize + 2 + i] = *b;
+        }
+        // parse buffer at 0x0260: byte0 = max words.
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 4;
+        // tokenise text parse (dict=0, flag=0): VAR:0x1B = 0xFB, [Large, Large, omit, omit].
+        buf[0x10]=0xFB; buf[0x11]=0x0F;
+        buf[0x12]=(text_buf>>8) as u8; buf[0x13]=(text_buf&0xFF) as u8;
+        buf[0x14]=(parse_buf>>8) as u8; buf[0x15]=(parse_buf&0xFF) as u8;
+        buf[0x16]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let pb = parse_buf as u32;
+        assert!(m.mem.read_byte(pb + 1) >= 1, "at least one token parsed");
+        assert_eq!(m.mem.read_word(pb + 2), addr_north, "known word resolved to its dict entry");
     }
 }
