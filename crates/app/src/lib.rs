@@ -23,6 +23,7 @@ pub mod roomid;
 pub mod session;
 pub mod state;
 pub mod style;
+pub mod style_mru;
 pub mod styles;
 pub mod symbols;
 pub mod watch;

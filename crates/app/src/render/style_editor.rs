@@ -7,7 +7,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::input::AttrKind;
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
@@ -27,10 +27,17 @@ const ATTR_KINDS: [(AttrKind, &str); 5] = [
 ///
 /// `samples` maps each drawn sample to `(global_selector_index, Rect)`.
 /// `attr_chips` maps each attribute chip to its `(AttrKind, Rect)`.
+/// `fg_swatches`/`bg_swatches`: 17 rects each (indices 0-15 = ANSI, 16 = default).
+/// `mru_rects`: one rect per drawn MRU cell (index == `ed.mru` position).
+/// `custom_rect`: the custom hex-entry field.
 pub struct StyleEditorRects {
     pub samples: Vec<(usize, Rect)>,
     pub attr_chips: Vec<(AttrKind, Rect)>,
     pub dialog: DialogRects,
+    pub fg_swatches: Vec<Rect>,
+    pub bg_swatches: Vec<Rect>,
+    pub mru_rects: Vec<Rect>,
+    pub custom_rect: Option<Rect>,
 }
 
 /// Draw the style-editor full-screen overlay onto `buf`.
@@ -46,7 +53,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         return None;
     }
 
-    let modal_w = 72u16.min(area.width.saturating_sub(4));
+    // Wide enough for board (≥30 cols) + gap + property pane (40 cols).
+    let modal_w = 86u16.min(area.width.saturating_sub(4));
     // rows = all selectors + one header per group + 2 padding lines.
     let n_groups = SELECTOR_GROUPS.len() as u16;
     let n_rows = total_selectors as u16 + n_groups + 2;
@@ -84,8 +92,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let content = dialog_rects.content;
 
     // Split content into board (left) and property pane (right) if wide enough.
-    // Property pane is 24 cols wide with a 1-col gap; board gets the rest.
-    const PROP_W: u16 = 24;
+    // Property pane is 40 cols wide (fits 16×2 ANSI swatches + labels); board gets the rest.
+    const PROP_W: u16 = 40;
     const GAP: u16 = 1;
     let (board_area, prop_area) = if content.width >= PROP_W + GAP + 20 {
         let board_w = content.width.saturating_sub(PROP_W + GAP);
@@ -161,8 +169,25 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     }
 
     // ── Property pane ─────────────────────────────────────────────────────────
+    //
+    // Layout (rows within the prop pane, relative to prop.y):
+    //   0: selector name header
+    //   1: "fg: <current_value>"
+    //   2: 16 ANSI swatch cells (2 chars each) + default cell
+    //   3: gap
+    //   4: "bg: <current_value>"
+    //   5: 16 ANSI swatch cells + default cell
+    //   6: gap
+    //   7: MRU row (shared hex-color history, up to 16 cells × 2 chars)
+    //   8: custom hex entry "# <buf>"
+    //   9: gap
+    //  10: attribute chips [B] [I] [U] [dim] [rev]
 
     let mut attr_chips: Vec<(AttrKind, Rect)> = Vec::new();
+    let mut fg_swatches: Vec<Rect> = Vec::new();
+    let mut bg_swatches: Vec<Rect> = Vec::new();
+    let mut mru_rects: Vec<Rect> = Vec::new();
+    let mut custom_rect: Option<Rect> = None;
 
     if let Some(prop) = prop_area {
         // Clear the property pane background.
@@ -174,34 +199,89 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             }
         }
 
-        let prop_focused = ed.focus == StyleFocus::Attrs;
-        let label_style = if prop_focused { active_style } else { normal_style };
-
-        // "Property" header.
+        // Row 0: selector name header.
         let sel_name = ed.selectors[ed.active];
         let trunc: String = sel_name.chars().take(PROP_W as usize).collect();
-        let hdr_text = format!(" {}", trunc);
-        crate::render::draw_str_clipped(buf, prop.x, prop.y, &hdr_text, header_style, prop);
+        crate::render::draw_str_clipped(buf, prop.x, prop.y, &format!(" {}", trunc), header_style, prop);
 
         // Look up the active Decl (may be absent if user hasn't edited this selector).
         let active_decl = ed.doc.colors.selectors.get(sel_name);
+        let fg_val = active_decl.and_then(|d| d.fg.as_deref()).unwrap_or("default");
+        let bg_val = active_decl.and_then(|d| d.bg.as_deref()).unwrap_or("default");
 
-        // fg / bg rows.
-        let fg_str = active_decl.and_then(|d| d.fg.as_deref()).unwrap_or("default");
-        let bg_str = active_decl.and_then(|d| d.bg.as_deref()).unwrap_or("default");
+        // Row 1: fg label.
         if prop.height > 1 {
-            let fg_line = format!(" fg:  {}", fg_str);
-            crate::render::draw_str_clipped(buf, prop.x, prop.y + 1, &fg_line, normal_style, prop);
-        }
-        if prop.height > 2 {
-            let bg_line = format!(" bg:  {}", bg_str);
-            crate::render::draw_str_clipped(buf, prop.x, prop.y + 2, &bg_line, normal_style, prop);
+            let fg_focused = ed.focus == StyleFocus::Fg;
+            let fg_lbl_style = if fg_focused { active_style } else { normal_style };
+            crate::render::draw_str_clipped(
+                buf, prop.x, prop.y + 1,
+                &format!(" fg: {}", fg_val), fg_lbl_style, prop,
+            );
         }
 
-        // Attribute chips row (row 4 within the prop pane).
+        // Row 2: fg swatch row (16 ANSI + default).
+        if prop.height > 2 {
+            draw_swatch_row(buf, prop, prop.y + 2, fg_val, &mut fg_swatches, normal_style, active_style);
+        }
+
+        // Row 4: bg label.
         if prop.height > 4 {
-            let chip_y = prop.y + 4;
+            let bg_focused = ed.focus == StyleFocus::Bg;
+            let bg_lbl_style = if bg_focused { active_style } else { normal_style };
+            crate::render::draw_str_clipped(
+                buf, prop.x, prop.y + 4,
+                &format!(" bg: {}", bg_val), bg_lbl_style, prop,
+            );
+        }
+
+        // Row 5: bg swatch row.
+        if prop.height > 5 {
+            draw_swatch_row(buf, prop, prop.y + 5, bg_val, &mut bg_swatches, normal_style, active_style);
+        }
+
+        // Row 7: MRU row (shared across fg/bg).
+        if prop.height > 7 && !ed.mru.is_empty() {
+            let mru_y = prop.y + 7;
+            let mut mru_x = prop.x + 1;
+            for hex in &ed.mru {
+                if mru_x + 2 > prop.right() {
+                    break;
+                }
+                let color = crate::colors::parse_hex_color(hex)
+                    .map(|c| Style::new().bg(c))
+                    .unwrap_or(normal_style);
+                for dx in 0..2u16 {
+                    if let Some(cell) = buf.cell_mut((mru_x + dx, mru_y)) {
+                        cell.set_symbol(" ").set_style(color);
+                    }
+                }
+                mru_rects.push(Rect::new(mru_x, mru_y, 2, 1));
+                mru_x += 2;
+            }
+        }
+
+        // Row 8: custom hex entry.
+        if prop.height > 8 {
+            let custom_y = prop.y + 8;
+            let custom_focused = ed.focus == StyleFocus::Custom;
+            let cstyle = if custom_focused { active_style } else { normal_style };
+            let prefix = " # ";
+            let prefix_w = prefix.len() as u16;
+            let max_buf_w = prop.right().saturating_sub(prop.x + prefix_w) as usize;
+            let buf_display: String = ed.custom_buf.chars().take(max_buf_w).collect();
+            let custom_text = format!("{}{}", prefix, buf_display);
+            crate::render::draw_str_clipped(buf, prop.x, custom_y, &custom_text, cstyle, prop);
+            // Record the rect of the editable portion.
+            let field_w = (buf_display.chars().count() as u16).max(1);
+            custom_rect = Some(Rect::new(prop.x + prefix_w, custom_y, field_w, 1));
+        }
+
+        // Row 10: attribute chips.
+        if prop.height > 10 {
+            let chip_y = prop.y + 10;
             let mut chip_x = prop.x + 1;
+            let prop_focused = ed.focus == StyleFocus::Attrs;
+            let label_style = if prop_focused { active_style } else { normal_style };
 
             for (ci, (kind, label)) in ATTR_KINDS.iter().enumerate() {
                 let flag_on = active_decl
@@ -217,10 +297,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                 let is_chip_cursor = prop_focused && ci == ed.attr_cursor;
 
                 let chip_style = if flag_on {
-                    // Attribute is ON: use active (highlighted) style.
                     active_style
                 } else if is_chip_cursor {
-                    // Cursor on this chip but not active: use label style (slightly highlighted).
                     label_style
                 } else {
                     normal_style
@@ -239,7 +317,57 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         }
     }
 
-    Some(StyleEditorRects { samples, attr_chips, dialog: dialog_rects })
+    Some(StyleEditorRects { samples, attr_chips, dialog: dialog_rects, fg_swatches, bg_swatches, mru_rects, custom_rect })
+}
+
+// ── draw_swatch_row ───────────────────────────────────────────────────────────
+
+/// Draw a row of 16 ANSI color swatches (2 chars each) + a 1-char "default" cell.
+///
+/// Each ANSI cell is filled with the ANSI color as background; the cell matching
+/// `current_val` is highlighted with a `▸` marker.  The "d" default cell uses
+/// `active_style` when selected.  Always pushes exactly 17 rects into `rects`
+/// (indices 0–15 = ANSI colors, 16 = default); out-of-bounds cells get a
+/// zero-width rect so Task 6 mouse hit-testing skips them cleanly.
+fn draw_swatch_row(
+    buf: &mut Buffer,
+    prop: Rect,
+    row_y: u16,
+    current_val: &str,
+    rects: &mut Vec<Rect>,
+    normal_style: Style,
+    active_style: Style,
+) {
+    let mut x = prop.x + 1;
+
+    for name in crate::style_mru::ANSI_NAMES {
+        if x + 2 <= prop.right() {
+            let is_selected = current_val == *name;
+            let color = crate::colors::parse_named_color(name).unwrap_or(Color::Reset);
+            let cell_style = if is_selected {
+                Style::new().bg(color).fg(Color::White).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().bg(color)
+            };
+            let sym0 = if is_selected { "▸" } else { " " };
+            if let Some(cell) = buf.cell_mut((x, row_y)) { cell.set_symbol(sym0).set_style(cell_style); }
+            if let Some(cell) = buf.cell_mut((x + 1, row_y)) { cell.set_symbol(" ").set_style(cell_style); }
+            rects.push(Rect::new(x, row_y, 2, 1));
+            x += 2;
+        } else {
+            rects.push(Rect::new(prop.right(), row_y, 0, 1));
+        }
+    }
+
+    // Default cell (1 char).
+    if x + 1 <= prop.right() {
+        let is_selected = current_val == "default";
+        let dflt_style = if is_selected { active_style } else { normal_style };
+        if let Some(cell) = buf.cell_mut((x, row_y)) { cell.set_symbol("d").set_style(dflt_style); }
+        rects.push(Rect::new(x, row_y, 1, 1));
+    } else {
+        rects.push(Rect::new(prop.right(), row_y, 0, 1));
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -281,5 +409,27 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let result = draw_style_editor(&s, area, &mut buf);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn style_editor_swatch_rects_populated() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        // Wide enough to display the property pane (needs >= 61 content cols).
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_style_editor(&s, area, &mut buf).expect("drawn");
+
+        // Both fg and bg swatch rows must have exactly 17 rects (16 ANSI + default).
+        assert_eq!(rects.fg_swatches.len(), 17,
+            "fg_swatches: expected 17 rects (16 ANSI + default)");
+        assert_eq!(rects.bg_swatches.len(), 17,
+            "bg_swatches: expected 17 rects (16 ANSI + default)");
+
+        // Custom rect must be Some (custom field is always rendered when prop visible).
+        assert!(rects.custom_rect.is_some(), "custom_rect should be Some");
+
+        // MRU is empty initially, so no MRU rects.
+        assert!(rects.mru_rects.is_empty(), "no MRU entries on fresh open");
     }
 }

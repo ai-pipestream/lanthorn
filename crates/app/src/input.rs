@@ -215,6 +215,13 @@ pub enum Action {
     StyleFocusCycle(i32),
     /// Move the attribute-chip cursor left (-1) or right (+1) within the Attrs focus.
     StyleAttrChipNav(i32),
+    /// Set the fg (is_bg=false) or bg (is_bg=true) of the active selector.
+    /// `value` is a color token (ANSI name, #rrggbb hex, or "default"); `None` clears to default.
+    StyleSetColor { is_bg: bool, value: Option<String> },
+    /// Append a character to the style-editor custom hex buffer.
+    StyleCustomChar(char),
+    /// Delete the last character from the style-editor custom hex buffer.
+    StyleCustomBackspace,
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -1024,9 +1031,31 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
 /// Key dispatch for the style-editor full-screen mode.
 fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> Action {
     use crate::state::StyleFocus;
-    let (focus, attr_cursor) = state.style_editor.as_ref()
-        .map(|e| (e.focus, e.attr_cursor))
-        .unwrap_or((StyleFocus::Board, 0));
+    let ed_ref = state.style_editor.as_ref();
+    let focus = ed_ref.map(|e| e.focus).unwrap_or(StyleFocus::Board);
+    let attr_cursor = ed_ref.map(|e| e.attr_cursor).unwrap_or(0);
+
+    // When Custom focus is active, route printable keys into the custom_buf.
+    if focus == StyleFocus::Custom {
+        match key.code {
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE
+                    || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                return Action::StyleCustomChar(c);
+            }
+            KeyCode::Backspace => return Action::StyleCustomBackspace,
+            KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                let buf = ed_ref.map(|e| e.custom_buf.as_str()).unwrap_or("");
+                return if crate::style_mru::is_valid_color_token(buf) {
+                    Action::StyleSetColor { is_bg: false, value: Some(buf.to_string()) }
+                } else {
+                    Action::None
+                };
+            }
+            _ => {}
+        }
+    }
 
     match key.code {
         KeyCode::Up   => Action::StyleNav(-1),
@@ -2114,6 +2143,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::StyleEditorCancel => {
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &state.style_editor {
+                let _ = crate::style_mru::save_mru(&dir, &ed.mru);
+            }
             state.style_editor = None;
         }
 
@@ -2161,6 +2194,34 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(ed) = &mut state.style_editor {
                 let n = 5i32;
                 ed.attr_cursor = ((ed.attr_cursor as i32 + d).rem_euclid(n)) as usize;
+            }
+        }
+
+        Action::StyleSetColor { is_bg, value } => {
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &mut state.style_editor {
+                let sel = ed.selectors[ed.active].to_string();
+                let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                let slot = if is_bg { &mut decl.bg } else { &mut decl.fg };
+                *slot = value.clone();
+                if let Some(v) = &value {
+                    if v.starts_with('#') {
+                        crate::style_mru::push_mru(&mut ed.mru, v);
+                    }
+                }
+                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleCustomChar(c) => {
+            if let Some(ed) = &mut state.style_editor {
+                ed.custom_buf.push(c);
+            }
+        }
+
+        Action::StyleCustomBackspace => {
+            if let Some(ed) = &mut state.style_editor {
+                ed.custom_buf.pop();
             }
         }
 
@@ -2519,7 +2580,7 @@ pub fn open_style_editor(state: &mut AppState) {
         active: 0,
         focus: crate::state::StyleFocus::Board,
         custom_buf: String::new(),
-        mru: Vec::new(),
+        mru: crate::style_mru::load_mru(&user_dir),
         attr_cursor: 0,
     });
 }
@@ -5583,5 +5644,58 @@ mod tests {
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bold), Some(true));
         // Smoke: preview was recomputed (exercises the code path).
         let _ = ed.preview;
+    }
+
+    #[test]
+    fn style_set_color_sets_fg_and_pushes_hex_to_mru() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
+
+        // Set fg to a named color — no MRU push.
+        apply_action(Action::StyleSetColor { is_bg: false, value: Some("red".into()) },
+                     &mut s, &mut mapper::mapper::Mapper::default());
+        {
+            let ed = s.style_editor.as_ref().unwrap();
+            assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("red"));
+            assert!(ed.mru.is_empty(), "named colors do not push to MRU");
+        }
+
+        // Set fg to a hex color — should push to MRU.
+        apply_action(Action::StyleSetColor { is_bg: false, value: Some("#aabbcc".into()) },
+                     &mut s, &mut mapper::mapper::Mapper::default());
+        {
+            let ed = s.style_editor.as_ref().unwrap();
+            assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("#aabbcc"));
+            assert_eq!(ed.mru, vec!["#aabbcc".to_string()]);
+        }
+
+        // Set bg to None — clears to default.
+        apply_action(Action::StyleSetColor { is_bg: true, value: None },
+                     &mut s, &mut mapper::mapper::Mapper::default());
+        {
+            let ed = s.style_editor.as_ref().unwrap();
+            assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.as_deref()), None);
+        }
+    }
+
+    #[test]
+    fn style_custom_char_and_backspace_edit_buf() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        let m = &mut mapper::mapper::Mapper::default();
+
+        apply_action(Action::StyleCustomChar('#'), &mut s, m);
+        apply_action(Action::StyleCustomChar('f'), &mut s, m);
+        apply_action(Action::StyleCustomChar('f'), &mut s, m);
+        apply_action(Action::StyleCustomChar('0'), &mut s, m);
+        apply_action(Action::StyleCustomChar('0'), &mut s, m);
+        apply_action(Action::StyleCustomChar('0'), &mut s, m);
+        apply_action(Action::StyleCustomChar('0'), &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#ff0000");
+
+        apply_action(Action::StyleCustomBackspace, &mut s, m);
+        apply_action(Action::StyleCustomBackspace, &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#ff00");
     }
 }
