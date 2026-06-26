@@ -401,6 +401,9 @@ impl Machine {
                 call_routine(&mut self.state, &mut self.mem, a, &[b], None);
                 StepResult::Continue
             }
+            // 2OP:0x1B set_colour — game-driven colour is not applied (babelmap styling
+            // owns the look); accept and ignore.
+            0x1B => StepResult::Continue,
             // Unknown / unimplemented 2OP — no-op seam for Tasks 10+ (object/text ops)
             _ => StepResult::Continue,
         }
@@ -600,12 +603,16 @@ impl Machine {
                 self.print_text("\n");
                 StepResult::Continue
             }
-            // 0x0D verify — branch always true (stub; real checksum in Task 16)
+            // 0OP:0x0D verify — checksum the story and branch on match.
             0x0D => {
-                self.do_branch(branch, true);
+                let header_ck = self.mem.read_word(0x1C);
+                // If the header records no checksum (some dev builds), treat as genuine.
+                let ok = header_ck == 0 || self.story_checksum() == header_ck;
+                self.do_branch(branch, ok);
                 StepResult::Continue
             }
-            // 0x0F piracy — branch always true (ZMSD: treat as legit copy)
+            // 0OP:0x0F piracy — the standard says interpreters should behave as if the
+            // game is genuine: always take the branch.
             0x0F => {
                 self.do_branch(branch, true);
                 StepResult::Continue
@@ -918,6 +925,40 @@ impl Machine {
                 self.do_branch(branch, found != 0);
                 StepResult::Continue
             }
+            // VAR:0x1B tokenise text parse [dictionary] [flag] — lex the text buffer
+            // into the parse buffer, like the lexing half of `read`.
+            0x1B => {
+                let text_buf = ops.first().copied().unwrap_or(0) as u32;
+                let parse = ops.get(1).copied().unwrap_or(0) as u32;
+                // TODO custom dict addr: dictionary::load targets the standard
+                // dictionary; a non-zero `dictionary` operand is not yet honoured.
+                let _dict_addr = ops.get(2).copied().unwrap_or(0);
+                let flag = ops.get(3).copied().unwrap_or(0) != 0;
+                let text = self.read_text_buffer(text_buf);
+                let text_data_start: u8 = if self.mem.version() <= 4 { 1 } else { 2 };
+                let dict = dictionary::load(&self.mem);
+                let tokens = dict.tokenise(&self.mem, &text);
+                self.write_parse_buffer(parse, &tokens, text_data_start, flag);
+                StepResult::Continue
+            }
+            // VAR:0x1C encode_text zscii-text length from coded-text — encode `length`
+            // ZSCII bytes at zscii-text+from to the packed dictionary form at coded-text.
+            0x1C => {
+                let src = ops.first().copied().unwrap_or(0) as u32;
+                let length = ops.get(1).copied().unwrap_or(0) as u32;
+                let from = ops.get(2).copied().unwrap_or(0) as u32;
+                let coded = ops.get(3).copied().unwrap_or(0) as u32;
+                let mut s = String::new();
+                for i in 0..length {
+                    let b = self.mem.read_byte(src + from + i);
+                    s.push(zscii_to_char(b as u16)); // mirror the read path's ZSCII decode
+                }
+                let packed = crate::text::encode::encode_word(&s, self.mem.version());
+                for (i, b) in packed.iter().enumerate() {
+                    self.mem.write_byte(coded + i as u32, *b);
+                }
+                StepResult::Continue
+            }
             // VAR:0x1D copy_table — copy/zero a memory region (ZMSD §15).
             0x1D => {
                 let first = ops.first().copied().unwrap_or(0) as u32;
@@ -1067,9 +1108,30 @@ impl Machine {
                 self.do_store(store, result as u16);
                 StepResult::Continue
             }
-            // EXT:0x04 set_font — return 0 (font change unsupported)
+            // EXT:0x04 set_font — one fixed font (id 1). font 1 or 0(query) -> previous (1);
+            // any other requested font is unavailable -> 0. No actual font change.
             0x04 => {
-                self.do_store(store, 0);
+                let requested = ops.first().copied().unwrap_or(0);
+                let result = if requested == 0 || requested == 1 { 1 } else { 0 };
+                self.do_store(store, result);
+                StepResult::Continue
+            }
+            // EXT:0x05 set_true_colour — we render with our own styling; accept and ignore.
+            0x05 => StepResult::Continue,
+            // EXT:0x0B print_unicode — output an arbitrary Unicode codepoint.
+            0x0B => {
+                let cp = ops.first().copied().unwrap_or(0) as u32;
+                let ch = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                let mut b = [0u8; 4];
+                self.print_text(ch.encode_utf8(&mut b));
+                StepResult::Continue
+            }
+            // EXT:0x0C check_unicode — bit0: can print, bit1: can input. We render and
+            // read UTF-8, so any valid scalar value is both (3); invalid -> 0.
+            0x0C => {
+                let cp = ops.first().copied().unwrap_or(0) as u32;
+                let val = if char::from_u32(cp).is_some() { 3 } else { 0 };
+                self.do_store(store, val);
                 StepResult::Continue
             }
             // EXT:0x09 save_undo — in-memory undo snapshot.
@@ -1119,6 +1181,114 @@ impl Machine {
                     self.state.pc = (self.state.pc as i32 + off as i32 - 2) as u32;
                 }
             }
+        }
+    }
+
+    /// Sum (mod 0x10000) of the story bytes [0x40, file_length) — every byte
+    /// past the header up to the declared file length (ZMSD §11.1.6). file_length =
+    /// header word 0x1A * scale (2 for v3, 4 for v4-5, 8 for v6+).
+    pub fn story_checksum(&self) -> u16 {
+        let scale: u32 = match self.mem.version() {
+            1..=3 => 2,
+            4 | 5 => 4,
+            _ => 8,
+        };
+        let file_length = self.mem.read_word(0x1A) as u32 * scale;
+        let end = file_length.min(self.mem.len() as u32);
+        // Checksum the ORIGINAL story image: the dynamic region [0..static_mem_base)
+        // may have been mutated by the running game, so read it from the snapshot
+        // captured at load; the static region never changes, so read it from `mem`.
+        let dyn_end = self.original_dynamic.len() as u32;
+        let mut sum: u16 = 0;
+        for addr in 0x40..end {
+            let b = if addr < dyn_end {
+                self.original_dynamic[addr as usize]
+            } else {
+                self.mem.read_byte(addr)
+            };
+            sum = sum.wrapping_add(b as u16);
+        }
+        sum
+    }
+
+    /// Write tokens into a parse buffer in the standard format (ZMSD §15):
+    /// [byte0 = max words][byte1 = count]; then per word: 2-byte dict address,
+    /// 1-byte length, 1-byte text-buffer position (1-based: `text_data_start +
+    /// token.text_pos`). When `flag` is set, slots for words not in the dictionary
+    /// (dict_addr == 0) are left untouched.
+    fn write_parse_buffer(
+        &mut self,
+        parse: u32,
+        tokens: &[dictionary::Token],
+        text_data_start: u8,
+        flag: bool,
+    ) {
+        let max = self.mem.read_byte(parse) as usize;
+        let n = tokens.len().min(max);
+        self.mem.write_byte(parse + 1, n as u8);
+        for (i, t) in tokens.iter().take(max).enumerate() {
+            if flag && t.dict_addr == 0 {
+                continue;
+            }
+            let base = parse + 2 + (i as u32) * 4;
+            self.mem.write_word(base, t.dict_addr);
+            self.mem.write_byte(base + 2, t.len);
+            self.mem.write_byte(base + 3, text_data_start + t.text_pos);
+        }
+    }
+
+    /// Read the already-entered line out of a text buffer (the inverse of the
+    /// write done by `supply_line`). Layout (ZMSD §15):
+    ///   v1–4: byte 0 = max; text starts at byte 1, 0-terminated.
+    ///   v5+:  byte 0 = max; byte 1 = char count; text starts at byte 2.
+    fn read_text_buffer(&self, text_buf: u32) -> String {
+        if self.mem.version() <= 4 {
+            let mut s = String::new();
+            let mut addr = text_buf + 1;
+            loop {
+                let b = self.mem.read_byte(addr);
+                if b == 0 {
+                    break;
+                }
+                s.push(b as char);
+                addr += 1;
+            }
+            s
+        } else {
+            let count = self.mem.read_byte(text_buf + 1) as u32;
+            (0..count)
+                .map(|i| self.mem.read_byte(text_buf + 2 + i) as char)
+                .collect()
+        }
+    }
+
+    /// v5+: does `ch` terminate line input? Enter (13) always does; otherwise, if a
+    /// terminating-characters table (header 0x2E) is present, any listed char does
+    /// (255 in the table = any function key, i.e. ch >= 129). ZMSD §10.7.
+    pub fn is_terminator(&self, ch: u16) -> bool {
+        if ch == 13 {
+            return true;
+        }
+        if self.mem.version() < 5 {
+            return false;
+        }
+        let mut p = self.mem.read_word(0x2E) as u32;
+        if p == 0 {
+            return false;
+        }
+        loop {
+            let t = self.mem.read_byte(p) as u16;
+            if t == 0 {
+                return false;
+            }
+            if t == 255 {
+                if ch >= 129 {
+                    return true;
+                }
+            } else if t == ch {
+                return true;
+            }
+            p += 1;
         }
     }
 
@@ -1263,33 +1433,24 @@ impl Machine {
         }
 
         // Tokenise and fill the parse buffer (skip if parse_buf == 0 in v5+).
-        let should_parse = parse_buf != 0 || version <= 4;
-        if should_parse && parse_buf != 0 {
+        if parse_buf != 0 {
             let text_data_start: u8 = if version <= 4 { 1 } else { 2 };
-            let max_tokens = self.mem.read_byte(parse_buf) as usize;
-
             let dict = dictionary::load(&self.mem);
             let tokens = dict.tokenise(&self.mem, text);
-
-            let count = tokens.len().min(max_tokens);
-            self.mem.write_byte(parse_buf + 1, count as u8);
-
-            for (i, tok) in tokens.iter().take(max_tokens).enumerate() {
-                let entry = parse_buf + 2 + i as u32 * 4;
-                // 2-byte dict address.
-                self.mem.write_word(entry, tok.dict_addr);
-                // 1-byte token length.
-                self.mem.write_byte(entry + 2, tok.len);
-                // 1-byte text-buffer position: convert 0-based text_pos to
-                // 1-based index from start of text buffer.
-                let buf_pos = text_data_start + tok.text_pos;
-                self.mem.write_byte(entry + 3, buf_pos);
-            }
+            self.write_parse_buffer(parse_buf, &tokens, text_data_start, false);
         }
 
-        // v5+: store the terminating character (13 = newline/Enter).
+        // v5+: store the terminating character. The host's `supply_line` only ever
+        // delivers Enter-terminated lines today, so the terminator is 13 (which
+        // `is_terminator` always accepts). A future host that supplies a function-key
+        // terminator (per the header 0x2E table) should thread that ZSCII code here
+        // and store it instead of 13.
+        // TODO function-key terminator threading: pass the actual terminating char
+        // into supply_line and store `term` when is_terminator(term) holds.
         if version >= 5 {
-            self.do_store(pending.store_var, 13);
+            let term: u16 = 13;
+            debug_assert!(self.is_terminator(term));
+            self.do_store(pending.store_var, term);
         }
     }
 
@@ -3767,5 +3928,193 @@ pub(crate) mod tests {
         m.exec_var(0x0A, &[3], None, None);
         assert_eq!(m.screen.upper.rows, 3);
         assert_eq!(m.screen.upper.cols, 12);
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 1: verify (real checksum) + piracy
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn verify_branches_true_on_correct_checksum() {
+        let mut buf = sample_story(5);
+        // Give the story a non-empty checksum region so the match path is real.
+        buf[0x1A] = 0x00; buf[0x1B] = 0x20; // file-length word = 0x20 -> 0x80 bytes (v5 *4)
+        buf[0x40] = 0xAB;                   // a marker byte inside [0x40, 0x80)
+        // 0x10: verify (0OP:0x0D = 0xBD), branch on_true offset 6 -> skip the add.
+        buf[0x10] = 0xBD;
+        buf[0x11] = 0xC6; // branch: on_true (bit7), short (bit6), offset 6
+        // add 0,7 -> G0 (2OP:0x14 long form, two small consts), skipped if branch taken.
+        buf[0x12] = 0x14; buf[0x13] = 0x00; buf[0x14] = 0x07; buf[0x15] = 0x10;
+        buf[0x16] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let ck = m.story_checksum();
+        assert_ne!(ck, 0, "checksum region non-empty so the compare path is exercised");
+        m.mem.write_word(0x1C, ck); // header checksum = computed -> verify must branch true
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 0, "verify branched true (skipped the add)");
+    }
+
+    #[test]
+    fn verify_branches_false_on_bad_checksum() {
+        let mut buf = sample_story(5);
+        buf[0x1A] = 0x00; buf[0x1B] = 0x20; buf[0x40] = 0xAB;
+        buf[0x10] = 0xBD; buf[0x11] = 0xC6;
+        buf[0x12] = 0x14; buf[0x13] = 0x00; buf[0x14] = 0x07; buf[0x15] = 0x10;
+        buf[0x16] = 0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.mem.write_word(0x1C, 0x0001); // deliberately wrong checksum
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 7, "verify branched false (ran the add)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2: set_font + set_colour + set_true_colour (graceful)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_font_reports_current_or_unavailable() {
+        // EXT:0x04 set_font font -> (store). font 1 (or 0=query) -> 1; other -> 0.
+        let mut buf = sample_story(5);
+        // set_font 1 -> G0
+        buf[0x10]=0xBE; buf[0x11]=0x04; buf[0x12]=0x7F; buf[0x13]=1; buf[0x14]=0x10;
+        // set_font 4 -> G1
+        buf[0x15]=0xBE; buf[0x16]=0x04; buf[0x17]=0x7F; buf[0x18]=4; buf[0x19]=0x11;
+        buf[0x1A]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 1, "font 1 available -> 1");
+        assert_eq!(m.global(1), 0, "font 4 unavailable -> 0");
+    }
+
+    #[test]
+    fn set_colour_and_true_colour_are_graceful_noops() {
+        // Neither stores nor branches; just must not warn/crash and must Continue.
+        let mut buf = sample_story(5);
+        // set_colour 2,3 (2OP:0x1B long form, both small)
+        buf[0x10]=0x1B; buf[0x11]=2; buf[0x12]=3;
+        // set_true_colour 0,0 (EXT:0x05, [Small,Small])
+        buf[0x13]=0xBE; buf[0x14]=0x05; buf[0x15]=0x5F; buf[0x16]=0; buf[0x17]=0;
+        // add 0,5 -> G0 (proves execution continued)
+        buf[0x18]=0x14; buf[0x19]=0x00; buf[0x1A]=0x05; buf[0x1B]=0x10;
+        buf[0x1C]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 5, "execution continued past set_colour/set_true_colour");
+        assert!(m.diagnostics.iter().all(|d| !d.contains("0x1B") && !d.contains("0x05")),
+            "graceful arms must not emit unimplemented diagnostics");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3: print_unicode + check_unicode (EXT:0x0B / 0x0C)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn print_unicode_outputs_codepoint() {
+        let mut buf = sample_story(5);
+        // print_unicode 0x00E9 ('é'): EXT:0x0B, [Large operand 0x00E9]
+        // type byte 0b00_11_11_11 = 0x3F ([Large, omit, omit, omit]); large = 2 bytes.
+        buf[0x10]=0xBE; buf[0x11]=0x0B; buf[0x12]=0x3F; buf[0x13]=0x00; buf[0x14]=0xE9;
+        buf[0x15]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let out = m.buffer_output().expect("default sink");
+        assert!(out.buf.contains('é'), "é reached the output sink: {:?}", out.buf);
+    }
+
+    #[test]
+    fn check_unicode_reports_printable_and_receivable() {
+        let mut buf = sample_story(5);
+        // check_unicode 0x00E9 -> G0  (EXT:0x0C, [Large], store)
+        buf[0x10]=0xBE; buf[0x11]=0x0C; buf[0x12]=0x3F; buf[0x13]=0x00; buf[0x14]=0xE9; buf[0x15]=0x10;
+        buf[0x16]=0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        assert_eq!(m.global(0), 3, "valid scalar: printable|receivable = 3");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 4: encode_text (VAR:0x1C)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn encode_text_writes_packed_word() {
+        let mut buf = sample_story(5);
+        // Lay out a ZSCII source word "sword" at 0x40 (dynamic memory), and a 6-byte
+        // coded-text buffer at 0x50. encode_text 0x40, 5, 0, 0x50.
+        for (i, b) in b"sword".iter().enumerate() { buf[0x40 + i] = *b; }
+        // encode_text (VAR:0x1C). opcode byte = 0xE0 | 0x1C = 0xFC.
+        // 4 operands [text,length,from,coded]: type byte 0b01_01_01_01 = 0x55.
+        buf[0x10]=0xFC; buf[0x11]=0x55; buf[0x12]=0x40; buf[0x13]=5; buf[0x14]=0; buf[0x15]=0x50;
+        buf[0x16]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let expected = crate::text::encode::encode_word("sword", 5);
+        for (i, b) in expected.iter().enumerate() {
+            assert_eq!(m.mem.read_byte(0x50 + i as u32), *b, "coded byte {i}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 5: tokenise (VAR:0x1B)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn tokenise_parses_a_dictionary_word_into_parse_buffer() {
+        // build_input_story embeds a dict containing "north" at addr_north.
+        let (mut buf, addr_north, _open, _mailbox) = build_input_story(5);
+        // v5 text buffer at 0x0250: [max][count][chars...]. "north" already entered.
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10;     // max chars
+        buf[text_buf as usize + 1] = 5;  // current length
+        for (i, b) in b"north".iter().enumerate() {
+            buf[text_buf as usize + 2 + i] = *b;
+        }
+        // parse buffer at 0x0260: byte0 = max words.
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 4;
+        // tokenise text parse (dict=0, flag=0): VAR:0x1B = 0xFB, [Large, Large, omit, omit].
+        buf[0x10]=0xFB; buf[0x11]=0x0F;
+        buf[0x12]=(text_buf>>8) as u8; buf[0x13]=(text_buf&0xFF) as u8;
+        buf[0x14]=(parse_buf>>8) as u8; buf[0x15]=(parse_buf&0xFF) as u8;
+        buf[0x16]=0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let pb = parse_buf as u32;
+        assert!(m.mem.read_byte(pb + 1) >= 1, "at least one token parsed");
+        assert_eq!(m.mem.read_word(pb + 2), addr_north, "known word resolved to its dict entry");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 7: terminating-characters table (header 0x2E, v5+)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn terminating_chars_table_is_honoured() {
+        // Build a v5 story with header 0x2E -> a table [0x81, 0x00] (function key 129).
+        let mut buf = sample_story(5);
+        let tbl: u32 = 0x0200;
+        buf[0x2E] = (tbl >> 8) as u8; buf[0x2F] = (tbl & 0xFF) as u8;
+        buf[tbl as usize] = 0x81; buf[tbl as usize + 1] = 0x00;
+        let mem = Memory::new(buf).unwrap();
+        let m = Machine::new(mem);
+        assert!(m.is_terminator(13), "Enter always terminates");
+        assert!(m.is_terminator(0x81), "listed function key terminates");
+        assert!(!m.is_terminator(b'a' as u16), "ordinary char does not terminate");
     }
 }
