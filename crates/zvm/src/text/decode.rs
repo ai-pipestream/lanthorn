@@ -12,8 +12,8 @@ use super::{A0, A1, A2};
 ///
 /// Returns `(decoded_string, address_past_end)`.
 /// Abbreviation strings are decoded recursively (one level in practice).
-/// Custom alphabet tables (header word 0x34) are not implemented — the
-/// default table is always used.
+/// Custom alphabet tables (header word 0x34, v5+) override the default A0/A1/A2
+/// glyphs when present; otherwise the default table is used.
 pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
     // Collect all Z-chars first, recording where the string ends.
     let mut zchars: Vec<u8> = Vec::new();
@@ -35,6 +35,16 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
     let mut i = 0;
     let mut alphabet: u8 = 0; // 0=A0, 1=A1, 2=A2
     let mut abbrev_pending: u8 = 0; // non-zero: waiting for abbrev index char
+
+    // v5+ custom alphabet table (header 0x34). When present, glyph rows come from
+    // the table (78 ZSCII bytes: A0 0..26, A1 26..52, A2 52..78). The A2 specials
+    // (position 0 = escape, 1 = newline) keep their built-in handling.
+    let custom = if mem.version() >= 5 {
+        let p = mem.read_word(0x34) as u32;
+        (p != 0).then_some(p)
+    } else {
+        None
+    };
 
     while i < zchars.len() {
         let zc = zchars[i];
@@ -86,12 +96,20 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
                     result.push(ch);
                     alphabet = 0;
                 } else {
-                    // Normal lookup: Z-char 6 → table index 0
+                    // Normal lookup: Z-char 6 → table index 0.
                     let idx = (zc - 6) as usize;
-                    let ch = match alphabet {
-                        0 => A0[idx],
-                        1 => A1[idx],
-                        _ => A2[idx],
+                    // A2 newline (idx 1) is special and is never taken from a custom
+                    // table; A2 escape (idx 0) is already handled above.
+                    let ch = match custom {
+                        Some(tbl) if !(alphabet == 2 && idx == 1) => {
+                            let row = alphabet as u32;
+                            mem.read_byte(tbl + row * 26 + idx as u32)
+                        }
+                        _ => match alphabet {
+                            0 => A0[idx],
+                            1 => A1[idx],
+                            _ => A2[idx],
+                        },
                     };
                     result.push(ch as char);
                     alphabet = 0;
@@ -267,6 +285,27 @@ mod tests {
         m.write_word(0x0102, w2);
         let (s, _end) = decode_string(&m, 0x0100);
         assert_eq!(s, "©", "custom Unicode table should map ZSCII 155 to © not ä");
+    }
+
+    #[test]
+    fn custom_alphabet_table_overrides_default_glyphs() {
+        // v5 story with header 0x34 -> a custom 78-byte alphabet table whose A0[0]='z'.
+        let mut bytes = sample_story(5);
+        let tbl: usize = 0x0200;
+        bytes[0x34] = (tbl >> 8) as u8;
+        bytes[0x35] = (tbl & 0xFF) as u8;
+        let a0 = b"zbcdefghijklmnopqrstuvwxyz";
+        let a1 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let a2 = b"\x00\n0123456789.,!?_#'\"/\\-:()";
+        for (i, &c) in a0.iter().enumerate() { bytes[tbl + i] = c; }
+        for (i, &c) in a1.iter().enumerate() { bytes[tbl + 26 + i] = c; }
+        for (i, &c) in a2.iter().enumerate() { bytes[tbl + 52 + i] = c; }
+        let mut m = Memory::new(bytes).unwrap();
+        // One A0 Z-char 6 (the first A0 letter), padded with shifts (no output).
+        let w: u16 = 0x8000 | (6 << 10) | (5 << 5) | 5;
+        m.write_word(0x0100, w);
+        let (s, _end) = decode_string(&m, 0x0100);
+        assert_eq!(s, "z", "custom A0[0] should decode to 'z' not the default 'a'");
     }
 
     #[test]
