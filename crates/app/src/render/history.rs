@@ -20,10 +20,12 @@ pub fn draw_history(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
     }
 
     let modal_w = 64u16.min(area.width.saturating_sub(4));
-    // up to 12 list rows + 1 footer + 2 header/sep + chrome.
+    // up to 12 list rows + a transcript preview (separator + up to 4 lines) +
+    // 1 footer + 2 header/sep + chrome.
     let list_rows = (state.history.len() as u16).min(12);
-    let modal_h = (list_rows + 6).min(area.height.saturating_sub(2));
-    if modal_w < 24 || modal_h < 6 {
+    let transcript_rows = 5u16; // 1 separator + up to 4 transcript lines
+    let modal_h = (list_rows + transcript_rows + 6).min(area.height.saturating_sub(2));
+    if modal_w < 24 || modal_h < 8 {
         return None;
     }
 
@@ -54,13 +56,23 @@ pub fn draw_history(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         .bg(ratatui::style::Color::Cyan)
         .add_modifier(Modifier::BOLD);
 
+    let dim_style = Style::new()
+        .fg(ratatui::style::Color::DarkGray)
+        .patch(state.colors.dialog);
+
+    // Partition the content: footer (1 row) at the bottom, the selected turn's
+    // transcript just above it, and the turn list filling the rest at the top.
+    let footer_y = content.bottom().saturating_sub(1);
+    let tr_h = transcript_rows.min(content.height.saturating_sub(2));
+    let tr_top = footer_y.saturating_sub(tr_h);
+
     // ── Turn list ────────────────────────────────────────────────────────────
     // Window the list around the selection so it stays visible.
-    let visible = list_rows as usize;
+    let visible = tr_top.saturating_sub(content.y) as usize;
     let first = replay.idx.saturating_sub(visible.saturating_sub(1));
     for (row, i) in (first..state.history.len()).take(visible).enumerate() {
         let row_y = content.y + row as u16;
-        if row_y >= content.bottom() { break; }
+        if row_y >= tr_top { break; }
         let rec = &state.history[i];
         let style = if i == replay.idx { selected_style } else { normal };
         for col in content.x..content.right() {
@@ -75,14 +87,28 @@ pub fn draw_history(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         crate::render::draw_str_clipped(buf, content.x, row_y, &line, style, content);
     }
 
+    // ── Selected turn's transcript ───────────────────────────────────────────
+    if tr_h > 0 {
+        let rec = &state.history[replay.idx];
+        let sep = format!("─ turn {} text ─", rec.turn);
+        crate::render::draw_str_clipped(buf, content.x, tr_top, &sep, dim_style, content);
+        let text_top = tr_top + 1;
+        let text_h = footer_y.saturating_sub(text_top) as usize;
+        let lines: Vec<&str> = rec.transcript.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() && text_h > 0 {
+            crate::render::draw_str_clipped(buf, content.x, text_top, "(no output)", dim_style, content);
+        } else {
+            for (row, line) in lines.iter().take(text_h).enumerate() {
+                let y = text_top + row as u16;
+                crate::render::draw_str_clipped(buf, content.x, y, line, normal, content);
+            }
+        }
+    }
+
     // ── Footer ───────────────────────────────────────────────────────────────
-    let footer_y = content.bottom().saturating_sub(1);
     if footer_y >= content.y {
-        let footer_style = Style::new()
-            .fg(ratatui::style::Color::DarkGray)
-            .patch(state.colors.dialog);
         let footer = "←/→:step  Space:play  Enter/r:resume  Esc:close";
-        crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
+        crate::render::draw_str_clipped(buf, content.x, footer_y, footer, dim_style, content);
     }
 
     Some(rects)
@@ -112,7 +138,7 @@ mod tests {
             assert!(out.is_none(), "draw_history is a no-op when replay is None");
         }).unwrap();
 
-        // Open → Some, and a turn command appears in the buffer.
+        // Open → Some, and the selected turn's command AND transcript appear.
         state.replay = Some(ReplayState::new(1));
         let mut term2 = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let mut rects: Option<DialogRects> = None;
@@ -121,5 +147,11 @@ mod tests {
             rects = draw_history(&state, area, f.buffer_mut());
         }).unwrap();
         assert!(rects.is_some(), "draw_history returns rects when open");
+
+        // Scan the rendered buffer for the turn command and its transcript text.
+        let buf = term2.backend().buffer();
+        let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("go north"), "turn command should render");
+        assert!(screen.contains("Forest"), "selected turn's transcript should render");
     }
 }
