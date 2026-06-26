@@ -39,6 +39,11 @@ pub fn parse_direction(cmd: &str) -> Option<Direction> {
         "d" | "down" => Some(Direction::Down),
         "in" | "inside" | "enter" => Some(Direction::In),
         "out" | "outside" | "exit" => Some(Direction::Out),
+        // Ship directions (Seastalker et al.): the bow/front points north.
+        "fore" | "forward" | "bow" => Some(Direction::N),
+        "aft" | "stern" => Some(Direction::S),
+        "port" => Some(Direction::W),
+        "starboard" => Some(Direction::E),
         _ => None,
     }
 }
@@ -95,6 +100,20 @@ mod tests {
         assert_eq!(parse_direction("up"), Some(Direction::Up));
         assert_eq!(parse_direction("xyzzy"), None);
         assert_eq!(parse_direction("take lamp"), None);
+    }
+
+    #[test]
+    fn parses_ship_directions() {
+        // Nautical terms map onto compass directions (front of ship = north).
+        assert_eq!(parse_direction("fore"), Some(Direction::N));
+        assert_eq!(parse_direction("forward"), Some(Direction::N));
+        assert_eq!(parse_direction("bow"), Some(Direction::N));
+        assert_eq!(parse_direction("aft"), Some(Direction::S));
+        assert_eq!(parse_direction("stern"), Some(Direction::S));
+        assert_eq!(parse_direction("port"), Some(Direction::W));
+        assert_eq!(parse_direction("starboard"), Some(Direction::E));
+        // Still works after "go" and case-insensitively.
+        assert_eq!(parse_direction("go Starboard"), Some(Direction::E));
     }
 
     #[test]
