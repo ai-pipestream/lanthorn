@@ -34,6 +34,8 @@ pub enum ButtonId {
     Reset,
     Resume,
     NewGame,
+    Archive,
+    Global,
 }
 
 // ── DialogButton ──────────────────────────────────────────────────────────────

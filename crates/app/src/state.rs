@@ -735,6 +735,11 @@ pub struct AppState {
     /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
     pub reset_clear_map: bool,
 
+    // ── Aux-storage prompt state ──────────────────────────────────────────────
+
+    /// When true, the first-use aux-storage prompt is open.
+    pub aux_prompt: bool,
+
     // ── Quit dialog state ─────────────────────────────────────────────────────
 
     /// When true, the "Save before quitting?" confirmation dialog is open.
@@ -848,6 +853,7 @@ impl Default for AppState {
             prev_objects_here: std::collections::BTreeSet::new(),
             reset_dialog: false,
             reset_clear_map: false,
+            aux_prompt: false,
             quit_dialog: false,
             launch_dialog: false,
             pending_resume: None,
@@ -881,6 +887,7 @@ impl AppState {
             || self.tidy_anim.is_some()
             || self.prompt.is_some()
             || self.reset_dialog
+            || self.aux_prompt
             || self.quit_dialog
             || self.launch_dialog
             || self.hints.is_some()

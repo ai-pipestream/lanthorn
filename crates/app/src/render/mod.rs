@@ -1,3 +1,4 @@
+pub mod aux_dialog;
 pub mod config_screen;
 pub mod upper_window;
 pub mod dialog;

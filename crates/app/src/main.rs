@@ -28,6 +28,7 @@ use app::render::gallery::draw_gallery;
 use app::render::hints_panel::{draw_hints_panel, HintsPanelRects};
 use app::render::launch_dialog::draw_launch_dialog;
 use app::render::quit_dialog::draw_quit_dialog;
+use app::render::aux_dialog::draw_aux_dialog;
 use app::render::reset_dialog::draw_reset_dialog;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
@@ -210,6 +211,8 @@ struct PaneRects {
     layer_tabs: Vec<(LayerId, Rect)>,
     /// Active dialog chrome rects (when a dialog is open).
     pub dialog: Option<DialogRects>,
+    /// Hit-rects for the aux-storage prompt (when open).
+    pub aux_dialog: Option<app::render::aux_dialog::AuxDialogRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
     /// Hit-rects for the quit dialog (when open).
@@ -240,6 +243,7 @@ fn draw_frame(
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
+    let mut aux_dialog_rects_out: Option<app::render::aux_dialog::AuxDialogRects> = None;
     let mut reset_dialog_rects_out: Option<app::render::reset_dialog::ResetDialogRects> = None;
     let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
@@ -591,6 +595,11 @@ fn draw_frame(
             dialog_rects_out = draw_config_screen(state, full, buf);
         }
 
+        // ── Aux-storage prompt — drawn over everything ────────────────────────
+        if state.aux_prompt {
+            aux_dialog_rects_out = draw_aux_dialog(state, full, buf);
+        }
+
         // ── Reset dialog overlay — drawn over everything ───────────────────────
         if state.reset_dialog {
             reset_dialog_rects_out = draw_reset_dialog(state, full, buf);
@@ -681,7 +690,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, selection_text: selection_text_out, transcript_max_scroll })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, selection_text: selection_text_out, transcript_max_scroll })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1131,7 +1140,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, selection_text: None, transcript_max_scroll: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, selection_text: None, transcript_max_scroll: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1285,6 +1294,83 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+        // ── Aux-storage prompt intercept — before normal action routing ───────
+        // When the first-use aux-storage prompt is open, route events here and
+        // continue (swallowing events the dialog does not handle).
+        if state.aux_prompt {
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    match k.code {
+                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                        code => match aux_dialog_key_focused(code, state.dialog_focus) {
+                            AuxDialogAction::Archive => {
+                                let mode = app::config::AuxStorage::Archive;
+                                state.aux_prompt = false;
+                                state.config.aux_storage = mode;
+                                let user_dir = state.config.user_dir.clone();
+                                let _ = app::config::write_config(&user_dir, &state.config);
+                                session.machine.aux_dirty = false;
+                            }
+                            AuxDialogAction::Global => {
+                                let mode = app::config::AuxStorage::Global;
+                                state.aux_prompt = false;
+                                state.config.aux_storage = mode;
+                                let user_dir = state.config.user_dir.clone();
+                                let _ = app::config::write_config(&user_dir, &state.config);
+                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, &session.machine.aux_data);
+                                session.machine.aux_dirty = false;
+                            }
+                            AuxDialogAction::None => {}
+                        },
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseEventKind, MouseButton};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let col = m.column;
+                        let row = m.row;
+                        let pt = ratatui::layout::Position { x: col, y: row };
+                        if let Some(ad) = &last_panes.aux_dialog {
+                            let in_close   = ad.close.map_or(false, |r| r.contains(pt));
+                            let in_archive = ad.archive.map_or(false, |r| r.contains(pt));
+                            let in_global  = ad.global.map_or(false, |r| r.contains(pt));
+                            let in_dialog  = ad.area.contains(pt);
+                            if in_close || (!in_archive && !in_global && !in_dialog) {
+                                // Close button or click outside → Archive (conservative default).
+                                let mode = app::config::AuxStorage::Archive;
+                                state.aux_prompt = false;
+                                state.config.aux_storage = mode;
+                                let user_dir = state.config.user_dir.clone();
+                                let _ = app::config::write_config(&user_dir, &state.config);
+                                session.machine.aux_dirty = false;
+                            } else if in_archive {
+                                let mode = app::config::AuxStorage::Archive;
+                                state.aux_prompt = false;
+                                state.config.aux_storage = mode;
+                                let user_dir = state.config.user_dir.clone();
+                                let _ = app::config::write_config(&user_dir, &state.config);
+                                session.machine.aux_dirty = false;
+                            } else if in_global {
+                                let mode = app::config::AuxStorage::Global;
+                                state.aux_prompt = false;
+                                state.config.aux_storage = mode;
+                                let user_dir = state.config.user_dir.clone();
+                                let _ = app::config::write_config(&user_dir, &state.config);
+                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, &session.machine.aux_data);
+                                session.machine.aux_dirty = false;
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
+                _ => {}
+            }
+            continue;
+        }
 
         // ── Reset dialog intercept — before normal action routing ─────────────
         // When the reset dialog is open, route keyboard/mouse directly here and
@@ -1750,7 +1836,7 @@ fn main() {
                     }
                     // Resume an in-game save/restore if this prompt resolved it.
                     let quit = resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
-                    persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
+                    persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
                     if quit { break; }
                     continue;
                 }
@@ -2020,7 +2106,7 @@ fn main() {
                     &mut state, &mapper, &session, &result, &cmd,
                     rooms_before, conns_before, &ifid, &arc_file,
                 );
-                persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
+                persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
 
                 // Background tidy: silently re-tidy the active layer when the
                 // configured mode calls for it. Only runs in Auto layout mode.
@@ -2350,7 +2436,7 @@ fn main() {
                         }
                     };
                     let quit = finish_resumed_turn(result, &mut mapper, &mut state, &session, &save_dir, &ifid, last_panes.map);
-                    persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
+                    persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &save_dir, &ifid, &mut state);
                     }
@@ -2488,7 +2574,7 @@ fn main() {
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was
         // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
         let quit = resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
-        persist_aux_after_turn(&mut session, &state.config, &save_dir, &ifid);
+        persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
         if quit {
             break;
         }
@@ -2861,21 +2947,30 @@ fn post_turn_bookkeeping(
 
 /// After a turn, persist the VM's aux table if it changed.  Archive mode is
 /// already covered by the per-turn auto-save (`save_archive_meta` embeds it);
-/// global mode writes the per-game file here.  `Ask` is treated as `Archive`
-/// until the first-use prompt (Task 6) resolves it.
+/// global mode writes the per-game file here.  `Ask` opens the first-use
+/// prompt dialog (Task 6) and leaves `aux_dirty` set for the dialog to resolve.
 fn persist_aux_after_turn(
     session: &mut app::session::GameSession,
-    cfg: &app::config::Config,
+    state: &mut AppState,
     save_dir: &std::path::Path,
     ifid: &str,
 ) {
     if !session.machine.aux_dirty {
         return;
     }
-    if cfg.aux_storage == app::config::AuxStorage::Global {
-        let _ = app::aux_store::write_global_aux(save_dir, ifid, &session.machine.aux_data);
+    match state.config.aux_storage {
+        app::config::AuxStorage::Global => {
+            let _ = app::aux_store::write_global_aux(save_dir, ifid, &session.machine.aux_data);
+            session.machine.aux_dirty = false;
+        }
+        app::config::AuxStorage::Archive => {
+            session.machine.aux_dirty = false; // archive auto-save already embedded it
+        }
+        app::config::AuxStorage::Ask => {
+            state.aux_prompt = true; // resolve in the dialog; leave aux_dirty set
+            state.dialog_focus = 0;
+        }
     }
-    session.machine.aux_dirty = false;
 }
 
 /// Post-process a TurnResult produced by `session.resume_*`: render output,
@@ -3105,6 +3200,30 @@ fn reset_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> Re
             _ => ResetDialogAction::Confirm, // focus 0 = Reset (default)
         },
         _ => ResetDialogAction::None,
+    }
+}
+
+// ── Aux-storage prompt keyboard routing ──────────────────────────────────────
+
+/// Action to take when a key is pressed while the aux-storage prompt is open.
+enum AuxDialogAction {
+    None,
+    Archive,
+    Global,
+}
+
+/// Aux-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button.
+/// Esc defaults to Archive (conservative: always resolves the prompt).
+fn aux_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> AuxDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => AuxDialogAction::Archive, // conservative default
+        KeyCode::Enter => match focus {
+            1 => AuxDialogAction::Global,
+            _ => AuxDialogAction::Archive, // focus 0 = Archive (default)
+        },
+        _ => AuxDialogAction::None,
     }
 }
 
@@ -3432,7 +3551,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{dim_area, hint_bar, hint_key_routes, is_slash, key_to_zscii, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
+    use super::{aux_dialog_key_focused, dim_area, hint_bar, hint_key_routes, is_slash, key_to_zscii, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, AuxDialogAction, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
@@ -4085,6 +4204,35 @@ mod tests {
         assert_eq!(focus, 1);
         let act = reset_dialog_key_focused(KeyCode::Enter, focus);
         assert!(matches!(act, ResetDialogAction::Cancel));
+    }
+
+    // ── aux_dialog_key_mapping ────────────────────────────────────────────────
+
+    #[test]
+    fn aux_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        // Esc → Archive (conservative default so prompt always resolves).
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Esc, 0), AuxDialogAction::Archive));
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Esc, 1), AuxDialogAction::Archive));
+        // Enter on focus 0 → Archive; Enter on focus 1 → Global.
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Enter, 0), AuxDialogAction::Archive));
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Enter, 1), AuxDialogAction::Global));
+        // Other keys → None.
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Char('x'), 0), AuxDialogAction::None));
+    }
+
+    // ── aux_dialog_tab_then_enter_fires_global ────────────────────────────────
+
+    #[test]
+    fn aux_dialog_tab_then_enter_fires_global() {
+        use crossterm::event::KeyCode;
+        // buttons: [Archive(0), Global(1)], default focus 0.
+        // Tab -> focus 1 (Global); Enter on focus 1 -> Global.
+        let mut focus = 0usize;
+        focus = app::input::cycle_focus(focus, 2, 1);
+        assert_eq!(focus, 1);
+        let act = aux_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, AuxDialogAction::Global));
     }
 
     // ── quit_dialog_tab_then_enter_fires_focused ──────────────────────────────
