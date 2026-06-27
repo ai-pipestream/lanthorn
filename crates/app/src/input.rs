@@ -2478,19 +2478,26 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::StyleOpenGlyphPicker(zone) => {
             if let Some(ed) = &state.style_editor {
                 let target_selector = ed.selectors[ed.active].to_string();
-                let user_dir = state.config.user_dir.clone();
-                let mru = crate::style_mru::load_glyph_mru(&user_dir);
-                state.glyph_picker = Some(crate::state::GlyphPickerState {
-                    target_selector,
-                    target_zone: zone,
-                    block: 0,
-                    custom_start: None,
-                    custom_focus: false,
-                    custom_buf: String::new(),
-                    cursor: 0,
-                    pending: None,
-                    mru,
-                });
+                // Picture-frame is a composite border; per-zone glyph overrides don't apply.
+                let is_picture_frame = ed.doc.colors.selectors.get(&target_selector)
+                    .and_then(|d| d.style.as_deref())
+                    .unwrap_or("single") == "picture-frame";
+                if !is_picture_frame {
+                    let user_dir = state.config.user_dir.clone();
+                    let mru = crate::style_mru::load_glyph_mru(&user_dir);
+                    state.glyph_picker = Some(crate::state::GlyphPickerState {
+                        target_selector,
+                        target_zone: zone,
+                        block: 0,
+                        custom_start: None,
+                        custom_focus: false,
+                        custom_buf: String::new(),
+                        cursor: 0,
+                        pending: None,
+                        mru,
+                    });
+                }
+                // picture-frame: leave state.glyph_picker as None (no-op).
             }
         }
 
@@ -6382,6 +6389,8 @@ mod tests {
         {
             let ed = s.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
+            // Ensure not picture-frame regardless of what style.toml on disk says.
+            ed.doc.colors.selectors.entry("map_border".into()).or_default().style = None;
         }
         apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
         assert!(s.glyph_picker.is_some(), "picker opens");
@@ -6404,8 +6413,10 @@ mod tests {
         {
             let ed = s.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
-            // Pre-set a glyph so we can verify clear removes it.
-            ed.doc.colors.selectors.entry("map_border".into()).or_default().glyph_top = Some("═".into());
+            // Pre-set a glyph so we can verify clear removes it; also ensure not picture-frame.
+            let decl = ed.doc.colors.selectors.entry("map_border".into()).or_default();
+            decl.glyph_top = Some("═".into());
+            decl.style = None;
         }
         apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
         assert!(s.glyph_picker.is_some());
@@ -6509,6 +6520,49 @@ mod tests {
             assert!(crate::input::is_bordered_selector(sel), "{sel} is bordered");
         }
         assert!(!crate::input::is_bordered_selector("transcript"));
+    }
+
+    #[test]
+    fn picture_frame_zone_does_not_open_picker() {
+        use crate::state::BorderZone;
+
+        // Active selector is "map_border" with style = "picture-frame" → picker must stay None.
+        let mut state = AppState::default();
+        open_style_editor(&mut state);
+        {
+            let ed = state.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
+            ed.doc.colors.selectors.entry("map_border".into()).or_default().style =
+                Some("picture-frame".into());
+        }
+        apply_action(
+            Action::StyleOpenGlyphPicker(BorderZone::Top),
+            &mut state,
+            &mut Mapper::default(),
+        );
+        assert!(
+            state.glyph_picker.is_none(),
+            "picture-frame zones must not open the glyph picker",
+        );
+
+        // Sanity: the same selector with style = None (→ "single") DOES open the picker.
+        let mut state2 = AppState::default();
+        open_style_editor(&mut state2);
+        {
+            let ed = state2.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
+            // Explicitly clear any disk-loaded border style so this is not picture-frame.
+            ed.doc.colors.selectors.entry("map_border".into()).or_default().style = None;
+        }
+        apply_action(
+            Action::StyleOpenGlyphPicker(BorderZone::Top),
+            &mut state2,
+            &mut Mapper::default(),
+        );
+        assert!(
+            state2.glyph_picker.is_some(),
+            "non-picture-frame selector opens the picker",
+        );
     }
 
     #[test]

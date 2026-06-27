@@ -247,6 +247,19 @@ pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         clear_rect = Some(Rect::new(clear_x, clear_y, llen.min(cw), 1));
     }
 
+    // ── Invalid-pending warning hint ──────────────────────────────────────────
+    if let Some(p) = picker.pending.as_deref() {
+        if !crate::style_mru::is_valid_glyph(p) {
+            let hint = format!("'{p}' invalid \u{2014} single-width only");
+            let warn_style = state.colors.transcript_warning;
+            // Render on the row just above MRU; the grid's safety margin leaves
+            // mru_y clear, so only mru_y-1 is a potential overlap (acceptable
+            // for a warning, which is drawn last and takes visual priority).
+            let warn_y = mru_y.saturating_sub(1);
+            crate::render::draw_str_clipped(buf, content.x, warn_y, &hint, warn_style, content);
+        }
+    }
+
     // ── Title ─────────────────────────────────────────────────────────────────
     let title = "Glyph Picker";
     let title_x = modal.x + (modal_w.saturating_sub(title.len() as u16 + 2)) / 2;
@@ -305,6 +318,49 @@ fn set_sym(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_pending_shows_warning_hint() {
+        use ratatui::{backend::TestBackend, Terminal};
+        use crate::input::open_style_editor;
+        use crate::input::Action;
+        use crate::input::apply_action;
+        use mapper::mapper::Mapper;
+
+        // Confirm "漢" is indeed invalid (double-width) so the test is meaningful.
+        assert!(
+            !crate::style_mru::is_valid_glyph("漢"),
+            "漢 must be an invalid glyph (double-width) for this test to be meaningful",
+        );
+
+        let mut state = crate::state::AppState::default();
+        open_style_editor(&mut state);
+        apply_action(
+            Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
+            &mut state,
+            &mut Mapper::default(),
+        );
+        assert!(state.glyph_picker.is_some());
+        // Inject an invalid (double-width) pending glyph directly.
+        state.glyph_picker.as_mut().unwrap().pending = Some("漢".into());
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let _ = draw_glyph_picker(&state, f.area(), f.buffer_mut());
+            })
+            .unwrap();
+
+        let all: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .flat_map(|c| c.symbol().chars())
+            .collect();
+        assert!(all.contains("single-width"), "invalid pending must show a single-width-only hint");
+    }
 
     #[test]
     fn glyph_picker_renders_title_and_header() {
