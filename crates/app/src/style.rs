@@ -271,6 +271,32 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
     }
 }
 
+/// Describe the resolved scheme as printable lines: a header per SELECTOR_GROUPS
+/// group (style `None`), then one line per selector
+/// `  <selector>: fg=<fg> bg=<bg><attrs>` carrying that selector's resolved Style.
+/// `border` (no color field) is skipped.
+pub fn describe_scheme(cs: &colors::ColorScheme) -> Vec<(String, Option<Style>)> {
+    let mut out: Vec<(String, Option<Style>)> = Vec::new();
+    for (title, selectors) in SELECTOR_GROUPS {
+        out.push((format!("── {title} ──"), None));
+        for sel in *selectors {
+            if *sel == "border" { continue; }
+            let st = style_for_selector(cs, sel);
+            let fg = st.fg.map(color_to_str).unwrap_or_else(|| "default".to_string());
+            let bg = st.bg.map(color_to_str).unwrap_or_else(|| "default".to_string());
+            let mut attrs: Vec<&str> = Vec::new();
+            if st.add_modifier.contains(Modifier::BOLD) { attrs.push("bold"); }
+            if st.add_modifier.contains(Modifier::ITALIC) { attrs.push("italic"); }
+            if st.add_modifier.contains(Modifier::UNDERLINED) { attrs.push("underline"); }
+            if st.add_modifier.contains(Modifier::DIM) { attrs.push("dim"); }
+            if st.add_modifier.contains(Modifier::REVERSED) { attrs.push("reversed"); }
+            let attr_str = if attrs.is_empty() { String::new() } else { format!(" {}", attrs.join(",")) };
+            out.push((format!("  {sel}: fg={fg} bg={bg}{attr_str}"), Some(st)));
+        }
+    }
+    out
+}
+
 // ── apply_color_decls ─────────────────────────────────────────────────────────
 
 /// Apply a map of selector→[`Decl`] declarations onto a [`ColorScheme`].
@@ -1760,6 +1786,26 @@ box_style = "rounded"
         let (cs, _set, _w) = resolve(&merged, &dir);
         assert_eq!(cs.room_normal.fg, Some(ratatui::style::Color::Reset),
             "per-game reset must win over the global color and resolve to terminal default");
+    }
+
+    #[test]
+    fn describe_scheme_lists_selectors_with_styles() {
+        let cs = colors::ColorScheme::terminal_default();
+        let lines = describe_scheme(&cs);
+        let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(texts.iter().any(|t| t.contains("Map")), "group title present");
+        assert!(texts.iter().any(|t| t.contains("room:") && t.contains("fg=white") && t.contains("bg=reset")),
+            "room line shows fg=white bg=reset");
+        assert!(texts.iter().any(|t| t.contains("connector:") && t.contains("fg=cyan")),
+            "connector line shows fg=cyan");
+        assert!(texts.iter().any(|t| t.contains("map_layer_tab_active:") && t.contains("bold")),
+            "an attribute is listed");
+        // A selector line carries Some(style) equal to style_for_selector.
+        let conn = lines.iter().find(|(t, _)| t.contains("connector:") && !t.contains("distorted") && !t.contains("portal")).unwrap();
+        assert_eq!(conn.1, Some(style_for_selector(&cs, "connector")), "selector line carries its style");
+        // A header line carries None.
+        let hdr = lines.iter().find(|(t, _)| t.contains("Map") && !t.contains(":")).unwrap();
+        assert_eq!(hdr.1, None, "group header has no style");
     }
 
     #[test]
