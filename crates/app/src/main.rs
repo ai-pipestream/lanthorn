@@ -1977,7 +1977,7 @@ fn main() {
                                     let value = if i < app::style_mru::ANSI_NAMES.len() {
                                         Some(app::style_mru::ANSI_NAMES[i].to_string())
                                     } else {
-                                        None
+                                        Some("reset".to_string())
                                     };
                                     apply_action(Action::StyleSetColor { is_bg: false, value }, &mut state, &mut mapper);
                                     continue 'event_loop;
@@ -1991,7 +1991,7 @@ fn main() {
                                     let value = if i < app::style_mru::ANSI_NAMES.len() {
                                         Some(app::style_mru::ANSI_NAMES[i].to_string())
                                     } else {
-                                        None
+                                        Some("reset".to_string())
                                     };
                                     apply_action(Action::StyleSetColor { is_bg: true, value }, &mut state, &mut mapper);
                                     continue 'event_loop;

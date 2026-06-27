@@ -2344,7 +2344,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(ed) = &state.style_editor {
                 if crate::style_mru::is_valid_color_token(&ed.custom_buf) {
                     let is_bg = ed.color_target;
-                    let value = if ed.custom_buf == "default" { None } else { Some(ed.custom_buf.clone()) };
+                    let value = if ed.custom_buf == "default" { Some("reset".to_string()) } else { Some(ed.custom_buf.clone()) };
                     let dir = state.config.user_dir.clone();
                     apply_style_set_color(state, is_bg, value, &dir);
                     if let Some(ed) = &mut state.style_editor { ed.custom_buf.clear(); }
@@ -2363,7 +2363,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(ed) = &state.style_editor {
                 let is_bg = ed.color_target;
                 let cur = ed.swatch_cursor;
-                let value = crate::style_mru::ANSI_NAMES.get(cur).map(|s| s.to_string());
+                let value = if cur == crate::style_mru::ANSI_NAMES.len() {
+                    Some("reset".to_string())
+                } else {
+                    crate::style_mru::ANSI_NAMES.get(cur).map(|s| s.to_string())
+                };
                 let dir = state.config.user_dir.clone();
                 apply_style_set_color(state, is_bg, value, &dir);
             }
@@ -6484,6 +6488,38 @@ mod tests {
     }
 
     #[test]
+    fn swatch_pick_default_cell_sets_reset() {
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.color_target = false; // fg
+            ed.swatch_cursor = crate::style_mru::ANSI_NAMES.len(); // the "default" cell
+        }
+        apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        let sel = ed.selectors[ed.active].to_string();
+        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"),
+            "picking the default swatch cell stores the reset token");
+    }
+
+    #[test]
+    fn custom_commit_default_stores_reset() {
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.color_target = false; // fg
+            ed.custom_buf = "default".into();
+        }
+        apply_action(Action::StyleCommitCustom, &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        let sel = ed.selectors[ed.active].to_string();
+        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"),
+            "typing default in the custom field stores the reset token");
+    }
+
+    #[test]
     fn glyph_picker_pick_sets_zone_glyph_and_closes() {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
@@ -6600,8 +6636,8 @@ mod tests {
         apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
         let ed = s.style_editor.as_ref().unwrap();
         let sel = ed.selectors[ed.active].to_string();
-        // default cell clears fg
-        assert!(ed.doc.colors.selectors.get(&sel).map_or(true, |d| d.fg.is_none()));
+        // default cell stores the reset token (freezes terminal-default)
+        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"));
     }
 
     #[test]

@@ -610,7 +610,7 @@ fn draw_swatch_row(
 
     // Default cell (1 char); index == ANSI_NAMES.len() == 16.
     if x + 1 <= prop.right() {
-        let is_selected = current_val == "default";
+        let is_selected = current_val == "default" || current_val == "reset";
         let is_cursor = show_cursor && swatch_cursor == crate::style_mru::ANSI_NAMES.len();
         let mut dflt_style = if is_selected { active_style } else { normal_style };
         if is_cursor {
