@@ -31,11 +31,18 @@ pub struct ResourceEntry {
     pub len: usize,
 }
 
+/// The kind of executable embedded in a Blorb's `Exec` chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecKind {
+    /// Z-machine story (`ZCOD` chunk).
+    ZCode,
+    /// Glulx story (`GLUL` chunk).
+    Glulx,
+}
+
 /// A parsed Blorb container: owns the file bytes and the resource index.
 #[derive(Debug)]
 pub struct Blorb {
-    // Read by the executable()/resource() data accessors (added in Task 2).
-    #[allow(dead_code)]
     bytes: Vec<u8>,
     index: Vec<ResourceEntry>,
 }
@@ -106,6 +113,39 @@ impl Blorb {
     /// The parsed resource index (for enumeration).
     pub fn resources(&self) -> &[ResourceEntry] {
         &self.index
+    }
+
+    fn chunk_data(&self, e: &ResourceEntry) -> &[u8] {
+        &self.bytes[e.start + 8..e.start + 8 + e.len]
+    }
+
+    /// The embedded executable: its [`ExecKind`] plus a slice of its chunk data.
+    ///
+    /// Finds the `Exec` resource, mapping a `ZCOD` chunk to [`ExecKind::ZCode`]
+    /// and `GLUL` to [`ExecKind::Glulx`]. Returns [`BlorbError::NoExecutable`]
+    /// when there is no `Exec` entry or its chunk type is neither.
+    pub fn executable(&self) -> Result<(ExecKind, &[u8]), BlorbError> {
+        let e = self
+            .index
+            .iter()
+            .find(|r| &r.usage == b"Exec")
+            .ok_or(BlorbError::NoExecutable)?;
+        let kind = match &e.chunk_type {
+            b"ZCOD" => ExecKind::ZCode,
+            b"GLUL" => ExecKind::Glulx,
+            _ => return Err(BlorbError::NoExecutable),
+        };
+        Ok((kind, self.chunk_data(e)))
+    }
+
+    /// A resource by `usage` + `number` (e.g. `(b"Snd ", 3)`): its chunk type
+    /// and data slice, or `None` when no such resource exists.
+    pub fn resource(&self, usage: &[u8; 4], number: u32) -> Option<(&[u8; 4], &[u8])> {
+        let e = self
+            .index
+            .iter()
+            .find(|r| &r.usage == usage && r.number == number)?;
+        Some((&e.chunk_type, self.chunk_data(e)))
     }
 }
 
@@ -196,6 +236,58 @@ mod tests {
         t.extend_from_slice(&4u32.to_be_bytes());
         t.extend_from_slice(b"IFRS");
         assert_eq!(Blorb::parse(t).unwrap_err(), BlorbError::NoResourceIndex);
+    }
+
+    #[test]
+    fn executable_returns_zcode_data() {
+        let b = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")]);
+        let blorb = Blorb::parse(b).unwrap();
+        let (kind, data) = blorb.executable().unwrap();
+        assert_eq!(kind, ExecKind::ZCode);
+        assert_eq!(data, b"abcd");
+    }
+
+    #[test]
+    fn executable_detects_glulx() {
+        let b = build_blorb(&[(b"Exec", 0, b"GLUL", b"glul")]);
+        assert_eq!(Blorb::parse(b).unwrap().executable().unwrap().0, ExecKind::Glulx);
+    }
+
+    #[test]
+    fn executable_missing_is_error() {
+        let b = build_blorb(&[(b"Snd ", 1, b"FORM", b"x")]);
+        assert_eq!(
+            Blorb::parse(b).unwrap().executable().unwrap_err(),
+            BlorbError::NoExecutable
+        );
+    }
+
+    #[test]
+    fn resource_fetches_by_usage_number() {
+        let b = build_blorb(&[
+            (b"Exec", 0, b"ZCOD", b"abcd"),
+            (b"Snd ", 3, b"OGGV", b"oggdata"),
+        ]);
+        let blorb = Blorb::parse(b).unwrap();
+        let (ty, data) = blorb.resource(b"Snd ", 3).unwrap();
+        assert_eq!(ty, b"OGGV");
+        assert_eq!(data, b"oggdata");
+        assert!(blorb.resource(b"Snd ", 99).is_none());
+    }
+
+    #[test]
+    fn resource_handles_odd_length_pad_byte() {
+        // First chunk has odd-length data ("oggdata" = 7); the pad byte must be
+        // skipped so the following resource is still found at its real offset.
+        let b = build_blorb(&[
+            (b"Snd ", 3, b"OGGV", b"oggdata"),
+            (b"Exec", 0, b"ZCOD", b"abcd"),
+        ]);
+        let blorb = Blorb::parse(b).unwrap();
+        assert_eq!(blorb.resource(b"Snd ", 3).unwrap().1, b"oggdata");
+        let (kind, data) = blorb.executable().unwrap();
+        assert_eq!(kind, ExecKind::ZCode);
+        assert_eq!(data, b"abcd");
     }
 
     #[test]
