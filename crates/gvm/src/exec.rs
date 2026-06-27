@@ -2089,6 +2089,26 @@ impl Machine {
                 0
             }
             0x0048 => self.glk.current_stream(), // glk_stream_get_current
+            // ── styles / gestalt / control ────────────────────────────────────
+            0x0086 => {
+                // glk_set_style(style) — on the current stream
+                let sid = self.glk.current_stream();
+                self.glk.set_stream_style(sid, GlkStyle::from_num(a(0)));
+                0
+            }
+            0x0087 => {
+                // glk_set_style_stream(str, style)
+                self.glk.set_stream_style(a(0), GlkStyle::from_num(a(1)));
+                0
+            }
+            0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
+            0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
+            0x0005 => self.glk_gestalt(a(0), a(1)), // glk_gestalt_ext(sel, val, arr, len)
+            0x0001 => {
+                // glk_exit — end the program
+                self.halted = true;
+                0
+            }
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -2156,6 +2176,23 @@ impl Machine {
             self.store_mem(ptr, v)?;
         }
         Ok(())
+    }
+
+    /// The Glk version this layer implements (0.7.5), reported by
+    /// `glk_gestalt(gestalt_Version)`.
+    const GLK_VERSION: u32 = 0x0000_0705;
+
+    /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
+    /// Unicode are supported; input/timer/graphics/sound are not yet (0).
+    fn glk_gestalt(&self, sel: u32, _val: u32) -> u32 {
+        match sel {
+            0 => Self::GLK_VERSION, // gestalt_Version
+            3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
+            15 => 1,                // gestalt_Unicode
+            // CharInput(1)/LineInput(2)/MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)
+            // and the rest are not supported in the output-only phase.
+            _ => 0,
+        }
     }
 
     // ── the run loop ──────────────────────────────────────────────────────────
@@ -3884,5 +3921,66 @@ mod tests {
         assert_eq!(m.mem.read8(0x180).unwrap(), b'Z' as u32, "explicit stream routing");
         assert_eq!(backend_of(&m).text(1), "Y", "current routing untouched");
         assert_eq!(m.mem.read32(0x108).unwrap(), 2, "set_current took effect");
+    }
+
+    // ── Task 4 (Glk styles, gestalt, output-selector completeness) ────────────
+
+    #[test]
+    fn glk_set_style_tags_subsequent_output() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0x86, &[C8(3)], Zero); // glk_set_style(Header)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        assert_eq!(backend_of(&m).runs(1), vec![(GlkStyle::Header, "Hi".to_string())]);
+    }
+
+    #[test]
+    fn glk_set_style_stream_targets_a_specific_stream() {
+        use asm::Op::{C8, Zero};
+        // window 1's stream is stream 1; tag it Alert, then print to current.
+        let mut body = glk_call(0x87, &[C8(1), C8(5)], Zero); // glk_set_style_stream(1, Alert)
+        body.extend(glk_call(0x80, &[C8(b'A' as i8)], Zero)); // glk_put_char('A')
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(backend_of(&m).runs(1), vec![(GlkStyle::Alert, "A".to_string())]);
+    }
+
+    #[test]
+    fn glk_gestalt_reports_output_capabilities() {
+        use asm::Op::{C8, Mem16, Zero};
+        let mut body = glk_call(0x04, &[C8(0), C8(0)], Mem16(0x0100)); // Version
+        body.extend(glk_call(0x04, &[C8(3), C8(b'A' as i8)], Mem16(0x0104))); // CharOutput 'A'
+        body.extend(glk_call(0x04, &[C8(15), C8(0)], Mem16(0x0108))); // Unicode
+        body.extend(glk_call(0x04, &[C8(2), C8(0)], Mem16(0x010C))); // LineInput (3a-2)
+        body.extend(glk_call(0x05, &[C8(0), C8(0), Zero, C8(0)], Mem16(0x0110))); // gestalt_ext Version
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0705, "glk version 0.7.5");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 2, "CharOutput = ExactPrint");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Unicode supported");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "LineInput not in 3a-1");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x0000_0705, "gestalt_ext mirrors gestalt");
+    }
+
+    #[test]
+    fn glk_stylehint_calls_are_accepted_silently() {
+        use asm::Op::{C8, Zero};
+        let mut body = glk_call(0xB0, &[C8(3), C8(3), C8(0), C8(1)], Zero); // stylehint_set
+        body.extend(glk_call(0xB1, &[C8(3), C8(3), C8(0)], Zero)); // stylehint_clear
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.diagnostics.is_empty(), "stylehints accepted: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_exit_halts_the_machine() {
+        use asm::Op::{C8, Zero};
+        let mut body = glk_call(0x01, &[], Zero); // glk_exit
+        body.extend(glk_call(0x80, &[C8(b'X' as i8)], Zero)); // poison: must not run
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.halted, "glk_exit halted the machine");
+        assert_eq!(backend_of(&m).text(1), "", "nothing printed after glk_exit");
     }
 }

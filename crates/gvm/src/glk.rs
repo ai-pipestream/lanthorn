@@ -189,8 +189,8 @@ pub trait GlkBackend {
 pub struct TestBackend {
     /// Reported display size.
     pub screen: (u32, u32),
-    /// Accumulated text per text-buffer window id.
-    text: BTreeMap<u32, String>,
+    /// Styled output runs per text-buffer window id, in print order.
+    runs: BTreeMap<u32, Vec<(GlkStyle, String)>>,
     /// Grid cells per text-grid window id, keyed `(row, col) -> char`.
     grid: BTreeMap<u32, BTreeMap<(u32, u32), char>>,
     /// Last laid-out rect per window id.
@@ -206,7 +206,7 @@ impl Default for TestBackend {
 impl TestBackend {
     /// A backend with a default 80×24 display.
     pub fn new() -> Self {
-        TestBackend { screen: (80, 24), text: BTreeMap::new(), grid: BTreeMap::new(), dims: BTreeMap::new() }
+        TestBackend { screen: (80, 24), runs: BTreeMap::new(), grid: BTreeMap::new(), dims: BTreeMap::new() }
     }
     /// A backend reporting a specific display size.
     pub fn with_screen(width: u32, height: u32) -> Self {
@@ -214,13 +214,23 @@ impl TestBackend {
     }
     /// Accumulated text for one text-buffer window (empty if none).
     pub fn text(&self, win: u32) -> String {
-        self.text.get(&win).cloned().unwrap_or_default()
+        self.runs
+            .get(&win)
+            .map(|rs| rs.iter().map(|(_, s)| s.as_str()).collect())
+            .unwrap_or_default()
+    }
+    /// The styled output runs recorded for one text-buffer window.
+    pub fn runs(&self, win: u32) -> Vec<(GlkStyle, String)> {
+        self.runs.get(&win).cloned().unwrap_or_default()
     }
     /// All text-buffer windows' text concatenated in window-id order — the
     /// migration replacement for `BufferOutput::buf` (there is one window in the
     /// migrated tests, so this is exactly that window's text).
     pub fn all_text(&self) -> String {
-        self.text.values().cloned().collect()
+        self.runs
+            .values()
+            .flat_map(|rs| rs.iter().map(|(_, s)| s.as_str()))
+            .collect()
     }
     /// The resolved rect last reported for a window.
     pub fn rect(&self, win: u32) -> Option<Rect> {
@@ -245,7 +255,7 @@ impl GlkBackend for TestBackend {
     fn window_open(&mut self, id: u32, wintype: WinType) {
         match wintype {
             WinType::TextBuffer => {
-                self.text.entry(id).or_default();
+                self.runs.entry(id).or_default();
             }
             WinType::TextGrid => {
                 self.grid.entry(id).or_default();
@@ -254,7 +264,7 @@ impl GlkBackend for TestBackend {
         }
     }
     fn window_close(&mut self, id: u32) {
-        self.text.remove(&id);
+        self.runs.remove(&id);
         self.grid.remove(&id);
         self.dims.remove(&id);
     }
@@ -263,8 +273,8 @@ impl GlkBackend for TestBackend {
             self.dims.insert(id, rect);
         }
     }
-    fn put_text(&mut self, win: u32, _style: GlkStyle, s: &str) {
-        self.text.entry(win).or_default().push_str(s);
+    fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
+        self.runs.entry(win).or_default().push((style, s.to_string()));
     }
     fn grid_put(&mut self, win: u32, x: u32, y: u32, _style: GlkStyle, s: &str) {
         let cells = self.grid.entry(win).or_default();
@@ -278,8 +288,8 @@ impl GlkBackend for TestBackend {
         }
     }
     fn window_clear(&mut self, win: u32) {
-        if let Some(t) = self.text.get_mut(&win) {
-            t.clear();
+        if let Some(rs) = self.runs.get_mut(&win) {
+            rs.clear();
         }
     }
     fn as_any(&self) -> &dyn Any {
