@@ -1812,6 +1812,7 @@ fn main() {
                             // Fg swatch row (17 rects: 0-15 = ANSI, 16 = default).
                             for (i, rect) in rects.fg_swatches.iter().enumerate() {
                                 if hit(rect) {
+                                    if let Some(ed) = &mut state.style_editor { ed.color_target = false; }
                                     let value = if i < app::style_mru::ANSI_NAMES.len() {
                                         Some(app::style_mru::ANSI_NAMES[i].to_string())
                                     } else {
@@ -1825,6 +1826,7 @@ fn main() {
                             // Bg swatch row.
                             for (i, rect) in rects.bg_swatches.iter().enumerate() {
                                 if hit(rect) {
+                                    if let Some(ed) = &mut state.style_editor { ed.color_target = true; }
                                     let value = if i < app::style_mru::ANSI_NAMES.len() {
                                         Some(app::style_mru::ANSI_NAMES[i].to_string())
                                     } else {
@@ -1841,7 +1843,8 @@ fn main() {
                                     let hex = state.style_editor.as_ref()
                                         .and_then(|ed| ed.mru.get(i).cloned());
                                     if let Some(hex) = hex {
-                                        apply_action(Action::StyleSetColor { is_bg: false, value: Some(hex) }, &mut state, &mut mapper);
+                                        let is_bg = state.style_editor.as_ref().map_or(false, |e| e.color_target);
+                                        apply_action(Action::StyleSetColor { is_bg, value: Some(hex) }, &mut state, &mut mapper);
                                     }
                                     continue 'event_loop;
                                 }

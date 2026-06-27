@@ -221,7 +221,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
 
         // Row 2: fg swatch row (16 ANSI + default).
         if prop.height > 2 {
-            draw_swatch_row(buf, prop, prop.y + 2, fg_val, &mut fg_swatches, normal_style, active_style);
+            let show_fg_cursor = ed.focus == StyleFocus::Fg;
+            draw_swatch_row(buf, prop, prop.y + 2, fg_val, &mut fg_swatches, normal_style, active_style, show_fg_cursor, ed.swatch_cursor);
         }
 
         // Row 4: bg label.
@@ -236,7 +237,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
 
         // Row 5: bg swatch row.
         if prop.height > 5 {
-            draw_swatch_row(buf, prop, prop.y + 5, bg_val, &mut bg_swatches, normal_style, active_style);
+            let show_bg_cursor = ed.focus == StyleFocus::Bg;
+            draw_swatch_row(buf, prop, prop.y + 5, bg_val, &mut bg_swatches, normal_style, active_style, show_bg_cursor, ed.swatch_cursor);
         }
 
         // Row 7: MRU row (shared across fg/bg).
@@ -329,6 +331,9 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
 /// `active_style` when selected.  Always pushes exactly 17 rects into `rects`
 /// (indices 0–15 = ANSI colors, 16 = default); out-of-bounds cells get a
 /// zero-width rect so Task 6 mouse hit-testing skips them cleanly.
+///
+/// When `show_cursor` is true, the cell at `swatch_cursor` gets an underline
+/// to indicate keyboard-navigation position.
 fn draw_swatch_row(
     buf: &mut Buffer,
     prop: Rect,
@@ -337,18 +342,24 @@ fn draw_swatch_row(
     rects: &mut Vec<Rect>,
     normal_style: Style,
     active_style: Style,
+    show_cursor: bool,
+    swatch_cursor: usize,
 ) {
     let mut x = prop.x + 1;
 
-    for name in crate::style_mru::ANSI_NAMES {
+    for (idx, name) in crate::style_mru::ANSI_NAMES.iter().enumerate() {
         if x + 2 <= prop.right() {
             let is_selected = current_val == *name;
+            let is_cursor = show_cursor && swatch_cursor == idx;
             let color = crate::colors::parse_named_color(name).unwrap_or(Color::Reset);
-            let cell_style = if is_selected {
+            let mut cell_style = if is_selected {
                 Style::new().bg(color).fg(Color::White).add_modifier(Modifier::BOLD)
             } else {
                 Style::new().bg(color)
             };
+            if is_cursor {
+                cell_style = cell_style.add_modifier(Modifier::UNDERLINED);
+            }
             let sym0 = if is_selected { "▸" } else { " " };
             if let Some(cell) = buf.cell_mut((x, row_y)) { cell.set_symbol(sym0).set_style(cell_style); }
             if let Some(cell) = buf.cell_mut((x + 1, row_y)) { cell.set_symbol(" ").set_style(cell_style); }
@@ -359,10 +370,14 @@ fn draw_swatch_row(
         }
     }
 
-    // Default cell (1 char).
+    // Default cell (1 char); index == ANSI_NAMES.len() == 16.
     if x + 1 <= prop.right() {
         let is_selected = current_val == "default";
-        let dflt_style = if is_selected { active_style } else { normal_style };
+        let is_cursor = show_cursor && swatch_cursor == crate::style_mru::ANSI_NAMES.len();
+        let mut dflt_style = if is_selected { active_style } else { normal_style };
+        if is_cursor {
+            dflt_style = dflt_style.add_modifier(Modifier::UNDERLINED);
+        }
         if let Some(cell) = buf.cell_mut((x, row_y)) { cell.set_symbol("d").set_style(dflt_style); }
         rects.push(Rect::new(x, row_y, 1, 1));
     } else {

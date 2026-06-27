@@ -218,6 +218,12 @@ pub enum Action {
     /// Set the fg (is_bg=false) or bg (is_bg=true) of the active selector.
     /// `value` is a color token (ANSI name, #rrggbb hex, or "default"); `None` clears to default.
     StyleSetColor { is_bg: bool, value: Option<String> },
+    /// Commit the custom hex buffer to the slot chosen by `color_target`.
+    StyleCommitCustom,
+    /// Move the swatch cursor by `d` (-1 or +1), wrapping over 17 cells.
+    StyleSwatchNav(i32),
+    /// Apply the swatch at `swatch_cursor` to the `color_target` slot.
+    StyleSwatchPick,
     /// Append a character to the style-editor custom hex buffer.
     StyleCustomChar(char),
     /// Delete the last character from the style-editor custom hex buffer.
@@ -1081,7 +1087,7 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
             KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                 let buf = ed_ref.map(|e| e.custom_buf.as_str()).unwrap_or("");
                 return if crate::style_mru::is_valid_color_token(buf) {
-                    Action::StyleSetColor { is_bg: false, value: Some(buf.to_string()) }
+                    Action::StyleCommitCustom
                 } else {
                     Action::None
                 };
@@ -1097,6 +1103,18 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
         KeyCode::BackTab => Action::StyleFocusCycle(-1),
         KeyCode::Left if focus == StyleFocus::Attrs => Action::StyleAttrChipNav(-1),
         KeyCode::Right if focus == StyleFocus::Attrs => Action::StyleAttrChipNav(1),
+        KeyCode::Left if focus == StyleFocus::Fg || focus == StyleFocus::Bg => Action::StyleSwatchNav(-1),
+        KeyCode::Right if focus == StyleFocus::Fg || focus == StyleFocus::Bg => Action::StyleSwatchNav(1),
+        KeyCode::Enter if key.modifiers == KeyModifiers::NONE
+            && (focus == StyleFocus::Fg || focus == StyleFocus::Bg) =>
+        {
+            Action::StyleSwatchPick
+        }
+        KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE
+            && (focus == StyleFocus::Fg || focus == StyleFocus::Bg) =>
+        {
+            Action::StyleSwatchPick
+        }
         KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE
             && focus == StyleFocus::Attrs =>
         {
@@ -2222,6 +2240,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 let cur = order.iter().position(|f| *f == ed.focus).unwrap_or(0) as i32;
                 let n = order.len() as i32;
                 ed.focus = order[((cur + d).rem_euclid(n)) as usize];
+                match ed.focus {
+                    StyleFocus::Fg => ed.color_target = false,
+                    StyleFocus::Bg => ed.color_target = true,
+                    _ => {}
+                }
             }
         }
 
@@ -2234,17 +2257,35 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::StyleSetColor { is_bg, value } => {
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &mut state.style_editor {
-                let sel = ed.selectors[ed.active].to_string();
-                let decl = ed.doc.colors.selectors.entry(sel).or_default();
-                let slot = if is_bg { &mut decl.bg } else { &mut decl.fg };
-                *slot = value.clone();
-                if let Some(v) = &value {
-                    if v.starts_with('#') {
-                        crate::style_mru::push_mru(&mut ed.mru, v);
-                    }
+            apply_style_set_color(state, is_bg, value, &dir);
+        }
+
+        Action::StyleCommitCustom => {
+            if let Some(ed) = &state.style_editor {
+                if crate::style_mru::is_valid_color_token(&ed.custom_buf) {
+                    let is_bg = ed.color_target;
+                    let value = if ed.custom_buf == "default" { None } else { Some(ed.custom_buf.clone()) };
+                    let dir = state.config.user_dir.clone();
+                    apply_style_set_color(state, is_bg, value, &dir);
+                    if let Some(ed) = &mut state.style_editor { ed.custom_buf.clear(); }
                 }
-                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleSwatchNav(d) => {
+            if let Some(ed) = &mut state.style_editor {
+                let n = crate::style_mru::ANSI_NAMES.len() as i32 + 1; // +1 for default cell
+                ed.swatch_cursor = ((ed.swatch_cursor as i32 + d).rem_euclid(n)) as usize;
+            }
+        }
+
+        Action::StyleSwatchPick => {
+            if let Some(ed) = &state.style_editor {
+                let is_bg = ed.color_target;
+                let cur = ed.swatch_cursor;
+                let value = crate::style_mru::ANSI_NAMES.get(cur).map(|s| s.to_string());
+                let dir = state.config.user_dir.clone();
+                apply_style_set_color(state, is_bg, value, &dir);
             }
         }
 
@@ -2641,6 +2682,8 @@ pub fn open_style_editor(state: &mut AppState) {
         custom_buf: String::new(),
         mru: crate::style_mru::load_mru(&user_dir),
         attr_cursor: 0,
+        color_target: false,
+        swatch_cursor: 0,
     });
     state.dialog_focus = 0;
 }
@@ -2652,6 +2695,29 @@ pub fn open_style_editor(state: &mut AppState) {
 pub fn recompute_style_preview(ed: &mut crate::state::StyleEditorState, user_dir: &std::path::Path) {
     let (cs, _set, _w) = crate::style::resolve(&ed.doc, user_dir);
     ed.preview = cs;
+}
+
+/// Set the fg or bg color for the active selector, push hex to MRU, recompute preview.
+///
+/// Shared by `StyleSetColor`, `StyleCommitCustom`, and `StyleSwatchPick`.
+pub(crate) fn apply_style_set_color(
+    state: &mut AppState,
+    is_bg: bool,
+    value: Option<String>,
+    user_dir: &std::path::Path,
+) {
+    if let Some(ed) = &mut state.style_editor {
+        let sel = ed.selectors[ed.active].to_string();
+        let decl = ed.doc.colors.selectors.entry(sel).or_default();
+        let slot = if is_bg { &mut decl.bg } else { &mut decl.fg };
+        *slot = value.clone();
+        if let Some(v) = &value {
+            if v.starts_with('#') {
+                crate::style_mru::push_mru(&mut ed.mru, v);
+            }
+        }
+        recompute_style_preview(ed, user_dir);
+    }
 }
 
 /// Return the ConfigPathField for a row, if the row is a path type.
@@ -5852,5 +5918,33 @@ mod tests {
             style_dialog_action(&rects, 0, 0).is_none(),
             "miss must return None"
         );
+    }
+
+    #[test]
+    fn custom_commit_targets_bg_when_color_target_is_bg() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.color_target = true; // bg
+            ed.custom_buf = "#abcdef".into();
+        }
+        apply_action(Action::StyleCommitCustom, &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        let sel = ed.selectors[ed.active].to_string();
+        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.clone()), Some("#abcdef".into()));
+        assert!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.clone()).is_none());
+    }
+
+    #[test]
+    fn swatch_pick_sets_color_for_target_and_default_clears() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        { let ed = s.style_editor.as_mut().unwrap(); ed.color_target = false; ed.swatch_cursor = 16; } // default cell
+        apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        let sel = ed.selectors[ed.active].to_string();
+        // default cell clears fg
+        assert!(ed.doc.colors.selectors.get(&sel).map_or(true, |d| d.fg.is_none()));
     }
 }

@@ -528,6 +528,12 @@ pub struct StyleEditorState {
     /// Which attribute chip (0-4) is selected when focus == Attrs.
     /// Order: Bold=0, Italic=1, Underline=2, Dim=3, Reversed=4.
     pub attr_cursor: usize,
+    /// Which color slot the next custom-entry commit or swatch pick targets.
+    /// `false` = fg, `true` = bg. Follows focus: Fg→false, Bg→true.
+    pub color_target: bool,
+    /// Cursor position within the swatch row (0..=16; 16 = default cell).
+    /// Active when focus == Fg or focus == Bg.
+    pub swatch_cursor: usize,
 }
 
 // ── Config screen state ───────────────────────────────────────────────────────
