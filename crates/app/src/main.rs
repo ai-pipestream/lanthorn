@@ -1299,7 +1299,7 @@ fn main() {
 
         // Poll for a key event. Use a shorter timeout while a tidy job is in flight
         // so the pulsing border animates at ~30fps; otherwise use the normal 50ms.
-        let poll_ms = if state.tidy_job.is_some() || state.sound_pulse.is_some() { TIDY_POLL_MS } else { 50 };
+        let poll_ms = if state.has_active_animation() { TIDY_POLL_MS } else { 50 };
         let event_ready = match poll(Duration::from_millis(poll_ms)) {
             Ok(r) => r,
             Err(e) => {

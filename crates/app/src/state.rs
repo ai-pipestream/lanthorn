@@ -313,6 +313,29 @@ pub struct SoundPulse {
     pub started: std::time::Instant,
 }
 
+// ── Smooth transcript scroll ─────────────────────────────────────────────────
+
+/// An in-flight smooth-scroll animation for the transcript. `transcript_scroll`
+/// remains the logical target; this eases the *displayed* offset from `from` to
+/// `to` over the tween. Driven by the run loop, which sets `transcript_scroll = to`
+/// and clears this once the tween is `done()`.
+#[derive(Debug)]
+pub struct ScrollAnim {
+    /// Displayed offset (rows) when the animation was armed.
+    pub from: f64,
+    /// Target offset (rows) the animation eases toward.
+    pub to: f64,
+    /// The timing curve.
+    pub tween: crate::anim::Tween,
+}
+
+impl ScrollAnim {
+    /// The current displayed offset: `lerp(from, to, tween.progress())`.
+    pub fn current(&self) -> f64 {
+        crate::anim::lerp(self.from, self.to, self.tween.progress())
+    }
+}
+
 // ── Background tidy job ───────────────────────────────────────────────────────
 
 /// An in-flight background tidy job. The worker thread runs the relayout on a
@@ -708,6 +731,9 @@ pub struct AppState {
     pub tidy_job: Option<TidyJob>,
     /// In-flight one-shot story-border flash, if any. Armed by a beep event; expires after SOUND_PULSE_MS.
     pub sound_pulse: Option<SoundPulse>,
+    /// In-flight smooth transcript-scroll animation, if any. `transcript_scroll`
+    /// holds the target; this eases the displayed offset toward it.
+    pub scroll_anim: Option<ScrollAnim>,
     /// Monotonically increasing generation counter. Bumped each time the real graph is mutated
     /// by an applied turn. Used to detect stale tidy results (job's gen vs current gen).
     pub graph_gen: u64,
@@ -943,6 +969,7 @@ impl Default for AppState {
             tidy_anim: None,
             tidy_job: None,
             sound_pulse: None,
+            scroll_anim: None,
             graph_gen: 0,
             viewed_layer: None,
             show_inspector: false,
@@ -1004,6 +1031,13 @@ impl Default for AppState {
 }
 
 impl AppState {
+    /// Return true if any time-based animation/effect is in flight, so the run
+    /// loop should fast-poll (and redraw) to advance it without input. Covers the
+    /// tidy border pulse, the sound-beep flash, and smooth transcript scroll.
+    pub fn has_active_animation(&self) -> bool {
+        self.tidy_job.is_some() || self.sound_pulse.is_some() || self.scroll_anim.is_some()
+    }
+
     /// Return true if any modal, dialog, or overlay is currently open.
     ///
     /// Used to suppress the story input cursor while an overlay is covering the pane.
@@ -1499,6 +1533,44 @@ mod tests {
         assert!(s.sound_pulse.is_none(), "no pulse by default");
         s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
         assert!(matches!(s.sound_pulse.as_ref().map(|p| p.kind), Some(Beep::High)));
+    }
+
+    #[test]
+    fn has_active_animation_reflects_sources() {
+        use zvm::cpu::exec::Beep;
+        let mut s = AppState::default();
+        assert!(!s.has_active_animation(), "idle state has no active animation");
+
+        s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
+        assert!(s.has_active_animation(), "sound pulse counts as active");
+        s.sound_pulse = None;
+
+        s.scroll_anim = Some(ScrollAnim {
+            from: 0.0,
+            to: 5.0,
+            tween: crate::anim::Tween::new(
+                std::time::Duration::from_millis(100),
+                crate::anim::Easing::EaseOut,
+            ),
+        });
+        assert!(s.has_active_animation(), "scroll anim counts as active");
+        s.scroll_anim = None;
+        assert!(!s.has_active_animation());
+    }
+
+    #[test]
+    fn scroll_anim_current_interpolates() {
+        let a = ScrollAnim {
+            from: 2.0,
+            to: 10.0,
+            tween: crate::anim::Tween::new(
+                std::time::Duration::from_millis(100),
+                crate::anim::Easing::Linear,
+            ),
+        };
+        // Right after construction progress is ~0, so current() is near `from`.
+        let c = a.current();
+        assert!(c >= 2.0 && c < 3.0, "current near from at start, got {c}");
     }
 
     #[test]
