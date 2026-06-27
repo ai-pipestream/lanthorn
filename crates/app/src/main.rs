@@ -49,7 +49,7 @@ use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
 use app::hints;
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, SoundPulse, TidyJob, TranscriptFilter, TranscriptKind};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, SoundPulse, StyleRun, TidyJob, TranscriptFilter, TranscriptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -976,7 +976,7 @@ fn main() {
     // Load mapper (and optionally restore the game save) from the archive.
     // Migration: if no archive exists but a legacy .map.json does, load that.
     // use_default_map = true: also fall back to legacy map when no archive.
-    let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>)> = None;
+    let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>)> = None;
     // Rewind/replay history carried from the archive when the game is auto-restored.
     let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
     // Command history (Up/Down recall) carried from the archive, always loaded.
@@ -996,7 +996,7 @@ fn main() {
                         // Restore the saved screen so a once-split game's upper
                         // window (status line) shows after auto-load.
                         if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
-                        startup_transcript = Some((ac.transcript, ac.transcript_kinds));
+                        startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs));
                         startup_history = ac.history;
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
@@ -1120,9 +1120,10 @@ fn main() {
     }
 
     // If an archived transcript was loaded on startup, replace the fresh one.
-    if let Some((lines, kinds)) = startup_transcript {
+    if let Some((lines, kinds, runs)) = startup_transcript {
         state.transcript = lines;
         state.transcript_kinds = kinds;
+        state.transcript_runs = runs;
     }
     if !startup_history.is_empty() {
         state.history = startup_history;
@@ -1505,7 +1506,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
                                 break;
                             }
                             QuitDialogAction::Quit => {
@@ -1542,7 +1543,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
                                 break;
                             } else if in_quit {
                                 break;
@@ -2341,7 +2342,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history) {
+                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -2374,6 +2375,7 @@ fn main() {
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
                                 state.transcript_kinds = ac.transcript_kinds;
+                                state.transcript_runs = ac.transcript_runs;
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
@@ -2622,6 +2624,7 @@ fn main() {
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
+                                    state.transcript_runs = ac.transcript_runs;
                                     state.history = ac.history;
                                     // Named-slot archives carry no command history; only
                                     // adopt it when present so a slot load doesn't wipe it.
@@ -2688,6 +2691,9 @@ fn main() {
                                     app::history::rebuild_transcript(&state.history, r.idx);
                                 state.transcript = lines;
                                 state.transcript_kinds = kinds;
+                                // History replay carries no style runs; keep the
+                                // parallel vec length-synced (unstyled rows).
+                                state.transcript_runs = vec![Vec::new(); state.transcript.len()];
                                 state.turns = plan.turn;
                                 state.graph_gen = state.graph_gen.wrapping_add(1);
                                 // Re-observe current location (mirror the restore path).
@@ -2823,7 +2829,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history) {
+        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }
@@ -2894,7 +2900,7 @@ fn dispatch_slash_outcome(
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
-                    save_named(save_dir, ifid, name, &*mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds)
+                    save_named(save_dir, ifid, name, &*mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -2911,7 +2917,7 @@ fn dispatch_slash_outcome(
                                 .unwrap_or(0),
                         ),
                     };
-                    save_archive_meta(arc_file, &*mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history)
+                    save_archive_meta(arc_file, &*mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history)
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -2955,6 +2961,7 @@ fn dispatch_slash_outcome(
                                     *mapper = ac.mapper;
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
+                                    state.transcript_runs = ac.transcript_runs;
                                     state.history = ac.history;
                                     if !ac.command_history.is_empty() {
                                         state.command_history = ac.command_history;
@@ -3118,6 +3125,7 @@ fn reset_game(
             state.suggestion_active = false;
             state.transcript.clear();
             state.transcript_kinds.clear();
+            state.transcript_runs.clear();
             state.transcript_scroll = 0;
             if clear_map {
                 *mapper = Mapper::default();
@@ -3177,7 +3185,7 @@ fn handle_saves_prompt(
                 }
                 return;
             }
-            match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds) {
+            match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs) {
                 Ok(()) => {
                     state.push_transcript(&format!("[Saved as: {}]", buf));
                     // Refresh saves list.
@@ -3393,7 +3401,7 @@ fn post_turn_bookkeeping(
                     .unwrap_or(0),
             ),
         };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history) {
+        if let Err(e) = save_archive_meta(arc_file, mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             state.push_transcript(&format!("[Auto-save failed: {}]", e));
         }
     }
@@ -3891,6 +3899,9 @@ fn apply_launch_resume(
             if let Some(scr) = screen { session.machine.screen = scr; }
             state.transcript = lines;
             state.transcript_kinds = kinds;
+            // The launch-resume stash carries no style runs; keep the parallel
+            // vec length-synced (unstyled rows).
+            state.transcript_runs = vec![Vec::new(); state.transcript.len()];
             // Re-observe current location (same as Action::RestoreGame).
             let loc = zvm::current_location(&session.machine);
             if let Some(snap) = loc {

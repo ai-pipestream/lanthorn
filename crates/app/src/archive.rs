@@ -60,6 +60,10 @@ pub struct Meta {
 struct TranscriptData {
     lines: Vec<String>,
     kinds: Vec<crate::state::TranscriptKind>,
+    /// Per-line Z-machine style runs, parallel to `lines`. Defaults to empty for
+    /// archives written before this field existed (back-compatible load).
+    #[serde(default)]
+    runs: Vec<Vec<crate::state::StyleRun>>,
 }
 
 /// Z-machine screen state written to `screen.json` (zvm has no serde, so we
@@ -133,6 +137,9 @@ pub struct ArchiveContents {
     pub transcript: Vec<String>,
     /// Parallel kind tag for each transcript entry (same length as `transcript`).
     pub transcript_kinds: Vec<crate::state::TranscriptKind>,
+    /// Parallel per-line Z-machine style runs (same length as `transcript`;
+    /// empty per line for archives that pre-date this field).
+    pub transcript_runs: Vec<Vec<crate::state::StyleRun>>,
     /// Per-turn rewind/replay history (empty for archives without `history/`).
     pub history: Vec<crate::history::TurnRecord>,
     /// Saved Z-machine screen state (None for archives without `screen.json`).
@@ -154,6 +161,7 @@ pub fn save_archive(
     machine: &zvm::cpu::exec::Machine,
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
+    transcript_runs: &[Vec<crate::state::StyleRun>],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
@@ -163,7 +171,7 @@ pub fn save_archive(
         name: None,
         turns: 0,
         saved_at: String::new(),
-    }, transcript, transcript_kinds, history, command_history)
+    }, transcript, transcript_kinds, transcript_runs, history, command_history)
 }
 
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
@@ -176,6 +184,7 @@ pub fn save_archive_meta(
     meta: Meta,
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
+    transcript_runs: &[Vec<crate::state::StyleRun>],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
@@ -208,13 +217,17 @@ pub fn save_archive_meta(
     // player's own Input), dropping Meta/Warning lines (slash-command output,
     // diagnostics) that aren't part of the game's narrative.
     use crate::state::TranscriptKind;
-    let (lines, kinds): (Vec<String>, Vec<TranscriptKind>) = transcript
-        .iter()
-        .zip(transcript_kinds.iter())
-        .filter(|(_, &k)| matches!(k, TranscriptKind::Story | TranscriptKind::Input))
-        .map(|(line, &k)| (line.clone(), k))
-        .unzip();
-    let td = TranscriptData { lines, kinds };
+    let mut lines: Vec<String> = Vec::new();
+    let mut kinds: Vec<TranscriptKind> = Vec::new();
+    let mut runs: Vec<Vec<crate::state::StyleRun>> = Vec::new();
+    for (i, (line, &k)) in transcript.iter().zip(transcript_kinds.iter()).enumerate() {
+        if matches!(k, TranscriptKind::Story | TranscriptKind::Input) {
+            lines.push(line.clone());
+            kinds.push(k);
+            runs.push(transcript_runs.get(i).cloned().unwrap_or_default());
+        }
+    }
+    let td = TranscriptData { lines, kinds, runs };
     let transcript_json =
         serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
@@ -322,16 +335,26 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     };
 
     // transcript.json — optional; older archives omit it, default to empty vecs.
-    let (transcript, transcript_kinds) = match zip.by_name(ENTRY_TRANSCRIPT) {
+    let (transcript, transcript_kinds, transcript_runs) = match zip.by_name(ENTRY_TRANSCRIPT) {
         Ok(mut entry) => {
             let mut buf = String::new();
             entry.read_to_string(&mut buf)?;
             match serde_json::from_str::<TranscriptData>(&buf) {
-                Ok(td) => (td.lines, td.kinds),
-                Err(_) => (Vec::new(), Vec::new()),
+                Ok(td) => {
+                    // Keep runs length-synced with lines: archives that pre-date
+                    // the runs field (or with a mismatched length) get one empty
+                    // run vec per line.
+                    let runs = if td.runs.len() == td.lines.len() {
+                        td.runs
+                    } else {
+                        vec![Vec::new(); td.lines.len()]
+                    };
+                    (td.lines, td.kinds, runs)
+                }
+                Err(_) => (Vec::new(), Vec::new(), Vec::new()),
             }
         }
-        Err(_) => (Vec::new(), Vec::new()),
+        Err(_) => (Vec::new(), Vec::new(), Vec::new()),
     };
 
     // command_history.json — optional; older archives omit it → empty vec.
@@ -418,7 +441,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history, screen, aux, command_history })
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history })
 }
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
@@ -467,7 +490,7 @@ mod tests {
         let expected = machine.save_quetzal();
 
         let path = temp_archive_path("qzl-from-babelmap");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save_archive");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save_archive");
         let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
         let _ = std::fs::remove_file(&path);
 
@@ -504,7 +527,7 @@ mod tests {
         machine.screen.cursor_col = 3;
 
         let path = temp_archive_path("screen-roundtrip");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
 
@@ -545,6 +568,7 @@ mod tests {
             &kinds,
             &[],
             &[],
+            &[],
         )
         .expect("save_archive_meta");
         let ac = load_archive(&path).expect("load");
@@ -581,7 +605,7 @@ mod tests {
         ];
 
         let path = temp_archive_path("history-rt");
-        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &history, &[])
+        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[], &history, &[])
             .expect("save_archive");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -608,7 +632,7 @@ mod tests {
         }
         let mapper = small_mapper();
         let path = temp_archive_path("history-v1");
-        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[], &[])
+        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
             .expect("save_archive without history");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -624,7 +648,7 @@ mod tests {
         }
         let cmds = vec!["look".to_string(), "open mailbox".to_string(), "/help".to_string()];
         let path = temp_archive_path("cmd-history-rt");
-        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &cmds)
+        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &[], &cmds)
             .expect("save_archive");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -640,7 +664,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let path = temp_archive_path("cmd-history-missing");
-        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[],
+        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &[],
             &["north".to_string()])
             .expect("save_archive");
 
@@ -693,7 +717,7 @@ mod tests {
         let expected_save = machine.save_quetzal();
 
         let path = temp_archive_path("roundtrip");
-        save_archive(&path, &mapper, &machine, &[], &[], &[], &[]).expect("save_archive");
+        save_archive(&path, &mapper, &machine, &[], &[], &[], &[], &[]).expect("save_archive");
 
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -822,6 +846,7 @@ mod tests {
             let td = TranscriptData {
                 lines: vec!["West of House".to_string(), "/help".to_string(), "You are standing...".to_string()],
                 kinds: vec![TranscriptKind::Story, TranscriptKind::Meta, TranscriptKind::Story],
+                runs: Vec::new(),
             };
             let transcript_json = serde_json::to_string(&td).unwrap();
             zip.start_file(ENTRY_TRANSCRIPT, options).unwrap();
@@ -836,6 +861,27 @@ mod tests {
         assert_eq!(ac.transcript, vec!["West of House", "/help", "You are standing..."]);
         assert_eq!(ac.transcript_kinds, vec![TranscriptKind::Story, TranscriptKind::Meta, TranscriptKind::Story]);
         assert_eq!(ac.transcript.len(), ac.transcript_kinds.len(), "vecs must be equal length");
+    }
+
+    #[test]
+    fn transcript_data_round_trips_runs() {
+        use crate::state::{StyleRun, TranscriptKind};
+        let td = TranscriptData {
+            lines: vec!["a".into(), "b".into()],
+            kinds: vec![TranscriptKind::Story, TranscriptKind::Input],
+            runs: vec![vec![StyleRun { start: 0, end: 1, bits: 0x02 }], vec![]],
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let back: TranscriptData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.runs, td.runs);
+    }
+
+    #[test]
+    fn old_transcript_json_loads_with_empty_runs() {
+        // JSON without a "runs" field (older archive)
+        let json = r#"{"lines":["x"],"kinds":["Story"]}"#;
+        let td: TranscriptData = serde_json::from_str(json).unwrap();
+        assert!(td.runs.is_empty());
     }
 
     // -------------------------------------------------------------------------
@@ -908,7 +954,7 @@ mod tests {
         let mut machine = dummy_machine();
         machine.aux_data.insert("hints".to_string(), vec![1, 2, 3]);
         let path = temp_archive_path("aux");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert_eq!(ac.aux.get("hints").map(|v| v.as_slice()), Some(&[1, 2, 3][..]));
@@ -918,7 +964,7 @@ mod tests {
     fn archive_without_aux_loads_empty_map() {
         let machine = dummy_machine(); // empty aux_data
         let path = temp_archive_path("noaux");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert!(ac.aux.is_empty());
