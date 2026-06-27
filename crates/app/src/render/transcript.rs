@@ -475,6 +475,49 @@ pub(crate) fn format_suggestion_line(suggestions: &[String], highlight_idx: usiz
         .join("  ")
 }
 
+/// Like `format_suggestion_line`, but horizontally scrolls the line to fit
+/// `width` columns while keeping the highlighted `[bracketed]` entry visible.
+///
+/// When the full line fits, it is returned unchanged. Otherwise the window is
+/// scrolled the minimum amount needed to bring the highlighted entry's right
+/// edge into view, so Tabbing toward off-screen candidates pulls them into the
+/// window instead of dropping the brackets off the right edge.
+pub(crate) fn visible_suggestion_line(
+    suggestions: &[String],
+    highlight_idx: usize,
+    width: usize,
+) -> String {
+    if suggestions.is_empty() || width == 0 {
+        return String::new();
+    }
+    let idx = highlight_idx % suggestions.len();
+    let line = format_suggestion_line(suggestions, highlight_idx);
+    let total = line.chars().count();
+    if total <= width {
+        return line;
+    }
+
+    // Char span of the highlighted entry within the joined line: each preceding
+    // entry contributes its word length plus a 2-space separator; the
+    // highlighted entry itself adds 2 chars for the surrounding brackets.
+    let hl_start: usize = suggestions[..idx]
+        .iter()
+        .map(|w| w.chars().count() + 2)
+        .sum();
+    let hl_end = hl_start + suggestions[idx].chars().count() + 2;
+    // Scroll just enough to keep the highlighted entry's end on screen. For an
+    // entry wider than the window, anchor on its start so the opening bracket
+    // shows.
+    let offset = if hl_end <= width {
+        0
+    } else if hl_end - hl_start >= width {
+        hl_start
+    } else {
+        hl_end - width
+    };
+    line.chars().skip(offset).take(width).collect()
+}
+
 /// Format the inventory strip content: "Inv: item1, item2, ..." truncated to `width`.
 ///
 /// Returns None when the strip should not show (show_inventory is false).
@@ -791,10 +834,11 @@ fn render_middle(
         let hint_style = state.colors.suggestion;
         draw_str_clipped(buf, area.x, suggestion_y, hint_trunc, hint_style, area);
     } else if has_suggestions && area.height >= 2 && suggestion_y > area.y {
-        let sug_line = format_suggestion_line(&state.suggestions, state.suggestion_idx);
-        let sug_trunc = truncate_line(&sug_line, w);
+        // Horizontally scroll so the highlighted entry stays on screen rather
+        // than being clipped off the right edge.
+        let sug_line = visible_suggestion_line(&state.suggestions, state.suggestion_idx, w);
         let sug_style = state.colors.suggestion;
-        draw_str_clipped(buf, area.x, suggestion_y, sug_trunc, sug_style, area);
+        draw_str_clipped(buf, area.x, suggestion_y, &sug_line, sug_style, area);
     }
 
     // ── Transcript body ───────────────────────────────────────────────────────
@@ -1631,6 +1675,45 @@ mod tests {
         // idx=2 wraps to 0
         let line = format_suggestion_line(&sug, 2);
         assert!(line.starts_with("[north]"), "idx wraps: {}", line);
+    }
+
+    // ── visible_suggestion_line (horizontal scroll) tests ────────────────────
+    #[test]
+    fn visible_suggestion_line_returns_full_when_it_fits() {
+        let sug = vec!["north".to_string(), "south".to_string()];
+        let full = format_suggestion_line(&sug, 0);
+        // Plenty of width: unchanged.
+        assert_eq!(visible_suggestion_line(&sug, 0, 80), full);
+    }
+
+    #[test]
+    fn visible_suggestion_line_no_scroll_when_highlight_near_start() {
+        let sug = vec!["aa".to_string(), "bb".to_string(), "cccccccc".to_string()];
+        // Full line: "[aa]  bb  cccccccc" (18 chars). Width 10 overflows, but the
+        // highlighted entry sits at the start, so no scroll is needed.
+        let out = visible_suggestion_line(&sug, 0, 10);
+        assert!(out.starts_with("[aa]"), "highlight at start stays visible: {out:?}");
+        assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn visible_suggestion_line_scrolls_to_keep_highlight_visible() {
+        let sug = vec!["aaaa".to_string(), "bbbb".to_string(), "cccc".to_string()];
+        // Full line: "aaaa  bbbb  [cccc]" (18 chars). At width 10 the highlighted
+        // last entry would be clipped off the right — it must scroll into view.
+        let out = visible_suggestion_line(&sug, 2, 10);
+        assert!(out.contains("[cccc]"), "highlighted entry must stay on screen: {out:?}");
+        assert_eq!(out.chars().count(), 10);
+    }
+
+    #[test]
+    fn visible_suggestion_line_entry_wider_than_window_shows_opening_bracket() {
+        let sug = vec!["xx".to_string(), "supercalifragilistic".to_string()];
+        // The highlighted entry alone exceeds the window; anchor on its start so
+        // the opening bracket is visible.
+        let out = visible_suggestion_line(&sug, 1, 8);
+        assert!(out.starts_with("[super"), "anchors on the opening bracket: {out:?}");
+        assert_eq!(out.chars().count(), 8);
     }
 
     #[test]
