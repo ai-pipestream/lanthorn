@@ -21,7 +21,7 @@ Consequences: names are inconsistent (`center`, `tidy`, `zoom`, `panh` vs `open-
 
 One **command registry** holds every command's metadata and dispatch. The parser looks a command up by name and runs its dispatch closure with the remaining tokens. Key bindings become data — `(context, key) → command-string` — resolved on keypress by feeding the string to the **same parser**. The `Command` enum is retired as the naming/binding layer; execution still flows through the existing `Action` enum (via `SlashOutcome::Action`) and the existing `SlashOutcome` variants.
 
-Directional/variant commands collapse into **parametric** commands; the default keymap supplies the arguments per key. This shrinks ~55 enum variants to ~40 verb-noun commands.
+Directional/variant commands collapse into **parametric** commands; the default keymap supplies the arguments per key. This collapses ~55 enum variants to 48 verb-noun commands (the directional variants become key bindings, not separate commands).
 
 Delivered in three waves, each leaving the app green and usable:
 
