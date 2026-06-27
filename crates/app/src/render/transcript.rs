@@ -260,6 +260,36 @@ pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
     rows
 }
 
+/// Like `wrap_line`, but every continuation row after the first is prefixed
+/// with `indent` spaces so wrapped text hangs under the first row's content.
+pub(crate) fn wrap_line_hanging(line: &str, width: u16, indent: u16) -> Vec<String> {
+    let indent = (indent as usize).min(width.saturating_sub(1) as usize);
+    if width == 0 || (line.chars().count() as u16) <= width {
+        return wrap_line(line, width);
+    }
+    // Wrap the body at the reduced width, then re-prefix continuations.
+    let first = wrap_line(line, width);
+    let mut out: Vec<String> = Vec::new();
+    for (i, row) in first.into_iter().enumerate() {
+        if i == 0 {
+            out.push(row);
+        } else {
+            // Re-wrap continuation content within (width - indent) to keep the
+            // hang stable, prefixing the indent.
+            let pad = " ".repeat(indent);
+            for sub in wrap_line(&row, width.saturating_sub(indent as u16)) {
+                out.push(format!("{pad}{sub}"));
+            }
+        }
+    }
+    out
+}
+
+/// Count leading ASCII spaces in `s`.
+pub(crate) fn leading_spaces(s: &str) -> u16 {
+    s.chars().take_while(|c| *c == ' ').count() as u16
+}
+
 /// Columns reserved at the left of a META line for the gutter marker (`▏` + space).
 pub(crate) const META_GUTTER: u16 = 2;
 
@@ -288,7 +318,12 @@ pub(crate) fn wrap_lines_kinded(
                 TranscriptKind::Meta | TranscriptKind::Warning => width.saturating_sub(META_GUTTER),
                 TranscriptKind::Story | TranscriptKind::Input => width,
             };
-            wrap_line(line, w).into_iter().map(move |row| (row, kind, style))
+            let rows = match kind {
+                TranscriptKind::Meta | TranscriptKind::Warning =>
+                    wrap_line_hanging(line, w, leading_spaces(line).max(2)),
+                TranscriptKind::Story | TranscriptKind::Input => wrap_line(line, w),
+            };
+            rows.into_iter().map(move |row| (row, kind, style))
         })
         .collect()
 }
@@ -896,9 +931,10 @@ mod tests {
         // Input: full width 8 (no gutter) → unsplit.
         let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, 8);
         assert_eq!(i.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
-        // Warning: wraps to width-2 = 6 like Meta.
+        // Warning: wraps to width-2 = 6 like Meta; continuation gets 2-space
+        // hanging indent (leading_spaces("abcdefgh")=0, .max(2)=2).
         let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, 8);
-        assert_eq!(w.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
+        assert_eq!(w.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
     }
 
     fn fields_score() -> StatusFields {
@@ -1059,10 +1095,12 @@ mod tests {
     #[test]
     fn meta_lines_wrap_narrower_and_carry_kind() {
         // An 8-char wordless line: STORY fits in width 8; META wraps to width-2 = 6.
+        // Continuation gets a 2-space hanging indent (leading_spaces("abcdefgh")=0,
+        // .max(2)=2).
         let transcript = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
         let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, 8);
-        assert_eq!(m.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "gh"]);
+        assert_eq!(m.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
         assert!(m.iter().all(|(_, k, _)| matches!(k, TranscriptKind::Meta)));
         let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, 8);
         assert_eq!(s.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
@@ -2086,5 +2124,18 @@ mod tests {
     fn draw_str_highlighted_query_longer_than_text_no_panic() {
         let row = highlighted_row("hi", "hello world", 10);
         assert!(row.contains('h'), "text glyphs must still appear; got: {:?}", row);
+    }
+
+    #[test]
+    fn hanging_indent_wraps_continuations() {
+        // A 2-space-indented line longer than width wraps with continuations
+        // indented 2 spaces.
+        let line = "  abcd efgh ijkl mnop";
+        let rows = wrap_line_hanging(line, 10, 2);
+        assert!(rows.len() >= 2);
+        assert!(rows[0].starts_with("  abcd"), "first row keeps original indent");
+        for cont in &rows[1..] {
+            assert!(cont.starts_with("  "), "continuation '{cont}' is indented 2");
+        }
     }
 }
