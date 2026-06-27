@@ -81,8 +81,9 @@ and unsupported; v1/v2 are not supported.)
 ### Map navigation & inspection
 - **Mouse support** — click a room for a story-info panel (name, notes, exits,
   objects); right-click for layout diagnostics; middle-drag to pan.
-- **Mouse wheel** pans the map (Shift = horizontal, Ctrl = zoom) and scrolls the
-  transcript.
+- **Mouse wheel** pans the map (Shift = horizontal, Ctrl = zoom) and scrolls
+  every scrollable surface — the transcript and the lists inside modals (saves,
+  file browser, gallery, hotkey dialog, …).
 - **Room inspector** overlay — id, name, layer, position, and per-edge
   dropped-constraint flags for understanding layout decisions.
 - Pane focus with clear visual highlighting; Tab / Shift-Tab cycle the layout
@@ -92,7 +93,11 @@ and unsupported; v1/v2 are not supported.)
 - **Verb/noun menu** — a two-pane token palette of common verbs and in-scope
   nouns; pick tokens to build a command (multi-noun via prepositions).
 - **Tab autocomplete** from the story's dictionary plus nouns mentioned in the
-  current room, with a live suggestion line.
+  current room. A live suggestion line shows the candidates with the active one
+  bracketed: **Tab** cycles forward and **Shift-Tab** backward, the bracket
+  always tracks the word currently on the command line, and the line scrolls
+  horizontally to keep the highlighted candidate visible when the list overflows
+  the width.
 - **Inventory panel** — a toggleable strip of carried items.
 - **In-game hints** — `/hint` opens a modal that runs a companion *Invisiclues*
   `.z5` in a second Z-machine session (the main game pauses): navigate its
@@ -145,6 +150,21 @@ and unsupported; v1/v2 are not supported.)
 - **Color schemes** — recolor rooms, connectors, and chrome from a
   [Ghostty](https://ghostty.org) theme file or a built-in (mono / high-contrast /
   tomorrow-night), with per-element overrides. Defaults to your terminal colors.
+  `/print-colors` prints the active scheme to the transcript (optionally
+  rendering each entry in its own color).
+- **Live style editor** — a full-screen click-to-edit editor (`F3` or `/style`)
+  for the entire theme: pick any element from a preview board, then set its
+  foreground/background from a swatch grid (ANSI palette, custom hex, or
+  terminal-default) and toggle bold / italic / underline / dim / reverse;
+  bordered elements get per-side border types and per-zone glyph overrides via a
+  glyph picker. Edits preview live. It is fully keyboard-navigable — **Tab** /
+  **Shift-Tab** move between the fields and on through the **Save Global** /
+  **Save Game** / **Cancel** buttons (each its own tab stop), **Enter** activates
+  the focused button — and equally mouse-driven. Saving writes `style.toml` or a
+  per-game style.
+- **Animations** — smooth, eased transcript scrolling instead of instant jumps,
+  configured under `[animation]` in `config.toml` (`enabled`, `easing`,
+  `scroll_ms`). Set `enabled = false` for instant scrolling.
 - **Transcript text styling** — color each transcript category independently via
   the `transcript`, `transcript:input`, `transcript:meta`, and `transcript:warning`
   selectors (`fg`/`bg`/`bold`/`italic`). Story lines also run through styling rules:
@@ -193,7 +213,9 @@ and unsupported; v1/v2 are not supported.)
   (the focused one is highlighted) and Enter then fires whichever is focused. `Esc` and **✕** always close. Text-entry modals
   keep **Enter** = submit the field; the navigation panels (verb menu, file browser)
   keep their own keys and just show the default button underlined. Colors/border
-  style are configurable under the `dialog*` style selectors.
+  style are configurable under the `dialog*` style selectors, and their on-screen
+  **placement** — centered (default) or anchored to any edge or corner with a
+  margin — via the `dialog` selector's `placement` / `margin` keys.
 
 ### Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
