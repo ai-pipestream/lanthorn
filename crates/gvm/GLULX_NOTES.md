@@ -547,8 +547,9 @@ is tagged with it. The backend maps classes → display attributes (SGR in the C
 Version 0, CharInput 1, LineInput 2, CharOutput 3 (returns CannotPrint 0 /
 ApproxPrint 1 / ExactPrint 2), MouseInput 4, Timer 5, Graphics 6, Unicode 15,
 LineInputEcho 17, LineTerminators 18, … We report `Version` = 0x00000705,
-`CharOutput` = ExactPrint for any code point (Unicode capable), `Unicode` = 1,
-and **0** for input/timer/graphics/sound in 3a-1 (truthful: not yet supported).
+`CharInput` = 1, `LineInput` = 1, `CharOutput` = ExactPrint for any code point
+(Unicode capable), `Unicode` = 1, and **0** for mouse/timer/graphics/sound/
+hyperlinks/echo/terminators (truthful: not supported).
 
 ### Dispatch selector codes implemented (output subset; from `gi_dispa.c`)
 
@@ -586,8 +587,95 @@ stream → Glulx main memory at `addr + pos·elsize` (1 byte, or 4 for a Unicode
 stream), advancing `pos` and the write count; a null/invalid/zero stream is
 discarded. Nothing here panics on a bad window/stream id.
 
-### Deferred to 3a-2 (NOT in 3a-1)
+### Input events + `glk_select` (3a-2)
 
-Input events (`glk_request_line_event`/`char_event`), `glk_select`
-suspend/resume, filerefs/file streams, echo streams, timers, the full
-`glk_gestalt` input capabilities, and the glulxercise compliance run.
+The IF input subset: **line** and **character** input, delivered through
+`glk_select`. The model mirrors `zvm`'s `NeedLine`/`NeedChar` suspend/resume.
+
+**The `event_t` struct** (4 `glui32` words, big-endian, written at the address
+passed to `glk_select`):
+
+| Offset | Field | Line input        | Char input          |
+|--------|-------|-------------------|---------------------|
+| +0     | type  | `evtype_LineInput` 3 | `evtype_CharInput` 2 |
+| +4     | win   | the window id     | the window id       |
+| +8     | val1  | chars entered     | the key code        |
+| +12    | val2  | 0 (terminator)    | 0                   |
+
+`evtype_*`: None 0, Timer 1, CharInput 2, LineInput 3, MouseInput 4, Arrange 5,
+Redraw 6, SoundNotify 7, Hyperlink 8.
+
+**Special keycodes** (`keycode_*`, from glk.h) occupy the top of the `glui32`
+range, `keycode_Func12` `0xffffffe4` … `keycode_Unknown` `0xffffffff`
+(`keycode_MAXVAL` = 28): Unknown ffffffff, Left fffffffe, Right fffffffd, Up
+fffffffc, Down fffffffb, Return fffffffa, Delete fffffff9, Escape fffffff8, Tab
+fffffff7, PageUp fffffff6, PageDown fffffff5, Home fffffff4, End fffffff3,
+Func1 ffffffef … Func12 ffffffe4.
+
+**Request selectors:** `glk_request_line_event` 0x00D0 (`win, buf, maxlen,
+initlen`), `glk_request_line_event_uni` 0x0141, `glk_request_char_event`
+0x00D2 (`win`), `glk_request_char_event_uni` 0x0140, `glk_select` 0x00C0
+(`event`). A request is recorded on the window (line and char are mutually
+exclusive per window). `glk_select` then: (1) delivers any queued non-input
+event (arrange) first; else (2) **suspends** on the first window with a pending
+request — `step()` returns `NeedLine{win}` / `NeedChar{win, unicode}` — until the
+host calls `supply_line(text)` / `supply_char(key)`, which writes the buffer +
+`event_t` and resumes; else (3) with nothing to wait for, writes `evtype_None`
+and continues (a malformed program would otherwise deadlock).
+
+`supply_line` writes `text` into the request buffer (truncated to `maxlen`;
+Latin-1 bytes, or 32-bit words for `_uni`) and sets `val1` to the char count.
+`supply_char` maps the key for a non-Unicode request: a Latin-1 code (≤ 0xff) or
+a special keycode passes through; any other code point becomes `keycode_Unknown`.
+A `_uni` char request passes the full code point. The model does **not** echo
+line input — like a stdio Glk, the display backend/terminal handles echo.
+
+**Cancel + other event selectors:** `glk_cancel_line_event` 0x00D1 (drops the
+request, reports `evtype_LineInput` with the `initlen` chars already in the
+buffer, else `evtype_None`), `glk_cancel_char_event` 0x00D3 (drops the request),
+`glk_select_poll` 0x00C1 (returns a queued internal event or `evtype_None`,
+never input, never suspends). **Arrange:** `glk_window_set_arrangement` queues an
+`evtype_Arrange` (win 0); `glk_select` delivers any queued non-input event before
+suspending for input. **Diagnosed no-ops (out of scope):**
+`glk_request_timer_events` 0x00D6, `glk_request_mouse_event` 0x00D4,
+`glk_cancel_mouse_event` 0x00D5. **Accepted best-effort:**
+`glk_set_echo_line_event` 0x0150, `glk_set_terminators_line_event` 0x0151.
+
+### Unicode case + the dispatch reference convention (glulxercise conformance)
+
+The parser path (and glulxercise) needs three more pieces, all transcribed from
+the Glulx Glk dispatch (gi_dispa) and glk.h:
+
+- **Character case:** `glk_char_to_lower` 0x00A0 / `glk_char_to_upper` 0x00A1
+  (Latin-1 case folding), and the in-place Unicode buffer folds
+  `glk_buffer_to_lower_case_uni` 0x0120 / `_upper_` 0x0121 / `_title_` 0x0122
+  (a fold may change the length; the result is clamped to the buffer and the full
+  length returned).
+- **The dispatch -1 reference convention.** A Glk output reference/struct pointer
+  argument is **not** a plain address: `0` is a C NULL (discard the result);
+  **`0xFFFFFFFF` (-1) means "use the VM stack"** — the output value(s) are
+  **pushed** (last field on top), and the game pops them back. Otherwise the value
+  is written to memory at the address. This applies to `glk_stream_close` /
+  `glk_window_close` (push `readcount` then `writecount`), `glk_window_get_size`,
+  `glk_window_get_arrangement`, the `*_iterate` rocks, and the `event_t*` of
+  `glk_select`/`glk_select_poll`. Inform's veneer (`PrintAnyToArray`) relies on
+  this to read a memory stream's write count without a stat buffer.
+
+### Core opcodes completed alongside (Glulx spec §2)
+
+`jumpabs` 0x104 (jump to an absolute address) and the exception pair `catch`
+0x32 / `throw` 0x33 (a catch stub — DestType/DestAddr/PC/FramePtr, like a call
+stub — records a token = the stack pointer; `throw value token` unwinds the stack
+to the token and resumes at the catch with `value` stored to its destination).
+
+### glulxercise capstone
+
+`gvm-cli/tests/glulxercise.rs` drives the vendored `glulxercise.ulx` headlessly
+and asserts the in-scope groups pass. Out of scope: filter iosys
+(`iosys2`/`iosys3`/`filter`/`nullio`/`gestalt` filter sub-tests), the
+`gidispa` introspection layer, `acceleration`, float/double, and Glk file `restore`.
+
+### Deferred / out of scope
+
+Filerefs/file streams (`@save`/`@restore` via Glk), echo streams, timers,
+hyperlinks, mouse, graphics, and sound remain out of scope.
