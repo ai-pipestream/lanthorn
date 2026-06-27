@@ -47,6 +47,23 @@ pub struct Decl {
     /// Optional shadow flag. Only interpreted for the `dialog` selector.
     #[serde(default)]
     pub shadow: Option<bool>,
+    /// Per-side/corner glyph overrides (border selectors only).
+    #[serde(default)]
+    pub glyph_top: Option<String>,
+    #[serde(default)]
+    pub glyph_bottom: Option<String>,
+    #[serde(default)]
+    pub glyph_left: Option<String>,
+    #[serde(default)]
+    pub glyph_right: Option<String>,
+    #[serde(default)]
+    pub glyph_tl: Option<String>,
+    #[serde(default)]
+    pub glyph_tr: Option<String>,
+    #[serde(default)]
+    pub glyph_bl: Option<String>,
+    #[serde(default)]
+    pub glyph_br: Option<String>,
 }
 
 // ── decl_to_style ─────────────────────────────────────────────────────────────
@@ -291,6 +308,20 @@ fn resolve_sides(base: paneframe::BorderStyle, decl: &Decl) -> (paneframe::PaneS
     (sides, warnings)
 }
 
+/// Map the 8 glyph fields of a [`Decl`] into a [`PaneGlyphs`].
+fn decl_glyphs(decl: &Decl) -> crate::render::paneframe::PaneGlyphs {
+    crate::render::paneframe::PaneGlyphs {
+        top:    decl.glyph_top.clone(),
+        bottom: decl.glyph_bottom.clone(),
+        left:   decl.glyph_left.clone(),
+        right:  decl.glyph_right.clone(),
+        tl:     decl.glyph_tl.clone(),
+        tr:     decl.glyph_tr.clone(),
+        bl:     decl.glyph_bl.clone(),
+        br:     decl.glyph_br.clone(),
+    }
+}
+
 pub fn apply_color_decls(
     cs: &mut ColorScheme,
     decls: &BTreeMap<String, Decl>,
@@ -329,6 +360,7 @@ pub fn apply_color_decls(
                 cs.map_border_style = base;
                 let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
                 cs.map_border_sides = sides;
+                cs.map_border_glyphs = decl_glyphs(decl);
                 if let Some(h) = decl.header { cs.map_header_on = h; }
             }
             "story_border" => {
@@ -337,6 +369,7 @@ pub fn apply_color_decls(
                 cs.story_border_style = base;
                 let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
                 cs.story_border_sides = sides;
+                cs.story_border_glyphs = decl_glyphs(decl);
                 if let Some(h) = decl.header { cs.story_header_on = h; }
             }
             "story_title"        => cs.story_title = cs.story_title.patch(style),
@@ -348,6 +381,7 @@ pub fn apply_color_decls(
                 cs.status_header_style = base;
                 let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
                 cs.status_header_sides = sides;
+                cs.status_header_glyphs = decl_glyphs(decl);
             }
             "input_line" => {
                 cs.input_line = cs.input_line.patch(style);
@@ -355,6 +389,7 @@ pub fn apply_color_decls(
                 cs.input_line_style = base;
                 let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
                 cs.input_line_sides = sides;
+                cs.input_line_glyphs = decl_glyphs(decl);
             }
             "dialog" => {
                 cs.dialog = cs.dialog.patch(style);
@@ -364,6 +399,7 @@ pub fn apply_color_decls(
                 if let Some(shadow_on) = decl.shadow {
                     cs.dialog_shadow_on = shadow_on;
                 }
+                cs.dialog_glyphs = decl_glyphs(decl);
             }
             "dialog:title"         => cs.dialog_title = cs.dialog_title.patch(style),
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
@@ -376,6 +412,7 @@ pub fn apply_color_decls(
                 cs.virtual_window_border = base;
                 let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
                 cs.upper_window_border_sides = sides;
+                cs.upper_window_border_glyphs = decl_glyphs(decl);
             }
             "sound_beep_high"    => cs.sound_beep_high = cs.sound_beep_high.patch(style),
             "sound_beep_low"     => cs.sound_beep_low = cs.sound_beep_low.patch(style),
@@ -554,6 +591,14 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
         style_right:  over.style_right.clone().or(base.style_right.clone()),
         header:       over.header.or(base.header),
         shadow:    over.shadow.or(base.shadow),
+        glyph_top:    over.glyph_top.clone().or(base.glyph_top.clone()),
+        glyph_bottom: over.glyph_bottom.clone().or(base.glyph_bottom.clone()),
+        glyph_left:   over.glyph_left.clone().or(base.glyph_left.clone()),
+        glyph_right:  over.glyph_right.clone().or(base.glyph_right.clone()),
+        glyph_tl:     over.glyph_tl.clone().or(base.glyph_tl.clone()),
+        glyph_tr:     over.glyph_tr.clone().or(base.glyph_tr.clone()),
+        glyph_bl:     over.glyph_bl.clone().or(base.glyph_bl.clone()),
+        glyph_br:     over.glyph_br.clone().or(base.glyph_br.clone()),
     }
 }
 
@@ -665,6 +710,14 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
         style_right:  t.get("style_right").and_then(toml::Value::as_str).map(str::to_string),
         header:       t.get("header").and_then(toml::Value::as_bool),
         shadow:    t.get("shadow").and_then(toml::Value::as_bool),
+        glyph_top:    t.get("glyph_top").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_bottom: t.get("glyph_bottom").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_left:   t.get("glyph_left").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_right:  t.get("glyph_right").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_tl:     t.get("glyph_tl").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_tr:     t.get("glyph_tr").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_bl:     t.get("glyph_bl").and_then(toml::Value::as_str).map(str::to_string),
+        glyph_br:     t.get("glyph_br").and_then(toml::Value::as_str).map(str::to_string),
     }
 }
 
@@ -883,6 +936,14 @@ fn style_to_decl(s: &Style) -> Decl {
         style_right: None,
         header: None,
         shadow: None, // callers set this for the dialog selector
+        glyph_top: None,
+        glyph_bottom: None,
+        glyph_left: None,
+        glyph_right: None,
+        glyph_tl: None,
+        glyph_tr: None,
+        glyph_bl: None,
+        glyph_br: None,
     }
 }
 
@@ -972,6 +1033,14 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
             if decl.dim       == Some(true) { itbl.insert("dim",       toml_edit::Value::from(true)); }
             if decl.reversed  == Some(true) { itbl.insert("reversed",  toml_edit::Value::from(true)); }
             if decl.shadow    == Some(true) { itbl.insert("shadow",    toml_edit::Value::from(true)); }
+            if let Some(g) = &decl.glyph_top    { itbl.insert("glyph_top",    toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_bottom { itbl.insert("glyph_bottom", toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_left   { itbl.insert("glyph_left",   toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_right  { itbl.insert("glyph_right",  toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_tl     { itbl.insert("glyph_tl",     toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_tr     { itbl.insert("glyph_tr",     toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_bl     { itbl.insert("glyph_bl",     toml_edit::Value::from(g.as_str())); }
+            if let Some(g) = &decl.glyph_br     { itbl.insert("glyph_br",     toml_edit::Value::from(g.as_str())); }
             colors[selector.as_str()] = toml_edit::Item::Value(toml_edit::Value::InlineTable(itbl));
         }
     }
@@ -1116,10 +1185,22 @@ pub fn write_style_full(
         if sides.left != base   { d.style_left   = Some(border_style_name(sides.left).to_string()); }
         if sides.right != base  { d.style_right  = Some(border_style_name(sides.right).to_string()); }
     }
+    // Helper: copy all glyph overrides from a PaneGlyphs onto a Decl.
+    fn decorate_glyphs(d: &mut Decl, g: &crate::render::paneframe::PaneGlyphs) {
+        d.glyph_top    = g.top.clone();
+        d.glyph_bottom = g.bottom.clone();
+        d.glyph_left   = g.left.clone();
+        d.glyph_right  = g.right.clone();
+        d.glyph_tl     = g.tl.clone();
+        d.glyph_tr     = g.tr.clone();
+        d.glyph_bl     = g.bl.clone();
+        d.glyph_br     = g.br.clone();
+    }
     {
         let mut d = style_to_decl(&cs.map_border);
         d.style = Some(paneframe::border_style_name(cs.map_border_style).to_string());
         decorate_sides(&mut d, cs.map_border_style, cs.map_border_sides);
+        decorate_glyphs(&mut d, &cs.map_border_glyphs);
         if !cs.map_header_on { d.header = Some(false); }
         doc.colors.selectors.insert("map_border".to_string(), d);
     }
@@ -1127,6 +1208,7 @@ pub fn write_style_full(
         let mut d = style_to_decl(&cs.story_border);
         d.style = Some(paneframe::border_style_name(cs.story_border_style).to_string());
         decorate_sides(&mut d, cs.story_border_style, cs.story_border_sides);
+        decorate_glyphs(&mut d, &cs.story_border_glyphs);
         if !cs.story_header_on { d.header = Some(false); }
         doc.colors.selectors.insert("story_border".to_string(), d);
     }
@@ -1139,6 +1221,7 @@ pub fn write_style_full(
             d.style = Some(paneframe::border_style_name(cs.status_header_style).to_string());
         }
         decorate_sides(&mut d, cs.status_header_style, cs.status_header_sides);
+        decorate_glyphs(&mut d, &cs.status_header_glyphs);
         doc.colors.selectors.insert("status_header".to_string(), d);
     }
     {
@@ -1147,6 +1230,7 @@ pub fn write_style_full(
             d.style = Some(paneframe::border_style_name(cs.input_line_style).to_string());
         }
         decorate_sides(&mut d, cs.input_line_style, cs.input_line_sides);
+        decorate_glyphs(&mut d, &cs.input_line_glyphs);
         doc.colors.selectors.insert("input_line".to_string(), d);
     }
     {
@@ -1155,6 +1239,7 @@ pub fn write_style_full(
         if cs.dialog_shadow_on {
             d.shadow = Some(true);
         }
+        decorate_glyphs(&mut d, &cs.dialog_glyphs);
         doc.colors.selectors.insert("dialog".to_string(), d);
     }
     doc.colors.selectors.insert("dialog:title".to_string(),         style_to_decl(&cs.dialog_title));
@@ -1166,6 +1251,7 @@ pub fn write_style_full(
         let mut d = style_to_decl(&cs.upper_window_border);
         d.style = Some(paneframe::border_style_name(cs.virtual_window_border).to_string());
         decorate_sides(&mut d, cs.virtual_window_border, cs.upper_window_border_sides);
+        decorate_glyphs(&mut d, &cs.upper_window_border_glyphs);
         doc.colors.selectors.insert("upper_window_border".to_string(), d);
     }
     doc.colors.selectors.insert("sound_beep_high".to_string(), style_to_decl(&cs.sound_beep_high));
@@ -1879,5 +1965,30 @@ box_style = "rounded"
         for sel in SELECTOR_FIELDS {
             assert!(grouped.contains(sel), "selector {sel} missing from SELECTOR_GROUPS");
         }
+    }
+
+    #[test]
+    fn glyph_overrides_parse_resolve_and_round_trip() {
+        let toml = r#"[colors]
+"map_border" = { style = "single", glyph_top = "═", glyph_tl = "╔" }
+"#;
+        let doc = parse_style_toml(toml).unwrap();
+        let d = doc.colors.selectors.get("map_border").unwrap();
+        assert_eq!(d.glyph_top.as_deref(), Some("═"));
+        assert_eq!(d.glyph_tl.as_deref(), Some("╔"));
+        // resolve carries them onto the ColorScheme
+        let (cs, _set, _w) = resolve(&doc, std::path::Path::new("."));
+        assert_eq!(cs.map_border_glyphs.top.as_deref(), Some("═"));
+        assert_eq!(cs.map_border_glyphs.tl.as_deref(), Some("╔"));
+        // write_style_full → re-parse preserves them
+        let dir = std::env::temp_dir().join(format!("bm-glyph-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("style.toml");
+        write_style_full(&path, &cs, &crate::symbols::SymbolSet::default()).unwrap();
+        let doc2 = parse_style_toml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let d2 = doc2.colors.selectors.get("map_border").unwrap();
+        assert_eq!(d2.glyph_top.as_deref(), Some("═"));
+        assert_eq!(d2.glyph_tl.as_deref(), Some("╔"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

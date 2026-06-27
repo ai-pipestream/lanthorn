@@ -15,7 +15,7 @@ use std::path::Path;
 use ratatui::style::{Color, Modifier, Style};
 use regex::Regex;
 
-use crate::render::paneframe::{BorderStyle, PaneSides};
+use crate::render::paneframe::{BorderStyle, PaneGlyphs, PaneSides};
 
 /// A compiled user transcript-styling rule: a regex matched whole-line against
 /// Story text, plus the `Style` patched over the base `transcript` style on a
@@ -286,6 +286,13 @@ pub struct ColorScheme {
     pub status_header_sides: PaneSides,
     pub input_line_sides: PaneSides,
     pub upper_window_border_sides: PaneSides,
+    /// Per-side/corner glyph overrides for each bordered pane element.
+    pub map_border_glyphs: PaneGlyphs,
+    pub story_border_glyphs: PaneGlyphs,
+    pub status_header_glyphs: PaneGlyphs,
+    pub input_line_glyphs: PaneGlyphs,
+    pub upper_window_border_glyphs: PaneGlyphs,
+    pub dialog_glyphs: PaneGlyphs,
     /// Whether the story title / map layer-tab header strip is shown.
     pub story_header_on: bool,
     pub map_header_on: bool,
@@ -371,6 +378,12 @@ impl ColorScheme {
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
             upper_window_border_sides: PaneSides::all(BorderStyle::Single),
+            map_border_glyphs: PaneGlyphs::default(),
+            story_border_glyphs: PaneGlyphs::default(),
+            status_header_glyphs: PaneGlyphs::default(),
+            input_line_glyphs: PaneGlyphs::default(),
+            upper_window_border_glyphs: PaneGlyphs::default(),
+            dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
             map_header_on: true,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
@@ -518,6 +531,12 @@ impl ColorScheme {
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
             upper_window_border_sides: PaneSides::all(BorderStyle::Single),
+            map_border_glyphs: PaneGlyphs::default(),
+            story_border_glyphs: PaneGlyphs::default(),
+            status_header_glyphs: PaneGlyphs::default(),
+            input_line_glyphs: PaneGlyphs::default(),
+            upper_window_border_glyphs: PaneGlyphs::default(),
+            dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
             map_header_on: true,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),

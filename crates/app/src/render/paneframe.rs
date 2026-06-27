@@ -200,7 +200,23 @@ pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, color: 
     PaneFrame { area, content, top_inset }
 }
 
-// ── PaneSides + per-side frame drawing ─────────────────────────────────────────
+// ── PaneGlyphs + PaneSides + per-side frame drawing ───────────────────────────
+
+/// Per-side/corner glyph overrides for a pane border.
+///
+/// Each field is `Some(glyph)` when the user has explicitly set an override for
+/// that position, or `None` to fall back to the border-style default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneGlyphs {
+    pub top: Option<String>,
+    pub bottom: Option<String>,
+    pub left: Option<String>,
+    pub right: Option<String>,
+    pub tl: Option<String>,
+    pub tr: Option<String>,
+    pub bl: Option<String>,
+    pub br: Option<String>,
+}
 
 /// Per-side border styles for one pane. A side of `None` is omitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
