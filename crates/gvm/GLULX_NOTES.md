@@ -453,3 +453,17 @@ These use the §14 core, entirely in memory (no Glk streams). The
 The undo stack is bounded to `UNDO_CAP` (16) snapshots; the oldest is dropped
 when full. (`@save`/`@restore` to a real file/stream, `hasundo`, and
 `discardundo` are deferred to sub-project 3.)
+
+## 16. protect (Phase 2c, spec §2.11)
+
+| Opcode  | Num   | L | S | Effect                                              |
+|---------|-------|---|---|-----------------------------------------------------|
+| protect | 0x127 | 2 | 0 | preserve RAM `[L1, L1+L2)` across restore/restoreundo; `L2 == 0` clears |
+
+The protected range `(addr, len)` lives on the `Machine`. During restore (§14)
+the bytes currently in the protected range are snapshotted before RAM is reset,
+then written back after the saved diff is applied — so a protected byte keeps its
+**current** value rather than the restored image's. `protect(_, 0)` clears
+protection. Our internal snapshot also carries the range in `GReg`, so a
+`saveundo`/`restoreundo` round-trip preserves it. (The spec also lists `restart`
+among the operations protect guards; `restart` is not implemented in 2c.)

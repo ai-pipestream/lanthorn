@@ -429,6 +429,12 @@ impl Machine {
             // Undo (in-memory; @save/@restore stream opcodes are sub-project 3).
             0x125 => self.op_saveundo(),
             0x126 => self.op_restoreundo(),
+            // Protect a RAM range across restore/restoreundo (L2 == 0 clears).
+            0x127 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                self.protect = (l[0], l[1]);
+                Ok(())
+            }
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
             0x41 => self.copy_sized(2),                                // copys
@@ -3205,5 +3211,53 @@ mod tests {
         let mut m = machine_with_body(&[], body);
         m.run();
         assert_eq!(m.undo_stack.len(), Machine::UNDO_CAP);
+    }
+
+    // ── Task 3 (2c): protect ──────────────────────────────────────────────────
+
+    #[test]
+    fn protect_opcode_sets_and_clears() {
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(4)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        assert_eq!(m.protect, (0x110, 4));
+
+        // protect(_, 0) clears protection.
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.protect = (0x110, 4);
+        m.step_once().unwrap();
+        assert_eq!(m.protect, (0x110, 0));
+    }
+
+    #[test]
+    fn protect_preserves_range_across_restore() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.protect = (0x110, 4);
+        m.mem.write32(0x110, 0xAAAA).unwrap();
+        let snap = m.save_state();
+        m.mem.write32(0x110, 0xBEEF).unwrap(); // change the protected word
+        m.restore_state(&snap).unwrap();
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // kept current, not restored 0xAAAA
+        assert_eq!(m.protect, (0x110, 4)); // range survives
+    }
+
+    #[test]
+    fn protect_survives_restoreundo() {
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(4)]); // protect
+        body.extend(asm::ins(0x125, &[asm::Op::Zero])); // saveundo
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0xBEEF), asm::Op::Mem16(0x0110)])); // change
+        body.extend(asm::ins(0x126, &[asm::Op::Mem16(0x0104)])); // restoreundo
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap(); // protect
+        m.step_once().unwrap(); // saveundo
+        m.step_once().unwrap(); // change → 0xBEEF
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF);
+        m.step_once().unwrap(); // restoreundo, resumes just after saveundo
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // protected → kept current value
+        assert_eq!(m.protect, (0x110, 4));
     }
 }
