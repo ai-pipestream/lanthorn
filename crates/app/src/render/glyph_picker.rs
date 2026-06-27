@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn invalid_pending_shows_warning_hint() {
         use ratatui::{backend::TestBackend, Terminal};
-        use crate::input::open_style_editor;
+        use crate::input::open_style_editor_hermetic;
         use crate::input::Action;
         use crate::input::apply_action;
         use mapper::mapper::Mapper;
@@ -334,7 +334,7 @@ mod tests {
         );
 
         let mut state = crate::state::AppState::default();
-        open_style_editor(&mut state);
+        open_style_editor_hermetic(&mut state);
         apply_action(
             Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
             &mut state,
@@ -365,13 +365,13 @@ mod tests {
     #[test]
     fn glyph_picker_renders_title_and_header() {
         use ratatui::{backend::TestBackend, Terminal};
-        use crate::input::open_style_editor;
+        use crate::input::open_style_editor_hermetic;
         use crate::input::Action;
         use crate::input::apply_action;
         use mapper::mapper::Mapper;
 
         let mut state = crate::state::AppState::default();
-        open_style_editor(&mut state);
+        open_style_editor_hermetic(&mut state);
         apply_action(
             Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
             &mut state,

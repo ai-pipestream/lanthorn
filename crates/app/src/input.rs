@@ -3069,6 +3069,24 @@ pub fn open_style_editor(state: &mut AppState) {
     state.dialog_focus = 0;
 }
 
+/// Test-only: open the style editor over a fresh, empty temp `user_dir` so it
+/// reads the built-in default style instead of the contributor's real
+/// `~/.babelmap/style.toml`. Without this, an on-disk style that overrides an
+/// asserted selector (fg/bg/glyph/style) causes spurious failures, and
+/// `StyleSave`/`save_mru` would write into the real user directory during tests.
+/// Each call gets a unique directory so save-path tests never collide.
+#[cfg(test)]
+pub(crate) fn open_style_editor_hermetic(state: &mut AppState) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir()
+        .join(format!("babelmap-style-test-{}-{}", std::process::id(), n));
+    let _ = std::fs::create_dir_all(&dir);
+    state.config.user_dir = dir;
+    open_style_editor(state);
+}
+
 /// Re-resolve `ed.preview` from the current `ed.doc` + `user_dir`.
 ///
 /// Called from edit handlers (Tasks 4-6) whenever the doc changes.
@@ -6181,9 +6199,33 @@ mod tests {
     }
 
     #[test]
+    fn hermetic_editor_ignores_ambient_user_dir() {
+        // Even when config.user_dir already points at a directory containing a
+        // poison style.toml, the hermetic helper rebinds to a fresh empty dir,
+        // so the editor loads the built-in default (room has no fg) — proving
+        // tests never inherit the contributor's real ~/.babelmap/style.toml.
+        let poison =
+            std::env::temp_dir().join(format!("bm-poison-{}", std::process::id()));
+        std::fs::create_dir_all(&poison).unwrap();
+        std::fs::write(
+            poison.join("style.toml"),
+            "[colors]\n\"room\" = { fg = \"#123456\" }\n[symbols]\n",
+        )
+        .unwrap();
+        let mut s = AppState::default();
+        s.config.user_dir = poison;
+        open_style_editor_hermetic(&mut s);
+        let ed = s.style_editor.as_ref().unwrap();
+        assert!(
+            ed.doc.colors.selectors.get("room").and_then(|d| d.fg.as_ref()).is_none(),
+            "hermetic editor must not inherit the ambient user_dir's style.toml",
+        );
+    }
+
+    #[test]
     fn toggling_bold_updates_decl_and_preview() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
         apply_action(Action::StyleToggleAttr(AttrKind::Bold), &mut s, &mut mapper::mapper::Mapper::default());
         let ed = s.style_editor.as_ref().unwrap();
@@ -6197,7 +6239,7 @@ mod tests {
         let mut s = AppState::default();
         // Use a non-existent user_dir so load_mru returns empty regardless of disk state.
         s.config.user_dir = std::path::PathBuf::from("/tmp/babelmap-test-empty-mru-dir");
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
 
         // Set fg to a named color — no MRU push.
@@ -6230,7 +6272,7 @@ mod tests {
     #[test]
     fn style_custom_char_and_backspace_edit_buf() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         let m = &mut mapper::mapper::Mapper::default();
 
         apply_action(Action::StyleCustomChar('#'), &mut s, m);
@@ -6250,7 +6292,7 @@ mod tests {
     #[test]
     fn style_focus_cycle_to_custom_seeds_hash() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         let m = &mut mapper::mapper::Mapper::default();
         // Cycle delta=3 lands on Custom (Board=0 → index 3).
         apply_action(Action::StyleFocusCycle(3), &mut s, m);
@@ -6262,7 +6304,7 @@ mod tests {
     #[test]
     fn style_custom_backspace_cannot_delete_leading_hash() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         let m = &mut mapper::mapper::Mapper::default();
         // Seed via focus cycle.
         apply_action(Action::StyleFocusCycle(3), &mut s, m);
@@ -6276,7 +6318,7 @@ mod tests {
     #[test]
     fn style_save_applies_to_live_colors_and_closes() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         apply_action(
             Action::StyleSetColor { is_bg: false, value: Some("#ff0000".into()) },
             &mut s, &mut mapper::mapper::Mapper::default(),
@@ -6294,7 +6336,7 @@ mod tests {
     #[test]
     fn style_reset_reverts_active_selector_to_default() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
         // Mutate the first selector's fg.
         apply_action(
@@ -6316,7 +6358,7 @@ mod tests {
     fn open_style_editor_resets_dialog_focus() {
         let mut s = AppState::default();
         s.dialog_focus = 5; // non-zero stale value
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         assert_eq!(s.dialog_focus, 0, "open_style_editor must reset dialog_focus to 0");
     }
 
@@ -6369,16 +6411,9 @@ mod tests {
     #[test]
     fn custom_commit_targets_bg_when_color_target_is_bg() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
-            // Neutralize any fg/bg inherited from an on-disk style.toml so the
-            // assertion reflects only this action (mirrors the sibling tests).
-            let sel = ed.selectors[ed.active].to_string();
-            if let Some(d) = ed.doc.colors.selectors.get_mut(&sel) {
-                d.fg = None;
-                d.bg = None;
-            }
             ed.color_target = true; // bg
             ed.custom_buf = "#abcdef".into();
         }
@@ -6392,7 +6427,7 @@ mod tests {
     #[test]
     fn glyph_picker_pick_sets_zone_glyph_and_closes() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
@@ -6416,7 +6451,7 @@ mod tests {
     #[test]
     fn glyph_picker_clear_sets_zone_to_none_and_closes() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
@@ -6440,7 +6475,7 @@ mod tests {
     #[test]
     fn glyph_picker_custom_range_entry() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         apply_action(
             Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
             &mut s,
@@ -6484,7 +6519,7 @@ mod tests {
     fn glyph_picker_custom_focus_blocks_pending() {
         // Verify that GlyphPickerChar is ignored when custom_focus is active.
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         apply_action(
             Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
             &mut s,
@@ -6501,7 +6536,7 @@ mod tests {
     #[test]
     fn swatch_pick_sets_color_for_target_and_default_clears() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         { let ed = s.style_editor.as_mut().unwrap(); ed.color_target = false; ed.swatch_cursor = 16; } // default cell
         apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
         let ed = s.style_editor.as_ref().unwrap();
@@ -6513,7 +6548,7 @@ mod tests {
     #[test]
     fn border_type_cycle_updates_decl_style() {
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         { let ed = s.style_editor.as_mut().unwrap();
           ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap(); }
         apply_action(Action::StyleBorderTypeCycle(1), &mut s, &mut mapper::mapper::Mapper::default());
@@ -6535,7 +6570,7 @@ mod tests {
 
         // Active selector is "map_border" with style = "picture-frame" → picker must stay None.
         let mut state = AppState::default();
-        open_style_editor(&mut state);
+        open_style_editor_hermetic(&mut state);
         {
             let ed = state.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
@@ -6554,7 +6589,7 @@ mod tests {
 
         // Sanity: the same selector with style = None (→ "single") DOES open the picker.
         let mut state2 = AppState::default();
-        open_style_editor(&mut state2);
+        open_style_editor_hermetic(&mut state2);
         {
             let ed = state2.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
@@ -6579,7 +6614,7 @@ mod tests {
 
         // ── non-bordered selector: cycling from Attrs wraps to Board, never Border ──
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             let non_bordered_idx = ed.selectors.iter()
@@ -6594,7 +6629,7 @@ mod tests {
 
         // ── bordered selector: cycling from Attrs reaches Border ──
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             let bordered_idx = ed.selectors.iter()
@@ -6609,7 +6644,7 @@ mod tests {
 
         // ── navigating away from bordered selector drops stale Border focus ──
         let mut s = AppState::default();
-        open_style_editor(&mut s);
+        open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             let bordered_idx = ed.selectors.iter()

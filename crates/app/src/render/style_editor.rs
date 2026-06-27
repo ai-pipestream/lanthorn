@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn style_editor_board_renders_samples_and_highlights_active() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         // Use a large area so all selectors fit and get drawn.
         let area = Rect::new(0, 0, 120, 60);
         let mut buf = Buffer::empty(area);
@@ -653,7 +653,7 @@ mod tests {
     #[test]
     fn board_scrolls_to_keep_active_visible() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         let n = s.style_editor.as_ref().unwrap().selectors.len();
         s.style_editor.as_mut().unwrap().active = n - 1; // last selector
         // Small area that cannot show all selectors at once:
@@ -676,9 +676,7 @@ mod tests {
     #[test]
     fn style_editor_swatch_rects_populated() {
         let mut s = AppState::default();
-        // Use a non-existent user_dir so load_mru returns empty regardless of disk state.
-        s.config.user_dir = std::path::PathBuf::from("/tmp/babelmap-test-empty-mru-dir");
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         // Wide enough to display the property pane (needs >= 61 content cols).
         let area = Rect::new(0, 0, 120, 60);
         let mut buf = Buffer::empty(area);
@@ -703,7 +701,7 @@ mod tests {
 
         // PANE selector (map_border): header chip present, shadow chip absent.
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|&sel| sel == "map_border")
@@ -716,7 +714,7 @@ mod tests {
 
         // dialog selector: shadow chip present, header chip absent.
         let mut s2 = AppState::default();
-        crate::input::open_style_editor(&mut s2);
+        crate::input::open_style_editor_hermetic(&mut s2);
         {
             let ed = s2.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|&sel| sel == "dialog")
@@ -731,7 +729,7 @@ mod tests {
     #[test]
     fn selector_list_draws_scrollbar_when_overflowing() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         // A short area forces the selector list (~39+ visual lines) to overflow.
         let area = Rect::new(0, 0, 120, 12);
         let mut buf = Buffer::empty(area);
@@ -752,7 +750,7 @@ mod tests {
     #[test]
     fn selector_list_no_scrollbar_when_not_overflowing() {
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         // A very tall area fits all selectors; should not panic and should not draw a thumb.
         let area = Rect::new(0, 0, 120, 80);
         let mut buf = Buffer::empty(area);
@@ -773,7 +771,7 @@ mod tests {
     fn mini_box_renders_actual_override_glyph() {
         let area = Rect::new(0, 0, 120, 40);
         let mut s = AppState::default();
-        crate::input::open_style_editor(&mut s);
+        crate::input::open_style_editor_hermetic(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|&sel| sel == "map_border")
