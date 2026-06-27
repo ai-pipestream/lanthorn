@@ -9,6 +9,7 @@
 // value-stack region. A four-word "call stub" sits just below each non-start
 // frame so a return can restore the caller.
 
+use crate::error::GError;
 use crate::io::Output;
 use crate::memory::Memory;
 
@@ -79,6 +80,9 @@ pub struct Machine {
     pub diagnostics: Vec<String>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
+    /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
+    /// `len == 0` means no protection (set by the `protect` opcode).
+    protect: (u32, u32),
 
     // Cached layout of the current frame (recomputed whenever `fp` changes).
     cur_frame_len: u32,
@@ -89,6 +93,40 @@ pub struct Machine {
 
 fn align_up(v: u32, to: u32) -> u32 {
     (v + to - 1) / to * to
+}
+
+/// Append one IFF chunk (`id`, 4-byte big-endian length, data, even-pad).
+fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(id);
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        out.push(0); // IFF chunks are padded to an even length
+    }
+}
+
+/// Parse a `FORM IFZS` container into its `(id, data)` chunks. Never panics;
+/// returns a [`GError::BadSave`] on any structural problem.
+fn parse_ifzs(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>, GError> {
+    let bad = |m: &str| GError::BadSave(m.to_string());
+    if data.len() < 12 || &data[0..4] != b"FORM" || &data[8..12] != b"IFZS" {
+        return Err(bad("not a FORM IFZS container"));
+    }
+    let form_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let end = (8 + form_len).min(data.len());
+    let mut chunks = Vec::new();
+    let mut p = 12;
+    while p + 8 <= end {
+        let id = [data[p], data[p + 1], data[p + 2], data[p + 3]];
+        let len = u32::from_be_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]) as usize;
+        let start = p + 8;
+        if start + len > data.len() {
+            return Err(bad("chunk length overruns the data"));
+        }
+        chunks.push((id, &data[start..start + len]));
+        p = start + len + (len & 1); // skip the even-pad byte
+    }
+    Ok(chunks)
 }
 
 impl Machine {
@@ -114,6 +152,7 @@ impl Machine {
             out,
             diagnostics: Vec::new(),
             halted: false,
+            protect: (0, 0),
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
@@ -951,6 +990,231 @@ impl Machine {
             11 => 0,                                   // Float
             _ => 0,
         }
+    }
+
+    // ── save / restore serialization core (GLULX_NOTES §14) ───────────────────
+
+    /// Serialize the VM's mutable state as Glulx-Quetzal bytes (`FORM IFZS`:
+    /// `IFhd` identity, `CMem` compressed RAM, `Stks` stack, `MAll` heap, plus a
+    /// `GReg` register chunk). Round-trips exactly via [`Machine::restore_state`].
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+
+        // IFhd: the first 128 bytes of memory (identity).
+        let mut ifhd = Vec::with_capacity(128);
+        for a in 0..128 {
+            ifhd.push(self.mem.read8(a).unwrap_or(0) as u8);
+        }
+        push_chunk(&mut body, b"IFhd", &ifhd);
+
+        // CMem: current memsize, then the RLE-compressed diff against the
+        // original image over [RAMSTART, memsize).
+        push_chunk(&mut body, b"CMem", &self.compress_ram());
+
+        // Stks: the live stack bytes [0, sp).
+        push_chunk(&mut body, b"Stks", &self.stack[..self.sp]);
+
+        // MAll: heap-start, block count, then (addr, len) per block.
+        let mut mall = Vec::new();
+        mall.extend_from_slice(&self.heap_start.to_be_bytes());
+        mall.extend_from_slice(&(self.heap_blocks.len() as u32).to_be_bytes());
+        for &(a, sz) in &self.heap_blocks {
+            mall.extend_from_slice(&a.to_be_bytes());
+            mall.extend_from_slice(&sz.to_be_bytes());
+        }
+        push_chunk(&mut body, b"MAll", &mall);
+
+        // GReg: registers not derivable from the stack (sp, fp, pc, iosys,
+        // string table, protect range).
+        let mut greg = Vec::with_capacity(32);
+        for v in [
+            self.sp as u32,
+            self.fp as u32,
+            self.pc,
+            self.iosys_mode,
+            self.iosys_rock,
+            self.cur_stringtbl,
+            self.protect.0,
+            self.protect.1,
+        ] {
+            greg.extend_from_slice(&v.to_be_bytes());
+        }
+        push_chunk(&mut body, b"GReg", &greg);
+
+        let mut out = Vec::with_capacity(body.len() + 12);
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(b"IFZS");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// RLE-compress the RAM diff `[RAMSTART, memsize)` against the original
+    /// image (`CMem` body: 4-byte memsize then the compressed bytes). A run of
+    /// 1..=256 zero bytes is `0x00` followed by `(count-1)`; non-zero diff bytes
+    /// are literal (spec §1.8 / Quetzal).
+    fn compress_ram(&self) -> Vec<u8> {
+        let ramstart = self.mem.ramstart();
+        let memsize = self.mem.mem_size();
+        let mut diff = Vec::with_capacity((memsize - ramstart) as usize);
+        for a in ramstart..memsize {
+            let cur = self.mem.read8(a).unwrap_or(0) as u8;
+            diff.push(cur ^ self.mem.orig_byte(a));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&memsize.to_be_bytes());
+        let mut i = 0;
+        while i < diff.len() {
+            if diff[i] == 0 {
+                let mut run = 1usize;
+                while i + run < diff.len() && diff[i + run] == 0 && run < 256 {
+                    run += 1;
+                }
+                out.push(0);
+                out.push((run - 1) as u8);
+                i += run;
+            } else {
+                out.push(diff[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Restore VM state from [`Machine::save_state`] bytes. Resets RAM to the
+    /// original image, applies the saved diff, rebuilds the stack/heap/registers,
+    /// preserves the protected range, and recomputes the frame cache. Corrupt or
+    /// truncated data yields a [`GError`] (never a panic).
+    pub fn restore_state(&mut self, data: &[u8]) -> Result<(), GError> {
+        let chunks = parse_ifzs(data)?;
+        let find = |id: &[u8; 4]| chunks.iter().find(|(cid, _)| cid == id).map(|(_, d)| *d);
+        let cmem = find(b"CMem").ok_or_else(|| GError::BadSave("missing CMem chunk".into()))?;
+        let stks = find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
+        let greg = find(b"GReg").ok_or_else(|| GError::BadSave("missing GReg chunk".into()))?;
+        if greg.len() != 32 {
+            return Err(GError::BadSave("GReg chunk has wrong length".into()));
+        }
+        let g = |i: usize| u32::from_be_bytes([greg[i], greg[i + 1], greg[i + 2], greg[i + 3]]);
+        let (sp, fp, pc) = (g(0), g(4), g(8));
+        let (iosys_mode, iosys_rock, stringtbl) = (g(12), g(16), g(20));
+        let (paddr, plen) = (g(24), g(28));
+
+        // Snapshot the currently-protected bytes (preserved across restore).
+        let (cur_paddr, cur_plen) = self.protect;
+        let mut protected: Vec<(u32, u8)> = Vec::new();
+        for a in cur_paddr..cur_paddr.saturating_add(cur_plen) {
+            if let Some(b) = self.mem.read8(a) {
+                protected.push((a, b as u8));
+            }
+        }
+
+        // Reset RAM to the original image and apply the saved CMem diff.
+        self.decompress_ram(cmem)?;
+
+        // Re-impose the protected bytes' pre-restore values.
+        for (a, b) in protected {
+            if a >= self.mem.ramstart() && a < self.mem.mem_size() {
+                self.mem.write_byte_raw(a, b);
+            }
+        }
+
+        // Stack: the Stks bytes must fit the buffer and match the saved sp.
+        if stks.len() != sp as usize {
+            return Err(GError::BadSave("Stks length disagrees with sp".into()));
+        }
+        if sp as usize > self.stack.len() {
+            return Err(GError::BadSave("saved sp exceeds the stack size".into()));
+        }
+        self.stack[..sp as usize].copy_from_slice(stks);
+        self.sp = sp as usize;
+        self.fp = fp as usize;
+        self.pc = pc;
+        self.iosys_mode = iosys_mode;
+        self.iosys_rock = iosys_rock;
+        self.cur_stringtbl = stringtbl;
+        self.protect = (paddr, plen);
+
+        // Heap: rebuild from MAll (absent/empty → inactive).
+        self.heap_start = 0;
+        self.heap_blocks.clear();
+        if let Some(mall) = find(b"MAll") {
+            self.restore_heap(mall)?;
+        }
+
+        // Recompute the current-frame cache from the restored stack.
+        self.reload_frame_meta().map_err(GError::BadSave)?;
+        Ok(())
+    }
+
+    /// Decompress a `CMem` body into RAM: read the saved memsize, resize memory,
+    /// and rebuild `[RAMSTART, memsize)` as `original XOR diff`. Faults on a
+    /// truncated/over-long stream.
+    fn decompress_ram(&mut self, cmem: &[u8]) -> Result<(), GError> {
+        if cmem.len() < 4 {
+            return Err(GError::BadSave("CMem chunk too short".into()));
+        }
+        let memsize = u32::from_be_bytes([cmem[0], cmem[1], cmem[2], cmem[3]]);
+        let ramstart = self.mem.ramstart();
+        if memsize < ramstart || memsize > Self::MAX_MEMSIZE {
+            return Err(GError::BadSave("CMem memsize out of range".into()));
+        }
+        self.mem.set_raw_size(memsize);
+        let mut addr = ramstart;
+        let mut i = 4;
+        while addr < memsize {
+            if i >= cmem.len() {
+                return Err(GError::BadSave("CMem data truncated".into()));
+            }
+            let b = cmem[i];
+            i += 1;
+            if b == 0 {
+                if i >= cmem.len() {
+                    return Err(GError::BadSave("CMem zero-run truncated".into()));
+                }
+                let run = cmem[i] as u32 + 1;
+                i += 1;
+                for _ in 0..run {
+                    if addr >= memsize {
+                        return Err(GError::BadSave("CMem data overruns memory".into()));
+                    }
+                    let base = self.mem.orig_byte(addr);
+                    self.mem.write_byte_raw(addr, base);
+                    addr += 1;
+                }
+            } else {
+                let base = self.mem.orig_byte(addr);
+                self.mem.write_byte_raw(addr, base ^ b);
+                addr += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild the allocation heap from a `MAll` chunk body.
+    fn restore_heap(&mut self, mall: &[u8]) -> Result<(), GError> {
+        if mall.len() < 8 {
+            if mall.is_empty() {
+                return Ok(()); // omitted/empty heap → inactive
+            }
+            return Err(GError::BadSave("MAll chunk too short".into()));
+        }
+        let rd = |i: usize| u32::from_be_bytes([mall[i], mall[i + 1], mall[i + 2], mall[i + 3]]);
+        let heap_start = rd(0);
+        let nblocks = rd(4) as usize;
+        if mall.len() != 8 + nblocks * 8 {
+            return Err(GError::BadSave("MAll block count disagrees with length".into()));
+        }
+        if heap_start == 0 && nblocks == 0 {
+            return Ok(()); // inactive
+        }
+        let mut blocks = Vec::with_capacity(nblocks);
+        for k in 0..nblocks {
+            let base = 8 + k * 8;
+            blocks.push((rd(base), rd(base + 4)));
+        }
+        self.heap_start = heap_start;
+        self.heap_blocks = blocks;
+        Ok(())
     }
 
     // ── allocation heap (GLULX_NOTES §11) ─────────────────────────────────────
@@ -2764,5 +3028,68 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert_eq!(m.mem.read32(0x100).unwrap(), 0);
+    }
+
+    // ── Task 1 (2c): save / restore serialization core ────────────────────────
+
+    #[test]
+    fn save_restore_roundtrips_ram_stack_heap_registers() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.mem.write32(0x100, 0xCAFE_BABE).unwrap();
+        m.push32(0x1111_2222).unwrap();
+        m.push32(0x3333_4444).unwrap();
+        m.iosys_mode = 2;
+        m.iosys_rock = 0x99;
+        m.cur_stringtbl = 0x1234;
+        m.pc = 0x40;
+        let blk = m.heap_malloc(16);
+        assert_ne!(blk, 0);
+
+        let snap = m.save_state();
+
+        // Diverge from the saved state.
+        m.mem.write32(0x100, 0).unwrap();
+        m.pop32().unwrap();
+        m.iosys_mode = 0;
+        m.iosys_rock = 0;
+        m.cur_stringtbl = 0;
+        m.pc = 0;
+        m.heap_free(blk).unwrap();
+
+        m.restore_state(&snap).unwrap();
+
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xCAFE_BABE);
+        assert_eq!(m.iosys_mode, 2);
+        assert_eq!(m.iosys_rock, 0x99);
+        assert_eq!(m.cur_stringtbl, 0x1234);
+        assert_eq!(m.pc, 0x40);
+        assert_eq!(m.heap_start, blk);
+        assert_eq!(m.heap_blocks, vec![(blk, 16)]);
+        assert_eq!(m.value_count(), 2);
+        assert_eq!(m.pop32().unwrap(), 0x3333_4444);
+        assert_eq!(m.pop32().unwrap(), 0x1111_2222);
+    }
+
+    #[test]
+    fn cmem_resets_to_original_then_applies_diff() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.mem.write8(0x150, 0xAB).unwrap();
+        let snap = m.save_state();
+        // A byte changed after the save must be reset to the original image (0).
+        m.mem.write8(0x150, 0x00).unwrap();
+        m.mem.write8(0x108, 0xFF).unwrap();
+        m.restore_state(&snap).unwrap();
+        assert_eq!(m.mem.read8(0x150).unwrap(), 0xAB); // saved diff re-applied
+        assert_eq!(m.mem.read8(0x108).unwrap(), 0x00); // not in the save → original
+    }
+
+    #[test]
+    fn restore_rejects_corrupt_save_without_panic() {
+        let mut m = machine_with_body(&[], vec![]);
+        assert!(matches!(m.restore_state(b"not a save"), Err(GError::BadSave(_))));
+        assert!(matches!(m.restore_state(&[]), Err(GError::BadSave(_))));
+        let mut good = m.save_state();
+        good.truncate(good.len() - 10); // sever a chunk
+        assert!(matches!(m.restore_state(&good), Err(GError::BadSave(_))));
     }
 }

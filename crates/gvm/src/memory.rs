@@ -25,6 +25,9 @@ pub struct Memory {
     header: Header,
     /// The original ENDMEM, the floor below which `set_mem_size` cannot shrink.
     endmem_floor: u32,
+    /// The original loaded image `[0, EXTSTART)`. Used as the diff base for
+    /// `CMem` save-state compression and as the reset image on restore.
+    orig: Vec<u8>,
 }
 
 impl Memory {
@@ -38,7 +41,8 @@ impl Memory {
         // Copy the stored initial memory [0, EXTSTART). The header check
         // guaranteed image.len() >= EXTSTART.
         bytes[..extstart].copy_from_slice(&image[..extstart]);
-        Ok(Memory { bytes, header, endmem_floor: header.endmem })
+        let orig = image[..extstart].to_vec();
+        Ok(Memory { bytes, header, endmem_floor: header.endmem, orig })
     }
 
     // ── header field accessors ────────────────────────────────────────────────
@@ -91,6 +95,20 @@ impl Memory {
     /// map itself) uses this; growth is zero-filled, shrink truncates.
     pub(crate) fn set_raw_size(&mut self, new: u32) {
         self.bytes.resize(new as usize, 0);
+    }
+
+    /// The original loaded byte at `addr` — the image as it was at load time,
+    /// extended with zeros at and above EXTSTART. This is the diff base for
+    /// `CMem` save-state compression and the reset image for restore.
+    pub(crate) fn orig_byte(&self, addr: u32) -> u8 {
+        self.orig.get(addr as usize).copied().unwrap_or(0)
+    }
+
+    /// Write one byte directly, bypassing the ROM/range checks. The caller
+    /// guarantees `addr` is in range; used only by save-state restore to lay
+    /// down the reconstructed RAM image.
+    pub(crate) fn write_byte_raw(&mut self, addr: u32, val: u8) {
+        self.bytes[addr as usize] = val;
     }
 
     // ── reads (big-endian, bounds-checked) ────────────────────────────────────

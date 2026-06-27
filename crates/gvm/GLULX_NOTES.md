@@ -389,3 +389,43 @@ report 1; save/undo/accel/float are deferred to 2c+ and report 0).
 filter (1) systems "will always succeed." This VM has not implemented the filter
 I/O system (it is stubbed with a diagnostic), so we honestly report 0 for L2=1
 and 1 only for the systems we run (null and Glk). Update this when filter lands.
+
+## 14. Save / restore serialization (Phase 2c, spec §1.8)
+
+The save state is a Glulx-Quetzal `FORM IFZS` container (IFF: a 4-byte type,
+4-byte big-endian length, then chunks, each `id(4) · len(4) · data · even-pad`).
+`Machine::save_state()` produces these bytes; `restore_state()` consumes them and
+returns `GError::BadSave` on any corruption (never a panic).
+
+| Chunk  | Contents                                                              |
+|--------|----------------------------------------------------------------------|
+| `IFhd` | the first 128 bytes of memory (identity / game-file header)          |
+| `CMem` | 4-byte current memsize, then the RLE-compressed RAM diff             |
+| `Stks` | the live stack bytes `[0, sp)`, big-endian, padding included         |
+| `MAll` | heap-start (4), block count (4), then `(addr, len)` per block        |
+| `GReg` | sp, fp, pc, iosys_mode, iosys_rock, cur_stringtbl, protect_addr, protect_len (8×u32) |
+
+**`CMem` compression (spec §1.8 / Quetzal RLE):** the memory area saved is
+`[RAMSTART, memsize)`. Each byte is XORed against the **original loaded image**
+(extended with zeros at/above EXTSTART). The resulting diff stream is
+run-length-encoded: a non-zero byte is literal; a run of 1..=256 zero bytes is a
+`0x00` byte followed by `(count − 1)`. Restore reverses this: reset RAM to the
+original image, then apply the diff (so bytes absent from the save return to
+their load-time values).
+
+**`Stks` (spec §1.8 / §1.3.1):** the stack is one byte-addressed buffer already
+in the spec's call-frame layout, so the chunk is simply `stack[0..sp]`. We store
+sp/fp/pc explicitly in `GReg` rather than deriving them from a top-of-stack call
+stub (a real Quetzal reader's job); `GReg` is this implementation's extension to
+keep `save_state`/`restore_state` self-contained for headless testing.
+
+**Restore order:** parse chunks → snapshot the currently-protected bytes →
+decompress `CMem` (reset+diff) → re-impose the protected bytes → load the stack
+and registers from `Stks`/`GReg` → rebuild the heap from `MAll` → recompute the
+frame cache. The **protected range** (§16) is preserved across restore: bytes in
+the current protect range keep their pre-restore values.
+
+Per the spec, an interpreter's Glk state, RNG internal state, protect range, and
+I/O-system/string-table settings are not part of a real Quetzal *file*; our
+internal snapshot additionally carries iosys/string-table/protect in `GReg` so
+that `saveundo`/`restoreundo` (§15) restore the full VM state exactly.

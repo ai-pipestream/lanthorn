@@ -17,4 +17,7 @@ pub enum GError {
     BadMemoryMap,
     /// The image is shorter than EXTSTART (missing stored initial memory).
     Truncated,
+    /// Save-state data (Glulx-Quetzal) is corrupt, truncated, or inconsistent.
+    /// Returned by [`crate::exec::Machine::restore_state`]; never a panic.
+    BadSave(String),
 }
