@@ -828,11 +828,16 @@ fn render_middle(
     let filtered_styles: Vec<Style> = visible_indices
         .iter()
         .zip(filtered_kinds.iter())
-        .map(|(&i, kind)| match kind {
-            TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
-            TranscriptKind::Input   => state.colors.transcript_input,
-            TranscriptKind::Meta    => state.colors.transcript_meta,
-            TranscriptKind::Warning => state.colors.transcript_warning,
+        .map(|(&i, kind)| {
+            if let Some(ov) = state.transcript_styles.get(i).copied().flatten() {
+                return ov;
+            }
+            match kind {
+                TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
+                TranscriptKind::Input   => state.colors.transcript_input,
+                TranscriptKind::Meta    => state.colors.transcript_meta,
+                TranscriptKind::Warning => state.colors.transcript_warning,
+            }
         })
         .collect();
     // Reserve the rightmost column of the body as the scrollbar gutter so text

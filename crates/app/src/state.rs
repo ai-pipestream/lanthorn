@@ -664,6 +664,10 @@ pub struct AppState {
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
+    /// Optional per-line render-style override, parallel to `transcript`. In-memory
+    /// only (not persisted). `None` = use the line's per-kind style. Kept length-
+    /// synced by `push_transcript_kind`; read defensively by the renderer.
+    pub transcript_styles: Vec<Option<ratatui::style::Style>>,
     /// Which categories of transcript entries are currently visible.
     pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
@@ -899,6 +903,7 @@ impl Default for AppState {
             selected_room: None,
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
+            transcript_styles: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
             input: String::new(),
@@ -1105,9 +1110,21 @@ impl AppState {
 
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
+        self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
+            self.transcript_styles.push(None);
+        }
+    }
+
+    /// Append lines with the given kind and an explicit per-line render style.
+    pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
+        self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
+        for line in text.split('\n') {
+            self.transcript.push(line.to_owned());
+            self.transcript_kinds.push(kind);
+            self.transcript_styles.push(Some(style));
         }
     }
 
@@ -1282,6 +1299,24 @@ mod tests {
         assert_eq!(s.transcript_kinds.len(), 2);
         assert!(matches!(s.transcript_kinds[0], TranscriptKind::Story));
         assert!(matches!(s.transcript_kinds[1], TranscriptKind::Meta));
+    }
+
+    #[test]
+    fn transcript_styles_track_and_self_heal() {
+        use ratatui::style::{Color, Style};
+        let mut s = AppState::default();
+        s.push_transcript_kind("a", TranscriptKind::Meta);
+        let cyan = Style::new().fg(Color::Cyan);
+        s.push_transcript_styled("b", TranscriptKind::Meta, cyan);
+        assert_eq!(s.transcript.len(), s.transcript_styles.len(), "lengths stay equal");
+        assert_eq!(s.transcript_styles[0], None, "plain push has no override");
+        assert_eq!(s.transcript_styles[1], Some(cyan), "styled push records the style");
+
+        // Simulate a wholesale reassignment that leaves transcript_styles short.
+        s.transcript = vec!["x".into(), "y".into(), "z".into()];
+        s.transcript_kinds = vec![TranscriptKind::Story; 3];
+        s.push_transcript_kind("w", TranscriptKind::Meta); // must self-heal
+        assert_eq!(s.transcript.len(), s.transcript_styles.len(), "self-heal re-aligns lengths");
     }
 
     #[test]
