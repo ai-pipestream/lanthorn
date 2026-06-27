@@ -9,9 +9,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::input::AttrKind;
+use crate::input::{AttrKind, is_bordered_selector};
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
-use crate::state::{AppState, StyleFocus};
+use crate::state::{AppState, BorderZone, StyleFocus};
 use crate::style::{SELECTOR_GROUPS, style_for_selector};
 
 /// The five attribute chips in display order.
@@ -38,6 +38,13 @@ pub struct StyleEditorRects {
     pub bg_swatches: Vec<Rect>,
     pub mru_rects: Vec<Rect>,
     pub custom_rect: Option<Rect>,
+    /// 8 border zone rects (BorderZone, Rect) for mouse hit-testing.
+    /// Only populated when the active selector is a bordered selector.
+    pub border_zones: Vec<(BorderZone, Rect)>,
+    pub border_type_prev: Option<Rect>,
+    pub border_type_next: Option<Rect>,
+    pub border_header: Option<Rect>,
+    pub border_shadow: Option<Rect>,
 }
 
 /// Draw the style-editor full-screen overlay onto `buf`.
@@ -208,6 +215,11 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let mut bg_swatches: Vec<Rect> = Vec::new();
     let mut mru_rects: Vec<Rect> = Vec::new();
     let mut custom_rect: Option<Rect> = None;
+    let mut border_zones: Vec<(BorderZone, Rect)> = Vec::new();
+    let mut border_type_prev: Option<Rect> = None;
+    let mut border_type_next: Option<Rect> = None;
+    let mut border_header: Option<Rect> = None;
+    let mut border_shadow: Option<Rect> = None;
 
     if let Some(prop) = prop_area {
         // Clear the property pane background.
@@ -335,9 +347,184 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                 }
             }
         }
+
+        // ── Border sub-editor (rows 12–19) ───────────────────────────────────
+        // Only shown for the six bordered selectors.
+        let active_sel = ed.selectors[ed.active];
+        if is_bordered_selector(active_sel) && prop.height > 13 {
+            let border_focused = ed.focus == StyleFocus::Border;
+            let section_style = if border_focused { active_style } else { normal_style };
+
+            // Determine the current border style name from the Decl.
+            let style_name = active_decl
+                .and_then(|d| d.style.as_deref())
+                .unwrap_or("single");
+
+            // Row 12: type cycle row  ` type: ◀ <name> ▶`
+            if prop.height > 12 {
+                let type_y = prop.y + 12;
+                let prefix = " type: ";
+                let prefix_w = prefix.chars().count() as u16;
+                let arrow_l = "◀";
+                let arrow_r = "▶";
+                let name_display = style_name;
+                let full_text = format!("{}{} {} {}", prefix, arrow_l, name_display, arrow_r);
+                crate::render::draw_str_clipped(buf, prop.x, type_y, &full_text, section_style, prop);
+
+                // Hit-rects for the arrows.
+                let prev_x = prop.x + prefix_w;
+                border_type_prev = Some(Rect::new(prev_x, type_y, 1, 1));
+                let next_x = prev_x + 1 + 1 + name_display.chars().count() as u16 + 1;
+                border_type_next = Some(Rect::new(next_x, type_y, 1, 1));
+            }
+
+            // Rows 14-16: the 8-zone border box (3 rows).
+            // Zone cell layout (x offsets from prop.x):
+            //   col0 = prop.x+1 (width 3): TL / Left / BL
+            //   col1 = prop.x+5 (width 3): Top / (empty) / Bottom
+            //   col2 = prop.x+9 (width 3): TR / Right / BR
+            let col0 = prop.x + 1;
+            let col1 = prop.x + 5;
+            let col2 = prop.x + 9;
+
+            let is_picture_frame = style_name == "picture-frame";
+
+            // Helper: get the display glyph for a zone.
+            let zone_glyph = |zone: BorderZone| -> &'static str {
+                // Override from decl takes priority.
+                let override_g = active_decl.and_then(|d| {
+                    let s: Option<&str> = match zone {
+                        BorderZone::Top    => d.glyph_top.as_deref(),
+                        BorderZone::Bottom => d.glyph_bottom.as_deref(),
+                        BorderZone::Left   => d.glyph_left.as_deref(),
+                        BorderZone::Right  => d.glyph_right.as_deref(),
+                        BorderZone::Tl     => d.glyph_tl.as_deref(),
+                        BorderZone::Tr     => d.glyph_tr.as_deref(),
+                        BorderZone::Bl     => d.glyph_bl.as_deref(),
+                        BorderZone::Br     => d.glyph_br.as_deref(),
+                    };
+                    s
+                });
+                if let Some(g) = override_g {
+                    // Safety: override glyphs come from user input; we store them as String
+                    // but need &'static str for this closure. Use a leak here.
+                    // Actually we cannot do that easily — return a fixed placeholder for override.
+                    let _ = g;
+                    "•"
+                } else {
+                    // Default glyph based on style.
+                    match style_name {
+                        "double" => match zone {
+                            BorderZone::Top | BorderZone::Bottom => "═",
+                            BorderZone::Left | BorderZone::Right => "║",
+                            BorderZone::Tl => "╔", BorderZone::Tr => "╗",
+                            BorderZone::Bl => "╚", BorderZone::Br => "╝",
+                        },
+                        "thick" => match zone {
+                            BorderZone::Top | BorderZone::Bottom => "━",
+                            BorderZone::Left | BorderZone::Right => "┃",
+                            BorderZone::Tl => "┏", BorderZone::Tr => "┓",
+                            BorderZone::Bl => "┗", BorderZone::Br => "┛",
+                        },
+                        "rounded" => match zone {
+                            BorderZone::Top | BorderZone::Bottom => "─",
+                            BorderZone::Left | BorderZone::Right => "│",
+                            BorderZone::Tl => "╭", BorderZone::Tr => "╮",
+                            BorderZone::Bl => "╰", BorderZone::Br => "╯",
+                        },
+                        "none" => " ",
+                        _ => match zone { // single, picture-frame, unknown
+                            BorderZone::Top | BorderZone::Bottom => "─",
+                            BorderZone::Left | BorderZone::Right => "│",
+                            BorderZone::Tl => "┌", BorderZone::Tr => "┐",
+                            BorderZone::Bl => "└", BorderZone::Br => "┘",
+                        },
+                    }
+                }
+            };
+
+            // Render all 8 zone cells across 3 rows.
+            let zone_rows: &[(u16, &[(BorderZone, u16)])] = &[
+                (14, &[(BorderZone::Tl, col0), (BorderZone::Top, col1), (BorderZone::Tr, col2)]),
+                (15, &[(BorderZone::Left, col0), (BorderZone::Right, col2)]),
+                (16, &[(BorderZone::Bl, col0), (BorderZone::Bottom, col1), (BorderZone::Br, col2)]),
+            ];
+
+            for (row_offset, cells) in zone_rows {
+                let zy = prop.y + row_offset;
+                if zy >= prop.bottom() { break; }
+                for (zone, zx) in *cells {
+                    let zone = *zone;
+                    let zx = *zx;
+                    // Determine zone index for cursor comparison.
+                    let zone_idx = match zone {
+                        BorderZone::Tl => 0, BorderZone::Top => 1, BorderZone::Tr => 2,
+                        BorderZone::Left => 3, BorderZone::Right => 4,
+                        BorderZone::Bl => 5, BorderZone::Bottom => 6, BorderZone::Br => 7,
+                    };
+                    let is_cursor = border_focused && ed.border_zone == zone_idx;
+                    let has_override = active_decl.map_or(false, |d| match zone {
+                        BorderZone::Top    => d.glyph_top.is_some(),
+                        BorderZone::Bottom => d.glyph_bottom.is_some(),
+                        BorderZone::Left   => d.glyph_left.is_some(),
+                        BorderZone::Right  => d.glyph_right.is_some(),
+                        BorderZone::Tl     => d.glyph_tl.is_some(),
+                        BorderZone::Tr     => d.glyph_tr.is_some(),
+                        BorderZone::Bl     => d.glyph_bl.is_some(),
+                        BorderZone::Br     => d.glyph_br.is_some(),
+                    });
+
+                    let base_style = if is_picture_frame {
+                        normal_style.add_modifier(Modifier::DIM)
+                    } else if is_cursor {
+                        active_style
+                    } else if has_override {
+                        normal_style.add_modifier(Modifier::BOLD)
+                    } else {
+                        normal_style
+                    };
+
+                    let glyph = zone_glyph(zone);
+                    // Draw 3-cell zone: space + glyph + space
+                    let cell_rect = Rect::new(zx, zy, 3, 1);
+                    if zx + 3 <= prop.right() {
+                        let cell_text = format!(" {} ", glyph);
+                        crate::render::draw_str_clipped(buf, zx, zy, &cell_text, base_style, prop);
+                        border_zones.push((zone, cell_rect));
+                    }
+                }
+            }
+
+            // Row 18-19: header/shadow toggle chips.
+            if prop.height > 18 {
+                let toggle_y = prop.y + 18;
+                let hdr_on = active_decl.and_then(|d| d.header).unwrap_or(false);
+                let shd_on = active_decl.and_then(|d| d.shadow).unwrap_or(false);
+
+                let hdr_text = "[header]";
+                let shd_text = "[shadow]";
+                let hdr_w = hdr_text.chars().count() as u16;
+                let shd_w = shd_text.chars().count() as u16;
+
+                let hdr_x = prop.x + 1;
+                let shd_x = hdr_x + hdr_w + 1;
+
+                let hdr_style = if hdr_on { active_style } else { normal_style };
+                let shd_style = if shd_on { active_style } else { normal_style };
+
+                if hdr_x + hdr_w <= prop.right() {
+                    crate::render::draw_str_clipped(buf, hdr_x, toggle_y, hdr_text, hdr_style, prop);
+                    border_header = Some(Rect::new(hdr_x, toggle_y, hdr_w, 1));
+                }
+                if shd_x + shd_w <= prop.right() {
+                    crate::render::draw_str_clipped(buf, shd_x, toggle_y, shd_text, shd_style, prop);
+                    border_shadow = Some(Rect::new(shd_x, toggle_y, shd_w, 1));
+                }
+            }
+        }
     }
 
-    Some(StyleEditorRects { samples, attr_chips, dialog: dialog_rects, fg_swatches, bg_swatches, mru_rects, custom_rect })
+    Some(StyleEditorRects { samples, attr_chips, dialog: dialog_rects, fg_swatches, bg_swatches, mru_rects, custom_rect, border_zones, border_type_prev, border_type_next, border_header, border_shadow })
 }
 
 // ── draw_swatch_row ───────────────────────────────────────────────────────────

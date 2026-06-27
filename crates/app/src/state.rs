@@ -546,6 +546,7 @@ pub enum StyleFocus {
     Bg,
     Custom,
     Attrs,
+    Border,
 }
 
 /// Transient state for the live style-editor full-screen mode.
@@ -575,6 +576,9 @@ pub struct StyleEditorState {
     /// Cursor position within the swatch row (0..=16; 16 = default cell).
     /// Active when focus == Fg or focus == Bg.
     pub swatch_cursor: usize,
+    /// Which of the 8 border zones (0..8) has keyboard focus when focus == Border.
+    /// Mapping: 0=Tl, 1=Top, 2=Tr, 3=Left, 4=Right, 5=Bl, 6=Bottom, 7=Br
+    pub border_zone: usize,
 }
 
 // ── Config screen state ───────────────────────────────────────────────────────

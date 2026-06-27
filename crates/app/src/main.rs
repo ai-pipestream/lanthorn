@@ -2002,6 +2002,41 @@ fn main() {
                                 }
                             }
 
+                            // Border zone cells.
+                            for (zone, rect) in &rects.border_zones {
+                                if hit(rect) {
+                                    let zone = *zone;
+                                    apply_action(Action::StyleOpenGlyphPicker(zone), &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+                            // Border type cycle arrows.
+                            if let Some(rect) = &rects.border_type_prev {
+                                if hit(rect) {
+                                    apply_action(Action::StyleBorderTypeCycle(-1), &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+                            if let Some(rect) = &rects.border_type_next {
+                                if hit(rect) {
+                                    apply_action(Action::StyleBorderTypeCycle(1), &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+                            // Header/shadow toggles.
+                            if let Some(rect) = &rects.border_header {
+                                if hit(rect) {
+                                    apply_action(Action::StyleBorderToggleHeader, &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+                            if let Some(rect) = &rects.border_shadow {
+                                if hit(rect) {
+                                    apply_action(Action::StyleBorderToggleShadow, &mut state, &mut mapper);
+                                    continue 'event_loop;
+                                }
+                            }
+
                             // Dialog buttons: Save / Cancel / close [X].
                             // These must reach the run-loop action path so the style_save
                             // flag fires and save_style_and_repoint writes style.toml.

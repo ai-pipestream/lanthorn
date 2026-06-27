@@ -232,6 +232,16 @@ pub enum Action {
     StyleSave,
     /// Reset the active selector's Decl to the built-in default.
     StyleReset,
+    /// Cycle the border type for the active selector by delta (+1/-1) over ["none","single","double","rounded","thick","picture-frame"].
+    StyleBorderTypeCycle(i32),
+    /// Move the border zone cursor by delta (-1/+1), wrapping over 0..8.
+    StyleBorderZoneNav(i32),
+    /// Clear the glyph override for the current border zone.
+    StyleBorderClearZone,
+    /// Toggle the header flag on the active selector's Decl.
+    StyleBorderToggleHeader,
+    /// Toggle the shadow flag on the active selector's Decl.
+    StyleBorderToggleShadow,
     /// Open the glyph-picker modal over the style editor, targeting `zone`.
     StyleOpenGlyphPicker(crate::state::BorderZone),
     /// Navigate the glyph grid by `delta` cells (wraps within current block).
@@ -1145,6 +1155,29 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
                 3 => Action::StyleToggleAttr(AttrKind::Dim),
                 _ => Action::StyleToggleAttr(AttrKind::Reversed),
             }
+        }
+        KeyCode::Left if focus == StyleFocus::Border => Action::StyleBorderZoneNav(-1),
+        KeyCode::Right if focus == StyleFocus::Border => Action::StyleBorderZoneNav(1),
+        KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
+            let zone = ed_ref.map(|e| border_zone_from_index(e.border_zone))
+                .unwrap_or(crate::state::BorderZone::Top);
+            Action::StyleOpenGlyphPicker(zone)
+        }
+        KeyCode::Char('t') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
+            Action::StyleBorderTypeCycle(1)
+        }
+        KeyCode::Char('[') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
+            Action::StyleBorderTypeCycle(-1)
+        }
+        KeyCode::Char(']') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
+            Action::StyleBorderTypeCycle(1)
+        }
+        KeyCode::Delete if focus == StyleFocus::Border => Action::StyleBorderClearZone,
+        KeyCode::Char('h') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
+            Action::StyleBorderToggleHeader
+        }
+        KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
+            Action::StyleBorderToggleShadow
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::StyleSave,
         KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => Action::StyleReset,
@@ -2256,6 +2289,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     StyleFocus::Bg,
                     StyleFocus::Custom,
                     StyleFocus::Attrs,
+                    StyleFocus::Border,
                 ];
                 let cur = order.iter().position(|f| *f == ed.focus).unwrap_or(0) as i32;
                 let n = order.len() as i32;
@@ -2348,6 +2382,59 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     None => { ed.doc.colors.selectors.remove(&sel); }
                 }
                 let dir = state.config.user_dir.clone();
+                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleBorderTypeCycle(d) => {
+            const STYLES: &[&str] = &["none", "single", "double", "rounded", "thick", "picture-frame"];
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &mut state.style_editor {
+                let sel = ed.selectors[ed.active].to_string();
+                let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                let cur_name = decl.style.as_deref().unwrap_or("single");
+                let cur_idx = STYLES.iter().position(|s| *s == cur_name).unwrap_or(1) as i32;
+                let n = STYLES.len() as i32;
+                let new_idx = ((cur_idx + d).rem_euclid(n)) as usize;
+                decl.style = Some(STYLES[new_idx].to_string());
+                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleBorderZoneNav(d) => {
+            if let Some(ed) = &mut state.style_editor {
+                let n = 8i32;
+                ed.border_zone = ((ed.border_zone as i32 + d).rem_euclid(n)) as usize;
+            }
+        }
+
+        Action::StyleBorderClearZone => {
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &mut state.style_editor {
+                let sel = ed.selectors[ed.active].to_string();
+                let zone = border_zone_from_index(ed.border_zone);
+                let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                set_zone_glyph(decl, zone, None);
+                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleBorderToggleHeader => {
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &mut state.style_editor {
+                let sel = ed.selectors[ed.active].to_string();
+                let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                decl.header = Some(!decl.header.unwrap_or(false));
+                recompute_style_preview(ed, &dir);
+            }
+        }
+
+        Action::StyleBorderToggleShadow => {
+            let dir = state.config.user_dir.clone();
+            if let Some(ed) = &mut state.style_editor {
+                let sel = ed.selectors[ed.active].to_string();
+                let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                decl.shadow = Some(!decl.shadow.unwrap_or(false));
                 recompute_style_preview(ed, &dir);
             }
         }
@@ -2864,6 +2951,28 @@ pub(crate) fn picker_glyph_at_cursor(picker: &crate::state::GlyphPickerState) ->
     None
 }
 
+/// Returns `true` for the six selectors that have configurable borders.
+pub fn is_bordered_selector(sel: &str) -> bool {
+    matches!(sel, "map_border" | "story_border" | "dialog" | "upper_window_border" | "status_header" | "input_line")
+}
+
+/// Map the 8-slot border_zone cursor to a BorderZone.
+/// Layout: 0=Tl, 1=Top, 2=Tr, 3=Left, 4=Right, 5=Bl, 6=Bottom, 7=Br
+fn border_zone_from_index(i: usize) -> crate::state::BorderZone {
+    use crate::state::BorderZone::*;
+    match i {
+        0 => Tl,
+        1 => Top,
+        2 => Tr,
+        3 => Left,
+        4 => Right,
+        5 => Bl,
+        6 => Bottom,
+        7 => Br,
+        _ => Top,
+    }
+}
+
 /// Write `g` into the `decl` field that corresponds to `zone`.
 pub(crate) fn set_zone_glyph(
     decl: &mut crate::style::Decl,
@@ -2914,6 +3023,7 @@ pub fn open_style_editor(state: &mut AppState) {
         attr_cursor: 0,
         color_target: false,
         swatch_cursor: 0,
+        border_zone: 0,
     });
     state.dialog_focus = 0;
 }
@@ -6307,5 +6417,24 @@ mod tests {
         let sel = ed.selectors[ed.active].to_string();
         // default cell clears fg
         assert!(ed.doc.colors.selectors.get(&sel).map_or(true, |d| d.fg.is_none()));
+    }
+
+    #[test]
+    fn border_type_cycle_updates_decl_style() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        { let ed = s.style_editor.as_mut().unwrap();
+          ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap(); }
+        apply_action(Action::StyleBorderTypeCycle(1), &mut s, &mut mapper::mapper::Mapper::default());
+        let ed = s.style_editor.as_ref().unwrap();
+        let st = ed.doc.colors.selectors.get("map_border").and_then(|d| d.style.clone());
+        assert!(st.is_some(), "cycling sets the border style name on the decl");
+    }
+    #[test]
+    fn is_bordered_selector_covers_the_six() {
+        for sel in ["map_border","story_border","dialog","upper_window_border","status_header","input_line"] {
+            assert!(crate::input::is_bordered_selector(sel), "{sel} is bordered");
+        }
+        assert!(!crate::input::is_bordered_selector("transcript"));
     }
 }
