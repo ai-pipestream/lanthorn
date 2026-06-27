@@ -1658,6 +1658,23 @@ mod tests {
     }
 
     #[test]
+    fn transcript_color_override_paints_line_in_its_style() {
+        use ratatui::style::{Color, Style};
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.push_transcript_styled("connector sample", TranscriptKind::Meta, Style::new().fg(Color::Cyan));
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&machine, &state, area, &mut buf);
+        // Find a cell of the line and assert its fg is Cyan (the override), not transcript_meta.
+        let found = (0..area.height).any(|y| (0..area.width).any(|x| {
+            let c = &buf[(x, y)];
+            c.symbol().starts_with('c') && c.style().fg == Some(Color::Cyan)
+        }));
+        assert!(found, "color override paints the line in its style");
+    }
+
+    #[test]
     fn render_transcript_status_line_nonblank_with_fixture() {
         let fixture = std::path::Path::new(
             "/Volumes/Videos/Source/babelmap/crates/zvm/tests/fixtures/czech.z5",

@@ -56,6 +56,9 @@ pub enum SlashOutcome {
     OpenHints,
     /// Show per-command detail for `help <name>`.
     HelpCommand(String),
+    /// Print the resolved color scheme to the transcript. `actual` = render each
+    /// selector line in its own style instead of the plain meta color.
+    PrintColors { actual: bool },
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -312,6 +315,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-watch", category: Category::Style, context: Context::Global,
         usage: "toggle-watch", description: "toggle live style-file watching",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleWatch) },
+    CommandSpec { name: "print-colors", category: Category::Style, context: Context::Global,
+        usage: "print-colors [color]", description: "print the current color scheme (color = actual colors)",
+        dispatch: |a| SlashOutcome::PrintColors { actual: a.first() == Some(&"color") } },
 
     // ── Export ────────────────────────────────────────────────────────────
     CommandSpec { name: "export-svg", category: Category::Export, context: Context::Global,
@@ -596,9 +602,9 @@ mod tests {
         assert_eq!(by("save-game").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (47 commands: Game 8, Map 20, View 4,
-        // Transcript 3, Style 4, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 47, "registry must match the spec's Full command table");
+        // Total count matches the spec table (48 commands: Game 8, Map 20, View 4,
+        // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
+        assert_eq!(COMMANDS.len(), 48, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -621,6 +627,13 @@ mod tests {
         // `help <command>` parses to HelpCommand; bare help to Help.
         assert!(matches!(parse("help", '/'), SlashOutcome::Help));
         assert!(matches!(parse("help zoom-map", '/'), SlashOutcome::HelpCommand(n) if n == "zoom-map"));
+    }
+
+    #[test]
+    fn print_colors_command_parses_flag() {
+        assert!(find_command("print-colors").is_some());
+        assert!(matches!(parse("print-colors", '/'), SlashOutcome::PrintColors { actual: false }));
+        assert!(matches!(parse("print-colors color", '/'), SlashOutcome::PrintColors { actual: true }));
     }
 
     #[test]

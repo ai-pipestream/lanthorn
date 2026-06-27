@@ -2813,6 +2813,14 @@ fn dispatch_slash_outcome(
                 state.push_transcript_kind(&line, TranscriptKind::Meta);
             }
         }
+        SlashOutcome::PrintColors { actual } => {
+            for (line, style_opt) in app::style::describe_scheme(&state.colors) {
+                match (actual, style_opt) {
+                    (true, Some(style)) => state.push_transcript_styled(&line, TranscriptKind::Meta, style),
+                    _ => state.push_transcript_kind(&line, TranscriptKind::Meta),
+                }
+            }
+        }
         SlashOutcome::Save(name_opt) => {
             // Named save or default archive save.
             let result = match name_opt {
