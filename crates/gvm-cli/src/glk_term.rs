@@ -126,6 +126,12 @@ impl TerminalBackend {
         }
     }
 
+    /// Flush buffered output to the display **without** tearing down the scroll
+    /// region (used before reading input, so the prompt is visible mid-run).
+    pub fn flush_out(&mut self) {
+        let _ = self.out.flush();
+    }
+
     /// Redraw the pinned grid (TTY only).
     fn redraw_grid(&mut self) {
         if !self.is_tty {
