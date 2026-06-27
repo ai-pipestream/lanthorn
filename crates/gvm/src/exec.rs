@@ -298,6 +298,44 @@ impl Machine {
             0x2B => self.branch2(|a, b| a >= b),
             0x2C => self.branch2(|a, b| a > b),
             0x2D => self.branch2(|a, b| a <= b),
+            // Copy / sign-extend.
+            0x40 => self.unop(|a| a),                                  // copy
+            0x41 => self.copy_sized(2),                                // copys
+            0x42 => self.copy_sized(1),                                // copyb
+            0x44 => self.unop(|a| a as u16 as i16 as i32 as u32),      // sexs
+            0x45 => self.unop(|a| a as u8 as i8 as i32 as u32),        // sexb
+            // Stack manipulation.
+            0x50 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                let c = self.value_count();
+                self.store(s[0], c)
+            }
+            0x51 => self.op_stkpeek(),
+            0x52 => self.op_stkswap(),
+            0x53 => self.op_stkroll(),
+            0x54 => self.op_stkcopy(),
+            // Memory size.
+            0x102 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                let v = self.mem.mem_size();
+                self.store(s[0], v)
+            }
+            0x103 => {
+                let (l, s) = self.read_operands(1, 1)?;
+                let r = u32::from(self.mem.set_mem_size(l[0]).is_err());
+                self.store(s[0], r)
+            }
+            // Calls / return.
+            0x30 => self.op_call(),
+            0x31 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.return_value(l[0])
+            }
+            0x34 => self.op_tailcall(),
+            0x160 => self.op_callf(0),
+            0x161 => self.op_callf(1),
+            0x162 => self.op_callf(2),
+            0x163 => self.op_callf(3),
             other => Err(format!("illegal/unimplemented opcode {other:#x}")),
         }
     }
@@ -610,18 +648,195 @@ impl Machine {
         Ok(())
     }
 
-    /// Write `v` to main memory at `addr`, mapping ROM/out-of-range faults to a
-    /// diagnostic string.
+    /// Write a 32-bit `v` to main memory at `addr`.
     pub(crate) fn store_mem(&mut self, addr: u32, v: u32) -> R<()> {
+        self.store_mem_sized(addr, v, 4)
+    }
+
+    /// Write the low `width` bytes of `v` to main memory at `addr`, mapping
+    /// ROM/out-of-range faults to a diagnostic (ROM) or a fault (out of range).
+    fn store_mem_sized(&mut self, addr: u32, v: u32, width: u32) -> R<()> {
         use crate::memory::WriteFault;
-        match self.mem.write32(addr, v) {
+        let res = match width {
+            1 => self.mem.write8(addr, v),
+            2 => self.mem.write16(addr, v),
+            _ => self.mem.write32(addr, v),
+        };
+        match res {
             Ok(()) => Ok(()),
             Err(WriteFault::Rom) => {
                 self.diagnostics.push(format!("ignored ROM write @{addr:#010x}"));
                 Ok(())
             }
-            Err(WriteFault::OutOfRange) => Err(format!("memory fault: write32 @{addr:#010x}")),
+            Err(WriteFault::OutOfRange) => Err(format!("memory fault: write @{addr:#010x}")),
         }
+    }
+
+    fn read_width(&self, addr: u32, width: u32) -> R<u32> {
+        match width {
+            1 => self.m8(addr),
+            2 => self.m16(addr),
+            _ => self.m32(addr),
+        }
+    }
+
+    // ── copys/copyb (width-sized copies; no sign extension) ───────────────────
+
+    /// `copys` (width 2) / `copyb` (width 1): copy a sub-word value. Memory
+    /// operands access `width` bytes; stack operands stay 32-bit. (Local
+    /// operands — deprecated — are read/written at the local's declared size.)
+    fn copy_sized(&mut self, width: u32) -> R<()> {
+        let mode_byte = self.take8()? as u8;
+        let lmode = mode_byte & 0x0F;
+        let smode = mode_byte >> 4;
+        let v = self.resolve_load_sized(lmode, width)?;
+        let dest = self.resolve_store(smode)?;
+        match dest {
+            Dest::Mem(a) => self.store_mem_sized(a, v, width),
+            other => self.store(other, v),
+        }
+    }
+
+    fn resolve_load_sized(&mut self, mode: u8, width: u32) -> R<u32> {
+        let ramstart = self.mem.ramstart();
+        let mask = if width >= 4 { u32::MAX } else { (1u32 << (width * 8)) - 1 };
+        let v = match mode {
+            0x0 => 0,
+            0x1 => self.take8()?, // zero-extended (no sign extension for copys/copyb)
+            0x2 => self.take16()?,
+            0x3 => self.take32()?,
+            0x5 => {
+                let a = self.take8()?;
+                self.read_width(a, width)?
+            }
+            0x6 => {
+                let a = self.take16()?;
+                self.read_width(a, width)?
+            }
+            0x7 => {
+                let a = self.take32()?;
+                self.read_width(a, width)?
+            }
+            0x8 => self.pop32()?,
+            0x9 => {
+                let o = self.take8()?;
+                self.local_load(o)?
+            }
+            0xA => {
+                let o = self.take16()?;
+                self.local_load(o)?
+            }
+            0xB => {
+                let o = self.take32()?;
+                self.local_load(o)?
+            }
+            0xD => {
+                let a = self.take8()? + ramstart;
+                self.read_width(a, width)?
+            }
+            0xE => {
+                let a = self.take16()? + ramstart;
+                self.read_width(a, width)?
+            }
+            0xF => {
+                let a = self.take32()? + ramstart;
+                self.read_width(a, width)?
+            }
+            other => return Err(format!("illegal load operand mode {other:#x}")),
+        };
+        Ok(v & mask)
+    }
+
+    // ── stack-manipulation opcodes ────────────────────────────────────────────
+
+    fn op_stkpeek(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(1, 1)?;
+        let i = l[0];
+        if i >= self.value_count() {
+            return Err(format!("stkpeek index {i} out of range"));
+        }
+        let off = self.sp - 4 * (i as usize + 1);
+        let v = self.st_r32(off);
+        self.store(s[0], v)
+    }
+
+    fn op_stkswap(&mut self) -> R<()> {
+        if self.value_count() < 2 {
+            return Err("stkswap underflow".to_string());
+        }
+        let (a, b) = (self.sp - 4, self.sp - 8);
+        let (va, vb) = (self.st_r32(a), self.st_r32(b));
+        self.st_w32(a, vb);
+        self.st_w32(b, va);
+        Ok(())
+    }
+
+    fn op_stkcopy(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let n = l[0] as usize;
+        if l[0] > self.value_count() {
+            return Err("stkcopy out of range".to_string());
+        }
+        let base = self.sp;
+        for k in 0..n {
+            let v = self.st_r32(base - 4 * n + 4 * k);
+            self.push32(v)?;
+        }
+        Ok(())
+    }
+
+    fn op_stkroll(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let count = l[0];
+        let places = l[1] as i32;
+        if count > self.value_count() {
+            return Err("stkroll out of range".to_string());
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let count = count as usize;
+        // Positive places rotate "up" (topmost moves deeper) → rotate_right on the
+        // bottom→top ordering.
+        let eff = (((places % count as i32) + count as i32) % count as i32) as usize;
+        let base = self.sp - 4 * count;
+        let mut vals: Vec<u32> = (0..count).map(|k| self.st_r32(base + 4 * k)).collect();
+        vals.rotate_right(eff);
+        for (k, v) in vals.iter().enumerate() {
+            self.st_w32(base + 4 * k, *v);
+        }
+        Ok(())
+    }
+
+    // ── call variants ─────────────────────────────────────────────────────────
+
+    fn op_call(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (func, argc) = (l[0], l[1]);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop32()?); // first arg is topmost
+        }
+        self.call_function(func, &args, s[0])
+    }
+
+    fn op_callf(&mut self, nargs: usize) -> R<()> {
+        let (l, s) = self.read_operands(1 + nargs, 1)?;
+        let args = l[1..].to_vec();
+        self.call_function(l[0], &args, s[0])
+    }
+
+    fn op_tailcall(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let (func, argc) = (l[0], l[1]);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop32()?);
+        }
+        // Destroy the current frame but keep the call stub beneath it, so the new
+        // function returns to the current function's caller.
+        self.sp = self.fp;
+        self.build_frame_and_enter(func, &args)
     }
 }
 
@@ -870,6 +1085,206 @@ mod tests {
         // Mode 0x1 (constant) is illegal as a store target.
         let mut m = machine_with_body(&[], vec![0x01, 0x00]);
         assert!(m.read_operands(0, 1).is_err());
+    }
+
+    // ── Task 5: stack ops, copy, memsize, call variants ───────────────────────
+
+    #[test]
+    fn copy_and_sign_extend() {
+        // copy: full 32-bit through RAM.
+        let body = asm::ins(0x40, &[asm::Op::C32(0xDEAD_BEEF), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF);
+
+        // copys: write only 2 bytes to memory (no sign extension).
+        let body = asm::ins(0x41, &[asm::Op::C32(0x1234_5678), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x100, 0xFFFF_FFFF).unwrap();
+        m.step_once().unwrap();
+        // Big-endian: the 2-byte write at 0x100 lands in the high-order bytes
+        // (0x5678), leaving the low half (0x102..0x104) unchanged (FFFF).
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x5678_FFFF);
+
+        // copyb: write only 1 byte (the top byte at 0x100).
+        let body = asm::ins(0x42, &[asm::Op::C32(0x1234_5678), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x100, 0).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x7800_0000);
+
+        // sexs / sexb sign-extend.
+        let sx = |op: u32, v: u32| {
+            let body = asm::ins(op, &[asm::Op::C32(v), asm::Op::Mem16(0x0100)]);
+            let mut m = machine_with_body(&[], body);
+            m.step_once().unwrap();
+            m.mem.read32(0x100).unwrap()
+        };
+        assert_eq!(sx(0x44, 0x0000_8000), 0xFFFF_8000); // sexs negative
+        assert_eq!(sx(0x44, 0x0000_7FFF), 0x0000_7FFF); // sexs positive
+        assert_eq!(sx(0x45, 0x0000_0080), 0xFFFF_FF80); // sexb negative
+        assert_eq!(sx(0x45, 0x0000_007F), 0x0000_007F); // sexb positive
+    }
+
+    #[test]
+    fn stkcount_peek_swap() {
+        // stkcount → RAM.
+        let body = asm::ins(0x50, &[asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(1).unwrap();
+        m.push32(2).unwrap();
+        m.push32(3).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 3);
+
+        // stkpeek index 1 (does not pop).
+        let body = asm::ins(0x51, &[asm::Op::C8(1), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(0xAA).unwrap();
+        m.push32(0xBB).unwrap();
+        m.push32(0xCC).unwrap(); // top
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xBB);
+        assert_eq!(m.value_count(), 3);
+
+        // stkswap.
+        let body = asm::ins(0x52, &[]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(1).unwrap();
+        m.push32(2).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.pop32().unwrap(), 1);
+        assert_eq!(m.pop32().unwrap(), 2);
+    }
+
+    #[test]
+    fn stkcopy_duplicates_top_n_in_order() {
+        let body = asm::ins(0x54, &[asm::Op::C8(2)]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(10).unwrap();
+        m.push32(20).unwrap();
+        m.push32(30).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.value_count(), 5);
+        // ...10,20,30,20,30 (top).
+        for expect in [30, 20, 30, 20, 10] {
+            assert_eq!(m.pop32().unwrap(), expect);
+        }
+    }
+
+    #[test]
+    fn stkroll_rotates_per_spec_example() {
+        // Spec example: 8 7 6 5 4 3 2 1 0<top>; stkroll 5 1 → 8 7 6 5 0 4 3 2 1<top>.
+        let body = asm::ins(0x53, &[asm::Op::C8(5), asm::Op::C8(1)]);
+        let mut m = machine_with_body(&[], body);
+        for v in [8u32, 7, 6, 5, 4, 3, 2, 1, 0] {
+            m.push32(v).unwrap();
+        }
+        m.step_once().unwrap();
+        for expect in [1, 2, 3, 4, 0, 5, 6, 7, 8] {
+            assert_eq!(m.pop32().unwrap(), expect);
+        }
+    }
+
+    #[test]
+    fn get_and_set_memsize() {
+        let body = asm::ins(0x102, &[asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        let size = m.mem.mem_size();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), size);
+
+        // setmemsize success → result 0, size grows.
+        let body = asm::ins(0x103, &[asm::Op::C16(0x300), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0); // success
+        assert_eq!(m.mem.mem_size(), 0x300);
+
+        // setmemsize failure (unaligned) → result 1, size unchanged.
+        let body = asm::ins(0x103, &[asm::Op::C16(0x250), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        let before = m.mem.mem_size();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1); // failure
+        assert_eq!(m.mem.mem_size(), before);
+    }
+
+    #[test]
+    fn call_takes_args_from_stack_and_returns() {
+        // callee (index 0, addr 0x24) returns the constant 0x123.
+        let callee = asm::func(0xC1, &[], &asm::ins(0x31, &[asm::Op::C16(0x123)]));
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x30, &[asm::Op::C32(0x24), asm::Op::C8(0), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[callee, start], 1, 0x100);
+        assert_eq!(built.addrs[0], 0x24);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // call
+        m.step_once().unwrap(); // return
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x123);
+    }
+
+    #[test]
+    fn callfi_passes_one_arg() {
+        // callee returns its single local (the argument).
+        let callee = asm::func(0xC1, &[(4, 1)], &asm::ins(0x31, &[asm::Op::Local8(0)]));
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x161, &[asm::Op::C32(0x24), asm::Op::C16(0x99), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[callee, start], 1, 0x100);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // callfi
+        m.step_once().unwrap(); // return
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x99);
+    }
+
+    #[test]
+    fn callfii_sums_two_args() {
+        // callee: add local0 + local1 → stack, then return it.
+        let mut body = asm::ins(0x10, &[asm::Op::Local8(0), asm::Op::Local8(4), asm::Op::Stack]);
+        body.extend(asm::ins(0x31, &[asm::Op::Stack]));
+        let callee = asm::func(0xC1, &[(4, 2)], &body);
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(
+                0x162,
+                &[asm::Op::C32(0x24), asm::Op::C8(10), asm::Op::C8(20), asm::Op::Mem16(0x0100)],
+            ),
+        );
+        let built = asm::assemble(&[callee, start], 1, 0x100);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // callfii
+        m.step_once().unwrap(); // add
+        m.step_once().unwrap(); // return
+        assert_eq!(m.mem.read32(0x100).unwrap(), 30);
+    }
+
+    #[test]
+    fn tailcall_reuses_caller_stub() {
+        // f2 (addr 0x24) returns 0x77. f1 tailcalls f2. start calls f1 storing to
+        // RAM 0x100. Because tailcall reuses f1's stub, 0x77 lands at 0x100.
+        let f2 = asm::func(0xC1, &[], &asm::ins(0x31, &[asm::Op::C16(0x77)]));
+        let f1_addr = 0x24 + f2.len() as u32;
+        let f1 = asm::func(0xC1, &[], &asm::ins(0x34, &[asm::Op::C32(0x24), asm::Op::C8(0)]));
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x30, &[asm::Op::C32(f1_addr), asm::Op::C8(0), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[f2, f1, start], 2, 0x100);
+        assert_eq!(built.addrs[1], f1_addr);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // start: call f1
+        m.step_once().unwrap(); // f1: tailcall f2
+        m.step_once().unwrap(); // f2: return 0x77
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x77);
+        assert!(!m.halted); // returned into start, not halted
     }
 
     #[test]
