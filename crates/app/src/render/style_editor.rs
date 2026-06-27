@@ -274,9 +274,10 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         if prop.height > 1 {
             let fg_focused = ed.focus == StyleFocus::Fg;
             let fg_lbl_style = if fg_focused { active_style } else { normal_style };
+            let fg_mark = if !ed.color_target { "\u{25b8}" } else { " " }; // ▸ marks active target
             crate::render::draw_str_clipped(
                 buf, prop.x, prop.y + 1,
-                &format!(" fg: {}", fg_val), fg_lbl_style, prop,
+                &format!("{}fg: {}", fg_mark, fg_val), fg_lbl_style, prop,
             );
         }
 
@@ -290,9 +291,10 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         if prop.height > 4 {
             let bg_focused = ed.focus == StyleFocus::Bg;
             let bg_lbl_style = if bg_focused { active_style } else { normal_style };
+            let bg_mark = if ed.color_target { "\u{25b8}" } else { " " }; // ▸ marks active target
             crate::render::draw_str_clipped(
                 buf, prop.x, prop.y + 4,
-                &format!(" bg: {}", bg_val), bg_lbl_style, prop,
+                &format!("{}bg: {}", bg_mark, bg_val), bg_lbl_style, prop,
             );
         }
 
@@ -328,8 +330,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let custom_y = prop.y + 8;
             let custom_focused = ed.focus == StyleFocus::Custom;
             let cstyle = if custom_focused { active_style } else { normal_style };
-            let prefix = " hex ";
-            let prefix_w = prefix.len() as u16;
+            let prefix = if ed.color_target { " hex \u{2192}bg " } else { " hex \u{2192}fg " };
+            let prefix_w = prefix.chars().count() as u16;
             let max_buf_w = prop.right().saturating_sub(prop.x + prefix_w) as usize;
             let buf_display: String = ed.custom_buf.chars().take(max_buf_w).collect();
             let custom_text = format!("{}{}", prefix, buf_display);
@@ -766,6 +768,26 @@ mod tests {
             }
         }
         assert!(!drew, "no scrollbar thumb expected when all selectors fit in the board area");
+    }
+
+    #[test]
+    fn property_pane_shows_fg_bg_target_indicator() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor_hermetic(&mut s);
+        let area = Rect::new(0, 0, 120, 60);
+
+        // Default target is fg.
+        let mut buf = Buffer::empty(area);
+        let _ = draw_style_editor(&s, area, &mut buf);
+        let fg_text: String = buf.content().iter().flat_map(|c| c.symbol().chars()).collect();
+        assert!(fg_text.contains("\u{2192}fg"), "custom row tags the fg target by default");
+
+        // Switch target to bg.
+        s.style_editor.as_mut().unwrap().color_target = true;
+        let mut buf2 = Buffer::empty(area);
+        let _ = draw_style_editor(&s, area, &mut buf2);
+        let bg_text: String = buf2.content().iter().flat_map(|c| c.symbol().chars()).collect();
+        assert!(bg_text.contains("\u{2192}bg"), "custom row tags the bg target when color_target is bg");
     }
 
     #[test]
