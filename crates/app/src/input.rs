@@ -222,8 +222,6 @@ pub enum Action {
     StyleFocusCycle(i32),
     /// Move the attribute-chip cursor left (-1) or right (+1) within the Attrs focus.
     StyleAttrChipNav(i32),
-    /// Move the footer-button focus left (-1) or right (+1) within the Buttons focus.
-    StyleButtonNav(i32),
     /// Set the fg (is_bg=false) or bg (is_bg=true) of the active selector.
     /// `value` is a color token (ANSI name, #rrggbb hex, or "default"); `None` clears to default.
     StyleSetColor { is_bg: bool, value: Option<String> },
@@ -1194,6 +1192,9 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
 
 // ── Internal: style-editor key routing ───────────────────────────────────────
 
+/// Number of footer buttons in the style editor (Save, Save Game, Cancel).
+const STYLE_BUTTON_COUNT: usize = 3;
+
 /// Key dispatch for the style-editor full-screen mode.
 fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> Action {
     use crate::state::StyleFocus;
@@ -1277,10 +1278,8 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
             Action::StyleBorderToggleShadow
         }
-        // Footer-button focus: Left/Right move among Save / Save Game / Cancel,
-        // Enter activates the focused button.
-        KeyCode::Left if focus == StyleFocus::Buttons => Action::StyleButtonNav(-1),
-        KeyCode::Right if focus == StyleFocus::Buttons => Action::StyleButtonNav(1),
+        // Footer-button focus: Tab/Shift-Tab step between the buttons (handled by
+        // StyleFocusCycle above); Enter activates the focused button.
         KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Buttons => {
             match state.dialog_focus {
                 0 => Action::StyleSave,
@@ -2444,40 +2443,65 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::StyleFocusCycle(d) => {
-            let mut entered_buttons = false;
-            if let Some(ed) = &mut state.style_editor {
-                use crate::state::StyleFocus;
-                let bordered = is_bordered_selector(ed.selectors[ed.active]);
-                let order: &[StyleFocus] = if bordered {
-                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs, StyleFocus::Border, StyleFocus::Buttons]
-                } else {
-                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs, StyleFocus::Buttons]
-                };
-                let prev = ed.focus;
-                let cur = order.iter().position(|f| *f == ed.focus).unwrap_or(0) as i32;
-                let n = order.len() as i32;
-                ed.focus = order[((cur + d).rem_euclid(n)) as usize];
-                match ed.focus {
-                    StyleFocus::Fg => ed.color_target = false,
-                    StyleFocus::Bg => ed.color_target = true,
-                    StyleFocus::Custom => {
-                        if ed.custom_buf.is_empty() {
-                            ed.custom_buf = "#".to_string();
+            use crate::state::StyleFocus;
+            // The tab order is the body focus ring followed by each footer button
+            // as its own stop, so Tab/Shift-Tab step through Save, Save Game and
+            // Cancel individually before leaving the button row. Body stops keep
+            // their original indices, so multi-step deltas still land correctly.
+            enum Stop {
+                Body(StyleFocus),
+                Button(usize),
+            }
+            let ed_info = state
+                .style_editor
+                .as_ref()
+                .map(|ed| (is_bordered_selector(ed.selectors[ed.active]), ed.focus));
+            if let Some((bordered, cur_focus)) = ed_info {
+                let mut stops = vec![
+                    Stop::Body(StyleFocus::Board),
+                    Stop::Body(StyleFocus::Fg),
+                    Stop::Body(StyleFocus::Bg),
+                    Stop::Body(StyleFocus::Custom),
+                    Stop::Body(StyleFocus::Attrs),
+                ];
+                if bordered {
+                    stops.push(Stop::Body(StyleFocus::Border));
+                }
+                for b in 0..STYLE_BUTTON_COUNT {
+                    stops.push(Stop::Button(b));
+                }
+                let cur = stops
+                    .iter()
+                    .position(|s| match s {
+                        Stop::Body(f) => *f == cur_focus,
+                        Stop::Button(b) => cur_focus == StyleFocus::Buttons && *b == state.dialog_focus,
+                    })
+                    .unwrap_or(0) as i32;
+                let n = stops.len() as i32;
+                match &stops[((cur + d).rem_euclid(n)) as usize] {
+                    Stop::Body(f) => {
+                        if let Some(ed) = &mut state.style_editor {
+                            ed.focus = *f;
+                            match f {
+                                StyleFocus::Fg => ed.color_target = false,
+                                StyleFocus::Bg => ed.color_target = true,
+                                StyleFocus::Custom => {
+                                    if ed.custom_buf.is_empty() {
+                                        ed.custom_buf = "#".to_string();
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
-                    _ => {}
+                    Stop::Button(b) => {
+                        if let Some(ed) = &mut state.style_editor {
+                            ed.focus = StyleFocus::Buttons;
+                        }
+                        state.dialog_focus = *b;
+                    }
                 }
-                entered_buttons = ed.focus == StyleFocus::Buttons && prev != StyleFocus::Buttons;
             }
-            // On arriving at the footer buttons, focus the first one (Save).
-            if entered_buttons {
-                state.dialog_focus = 0;
-            }
-        }
-
-        Action::StyleButtonNav(d) => {
-            // Three footer buttons: Save (0), Save Game (1), Cancel (2).
-            state.dialog_focus = cycle_focus(state.dialog_focus, 3, d);
         }
 
         Action::StyleAttrChipNav(d) => {
@@ -6827,34 +6851,28 @@ mod tests {
     }
 
     #[test]
-    fn style_focus_cycle_reaches_buttons_and_seeds_focus() {
+    fn style_tab_cycles_through_each_footer_button() {
         use crate::state::StyleFocus;
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         let m = &mut mapper::mapper::Mapper::default();
-        s.dialog_focus = 2; // stale value from a previous dialog
-        // The footer buttons are the last stop in the ring, so a single Shift-Tab
-        // from Board wraps straight onto them regardless of selector borderedness.
-        apply_action(Action::StyleFocusCycle(-1), &mut s, m);
+        // The three buttons are the final stops, so Shift-Tab from Board steps
+        // backward through them: Cancel (2), Save Game (1), Save (0). Each button
+        // is its own tab stop, regardless of selector borderedness.
+        for expected in [2usize, 1, 0] {
+            apply_action(Action::StyleFocusCycle(-1), &mut s, m);
+            assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
+            assert_eq!(s.dialog_focus, expected);
+        }
+        // Forward Tab steps through them the other way, then leaves the row and
+        // wraps back to the top of the body ring (Board).
+        apply_action(Action::StyleFocusCycle(1), &mut s, m); // Save -> Save Game
         assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
-        // Arriving at the buttons focuses the first one (Save).
-        assert_eq!(s.dialog_focus, 0);
-    }
-
-    #[test]
-    fn style_button_nav_cycles_three_buttons() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        let m = &mut mapper::mapper::Mapper::default();
-        s.dialog_focus = 0;
-        apply_action(Action::StyleButtonNav(1), &mut s, m);
         assert_eq!(s.dialog_focus, 1);
-        apply_action(Action::StyleButtonNav(1), &mut s, m);
+        apply_action(Action::StyleFocusCycle(1), &mut s, m); // -> Cancel
         assert_eq!(s.dialog_focus, 2);
-        apply_action(Action::StyleButtonNav(1), &mut s, m); // wrap
-        assert_eq!(s.dialog_focus, 0);
-        apply_action(Action::StyleButtonNav(-1), &mut s, m); // wrap back
-        assert_eq!(s.dialog_focus, 2);
+        apply_action(Action::StyleFocusCycle(1), &mut s, m); // -> wraps to Board
+        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Board);
     }
 
     #[test]
@@ -6869,9 +6887,6 @@ mod tests {
         assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSaveGame));
         s.dialog_focus = 2;
         assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleEditorCancel));
-        // Left/Right move the button focus.
-        assert!(matches!(style_editor_key_to_action(key(KeyCode::Left), &s), Action::StyleButtonNav(-1)));
-        assert!(matches!(style_editor_key_to_action(key(KeyCode::Right), &s), Action::StyleButtonNav(1)));
     }
 
     #[test]
@@ -7264,14 +7279,16 @@ mod tests {
             ed.active = non_bordered_idx;
             ed.focus = StyleFocus::Attrs;
         }
-        // Attrs → Buttons (the footer row), which then wraps to Board — Border is
-        // never entered for a non-bordered selector.
+        // Attrs → the footer buttons; cycling a full loop never enters Border for
+        // a non-bordered selector.
         apply_action(Action::StyleFocusCycle(1), &mut s, m);
         assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons,
             "non-bordered selector goes from Attrs to the footer buttons");
-        apply_action(Action::StyleFocusCycle(1), &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Board,
-            "non-bordered selector wraps to Board, never Border");
+        for _ in 0..10 {
+            apply_action(Action::StyleFocusCycle(1), &mut s, m);
+            assert_ne!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
+                "non-bordered selector must never enter Border focus");
+        }
 
         // ── bordered selector: cycling from Attrs reaches Border ──
         let mut s = AppState::default();
