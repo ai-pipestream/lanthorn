@@ -1079,6 +1079,8 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
             if decl.dim       == Some(true) { itbl.insert("dim",       toml_edit::Value::from(true)); }
             if decl.reversed  == Some(true) { itbl.insert("reversed",  toml_edit::Value::from(true)); }
             if decl.shadow    == Some(true) { itbl.insert("shadow",    toml_edit::Value::from(true)); }
+            if let Some(p) = &decl.placement { itbl.insert("placement", toml_edit::Value::from(p.as_str())); }
+            if let Some(m) = decl.margin { itbl.insert("margin", toml_edit::Value::from(m as i64)); }
             if let Some(g) = &decl.glyph_top    { itbl.insert("glyph_top",    toml_edit::Value::from(g.as_str())); }
             if let Some(g) = &decl.glyph_bottom { itbl.insert("glyph_bottom", toml_edit::Value::from(g.as_str())); }
             if let Some(g) = &decl.glyph_left   { itbl.insert("glyph_left",   toml_edit::Value::from(g.as_str())); }
@@ -1284,6 +1286,12 @@ pub fn write_style_full(
         d.style = Some(paneframe::border_style_name(cs.dialog_box_style).to_string());
         if cs.dialog_shadow_on {
             d.shadow = Some(true);
+        }
+        if cs.dialog_placement != crate::render::dialog::DialogPlacement::Center {
+            d.placement = Some(cs.dialog_placement.as_token().to_string());
+        }
+        if cs.dialog_margin != 0 {
+            d.margin = Some(cs.dialog_margin);
         }
         decorate_glyphs(&mut d, &cs.dialog_glyphs);
         doc.colors.selectors.insert("dialog".to_string(), d);
@@ -1959,6 +1967,31 @@ box_style = "rounded"
         let (cs2,_s,_w) = resolve(&d2, std::path::Path::new("."));
         assert!(matches!(cs2.dialog_box_style, crate::render::paneframe::BorderStyle::Double));
         assert_eq!(cs2.dialog_button.fg, Some(ratatui::style::Color::Cyan));
+    }
+
+    #[test]
+    fn write_style_full_round_trips_dialog_placement_and_margin() {
+        use crate::render::dialog::DialogPlacement;
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-style-test-placement-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("placement-full.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.dialog_placement = DialogPlacement::BottomRight;
+        cs.dialog_margin = 3;
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("placement = \"bottom-right\""));
+        assert!(text.contains("margin = 3"));
+
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+        assert_eq!(cs2.dialog_placement, DialogPlacement::BottomRight);
+        assert_eq!(cs2.dialog_margin, 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

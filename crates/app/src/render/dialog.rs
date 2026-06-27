@@ -15,6 +15,50 @@ pub fn centered_rect(area: Rect, w: u16, h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Resolve the final rect for a centered modal of size `w`x`h` under a placement
+/// and margin. `Center` is exactly `centered_rect` (behavior-preserving); edges
+/// anchor to the matching side(s) with `margin` cells of gap, with the other axis
+/// kept centered. The result is clamped to stay within `area`.
+pub fn resolve_dialog_rect(
+    placement: DialogPlacement,
+    margin: u16,
+    w: u16,
+    h: u16,
+    area: Rect,
+) -> Rect {
+    use DialogPlacement::*;
+    if placement == Center {
+        return centered_rect(area, w, h);
+    }
+    let w = w.min(area.width);
+    let h = h.min(area.height);
+    // Centered position on each axis (matches centered_rect's formula).
+    let cx = area.x + (area.width - w) / 2;
+    let cy = area.y + (area.height - h) / 2;
+    // Edge-anchored positions with margin.
+    let left_x = area.x + margin;
+    let right_x = area.right().saturating_sub(w).saturating_sub(margin);
+    let top_y = area.y + margin;
+    let bottom_y = area.bottom().saturating_sub(h).saturating_sub(margin);
+    let (x, y) = match placement {
+        Center => (cx, cy), // handled above; unreachable
+        Top => (cx, top_y),
+        Bottom => (cx, bottom_y),
+        Left => (left_x, cy),
+        Right => (right_x, cy),
+        TopLeft => (left_x, top_y),
+        TopRight => (right_x, top_y),
+        BottomLeft => (left_x, bottom_y),
+        BottomRight => (right_x, bottom_y),
+    };
+    // Clamp so the rect never spills outside `area`.
+    let max_x = area.right().saturating_sub(w);
+    let max_y = area.bottom().saturating_sub(h);
+    let x = x.clamp(area.x, max_x.max(area.x));
+    let y = y.clamp(area.y, max_y.max(area.y));
+    Rect::new(x, y, w, h)
+}
+
 // ── Placement ─────────────────────────────────────────────────────────────────
 
 pub enum Placement {
@@ -108,6 +152,10 @@ pub struct DialogStyle {
     pub button_active: Style,
     pub shadow: Style,
     pub shadow_on: bool,
+    /// Where a centered modal is anchored on screen (default `Center`).
+    pub placement: DialogPlacement,
+    /// Cells of gap from the anchored edge(s); ignored for `Center`.
+    pub margin: u16,
 }
 
 impl DialogStyle {
@@ -124,6 +172,8 @@ impl DialogStyle {
             button_active: cs.dialog_button_active,
             shadow: cs.dialog_shadow,
             shadow_on: cs.dialog_shadow_on,
+            placement: cs.dialog_placement,
+            margin: cs.dialog_margin,
         }
     }
 }
@@ -162,7 +212,7 @@ pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> Dia
     // (1) Resolve area from placement
     let buf_area = *buf.area();
     let area = match spec.placement {
-        Placement::Centered { w, h } => centered_rect(buf_area, w, h),
+        Placement::Centered { w, h } => resolve_dialog_rect(st.placement, st.margin, w, h, buf_area),
         Placement::Positioned(r) => r,
     };
 
@@ -296,7 +346,7 @@ mod tests {
         let mut buf = Buffer::empty(full);
         // pre-fill a REVERSED cell where the dialog will sit
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false };
+        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None };
         let r = draw_dialog(&mut buf, &spec, &st);
         // opaque: the covered cell no longer REVERSED
@@ -349,6 +399,56 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dialog_rect_center_equals_centered_rect() {
+        use ratatui::layout::Rect;
+        let area = Rect::new(0, 0, 40, 12);
+        // Behavior-preserving: Center is byte-for-byte centered_rect, margin ignored.
+        assert_eq!(
+            resolve_dialog_rect(DialogPlacement::Center, 0, 20, 8, area),
+            centered_rect(area, 20, 8)
+        );
+        assert_eq!(
+            resolve_dialog_rect(DialogPlacement::Center, 5, 20, 8, area),
+            centered_rect(area, 20, 8)
+        );
+    }
+
+    #[test]
+    fn resolve_dialog_rect_edges_and_corners_with_margin() {
+        use ratatui::layout::Rect;
+        let area = Rect::new(0, 0, 40, 12);
+        let (w, h, m) = (20u16, 4u16, 2u16);
+        // Centered axis values: cx = (40-20)/2 = 10, cy = (12-4)/2 = 4.
+        // Edge values with margin 2: left=2, right=40-20-2=18, top=2, bottom=12-4-2=6.
+        assert_eq!(resolve_dialog_rect(DialogPlacement::Top, m, w, h, area), Rect::new(10, 2, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::Bottom, m, w, h, area), Rect::new(10, 6, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::Left, m, w, h, area), Rect::new(2, 4, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::Right, m, w, h, area), Rect::new(18, 4, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::TopLeft, m, w, h, area), Rect::new(2, 2, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::TopRight, m, w, h, area), Rect::new(18, 2, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::BottomLeft, m, w, h, area), Rect::new(2, 6, w, h));
+        assert_eq!(resolve_dialog_rect(DialogPlacement::BottomRight, m, w, h, area), Rect::new(18, 6, w, h));
+    }
+
+    #[test]
+    fn resolve_dialog_rect_clamps_within_area() {
+        use ratatui::layout::Rect;
+        let area = Rect::new(0, 0, 40, 12);
+        // A huge margin must not push the rect off-screen. For TopLeft the margin
+        // adds to x/y, so it overshoots and clamps to (max_x=20, max_y=8).
+        let r = resolve_dialog_rect(DialogPlacement::TopLeft, 100, 20, 4, area);
+        assert!(r.right() <= area.right() && r.bottom() <= area.bottom());
+        assert_eq!(r, Rect::new(20, 8, 20, 4));
+        // For BottomRight the margin subtracts, saturating to the top-left corner;
+        // still within bounds.
+        let br = resolve_dialog_rect(DialogPlacement::BottomRight, 100, 20, 4, area);
+        assert_eq!(br, Rect::new(0, 0, 20, 4));
+        // Oversized w/h clamp to the area dimensions.
+        let big = resolve_dialog_rect(DialogPlacement::Top, 0, 100, 100, area);
+        assert!(big.width <= area.width && big.height <= area.height);
+    }
+
+    #[test]
     fn centered_rect_centers_and_clamps() {
         use ratatui::layout::Rect;
         assert_eq!(centered_rect(Rect::new(0,0,40,12), 20, 8), Rect::new(10,2,20,8));
@@ -360,7 +460,7 @@ mod tests {
     fn dialog_shadow_paints_offset_cells_when_on() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style,Color}};
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true };
+        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None };
         let r = draw_dialog(&mut buf, &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
@@ -382,6 +482,8 @@ mod tests {
             button_active: Style::default().add_modifier(Modifier::REVERSED),
             shadow: Style::default(),
             shadow_on: false,
+            placement: DialogPlacement::Center,
+            margin: 0,
         };
         let spec = DialogSpec {
             title: "T",

@@ -208,7 +208,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use ratatui::style::{Color, Style};
-    use crate::render::dialog::DialogStyle;
+    use crate::render::dialog::{DialogPlacement, DialogStyle};
     use crate::render::paneframe::BorderStyle;
 
     #[test]
@@ -241,6 +241,8 @@ mod tests {
             button_active: Style::default(),
             shadow: Style::default(),
             shadow_on: false,
+            placement: DialogPlacement::Center,
+            margin: 0,
         }
     }
 
