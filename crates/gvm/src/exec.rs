@@ -1980,7 +1980,72 @@ impl Machine {
                 0
             }
             // ── windows ───────────────────────────────────────────────────────
+            0x0020 => {
+                // glk_window_iterate(win, rockptr) -> next window id
+                let (next, rock) = self.glk.window_iterate(a(0));
+                self.glk_store_ptr(a(1), rock)?;
+                next
+            }
+            0x0021 => self.glk.window_rock(a(0)).unwrap_or(0), // glk_window_get_rock
+            0x0022 => self.glk.root(),                         // glk_window_get_root
             0x0023 => self.glk_open_window(a(0), a(1), a(2), a(3), a(4)), // glk_window_open
+            0x0024 => {
+                // glk_window_close(win, streamresultptr{readcount, writecount})
+                match self.glk.window_close(a(0)) {
+                    Some((r, w)) => {
+                        let ptr = a(1);
+                        if ptr != 0 {
+                            self.store_mem(ptr, r)?;
+                            self.store_mem(ptr + 4, w)?;
+                        }
+                        self.backend.window_close(a(0));
+                        self.relayout_glk();
+                    }
+                    None => self.diagnostics.push(format!("glk_window_close: bad window {}", a(0))),
+                }
+                0
+            }
+            0x0025 => {
+                // glk_window_get_size(win, awidthptr, aheightptr)
+                if let Some((w, h)) = self.glk.window_size(a(0)) {
+                    self.glk_store_ptr(a(1), w)?;
+                    self.glk_store_ptr(a(2), h)?;
+                }
+                0
+            }
+            0x0026 => {
+                // glk_window_set_arrangement(win, method, size, keywin)
+                self.glk.window_set_arrangement(a(0), a(1), a(2), a(3));
+                self.relayout_glk();
+                0
+            }
+            0x0027 => {
+                // glk_window_get_arrangement(win, methodptr, sizeptr, keywinptr)
+                if let Some((m, s, k)) = self.glk.window_arrangement(a(0)) {
+                    self.glk_store_ptr(a(1), m)?;
+                    self.glk_store_ptr(a(2), s)?;
+                    self.glk_store_ptr(a(3), k)?;
+                }
+                0
+            }
+            0x0028 => self.glk.window_type(a(0)).map(|t| t.to_arg()).unwrap_or(0), // get_type
+            0x0029 => self.glk.window_parent(a(0)).unwrap_or(0),                   // get_parent
+            0x002A => {
+                // glk_window_clear(win)
+                match self.glk.window_clear(a(0)) {
+                    Some(WinType::TextGrid) => self.backend.grid_clear(a(0)),
+                    Some(WinType::TextBuffer) => self.backend.window_clear(a(0)),
+                    _ => {}
+                }
+                0
+            }
+            0x002B => {
+                // glk_window_move_cursor(win, xpos, ypos)
+                self.glk.window_move_cursor(a(0), a(1), a(2));
+                0
+            }
+            0x002C => self.glk.window_stream(a(0)).unwrap_or(0), // glk_window_get_stream
+            0x0030 => self.glk.window_sibling(a(0)).unwrap_or(0), // glk_window_get_sibling
             0x002F => {
                 // glk_set_window(win)
                 let win = a(0);
@@ -2046,6 +2111,15 @@ impl Machine {
         let (w, h) = self.backend.screen_size();
         let layout = self.glk.relayout(w, h);
         self.backend.window_layout(&layout);
+    }
+
+    /// Store `v` at the Glulx-memory pointer `ptr`, unless `ptr` is 0 (the Glk
+    /// convention for "don't store this result").
+    fn glk_store_ptr(&mut self, ptr: u32, v: u32) -> R<()> {
+        if ptr != 0 {
+            self.store_mem(ptr, v)?;
+        }
+        Ok(())
     }
 
     // ── the run loop ──────────────────────────────────────────────────────────
@@ -3628,5 +3702,92 @@ mod tests {
         assert_eq!(backend.text(1), "Z");
         assert_eq!(m.glk.root(), 1);
         assert_eq!(m.glk.window_type(1), Some(WinType::TextBuffer));
+    }
+
+    // ── Task 2 (Glk window tree, sizing, TextGrid) ────────────────────────────
+
+    /// Emit code calling `@glk(selector, args)` storing the result via `store`.
+    /// Args are pushed so `args[0]` is topmost (the first value `@glk` pops).
+    fn glk_call(selector: u32, args: &[asm::Op], store: asm::Op) -> Vec<u8> {
+        let mut body = Vec::new();
+        for &arg in args.iter().rev() {
+            body.extend(asm::ins(0x40, &[arg, asm::Op::Stack])); // copy arg -> push
+        }
+        body.extend(asm::ins(0x130, &[asm::Op::C32(selector), asm::Op::C8(args.len() as i8), store]));
+        body
+    }
+
+    fn backend_of(m: &Machine) -> &TestBackend {
+        m.backend.as_any().downcast_ref::<TestBackend>().unwrap()
+    }
+
+    #[test]
+    fn glk_split_builds_pair_tree_with_fixed_sizes() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Prelude opens window 1 (TextBuffer root, 80x24). Split it: a TextGrid
+        // ABOVE | FIXED (0x12), 3 rows. New grid = window 2; pair = window 3.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x22, &[], Mem16(0x0104))); // get_root
+        body.extend(glk_call(0x25, &[C8(2), C16(0x0108), C16(0x010C)], Zero)); // get_size(grid)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open returns the new grid window id");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 3, "root is the pair window");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 80, "grid width = full screen");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 3, "grid height = fixed 3 rows");
+    }
+
+    #[test]
+    fn glk_window_tree_queries_and_proportional_split() {
+        use asm::Op::{C16, C8, Zero};
+        // Split window 1 RIGHT | PROPORTIONAL (0x21), 25% of 80 = 20 cols.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x21), C8(25), C8(4), C8(0)], asm::Op::Mem16(0x0100));
+        // get_size(grid=2) -> 0x108,0x10C ; get_size(buf=1) -> 0x110,0x114
+        body.extend(glk_call(0x25, &[C8(2), C16(0x0108), C16(0x010C)], Zero));
+        body.extend(glk_call(0x25, &[C8(1), C16(0x0110), C16(0x0114)], Zero));
+        body.extend(glk_call(0x28, &[C8(2)], asm::Op::Mem16(0x0118))); // get_type(2)
+        body.extend(glk_call(0x29, &[C8(2)], asm::Op::Mem16(0x011C))); // get_parent(2)
+        body.extend(glk_call(0x30, &[C8(2)], asm::Op::Mem16(0x0120))); // get_sibling(2)
+        body.extend(glk_call(0x28, &[C8(3)], asm::Op::Mem16(0x0124))); // get_type(pair)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x108).unwrap(), 20, "grid width = 25% of 80");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 24, "grid height = full");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 60, "buffer width = remainder");
+        assert_eq!(m.mem.read32(0x118).unwrap(), 4, "grid type = wintype_TextGrid");
+        assert_eq!(m.mem.read32(0x11C).unwrap(), 3, "grid parent = pair window");
+        assert_eq!(m.mem.read32(0x120).unwrap(), 1, "grid sibling = buffer window");
+        assert_eq!(m.mem.read32(0x124).unwrap(), 1, "pair type = wintype_Pair");
+    }
+
+    #[test]
+    fn glk_textgrid_move_cursor_and_put_writes_cells() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Open a grid above; move its cursor to (x=2,y=1); make it current; print.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x2B, &[C8(2), C8(2), C8(1)], Zero)); // move_cursor(2, 2,1)
+        body.extend(glk_call(0x2F, &[C8(2)], Zero)); // set_window(2)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        assert_eq!(backend_of(&m).grid_line(2, 1), "  Hi"); // cols 2,3 hold "Hi"
+    }
+
+    #[test]
+    fn glk_window_clear_buffer_and_grid() {
+        use asm::Op::{C8, Zero};
+        // Buffer (window 1, current via prelude): put 'X', clear, put 'Y' -> "Y".
+        let mut body = glk_call(0x80, &[C8(b'X' as i8)], Zero);
+        body.extend(glk_call(0x2A, &[C8(1)], Zero)); // glk_window_clear(1)
+        body.extend(glk_call(0x80, &[C8(b'Y' as i8)], Zero));
+        // Grid: open above, write at (0,0), clear it -> grid line empty.
+        body.extend(glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Zero)); // grid=2
+        body.extend(glk_call(0x2F, &[C8(2)], Zero)); // set_window(2)
+        body.extend(glk_call(0x80, &[C8(b'Q' as i8)], Zero)); // grid (0,0)='Q'
+        body.extend(glk_call(0x2A, &[C8(2)], Zero)); // glk_window_clear(2)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x100, |_| {});
+        assert_eq!(backend_of(&m).text(1), "Y", "buffer clear wiped 'X'");
+        assert_eq!(backend_of(&m).grid_line(2, 0), "", "grid clear wiped 'Q'");
     }
 }
