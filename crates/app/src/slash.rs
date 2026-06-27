@@ -48,6 +48,47 @@ pub enum TranscriptFilterArg {
     Meta,
 }
 
+// ── Category ──────────────────────────────────────────────────────────────────
+
+/// User-facing grouping for `/help` and the hotkey dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Game,
+    Map,
+    View,
+    Transcript,
+    Style,
+    Export,
+    Animation,
+    Help,
+}
+
+impl Category {
+    pub const ORDER: [Category; 8] = [
+        Category::Game,
+        Category::Map,
+        Category::View,
+        Category::Transcript,
+        Category::Style,
+        Category::Export,
+        Category::Animation,
+        Category::Help,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Category::Game => "Game",
+            Category::Map => "Map",
+            Category::View => "View",
+            Category::Transcript => "Transcript",
+            Category::Style => "Style",
+            Category::Export => "Export",
+            Category::Animation => "Animation",
+            Category::Help => "Help",
+        }
+    }
+}
+
 // ── Curated table ─────────────────────────────────────────────────────────────
 
 /// One entry in the curated table: a command name (or alias) and a builder
@@ -431,5 +472,14 @@ mod tests {
         assert!(matches!(parse("filter nope", '/'), SlashOutcome::Error(_)));
         assert!(matches!(parse("export", '/'), SlashOutcome::Export(None)));
         assert!(matches!(parse("export out.txt", '/'), SlashOutcome::Export(Some(f)) if f == "out.txt"));
+    }
+
+    #[test]
+    fn category_order_and_titles() {
+        assert_eq!(Category::ORDER.len(), 8);
+        assert_eq!(Category::ORDER[0], Category::Game);
+        assert_eq!(Category::ORDER[7], Category::Help);
+        assert_eq!(Category::Game.title(), "Game");
+        assert_eq!(Category::Animation.title(), "Animation");
     }
 }
