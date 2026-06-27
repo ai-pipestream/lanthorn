@@ -488,51 +488,59 @@ impl GameSession {
         }
     }
 
-    /// Mirror the Z-machine screen into the neutral [`ScreenModel`].
-    ///
-    /// The upper window becomes a [`GridWindow`] (logical size + cells + cursor +
-    /// active-window flag); the lower window is a buffer placeholder (the app
-    /// owns the transcript). The status is the v3 automatic status line
-    /// (`Classic`) for v1–3, or `HostManaged` for v4+ (whose globals are not a
-    /// status line).
-    fn build_screen_model(&self) -> ScreenModel {
-        let screen = &self.machine.screen;
-        let src = &screen.upper;
-        let grid = GridWindow {
-            cols: src.cols,
-            rows: src.rows,
-            cells: src
-                .cells
-                .iter()
-                .map(|c| GridCell { ch: c.ch, style: c.style })
-                .collect(),
-            active_rows: screen.upper_window_rows,
-            cursor: (screen.cursor_row, screen.cursor_col),
-            cursor_active: screen.current_window == 1,
+}
+
+/// Mirror a Z-machine's screen into the neutral [`ScreenModel`].
+///
+/// The upper window becomes a [`GridWindow`] (logical size + cells + cursor +
+/// active-window flag); the lower window is a buffer placeholder (the app owns
+/// the transcript). The status is the v3 automatic status line (`Classic`) for
+/// v1–3, or `HostManaged` for v4+ (whose globals are not a status line). Shared
+/// by the engine adapter and the render-equivalence tests.
+pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
+    let screen = &machine.screen;
+    let src = &screen.upper;
+    let grid = GridWindow {
+        cols: src.cols,
+        rows: src.rows,
+        cells: src
+            .cells
+            .iter()
+            .map(|c| GridCell { ch: c.ch, style: c.style })
+            .collect(),
+        active_rows: screen.upper_window_rows,
+        cursor: (screen.cursor_row, screen.cursor_col),
+        cursor_active: screen.current_window == 1,
+    };
+    ScreenModel {
+        root: WinNode::Pair {
+            vertical: true,
+            split: Split { fixed: screen.upper_window_rows },
+            first: Box::new(WinNode::Grid(grid)),
+            second: Box::new(WinNode::Buffer(BufferWindow::default())),
+        },
+        status: status_model_from_machine(machine),
+    }
+}
+
+/// Build the neutral [`StatusModel`] from a Z-machine's screen state: a
+/// `Classic` automatic status line (location + score/turns or clock) for v1–3,
+/// or `HostManaged` for v4+ (whose globals are not a status line). Shared by
+/// the engine adapter and the render-equivalence tests.
+pub fn status_model_from_machine(machine: &Machine) -> StatusModel {
+    if machine.mem.version() <= 3 {
+        let sl = machine.status_line();
+        let right = match sl.right {
+            zvm::screen::StatusRight::ScoreTurns { score, turns } => {
+                StatusField::ScoreTurns { score, turns }
+            }
+            zvm::screen::StatusRight::Time { hours, minutes } => {
+                StatusField::Time { hours, minutes }
+            }
         };
-        let status = if self.machine.mem.version() <= 3 {
-            let sl = self.machine.status_line();
-            let right = match sl.right {
-                zvm::screen::StatusRight::ScoreTurns { score, turns } => {
-                    StatusField::ScoreTurns { score, turns }
-                }
-                zvm::screen::StatusRight::Time { hours, minutes } => {
-                    StatusField::Time { hours, minutes }
-                }
-            };
-            StatusModel::Classic { location: sl.location, right }
-        } else {
-            StatusModel::HostManaged
-        };
-        ScreenModel {
-            root: WinNode::Pair {
-                vertical: true,
-                split: Split { fixed: screen.upper_window_rows },
-                first: Box::new(WinNode::Grid(grid)),
-                second: Box::new(WinNode::Buffer(BufferWindow::default())),
-            },
-            status,
-        }
+        StatusModel::Classic { location: sl.location, right }
+    } else {
+        StatusModel::HostManaged
     }
 }
 
@@ -569,7 +577,7 @@ impl Engine for GameSession {
     }
 
     fn screen(&self) -> ScreenModel {
-        self.build_screen_model()
+        screen_model_from_machine(&self.machine)
     }
 
     fn save_state(&self) -> EngineSave {

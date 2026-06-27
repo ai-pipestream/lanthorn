@@ -45,6 +45,7 @@ use app::render::history::draw_history;
 use app::render::transcript::render_transcript;
 use app::render::upper_window::draw_upper_window;
 use app::render::draw_str_clipped;
+use app::engine::Engine;
 use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
 use app::hints;
@@ -249,7 +250,7 @@ struct PaneRects {
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    session: &GameSession,
+    engine: &dyn Engine,
     mapper: &Mapper,
     state: &AppState,
 ) -> std::io::Result<PaneRects> {
@@ -273,6 +274,8 @@ fn draw_frame(
     terminal.draw(|f| {
         let full = f.area();
         let buf = f.buffer_mut();
+        // The engine-neutral screen model for this frame (status + window tree).
+        let screen_model = engine.screen();
         // During replay the map shows the reconstructed snapshot for the selected turn.
         let replay_graph: Option<mapper::graph::MapGraph> = state.replay.as_ref().map(|r| {
             let snap = state
@@ -341,9 +344,9 @@ fn draw_frame(
             Layout::TranscriptFull => {
                 let story_fp = draw_framed(buf, main_area, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
-                let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
+                let used = draw_upper_window(screen_model.grid().expect("screen tree carries a grid"), state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                let (sb_, ms_) = render_transcript(&session.machine, state, tarea, buf);
+                let (sb_, ms_) = render_transcript(&screen_model.status, engine.introspect(), state, tarea, buf);
                 story_scrollbar = sb_;
                 transcript_max_scroll = ms_;
                 transcript_viewport_rows = tarea.height;
@@ -412,9 +415,9 @@ fn draw_frame(
 
                 let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
-                let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
+                let used = draw_upper_window(screen_model.grid().expect("screen tree carries a grid"), state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                let (sb_, ms_) = render_transcript(&session.machine, state, tarea, buf);
+                let (sb_, ms_) = render_transcript(&screen_model.status, engine.introspect(), state, tarea, buf);
                 story_scrollbar = sb_;
                 transcript_max_scroll = ms_;
                 transcript_viewport_rows = tarea.height;
@@ -503,12 +506,14 @@ fn draw_frame(
                 match panel.mode {
                     RoomPanelMode::Info => {
                         let current_room = graph.current();
-                        let mem = if state.tidy_anim.is_none() {
-                            Some(&session.machine.mem)
+                        // Objects in the room come from the engine's introspection
+                        // (unavailable during tidy-anim playback → empty).
+                        let room_objects: Vec<String> = if state.tidy_anim.is_none() {
+                            engine.introspect().map(|i| i.room_objects(panel.id)).unwrap_or_default()
                         } else {
-                            None
+                            Vec::new()
                         };
-                        if let Some(dr) = draw_room_info(graph, mem, panel.id, current_room, map_area, buf, &panel_ds) {
+                        if let Some(dr) = draw_room_info(graph, &room_objects, panel.id, current_room, map_area, buf, &panel_ds) {
                             dialog_rects_out = Some(dr);
                         }
                     }

@@ -35,8 +35,9 @@ fn dir_label(dir: Direction) -> &'static str {
 /// Render the room-info panel into the top-left corner of `map_area`.
 ///
 /// - `graph`: the mapper graph for name/notes/exits.
-/// - `machine_mem`: the Z-machine memory for listing current-room objects (`None` when
-///   the map is in tidy-anim mode and the live machine isn't available).
+/// - `room_objects`: the objects located in this room, already queried from the
+///   engine's introspection (empty when introspection is unavailable, e.g. the
+///   map is in tidy-anim mode). Shown only when this is the current room.
 /// - `room_id`: the room to display.
 /// - `current_room`: the player's actual current room (used to gate object listing).
 /// - `dialog_style`: dialog chrome colors from state.colors.
@@ -44,7 +45,7 @@ fn dir_label(dir: Direction) -> &'static str {
 /// Returns `Some(DialogRects)` when the panel was drawn (for mouse hit-testing).
 pub fn draw_room_info(
     graph: &MapGraph,
-    machine_mem: Option<&zvm::memory::Memory>,
+    room_objects: &[String],
     room_id: RoomId,
     current_room: Option<RoomId>,
     map_area: Rect,
@@ -65,13 +66,9 @@ pub fn draw_room_info(
         })
         .collect();
 
-    // Collect objects only when this is the current room AND we have memory.
+    // Show objects only when this is the current room.
     let objects: Vec<String> = if current_room == Some(room_id) {
-        if let Some(mem) = machine_mem {
-            list_room_objects(mem, room_id)
-        } else {
-            Vec::new()
-        }
+        room_objects.to_vec()
     } else {
         Vec::new()
     };
@@ -269,7 +266,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert!(buf_contains(&buf, "West of House"), "should show room name");
@@ -286,7 +283,7 @@ mod tests {
         // room2 is not the current room (current_room = Some(room1)), so no objects section.
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room2, Some(room1), area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], room2, Some(room1), area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // "Here:" section should not appear for non-current rooms.
@@ -302,7 +299,7 @@ mod tests {
         terminal.draw(|f| {
             let area = f.area();
             // Room 99 does not exist; should not panic.
-            draw_room_info(&g, None, 99, None, area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], 99, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         // No assertion — just must not panic.
     }
@@ -317,7 +314,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, Some(room1), area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], room1, Some(room1), area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Without machine_mem, objects list is empty, so "Here:" should not appear.
@@ -347,7 +344,7 @@ mod tests {
                     }
                 }
             }
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         for y in 0..4u16 {
@@ -377,7 +374,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Panel is at (0,0) with width=36 (or area width if smaller).
@@ -404,7 +401,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_room_info(&g, None, room1, None, area, f.buffer_mut(), &ds);
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // The dialog chrome shows the close symbol.
@@ -420,7 +417,7 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, 60, 20);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let ds = make_dialog_style();
-        let result = draw_room_info(&g, None, room1, None, area, &mut buf, &ds);
+        let result = draw_room_info(&g, &[], room1, None, area, &mut buf, &ds);
         assert!(result.is_some(), "draw_room_info must return Some(DialogRects)");
         let dr = result.unwrap();
         assert!(dr.close.is_some(), "DialogRects.close must be Some (show_close=true)");
