@@ -31,7 +31,8 @@ you are*, and the mapper turns the stream of locations and movements into a
 spatial graph without knowing anything about the Z-machine.
 
 **Supported story versions:** Z-machine v3, v4, v5, v7, and v8. (v6 is graphical
-and unsupported; v1/v2 are not supported.)
+and unsupported; v1/v2 are not supported.) Story files load raw, from a `.zip`,
+or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
 
 ---
 
@@ -173,7 +174,10 @@ and unsupported; v1/v2 are not supported.)
   (`transcript:system`), plus your own ordered `[[transcript.rule]]` regex rules in
   `style.toml` (e.g. paint every `grue` red). The meta/warning gutter glyphs come
   from the `gutter.meta` / `gutter.warning` symbol overrides and are colored by the
-  `meta_marker` / `warning_marker` selectors.
+  `meta_marker` / `warning_marker` selectors. On top of all that, the game's own
+  **`set_text_style`** emphasis (bold / italic / reverse-video) is rendered
+  per-span — a bold word inside a sentence shows just that word bold — layered
+  over the category/rule colors and preserved across save/reload.
 - **Configurable keymap** via a leader-key model: a configurable prefix
   (default `Ctrl+K`) opens a sticky **hotkey dialog** listing every command;
   any command can be made directly available or routed through the dialog.
