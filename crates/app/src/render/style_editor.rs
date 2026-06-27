@@ -286,7 +286,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let custom_y = prop.y + 8;
             let custom_focused = ed.focus == StyleFocus::Custom;
             let cstyle = if custom_focused { active_style } else { normal_style };
-            let prefix = " # ";
+            let prefix = " hex ";
             let prefix_w = prefix.len() as u16;
             let max_buf_w = prop.right().saturating_sub(prop.x + prefix_w) as usize;
             let buf_display: String = ed.custom_buf.chars().take(max_buf_w).collect();

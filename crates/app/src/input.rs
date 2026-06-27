@@ -2243,6 +2243,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 match ed.focus {
                     StyleFocus::Fg => ed.color_target = false,
                     StyleFocus::Bg => ed.color_target = true,
+                    StyleFocus::Custom => {
+                        if ed.custom_buf.is_empty() {
+                            ed.custom_buf = "#".to_string();
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -2297,7 +2302,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::StyleCustomBackspace => {
             if let Some(ed) = &mut state.style_editor {
-                ed.custom_buf.pop();
+                if ed.custom_buf.len() > 1 {
+                    ed.custom_buf.pop();
+                }
             }
         }
 
@@ -5825,6 +5832,32 @@ mod tests {
         apply_action(Action::StyleCustomBackspace, &mut s, m);
         apply_action(Action::StyleCustomBackspace, &mut s, m);
         assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#ff00");
+    }
+
+    #[test]
+    fn style_focus_cycle_to_custom_seeds_hash() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        let m = &mut mapper::mapper::Mapper::default();
+        // Cycle delta=3 lands on Custom (Board=0 → index 3).
+        apply_action(Action::StyleFocusCycle(3), &mut s, m);
+        let ed = s.style_editor.as_ref().unwrap();
+        assert_eq!(ed.focus, crate::state::StyleFocus::Custom);
+        assert_eq!(ed.custom_buf, "#", "entering Custom via Tab seeds custom_buf with '#'");
+    }
+
+    #[test]
+    fn style_custom_backspace_cannot_delete_leading_hash() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        let m = &mut mapper::mapper::Mapper::default();
+        // Seed via focus cycle.
+        apply_action(Action::StyleFocusCycle(3), &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#");
+        // Backspace on lone '#' must be a no-op.
+        apply_action(Action::StyleCustomBackspace, &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#",
+            "backspace on lone '#' must not delete it");
     }
 
     #[test]

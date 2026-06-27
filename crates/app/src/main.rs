@@ -1856,6 +1856,9 @@ fn main() {
                                     use app::state::StyleFocus;
                                     if let Some(ed) = &mut state.style_editor {
                                         ed.focus = StyleFocus::Custom;
+                                        if ed.custom_buf.is_empty() {
+                                            ed.custom_buf = "#".to_string();
+                                        }
                                     }
                                     continue 'event_loop;
                                 }
