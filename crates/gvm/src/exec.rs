@@ -68,6 +68,11 @@ pub struct Machine {
     /// Current string-decoding-table address (0 = none). Initialized from the
     /// header's decode_table; overridable by `setstringtbl`.
     pub(crate) cur_stringtbl: u32,
+    /// Allocation-heap start address (0 = heap inactive). Set on the first
+    /// `malloc` to the memsize at that moment.
+    pub(crate) heap_start: u32,
+    /// Extant allocated blocks `(addr, size)`, kept sorted by address.
+    heap_blocks: Vec<(u32, u32)>,
     /// The output sink.
     pub(crate) out: Box<dyn Output>,
     /// Recorded runtime faults / deferred-feature notices.
@@ -87,6 +92,9 @@ fn align_up(v: u32, to: u32) -> u32 {
 }
 
 impl Machine {
+    /// Ceiling on the memory-map size; `malloc` fails rather than grow past it.
+    const MAX_MEMSIZE: u32 = 0x1000_0000; // 256 MiB
+
     /// Build a machine over `mem`, entering the start function (no arguments).
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
@@ -101,6 +109,8 @@ impl Machine {
             iosys_mode: 0,
             iosys_rock: 0,
             cur_stringtbl: decode_table,
+            heap_start: 0,
+            heap_blocks: Vec::new(),
             out,
             diagnostics: Vec::new(),
             halted: false,
@@ -381,8 +391,24 @@ impl Machine {
             }
             0x103 => {
                 let (l, s) = self.read_operands(1, 1)?;
-                let r = u32::from(self.mem.set_mem_size(l[0]).is_err());
+                let r = if self.heap_start != 0 {
+                    self.diagnostics
+                        .push("setmemsize while the heap is active is illegal".to_string());
+                    1
+                } else {
+                    u32::from(self.mem.set_mem_size(l[0]).is_err())
+                };
                 self.store(s[0], r)
+            }
+            // Allocation heap.
+            0x178 => {
+                let (l, s) = self.read_operands(1, 1)?;
+                let a = self.heap_malloc(l[0]);
+                self.store(s[0], a)
+            }
+            0x179 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.heap_free(l[0])
             }
             // Calls / return.
             0x30 => self.op_call(),
@@ -881,6 +907,63 @@ impl Machine {
                 let b = self.m8(from + i)?;
                 self.store_mem_sized(to + i, b, 1)?;
             }
+        }
+        Ok(())
+    }
+
+    // ── allocation heap (GLULX_NOTES §11) ─────────────────────────────────────
+
+    /// Allocate `size` bytes in the heap, returning the block address or 0 on
+    /// failure. The first allocation activates the heap at the current memsize.
+    fn heap_malloc(&mut self, size: u32) -> u32 {
+        if size == 0 {
+            return 0; // malloc requires a positive size
+        }
+        let heap_start = if self.heap_start == 0 { self.mem.mem_size() } else { self.heap_start };
+
+        // Walk the free gaps from heap_start, reusing the first that fits.
+        let mut cursor = heap_start;
+        let mut addr = None;
+        for &(a, sz) in &self.heap_blocks {
+            if a - cursor >= size {
+                addr = Some(cursor);
+                break;
+            }
+            cursor = a + sz;
+        }
+        // No internal gap fit: append at the end of the last block (or
+        // heap_start if empty), reusing committed tail space and growing only
+        // if necessary.
+        let addr = addr.unwrap_or(cursor);
+
+        let top = addr as u64 + size as u64;
+        if top > Self::MAX_MEMSIZE as u64 {
+            return 0; // would exceed the heap ceiling
+        }
+        let top = top as u32;
+        if top > self.mem.mem_size() {
+            self.mem.set_raw_size(top);
+        }
+        // Insert keeping the block list sorted by address.
+        let pos = self.heap_blocks.partition_point(|&(a, _)| a < addr);
+        self.heap_blocks.insert(pos, (addr, size));
+        self.heap_start = heap_start;
+        addr
+    }
+
+    /// Free the extant block at `addr`; faults if it is not a current block.
+    /// Freeing the last block deactivates the heap and shrinks memory back to
+    /// the heap-start address.
+    fn heap_free(&mut self, addr: u32) -> R<()> {
+        let pos = self
+            .heap_blocks
+            .iter()
+            .position(|&(a, _)| a == addr)
+            .ok_or_else(|| format!("mfree of non-extant block @{addr:#010x}"))?;
+        self.heap_blocks.remove(pos);
+        if self.heap_blocks.is_empty() {
+            self.mem.set_raw_size(self.heap_start);
+            self.heap_start = 0;
         }
         Ok(())
     }
@@ -2273,5 +2356,74 @@ mod tests {
             ],
             [1, 2, 3, 4]
         );
+    }
+
+    // ── Task 3 (2b): malloc / mfree heap ──────────────────────────────────────
+
+    #[test]
+    fn malloc_returns_distinct_in_range_blocks() {
+        use asm::Op::{C8, Mem16};
+        let mut body = asm::ins(0x178, &[C8(16), Mem16(0x0100)]); // malloc 16 → 0x100
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)])); // malloc 16 → 0x104
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        let a = m.mem.read32(0x100).unwrap();
+        let b = m.mem.read32(0x104).unwrap();
+        let floor = m.mem.endmem();
+        assert!(a >= floor, "block a {a:#x} below endmem {floor:#x}");
+        assert_ne!(a, b);
+        assert_eq!(b, a + 16, "blocks must be adjacent and non-overlapping");
+        assert!(a + 16 <= m.mem.mem_size() && b + 16 <= m.mem.mem_size());
+    }
+
+    #[test]
+    fn mfree_then_malloc_reuses_freed_space() {
+        use asm::Op::{C8, Mem16};
+        // malloc a, malloc b, free a, malloc c → c reuses a's address.
+        let mut body = asm::ins(0x178, &[C8(16), Mem16(0x0100)]); // a
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)])); // b
+        body.extend(asm::ins(0x179, &[Mem16(0x0100)])); // mfree a (contents of 0x100)
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0108)])); // c
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        let a = m.mem.read32(0x100).unwrap();
+        let c = m.mem.read32(0x108).unwrap();
+        assert_eq!(c, a, "freed block should be reused");
+    }
+
+    #[test]
+    fn setmemsize_while_heap_active_fails() {
+        use asm::Op::{C32, C8, Mem16, Zero};
+        let mut body = asm::ins(0x178, &[C8(16), Zero]); // malloc 16 (activate heap)
+        body.extend(asm::ins(0x103, &[C32(0x1_0000), Mem16(0x0100)])); // setmemsize → result
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "setmemsize must fail");
+        assert!(m.diagnostics.iter().any(|d| d.contains("heap")));
+    }
+
+    #[test]
+    fn malloc_too_large_returns_zero() {
+        use asm::Op::{C32, Mem16};
+        // A request beyond the heap ceiling fails without allocating.
+        let mut body = asm::ins(0x178, &[C32(0x2000_0000), Mem16(0x0100)]);
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0);
+    }
+
+    #[test]
+    fn freeing_last_block_deactivates_and_shrinks() {
+        use asm::Op::{C8, Mem16};
+        let mut body = asm::ins(0x178, &[C8(32), Mem16(0x0100)]); // malloc → activates
+        body.extend(asm::ins(0x179, &[Mem16(0x0100)])); // free the only block
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        let floor = m.mem.mem_size();
+        m.run();
+        assert_eq!(m.heap_start, 0, "heap should be inactive again");
+        assert_eq!(m.mem.mem_size(), floor, "memory shrinks back to heap start");
     }
 }

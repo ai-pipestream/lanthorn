@@ -86,6 +86,13 @@ impl Memory {
         Ok(())
     }
 
+    /// Resize the byte map directly, bypassing the `set_mem_size`
+    /// alignment/floor checks. The allocation heap (which manages the memory
+    /// map itself) uses this; growth is zero-filled, shrink truncates.
+    pub(crate) fn set_raw_size(&mut self, new: u32) {
+        self.bytes.resize(new as usize, 0);
+    }
+
     // ── reads (big-endian, bounds-checked) ────────────────────────────────────
 
     /// Read one byte; `None` if `addr` is out of range.
