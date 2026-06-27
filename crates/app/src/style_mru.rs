@@ -57,9 +57,13 @@ pub fn is_valid_color_token(s: &str) -> bool {
 }
 
 pub fn push_mru(v: &mut Vec<String>, value: &str) {
-    v.retain(|x| x != value);
-    v.insert(0, value.to_string());
-    v.truncate(CAP);
+    if v.iter().any(|x| x == value) {
+        return; // already present: keep its position stable
+    }
+    if v.len() >= CAP {
+        v.remove(0); // full: evict the oldest (front) entry
+    }
+    v.push(value.to_string()); // new color goes to the end
 }
 
 pub fn load_mru(dir: &Path) -> Vec<String> {
@@ -104,14 +108,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn push_mru_keeps_position_of_existing() {
+        let mut v = vec!["#aaaaaa".to_string(), "#bbbbbb".to_string()];
+        push_mru(&mut v, "#aaaaaa"); // re-use the first entry
+        assert_eq!(v, vec!["#aaaaaa".to_string(), "#bbbbbb".to_string()],
+            "re-using an existing color must not reorder the list");
+    }
+
+    #[test]
+    fn push_mru_appends_new_to_end() {
+        let mut v = vec!["#aaaaaa".to_string()];
+        push_mru(&mut v, "#bbbbbb");
+        assert_eq!(v, vec!["#aaaaaa".to_string(), "#bbbbbb".to_string()],
+            "a new color must be appended at the end, not inserted at the front");
+    }
+
+    #[test]
+    fn push_mru_evicts_oldest_when_full() {
+        let mut v: Vec<String> = (0..CAP).map(|i| format!("#0000{:02x}", i)).collect();
+        let oldest = v[0].clone();
+        let newest = "#ffffff".to_string();
+        push_mru(&mut v, &newest);
+        assert_eq!(v.len(), CAP, "length stays capped");
+        assert!(!v.contains(&oldest), "the oldest (front) entry is evicted when full");
+        assert_eq!(v.last().unwrap(), &newest, "the new color lands at the end");
+    }
+
+    #[test]
     fn push_dedups_caps_16_newest_first() {
         let mut v = Vec::new();
         for i in 0..20 { push_mru(&mut v, &format!("#{:06x}", i)); }
         assert_eq!(v.len(), 16);
-        assert_eq!(v[0], "#000013"); // last pushed is first
-        push_mru(&mut v, "#000013"); // existing → moves to front, no dup
+        assert_eq!(v[15], "#000013"); // last pushed is at the end
+        push_mru(&mut v, "#000013"); // existing → stays in place, no dup
         assert_eq!(v.iter().filter(|x| *x == "#000013").count(), 1);
-        assert_eq!(v[0], "#000013");
+        assert_eq!(v[15], "#000013");
     }
 
     #[test]
