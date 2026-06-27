@@ -232,6 +232,20 @@ pub enum Action {
     StyleSave,
     /// Reset the active selector's Decl to the built-in default.
     StyleReset,
+    /// Open the glyph-picker modal over the style editor, targeting `zone`.
+    StyleOpenGlyphPicker(crate::state::BorderZone),
+    /// Navigate the glyph grid by `delta` cells (wraps within current block).
+    GlyphPickerNav(i32),
+    /// Shift the curated block by `delta` (−1 / +1), or cycle.
+    GlyphPickerBlock(i32),
+    /// Feed a character into the picker's pending slot (direct char entry path).
+    GlyphPickerChar(char),
+    /// Commit: write the selected/pending glyph to the target zone and close.
+    GlyphPickerPick,
+    /// Clear: set the target zone to None and close.
+    GlyphPickerClear,
+    /// Cancel: close without any change.
+    GlyphPickerCancel,
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -2332,6 +2346,110 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             }
         }
 
+        // ── Glyph-picker modal actions ────────────────────────────────────────
+
+        Action::StyleOpenGlyphPicker(zone) => {
+            if let Some(ed) = &state.style_editor {
+                let target_selector = ed.selectors[ed.active].to_string();
+                let user_dir = state.config.user_dir.clone();
+                let mru = crate::style_mru::load_glyph_mru(&user_dir);
+                state.glyph_picker = Some(crate::state::GlyphPickerState {
+                    target_selector,
+                    target_zone: zone,
+                    block: 0,
+                    custom_start: None,
+                    cursor: 0,
+                    pending: None,
+                    mru,
+                });
+            }
+        }
+
+        Action::GlyphPickerNav(delta) => {
+            if let Some(picker) = &mut state.glyph_picker {
+                let (lo, hi) = picker_block_range(picker);
+                let count = (hi - lo + 1) as usize;
+                if count > 0 {
+                    picker.cursor =
+                        ((picker.cursor as i32 + delta).rem_euclid(count as i32)) as usize;
+                }
+            }
+        }
+
+        Action::GlyphPickerBlock(delta) => {
+            if let Some(picker) = &mut state.glyph_picker {
+                picker.custom_start = None; // return to curated blocks
+                let n = GLYPH_BLOCKS.len() as i32;
+                picker.block = ((picker.block as i32 + delta).rem_euclid(n)) as usize;
+                picker.cursor = 0;
+                picker.pending = None;
+            }
+        }
+
+        Action::GlyphPickerChar(c) => {
+            if let Some(picker) = &mut state.glyph_picker {
+                picker.pending = Some(c.to_string());
+            }
+        }
+
+        Action::GlyphPickerPick => {
+            // Gather what we need before splitting borrows.
+            let resolve_info = state.glyph_picker.as_ref().and_then(|picker| {
+                let glyph = if let Some(s) = &picker.pending {
+                    if crate::style_mru::is_valid_glyph(s) { Some(s.clone()) } else { None }
+                } else {
+                    picker_glyph_at_cursor(picker)
+                };
+                glyph.map(|g| (picker.target_selector.clone(), picker.target_zone, g))
+            });
+
+            if let Some((sel, zone, glyph)) = resolve_info {
+                let user_dir = state.config.user_dir.clone();
+
+                // Write glyph into the style doc.
+                if let Some(ed) = &mut state.style_editor {
+                    let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                    set_zone_glyph(decl, zone, Some(glyph.clone()));
+                }
+
+                // Push to glyph MRU and save.
+                let saved_mru = if let Some(picker) = &mut state.glyph_picker {
+                    crate::style_mru::push_glyph_mru(&mut picker.mru, &glyph);
+                    picker.mru.clone()
+                } else {
+                    Vec::new()
+                };
+                let _ = crate::style_mru::save_glyph_mru(&user_dir, &saved_mru);
+
+                // Close the picker.
+                state.glyph_picker = None;
+
+                // Recompute the preview.
+                if let Some(ed) = &mut state.style_editor {
+                    recompute_style_preview(ed, &user_dir);
+                }
+            }
+            // If glyph was invalid / none, leave picker open.
+        }
+
+        Action::GlyphPickerClear => {
+            let pick_info = state.glyph_picker.as_ref()
+                .map(|p| (p.target_selector.clone(), p.target_zone));
+            if let Some((sel, zone)) = pick_info {
+                let user_dir = state.config.user_dir.clone();
+                if let Some(ed) = &mut state.style_editor {
+                    let decl = ed.doc.colors.selectors.entry(sel).or_default();
+                    set_zone_glyph(decl, zone, None);
+                    recompute_style_preview(ed, &user_dir);
+                }
+            }
+            state.glyph_picker = None;
+        }
+
+        Action::GlyphPickerCancel => {
+            state.glyph_picker = None;
+        }
+
         // ── Config screen actions ─────────────────────────────────────────────
 
         Action::OpenConfig => {
@@ -2658,6 +2776,69 @@ fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
     }
     // No selected room or no position: recenter on origin.
     state.recenter_on((0, 0), 80, 24);
+}
+
+// ── Glyph-picker helpers ──────────────────────────────────────────────────────
+
+/// Number of glyph columns in the picker grid (matches `GRID_COLS` in the render module).
+pub const GLYPH_GRID_COLS: usize = 16;
+
+/// Curated Unicode blocks offered by the glyph picker.
+/// Each entry is (display name, first codepoint, last codepoint inclusive).
+pub(crate) const GLYPH_BLOCKS: &[(&str, u32, u32)] = &[
+    ("Box Drawing",       0x2500, 0x257F),
+    ("Block Elements",    0x2580, 0x259F),
+    ("Geometric Shapes",  0x25A0, 0x25FF),
+    ("Arrows",            0x2190, 0x21FF),
+];
+
+/// Return the (lo, hi) codepoint range for the picker's current block/custom range.
+pub(crate) fn picker_block_range(picker: &crate::state::GlyphPickerState) -> (u32, u32) {
+    if let Some(start) = picker.custom_start {
+        (start, start.saturating_add(127))
+    } else {
+        let (_, lo, hi) = GLYPH_BLOCKS[picker.block.min(GLYPH_BLOCKS.len() - 1)];
+        (lo, hi)
+    }
+}
+
+/// Resolve the glyph at the picker's current `cursor` position, if it is single-width.
+/// Returns `None` for empty ranges or non-single-width codepoints.
+pub(crate) fn picker_glyph_at_cursor(picker: &crate::state::GlyphPickerState) -> Option<String> {
+    let (lo, hi) = picker_block_range(picker);
+    // Collect single-width glyphs in order.
+    let mut idx = 0usize;
+    for cp in lo..=hi {
+        if let Some(c) = char::from_u32(cp) {
+            let s = c.to_string();
+            if crate::style_mru::is_valid_glyph(&s) {
+                if idx == picker.cursor {
+                    return Some(s);
+                }
+                idx += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Write `g` into the `decl` field that corresponds to `zone`.
+pub(crate) fn set_zone_glyph(
+    decl: &mut crate::style::Decl,
+    zone: crate::state::BorderZone,
+    g: Option<String>,
+) {
+    use crate::state::BorderZone::*;
+    match zone {
+        Top    => decl.glyph_top    = g,
+        Bottom => decl.glyph_bottom = g,
+        Left   => decl.glyph_left   = g,
+        Right  => decl.glyph_right  = g,
+        Tl     => decl.glyph_tl     = g,
+        Tr     => decl.glyph_tr     = g,
+        Bl     => decl.glyph_bl     = g,
+        Br     => decl.glyph_br     = g,
+    }
 }
 
 // ── Config screen helpers ─────────────────────────────────────────────────────
@@ -5967,6 +6148,50 @@ mod tests {
         let sel = ed.selectors[ed.active].to_string();
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.clone()), Some("#abcdef".into()));
         assert!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.clone()).is_none());
+    }
+
+    #[test]
+    fn glyph_picker_pick_sets_zone_glyph_and_closes() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
+        }
+        apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
+        assert!(s.glyph_picker.is_some(), "picker opens");
+        // Feed '═' via the pending path then commit.
+        apply_action(Action::GlyphPickerChar('═'), &mut s, &mut Mapper::default());
+        apply_action(Action::GlyphPickerPick, &mut s, &mut Mapper::default());
+        assert!(s.glyph_picker.is_none(), "pick closes the picker");
+        let ed = s.style_editor.as_ref().unwrap();
+        assert_eq!(
+            ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
+            Some("═".into()),
+            "glyph written to the doc",
+        );
+    }
+
+    #[test]
+    fn glyph_picker_clear_sets_zone_to_none_and_closes() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
+            // Pre-set a glyph so we can verify clear removes it.
+            ed.doc.colors.selectors.entry("map_border".into()).or_default().glyph_top = Some("═".into());
+        }
+        apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
+        assert!(s.glyph_picker.is_some());
+        apply_action(Action::GlyphPickerClear, &mut s, &mut Mapper::default());
+        assert!(s.glyph_picker.is_none(), "clear closes the picker");
+        let ed = s.style_editor.as_ref().unwrap();
+        assert_eq!(
+            ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
+            None,
+            "glyph cleared from the doc",
+        );
     }
 
     #[test]

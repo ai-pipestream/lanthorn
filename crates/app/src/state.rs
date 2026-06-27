@@ -495,6 +495,43 @@ impl FileBrowserState {
     }
 }
 
+// ── Glyph-picker modal state ─────────────────────────────────────────────────
+
+/// Which border zone a glyph-picker commit targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderZone {
+    Top,
+    Bottom,
+    Left,
+    Right,
+    Tl,
+    Tr,
+    Bl,
+    Br,
+}
+
+/// Transient state for the glyph-picker modal.
+/// Opened over the style editor; `None` in `AppState.glyph_picker` means closed.
+#[derive(Debug, Clone)]
+pub struct GlyphPickerState {
+    /// The CSS-ish selector name that will receive the glyph on commit.
+    pub target_selector: String,
+    /// Which border zone to write into on commit.
+    pub target_zone: BorderZone,
+    /// Index into the curated block list (0–3: Box Drawing, Block Elements,
+    /// Geometric Shapes, Arrows). Ignored when `custom_start` is set.
+    pub block: usize,
+    /// When `Some`, overrides the curated block with a custom U+start range.
+    pub custom_start: Option<u32>,
+    /// Cursor position within the current glyph grid (0-based index).
+    pub cursor: usize,
+    /// A pending glyph set via direct character input (`GlyphPickerChar`).
+    /// When `Some`, `GlyphPickerPick` uses this instead of the grid cursor.
+    pub pending: Option<String>,
+    /// Most-recently-used glyphs (up to 32), loaded from the sidecar on open.
+    pub mru: Vec<String>,
+}
+
 // ── Style editor state ────────────────────────────────────────────────────────
 
 /// Which sub-widget has keyboard focus inside the style editor.
@@ -717,6 +754,10 @@ pub struct AppState {
     /// Active style-editor full-screen state. `None` means the editor is closed.
     pub style_editor: Option<StyleEditorState>,
 
+    /// Active glyph-picker modal state. `None` means the picker is closed.
+    /// Opened over the style editor; closes on pick/clear/cancel.
+    pub glyph_picker: Option<GlyphPickerState>,
+
     /// Session turn counter; incremented on each non-empty `SubmitCommand`.
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
@@ -882,6 +923,7 @@ impl Default for AppState {
             config: crate::config::Config::default(),
             config_screen: None,
             style_editor: None,
+            glyph_picker: None,
             turns: 0,
             history: Vec::new(),
             replay: None,
@@ -927,6 +969,7 @@ impl AppState {
             || self.file_browser.is_some()
             || self.config_screen.is_some()
             || self.style_editor.is_some()
+            || self.glyph_picker.is_some()
             || self.verb_menu.is_some()
             || self.hotkey_dialog
             || self.room_panel.is_some()

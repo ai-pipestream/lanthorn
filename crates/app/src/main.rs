@@ -224,6 +224,8 @@ struct PaneRects {
     pub hints_panel: Option<HintsPanelRects>,
     /// Hit-rects for the style-editor board (when open).
     pub style_editor: Option<StyleEditorRects>,
+    /// Hit-rects for the glyph-picker modal (when open).
+    pub glyph_picker: Option<app::render::glyph_picker::GlyphPickerRects>,
     /// Text under the active story-pane selection, captured from THIS frame's
     /// buffer (clamped to story columns). Read on mouse-release to copy.
     pub selection_text: Option<String>,
@@ -252,6 +254,7 @@ fn draw_frame(
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
     let mut style_editor_rects_out: Option<StyleEditorRects> = None;
+    let mut glyph_picker_rects_out: Option<app::render::glyph_picker::GlyphPickerRects> = None;
     let mut selection_text_out: Option<String> = None;
     let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
@@ -604,6 +607,11 @@ fn draw_frame(
             style_editor_rects_out = draw_style_editor(state, full, buf);
         }
 
+        // ── Glyph-picker modal — drawn over the style editor ──────────────────
+        if state.glyph_picker.is_some() {
+            glyph_picker_rects_out = app::render::glyph_picker::draw_glyph_picker(state, full, buf);
+        }
+
         // ── Aux-storage prompt — drawn over everything ────────────────────────
         if state.aux_prompt {
             aux_dialog_rects_out = draw_aux_dialog(state, full, buf);
@@ -699,7 +707,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, selection_text: selection_text_out, transcript_max_scroll })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1149,7 +1157,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, selection_text: None, transcript_max_scroll: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1682,6 +1690,99 @@ fn main() {
                     }
                 }
             }
+        }
+
+        // ── Glyph-picker intercept — modal over the style editor ─────────────
+        // When the glyph picker is open, route all keyboard events here and
+        // continue (swallowing events the picker doesn't handle).
+        if state.glyph_picker.is_some() {
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    use crossterm::event::KeyCode;
+                    match k.code {
+                        KeyCode::Esc => {
+                            apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
+                        }
+                        KeyCode::Enter => {
+                            apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
+                        }
+                        KeyCode::Delete | KeyCode::Backspace => {
+                            // Clear the pending selection (revert to grid cursor).
+                            if let Some(p) = &mut state.glyph_picker {
+                                p.pending = None;
+                            }
+                        }
+                        KeyCode::Left => {
+                            apply_action(Action::GlyphPickerNav(-1), &mut state, &mut mapper);
+                        }
+                        KeyCode::Right => {
+                            apply_action(Action::GlyphPickerNav(1), &mut state, &mut mapper);
+                        }
+                        KeyCode::Up => {
+                            apply_action(Action::GlyphPickerNav(-(app::input::GLYPH_GRID_COLS as i32)), &mut state, &mut mapper);
+                        }
+                        KeyCode::Down => {
+                            apply_action(Action::GlyphPickerNav(app::input::GLYPH_GRID_COLS as i32), &mut state, &mut mapper);
+                        }
+                        KeyCode::Char(',') | KeyCode::Char('[') => {
+                            apply_action(Action::GlyphPickerBlock(-1), &mut state, &mut mapper);
+                        }
+                        KeyCode::Char('.') | KeyCode::Char(']') => {
+                            apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
+                        }
+                        KeyCode::Char(c) => {
+                            apply_action(Action::GlyphPickerChar(c), &mut state, &mut mapper);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseEventKind, MouseButton};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(gp) = &last_panes.glyph_picker {
+                            // Close button.
+                            if gp.close.map_or(false, |r| r.contains(pt)) {
+                                apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
+                            // Glyph cells: set pending + pick.
+                            } else {
+                                let mut picked = false;
+                                for (g, r) in &gp.glyphs {
+                                    if r.contains(pt) {
+                                        apply_action(Action::GlyphPickerChar(g.chars().next().unwrap_or(' ')), &mut state, &mut mapper);
+                                        apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
+                                        picked = true;
+                                        break;
+                                    }
+                                }
+                                if !picked {
+                                    for (g, r) in &gp.mru {
+                                        if r.contains(pt) {
+                                            apply_action(Action::GlyphPickerChar(g.chars().next().unwrap_or(' ')), &mut state, &mut mapper);
+                                            apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
+                                            picked = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if !picked {
+                                    if gp.blocks_prev.map_or(false, |r| r.contains(pt)) {
+                                        apply_action(Action::GlyphPickerBlock(-1), &mut state, &mut mapper);
+                                    } else if gp.blocks_next.map_or(false, |r| r.contains(pt)) {
+                                        apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
+                                    } else if gp.clear.map_or(false, |r| r.contains(pt)) {
+                                        apply_action(Action::GlyphPickerClear, &mut state, &mut mapper);
+                                    }
+                                    // Clicks outside modal area: swallow (modal is top).
+                                }
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { let _ = terminal.clear(); }
+                _ => {}
+            }
+            continue;
         }
 
         // ── Config-screen Tab focus intercept ────────────────────────────────
