@@ -23,7 +23,25 @@ pub mod verbmenu;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
+
+// ── Shared text-style mapping ─────────────────────────────────────────────────
+
+/// Layer Z-machine text-style bits (ZMSD §8.7.1: 1=reverse, 2=bold, 4=italic,
+/// 8=fixed-pitch) over a base style. Fixed-pitch is ignored (already monospaced).
+pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
+    let mut s = base;
+    if bits & 0x02 != 0 {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    if bits & 0x01 != 0 {
+        s = s.add_modifier(Modifier::REVERSED);
+    }
+    if bits & 0x04 != 0 {
+        s = s.add_modifier(Modifier::ITALIC);
+    }
+    s
+}
 
 // ── Shared clipped drawing helpers ────────────────────────────────────────────
 
@@ -85,5 +103,25 @@ pub fn put_str(buf: &mut Buffer, x: i32, y: i32, s: &str, style: Style, area: Re
     }
     for (i, ch) in s.chars().enumerate() {
         put_char(buf, x + i as i32, y, ch, style, area);
+    }
+}
+
+#[cfg(test)]
+mod text_style_tests {
+    use super::*;
+    use ratatui::style::{Modifier, Style};
+
+    #[test]
+    fn apply_text_style_maps_all_bits() {
+        let b = Style::default();
+        assert!(apply_text_style(b, 0x02).add_modifier.contains(Modifier::BOLD));
+        assert!(apply_text_style(b, 0x01).add_modifier.contains(Modifier::REVERSED));
+        assert!(apply_text_style(b, 0x04).add_modifier.contains(Modifier::ITALIC));
+        // fixed-pitch (0x08) adds nothing; 0 is a no-op
+        assert_eq!(apply_text_style(b, 0x08), b);
+        assert_eq!(apply_text_style(b, 0x00), b);
+        // composes: bold+italic
+        let bi = apply_text_style(b, 0x06).add_modifier;
+        assert!(bi.contains(Modifier::BOLD) && bi.contains(Modifier::ITALIC));
     }
 }

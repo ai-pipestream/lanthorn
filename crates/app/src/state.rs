@@ -169,6 +169,14 @@ pub enum TranscriptKind {
     Warning,
 }
 
+/// A run of characters in a transcript line carrying Z-machine text-style bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StyleRun {
+    pub start: usize, // char offset within the line, inclusive
+    pub end: usize,   // char offset, exclusive
+    pub bits: u8,     // 1=reverse, 2=bold, 4=italic, 8=fixed
+}
+
 // ── Transcript filter ─────────────────────────────────────────────────────────
 
 /// Which categories of transcript entries are currently visible.

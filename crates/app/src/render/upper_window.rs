@@ -4,30 +4,13 @@
 /// to the testable `draw_grid` helper.
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use zvm::cpu::exec::Machine;
 use zvm::screen::UpperWindow;
 
 use crate::colors::ColorScheme;
+use crate::render::apply_text_style;
 use crate::render::paneframe::{draw_framed, BorderStyle};
-
-// ── Style helpers ─────────────────────────────────────────────────────────────
-
-/// Apply Z-machine text_style bits on top of a base `Style`.
-///
-/// ZMSD §8.7.2 operand values: 1 = reverse-video, 2 = bold, 4 = italic,
-/// 8 = fixed-pitch.  The VM stores the raw game operand verbatim, so test
-/// the exact value bits (0x01 for reverse, 0x02 for bold).
-fn apply_text_style(base: Style, text_style: u8) -> Style {
-    let mut s = base;
-    if text_style & 0x02 != 0 {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    if text_style & 0x01 != 0 {
-        s = s.add_modifier(Modifier::REVERSED);
-    }
-    s
-}
 
 // ── Core grid renderer ────────────────────────────────────────────────────────
 
