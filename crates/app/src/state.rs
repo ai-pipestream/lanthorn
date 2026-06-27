@@ -717,6 +717,10 @@ pub struct AppState {
     /// only (not persisted). `None` = use the line's per-kind style. Kept length-
     /// synced by `push_transcript_kind`; read defensively by the renderer.
     pub transcript_styles: Vec<Option<ratatui::style::Style>>,
+    /// Per-line Z-machine text-style runs, parallel to `transcript` (always same
+    /// length). Empty for the common unstyled line. Populated only by game-turn
+    /// output via `push_transcript_runs`; persisted in `transcript.json`.
+    pub transcript_runs: Vec<Vec<StyleRun>>,
     /// Which categories of transcript entries are currently visible.
     pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
@@ -976,6 +980,7 @@ impl Default for AppState {
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
             transcript_styles: Vec::new(),
+            transcript_runs: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
             input: String::new(),
@@ -1231,20 +1236,86 @@ impl AppState {
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
+        self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(None);
+            self.transcript_runs.push(Vec::new());
         }
     }
 
     /// Append lines with the given kind and an explicit per-line render style.
     pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
+        self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(Some(style));
+            self.transcript_runs.push(Vec::new());
+        }
+    }
+
+    /// Split `text` on `'\n'` and append each line tagged with `kind`, deriving a
+    /// per-line `Vec<StyleRun>` from `chunks` — a `(char_count, bits)` list whose
+    /// total char-count covers every char of `text` INCLUDING the `'\n'`
+    /// separators (as recorded by `CaptureSink`). Adjacent equal-bits spans merge;
+    /// zero-bits spans are omitted (so an unstyled line yields an empty run vec).
+    pub fn push_transcript_runs(&mut self, text: &str, kind: TranscriptKind, chunks: &[(usize, u8)]) {
+        self.transcript_styles.resize(self.transcript.len(), None);
+        self.transcript_runs.resize(self.transcript.len(), Vec::new());
+
+        // Walk `text` char-by-char while consuming the chunk list in lockstep.
+        let mut chunk_iter = chunks.iter().copied();
+        let mut rem: usize = 0;
+        let mut bits: u8 = 0;
+        // Advance to the next non-exhausted chunk when the current one is spent.
+        // When chunks run out, treat the remainder as plain (bits 0).
+        let mut refill = |rem: &mut usize, bits: &mut u8| {
+            while *rem == 0 {
+                match chunk_iter.next() {
+                    Some((c, b)) => {
+                        *rem = c;
+                        *bits = b;
+                    }
+                    None => {
+                        *rem = usize::MAX;
+                        *bits = 0;
+                        break;
+                    }
+                }
+            }
+        };
+
+        let mut first = true;
+        for line in text.split('\n') {
+            // Consume the '\n' separator's chunk char (one per separator, i.e.
+            // before every line except the first).
+            if !first {
+                refill(&mut rem, &mut bits);
+                rem = rem.saturating_sub(1);
+            }
+            first = false;
+
+            let mut runs: Vec<StyleRun> = Vec::new();
+            let mut col = 0usize;
+            for _ch in line.chars() {
+                refill(&mut rem, &mut bits);
+                if bits != 0 {
+                    match runs.last_mut() {
+                        Some(r) if r.end == col && r.bits == bits => r.end = col + 1,
+                        _ => runs.push(StyleRun { start: col, end: col + 1, bits }),
+                    }
+                }
+                col += 1;
+                rem = rem.saturating_sub(1);
+            }
+
+            self.transcript.push(line.to_owned());
+            self.transcript_kinds.push(kind);
+            self.transcript_styles.push(None);
+            self.transcript_runs.push(runs);
         }
     }
 
@@ -1581,6 +1652,42 @@ mod tests {
         s.transcript_kinds = vec![TranscriptKind::Story; 3];
         s.push_transcript_kind("w", TranscriptKind::Meta); // must self-heal
         assert_eq!(s.transcript.len(), s.transcript_styles.len(), "self-heal re-aligns lengths");
+    }
+
+    #[test]
+    fn push_runs_extracts_per_line_spans() {
+        let mut s = AppState::default();
+        s.push_transcript_runs("ab cd", TranscriptKind::Story, &[(2, 0x02), (3, 0)]);
+        assert_eq!(s.transcript.last().unwrap(), "ab cd");
+        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02 }]);
+        assert_eq!(s.transcript.len(), s.transcript_runs.len());
+        assert_eq!(s.transcript.len(), s.transcript_kinds.len());
+    }
+
+    #[test]
+    fn push_runs_splits_across_newlines() {
+        let mut s = AppState::default();
+        s.push_transcript_runs("A\nB", TranscriptKind::Story, &[(1, 0x02), (1, 0), (1, 0x02)]);
+        let n = s.transcript.len();
+        assert_eq!(s.transcript[n - 2], "A");
+        assert_eq!(s.transcript[n - 1], "B");
+        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02 }]);
+        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02 }]);
+    }
+
+    #[test]
+    fn push_runs_all_plain_is_empty() {
+        let mut s = AppState::default();
+        s.push_transcript_runs("hello", TranscriptKind::Story, &[(5, 0)]);
+        assert!(s.transcript_runs.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn push_kind_keeps_runs_synced_empty() {
+        let mut s = AppState::default();
+        s.push_transcript_kind("x", TranscriptKind::Meta);
+        assert_eq!(s.transcript.len(), s.transcript_runs.len());
+        assert!(s.transcript_runs.last().unwrap().is_empty());
     }
 
     #[test]
