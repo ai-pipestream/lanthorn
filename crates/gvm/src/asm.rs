@@ -43,6 +43,109 @@ pub fn func(type_byte: u8, locals: &[(u8, u8)], body: &[u8]) -> Vec<u8> {
     f
 }
 
+/// One operand in a hand-assembled instruction, naming its addressing mode
+/// explicitly so tests can exercise each mode (GLULX_NOTES §3).
+#[derive(Clone, Copy)]
+pub enum Op {
+    /// Mode 0x0: constant zero (load) / discard (store).
+    Zero,
+    /// Mode 0x1: 1-byte signed constant.
+    C8(i8),
+    /// Mode 0x2: 2-byte signed constant.
+    C16(i16),
+    /// Mode 0x3: 4-byte constant.
+    C32(u32),
+    /// Mode 0x5: contents of / store to a 1-byte main-memory address.
+    Mem8(u8),
+    /// Mode 0x6: contents of / store to a 2-byte main-memory address.
+    Mem16(u16),
+    /// Mode 0x7: contents of / store to a 4-byte main-memory address.
+    Mem32(u32),
+    /// Mode 0x8: pop (load) / push (store).
+    Stack,
+    /// Mode 0x9: call-frame local at a 1-byte offset.
+    Local8(u8),
+    /// Mode 0xA: call-frame local at a 2-byte offset.
+    Local16(u16),
+    /// Mode 0xB: call-frame local at a 4-byte offset.
+    Local32(u32),
+    /// Mode 0xD: contents of / store to a 1-byte RAM-relative address.
+    Ram8(u8),
+    /// Mode 0xE: contents of / store to a 2-byte RAM-relative address.
+    Ram16(u16),
+    /// Mode 0xF: contents of / store to a 4-byte RAM-relative address.
+    Ram32(u32),
+}
+
+impl Op {
+    fn mode(self) -> u8 {
+        match self {
+            Op::Zero => 0x0,
+            Op::C8(_) => 0x1,
+            Op::C16(_) => 0x2,
+            Op::C32(_) => 0x3,
+            Op::Mem8(_) => 0x5,
+            Op::Mem16(_) => 0x6,
+            Op::Mem32(_) => 0x7,
+            Op::Stack => 0x8,
+            Op::Local8(_) => 0x9,
+            Op::Local16(_) => 0xA,
+            Op::Local32(_) => 0xB,
+            Op::Ram8(_) => 0xD,
+            Op::Ram16(_) => 0xE,
+            Op::Ram32(_) => 0xF,
+        }
+    }
+    fn data(self) -> Vec<u8> {
+        match self {
+            Op::Zero | Op::Stack => vec![],
+            Op::C8(v) => vec![v as u8],
+            Op::C16(v) => v.to_be_bytes().to_vec(),
+            Op::C32(v) => v.to_be_bytes().to_vec(),
+            Op::Mem8(v) | Op::Local8(v) | Op::Ram8(v) => vec![v],
+            Op::Mem16(v) | Op::Local16(v) | Op::Ram16(v) => v.to_be_bytes().to_vec(),
+            Op::Mem32(v) | Op::Local32(v) | Op::Ram32(v) => v.to_be_bytes().to_vec(),
+        }
+    }
+}
+
+/// Encode the variable-length opcode number (GLULX_NOTES §3).
+pub fn opcode_bytes(opcode: u32) -> Vec<u8> {
+    if opcode < 0x80 {
+        vec![opcode as u8]
+    } else if opcode < 0x4000 {
+        ((opcode + 0x8000) as u16).to_be_bytes().to_vec()
+    } else {
+        (opcode + 0xC000_0000).to_be_bytes().to_vec()
+    }
+}
+
+/// Encode just the operand block: packed mode nibbles (two per byte, earlier
+/// operand in the low nibble) followed by the operand data in order.
+pub fn operands(ops: &[Op]) -> Vec<u8> {
+    let mut modes = vec![0u8; ops.len().div_ceil(2)];
+    for (i, op) in ops.iter().enumerate() {
+        let m = op.mode();
+        if i % 2 == 0 {
+            modes[i / 2] |= m;
+        } else {
+            modes[i / 2] |= m << 4;
+        }
+    }
+    let mut out = modes;
+    for op in ops {
+        out.extend_from_slice(&op.data());
+    }
+    out
+}
+
+/// Assemble one instruction: opcode number, then the operand block.
+pub fn ins(opcode: u32, ops: &[Op]) -> Vec<u8> {
+    let mut out = opcode_bytes(opcode);
+    out.extend_from_slice(&operands(ops));
+    out
+}
+
 /// A built test image plus the load address of each supplied function.
 pub struct Built {
     /// The complete Glulx image bytes.

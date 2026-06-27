@@ -112,6 +112,147 @@ impl Machine {
     fn m8(&self, a: u32) -> R<u32> {
         self.mem.read8(a).ok_or_else(|| format!("memory fault: read8 @{a:#010x}"))
     }
+    fn m16(&self, a: u32) -> R<u32> {
+        self.mem.read16(a).ok_or_else(|| format!("memory fault: read16 @{a:#010x}"))
+    }
+    fn m32(&self, a: u32) -> R<u32> {
+        self.mem.read32(a).ok_or_else(|| format!("memory fault: read32 @{a:#010x}"))
+    }
+
+    // ── instruction-stream readers (advance pc) ───────────────────────────────
+
+    fn take8(&mut self) -> R<u32> {
+        let v = self.m8(self.pc)?;
+        self.pc += 1;
+        Ok(v)
+    }
+    fn take16(&mut self) -> R<u32> {
+        let v = self.m16(self.pc)?;
+        self.pc += 2;
+        Ok(v)
+    }
+    fn take32(&mut self) -> R<u32> {
+        let v = self.m32(self.pc)?;
+        self.pc += 4;
+        Ok(v)
+    }
+
+    // ── opcode + operand decode (GLULX_NOTES §3) ──────────────────────────────
+
+    /// Decode the variable-length opcode number at `pc`, advancing past it.
+    pub(crate) fn decode_opcode(&mut self) -> R<u32> {
+        let b0 = self.m8(self.pc)?;
+        match b0 & 0xC0 {
+            0xC0 => Ok(self.take32()? - 0xC000_0000), // top bits 11 → 4 bytes
+            0x80 => Ok(self.take16()? - 0x8000),      // top bits 10 → 2 bytes
+            _ => self.take8(),                        // top bit 0 → 1 byte
+        }
+    }
+
+    /// Decode `n_load` load values then `n_store` store destinations from the
+    /// packed mode nibbles + operand data following `pc`.
+    pub(crate) fn read_operands(&mut self, n_load: usize, n_store: usize) -> R<(Vec<u32>, Vec<Dest>)> {
+        let total = n_load + n_store;
+        let mode_bytes = total.div_ceil(2);
+        // Slurp the mode nibbles first; operand data follows them, in order.
+        let mut modes = Vec::with_capacity(total);
+        let start = self.pc;
+        for i in 0..mode_bytes {
+            let byte = self.m8(start + i as u32)?;
+            modes.push((byte & 0x0F) as u8);
+            modes.push((byte >> 4) as u8);
+        }
+        self.pc += mode_bytes as u32;
+
+        let mut loads = Vec::with_capacity(n_load);
+        let mut stores = Vec::with_capacity(n_store);
+        for (i, &mode) in modes.iter().enumerate().take(total) {
+            if i < n_load {
+                loads.push(self.resolve_load(mode)?);
+            } else {
+                stores.push(self.resolve_store(mode)?);
+            }
+        }
+        Ok((loads, stores))
+    }
+
+    /// Resolve one LOAD operand of the given addressing mode to its value.
+    fn resolve_load(&mut self, mode: u8) -> R<u32> {
+        let ramstart = self.mem.ramstart();
+        Ok(match mode {
+            0x0 => 0,
+            0x1 => self.take8()? as u8 as i8 as i32 as u32, // sign-extend
+            0x2 => self.take16()? as u16 as i16 as i32 as u32,
+            0x3 => self.take32()?,
+            0x5 => {
+                let a = self.take8()?;
+                self.m32(a)?
+            }
+            0x6 => {
+                let a = self.take16()?;
+                self.m32(a)?
+            }
+            0x7 => {
+                let a = self.take32()?;
+                self.m32(a)?
+            }
+            0x8 => self.pop32()?,
+            0x9 => {
+                let o = self.take8()?;
+                self.local_load(o)?
+            }
+            0xA => {
+                let o = self.take16()?;
+                self.local_load(o)?
+            }
+            0xB => {
+                let o = self.take32()?;
+                self.local_load(o)?
+            }
+            0xD => {
+                let a = self.take8()? + ramstart;
+                self.m32(a)?
+            }
+            0xE => {
+                let a = self.take16()? + ramstart;
+                self.m32(a)?
+            }
+            0xF => {
+                let a = self.take32()? + ramstart;
+                self.m32(a)?
+            }
+            other => return Err(format!("illegal load operand mode {other:#x}")),
+        })
+    }
+
+    /// Resolve one STORE operand of the given addressing mode to a destination.
+    fn resolve_store(&mut self, mode: u8) -> R<Dest> {
+        let ramstart = self.mem.ramstart();
+        Ok(match mode {
+            0x0 => Dest::Discard,
+            0x8 => Dest::Push,
+            0x5 => Dest::Mem(self.take8()?),
+            0x6 => Dest::Mem(self.take16()?),
+            0x7 => Dest::Mem(self.take32()?),
+            0x9 => Dest::Local(self.take8()?),
+            0xA => Dest::Local(self.take16()?),
+            0xB => Dest::Local(self.take32()?),
+            0xD => Dest::Mem(self.take8()? + ramstart),
+            0xE => Dest::Mem(self.take16()? + ramstart),
+            0xF => Dest::Mem(self.take32()? + ramstart),
+            other => return Err(format!("illegal store operand mode {other:#x}")),
+        })
+    }
+
+    /// Write `v` to a resolved destination.
+    pub(crate) fn store(&mut self, dest: Dest, v: u32) -> R<()> {
+        match dest {
+            Dest::Discard => Ok(()),
+            Dest::Push => self.push32(v),
+            Dest::Mem(a) => self.store_mem(a, v),
+            Dest::Local(a) => self.local_store(a, v),
+        }
+    }
 
     // ── stack byte accessors (offsets are guaranteed in-range by callers) ─────
 
@@ -391,6 +532,120 @@ mod tests {
     fn machine(built: asm::Built) -> Machine {
         let mem = Memory::new(built.image).expect("valid image");
         Machine::with_output(mem, Box::new(BufferOutput::new()))
+    }
+
+    /// A machine whose start function has `locals` and whose body is `body`,
+    /// with `pc` positioned at the first body byte. RAMSTART is 0x100 (tiny
+    /// code), so tests can hardcode RAM addresses.
+    fn machine_with_body(locals: &[(u8, u8)], body: Vec<u8>) -> Machine {
+        let start = asm::func(0xC1, locals, &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let m = machine(built);
+        assert_eq!(m.mem.ramstart(), 0x100, "test assumes RAMSTART == 0x100");
+        m
+    }
+
+    #[test]
+    fn decode_opcode_1_2_4_byte_forms() {
+        let mut m = machine_with_body(&[], asm::opcode_bytes(0x10));
+        assert_eq!(m.decode_opcode().unwrap(), 0x10);
+        let mut m = machine_with_body(&[], asm::opcode_bytes(0x130));
+        assert_eq!(m.decode_opcode().unwrap(), 0x130);
+        let mut m = machine_with_body(&[], asm::opcode_bytes(0x0100_0000));
+        assert_eq!(m.decode_opcode().unwrap(), 0x0100_0000);
+    }
+
+    fn one_load(locals: &[(u8, u8)], op: asm::Op, setup: impl FnOnce(&mut Machine)) -> u32 {
+        let mut m = machine_with_body(locals, asm::operands(&[op]));
+        setup(&mut m);
+        let (loads, _) = m.read_operands(1, 0).unwrap();
+        loads[0]
+    }
+
+    #[test]
+    fn load_mode_constants_sign_extend() {
+        assert_eq!(one_load(&[], asm::Op::Zero, |_| {}), 0);
+        assert_eq!(one_load(&[], asm::Op::C8(-5), |_| {}), (-5i32) as u32);
+        assert_eq!(one_load(&[], asm::Op::C16(-1000), |_| {}), (-1000i32) as u32);
+        assert_eq!(one_load(&[], asm::Op::C32(0xDEAD_BEEF), |_| {}), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn load_mode_contents_of_address() {
+        // Address 0 holds the "Glul" magic.
+        assert_eq!(one_load(&[], asm::Op::Mem8(0), |_| {}), 0x476C_756C);
+        // 2-/4-byte address forms read a value we plant in RAM at 0x100.
+        let plant = |m: &mut Machine| m.mem.write32(0x100, 0x0102_0304).unwrap();
+        assert_eq!(one_load(&[], asm::Op::Mem16(0x0100), plant), 0x0102_0304);
+        assert_eq!(one_load(&[], asm::Op::Mem32(0x0100), plant), 0x0102_0304);
+    }
+
+    #[test]
+    fn load_mode_ram_relative() {
+        let plant = |m: &mut Machine| m.mem.write32(0x100, 0x1111_2222).unwrap();
+        assert_eq!(one_load(&[], asm::Op::Ram8(0), plant), 0x1111_2222);
+        assert_eq!(one_load(&[], asm::Op::Ram16(0), plant), 0x1111_2222);
+        assert_eq!(one_load(&[], asm::Op::Ram32(0), plant), 0x1111_2222);
+    }
+
+    #[test]
+    fn load_mode_local_each_offset_size() {
+        let set = |m: &mut Machine| m.local_store(4, 0x55AA).unwrap();
+        assert_eq!(one_load(&[(4, 4)], asm::Op::Local8(4), set), 0x55AA);
+        assert_eq!(one_load(&[(4, 4)], asm::Op::Local16(4), set), 0x55AA);
+        assert_eq!(one_load(&[(4, 4)], asm::Op::Local32(4), set), 0x55AA);
+    }
+
+    #[test]
+    fn load_mode_stack_pops() {
+        let v = one_load(&[], asm::Op::Stack, |m| m.push32(0xFEED_FACE).unwrap());
+        assert_eq!(v, 0xFEED_FACE);
+    }
+
+    #[test]
+    fn store_mode_discard_and_push() {
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Zero]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Discard);
+        m.store(dests[0], 0x1234).unwrap(); // no-op
+
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Stack]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Push);
+        m.store(dests[0], 0x9).unwrap();
+        assert_eq!(m.pop32().unwrap(), 0x9);
+    }
+
+    #[test]
+    fn store_mode_memory_and_local() {
+        // Memory (2-byte addr form) → RAM at 0x100.
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Mem16(0x0100)]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Mem(0x100));
+        m.store(dests[0], 0xABCD_1234).unwrap();
+        assert_eq!(m.mem.read32(0x100), Some(0xABCD_1234));
+
+        // RAM-relative store maps to the same address.
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Ram8(0)]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Mem(0x100));
+
+        // Local store.
+        let mut m = machine_with_body(&[(4, 2)], asm::operands(&[asm::Op::Local8(4)]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Local(4));
+        m.store(dests[0], 0x7777).unwrap();
+        assert_eq!(m.local_load(4).unwrap(), 0x7777);
+    }
+
+    #[test]
+    fn illegal_operand_mode_faults() {
+        // Mode 0x4 is unused/illegal for load.
+        let mut m = machine_with_body(&[], vec![0x04]);
+        assert!(m.read_operands(1, 0).is_err());
+        // Mode 0x1 (constant) is illegal as a store target.
+        let mut m = machine_with_body(&[], vec![0x01, 0x00]);
+        assert!(m.read_operands(0, 1).is_err());
     }
 
     #[test]
