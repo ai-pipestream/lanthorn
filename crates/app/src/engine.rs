@@ -142,10 +142,24 @@ impl GridWindow {
 
 /// A text-buffer window: the scrolling, wrapped, styled lower window.
 ///
-/// In 3b-i the app keeps its own transcript buffer, so this node is a marker;
-/// 3b-ii's generic renderer drives a real buffer stream through it.
+/// For the Z-machine (and a Glulx game's **primary** window) the app keeps its
+/// own transcript buffer, so [`primary`](Self::primary) is set and `lines`/`runs`
+/// stay empty — the renderer draws this window from `state.transcript` (keeping
+/// search / persistence / styling). A Glulx layout's **extra** buffer windows
+/// set `primary = false` and carry their inline content in `lines`/`runs`/`scroll`.
 #[derive(Debug, Clone, Default)]
-pub struct BufferWindow {}
+pub struct BufferWindow {
+    /// Accumulated logical lines (split on `\n`) for an inline (non-primary)
+    /// buffer window. Empty for the primary window.
+    pub lines: Vec<String>,
+    /// Per-line style runs, parallel to [`lines`](Self::lines).
+    pub runs: Vec<Vec<crate::state::StyleRun>>,
+    /// Scrollback offset (0 = newest at bottom).
+    pub scroll: u16,
+    /// True when this is the primary window whose content the app mirrors into
+    /// `state.transcript`; the renderer then draws it via the transcript path.
+    pub primary: bool,
+}
 
 /// How a [`WinNode::Pair`] divides its space.
 #[derive(Debug, Clone, Copy, Default)]
