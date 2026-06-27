@@ -218,3 +218,174 @@ Glk dispatch selectors (from `gi_dispa.c`):
 | glk_stream_set_current| 0x0047 | return 0                                     |
 | glk_stream_get_current| 0x0048 | return 0                                     |
 | (any other selector)  | —      | pop args, return 0                           |
+
+## 9. String objects + compressed-string decoding (Phase 2b)
+
+A string object is identified by its first byte (spec §1.6.1):
+
+- `0xE0` — unencoded Latin-1 C-string: the bytes follow, terminated by a `00`.
+- `0xE2` — unencoded Unicode: an `E2` byte, **three padding `00` bytes**, then
+  big-endian 32-bit code points, terminated by a `0000_0000` word.
+- `0xE1` — compressed: an `E1` byte, then a Huffman bit stream.
+
+`streamstr L1` (0x72) prints the string object at L1 to the current iosys. A
+"printable object" can also be a **function** (`0xC0`/`0xC1`); when an indirect
+decode node names a function it is *called* and its output streamed.
+
+### Compressed (E1) bit stream (spec §1.6.1.3)
+
+Bits are read **low bit first**: bit 0 is the `0x01` bit of the first byte after
+the `E1`, up through the `0x80` bit, then on to the next byte. Decoding walks the
+string-decoding table (a Huffman tree) from its root: at each branch read one
+bit, `0` → left child, `1` → right child, until a leaf. Print the leaf's entity,
+return to the root, repeat. The string-terminator leaf ends decoding.
+
+### String-decoding table (spec §1.6.1.4)
+
+Header (three big-endian 32-bit words), then the node data:
+
+| Offset | Field           |
+|--------|-----------------|
+| +0     | Table Length    |
+| +4     | Number of Nodes |
+| +8     | Root Node Addr (**absolute** address, not an offset) |
+| +12…   | Node data       |
+
+The table root is at `decode_table()` (header field 0x1C) but is **overridable**
+at run time by `setstringtbl`/`getstringtbl`; the current value lives on the
+Machine. Decoding an `E1` string with **no** table set is illegal (fault).
+
+### Node types (distinguished by their first byte)
+
+| Type | Name                         | Layout                                       |
+|------|------------------------------|----------------------------------------------|
+| 0x00 | Branch                       | `00` · Left addr (4) · Right addr (4)        |
+| 0x01 | String terminator            | `01`                                         |
+| 0x02 | Single character             | `02` · char (1)                              |
+| 0x03 | C-style string               | `03` · Latin-1 bytes… · NUL (1)              |
+| 0x04 | Single Unicode character     | `04` · char (4)                              |
+| 0x05 | C-style Unicode string       | `05` · 32-bit chars… · NUL word (4)          |
+| 0x08 | Indirect reference           | `08` · addr (4) → print string / call func   |
+| 0x09 | Double-indirect reference    | `09` · addr (4); `*addr` → object            |
+| 0x0A | Indirect, with arguments     | `0A` · addr (4) · argc (4) · args (4·argc)   |
+| 0x0B | Double-indirect, with args   | `0B` · addr (4) · argc (4) · args (4·argc)   |
+
+For 0x08/0x0A the address names the object directly; for 0x09/0x0B it names a
+4-byte field whose contents are the object address. If the object is a string it
+is printed (args ignored); if it is a function it is **called** (with the given
+args, or none for 0x08/0x09) and its output is streamed in place.
+
+### Calling functions from within strings (spec §1.3.4)
+
+The spec models a string-called function with type-10/11/13/14 call stubs so
+that a normal `return` resumes string decoding. We instead execute the call
+**synchronously**: decoding is a recursive Rust walk, and a function node calls
+the function and runs the VM run-loop until that frame returns (tracked by the
+frame pointer), then resumes the walk. This is observably equivalent for
+well-behaved veneer functions (their output is streamed in order). A recursion
+depth limit guards against pathological/cyclic tables (fault, never a Rust stack
+overflow).
+
+### `getstringtbl` / `setstringtbl`
+
+| Opcode       | Num   | L | S | Behavior                                       |
+|--------------|-------|---|---|------------------------------------------------|
+| getstringtbl | 0x140 | 0 | 1 | store the current decoding-table address (0=none) |
+| setstringtbl | 0x141 | 1 | 0 | set it (0 = none; does not touch the ROM header)  |
+
+## 10. The memory-array opcodes (Phase 2b, spec §2.4)
+
+All take a main-memory base in L1 and a **signed** index in L2; loads
+zero-extend, stores truncate. Address is `L1 + width*L2`.
+
+| Opcode    | Num   | L | S | Address / effect                              |
+|-----------|-------|---|---|-----------------------------------------------|
+| aload     | 0x48  | 2 | 1 | read 32-bit @ `L1+4*L2`                        |
+| aloads    | 0x49  | 2 | 1 | read 16-bit @ `L1+2*L2` (zero-extended)        |
+| aloadb    | 0x4A  | 2 | 1 | read 8-bit @ `L1+L2` (zero-extended)           |
+| aloadbit  | 0x4B  | 2 | 1 | bit `L2 mod 8` of `L1 + L2/8` → 0/1            |
+| astore    | 0x4C  | 3 | 0 | write 32-bit L3 @ `L1+4*L2`                    |
+| astores   | 0x4D  | 3 | 0 | write 16-bit (low) L3 @ `L1+2*L2`              |
+| astoreb   | 0x4E  | 3 | 0 | write 8-bit (low) L3 @ `L1+L2`                 |
+| astorebit | 0x4F  | 3 | 0 | set (L3≠0) / clear (L3=0) bit `L2 mod 8`       |
+| mzero     | 0x170 | 2 | 0 | zero L1 bytes at L2                            |
+| mcopy     | 0x171 | 3 | 0 | copy L1 bytes from L2 to L3                    |
+
+Bit indexing uses **flooring** division (`div_euclid`/`rem_euclid`), so a
+negative `L2` reaches bytes before `L1` (spec examples: base 1002, `L2=-1` →
+bit 7 of 1001). `mcopy` copies forward when `to < from`, otherwise backward, so
+overlapping ranges move correctly.
+
+## 11. The allocation heap (Phase 2b, spec §2.9)
+
+Dynamically-allocated blocks live above ENDMEM. The first `malloc` activates the
+heap: the heap-start address is the `getmemsize` value at that moment, and the
+memory map is extended to fit the block. While the heap is active, `setmemsize`
+is illegal (it fails — stores 1). When the last block is freed, the heap goes
+inactive and the memory map shrinks back to the heap-start address.
+
+| Opcode | Num   | L | S | Effect                                            |
+|--------|-------|---|---|---------------------------------------------------|
+| malloc | 0x178 | 1 | 1 | allocate L1 bytes; store the block address or 0   |
+| mfree  | 0x179 | 1 | 0 | free the extant block at L1                        |
+
+**Implementation:** we track the heap-start address (0 = inactive) and a list of
+extant blocks `(addr, size)` kept sorted by address. `malloc` walks the free
+gaps from heap-start (reusing freed space) and places the block in the first gap
+large enough, extending the memory map only if it must append past the committed
+end. Coalescing is implicit: a freed block simply leaves a gap that the next
+`malloc` can reuse or grow across. Allocation fails (stores 0) for a
+non-positive size or if the block would push memory past a fixed ceiling
+(`MAX_MEMSIZE`). `mfree` of an address that is not an extant block faults.
+
+## 12. Search opcodes (Phase 2b, spec §2.16)
+
+A collection of fixed-size structs each hold a `KeySize`-byte key at byte
+`KeyOffset`. Searches find a struct whose key matches the given key.
+
+| Opcode       | Num   | L | S | Operands                                            |
+|--------------|-------|---|---|-----------------------------------------------------|
+| linearsearch | 0x150 | 7 | 1 | Key, KeySize, Start, StructSize, NumStructs, KeyOffset, Options |
+| binarysearch | 0x151 | 7 | 1 | same; structs sorted ascending by key; NumStructs exact |
+| linkedsearch | 0x152 | 6 | 1 | Key, KeySize, Start, KeyOffset, NextOffset, Options |
+
+**Options bitfield:**
+- `KeyIndirect` (0x01): Key is the *address* of the key bytes. Otherwise Key is
+  the value itself and KeySize must be 1/2/4 (its low bytes are used).
+- `ZeroKeyTerminates` (0x02): stop and fail at an all-zero struct key (a real
+  match on an all-zero search key still takes precedence). linear/linked only.
+- `ReturnIndex` (0x04): return the array index (or 0xFFFFFFFF on failure)
+  instead of the struct address (or 0 on failure). linear/binary only.
+
+`linearsearch` scans in order; `NumStructs` may be 0xFFFFFFFF for no limit.
+`binarysearch` compares keys as big-endian unsigned integers (byte-wise
+lexicographic on equal-length keys). `linkedsearch` follows the 4-byte link at
+`NextOffset` until it is zero. All key reads are bounds-checked.
+
+## 13. gestalt + verify (Phase 2b, spec §2.18)
+
+`gestalt L1 L2 S1` (0x100) — test selector L1 (with optional arg L2). Unknown
+selectors return 0. `verify S1` (0x121) — image checksum check; we store 0
+(success). Selector numbers and meanings are from the spec; the **returned
+capability values reflect what this VM actually implements** (2a/2b features
+report 1; save/undo/accel/float are deferred to 2c+ and report 0).
+
+| Sel | Name         | Num | Returns                                              |
+|-----|--------------|-----|------------------------------------------------------|
+| 0   | GlulxVersion | 0   | 0x00030102 (spec 3.1.2)                              |
+| 1   | TerpVersion  | 1   | 0x00000100 (this terp, v0.1.0)                       |
+| 2   | ResizeMem    | 2   | 1 (setmemsize supported)                            |
+| 3   | Undo         | 3   | 0 (deferred to 2c)                                  |
+| 4   | IOSystem     | 4   | 1 if L2 ∈ {0 null, 2 Glk}, else 0                   |
+| 5   | Unicode      | 5   | 1                                                    |
+| 6   | MemCopy      | 6   | 1 (mzero/mcopy)                                      |
+| 7   | MAlloc       | 7   | 1 (malloc/mfree)                                     |
+| 8   | MAllocHeap   | 8   | heap-start address (0 if the heap is inactive)      |
+| 9   | Acceleration | 9   | 0 (deferred to 2c)                                  |
+| 10  | AccelFunc    | 10  | 0 (deferred to 2c)                                  |
+| 11  | Float        | 11  | 0 (floating point deferred)                         |
+
+**Deviation note:** for selector 4 (IOSystem) the spec states the null (0) and
+filter (1) systems "will always succeed." This VM has not implemented the filter
+I/O system (it is stubbed with a diagnostic), so we honestly report 0 for L2=1
+and 1 only for the systems we run (null and Glk). Update this when filter lands.

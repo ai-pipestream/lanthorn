@@ -65,6 +65,14 @@ pub struct Machine {
     pub(crate) iosys_mode: u32,
     /// Current I/O system rock.
     pub(crate) iosys_rock: u32,
+    /// Current string-decoding-table address (0 = none). Initialized from the
+    /// header's decode_table; overridable by `setstringtbl`.
+    pub(crate) cur_stringtbl: u32,
+    /// Allocation-heap start address (0 = heap inactive). Set on the first
+    /// `malloc` to the memsize at that moment.
+    pub(crate) heap_start: u32,
+    /// Extant allocated blocks `(addr, size)`, kept sorted by address.
+    heap_blocks: Vec<(u32, u32)>,
     /// The output sink.
     pub(crate) out: Box<dyn Output>,
     /// Recorded runtime faults / deferred-feature notices.
@@ -84,10 +92,14 @@ fn align_up(v: u32, to: u32) -> u32 {
 }
 
 impl Machine {
+    /// Ceiling on the memory-map size; `malloc` fails rather than grow past it.
+    const MAX_MEMSIZE: u32 = 0x1000_0000; // 256 MiB
+
     /// Build a machine over `mem`, entering the start function (no arguments).
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
         let start = mem.start_func();
+        let decode_table = mem.decode_table();
         let mut m = Machine {
             mem,
             stack: vec![0u8; stack_len],
@@ -96,6 +108,9 @@ impl Machine {
             pc: 0,
             iosys_mode: 0,
             iosys_rock: 0,
+            cur_stringtbl: decode_table,
+            heap_start: 0,
+            heap_blocks: Vec::new(),
             out,
             diagnostics: Vec::new(),
             halted: false,
@@ -297,6 +312,17 @@ impl Machine {
             0x72 => self.op_streamstr(),
             0x73 => self.op_streamunichar(),
             0x130 => self.op_glk(),
+            // String-decoding table (get/set the current table address).
+            0x140 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                let v = self.cur_stringtbl;
+                self.store(s[0], v)
+            }
+            0x141 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.cur_stringtbl = l[0];
+                Ok(())
+            }
             // Arithmetic (2 load, 1 store) — 32-bit two's complement.
             0x10 => self.binop(|a, b| a.wrapping_add(b)),
             0x11 => self.binop(|a, b| a.wrapping_sub(b)),
@@ -329,6 +355,32 @@ impl Machine {
             0x2B => self.branch2(|a, b| a >= b),
             0x2C => self.branch2(|a, b| a > b),
             0x2D => self.branch2(|a, b| a <= b),
+            // Memory-array load/store (L2 is a signed index).
+            0x48 => self.op_aload(4),
+            0x49 => self.op_aload(2),
+            0x4A => self.op_aload(1),
+            0x4B => self.op_aloadbit(),
+            0x4C => self.op_astore(4),
+            0x4D => self.op_astore(2),
+            0x4E => self.op_astore(1),
+            0x4F => self.op_astorebit(),
+            // Block zero / copy.
+            0x170 => self.op_mzero(),
+            0x171 => self.op_mcopy(),
+            // Search opcodes.
+            0x150 => self.op_linearsearch(),
+            0x151 => self.op_binarysearch(),
+            0x152 => self.op_linkedsearch(),
+            // Capability query / image verify.
+            0x100 => {
+                let (l, s) = self.read_operands(2, 1)?;
+                let v = self.gestalt(l[0], l[1]);
+                self.store(s[0], v)
+            }
+            0x121 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                self.store(s[0], 0) // verify: report success
+            }
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
             0x41 => self.copy_sized(2),                                // copys
@@ -353,8 +405,24 @@ impl Machine {
             }
             0x103 => {
                 let (l, s) = self.read_operands(1, 1)?;
-                let r = u32::from(self.mem.set_mem_size(l[0]).is_err());
+                let r = if self.heap_start != 0 {
+                    self.diagnostics
+                        .push("setmemsize while the heap is active is illegal".to_string());
+                    1
+                } else {
+                    u32::from(self.mem.set_mem_size(l[0]).is_err())
+                };
                 self.store(s[0], r)
+            }
+            // Allocation heap.
+            0x178 => {
+                let (l, s) = self.read_operands(1, 1)?;
+                let a = self.heap_malloc(l[0]);
+                self.store(s[0], a)
+            }
+            0x179 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.heap_free(l[0])
             }
             // Calls / return.
             0x30 => self.op_call(),
@@ -778,6 +846,280 @@ impl Machine {
         Ok(v & mask)
     }
 
+    // ── memory-array opcodes (GLULX_NOTES; L2 is a signed index) ──────────────
+
+    /// `aload`/`aloads`/`aloadb` (width 4/2/1): load from `L1 + width*L2`
+    /// (L2 signed), zero-extended to 32 bits.
+    fn op_aload(&mut self, width: u32) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let addr = Self::array_addr(l[0], l[1], width);
+        let v = self.read_width(addr, width)?;
+        self.store(s[0], v)
+    }
+
+    /// `astore`/`astores`/`astoreb` (width 4/2/1): store the low `width` bytes
+    /// of L3 at `L1 + width*L2` (L2 signed).
+    fn op_astore(&mut self, width: u32) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let addr = Self::array_addr(l[0], l[1], width);
+        self.store_mem_sized(addr, l[2], width)
+    }
+
+    /// `aloadbit`: store bit `(L2 mod 8)` of byte `(L1 + L2/8)` (L2 signed,
+    /// flooring division) as 0/1.
+    fn op_aloadbit(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (addr, bit) = Self::bit_addr(l[0], l[1]);
+        let byte = self.m8(addr)?;
+        self.store(s[0], (byte >> bit) & 1)
+    }
+
+    /// `astorebit`: set (L3 nonzero) or clear (L3 zero) bit `(L2 mod 8)` of byte
+    /// `(L1 + L2/8)` (L2 signed).
+    fn op_astorebit(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let (addr, bit) = Self::bit_addr(l[0], l[1]);
+        let byte = self.m8(addr)?;
+        let v = if l[2] != 0 { byte | (1 << bit) } else { byte & !(1 << bit) };
+        self.store_mem_sized(addr, v, 1)
+    }
+
+    /// Compute `base + scale*index` with `index` taken as signed.
+    fn array_addr(base: u32, index: u32, scale: u32) -> u32 {
+        (base as i64 + scale as i64 * (index as i32 as i64)) as u32
+    }
+
+    /// Compute `(byte_address, bit_number)` for the signed bit index `L2`.
+    fn bit_addr(base: u32, index: u32) -> (u32, u32) {
+        let idx = index as i32;
+        let byte = (base as i64 + idx.div_euclid(8) as i64) as u32;
+        (byte, idx.rem_euclid(8) as u32)
+    }
+
+    /// `mzero count addr`: zero `count` bytes starting at `addr`.
+    fn op_mzero(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let (count, addr) = (l[0], l[1]);
+        for i in 0..count {
+            self.store_mem_sized(addr + i, 0, 1)?;
+        }
+        Ok(())
+    }
+
+    /// `mcopy count from to`: copy `count` bytes, choosing the copy direction so
+    /// overlapping ranges move correctly (spec §2.6).
+    fn op_mcopy(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let (count, from, to) = (l[0], l[1], l[2]);
+        if to < from {
+            for i in 0..count {
+                let b = self.m8(from + i)?;
+                self.store_mem_sized(to + i, b, 1)?;
+            }
+        } else {
+            for i in (0..count).rev() {
+                let b = self.m8(from + i)?;
+                self.store_mem_sized(to + i, b, 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    // ── gestalt (GLULX_NOTES §13) ─────────────────────────────────────────────
+
+    /// Version of the Glulx spec this VM targets (3.1.2).
+    const GLULX_VERSION: u32 = 0x0003_0102;
+    /// This interpreter's own version (0.1.0).
+    const TERP_VERSION: u32 = 0x0000_0100;
+
+    /// Report the capability for gestalt selector `sel` (with argument `arg`).
+    /// Returned values reflect what this VM actually implements; unimplemented
+    /// selectors and deferred features return 0.
+    fn gestalt(&self, sel: u32, arg: u32) -> u32 {
+        match sel {
+            0 => Self::GLULX_VERSION,                  // GlulxVersion
+            1 => Self::TERP_VERSION,                   // TerpVersion
+            2 => 1,                                    // ResizeMem
+            3 => 0,                                    // Undo (2c)
+            4 => u32::from(arg == 0 || arg == 2),      // IOSystem: null + Glk
+            5 => 1,                                    // Unicode
+            6 => 1,                                    // MemCopy
+            7 => 1,                                    // MAlloc
+            8 => self.heap_start,                      // MAllocHeap (0 if inactive)
+            9 => 0,                                    // Acceleration (2c)
+            10 => 0,                                   // AccelFunc (2c)
+            11 => 0,                                   // Float
+            _ => 0,
+        }
+    }
+
+    // ── allocation heap (GLULX_NOTES §11) ─────────────────────────────────────
+
+    /// Allocate `size` bytes in the heap, returning the block address or 0 on
+    /// failure. The first allocation activates the heap at the current memsize.
+    fn heap_malloc(&mut self, size: u32) -> u32 {
+        if size == 0 {
+            return 0; // malloc requires a positive size
+        }
+        let heap_start = if self.heap_start == 0 { self.mem.mem_size() } else { self.heap_start };
+
+        // Walk the free gaps from heap_start, reusing the first that fits.
+        let mut cursor = heap_start;
+        let mut addr = None;
+        for &(a, sz) in &self.heap_blocks {
+            if a - cursor >= size {
+                addr = Some(cursor);
+                break;
+            }
+            cursor = a + sz;
+        }
+        // No internal gap fit: append at the end of the last block (or
+        // heap_start if empty), reusing committed tail space and growing only
+        // if necessary.
+        let addr = addr.unwrap_or(cursor);
+
+        let top = addr as u64 + size as u64;
+        if top > Self::MAX_MEMSIZE as u64 {
+            return 0; // would exceed the heap ceiling
+        }
+        let top = top as u32;
+        if top > self.mem.mem_size() {
+            self.mem.set_raw_size(top);
+        }
+        // Insert keeping the block list sorted by address.
+        let pos = self.heap_blocks.partition_point(|&(a, _)| a < addr);
+        self.heap_blocks.insert(pos, (addr, size));
+        self.heap_start = heap_start;
+        addr
+    }
+
+    /// Free the extant block at `addr`; faults if it is not a current block.
+    /// Freeing the last block deactivates the heap and shrinks memory back to
+    /// the heap-start address.
+    fn heap_free(&mut self, addr: u32) -> R<()> {
+        let pos = self
+            .heap_blocks
+            .iter()
+            .position(|&(a, _)| a == addr)
+            .ok_or_else(|| format!("mfree of non-extant block @{addr:#010x}"))?;
+        self.heap_blocks.remove(pos);
+        if self.heap_blocks.is_empty() {
+            self.mem.set_raw_size(self.heap_start);
+            self.heap_start = 0;
+        }
+        Ok(())
+    }
+
+    // ── search opcodes (GLULX_NOTES §12) ──────────────────────────────────────
+
+    const KEY_INDIRECT: u32 = 0x01;
+    const ZERO_KEY_TERMINATES: u32 = 0x02;
+    const RETURN_INDEX: u32 = 0x04;
+
+    /// Build the search key as a byte vector: either read indirectly from the
+    /// key address, or take the low `size` bytes of the immediate value.
+    fn search_key(&self, key: u32, size: u32, options: u32) -> R<Vec<u8>> {
+        if options & Self::KEY_INDIRECT != 0 {
+            self.read_bytes(key, size)
+        } else {
+            match size {
+                1 | 2 | 4 => Ok(key.to_be_bytes()[(4 - size as usize)..].to_vec()),
+                _ => Err(format!("search: KeySize {size} must be 1, 2, or 4 for a direct key")),
+            }
+        }
+    }
+
+    /// Read `n` bytes from main memory into a vector (bounds-checked).
+    fn read_bytes(&self, addr: u32, n: u32) -> R<Vec<u8>> {
+        let mut v = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            v.push(self.m8(addr + i)? as u8);
+        }
+        Ok(v)
+    }
+
+    fn op_linearsearch(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(7, 1)?;
+        let (key, key_size, start, struct_size, num, key_off, opts) =
+            (l[0], l[1], l[2], l[3], l[4], l[5], l[6]);
+        let want = self.search_key(key, key_size, opts)?;
+        let mut found: Option<(u32, u32)> = None; // (addr, index)
+        let mut index = 0u32;
+        loop {
+            if num != 0xFFFF_FFFF && index >= num {
+                break;
+            }
+            let saddr = start.wrapping_add(index.wrapping_mul(struct_size));
+            let have = self.read_bytes(saddr + key_off, key_size)?;
+            if have == want {
+                found = Some((saddr, index));
+                break;
+            }
+            if opts & Self::ZERO_KEY_TERMINATES != 0 && have.iter().all(|&b| b == 0) {
+                break;
+            }
+            index += 1;
+        }
+        let r = Self::search_result(found, opts);
+        self.store(s[0], r)
+    }
+
+    fn op_binarysearch(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(7, 1)?;
+        let (key, key_size, start, struct_size, num, key_off, opts) =
+            (l[0], l[1], l[2], l[3], l[4], l[5], l[6]);
+        let want = self.search_key(key, key_size, opts)?;
+        let mut found: Option<(u32, u32)> = None;
+        let (mut lo, mut hi) = (0u32, num);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let saddr = start.wrapping_add(mid.wrapping_mul(struct_size));
+            let have = self.read_bytes(saddr + key_off, key_size)?;
+            match have.cmp(&want) {
+                std::cmp::Ordering::Equal => {
+                    found = Some((saddr, mid));
+                    break;
+                }
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        let r = Self::search_result(found, opts);
+        self.store(s[0], r)
+    }
+
+    fn op_linkedsearch(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(6, 1)?;
+        let (key, key_size, start, key_off, next_off, opts) =
+            (l[0], l[1], l[2], l[3], l[4], l[5]);
+        let want = self.search_key(key, key_size, opts)?;
+        let mut node = start;
+        let mut result = 0u32;
+        while node != 0 {
+            let have = self.read_bytes(node + key_off, key_size)?;
+            if have == want {
+                result = node;
+                break;
+            }
+            if opts & Self::ZERO_KEY_TERMINATES != 0 && have.iter().all(|&b| b == 0) {
+                break;
+            }
+            node = self.m32(node + next_off)?;
+        }
+        self.store(s[0], result)
+    }
+
+    /// Map a found `(addr, index)` (or `None`) to the result value per the
+    /// ReturnIndex option.
+    fn search_result(found: Option<(u32, u32)>, options: u32) -> u32 {
+        match (found, options & Self::RETURN_INDEX != 0) {
+            (Some((_, idx)), true) => idx,
+            (Some((addr, _)), false) => addr,
+            (None, true) => 0xFFFF_FFFF,
+            (None, false) => 0,
+        }
+    }
+
     // ── stack-manipulation opcodes ────────────────────────────────────────────
 
     fn op_stkpeek(&mut self) -> R<()> {
@@ -904,22 +1246,141 @@ impl Machine {
 
     fn op_streamstr(&mut self) -> R<()> {
         let (l, _) = self.read_operands(1, 0)?;
-        let addr = l[0];
+        self.print_object(l[0], &[], 0)
+    }
+
+    /// Print a "typable object" at `addr`: a string (E0/E1/E2) is decoded and
+    /// streamed; a function (C0/C1) is called with `args` and its output
+    /// streamed in its place. `depth` bounds indirect/recursive references.
+    fn print_object(&mut self, addr: u32, args: &[u32], depth: u32) -> R<()> {
+        if depth > 256 {
+            return Err(format!("string decode recursion too deep @{addr:#010x}"));
+        }
         match self.m8(addr)? {
             0xE0 => {
                 let s = self.read_cstring(addr + 1)?;
                 self.emit(&s);
+                Ok(())
             }
             0xE2 => {
                 let s = self.read_ustring(addr + 4)?;
                 self.emit(&s);
+                Ok(())
             }
-            0xE1 => self
-                .diagnostics
-                .push("compressed string (E1) decoding deferred to phase 2b".to_string()),
-            other => return Err(format!("bad string type {other:#x} @{addr:#010x}")),
+            0xE1 => self.decode_compressed(addr + 1, depth),
+            0xC0 | 0xC1 => self.run_call_to_return(addr, args),
+            other => Err(format!("bad string/function type {other:#x} @{addr:#010x}")),
+        }
+    }
+
+    /// Decode a compressed (E1) bit stream beginning at `start`, walking the
+    /// current string-decoding table. Bits are read low-bit-first (GLULX_NOTES
+    /// §9). Never panics: bad addresses/node types fault.
+    fn decode_compressed(&mut self, start: u32, depth: u32) -> R<()> {
+        let table = self.cur_stringtbl;
+        if table == 0 {
+            return Err("compressed string (E1) with no string-decoding table set".to_string());
+        }
+        let root = self.m32(table + 8)?;
+        let mut node = root;
+        let mut addr = start;
+        let mut bit = 0u32;
+        loop {
+            match self.m8(node)? {
+                0x00 => {
+                    // Branch: read one bit, go left (0) or right (1).
+                    let byte = self.m8(addr)?;
+                    let b = (byte >> bit) & 1;
+                    bit += 1;
+                    if bit == 8 {
+                        bit = 0;
+                        addr += 1;
+                    }
+                    node = if b == 0 { self.m32(node + 1)? } else { self.m32(node + 5)? };
+                }
+                0x01 => return Ok(()), // string terminator
+                0x02 => {
+                    let c = self.m8(node + 1)?;
+                    self.emit_latin1(c);
+                    node = root;
+                }
+                0x03 => {
+                    let s = self.read_cstring(node + 1)?;
+                    self.emit(&s);
+                    node = root;
+                }
+                0x04 => {
+                    let cp = self.m32(node + 1)?;
+                    self.emit_uni(cp);
+                    node = root;
+                }
+                0x05 => {
+                    // C-style Unicode string: 32-bit chars until a zero word.
+                    let s = self.read_ustring(node + 1)?;
+                    self.emit(&s);
+                    node = root;
+                }
+                0x08 => {
+                    let a = self.m32(node + 1)?;
+                    self.print_object(a, &[], depth + 1)?;
+                    node = root;
+                }
+                0x09 => {
+                    let a = self.m32(self.m32(node + 1)?)?;
+                    self.print_object(a, &[], depth + 1)?;
+                    node = root;
+                }
+                0x0A => {
+                    let a = self.m32(node + 1)?;
+                    let args = self.read_node_args(node + 5)?;
+                    self.print_object(a, &args, depth + 1)?;
+                    node = root;
+                }
+                0x0B => {
+                    let a = self.m32(self.m32(node + 1)?)?;
+                    let args = self.read_node_args(node + 5)?;
+                    self.print_object(a, &args, depth + 1)?;
+                    node = root;
+                }
+                other => return Err(format!("bad string node type {other:#x} @{node:#010x}")),
+            }
+        }
+    }
+
+    /// Read an argument list for a 0x0A/0x0B node: a 32-bit count then that many
+    /// 32-bit arguments.
+    fn read_node_args(&self, at: u32) -> R<Vec<u32>> {
+        let argc = self.m32(at)?;
+        let mut args = Vec::with_capacity(argc as usize);
+        for i in 0..argc {
+            args.push(self.m32(at + 4 + 4 * i)?);
+        }
+        Ok(args)
+    }
+
+    /// Call the function at `func` with `args`, running the VM run-loop until
+    /// that frame returns, then resume the caller. Used for string-embedded
+    /// function nodes (GLULX_NOTES §9); the return value is discarded.
+    fn run_call_to_return(&mut self, func: u32, args: &[u32]) -> R<()> {
+        let resume_fp = self.fp;
+        self.call_function(func, args, Dest::Discard)?;
+        // call_function installed a deeper callee frame; run until it returns.
+        while self.fp != resume_fp {
+            if self.halted {
+                return Err("function called within a string halted the machine".to_string());
+            }
+            self.step_once()?;
         }
         Ok(())
+    }
+
+    fn emit_latin1(&mut self, v: u32) {
+        let s = ((v & 0xFF) as u8 as char).to_string();
+        self.emit(&s);
+    }
+    fn emit_uni(&mut self, v: u32) {
+        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
+        self.emit(&s);
     }
 
     /// Read a zero-terminated Latin-1 string from main memory.
@@ -1745,5 +2206,563 @@ mod tests {
         assert_eq!(m.fp, 0); // back to start
         assert_eq!(m.pc, 0xDEAD);
         let _ = start_pc;
+    }
+
+    // ── Task 1 (2b): compressed-string decoding + full streamstr ──────────────
+
+    /// Write consecutive bytes into memory starting at `addr` (RAM).
+    fn poke(m: &mut Machine, addr: u32, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            m.mem.write8(addr + i as u32, b as u32).unwrap();
+        }
+    }
+
+    /// Run a start-function body that has already had its RAM populated by
+    /// `setup`; returns the machine. iosys is left to the body.
+    fn run_with_ram(body: Vec<u8>, ram_bytes: u32, setup: impl FnOnce(&mut Machine)) -> Machine {
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, ram_bytes);
+        let mut m = machine(built);
+        setup(&mut m);
+        m.run();
+        m
+    }
+
+    /// A standard tiny decoding table at RAM base `t` that decodes the bit
+    /// sequence 0,0,0,1,1 (packed byte 0x18) to "Hi": root branches
+    /// left→inner / right→terminator; inner branches left→'H' / right→'i'.
+    fn build_hi_table(m: &mut Machine, t: u32) {
+        // Header: length, numnodes, root.
+        let root = t + 12;
+        let inner = root + 9;
+        let h = inner + 9;
+        let i = h + 2;
+        let term = i + 2;
+        let len = (term + 1) - t;
+        poke(m, t, &len.to_be_bytes());
+        poke(m, t + 4, &5u32.to_be_bytes());
+        poke(m, t + 8, &root.to_be_bytes());
+        // root: branch left=inner right=term
+        poke(m, root, &[0x00]);
+        poke(m, root + 1, &inner.to_be_bytes());
+        poke(m, root + 5, &term.to_be_bytes());
+        // inner: branch left='H' right='i'
+        poke(m, inner, &[0x00]);
+        poke(m, inner + 1, &h.to_be_bytes());
+        poke(m, inner + 5, &i.to_be_bytes());
+        poke(m, h, &[0x02, b'H']);
+        poke(m, i, &[0x02, b'i']);
+        poke(m, term, &[0x01]);
+    }
+
+    #[test]
+    fn compressed_string_decodes_against_table() {
+        // setstringtbl 0x100; streamstr 0x140; quit.
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]); // setiosys glk
+        body.extend(asm::ins(0x141, &[asm::Op::C16(0x0100)])); // setstringtbl 0x100
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0140)])); // streamstr 0x140
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            build_hi_table(m, 0x100);
+            poke(m, 0x140, &[0xE1, 0x18]); // compressed "Hi": bits 0,0,0,1,1
+        });
+        assert_eq!(out_str(&m), "Hi");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn getstringtbl_reports_current_table() {
+        // setstringtbl 0x100; getstringtbl → RAM 0x160.
+        let mut body = asm::ins(0x141, &[asm::Op::C16(0x0100)]);
+        body.extend(asm::ins(0x140, &[asm::Op::Mem16(0x0160)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x160).unwrap(), 0x100);
+    }
+
+    #[test]
+    fn compressed_string_indirect_node_prints_e0() {
+        // root: left → 0x08 node (→ E0 "Ok"), right → terminator. bits 0,1 → 0x02.
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x141, &[asm::Op::C16(0x0100)]));
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0150)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            let t = 0x100u32;
+            let root = t + 12;
+            let indir = root + 9;
+            let term = indir + 5;
+            let estr = 0x170u32;
+            let len = (term + 1) - t;
+            poke(m, t, &len.to_be_bytes());
+            poke(m, t + 4, &3u32.to_be_bytes());
+            poke(m, t + 8, &root.to_be_bytes());
+            poke(m, root, &[0x00]);
+            poke(m, root + 1, &indir.to_be_bytes());
+            poke(m, root + 5, &term.to_be_bytes());
+            poke(m, indir, &[0x08]);
+            poke(m, indir + 1, &estr.to_be_bytes());
+            poke(m, term, &[0x01]);
+            poke(m, estr, &[0xE0, b'O', b'k', 0]);
+            poke(m, 0x150, &[0xE1, 0x02]); // bits 0,1
+        });
+        assert_eq!(out_str(&m), "Ok");
+    }
+
+    #[test]
+    fn compressed_string_function_node_calls_function() {
+        // A printer function (C1, no locals) that streams 'Z' and returns.
+        let printer = asm::func(
+            0xC1,
+            &[],
+            &{
+                let mut b = asm::ins(0x70, &[asm::Op::C8(b'Z' as i8)]); // streamchar 'Z'
+                b.extend(asm::ins(0x31, &[asm::Op::Zero])); // return 0
+                b
+            },
+        );
+        // start: setiosys glk; setstringtbl 0x100; streamstr 0x150; quit.
+        let mut sbody = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        sbody.extend(asm::ins(0x141, &[asm::Op::C16(0x0100)]));
+        sbody.extend(asm::ins(0x72, &[asm::Op::C16(0x0150)]));
+        sbody.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &sbody);
+        let built = asm::assemble(&[printer, start], 1, 0x200);
+        let printer_addr = built.addrs[0];
+        let mut m = machine(built);
+        // root: left → 0x08 node (→ printer fn), right → terminator. bits 0,1.
+        let t = 0x100u32;
+        let root = t + 12;
+        let fnode = root + 9;
+        let term = fnode + 5;
+        let len = (term + 1) - t;
+        poke(&mut m, t, &len.to_be_bytes());
+        poke(&mut m, t + 4, &3u32.to_be_bytes());
+        poke(&mut m, t + 8, &root.to_be_bytes());
+        poke(&mut m, root, &[0x00]);
+        poke(&mut m, root + 1, &fnode.to_be_bytes());
+        poke(&mut m, root + 5, &term.to_be_bytes());
+        poke(&mut m, fnode, &[0x08]);
+        poke(&mut m, fnode + 1, &printer_addr.to_be_bytes());
+        poke(&mut m, term, &[0x01]);
+        poke(&mut m, 0x150, &[0xE1, 0x02]); // bits 0,1 → call printer, then terminate
+        m.run();
+        assert_eq!(out_str(&m), "Z");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn streamstr_e2_unicode_still_works() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            // E2 + 3 pad bytes + 'A'(0x41) + 'λ'(0x3BB) + terminator word.
+            poke(m, 0x100, &[0xE2, 0, 0, 0]);
+            poke(m, 0x104, &0x41u32.to_be_bytes());
+            poke(m, 0x108, &0x3BBu32.to_be_bytes());
+            poke(m, 0x10C, &0u32.to_be_bytes());
+        });
+        assert_eq!(out_str(&m), "Aλ");
+    }
+
+    #[test]
+    fn compressed_string_with_no_table_faults() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x100, &[0xE1, 0x00]));
+        assert!(m.halted);
+        assert!(m.diagnostics.iter().any(|d| d.contains("decoding table")));
+    }
+
+    // ── Task 2 (2b): memory-array opcodes + mzero/mcopy ───────────────────────
+
+    #[test]
+    fn aload_astore_32bit_roundtrip_signed_index() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        // astore base=0x140 index=2 → 0x148; aload reads it back to 0x100.
+        let mut body = asm::ins(0x4C, &[C16(0x0140), C8(2), C32(0xDEAD_BEEF)]);
+        body.extend(asm::ins(0x48, &[C16(0x0140), C8(2), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x148).unwrap(), 0xDEAD_BEEF);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF);
+
+        // Negative index: astore base=0x148 index=-1 → 0x144.
+        let mut body = asm::ins(0x4C, &[C16(0x0148), C8(-1), C32(0x1234_5678)]);
+        body.extend(asm::ins(0x48, &[C16(0x0148), C8(-1), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x144).unwrap(), 0x1234_5678);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn aloads_astores_16bit_and_aloadb_astoreb_8bit() {
+        use asm::Op::{C16, C8, Mem16};
+        // 16-bit: astores base=0x140 index=3 → 0x146; loads expand WITHOUT sign.
+        let mut body = asm::ins(0x4D, &[C16(0x0140), C8(3), C16(-2)]); // 0xFFFE truncated
+        body.extend(asm::ins(0x49, &[C16(0x0140), C8(3), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read16(0x146).unwrap(), 0xFFFE);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_FFFE); // zero-extended
+
+        // 8-bit at a negative index.
+        let mut body = asm::ins(0x4E, &[C16(0x0150), C8(-1), C16(0xAB)]); // → 0x14F
+        body.extend(asm::ins(0x4A, &[C16(0x0150), C8(-1), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read8(0x14F).unwrap(), 0xAB);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_00AB);
+    }
+
+    #[test]
+    fn aloadbit_astorebit_signed_bit_index() {
+        use asm::Op::{C16, C8, Mem16};
+        // Set bit 0 of 0x142, bit 7 of 0x142, bit 0 of 0x143 (index 8), bit 7 of
+        // 0x141 (index -1) — mirrors the spec's astorebit examples.
+        let sets: &[(u16, i8)] = &[(0x142, 0), (0x142, 7), (0x142, 8), (0x142, -1)];
+        let mut body = Vec::new();
+        for &(base, idx) in sets {
+            body.extend(asm::ins(0x4F, &[C16(base as i16), C8(idx), C8(1)]));
+        }
+        // Read them back: bit 7 of 0x141 should be 1; bit 0 of 0x142 should be 1.
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(0), Mem16(0x0100)]));
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(-1), Mem16(0x0104)])); // bit7 of 0x141
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(8), Mem16(0x0108)])); // bit0 of 0x143
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(1), Mem16(0x010C)])); // clear bit → 0
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read8(0x142).unwrap(), 0b1000_0001); // bits 0 and 7 set
+        assert_eq!(m.mem.read8(0x143).unwrap(), 0b0000_0001); // bit 0 set
+        assert_eq!(m.mem.read8(0x141).unwrap(), 0b1000_0000); // bit 7 set
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x108).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0);
+    }
+
+    #[test]
+    fn aload_out_of_range_faults() {
+        use asm::Op::{C32, Zero};
+        // base near the top of memory + a big index → out of range.
+        let m = run_program(asm::ins(0x48, &[C32(0xFFFF_FFF0), Zero, Zero]));
+        assert!(m.halted);
+        assert!(m.diagnostics.iter().any(|d| d.contains("memory fault")));
+    }
+
+    #[test]
+    fn mzero_clears_a_span() {
+        use asm::Op::{C16, C32, C8};
+        // Plant a value, then mzero 4 bytes over it.
+        let mut body = asm::ins(0x4C, &[C16(0x0140), C8(0), C32(0xFFFF_FFFF)]);
+        body.extend(asm::ins(0x170, &[asm::Op::C8(4), C16(0x0140)])); // mzero count=4 addr=0x140
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x140).unwrap(), 0);
+    }
+
+    #[test]
+    fn mcopy_handles_forward_and_backward_overlap() {
+        use asm::Op::{C16, C8};
+        // Source bytes 1,2,3,4 at 0x140. mcopy 4 from 0x140 to 0x142 (to > from →
+        // backward copy) must yield 1,2,1,2,3,4 across 0x140..0x146.
+        let plant = |body: &mut Vec<u8>| {
+            for (i, v) in [1u8, 2, 3, 4].iter().enumerate() {
+                body.extend(asm::ins(0x4E, &[C16(0x0140), C8(i as i8), C8(*v as i8)]));
+            }
+        };
+        let mut body = Vec::new();
+        plant(&mut body);
+        body.extend(asm::ins(0x171, &[C8(4), C16(0x0140), C16(0x0142)])); // count,from,to
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(
+            [
+                m.mem.read8(0x140).unwrap(),
+                m.mem.read8(0x141).unwrap(),
+                m.mem.read8(0x142).unwrap(),
+                m.mem.read8(0x143).unwrap(),
+                m.mem.read8(0x144).unwrap(),
+                m.mem.read8(0x145).unwrap(),
+            ],
+            [1, 2, 1, 2, 3, 4]
+        );
+
+        // to < from → forward copy. 1,2,3,4 at 0x142; copy to 0x140 → 1,2,3,4.
+        let mut body = Vec::new();
+        for (i, v) in [1u8, 2, 3, 4].iter().enumerate() {
+            body.extend(asm::ins(0x4E, &[C16(0x0142), C8(i as i8), C8(*v as i8)]));
+        }
+        body.extend(asm::ins(0x171, &[C8(4), C16(0x0142), C16(0x0140)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(
+            [
+                m.mem.read8(0x140).unwrap(),
+                m.mem.read8(0x141).unwrap(),
+                m.mem.read8(0x142).unwrap(),
+                m.mem.read8(0x143).unwrap(),
+            ],
+            [1, 2, 3, 4]
+        );
+    }
+
+    // ── Task 3 (2b): malloc / mfree heap ──────────────────────────────────────
+
+    #[test]
+    fn malloc_returns_distinct_in_range_blocks() {
+        use asm::Op::{C8, Mem16};
+        let mut body = asm::ins(0x178, &[C8(16), Mem16(0x0100)]); // malloc 16 → 0x100
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)])); // malloc 16 → 0x104
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        let a = m.mem.read32(0x100).unwrap();
+        let b = m.mem.read32(0x104).unwrap();
+        let floor = m.mem.endmem();
+        assert!(a >= floor, "block a {a:#x} below endmem {floor:#x}");
+        assert_ne!(a, b);
+        assert_eq!(b, a + 16, "blocks must be adjacent and non-overlapping");
+        assert!(a + 16 <= m.mem.mem_size() && b + 16 <= m.mem.mem_size());
+    }
+
+    #[test]
+    fn mfree_then_malloc_reuses_freed_space() {
+        use asm::Op::{C8, Mem16};
+        // malloc a, malloc b, free a, malloc c → c reuses a's address.
+        let mut body = asm::ins(0x178, &[C8(16), Mem16(0x0100)]); // a
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)])); // b
+        body.extend(asm::ins(0x179, &[Mem16(0x0100)])); // mfree a (contents of 0x100)
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0108)])); // c
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        let a = m.mem.read32(0x100).unwrap();
+        let c = m.mem.read32(0x108).unwrap();
+        assert_eq!(c, a, "freed block should be reused");
+    }
+
+    #[test]
+    fn setmemsize_while_heap_active_fails() {
+        use asm::Op::{C32, C8, Mem16, Zero};
+        let mut body = asm::ins(0x178, &[C8(16), Zero]); // malloc 16 (activate heap)
+        body.extend(asm::ins(0x103, &[C32(0x1_0000), Mem16(0x0100)])); // setmemsize → result
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "setmemsize must fail");
+        assert!(m.diagnostics.iter().any(|d| d.contains("heap")));
+    }
+
+    #[test]
+    fn malloc_too_large_returns_zero() {
+        use asm::Op::{C32, Mem16};
+        // A request beyond the heap ceiling fails without allocating.
+        let mut body = asm::ins(0x178, &[C32(0x2000_0000), Mem16(0x0100)]);
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0);
+    }
+
+    #[test]
+    fn freeing_last_block_deactivates_and_shrinks() {
+        use asm::Op::{C8, Mem16};
+        let mut body = asm::ins(0x178, &[C8(32), Mem16(0x0100)]); // malloc → activates
+        body.extend(asm::ins(0x179, &[Mem16(0x0100)])); // free the only block
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        let floor = m.mem.mem_size();
+        m.run();
+        assert_eq!(m.heap_start, 0, "heap should be inactive again");
+        assert_eq!(m.mem.mem_size(), floor, "memory shrinks back to heap start");
+    }
+
+    // ── Task 4 (2b): search opcodes ───────────────────────────────────────────
+
+    /// Run `linearsearch` with the given operands; return the stored result.
+    fn linear(
+        key: asm::Op,
+        keysize: i8,
+        start: u16,
+        structsize: i8,
+        numstructs: asm::Op,
+        keyoffset: i8,
+        options: i8,
+        setup: impl FnOnce(&mut Machine),
+    ) -> u32 {
+        use asm::Op::{C16, C8, Mem16};
+        let mut body = asm::ins(
+            0x150,
+            &[
+                key,
+                C8(keysize),
+                C16(start as i16),
+                C8(structsize),
+                numstructs,
+                C8(keyoffset),
+                C8(options),
+                Mem16(0x0100),
+            ],
+        );
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x300, setup);
+        m.mem.read32(0x100).unwrap()
+    }
+
+    /// Three 8-byte structs at 0x140 with 4-byte keys at offset 0.
+    fn three_structs(m: &mut Machine) {
+        poke(m, 0x140, &0x1111u32.to_be_bytes());
+        poke(m, 0x148, &0x2222u32.to_be_bytes());
+        poke(m, 0x150, &0x3333u32.to_be_bytes());
+    }
+
+    #[test]
+    fn linearsearch_finds_and_reports_absence() {
+        use asm::Op::{C32, C8};
+        // Present key → struct address.
+        assert_eq!(
+            linear(C32(0x2222), 4, 0x140, 8, C8(3), 0, 0, three_structs),
+            0x148
+        );
+        // Absent key → 0.
+        assert_eq!(linear(C32(0x9999), 4, 0x140, 8, C8(3), 0, 0, three_structs), 0);
+        // ReturnIndex (0x04): present → index 2.
+        assert_eq!(
+            linear(C32(0x3333), 4, 0x140, 8, C8(3), 0, 0x04, three_structs),
+            2
+        );
+        // ReturnIndex + absent → 0xFFFFFFFF.
+        assert_eq!(
+            linear(C32(0x9999), 4, 0x140, 8, C8(3), 0, 0x04, three_structs),
+            0xFFFF_FFFF
+        );
+    }
+
+    #[test]
+    fn linearsearch_key_indirect_and_zero_terminates() {
+        use asm::Op::{C32, C8};
+        // KeyIndirect (0x01): key bytes live at 0x110.
+        let r = linear(C32(0x0110), 4, 0x140, 8, C8(3), 0, 0x01, |m| {
+            three_structs(m);
+            poke(m, 0x110, &0x2222u32.to_be_bytes());
+        });
+        assert_eq!(r, 0x148);
+
+        // ZeroKeyTerminates (0x02): a zero key at index 1 halts before 0x3333.
+        // NumStructs -1 (no limit) so only the zero key stops it.
+        let r = linear(C32(0x3333), 4, 0x140, 8, C8(-1), 0, 0x02, |m| {
+            poke(m, 0x140, &0x1111u32.to_be_bytes());
+            poke(m, 0x148, &0u32.to_be_bytes()); // zero key terminates here
+            poke(m, 0x150, &0x3333u32.to_be_bytes());
+        });
+        assert_eq!(r, 0, "search should fail at the zero key");
+    }
+
+    #[test]
+    fn binarysearch_on_sorted_table() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        // Sorted keys 0x10,0x20,0x30,0x40 in 8-byte structs at 0x140.
+        let setup = |m: &mut Machine| {
+            for (i, k) in [0x10u32, 0x20, 0x30, 0x40].iter().enumerate() {
+                poke(m, 0x140 + 8 * i as u32, &k.to_be_bytes());
+            }
+        };
+        let run = |key: u32, options: i8| -> u32 {
+            let mut body = asm::ins(
+                0x151,
+                &[
+                    C32(key),
+                    C8(4),
+                    C16(0x0140),
+                    C8(8),
+                    C8(4),
+                    C8(0),
+                    C8(options),
+                    Mem16(0x0100),
+                ],
+            );
+            body.extend(asm::ins(0x120, &[]));
+            run_with_ram(body, 0x300, setup).mem.read32(0x100).unwrap()
+        };
+        assert_eq!(run(0x30, 0), 0x150); // address of the 3rd struct
+        assert_eq!(run(0x30, 0x04), 2); // ReturnIndex
+        assert_eq!(run(0x25, 0), 0); // absent
+        assert_eq!(run(0x10, 0x04), 0); // first element, index 0
+        assert_eq!(run(0x40, 0x04), 3); // last element
+        assert_eq!(run(0x50, 0x04), 0xFFFF_FFFF); // absent past end
+    }
+
+    #[test]
+    fn linkedsearch_over_a_linked_list() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        // Nodes: key at offset 0, next pointer at offset 4.
+        let setup = |m: &mut Machine| {
+            poke(m, 0x140, &0xAAAAu32.to_be_bytes());
+            poke(m, 0x144, &0x0150u32.to_be_bytes());
+            poke(m, 0x150, &0xBBBBu32.to_be_bytes());
+            poke(m, 0x154, &0x0160u32.to_be_bytes());
+            poke(m, 0x160, &0xCCCCu32.to_be_bytes());
+            poke(m, 0x164, &0u32.to_be_bytes()); // end of list
+        };
+        let run = |key: u32| -> u32 {
+            let mut body = asm::ins(
+                0x152,
+                &[C32(key), C8(4), C16(0x0140), C8(0), C8(4), C8(0), Mem16(0x0100)],
+            );
+            body.extend(asm::ins(0x120, &[]));
+            run_with_ram(body, 0x300, setup).mem.read32(0x100).unwrap()
+        };
+        assert_eq!(run(0xBBBB), 0x150); // middle node
+        assert_eq!(run(0xAAAA), 0x140); // head
+        assert_eq!(run(0xCCCC), 0x160); // tail
+        assert_eq!(run(0x9999), 0); // absent → 0
+    }
+
+    // ── Task 5 (2b): gestalt + verify ─────────────────────────────────────────
+
+    #[test]
+    fn gestalt_reports_capabilities() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(0, 0), 0x0003_0102); // GlulxVersion 3.1.2
+        assert_eq!(m.gestalt(1, 0), 0x0000_0100); // TerpVersion 0.1.0
+        assert_eq!(m.gestalt(2, 0), 1); // ResizeMem
+        assert_eq!(m.gestalt(3, 0), 0); // Undo (deferred)
+        assert_eq!(m.gestalt(4, 0), 1); // IOSystem null
+        assert_eq!(m.gestalt(4, 2), 1); // IOSystem Glk
+        assert_eq!(m.gestalt(4, 1), 0); // IOSystem filter (not implemented)
+        assert_eq!(m.gestalt(5, 0), 1); // Unicode
+        assert_eq!(m.gestalt(6, 0), 1); // MemCopy
+        assert_eq!(m.gestalt(7, 0), 1); // MAlloc
+        assert_eq!(m.gestalt(8, 0), 0); // MAllocHeap inactive → 0
+        assert_eq!(m.gestalt(9, 0), 0); // Acceleration (deferred)
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc (deferred)
+        assert_eq!(m.gestalt(11, 0), 0); // Float (deferred)
+        assert_eq!(m.gestalt(999, 0), 0); // unknown selector
+    }
+
+    #[test]
+    fn gestalt_opcode_and_mallocheap() {
+        use asm::Op::{C8, Mem16, Zero};
+        // gestalt(0,0) via the opcode → 0x00030102.
+        let mut body = asm::ins(0x100, &[Zero, Zero, Mem16(0x0100)]);
+        // malloc 16 (activates heap), then gestalt(8) → heap-start address.
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)]));
+        body.extend(asm::ins(0x100, &[C8(8), Zero, Mem16(0x0108)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0003_0102);
+        let heap_start = m.mem.read32(0x108).unwrap();
+        assert_eq!(heap_start, m.mem.read32(0x104).unwrap()); // == first block addr
+        assert_eq!(heap_start, m.heap_start);
+    }
+
+    #[test]
+    fn verify_returns_success() {
+        let mut body = asm::ins(0x121, &[asm::Op::Mem16(0x0100)]);
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0);
     }
 }
