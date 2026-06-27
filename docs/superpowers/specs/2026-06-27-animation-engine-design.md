@@ -135,12 +135,27 @@ The transcript scroll offset eases to its target instead of jumping.
   the offset jumps and `scroll_anim` stays `None`; the effective offset is
   line-rounded and clamped to `[0, max_scroll]`.
 
-## Out of scope
+## Follow-on phases (future — each its own spec, consuming this engine)
 
-- Migrating the existing sound/tidy pulses onto `Tween` (future cleanup).
-- Dialog open/close, layout transitions, dock slide-ins — separate follow-on specs
-  that consume this engine.
-- Animating modal-list selection, map pan/zoom, or anything sub-cell.
+These are NOT in this wave; they are the planned consumers the engine exists to
+serve, listed so the foundation is built to fit them:
+
+- **Dialog open/close** — slide-in / grow-shrink (approximate fade).
+- **Smooth map pan/scroll** — ease the map's char-pan offset (`char_pan` /
+  `off_x`/`off_y`) toward its target on keyboard/wheel pan and recenter, the map
+  analogue of this wave's transcript smooth scroll. Line/char-quantized (no
+  sub-cell). Likely a `Tween` over the pan offset, gated by the same
+  `[animation]` config.
+- **Layout transitions** — animate the split ratio across `Split ↔ MapFull ↔
+  TranscriptFull`.
+- **Dock slide-ins** — inventory bottom-dock, verb-menu left-dock (blocked on the
+  docking-reposition work; do last).
+
+## Out of scope (this wave, and permanently)
+
+- Migrating the existing sound/tidy pulses onto `Tween` (future cleanup, optional).
+- Animating modal-list *selection* (discrete, not an offset) or anything sub-cell
+  (a character grid cannot render it) — permanently out.
 
 ## Global constraints
 
