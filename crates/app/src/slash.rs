@@ -5,7 +5,7 @@
 //! stripped. It does not know what the prefix was.
 
 use crate::input::Action;
-use crate::keymap::{Command, Context, ALL_COMMANDS};
+use crate::keymap::{Context, ALL_COMMANDS};
 
 // ── SlashOutcome ──────────────────────────────────────────────────────────────
 
@@ -340,6 +340,7 @@ pub fn find_command(name: &str) -> Option<&'static CommandSpec> {
 struct CuratedEntry {
     name: &'static str,
     help: &'static str,
+    #[allow(dead_code)] // Task 4 removes this shim entirely; parse no longer routes here.
     build: fn(&[&str]) -> SlashOutcome,
 }
 
@@ -532,78 +533,44 @@ static CURATED: &[CuratedEntry] = &[
 /// `prefix` is the configured command prefix character, used only in user-facing
 /// error/help display strings. Routing and matching logic is unaffected.
 ///
-/// Empty body → `Error`.
-/// Token0 matched in the curated table → run its builder with remaining tokens.
-/// Token0 matched as kebab-case `Command` name → `Action(command.to_action())`.
-/// Otherwise → `Error("unknown command: <prefix><t0> — try <prefix>help")`.
-///
-/// Special case: `search` passes the raw remainder of the line (after the
-/// command word and its single following space) as the query, preserving any
-/// internal whitespace. Other commands still receive split tokens.
+/// Routes entirely through the `COMMANDS` registry. Special case:
+/// `search-transcript` passes the raw remainder of the line preserving internal
+/// whitespace. All other commands receive split tokens.
 pub fn parse(body: &str, prefix: char) -> SlashOutcome {
-    let tokens: Vec<&str> = body.split_whitespace().collect();
+    parse_in_context(body, prefix, Context::Global)
+}
 
-    let Some(t0) = tokens.first().copied() else {
+pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome {
+    let Some(t0) = body.split_whitespace().next() else {
         return SlashOutcome::Error(format!("type {prefix}help for commands"));
     };
 
-    // Special-case `search`: preserve internal whitespace in the query by
-    // taking the raw remainder after the command word rather than re-joining
-    // split tokens.
-    if t0 == "search" {
-        let remainder = body[t0.len()..].trim_start_matches(' ');
-        let trimmed = remainder.trim_end();
-        if trimmed.is_empty() {
-            return SlashOutcome::Search(None);
-        }
-        return SlashOutcome::Search(Some(trimmed.to_string()));
+    // search-transcript: preserve internal whitespace in the query.
+    if t0 == "search-transcript" {
+        let remainder = body[t0.len()..].trim_start_matches(' ').trim_end();
+        return if remainder.is_empty() { SlashOutcome::Search(None) }
+               else { SlashOutcome::Search(Some(remainder.to_string())) };
     }
 
-    let args = &tokens[1..];
+    let Some(spec) = find_command(t0) else {
+        return SlashOutcome::Error(format!("unknown command: {prefix}{t0} — try {prefix}help"));
+    };
 
-    // Curated table first.
-    if let Some(entry) = CURATED.iter().find(|e| e.name == t0) {
-        return (entry.build)(args);
+    if spec.context == Context::Anim && ctx != Context::Anim {
+        return SlashOutcome::Error(format!("{} is only available during animation playback", spec.name));
     }
 
-    if t0 == "reload" {
-        return SlashOutcome::Action(crate::keymap::Command::ReloadStyle.to_action());
-    }
-
-    if t0 == "watch" {
-        return SlashOutcome::Action(crate::keymap::Command::ToggleWatch.to_action());
-    }
-
-    if t0 == "game-style" {
-        return SlashOutcome::Action(crate::keymap::Command::GameStyle.to_action());
-    }
-
-    // Fallback: kebab-name → Command::from_name (snake_case; convert hyphens to underscores).
-    let snake = t0.replace('-', "_");
-    if let Some(cmd) = Command::from_name(&snake) {
-        return SlashOutcome::Action(cmd.to_action());
-    }
-
-    SlashOutcome::Error(format!("unknown command: {prefix}{t0} — try {prefix}help"))
+    let tokens: Vec<&str> = body.split_whitespace().collect();
+    (spec.dispatch)(&tokens[1..])
 }
 
 // ── slash_names ───────────────────────────────────────────────────────────────
 
 /// All known slash-command names (for Tab autocomplete).
 ///
-/// Returns the union of curated names and `ALL_COMMANDS` kebab names
-/// (underscores converted to hyphens).
+/// Returns the registry command names.
 pub fn slash_names() -> Vec<String> {
-    let mut names: Vec<String> = CURATED.iter().map(|e| e.name.to_string()).collect();
-
-    for cmd in ALL_COMMANDS {
-        let kebab = cmd.name().replace('_', "-");
-        if !names.contains(&kebab) {
-            names.push(kebab);
-        }
-    }
-
-    names
+    COMMANDS.iter().map(|c| c.name.to_string()).collect()
 }
 
 // ── help_text ─────────────────────────────────────────────────────────────────
@@ -647,30 +614,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_curated_and_fallback_and_errors() {
+    fn parse_registry_and_errors() {
         use crate::input::Action;
-        assert!(matches!(parse("panh -1", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
-        assert!(matches!(parse("panv 2", '/'), SlashOutcome::Action(Action::Pan(0, 2))));
-        assert!(matches!(parse("zoom reset", '/'), SlashOutcome::Action(Action::ZoomReset)));
-        assert!(matches!(parse("save foo", '/'), SlashOutcome::Save(Some(_))));
-        assert!(matches!(parse("save", '/'), SlashOutcome::Save(None)));
-        assert!(matches!(parse("reset map", '/'), SlashOutcome::Reset { map: true }));
-        assert!(matches!(parse("reset", '/'), SlashOutcome::Reset { map: false }));
+        assert!(matches!(parse("pan-map -1 0", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
+        assert!(matches!(parse("pan-map 0 2", '/'), SlashOutcome::Action(Action::Pan(0, 2))));
+        assert!(matches!(parse("zoom-map reset", '/'), SlashOutcome::Action(Action::ZoomReset)));
+        assert!(matches!(parse("save-game foo", '/'), SlashOutcome::Save(Some(_))));
+        assert!(matches!(parse("save-game", '/'), SlashOutcome::Save(None)));
+        assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
+        assert!(matches!(parse("reset-game", '/'), SlashOutcome::Reset { map: false }));
         assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
         assert!(matches!(parse("help", '/'), SlashOutcome::Help));
-        // fallback by kebab name:
+        // in registry:
         assert!(matches!(parse("open-config", '/'), SlashOutcome::Action(_)));
         // errors:
-        assert!(matches!(parse("panh", '/'), SlashOutcome::Error(_)));   // missing arg
+        assert!(matches!(parse("panh", '/'), SlashOutcome::Error(_)));   // no longer in registry
         assert!(matches!(parse("nope", '/'), SlashOutcome::Error(_)));   // unknown
         assert!(matches!(parse("", '/'), SlashOutcome::Error(_)));       // bare prefix
+        // old short names now error (clean break):
+        assert!(matches!(parse("save", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("pan", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("zoom", '/'), SlashOutcome::Error(_)));
     }
 
     #[test]
-    fn slash_names_includes_curated_and_fallback() {
+    fn slash_names_returns_registry() {
         let n = slash_names();
-        assert!(n.iter().any(|s| s == "panh"));
-        assert!(n.iter().any(|s| s == "open-config")); // a kebab Command name
+        assert!(n.iter().any(|s| s == "pan-map")); // registry name
+        assert!(n.iter().any(|s| s == "open-config")); // registry name
+        assert!(!n.iter().any(|s| s == "panh")); // old curated name, not in registry
     }
 
     #[test]
@@ -697,25 +669,56 @@ mod tests {
 
     #[test]
     fn slash_hint_parses_to_open_hints() {
-        assert!(matches!(crate::slash::parse("hint", '/'), crate::slash::SlashOutcome::OpenHints));
-        assert!(matches!(crate::slash::parse("hints", '/'), crate::slash::SlashOutcome::OpenHints));
+        assert!(matches!(crate::slash::parse("open-hints", '/'), crate::slash::SlashOutcome::OpenHints));
+        // old short names no longer resolve (clean break):
+        assert!(matches!(crate::slash::parse("hint", '/'), crate::slash::SlashOutcome::Error(_)));
+        assert!(matches!(crate::slash::parse("hints", '/'), crate::slash::SlashOutcome::Error(_)));
     }
 
     #[test]
     fn slash_style_opens_editor() {
-        assert!(matches!(parse("style", '/'), SlashOutcome::Action(Action::OpenStyleEditor)));
+        use crate::input::Action;
+        assert!(matches!(parse("open-style-editor", '/'), SlashOutcome::Action(Action::OpenStyleEditor)));
+        // old short name no longer resolves (clean break):
+        assert!(matches!(parse("style", '/'), SlashOutcome::Error(_)));
     }
 
     #[test]
     fn parse_search_filter_export() {
-        assert!(matches!(parse("search twisty maze", '/'), SlashOutcome::Search(Some(q)) if q == "twisty maze"));
-        assert!(matches!(parse("search a  b", '/'), SlashOutcome::Search(Some(q)) if q == "a  b"));
-        assert!(matches!(parse("search", '/'), SlashOutcome::Search(None)));
-        assert!(matches!(parse("filter meta", '/'), SlashOutcome::Filter(TranscriptFilterArg::Meta)));
-        assert!(matches!(parse("filter both", '/'), SlashOutcome::Filter(TranscriptFilterArg::Both)));
-        assert!(matches!(parse("filter nope", '/'), SlashOutcome::Error(_)));
-        assert!(matches!(parse("export", '/'), SlashOutcome::Export(None)));
-        assert!(matches!(parse("export out.txt", '/'), SlashOutcome::Export(Some(f)) if f == "out.txt"));
+        assert!(matches!(parse("search-transcript twisty maze", '/'), SlashOutcome::Search(Some(q)) if q == "twisty maze"));
+        assert!(matches!(parse("search-transcript a  b", '/'), SlashOutcome::Search(Some(q)) if q == "a  b"));
+        assert!(matches!(parse("search-transcript", '/'), SlashOutcome::Search(None)));
+        assert!(matches!(parse("filter-transcript meta", '/'), SlashOutcome::Filter(TranscriptFilterArg::Meta)));
+        assert!(matches!(parse("filter-transcript both", '/'), SlashOutcome::Filter(TranscriptFilterArg::Both)));
+        assert!(matches!(parse("filter-transcript nope", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("export-transcript", '/'), SlashOutcome::Export(None)));
+        assert!(matches!(parse("export-transcript out.txt", '/'), SlashOutcome::Export(Some(f)) if f == "out.txt"));
+        // old short names now error (clean break):
+        assert!(matches!(parse("search", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("filter", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("export", '/'), SlashOutcome::Error(_)));
+    }
+
+    #[test]
+    fn parse_routes_registry_and_gates_anim() {
+        use crate::input::Action;
+        use crate::keymap::Context;
+        assert!(matches!(parse("pan-map -1 0", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
+        assert!(matches!(parse("zoom-map in", '/'), SlashOutcome::Action(Action::ZoomIn)));
+        assert!(matches!(parse("select-room next", '/'), SlashOutcome::Action(Action::SelectNext)));
+        assert!(matches!(parse("save-game foo", '/'), SlashOutcome::Save(Some(_))));
+        assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
+        assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
+        // Old short names no longer resolve (clean break).
+        assert!(matches!(parse("center", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("panh", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("nope", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("", '/'), SlashOutcome::Error(_)));
+        // Context gating: anim-step outside Anim errors; inside Anim it fires.
+        assert!(matches!(parse_in_context("anim-step forward", '/', Context::Global), SlashOutcome::Error(_)));
+        assert!(matches!(parse_in_context("anim-step forward", '/', Context::Anim), SlashOutcome::Action(Action::AnimStep(1))));
+        // search-transcript preserves internal whitespace.
+        assert!(matches!(parse("search-transcript a  b", '/'), SlashOutcome::Search(Some(q)) if q == "a  b"));
     }
 
     #[test]
