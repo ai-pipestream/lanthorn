@@ -180,7 +180,7 @@ pub fn draw_room_info(
 /// In Z-machine fiction, objects carried by or present in a room are children
 /// of the room object (or children of containers in the room). We list only the
 /// direct children here (one level deep), which covers visible items on the floor.
-fn list_room_objects(mem: &zvm::memory::Memory, room_id: RoomId) -> Vec<String> {
+pub(crate) fn list_room_objects(mem: &zvm::memory::Memory, room_id: RoomId) -> Vec<String> {
     // Name-only rooms have no backing object; never read the object table by a
     // synthetic id (it would be outside the table).
     if crate::roomid::is_synthetic_room(room_id) {

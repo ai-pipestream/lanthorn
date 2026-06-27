@@ -454,6 +454,202 @@ pub fn resolve_title(
         .to_owned()
 }
 
+// ── Engine adapter (zvm) ────────────────────────────────────────────────────
+//
+// `GameSession` implements the engine-neutral `Engine` trait so the app can
+// drive the Z-machine through the abstraction. The adapter is a thin wrapper:
+// the turn methods delegate to the inherent methods (dot-syntax method calls
+// resolve to the inherent impl, which takes precedence over the trait), the
+// relocated key→ZSCII mapping lives in `key_input_to_zscii`, and `screen()`
+// mirrors the Z-machine screen into the neutral `ScreenModel`.
+
+use crate::engine::{
+    BufferWindow, Engine, EngineError, EngineSave, GridCell, GridWindow, Introspect, KeyInput,
+    LocationInfo, ScreenModel, Split, StatusField, StatusModel, WinNode,
+};
+
+/// The engine tag recorded in an `EngineSave` produced by the Z-machine adapter.
+pub const ZMACHINE_ENGINE: &str = "zmachine";
+/// The save-format version within the `zmachine` engine (Quetzal).
+const ZMACHINE_SAVE_FORMAT: u32 = 1;
+
+impl GameSession {
+    /// Map a neutral [`KeyInput`] to a ZSCII input byte (the logic relocated from
+    /// the app's former `key_to_zscii`). Returns `None` for keys with no ZSCII
+    /// meaning (arrows, function keys, non-ASCII), so the caller leaves the turn
+    /// untouched — matching the old "skip unmapped key" behavior exactly.
+    fn key_input_to_zscii(key: KeyInput) -> Option<u8> {
+        match key {
+            KeyInput::Enter => Some(13),
+            KeyInput::Backspace => Some(8),
+            KeyInput::Escape => Some(27),
+            KeyInput::Char(c) if c.is_ascii() => Some(c as u8),
+            _ => None,
+        }
+    }
+
+    /// Mirror the Z-machine screen into the neutral [`ScreenModel`].
+    ///
+    /// The upper window becomes a [`GridWindow`] (logical size + cells + cursor +
+    /// active-window flag); the lower window is a buffer placeholder (the app
+    /// owns the transcript). The status is the v3 automatic status line
+    /// (`Classic`) for v1–3, or `HostManaged` for v4+ (whose globals are not a
+    /// status line).
+    fn build_screen_model(&self) -> ScreenModel {
+        let screen = &self.machine.screen;
+        let src = &screen.upper;
+        let grid = GridWindow {
+            cols: src.cols,
+            rows: src.rows,
+            cells: src
+                .cells
+                .iter()
+                .map(|c| GridCell { ch: c.ch, style: c.style })
+                .collect(),
+            active_rows: screen.upper_window_rows,
+            cursor: (screen.cursor_row, screen.cursor_col),
+            cursor_active: screen.current_window == 1,
+        };
+        let status = if self.machine.mem.version() <= 3 {
+            let sl = self.machine.status_line();
+            let right = match sl.right {
+                zvm::screen::StatusRight::ScoreTurns { score, turns } => {
+                    StatusField::ScoreTurns { score, turns }
+                }
+                zvm::screen::StatusRight::Time { hours, minutes } => {
+                    StatusField::Time { hours, minutes }
+                }
+            };
+            StatusModel::Classic { location: sl.location, right }
+        } else {
+            StatusModel::HostManaged
+        };
+        ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: screen.upper_window_rows },
+                first: Box::new(WinNode::Grid(grid)),
+                second: Box::new(WinNode::Buffer(BufferWindow::default())),
+            },
+            status,
+        }
+    }
+}
+
+impl Engine for GameSession {
+    fn submit(&mut self, command: &str) -> TurnResult {
+        // Dot syntax resolves to the inherent `GameSession::submit` (inherent
+        // methods take precedence over trait methods), so this is not recursive.
+        self.submit(command)
+    }
+
+    fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult> {
+        let byte = GameSession::key_input_to_zscii(key)?;
+        Some(self.submit_char(byte))
+    }
+
+    fn take_transcript(&mut self) -> String {
+        self.take_transcript()
+    }
+
+    fn pending_input(&self) -> InputKind {
+        self.pending
+    }
+
+    fn resume_save(&mut self, wrote_ok: bool) -> TurnResult {
+        self.resume_save(wrote_ok)
+    }
+
+    fn resume_restore(&mut self, data: Option<&[u8]>) -> TurnResult {
+        self.resume_restore(data)
+    }
+
+    fn has_quit(&self) -> bool {
+        self.quit
+    }
+
+    fn screen(&self) -> ScreenModel {
+        self.build_screen_model()
+    }
+
+    fn save_state(&self) -> EngineSave {
+        EngineSave::new(ZMACHINE_ENGINE, ZMACHINE_SAVE_FORMAT, self.machine.save_quetzal())
+    }
+
+    fn restore_state(&mut self, save: &EngineSave) -> Result<(), EngineError> {
+        if !save.is_engine(ZMACHINE_ENGINE) {
+            return Err(EngineError::EngineMismatch {
+                expected: ZMACHINE_ENGINE.to_string(),
+                found: save.engine.clone(),
+            });
+        }
+        self.machine
+            .restore_file(&save.bytes)
+            .map_err(|e| EngineError::BadSave(format!("{e:?}")))
+    }
+
+    fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
+        &self.machine.aux_data
+    }
+
+    fn set_aux_data(&mut self, data: std::collections::BTreeMap<String, Vec<u8>>) {
+        self.machine.aux_data = data;
+    }
+
+    fn aux_dirty(&self) -> bool {
+        self.machine.aux_dirty
+    }
+
+    fn clear_aux_dirty(&mut self) {
+        self.machine.aux_dirty = false;
+    }
+
+    fn current_location(&self) -> Option<LocationInfo> {
+        zvm::current_location(&self.machine)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn introspect(&self) -> Option<&dyn Introspect> {
+        Some(self)
+    }
+}
+
+impl Introspect for GameSession {
+    fn vocabulary(&self) -> Vec<String> {
+        zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem)
+    }
+
+    fn contents(&self, container: u16) -> Vec<String> {
+        crate::inventory::list_inventory(&self.machine.mem, container)
+    }
+
+    fn room_objects(&self, room: u16) -> Vec<String> {
+        crate::render::room_info::list_room_objects(&self.machine.mem, room)
+    }
+
+    fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16> {
+        let max_obj = zvm::object_tree_view(&self.machine)
+            .into_iter()
+            .map(|s| s.number)
+            .max()
+            .unwrap_or(0);
+        (1..=max_obj)
+            .filter(|&o| zvm::objects::get_parent(&self.machine.mem, o) == parent)
+            .collect()
+    }
+
+    fn player_object(&self) -> Option<u16> {
+        zvm::find_player_object(&self.machine)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -704,6 +900,135 @@ mod tests {
         // The quit path sets pending back to Line (no input pending).
         assert_eq!(session.pending_input(), InputKind::Line,
             "after quit, pending should be reset to Line");
+    }
+
+    // ── Engine adapter (zvm) tests ─────────────────────────────────────────────
+
+    /// Build the v3 variant of the read_char story (so screen() yields a v3
+    /// automatic status line).
+    fn read_char_story_v3() -> Vec<u8> {
+        let mut buf = read_char_story_v5();
+        buf[0x00] = 3;
+        buf
+    }
+
+    #[test]
+    fn key_input_to_zscii_matches_legacy_mapping() {
+        // The relocated mapping reproduces the app's former key_to_zscii exactly.
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Enter), Some(13));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Backspace), Some(8));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Escape), Some(27));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('y')), Some(b'y'));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('x')), Some(120));
+        // Non-ASCII and non-text keys carry no ZSCII byte (skip the turn).
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('\u{00E9}')), None);
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Up), None);
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Func(1)), None);
+    }
+
+    #[test]
+    fn engine_submit_key_drives_turn_for_mapped_key() {
+        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Char);
+        // 'x' → read_char → quit.
+        let r = sess.submit_key(KeyInput::Char('x'));
+        assert!(r.is_some(), "a mapped key produces a turn");
+        assert!(r.unwrap().quit);
+    }
+
+    #[test]
+    fn engine_submit_key_is_noop_for_unmapped_key() {
+        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        // An arrow key has no ZSCII meaning: no turn runs, the VM stays waiting.
+        assert!(sess.submit_key(KeyInput::Up).is_none());
+        assert_eq!(sess.pending_input(), InputKind::Char, "VM untouched by an unmapped key");
+    }
+
+    #[test]
+    fn engine_screen_v3_is_classic_status() {
+        let sess = GameSession::new(read_char_story_v3()).expect("new v3");
+        let model = sess.screen();
+        match model.status {
+            StatusModel::Classic { right, .. } => {
+                // Default flags (bit 1 = 0) → score/turns form.
+                assert!(matches!(right, StatusField::ScoreTurns { .. }));
+            }
+            other => panic!("v3 must yield a Classic status, got {other:?}"),
+        }
+        // The tree still carries a grid (the upper window) over a buffer.
+        assert!(model.grid().is_some(), "screen tree exposes a grid node");
+    }
+
+    #[test]
+    fn engine_screen_v5_is_host_managed_and_mirrors_upper_grid() {
+        let mut sess = GameSession::new(read_char_story_v5()).expect("new v5");
+        // Paint the upper window directly and confirm screen() mirrors it exactly.
+        sess.machine.screen.upper.resize(2, 5);
+        sess.machine.screen.upper.put(1, 1, 'H', 2); // bold
+        sess.machine.screen.upper.put(1, 2, 'I', 0);
+        sess.machine.screen.upper_window_rows = 2;
+        sess.machine.screen.cursor_row = 1;
+        sess.machine.screen.cursor_col = 3;
+        sess.machine.screen.current_window = 1;
+
+        let model = sess.screen();
+        assert_eq!(model.status, StatusModel::HostManaged, "v4+ has no automatic status");
+        let g = model.grid().expect("grid node");
+        assert_eq!((g.cols, g.rows), (5, 2));
+        assert_eq!(g.active_rows, 2);
+        assert_eq!(g.cell(1, 1).ch, 'H');
+        assert_eq!(g.cell(1, 1).style, 2);
+        assert_eq!(g.cell(1, 2).ch, 'I');
+        assert_eq!(g.cursor, (1, 3));
+        assert!(g.cursor_active, "current_window == 1 marks the grid active");
+    }
+
+    #[test]
+    fn engine_save_state_round_trips_and_is_tagged() {
+        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        let save = sess.save_state();
+        assert_eq!(save.engine, ZMACHINE_ENGINE);
+        assert!(!save.bytes.is_empty(), "Quetzal save is non-empty");
+
+        // Advance the VM, then restore the captured state.
+        let _ = sess.submit_key(KeyInput::Char('x'));
+        sess.restore_state(&save).expect("same-engine restore succeeds");
+
+        // A foreign-engine save is refused.
+        let foreign = EngineSave::new("glulx", 1, save.bytes.clone());
+        match sess.restore_state(&foreign) {
+            Err(EngineError::EngineMismatch { expected, found }) => {
+                assert_eq!(expected, ZMACHINE_ENGINE);
+                assert_eq!(found, "glulx");
+            }
+            other => panic!("foreign-engine restore must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_introspect_wraps_existing_logic() {
+        let sess = GameSession::new(read_char_story_v5()).expect("new");
+        let intro = sess.introspect().expect("zvm exposes introspection");
+        // vocabulary == today's dictionary load.
+        let vocab = intro.vocabulary();
+        let expected = zvm::dictionary::load(&sess.machine.mem).words(&sess.machine.mem);
+        assert_eq!(vocab, expected);
+        // player_object == today's find_player_object.
+        assert_eq!(intro.player_object(), zvm::find_player_object(&sess.machine));
+    }
+
+    #[test]
+    fn engine_aux_data_accessors_round_trip() {
+        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        assert!(sess.aux_data().is_empty());
+        let mut table = std::collections::BTreeMap::new();
+        table.insert("k".to_string(), vec![1u8, 2, 3]);
+        sess.set_aux_data(table.clone());
+        assert_eq!(sess.aux_data(), &table);
+        sess.machine.aux_dirty = true;
+        assert!(sess.aux_dirty());
+        sess.clear_aux_dirty();
+        assert!(!sess.aux_dirty());
     }
 
     // ── In-game save/restore plumbing (v4) ─────────────────────────────────────
