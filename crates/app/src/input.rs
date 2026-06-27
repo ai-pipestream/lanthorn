@@ -222,6 +222,8 @@ pub enum Action {
     StyleFocusCycle(i32),
     /// Move the attribute-chip cursor left (-1) or right (+1) within the Attrs focus.
     StyleAttrChipNav(i32),
+    /// Move the footer-button focus left (-1) or right (+1) within the Buttons focus.
+    StyleButtonNav(i32),
     /// Set the fg (is_bg=false) or bg (is_bg=true) of the active selector.
     /// `value` is a color token (ANSI name, #rrggbb hex, or "default"); `None` clears to default.
     StyleSetColor { is_bg: bool, value: Option<String> },
@@ -1274,6 +1276,17 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
         }
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
             Action::StyleBorderToggleShadow
+        }
+        // Footer-button focus: Left/Right move among Save / Save Game / Cancel,
+        // Enter activates the focused button.
+        KeyCode::Left if focus == StyleFocus::Buttons => Action::StyleButtonNav(-1),
+        KeyCode::Right if focus == StyleFocus::Buttons => Action::StyleButtonNav(1),
+        KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Buttons => {
+            match state.dialog_focus {
+                0 => Action::StyleSave,
+                1 => Action::StyleSaveGame,
+                _ => Action::StyleEditorCancel,
+            }
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::StyleSave,
         KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => Action::StyleSaveGame,
@@ -2431,14 +2444,16 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::StyleFocusCycle(d) => {
+            let mut entered_buttons = false;
             if let Some(ed) = &mut state.style_editor {
                 use crate::state::StyleFocus;
                 let bordered = is_bordered_selector(ed.selectors[ed.active]);
                 let order: &[StyleFocus] = if bordered {
-                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs, StyleFocus::Border]
+                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs, StyleFocus::Border, StyleFocus::Buttons]
                 } else {
-                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs]
+                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs, StyleFocus::Buttons]
                 };
+                let prev = ed.focus;
                 let cur = order.iter().position(|f| *f == ed.focus).unwrap_or(0) as i32;
                 let n = order.len() as i32;
                 ed.focus = order[((cur + d).rem_euclid(n)) as usize];
@@ -2452,7 +2467,17 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     }
                     _ => {}
                 }
+                entered_buttons = ed.focus == StyleFocus::Buttons && prev != StyleFocus::Buttons;
             }
+            // On arriving at the footer buttons, focus the first one (Save).
+            if entered_buttons {
+                state.dialog_focus = 0;
+            }
+        }
+
+        Action::StyleButtonNav(d) => {
+            // Three footer buttons: Save (0), Save Game (1), Cancel (2).
+            state.dialog_focus = cycle_focus(state.dialog_focus, 3, d);
         }
 
         Action::StyleAttrChipNav(d) => {
@@ -6802,6 +6827,67 @@ mod tests {
     }
 
     #[test]
+    fn style_focus_cycle_reaches_buttons_and_seeds_focus() {
+        use crate::state::StyleFocus;
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        let m = &mut mapper::mapper::Mapper::default();
+        s.dialog_focus = 2; // stale value from a previous dialog
+        // The footer buttons are the last stop in the ring, so a single Shift-Tab
+        // from Board wraps straight onto them regardless of selector borderedness.
+        apply_action(Action::StyleFocusCycle(-1), &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
+        // Arriving at the buttons focuses the first one (Save).
+        assert_eq!(s.dialog_focus, 0);
+    }
+
+    #[test]
+    fn style_button_nav_cycles_three_buttons() {
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        let m = &mut mapper::mapper::Mapper::default();
+        s.dialog_focus = 0;
+        apply_action(Action::StyleButtonNav(1), &mut s, m);
+        assert_eq!(s.dialog_focus, 1);
+        apply_action(Action::StyleButtonNav(1), &mut s, m);
+        assert_eq!(s.dialog_focus, 2);
+        apply_action(Action::StyleButtonNav(1), &mut s, m); // wrap
+        assert_eq!(s.dialog_focus, 0);
+        apply_action(Action::StyleButtonNav(-1), &mut s, m); // wrap back
+        assert_eq!(s.dialog_focus, 2);
+    }
+
+    #[test]
+    fn style_buttons_enter_activates_focused_button() {
+        use crate::state::StyleFocus;
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        s.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
+        s.dialog_focus = 0;
+        assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSave));
+        s.dialog_focus = 1;
+        assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSaveGame));
+        s.dialog_focus = 2;
+        assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleEditorCancel));
+        // Left/Right move the button focus.
+        assert!(matches!(style_editor_key_to_action(key(KeyCode::Left), &s), Action::StyleButtonNav(-1)));
+        assert!(matches!(style_editor_key_to_action(key(KeyCode::Right), &s), Action::StyleButtonNav(1)));
+    }
+
+    #[test]
+    fn style_buttons_enter_on_cancel_closes_editor() {
+        use crate::state::StyleFocus;
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        let m = &mut mapper::mapper::Mapper::default();
+        s.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
+        s.dialog_focus = 2; // Cancel
+        let action = style_editor_key_to_action(key(KeyCode::Enter), &s);
+        apply_action(action, &mut s, m);
+        assert!(s.style_editor.is_none(), "activating Cancel closes the editor");
+    }
+
+    #[test]
     fn style_custom_backspace_cannot_delete_leading_hash() {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
@@ -7178,9 +7264,14 @@ mod tests {
             ed.active = non_bordered_idx;
             ed.focus = StyleFocus::Attrs;
         }
+        // Attrs → Buttons (the footer row), which then wraps to Board — Border is
+        // never entered for a non-bordered selector.
+        apply_action(Action::StyleFocusCycle(1), &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons,
+            "non-bordered selector goes from Attrs to the footer buttons");
         apply_action(Action::StyleFocusCycle(1), &mut s, m);
         assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Board,
-            "non-bordered selector must skip Border focus");
+            "non-bordered selector wraps to Board, never Border");
 
         // ── bordered selector: cycling from Attrs reaches Border ──
         let mut s = AppState::default();

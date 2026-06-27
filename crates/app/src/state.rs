@@ -584,6 +584,10 @@ pub enum StyleFocus {
     Custom,
     Attrs,
     Border,
+    /// The dialog footer buttons (Save / Save Game / Cancel). The highlighted
+    /// button is tracked by `AppState.dialog_focus`; Left/Right move among them
+    /// and Enter activates the focused one.
+    Buttons,
 }
 
 /// Transient state for the live style-editor full-screen mode.
