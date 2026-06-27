@@ -6372,6 +6372,13 @@ mod tests {
         open_style_editor(&mut s);
         {
             let ed = s.style_editor.as_mut().unwrap();
+            // Neutralize any fg/bg inherited from an on-disk style.toml so the
+            // assertion reflects only this action (mirrors the sibling tests).
+            let sel = ed.selectors[ed.active].to_string();
+            if let Some(d) = ed.doc.colors.selectors.get_mut(&sel) {
+                d.fg = None;
+                d.bg = None;
+            }
             ed.color_target = true; // bg
             ed.custom_buf = "#abcdef".into();
         }
