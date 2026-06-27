@@ -13,7 +13,7 @@ use zvm::screen::StatusRight;
 use ratatui::style::Color;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
-use crate::state::{AppState, Focus, TranscriptFilter, TranscriptKind};
+use crate::state::{AppState, Focus, StyleRun, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
@@ -204,21 +204,31 @@ pub(crate) fn truncate_line(line: &str, width: usize) -> &str {
 /// - An empty line produces a single empty string (preserves blank lines).
 /// - Zero width returns the line unsplit.
 pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
+    wrap_line_ranges(line, width).into_iter().map(|(s, _, _)| s).collect()
+}
+
+/// Like `wrap_line`, but each emitted row carries the `[start, end)` char range
+/// it occupies in the *original* `line` (so per-line style runs can be re-based
+/// onto wrapped rows). The break space dropped between two rows is excluded from
+/// both: row N ends before the space, row N+1 starts after it. Hard-broken long
+/// words split into contiguous ranges.
+pub(crate) fn wrap_line_ranges(line: &str, width: u16) -> Vec<(String, usize, usize)> {
     let width = width as usize;
     if width == 0 {
-        return vec![line.to_string()];
+        return vec![(line.to_string(), 0, line.chars().count())];
     }
     if line.is_empty() {
-        return vec![String::new()];
+        return vec![(String::new(), 0, 0)];
     }
 
-    let mut rows: Vec<String> = Vec::new();
+    let mut rows: Vec<(String, usize, usize)> = Vec::new();
     let mut remaining = line;
+    let mut base_col = 0usize; // char offset of `remaining`'s start within `line`
 
     while !remaining.is_empty() {
         let char_count: usize = remaining.chars().count();
         if char_count <= width {
-            rows.push(remaining.to_string());
+            rows.push((remaining.to_string(), base_col, base_col + char_count));
             break;
         }
 
@@ -243,21 +253,45 @@ pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
 
         if let Some(sp) = last_space_before {
             // Break at the space: take everything before it, skip the space.
-            rows.push(remaining[..sp].to_string());
+            let head = &remaining[..sp];
+            let head_chars = head.chars().count();
+            rows.push((head.to_string(), base_col, base_col + head_chars));
             // Advance past the space (sp is a byte offset of ' ', so sp+1 is safe for ASCII ' ').
             let next = sp + ' '.len_utf8();
             remaining = &remaining[next..];
+            base_col += head_chars + 1; // +1 for the dropped break space
         } else {
             // No space found: hard-break at `width` chars.
-            rows.push(remaining[..byte_at_width].to_string());
+            let head = &remaining[..byte_at_width];
+            let head_chars = head.chars().count();
+            rows.push((head.to_string(), base_col, base_col + head_chars));
             remaining = &remaining[byte_at_width..];
+            base_col += head_chars;
         }
     }
 
     if rows.is_empty() {
-        rows.push(String::new());
+        rows.push((String::new(), 0, 0));
     }
     rows
+}
+
+/// Intersect a logical line's `StyleRun`s with a wrapped row's `[start, end)`
+/// source char range, re-basing the surviving spans to the row's own offsets.
+/// Empty intersections are dropped (so an unstyled row yields an empty vec).
+fn rebase_runs(line_runs: Option<&Vec<StyleRun>>, start: usize, end: usize) -> Vec<StyleRun> {
+    let Some(line_runs) = line_runs else {
+        return Vec::new();
+    };
+    let mut out: Vec<StyleRun> = Vec::new();
+    for r in line_runs {
+        let s = r.start.max(start);
+        let e = r.end.min(end);
+        if s < e {
+            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits });
+        }
+    }
+    out
 }
 
 /// Like `wrap_line`, but every continuation row after the first is prefixed
@@ -306,24 +340,37 @@ pub(crate) fn wrap_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
     styles: &[Style],
+    runs: &[Vec<StyleRun>],
     width: u16,
-) -> Vec<(String, TranscriptKind, Style)> {
+) -> Vec<(String, TranscriptKind, Style, Vec<StyleRun>)> {
     transcript
         .iter()
         .enumerate()
         .flat_map(|(i, line)| {
             let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
             let style = styles.get(i).copied().unwrap_or_default();
+            let line_runs = runs.get(i);
             let w = match kind {
                 TranscriptKind::Meta | TranscriptKind::Warning => width.saturating_sub(META_GUTTER),
                 TranscriptKind::Story | TranscriptKind::Input => width,
             };
-            let rows = match kind {
-                TranscriptKind::Meta | TranscriptKind::Warning =>
-                    wrap_line_hanging(line, w, leading_spaces(line).max(2)),
-                TranscriptKind::Story | TranscriptKind::Input => wrap_line(line, w),
+            let out: Vec<(String, TranscriptKind, Style, Vec<StyleRun>)> = match kind {
+                // Meta/Warning are app-generated (always unstyled) and use hanging
+                // wrap, whose indentation shifts offsets — emit empty runs.
+                TranscriptKind::Meta | TranscriptKind::Warning => {
+                    wrap_line_hanging(line, w, leading_spaces(line).max(2))
+                        .into_iter()
+                        .map(|row| (row, kind, style, Vec::new()))
+                        .collect()
+                }
+                TranscriptKind::Story | TranscriptKind::Input => {
+                    wrap_line_ranges(line, w)
+                        .into_iter()
+                        .map(|(row, start, end)| (row, kind, style, rebase_runs(line_runs, start, end)))
+                        .collect()
+                }
             };
-            rows.into_iter().map(move |row| (row, kind, style))
+            out
         })
         .collect()
 }
@@ -338,14 +385,15 @@ pub(crate) fn visible_wrapped_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
     styles: &[Style],
+    runs: &[Vec<StyleRun>],
     rows: usize,
     scroll: u16,
     width: u16,
-) -> (Vec<(String, TranscriptKind, Style)>, usize) {
+) -> (Vec<(String, TranscriptKind, Style, Vec<StyleRun>)>, usize) {
     if rows == 0 || transcript.is_empty() {
         return (Vec::new(), 0);
     }
-    let display_rows = wrap_lines_kinded(transcript, kinds, styles, width);
+    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, width);
     let n = display_rows.len();
     // Clamp scroll so it never exceeds the top: past `n - rows` the window would
     // otherwise shrink from the bottom, blanking viewport rows.
@@ -884,6 +932,10 @@ fn render_middle(
             }
         })
         .collect();
+    let filtered_runs: Vec<Vec<StyleRun>> = visible_indices
+        .iter()
+        .map(|&i| state.transcript_runs.get(i).cloned().unwrap_or_default())
+        .collect();
     // Reserve the rightmost column of the body as the scrollbar gutter so text
     // never collides with the scrollbar. Wrap and clip to this narrower body.
     let body_area = if area.width >= 2 {
@@ -898,6 +950,7 @@ fn render_middle(
         &filtered_lines,
         &filtered_kinds,
         &filtered_styles,
+        &filtered_runs,
         transcript_rows,
         effective_scroll,
         body_area.width,
@@ -906,7 +959,7 @@ fn render_middle(
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
 
-    for (i, (line, kind, style)) in lines.iter().enumerate() {
+    for (i, (line, kind, style, _runs)) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
@@ -981,12 +1034,12 @@ mod tests {
         let line = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
         // Input: full width 8 (no gutter) → unsplit.
-        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, 8);
-        assert_eq!(i.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], 8);
+        assert_eq!(i.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
         // Warning: wraps to width-2 = 6 like Meta; continuation gets 2-space
         // hanging indent (leading_spaces("abcdefgh")=0, .max(2)=2).
-        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, 8);
-        assert_eq!(w.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
+        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], 8);
+        assert_eq!(w.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
     }
 
     fn fields_score() -> StatusFields {
@@ -1098,6 +1151,29 @@ mod tests {
     }
 
     #[test]
+    fn wrap_line_ranges_round_trips_word_wrap() {
+        // Same row strings as wrap_line, plus correct source char ranges.
+        let rows = wrap_line_ranges("AAAAA BBBBB", 5);
+        assert_eq!(rows.iter().map(|(s, _, _)| s.clone()).collect::<Vec<_>>(),
+                   wrap_line("AAAAA BBBBB", 5));
+        // first row covers chars 0..5, second covers 6..11 (break space dropped)
+        assert_eq!((rows[0].1, rows[0].2), (0, 5));
+        assert_eq!((rows[1].1, rows[1].2), (6, 11));
+    }
+
+    #[test]
+    fn wrap_lines_kinded_rebases_runs_per_row() {
+        let lines = vec!["AAAAA BBBBB".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02 }]]; // bold "BBBBB"
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, 5);
+        // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
+        assert!(out[0].3.is_empty());
+        assert_eq!(out[1].3, vec![StyleRun { start: 0, end: 5, bits: 0x02 }]);
+    }
+
+    #[test]
     fn wrap_line_basic_word_wrap() {
         // "the quick brown fox" at width 9: "the quick" + "brown fox"
         let result = wrap_line("the quick brown fox", 9);
@@ -1139,8 +1215,8 @@ mod tests {
         let kinds = vec![TranscriptKind::Story; 2];
         let styles = vec![Style::default(); 2];
         // width 5: "hello" + "world" + "test" + "short"
-        let result = wrap_lines_kinded(&lines, &kinds, &styles, 5);
-        let rows: Vec<&str> = result.iter().map(|(s, _, _)| s.as_str()).collect();
+        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], 5);
+        let rows: Vec<&str> = result.iter().map(|(s, _, _, _)| s.as_str()).collect();
         assert_eq!(rows, vec!["hello", "world", "test", "short"]);
     }
 
@@ -1151,11 +1227,11 @@ mod tests {
         // .max(2)=2).
         let transcript = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
-        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, 8);
-        assert_eq!(m.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
-        assert!(m.iter().all(|(_, k, _)| matches!(k, TranscriptKind::Meta)));
-        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, 8);
-        assert_eq!(s.iter().map(|(s, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], 8);
+        assert_eq!(m.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
+        assert!(m.iter().all(|(_, k, _, _)| matches!(k, TranscriptKind::Meta)));
+        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], 8);
+        assert_eq!(s.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
     }
 
     #[test]
@@ -1164,9 +1240,9 @@ mod tests {
         // One logical line that wraps to 3 rows; its style must appear on all rows.
         let transcript = vec!["alpha beta gamma".to_string()];
         let styles = [Style::new().fg(Color::Magenta)];
-        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, 5);
+        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], 5);
         assert!(rows.len() >= 3, "expected wrap to >= 3 rows, got {}", rows.len());
-        assert!(rows.iter().all(|(_, _, s)| s.fg == Some(Color::Magenta)),
+        assert!(rows.iter().all(|(_, _, s, _)| s.fg == Some(Color::Magenta)),
             "every wrapped row must carry the logical line's style");
     }
 
@@ -1176,7 +1252,7 @@ mod tests {
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
         let styles = vec![Style::default(); 3];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 3, 0, 10);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10);
         assert_eq!(vis.len(), 3);
         assert_eq!(total, 3, "total wrapped rows reported");
         assert_eq!(vis[2].0, "ghi");
@@ -1189,11 +1265,11 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 1, 5);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 1, 5);
         assert_eq!(vis[0].0, "hello");
         assert_eq!(total, 2, "both wrapped rows counted");
         // scroll=0: end=2, start=1 → ["world"]
-        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 1, 0, 5);
+        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 0, 5);
         assert_eq!(vis2[0].0, "world");
     }
 
@@ -1204,7 +1280,7 @@ mod tests {
         let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, 3, 999, 10);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 999, 10);
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 3, "over-scroll still fills the viewport");
         assert_eq!(vis[0].0, "L0", "top line stays at the top");
