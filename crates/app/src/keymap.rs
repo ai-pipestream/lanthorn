@@ -1,9 +1,9 @@
-//! Configurable keymap — `Command`, `KeySpec`, `Context`, and `KeyMap`.
+//! Configurable keymap — `KeySpec`, `Context`, and `KeyMap`.
 //!
-//! `Command` enumerates every rebindable action. `KeySpec` is a parsed
-//! keystroke (key code + modifier flags). `Context` partitions bindings into
-//! Global, Map, and Anim layers. `KeyMap` holds the full binding table and
-//! exposes lookup / resolve / primary-key queries.
+//! Commands are identified by their registry command-string (see `crate::slash`).
+//! `KeySpec` is a parsed keystroke (key code + modifier flags). `Context`
+//! partitions bindings into Global, Map, and Anim layers. `KeyMap` holds the
+//! full binding table and exposes lookup / resolve / primary-key queries.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -19,493 +19,6 @@ pub enum Context {
     /// Tidy-animation sub-mode (does NOT fall through).
     Anim,
 }
-
-// ── Command ────────────────────────────────────────────────────────────────────
-
-/// Every rebindable named command.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Command {
-    // ── Global ────────────────────────────────────────────────────────────────
-    /// Rebindable quit binding (Ctrl+Q/C remain hardwired separately).
-    Quit,
-    SaveGame,
-    RestoreGame,
-    ExportSvg,
-    ExportDot,
-    ExportDump,
-    CycleLayout,
-    Retidy,
-    ReloadStyle,
-    GameStyle,
-    ToggleWatch,
-    AnimateTidy,
-    ToggleAlignment,
-    TogglePortalLabels,
-    /// Toggle between Game and Map focus.
-    ToggleFocus,
-    // ── Nudge (Global, Ctrl+Arrows) ───────────────────────────────────────────
-    NudgeLeft,
-    NudgeRight,
-    NudgeUp,
-    NudgeDown,
-
-    // ── Map ───────────────────────────────────────────────────────────────────
-    OpenGallery,
-    ZoomIn,
-    ZoomOut,
-    /// Reset zoom to the default level and clear the char-pan offset.
-    ZoomReset,
-    Recenter,
-    SelectNext,
-    SelectPrev,
-    RenameRoom,
-    RenameLayer,
-    EditNotes,
-    DeleteSelectedConnection,
-    RelabelSelectedEdge,
-    ToggleInspector,
-    PeelLayer,
-    MergeLayer,
-    PanLeft,
-    PanRight,
-    PanUp,
-    PanDown,
-    CycleLayerNext,
-    CycleLayerPrev,
-
-    // ── Anim ──────────────────────────────────────────────────────────────────
-    AnimStepFwd,
-    AnimStepBack,
-    AnimTogglePlay,
-    AnimExit,
-    // Anim pan/zoom reuse the Map variants above.
-
-    // ── Saves manager ─────────────────────────────────────────────────────────
-    /// Open the saves-manager modal (Ctrl+O by default).
-    OpenSaves,
-
-    // ── Inventory ─────────────────────────────────────────────────────────────
-    /// Toggle the inventory strip at the bottom of the story pane (default: v).
-    ToggleInventory,
-
-    // ── Layout ────────────────────────────────────────────────────────────────
-    /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
-    CycleLayoutReverse,
-
-    // ── Game ──────────────────────────────────────────────────────────────────
-    /// Reset the game to its opening state (keeps the accumulated map).
-    ResetGame,
-
-    // ── Verb menu ─────────────────────────────────────────────────────────────
-    /// Open the verb/item token-palette modal (default: m).
-    OpenVerbMenu,
-
-    // ── Style editor ──────────────────────────────────────────────────────────
-    /// Open the live style editor full-screen mode (default: F3).
-    OpenStyleEditor,
-
-    // ── Config screen ─────────────────────────────────────────────────────────
-    /// Open the in-app config screen modal (default: F2).
-    OpenConfig,
-
-    // ── Room display ──────────────────────────────────────────────────────────
-    /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
-    ToggleRoomNumbers,
-    /// Toggle the room-detection-method indicator in the map corner.
-    ToggleLocMethod,
-    /// Toggle the status/score bar (top row of the story pane).
-    ToggleStatusBar,
-
-    // ── Hints ─────────────────────────────────────────────────────────────────
-    /// Open the Hints panel (companion Invisiclues / hint-file mini-terminal).
-    OpenHints,
-
-    // ── History ───────────────────────────────────────────────────────────────
-    /// Open the rewind/replay history modal.
-    OpenHistory,
-}
-
-impl Command {
-    /// Convert this command into its `Action` equivalent.
-    pub fn to_action(self) -> crate::input::Action {
-        use crate::input::Action;
-        match self {
-            Command::Quit => Action::Quit,
-            Command::SaveGame => Action::SaveGame,
-            Command::RestoreGame => Action::RestoreGame,
-            Command::ExportSvg => Action::ExportSvg,
-            Command::ExportDot => Action::ExportDot,
-            Command::ExportDump => Action::ExportDump,
-            Command::CycleLayout => Action::CycleLayout,
-            Command::Retidy => Action::Retidy,
-            Command::ReloadStyle => Action::ReloadStyle,
-            Command::GameStyle => Action::GameStyle,
-            Command::ToggleWatch => Action::ToggleWatch,
-            Command::AnimateTidy => Action::AnimateTidy,
-            Command::ToggleAlignment => Action::ToggleAlignment,
-            Command::TogglePortalLabels => Action::TogglePortalLabels,
-            Command::ToggleFocus => Action::ToggleFocus,
-            Command::NudgeLeft => Action::NudgeSelected(-1, 0),
-            Command::NudgeRight => Action::NudgeSelected(1, 0),
-            Command::NudgeUp => Action::NudgeSelected(0, -1),
-            Command::NudgeDown => Action::NudgeSelected(0, 1),
-            Command::OpenGallery => Action::OpenGallery,
-            Command::ZoomIn => Action::ZoomIn,
-            Command::ZoomOut => Action::ZoomOut,
-            Command::ZoomReset => Action::ZoomReset,
-            Command::Recenter => Action::Recenter,
-            Command::SelectNext => Action::SelectNext,
-            Command::SelectPrev => Action::SelectPrev,
-            Command::RenameRoom => Action::RenameRoom,
-            Command::RenameLayer => Action::RenameLayer,
-            Command::EditNotes => Action::EditNotes,
-            Command::DeleteSelectedConnection => Action::DeleteSelectedConnection,
-            Command::RelabelSelectedEdge => Action::RelabelSelectedEdge,
-            Command::ToggleInspector => Action::ToggleInspector,
-            Command::PeelLayer => Action::PeelLayer,
-            Command::MergeLayer => Action::MergeLayer,
-            Command::PanLeft => Action::Pan(-1, 0),
-            Command::PanRight => Action::Pan(1, 0),
-            Command::PanUp => Action::Pan(0, -1),
-            Command::PanDown => Action::Pan(0, 1),
-            Command::CycleLayerNext => Action::CycleLayer(1),
-            Command::CycleLayerPrev => Action::CycleLayer(-1),
-            Command::AnimStepFwd => Action::AnimStep(1),
-            Command::AnimStepBack => Action::AnimStep(-1),
-            Command::AnimTogglePlay => Action::AnimTogglePlay,
-            Command::AnimExit => Action::AnimExit,
-            Command::OpenSaves => Action::OpenSaves,
-            Command::ToggleInventory => Action::ToggleInventory,
-            Command::CycleLayoutReverse => Action::CycleLayoutReverse,
-            Command::ResetGame => Action::ResetGame,
-            Command::OpenVerbMenu => Action::OpenVerbMenu,
-            Command::OpenStyleEditor => Action::OpenStyleEditor,
-            Command::OpenConfig => Action::OpenConfig,
-            Command::ToggleRoomNumbers => Action::ToggleRoomNumbers,
-            Command::ToggleLocMethod => Action::ToggleLocMethod,
-            Command::ToggleStatusBar => Action::ToggleStatusBar,
-            Command::OpenHints => Action::OpenHints,
-            Command::OpenHistory => Action::OpenHistory,
-        }
-    }
-
-    /// Snake_case config key for this command.
-    pub fn name(self) -> &'static str {
-        match self {
-            Command::Quit => "quit",
-            Command::SaveGame => "save_game",
-            Command::RestoreGame => "restore_game",
-            Command::ExportSvg => "export_svg",
-            Command::ExportDot => "export_dot",
-            Command::ExportDump => "export_dump",
-            Command::CycleLayout => "cycle_layout",
-            Command::Retidy => "retidy",
-            Command::ReloadStyle => "reload_style",
-            Command::GameStyle => "game_style",
-            Command::ToggleWatch => "toggle_watch",
-            Command::AnimateTidy => "animate_tidy",
-            Command::ToggleAlignment => "toggle_alignment",
-            Command::TogglePortalLabels => "toggle_portal_labels",
-            Command::ToggleFocus => "toggle_focus",
-            Command::NudgeLeft => "nudge_left",
-            Command::NudgeRight => "nudge_right",
-            Command::NudgeUp => "nudge_up",
-            Command::NudgeDown => "nudge_down",
-            Command::OpenGallery => "open_gallery",
-            Command::ZoomIn => "zoom_in",
-            Command::ZoomOut => "zoom_out",
-            Command::ZoomReset => "zoom_reset",
-            Command::Recenter => "recenter",
-            Command::SelectNext => "select_next",
-            Command::SelectPrev => "select_prev",
-            Command::RenameRoom => "rename_room",
-            Command::RenameLayer => "rename_layer",
-            Command::EditNotes => "edit_notes",
-            Command::DeleteSelectedConnection => "delete_selected_connection",
-            Command::RelabelSelectedEdge => "relabel_selected_edge",
-            Command::ToggleInspector => "toggle_inspector",
-            Command::PeelLayer => "peel_layer",
-            Command::MergeLayer => "merge_layer",
-            Command::PanLeft => "pan_left",
-            Command::PanRight => "pan_right",
-            Command::PanUp => "pan_up",
-            Command::PanDown => "pan_down",
-            Command::CycleLayerNext => "cycle_layer_next",
-            Command::CycleLayerPrev => "cycle_layer_prev",
-            Command::AnimStepFwd => "anim_step_fwd",
-            Command::AnimStepBack => "anim_step_back",
-            Command::AnimTogglePlay => "anim_toggle_play",
-            Command::AnimExit => "anim_exit",
-            Command::OpenSaves => "open_saves",
-            Command::ToggleInventory => "toggle_inventory",
-            Command::CycleLayoutReverse => "cycle_layout_reverse",
-            Command::ResetGame => "reset_game",
-            Command::OpenVerbMenu => "open_verb_menu",
-            Command::OpenStyleEditor => "open_style_editor",
-            Command::OpenConfig => "open_config",
-            Command::ToggleRoomNumbers => "toggle_room_numbers",
-            Command::ToggleLocMethod => "toggle_loc_method",
-            Command::ToggleStatusBar => "toggle_status_bar",
-            Command::OpenHints => "open_hints",
-            Command::OpenHistory => "open_history",
-        }
-    }
-
-    /// Short human-readable label for the hint bar and help overlay.
-    pub fn label(self) -> &'static str {
-        match self {
-            Command::Quit => "quit",
-            Command::SaveGame => "save game",
-            Command::RestoreGame => "restore",
-            Command::ExportSvg => "export SVG",
-            Command::ExportDot => "export DOT",
-            Command::ExportDump => "dump map",
-            Command::CycleLayout => "layout",
-            Command::Retidy => "retidy",
-            Command::ReloadStyle => "reload style",
-            Command::GameStyle => "game style",
-            Command::ToggleWatch => "watch style",
-            Command::AnimateTidy => "animate tidy",
-            Command::ToggleAlignment => "alignment",
-            Command::TogglePortalLabels => "portals",
-            Command::ToggleFocus => "focus",
-            Command::NudgeLeft => "nudge left",
-            Command::NudgeRight => "nudge right",
-            Command::NudgeUp => "nudge up",
-            Command::NudgeDown => "nudge down",
-            Command::OpenGallery => "gallery",
-            Command::ZoomIn => "zoom in",
-            Command::ZoomOut => "zoom out",
-            Command::ZoomReset => "zoom reset",
-            Command::Recenter => "center",
-            Command::SelectNext => "next room",
-            Command::SelectPrev => "prev room",
-            Command::RenameRoom => "rename room",
-            Command::RenameLayer => "rename layer",
-            Command::EditNotes => "edit notes",
-            Command::DeleteSelectedConnection => "delete conn",
-            Command::RelabelSelectedEdge => "relabel edge",
-            Command::ToggleInspector => "inspect",
-            Command::PeelLayer => "peel layer",
-            Command::MergeLayer => "merge layer",
-            Command::PanLeft => "pan left",
-            Command::PanRight => "pan right",
-            Command::PanUp => "pan up",
-            Command::PanDown => "pan down",
-            Command::CycleLayerNext => "layer next",
-            Command::CycleLayerPrev => "layer prev",
-            Command::AnimStepFwd => "step fwd",
-            Command::AnimStepBack => "step back",
-            Command::AnimTogglePlay => "play/pause",
-            Command::AnimExit => "exit anim",
-            Command::OpenSaves => "saves",
-            Command::ToggleInventory => "inventory",
-            Command::CycleLayoutReverse => "layout back",
-            Command::ResetGame => "reset game",
-            Command::OpenVerbMenu => "verb menu",
-            Command::OpenStyleEditor => "style editor",
-            Command::OpenConfig => "settings",
-            Command::ToggleRoomNumbers => "room numbers",
-            Command::ToggleLocMethod => "location method",
-            Command::ToggleStatusBar => "status bar",
-            Command::OpenHints => "hints",
-            Command::OpenHistory => "history",
-        }
-    }
-
-    /// The primary context this command belongs to (used by resolve).
-    pub fn context(self) -> Context {
-        match self {
-            Command::Quit
-            | Command::SaveGame
-            | Command::RestoreGame
-            | Command::ExportSvg
-            | Command::ExportDot
-            | Command::ExportDump
-            | Command::CycleLayout
-            | Command::Retidy
-            | Command::ReloadStyle
-            | Command::GameStyle
-            | Command::ToggleWatch
-            | Command::AnimateTidy
-            | Command::ToggleAlignment
-            | Command::TogglePortalLabels
-            | Command::ToggleFocus
-            | Command::NudgeLeft
-            | Command::NudgeRight
-            | Command::NudgeUp
-            | Command::NudgeDown => Context::Global,
-
-            Command::OpenGallery
-            | Command::ZoomIn
-            | Command::ZoomOut
-            | Command::ZoomReset
-            | Command::Recenter
-            | Command::SelectNext
-            | Command::SelectPrev
-            | Command::RenameRoom
-            | Command::RenameLayer
-            | Command::EditNotes
-            | Command::DeleteSelectedConnection
-            | Command::RelabelSelectedEdge
-            | Command::ToggleInspector
-            | Command::PeelLayer
-            | Command::MergeLayer
-            | Command::PanLeft
-            | Command::PanRight
-            | Command::PanUp
-            | Command::PanDown
-            | Command::CycleLayerNext
-            | Command::CycleLayerPrev => Context::Map,
-
-            Command::AnimStepFwd
-            | Command::AnimStepBack
-            | Command::AnimTogglePlay
-            | Command::AnimExit => Context::Anim,
-
-            Command::OpenSaves => Context::Global,
-            Command::ToggleInventory => Context::Global,
-            Command::CycleLayoutReverse => Context::Global,
-            Command::ResetGame => Context::Global,
-            Command::OpenVerbMenu => Context::Global,
-            Command::OpenStyleEditor => Context::Global,
-            Command::OpenConfig => Context::Global,
-            Command::ToggleRoomNumbers => Context::Global,
-            Command::ToggleLocMethod => Context::Global,
-            Command::ToggleStatusBar => Context::Global,
-            Command::OpenHints => Context::Global,
-            Command::OpenHistory => Context::Global,
-        }
-    }
-
-    /// Return the `Command` whose `name()` matches `s`, or `None`.
-    pub fn from_name(s: &str) -> Option<Command> {
-        ALL_COMMANDS.iter().copied().find(|c| c.name() == s)
-    }
-
-    /// The full command string as used in keymap bindings.
-    /// Task 10 bridge: removed in Task 10 when dispatch is rewritten.
-    pub fn full_cmd_string(self) -> &'static str {
-        match self {
-            Command::Quit => "quit",
-            Command::SaveGame => "save-game",
-            Command::RestoreGame => "load-game",
-            Command::ExportSvg => "export-svg",
-            Command::ExportDot => "export-dot",
-            Command::ExportDump => "export-dump",
-            Command::CycleLayout => "cycle-layout",
-            Command::Retidy => "tidy-map",
-            Command::ReloadStyle => "reload-style",
-            Command::GameStyle => "create-game-style",
-            Command::ToggleWatch => "toggle-watch",
-            Command::AnimateTidy => "animate-tidy",
-            Command::ToggleAlignment => "toggle-alignment",
-            Command::TogglePortalLabels => "toggle-portal-labels",
-            Command::ToggleFocus => "toggle-focus",
-            Command::NudgeLeft => "nudge-room -1 0",
-            Command::NudgeRight => "nudge-room 1 0",
-            Command::NudgeUp => "nudge-room 0 -1",
-            Command::NudgeDown => "nudge-room 0 1",
-            Command::OpenGallery => "open-gallery",
-            Command::ZoomIn => "zoom-map in",
-            Command::ZoomOut => "zoom-map out",
-            Command::ZoomReset => "zoom-map reset",
-            Command::Recenter => "center-map",
-            Command::SelectNext => "select-room next",
-            Command::SelectPrev => "select-room prev",
-            Command::RenameRoom => "rename-room",
-            Command::RenameLayer => "rename-layer",
-            Command::EditNotes => "edit-notes",
-            Command::DeleteSelectedConnection => "delete-connection",
-            Command::RelabelSelectedEdge => "relabel-edge",
-            Command::ToggleInspector => "toggle-inspector",
-            Command::PeelLayer => "peel-layer",
-            Command::MergeLayer => "merge-layer",
-            Command::PanLeft => "pan-map -1 0",
-            Command::PanRight => "pan-map 1 0",
-            Command::PanUp => "pan-map 0 -1",
-            Command::PanDown => "pan-map 0 1",
-            Command::CycleLayerNext => "cycle-layer next",
-            Command::CycleLayerPrev => "cycle-layer prev",
-            Command::AnimStepFwd => "anim-step forward",
-            Command::AnimStepBack => "anim-step back",
-            Command::AnimTogglePlay => "anim-play",
-            Command::AnimExit => "anim-exit",
-            Command::OpenSaves => "open-saves",
-            Command::ToggleInventory => "toggle-inventory",
-            Command::CycleLayoutReverse => "cycle-layout reverse",
-            Command::ResetGame => "reset-game",
-            Command::OpenVerbMenu => "open-verb-menu",
-            Command::OpenStyleEditor => "open-style-editor",
-            Command::OpenConfig => "open-config",
-            Command::ToggleRoomNumbers => "toggle-room-numbers",
-            Command::ToggleLocMethod => "toggle-loc-method",
-            Command::ToggleStatusBar => "toggle-status-bar",
-            Command::OpenHints => "open-hints",
-            Command::OpenHistory => "open-history",
-        }
-    }
-}
-
-/// All commands in a single slice, for iteration.
-pub const ALL_COMMANDS: &[Command] = &[
-    Command::Quit,
-    Command::SaveGame,
-    Command::RestoreGame,
-    Command::ExportSvg,
-    Command::ExportDot,
-    Command::ExportDump,
-    Command::CycleLayout,
-    Command::Retidy,
-    Command::ReloadStyle,
-    Command::GameStyle,
-    Command::ToggleWatch,
-    Command::AnimateTidy,
-    Command::ToggleAlignment,
-    Command::TogglePortalLabels,
-    Command::ToggleFocus,
-    Command::NudgeLeft,
-    Command::NudgeRight,
-    Command::NudgeUp,
-    Command::NudgeDown,
-    Command::OpenGallery,
-    Command::ZoomIn,
-    Command::ZoomOut,
-    Command::ZoomReset,
-    Command::Recenter,
-    Command::SelectNext,
-    Command::SelectPrev,
-    Command::RenameRoom,
-    Command::RenameLayer,
-    Command::EditNotes,
-    Command::DeleteSelectedConnection,
-    Command::RelabelSelectedEdge,
-    Command::ToggleInspector,
-    Command::PeelLayer,
-    Command::MergeLayer,
-    Command::PanLeft,
-    Command::PanRight,
-    Command::PanUp,
-    Command::PanDown,
-    Command::CycleLayerNext,
-    Command::CycleLayerPrev,
-    Command::AnimStepFwd,
-    Command::AnimStepBack,
-    Command::AnimTogglePlay,
-    Command::AnimExit,
-    Command::OpenSaves,
-    Command::ToggleInventory,
-    Command::CycleLayoutReverse,
-    Command::ResetGame,
-    Command::OpenVerbMenu,
-    Command::OpenStyleEditor,
-    Command::OpenConfig,
-    Command::ToggleRoomNumbers,
-    Command::ToggleLocMethod,
-    Command::ToggleStatusBar,
-    Command::OpenHints,
-    Command::OpenHistory,
-];
 
 // ── KeySpec ────────────────────────────────────────────────────────────────────
 
@@ -822,17 +335,6 @@ impl KeyMap {
             .map(|(spec, _, _)| *spec)
     }
 
-    /// Return the first (primary) `KeySpec` bound to `cmd` by matching `full_cmd_string()`.
-    /// Task 10 bridge: removed in Task 10 when dispatch is rewritten.
-    pub fn primary_key_cmd(&self, cmd: Command) -> Option<KeySpec> {
-        let full = cmd.full_cmd_string();
-        let preferred_ctx = cmd.context();
-        self.bindings.iter()
-            .find(|(_, s, c)| s.as_str() == full && *c == preferred_ctx)
-            .or_else(|| self.bindings.iter().find(|(_, s, _)| s.as_str() == full))
-            .map(|(spec, _, _)| *spec)
-    }
-
     /// Look up a key across ALL contexts (Global → Map → Anim) and return the
     /// first match. Used by the hotkey dialog so that commands in any context
     /// can be triggered from the dialog.
@@ -889,36 +391,36 @@ impl KeyMap {
 
 // ── HotkeyLayout ──────────────────────────────────────────────────────────────
 
-/// Default snake_case names for the direct (always-available) command set.
-const DEFAULT_DIRECT_NAMES: &[&str] = &[
+/// Default full command-strings for the direct (always-available) command set.
+const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     "quit",
-    "save_game",
-    "restore_game",
-    "pan_left",
-    "pan_right",
-    "pan_up",
-    "pan_down",
-    "zoom_in",
-    "zoom_out",
-    "zoom_reset",
-    "select_next",
-    "select_prev",
-    "recenter",
-    "toggle_focus",
-    "cycle_layout_reverse",
-    "nudge_left",
-    "nudge_right",
-    "nudge_up",
-    "nudge_down",
+    "save-game",
+    "load-game",
+    "pan-map -1 0",
+    "pan-map 1 0",
+    "pan-map 0 -1",
+    "pan-map 0 1",
+    "zoom-map in",
+    "zoom-map out",
+    "zoom-map reset",
+    "select-room next",
+    "select-room prev",
+    "center-map",
+    "toggle-focus",
+    "cycle-layout reverse",
+    "nudge-room -1 0",
+    "nudge-room 1 0",
+    "nudge-room 0 -1",
+    "nudge-room 0 1",
 ];
 
-/// Default groups for the hotkey dialog (title, command snake_case names).
+/// Default groups for the hotkey dialog (title, registry command names).
 const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
-    ("Layout", &["retidy", "animate_tidy", "cycle_layout"]),
-    ("Layers", &["peel_layer", "merge_layer", "cycle_layer_next", "cycle_layer_prev", "rename_layer"]),
-    ("Edit", &["rename_room", "edit_notes", "delete_selected_connection", "relabel_selected_edge"]),
-    ("Files", &["open_saves", "open_history", "reset_game", "export_svg", "export_dot", "export_dump"]),
-    ("View", &["toggle_alignment", "toggle_portal_labels", "toggle_inspector", "open_gallery", "toggle_inventory", "open_verb_menu", "open_config"]),
+    ("Layout", &["tidy-map", "animate-tidy", "cycle-layout"]),
+    ("Layers", &["peel-layer", "merge-layer", "cycle-layer", "rename-layer"]),
+    ("Edit", &["rename-room", "edit-notes", "delete-connection", "relabel-edge"]),
+    ("Files", &["open-saves", "open-history", "reset-game", "export-svg", "export-dot", "export-dump"]),
+    ("View", &["toggle-alignment", "toggle-portal-labels", "toggle-inspector", "open-gallery", "toggle-inventory", "open-verb-menu", "open-config"]),
 ];
 
 /// Runtime layout for the hotkey dialog.
@@ -930,10 +432,10 @@ const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
 pub struct HotkeyLayout {
     /// The key that opens (and closes) the dialog.
     pub prefix: KeySpec,
-    /// Commands that are always available without opening the dialog.
-    pub direct: std::collections::HashSet<Command>,
-    /// Groups of commands shown in the dialog: (group title, commands).
-    pub groups: Vec<(String, Vec<Command>)>,
+    /// Full command-strings that are always available without opening the dialog.
+    pub direct: std::collections::HashSet<String>,
+    /// Groups of commands shown in the dialog: (group title, command names).
+    pub groups: Vec<(String, Vec<String>)>,
 }
 
 impl HotkeyLayout {
@@ -941,19 +443,12 @@ impl HotkeyLayout {
     pub fn default() -> HotkeyLayout {
         let prefix: KeySpec = "ctrl+k".parse().expect("ctrl+k must parse");
 
-        let direct = DEFAULT_DIRECT_NAMES
-            .iter()
-            .filter_map(|name| Command::from_name(name))
-            .collect();
+        let direct = DEFAULT_DIRECT_COMMANDS.iter().map(|s| s.to_string()).collect();
 
         let groups = DEFAULT_GROUPS
             .iter()
             .map(|(title, names)| {
-                let cmds = names
-                    .iter()
-                    .filter_map(|name| Command::from_name(name))
-                    .collect();
-                (title.to_string(), cmds)
+                (title.to_string(), names.iter().map(|s| s.to_string()).collect())
             })
             .collect();
 
@@ -975,13 +470,16 @@ impl HotkeyLayout {
             }
         }
 
-        // Override direct set if specified.
-        if let Some(direct_names) = &cfg.direct {
+        // Override direct set if specified. Each entry is a full command-string;
+        // its first token is validated against the registry.
+        if let Some(direct_cmds) = &cfg.direct {
             let mut direct_set = std::collections::HashSet::new();
-            for name in direct_names {
-                match Command::from_name(name) {
-                    Some(cmd) => { direct_set.insert(cmd); }
-                    None => warnings.push(format!("hotkeys: direct: unknown command '{name}'; skipped")),
+            for cmd in direct_cmds {
+                let name = cmd.split_whitespace().next().unwrap_or("");
+                if crate::slash::find_command(name).is_some() {
+                    direct_set.insert(cmd.clone());
+                } else {
+                    warnings.push(format!("hotkeys: direct: unknown command '{cmd}'; skipped"));
                 }
             }
             layout.direct = direct_set;
@@ -993,9 +491,11 @@ impl HotkeyLayout {
             for g in &cfg.group {
                 let mut cmds = Vec::new();
                 for name in &g.commands {
-                    match Command::from_name(name) {
-                        Some(cmd) => cmds.push(cmd),
-                        None => warnings.push(format!("hotkeys: group '{}': unknown command '{name}'; dropped", g.title)),
+                    let first = name.split_whitespace().next().unwrap_or("");
+                    if crate::slash::find_command(first).is_some() {
+                        cmds.push(name.clone());
+                    } else {
+                        warnings.push(format!("hotkeys: group '{}': unknown command '{name}'; dropped", g.title));
                     }
                 }
                 groups.push((g.title.clone(), cmds));
@@ -1006,20 +506,14 @@ impl HotkeyLayout {
         (layout, warnings)
     }
 
-    /// Check whether a command is in the direct (always-available) set.
-    pub fn is_direct(&self, cmd: Command) -> bool {
-        self.direct.contains(&cmd)
-    }
-
     /// Check whether a full keymap command-string resolves to a direct command.
     ///
     /// `cmd_str` is the full binding string as returned by `KeyMap::lookup`
-    /// (e.g. `"zoom-map in"`, `"save-game"`). Resolves direct-ness the same way
-    /// `is_direct` does — by matching the command's `full_cmd_string()` — so a
-    /// command with arguments is matched as a whole (e.g. `"cycle-layout"` is
-    /// not direct even though `"cycle-layout reverse"` is).
+    /// (e.g. `"zoom-map in"`, `"save-game"`). Matched as a whole against the
+    /// direct set, so a command with arguments is matched exactly (e.g.
+    /// `"cycle-layout"` is not direct even though `"cycle-layout reverse"` is).
     pub fn is_direct_name(&self, cmd_str: &str) -> bool {
-        self.direct.iter().any(|c| c.full_cmd_string() == cmd_str)
+        self.direct.contains(cmd_str)
     }
 }
 
@@ -1029,17 +523,6 @@ impl HotkeyLayout {
 mod tests {
     use super::*;
     use crate::input::Action;
-
-    // Task 1: Command::to_action and name()
-    #[test]
-    fn command_to_action_maps_directionals_and_names() {
-        assert!(matches!(Command::PanLeft.to_action(), Action::Pan(-1, 0)));
-        assert!(matches!(Command::NudgeUp.to_action(), Action::NudgeSelected(0, -1)));
-        assert!(matches!(Command::CycleLayerNext.to_action(), Action::CycleLayer(1)));
-        assert!(matches!(Command::AnimStepBack.to_action(), Action::AnimStep(-1)));
-        assert!(matches!(Command::SaveGame.to_action(), Action::SaveGame));
-        assert_eq!(Command::ToggleFocus.name(), "toggle_focus");
-    }
 
     // Task 2: KeySpec parsing and labels
     #[test]
@@ -1077,12 +560,12 @@ mod tests {
     fn hotkey_layout_default_direct_and_indirect() {
         let layout = HotkeyLayout::default();
         // Direct commands
-        assert!(layout.is_direct(Command::Recenter), "Recenter should be direct");
-        assert!(layout.is_direct(Command::Quit), "Quit should be direct");
-        assert!(layout.is_direct(Command::ToggleFocus), "ToggleFocus should be direct");
+        assert!(layout.is_direct_name("center-map"), "center-map should be direct");
+        assert!(layout.is_direct_name("quit"), "quit should be direct");
+        assert!(layout.is_direct_name("toggle-focus"), "toggle-focus should be direct");
         // Non-direct (dialog-only) commands
-        assert!(!layout.is_direct(Command::Retidy), "Retidy should NOT be direct");
-        assert!(!layout.is_direct(Command::OpenGallery), "OpenGallery should NOT be direct");
+        assert!(!layout.is_direct_name("tidy-map"), "tidy-map should NOT be direct");
+        assert!(!layout.is_direct_name("open-gallery"), "open-gallery should NOT be direct");
         // Groups
         assert_eq!(layout.groups.len(), 5, "default layout should have 5 groups");
         assert_eq!(layout.groups[0].0, "Layout", "first group title should be Layout");
@@ -1093,18 +576,18 @@ mod tests {
         use crate::config::{HotkeysConfig, HotkeyGroupConfig};
         let cfg = HotkeysConfig {
             prefix: None,
-            direct: Some(vec!["save_game".into(), "quit".into(), "not_a_command".into()]),
-            group: vec![HotkeyGroupConfig { title: "T".into(), commands: vec!["retidy".into()] }],
+            direct: Some(vec!["save-game".into(), "quit".into(), "not-a-command".into()]),
+            group: vec![HotkeyGroupConfig { title: "T".into(), commands: vec!["tidy-map".into()] }],
         };
         let (layout, warnings) = HotkeyLayout::resolve(&cfg);
         // Specified direct commands are direct
-        assert!(layout.is_direct(Command::SaveGame), "SaveGame should be direct");
-        assert!(layout.is_direct(Command::Quit), "Quit should be direct");
-        // Recenter is NOT in custom direct list
-        assert!(!layout.is_direct(Command::Recenter), "Recenter should NOT be direct with custom list");
+        assert!(layout.is_direct_name("save-game"), "save-game should be direct");
+        assert!(layout.is_direct_name("quit"), "quit should be direct");
+        // center-map is NOT in custom direct list
+        assert!(!layout.is_direct_name("center-map"), "center-map should NOT be direct with custom list");
         // Unknown command produces a warning
         assert!(!warnings.is_empty(), "unknown command in direct should produce warning");
-        assert!(warnings.iter().any(|w| w.contains("not_a_command")), "warning should mention not_a_command");
+        assert!(warnings.iter().any(|w| w.contains("not-a-command")), "warning should mention not-a-command");
     }
 
     #[test]
@@ -1115,15 +598,15 @@ mod tests {
             direct: None,
             group: vec![HotkeyGroupConfig {
                 title: "MyGroup".into(),
-                commands: vec!["retidy".into(), "totally_fake_cmd".into()],
+                commands: vec!["tidy-map".into(), "totally-fake-cmd".into()],
             }],
         };
         let (layout, warnings) = HotkeyLayout::resolve(&cfg);
         assert_eq!(layout.groups.len(), 1);
         assert_eq!(layout.groups[0].1.len(), 1, "unknown command should be dropped from group");
-        assert_eq!(layout.groups[0].1[0], Command::Retidy);
+        assert_eq!(layout.groups[0].1[0], "tidy-map");
         assert!(!warnings.is_empty(), "unknown group command should produce warning");
-        assert!(warnings.iter().any(|w| w.contains("totally_fake_cmd")));
+        assert!(warnings.iter().any(|w| w.contains("totally-fake-cmd")));
     }
 
     #[test]
@@ -1182,19 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_layout_reverse_command_wiring() {
-        assert_eq!(Command::CycleLayoutReverse.name(), "cycle_layout_reverse");
-        assert_eq!(Command::CycleLayoutReverse.label(), "layout back");
-        assert_eq!(Command::CycleLayoutReverse.context(), Context::Global);
-        assert!(matches!(Command::CycleLayoutReverse.to_action(), Action::CycleLayoutReverse));
-    }
-
-    #[test]
-    fn reset_game_command_wiring() {
-        assert_eq!(Command::ResetGame.name(), "reset_game");
-        assert_eq!(Command::ResetGame.label(), "reset game");
-        assert_eq!(Command::ResetGame.context(), Context::Global);
-        assert!(matches!(Command::ResetGame.to_action(), Action::ResetGame));
+    fn reset_game_default_key_is_f5() {
         // F5 is the default key
         let km = KeyMap::default();
         let f5 = KeySpec { code: KeyCode::F(5), ctrl: false, shift: false, alt: false };
@@ -1202,11 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn open_history_command_wiring() {
-        assert_eq!(Command::OpenHistory.name(), "open_history");
-        assert_eq!(Command::OpenHistory.label(), "history");
-        assert_eq!(Command::OpenHistory.context(), Context::Global);
-        assert!(matches!(Command::OpenHistory.to_action(), Action::OpenHistory));
+    fn open_history_default_key_and_group() {
         // F4 is the default key.
         let km = KeyMap::default();
         let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
@@ -1214,7 +681,7 @@ mod tests {
         // It appears in the Files hotkey group.
         let layout = HotkeyLayout::default();
         let files = layout.groups.iter().find(|(t, _)| t == "Files").expect("Files group");
-        assert!(files.1.contains(&Command::OpenHistory), "OpenHistory in Files group");
+        assert!(files.1.iter().any(|c| c == "open-history"), "open-history in Files group");
     }
 
     #[test]
@@ -1223,16 +690,15 @@ mod tests {
         let files_group = layout.groups.iter().find(|(title, _)| title == "Files");
         assert!(files_group.is_some(), "Files group should exist");
         let (_, cmds) = files_group.unwrap();
-        assert!(cmds.contains(&Command::ResetGame), "ResetGame should be in Files group");
+        assert!(cmds.iter().any(|c| c == "reset-game"), "reset-game should be in Files group");
     }
 
     #[test]
-    fn toggle_inventory_key_is_v_and_routes_to_action() {
+    fn toggle_inventory_key_is_v() {
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::Char('v'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, Context::Global);
         assert_eq!(cmd, Some("toggle-inventory"), "v should be bound to toggle-inventory");
-        assert!(matches!(Command::ToggleInventory.to_action(), Action::ToggleInventory));
     }
 
     #[test]
@@ -1241,7 +707,7 @@ mod tests {
         let view_group = layout.groups.iter().find(|(title, _)| title == "View");
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
-        assert!(cmds.contains(&Command::ToggleInventory), "ToggleInventory should be in View group");
+        assert!(cmds.iter().any(|c| c == "toggle-inventory"), "toggle-inventory should be in View group");
     }
 
     #[test]
@@ -1261,14 +727,6 @@ mod tests {
     // ── Item 2: ZoomReset command wiring ─────────────────────────────────────
 
     #[test]
-    fn zoom_reset_command_wiring() {
-        assert_eq!(Command::ZoomReset.name(), "zoom_reset");
-        assert_eq!(Command::ZoomReset.label(), "zoom reset");
-        assert_eq!(Command::ZoomReset.context(), Context::Map);
-        assert!(matches!(Command::ZoomReset.to_action(), Action::ZoomReset));
-    }
-
-    #[test]
     fn zoom_reset_bound_to_zero_key() {
         let km = KeyMap::default();
         let zero = KeySpec { code: KeyCode::Char('0'), ctrl: false, shift: false, alt: false };
@@ -1283,8 +741,8 @@ mod tests {
     fn zoom_reset_is_in_direct_set() {
         let layout = HotkeyLayout::default();
         assert!(
-            layout.is_direct(Command::ZoomReset),
-            "ZoomReset must be in the direct set (accessible without the hotkey dialog)"
+            layout.is_direct_name("zoom-map reset"),
+            "zoom-map reset must be in the direct set (accessible without the hotkey dialog)"
         );
     }
 
@@ -1324,10 +782,7 @@ mod tests {
             if excluded.contains(&first) {
                 continue;
             }
-            // Check is_direct by mapping command string back to Command via full_cmd_string.
-            let is_direct = ALL_COMMANDS.iter().copied()
-                .any(|c| c.full_cmd_string() == cmd_str.as_str() && layout.is_direct(c));
-            if !is_direct {
+            if !layout.is_direct_name(cmd_str) {
                 continue;
             }
             if spec.ctrl || spec.shift {

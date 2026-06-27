@@ -110,67 +110,69 @@ fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
 
 // ── Hint bar ─────────────────────────────────────────────────────────────────
 
-use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
+use app::keymap::{Context, HotkeyLayout, KeyMap};
 
-/// Priority-ordered command lists for the bottom hint bar.
+/// Priority-ordered command-string lists for the bottom hint bar.
 /// Commands are included only when directly available in the current context.
-/// Command::Retidy is intentionally excluded from all lists.
-const GAME_HINTS: &[Command] = &[
-    Command::ToggleFocus,
-    Command::SaveGame,
-    Command::RestoreGame,
-    Command::CycleLayout,
+/// `tidy-map` is intentionally excluded from all lists.
+const GAME_HINTS: &[&str] = &[
+    "toggle-focus",
+    "save-game",
+    "load-game",
+    "cycle-layout",
 ];
 
-const MAP_HINTS: &[Command] = &[
-    Command::ToggleFocus,
-    Command::CycleLayout,
-    Command::ZoomIn,
-    Command::Recenter,
-    Command::SelectNext,
-    Command::OpenGallery,
-    Command::ToggleInspector,
+const MAP_HINTS: &[&str] = &[
+    "toggle-focus",
+    "cycle-layout",
+    "zoom-map in",
+    "center-map",
+    "select-room next",
+    "open-gallery",
+    "toggle-inspector",
 ];
 
-const ANIM_HINTS: &[Command] = &[
-    Command::AnimStepFwd,
-    Command::AnimTogglePlay,
-    Command::AnimExit,
-    Command::PanLeft,
-    Command::ZoomIn,
+const ANIM_HINTS: &[&str] = &[
+    "anim-step forward",
+    "anim-play",
+    "anim-exit",
+    "pan-map -1 0",
+    "zoom-map in",
 ];
 
 /// Build the hint bar string for the given context from the live keymap and layout.
 ///
-/// For each command in `priority`, an entry is included only if all three hold:
-/// 1. `layout.is_direct(cmd)` — the command is directly available, not dialog-only.
-/// 2. `keymap.primary_key(cmd)` returns a KeySpec `k`.
+/// For each command-string in `priority`, an entry is included only if all three hold:
+/// 1. `layout.is_direct_name(cmd)` — the command is directly available, not dialog-only.
+/// 2. `keymap.primary_key(name)` returns a KeySpec `k`.
 /// 3. `keymap.lookup(&k, ctx) == Some(cmd)` — pressing `k` in `ctx` resolves to `cmd`.
 ///
-/// Each surviving entry renders as "{k.label()}: {cmd.label()}"; entries join with " | ".
+/// Each surviving entry renders as "{k.label()}: {label}"; entries join with " | ".
 /// If the joined string exceeds `width` characters, it is truncated and "…" appended.
 pub fn hint_bar(
     keymap: &KeyMap,
     layout: &HotkeyLayout,
     ctx: Context,
-    priority: &[Command],
+    priority: &[&str],
     width: usize,
 ) -> String {
     let entries: Vec<String> = priority
         .iter()
         .filter_map(|&cmd| {
             // Gate 1: command must be directly available (not dialog-only).
-            if !layout.is_direct(cmd) {
+            if !layout.is_direct_name(cmd) {
                 return None;
             }
             // Gate 2: command must have a primary key binding.
-            // Task 10 bridge: primary_key_cmd removed in Task 10
-            let k = keymap.primary_key_cmd(cmd)?;
+            let name = cmd.split_whitespace().next().unwrap_or("");
+            let k = keymap.primary_key(name)?;
             // Gate 3: pressing that key in this context must resolve back to this command.
-            if keymap.lookup(&k, ctx) != Some(cmd.full_cmd_string()) {
+            if keymap.lookup(&k, ctx) != Some(cmd) {
                 return None;
             }
-            Some(format!("{}: {}", k.label(), cmd.label()))
+            // Task 11: refine label — use the registry description for now.
+            let label = app::slash::find_command(name).map(|c| c.description).unwrap_or(name);
+            Some(format!("{}: {}", k.label(), label))
         })
         .collect();
 
@@ -3899,7 +3901,7 @@ mod tests {
 
     use super::{aux_dialog_key_focused, dim_area, hint_bar, hint_key_routes, is_slash, key_to_zscii, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, AuxDialogAction, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
-    use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
+    use app::keymap::{Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
 
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
@@ -3985,8 +3987,8 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
-        // With default keymap: ZoomIn primary key is '+', label from Command::label() is "zoom in"
-        assert!(line.contains("+: zoom in"), "expected '+: zoom in' in '{line}'");
+        // With default keymap: zoom-map in primary key is '+'; label is the registry description.
+        assert!(line.contains("+: zoom"), "expected '+: zoom' in '{line}'");
     }
 
     #[test]
@@ -4001,8 +4003,8 @@ mod tests {
         assert!(!line.contains("inspector"), "must not advertise inspector (dialog-only): {line}");
         assert!(!line.contains("layout"), "must not advertise cycle-layout (dialog-only): {line}");
         // The working direct keys ARE present.
-        assert!(line.contains("Tab: focus"), "focus toggle present: {line}");
-        assert!(line.contains("+: zoom in"), "zoom present: {line}");
+        assert!(line.contains("Tab: switch focus"), "focus toggle present: {line}");
+        assert!(line.contains("+: zoom"), "zoom present: {line}");
     }
 
     #[test]
@@ -4010,8 +4012,8 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         let line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
-        // Ctrl+S → SaveGame; label from Command::label() is "save game"
-        assert!(line.contains("Ctrl+S: save game"), "expected 'Ctrl+S: save game' in '{line}'");
+        // Ctrl+S → save-game; label is the registry description ("save the game…").
+        assert!(line.contains("Ctrl+S: save the game"), "expected 'Ctrl+S: save the game' in '{line}'");
     }
 
     // ── Hotkey dialog tests ───────────────────────────────────────────────────
@@ -4103,15 +4105,16 @@ mod tests {
             (Context::Anim, ANIM_HINTS),
         ] {
             for &cmd in hints {
-                if !layout.is_direct(cmd) {
+                if !layout.is_direct_name(cmd) {
                     continue;
                 }
-                // Task 10 bridge: primary_key_cmd removed in Task 10
-                if let Some(k) = km.primary_key_cmd(cmd) {
+                let name = cmd.split_whitespace().next().unwrap_or("");
+                if let Some(k) = km.primary_key(name) {
                     let resolved = km.lookup(&k, ctx);
-                    if resolved == Some(cmd.full_cmd_string()) {
+                    if resolved == Some(cmd) {
                         // This entry would be shown — verify label format.
-                        let entry = format!("{}: {}", k.label(), cmd.label());
+                        let label = app::slash::find_command(name).map(|c| c.description).unwrap_or(name);
+                        let entry = format!("{}: {}", k.label(), label);
                         let bar = hint_bar(&km, &layout, ctx, hints, 200);
                         assert!(
                             bar.contains(&entry),
@@ -4126,12 +4129,12 @@ mod tests {
     #[test]
     fn hint_bar_drops_non_direct_command() {
         use std::collections::HashSet;
-        // Build a layout where ZoomIn is NOT direct (dialog-only), but ToggleFocus IS.
-        let mut direct: HashSet<Command> = HashSet::new();
-        direct.insert(Command::ToggleFocus);
-        direct.insert(Command::Recenter);
-        direct.insert(Command::SelectNext);
-        // ZoomIn intentionally NOT in direct set.
+        // Build a layout where zoom-map in is NOT direct (dialog-only), but toggle-focus IS.
+        let mut direct: HashSet<String> = HashSet::new();
+        direct.insert("toggle-focus".into());
+        direct.insert("center-map".into());
+        direct.insert("select-room next".into());
+        // zoom-map in intentionally NOT in direct set.
         let layout = HotkeyLayout {
             prefix: "ctrl+k".parse().unwrap(),
             direct,
@@ -4140,13 +4143,13 @@ mod tests {
         let km = KeyMap::default();
         let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
         assert!(
-            !bar.contains("zoom in"),
-            "ZoomIn should be absent when not direct; got: '{bar}'"
+            !bar.contains("zoom"),
+            "zoom-map in should be absent when not direct; got: '{bar}'"
         );
-        // ToggleFocus IS direct, so it should appear.
+        // toggle-focus IS direct, so it should appear.
         assert!(
             bar.contains("focus"),
-            "ToggleFocus should still appear when direct; got: '{bar}'"
+            "toggle-focus should still appear when direct; got: '{bar}'"
         );
     }
 
@@ -4180,19 +4183,20 @@ mod tests {
     }
 
     #[test]
-    fn hint_bar_labels_come_from_command_label() {
+    fn hint_bar_labels_come_from_registry_description() {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
-        // Command::ZoomIn.label() == "zoom in" (not the old "zoom+")
+        // Task 11: refine label — label is currently the registry description.
+        // zoom-map description starts with "zoom the map…".
         assert!(
-            bar.contains("zoom in"),
-            "label must come from Command::label(); expected 'zoom in', got: '{bar}'"
+            bar.contains("zoom"),
+            "label must come from the registry description; expected 'zoom', got: '{bar}'"
         );
-        // Command::ToggleFocus.label() == "focus"
+        // toggle-focus description contains "focus".
         assert!(
             bar.contains("focus"),
-            "ToggleFocus label should be 'focus'; got: '{bar}'"
+            "toggle-focus label should contain 'focus'; got: '{bar}'"
         );
     }
 

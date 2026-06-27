@@ -1,5 +1,5 @@
-//! Slash-command parser: `parse`, curated table, fallback to `keymap::Command`,
-//! `slash_names`, and `help_text`.
+//! Slash-command parser: `parse`, the `COMMANDS` registry, `slash_names`,
+//! and `help_text`.
 //!
 //! `parse` receives the input AFTER the leading prefix character has been
 //! stripped. It does not know what the prefix was.

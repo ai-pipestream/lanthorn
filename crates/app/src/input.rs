@@ -413,7 +413,7 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return KeyResolve::Action(config_screen_key_to_action(key, state.dialog_focus));
     }
     if state.hotkey_dialog {
-        return KeyResolve::Action(hotkey_dialog_key_to_action(state, key));
+        return hotkey_dialog_key_to_action(state, key);
     }
 
     // 6.5. Room panel close: Esc or Enter while a panel is open.
@@ -980,33 +980,35 @@ pub fn mouse_to_action(
 // ── Internal: hotkey dialog key routing ───────────────────────────────────────
 
 /// When the hotkey dialog is open, route keys to either close the dialog or
-/// fire the bound command action. The dialog closes itself when a sub-mode
+/// fire the bound command. The dialog closes itself when a sub-mode
 /// opens (handled in apply_action).
-fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
+fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> KeyResolve {
     // ESC or Enter always closes the hotkey dialog (same as [X] / [Done]).
     // Enter is handled before lookup_any to prevent the Anim/AnimExit binding
     // from firing when the hotkey dialog is open.
     if matches!(key.code, KeyCode::Esc | KeyCode::Enter) && key.modifiers == KeyModifiers::NONE {
-        return Action::CloseHotkeyDialog;
+        return KeyResolve::Action(Action::CloseHotkeyDialog);
     }
 
     let spec = KeySpec::from_key_event(key);
 
     // Prefix key closes the dialog.
     if spec == state.hotkeys.prefix {
-        return Action::CloseHotkeyDialog;
+        return KeyResolve::Action(Action::CloseHotkeyDialog);
     }
 
     // Look up the key across all contexts (Global, Map, Anim) so that commands
-    // in any context can be triggered from the dialog. The dialog stays an
-    // Action-producing modal, so resolve the command-string to its Action here.
+    // in any context can be triggered from the dialog. Route the resolved
+    // command-string through the slash parser using its registry context.
     if let Some(s) = state.keymap.lookup_any(&spec) {
-        if let Some(cmd) = crate::keymap::ALL_COMMANDS.iter().copied().find(|c| c.full_cmd_string() == s) {
-            return cmd.to_action();
-        }
+        let name = s.split_whitespace().next().unwrap_or("");
+        let ctx = crate::slash::find_command(name)
+            .map(|c| c.context)
+            .unwrap_or(Context::Global);
+        return KeyResolve::Command(s.to_string(), ctx);
     }
 
-    Action::None
+    KeyResolve::None
 }
 
 // ── Internal: prompt key routing ──────────────────────────────────────────────
@@ -4459,17 +4461,17 @@ mod tests {
         use crate::config::{HotkeysConfig, HotkeyGroupConfig};
         let cfg = HotkeysConfig {
             prefix: None,
-            direct: Some(vec!["retidy".into()]),
+            direct: Some(vec!["tidy-map".into()]),
             group: vec![HotkeyGroupConfig {
                 title: "Layout".into(),
-                commands: vec!["retidy".into()],
+                commands: vec!["tidy-map".into()],
             }],
         };
         let (layout, _) = crate::keymap::HotkeyLayout::resolve(&cfg);
         let mut s = AppState::default();
         s.hotkeys = layout;
         s.focus = Focus::Map;
-        // With dialog closed: retidy is now direct → fires.
+        // With dialog closed: tidy-map is now direct → fires.
         assert!(
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy),
             "promoted retidy should fire directly (dialog closed)"
@@ -5254,8 +5256,7 @@ mod tests {
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::Char('m'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, crate::keymap::Context::Global);
-        assert_eq!(cmd, Some("open-verb-menu"), "m should be bound to OpenVerbMenu");
-        assert!(matches!(crate::keymap::Command::OpenVerbMenu.to_action(), Action::OpenVerbMenu));
+        assert_eq!(cmd, Some("open-verb-menu"), "m should be bound to open-verb-menu");
     }
 
     #[test]
@@ -5265,7 +5266,7 @@ mod tests {
         let view_group = layout.groups.iter().find(|(title, _)| title == "View");
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
-        assert!(cmds.contains(&crate::keymap::Command::OpenVerbMenu), "OpenVerbMenu should be in View group");
+        assert!(cmds.iter().any(|c| c == "open-verb-menu"), "open-verb-menu should be in View group");
     }
 
     #[test]

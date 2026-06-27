@@ -9,7 +9,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::keymap::Command;
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::render::{draw_str_clipped, put_str};
 use crate::state::AppState;
@@ -112,8 +111,13 @@ fn build_rows(state: &AppState) -> Vec<String> {
     for (title, cmds) in &state.hotkeys.groups {
         rows.push(format!("## {title}"));
         for cmd in cmds {
-            let key_label = primary_key_label(state, *cmd);
-            rows.push(format!("{:<12}  {}", key_label, cmd.label()));
+            // `cmd` is a registry command NAME (first token).
+            let key_label = primary_key_label(state, cmd);
+            // Task 11: refine label — use the registry description for now.
+            let label = crate::slash::find_command(cmd)
+                .map(|c| c.description)
+                .unwrap_or(cmd.as_str());
+            rows.push(format!("{:<12}  {}", key_label, label));
         }
         rows.push("---".into());
     }
@@ -121,10 +125,9 @@ fn build_rows(state: &AppState) -> Vec<String> {
     rows
 }
 
-/// Find the primary key label for a command in the state's keymap.
-fn primary_key_label(state: &AppState, cmd: Command) -> String {
-    // Task 10 bridge: primary_key_cmd removed in Task 10
-    state.keymap.primary_key_cmd(cmd)
+/// Find the primary key label for a command name in the state's keymap.
+fn primary_key_label(state: &AppState, cmd_name: &str) -> String {
+    state.keymap.primary_key(cmd_name)
         .map(|k| k.label())
         .unwrap_or_else(|| "?".to_string())
 }
@@ -164,8 +167,8 @@ mod tests {
         let text = buf_text(&buf);
         // The default layout has a "Layout" group
         assert!(text.contains("Layout"), "expected 'Layout' group heading in dialog");
-        // The retidy command's label appears in that group
-        assert!(text.contains("retidy"), "expected 'retidy' label in dialog");
+        // The tidy-map command's label (registry description) appears in that group
+        assert!(text.contains("tidy"), "expected 'tidy' label in dialog");
     }
 
     #[test]
