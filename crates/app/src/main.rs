@@ -140,6 +140,11 @@ const ANIM_HINTS: &[&str] = &[
     "zoom-map in",
 ];
 
+/// Short hint-bar label for a command-string: "zoom-map in" -> "zoom map in".
+fn hint_label(cmd_str: &str) -> String {
+    cmd_str.replace('-', " ")
+}
+
 /// Build the hint bar string for the given context from the live keymap and layout.
 ///
 /// For each command-string in `priority`, an entry is included only if all three hold:
@@ -170,8 +175,7 @@ pub fn hint_bar(
             if keymap.lookup(&k, ctx) != Some(cmd) {
                 return None;
             }
-            // Task 11: refine label — use the registry description for now.
-            let label = app::slash::find_command(name).map(|c| c.description).unwrap_or(name);
+            let label = hint_label(cmd);
             Some(format!("{}: {}", k.label(), label))
         })
         .collect();
@@ -3987,7 +3991,7 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
-        // With default keymap: zoom-map in primary key is '+'; label is the registry description.
+        // With default keymap: zoom-map in primary key is '+'; short label is "zoom map in".
         assert!(line.contains("+: zoom"), "expected '+: zoom' in '{line}'");
     }
 
@@ -4003,7 +4007,7 @@ mod tests {
         assert!(!line.contains("inspector"), "must not advertise inspector (dialog-only): {line}");
         assert!(!line.contains("layout"), "must not advertise cycle-layout (dialog-only): {line}");
         // The working direct keys ARE present.
-        assert!(line.contains("Tab: switch focus"), "focus toggle present: {line}");
+        assert!(line.contains("Tab: toggle focus"), "focus toggle present: {line}");
         assert!(line.contains("+: zoom"), "zoom present: {line}");
     }
 
@@ -4012,8 +4016,8 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         let line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
-        // Ctrl+S → save-game; label is the registry description ("save the game…").
-        assert!(line.contains("Ctrl+S: save the game"), "expected 'Ctrl+S: save the game' in '{line}'");
+        // Ctrl+S → save-game; short label is "save game".
+        assert!(line.contains("Ctrl+S: save game"), "expected 'Ctrl+S: save game' in '{line}'");
     }
 
     // ── Hotkey dialog tests ───────────────────────────────────────────────────
@@ -4113,8 +4117,7 @@ mod tests {
                     let resolved = km.lookup(&k, ctx);
                     if resolved == Some(cmd) {
                         // This entry would be shown — verify label format.
-                        let label = app::slash::find_command(name).map(|c| c.description).unwrap_or(name);
-                        let entry = format!("{}: {}", k.label(), label);
+                        let entry = format!("{}: {}", k.label(), super::hint_label(cmd));
                         let bar = hint_bar(&km, &layout, ctx, hints, 200);
                         assert!(
                             bar.contains(&entry),
@@ -4183,21 +4186,14 @@ mod tests {
     }
 
     #[test]
-    fn hint_bar_labels_come_from_registry_description() {
+    fn hint_bar_shows_short_registry_labels() {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
-        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
-        // Task 11: refine label — label is currently the registry description.
-        // zoom-map description starts with "zoom the map…".
-        assert!(
-            bar.contains("zoom"),
-            "label must come from the registry description; expected 'zoom', got: '{bar}'"
-        );
-        // toggle-focus description contains "focus".
-        assert!(
-            bar.contains("focus"),
-            "toggle-focus label should contain 'focus'; got: '{bar}'"
-        );
+        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        // center-map is direct and bound to 'c' in Map; its short label is "center map".
+        assert!(line.contains("center map"), "hint bar should show the short label 'center map', got: {line}");
+        // The full description sentence must NOT appear.
+        assert!(!line.contains("re-center the map"), "hint bar must not show the long description");
     }
 
     // ── dim_area ──────────────────────────────────────────────────────────────

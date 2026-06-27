@@ -113,7 +113,6 @@ fn build_rows(state: &AppState) -> Vec<String> {
         for cmd in cmds {
             // `cmd` is a registry command NAME (first token).
             let key_label = primary_key_label(state, cmd);
-            // Task 11: refine label — use the registry description for now.
             let label = crate::slash::find_command(cmd)
                 .map(|c| c.description)
                 .unwrap_or(cmd.as_str());

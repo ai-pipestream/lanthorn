@@ -804,6 +804,21 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_defaults_use_registry_names() {
+        // DEFAULT_DIRECT_COMMANDS are full command-strings; validate the first token.
+        for cmd in DEFAULT_DIRECT_COMMANDS {
+            let name = cmd.split_whitespace().next().unwrap_or("");
+            assert!(crate::slash::find_command(name).is_some(), "direct command not in registry: {cmd}");
+        }
+        // DEFAULT_GROUPS hold command names.
+        for (_title, names) in DEFAULT_GROUPS {
+            for n in *names {
+                assert!(crate::slash::find_command(n).is_some(), "group name not in registry: {n}");
+            }
+        }
+    }
+
+    #[test]
     fn keymap_default_and_resolve_command_strings() {
         use crate::config::KeymapConfig;
         let km = KeyMap::default();
