@@ -361,3 +361,31 @@ A collection of fixed-size structs each hold a `KeySize`-byte key at byte
 `binarysearch` compares keys as big-endian unsigned integers (byte-wise
 lexicographic on equal-length keys). `linkedsearch` follows the 4-byte link at
 `NextOffset` until it is zero. All key reads are bounds-checked.
+
+## 13. gestalt + verify (Phase 2b, spec §2.18)
+
+`gestalt L1 L2 S1` (0x100) — test selector L1 (with optional arg L2). Unknown
+selectors return 0. `verify S1` (0x121) — image checksum check; we store 0
+(success). Selector numbers and meanings are from the spec; the **returned
+capability values reflect what this VM actually implements** (2a/2b features
+report 1; save/undo/accel/float are deferred to 2c+ and report 0).
+
+| Sel | Name         | Num | Returns                                              |
+|-----|--------------|-----|------------------------------------------------------|
+| 0   | GlulxVersion | 0   | 0x00030102 (spec 3.1.2)                              |
+| 1   | TerpVersion  | 1   | 0x00000100 (this terp, v0.1.0)                       |
+| 2   | ResizeMem    | 2   | 1 (setmemsize supported)                            |
+| 3   | Undo         | 3   | 0 (deferred to 2c)                                  |
+| 4   | IOSystem     | 4   | 1 if L2 ∈ {0 null, 2 Glk}, else 0                   |
+| 5   | Unicode      | 5   | 1                                                    |
+| 6   | MemCopy      | 6   | 1 (mzero/mcopy)                                      |
+| 7   | MAlloc       | 7   | 1 (malloc/mfree)                                     |
+| 8   | MAllocHeap   | 8   | heap-start address (0 if the heap is inactive)      |
+| 9   | Acceleration | 9   | 0 (deferred to 2c)                                  |
+| 10  | AccelFunc    | 10  | 0 (deferred to 2c)                                  |
+| 11  | Float        | 11  | 0 (floating point deferred)                         |
+
+**Deviation note:** for selector 4 (IOSystem) the spec states the null (0) and
+filter (1) systems "will always succeed." This VM has not implemented the filter
+I/O system (it is stubbed with a diagnostic), so we honestly report 0 for L2=1
+and 1 only for the systems we run (null and Glk). Update this when filter lands.

@@ -371,6 +371,16 @@ impl Machine {
             0x150 => self.op_linearsearch(),
             0x151 => self.op_binarysearch(),
             0x152 => self.op_linkedsearch(),
+            // Capability query / image verify.
+            0x100 => {
+                let (l, s) = self.read_operands(2, 1)?;
+                let v = self.gestalt(l[0], l[1]);
+                self.store(s[0], v)
+            }
+            0x121 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                self.store(s[0], 0) // verify: report success
+            }
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
             0x41 => self.copy_sized(2),                                // copys
@@ -913,6 +923,34 @@ impl Machine {
             }
         }
         Ok(())
+    }
+
+    // ── gestalt (GLULX_NOTES §13) ─────────────────────────────────────────────
+
+    /// Version of the Glulx spec this VM targets (3.1.2).
+    const GLULX_VERSION: u32 = 0x0003_0102;
+    /// This interpreter's own version (0.1.0).
+    const TERP_VERSION: u32 = 0x0000_0100;
+
+    /// Report the capability for gestalt selector `sel` (with argument `arg`).
+    /// Returned values reflect what this VM actually implements; unimplemented
+    /// selectors and deferred features return 0.
+    fn gestalt(&self, sel: u32, arg: u32) -> u32 {
+        match sel {
+            0 => Self::GLULX_VERSION,                  // GlulxVersion
+            1 => Self::TERP_VERSION,                   // TerpVersion
+            2 => 1,                                    // ResizeMem
+            3 => 0,                                    // Undo (2c)
+            4 => u32::from(arg == 0 || arg == 2),      // IOSystem: null + Glk
+            5 => 1,                                    // Unicode
+            6 => 1,                                    // MemCopy
+            7 => 1,                                    // MAlloc
+            8 => self.heap_start,                      // MAllocHeap (0 if inactive)
+            9 => 0,                                    // Acceleration (2c)
+            10 => 0,                                   // AccelFunc (2c)
+            11 => 0,                                   // Float
+            _ => 0,
+        }
     }
 
     // ── allocation heap (GLULX_NOTES §11) ─────────────────────────────────────
@@ -2680,5 +2718,51 @@ mod tests {
         assert_eq!(run(0xAAAA), 0x140); // head
         assert_eq!(run(0xCCCC), 0x160); // tail
         assert_eq!(run(0x9999), 0); // absent → 0
+    }
+
+    // ── Task 5 (2b): gestalt + verify ─────────────────────────────────────────
+
+    #[test]
+    fn gestalt_reports_capabilities() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(0, 0), 0x0003_0102); // GlulxVersion 3.1.2
+        assert_eq!(m.gestalt(1, 0), 0x0000_0100); // TerpVersion 0.1.0
+        assert_eq!(m.gestalt(2, 0), 1); // ResizeMem
+        assert_eq!(m.gestalt(3, 0), 0); // Undo (deferred)
+        assert_eq!(m.gestalt(4, 0), 1); // IOSystem null
+        assert_eq!(m.gestalt(4, 2), 1); // IOSystem Glk
+        assert_eq!(m.gestalt(4, 1), 0); // IOSystem filter (not implemented)
+        assert_eq!(m.gestalt(5, 0), 1); // Unicode
+        assert_eq!(m.gestalt(6, 0), 1); // MemCopy
+        assert_eq!(m.gestalt(7, 0), 1); // MAlloc
+        assert_eq!(m.gestalt(8, 0), 0); // MAllocHeap inactive → 0
+        assert_eq!(m.gestalt(9, 0), 0); // Acceleration (deferred)
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc (deferred)
+        assert_eq!(m.gestalt(11, 0), 0); // Float (deferred)
+        assert_eq!(m.gestalt(999, 0), 0); // unknown selector
+    }
+
+    #[test]
+    fn gestalt_opcode_and_mallocheap() {
+        use asm::Op::{C8, Mem16, Zero};
+        // gestalt(0,0) via the opcode → 0x00030102.
+        let mut body = asm::ins(0x100, &[Zero, Zero, Mem16(0x0100)]);
+        // malloc 16 (activates heap), then gestalt(8) → heap-start address.
+        body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)]));
+        body.extend(asm::ins(0x100, &[C8(8), Zero, Mem16(0x0108)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0003_0102);
+        let heap_start = m.mem.read32(0x108).unwrap();
+        assert_eq!(heap_start, m.mem.read32(0x104).unwrap()); // == first block addr
+        assert_eq!(heap_start, m.heap_start);
+    }
+
+    #[test]
+    fn verify_returns_success() {
+        let mut body = asm::ins(0x121, &[asm::Op::Mem16(0x0100)]);
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0);
     }
 }
