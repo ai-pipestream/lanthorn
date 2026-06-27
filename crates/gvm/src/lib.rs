@@ -10,10 +10,12 @@
 #[cfg(test)]
 mod asm;
 pub mod error;
+pub mod exec;
 pub mod header;
 pub mod io;
 pub mod memory;
 
 pub use error::GError;
+pub use exec::Machine;
 pub use io::{BufferOutput, Output};
 pub use memory::{Memory, WriteFault};
