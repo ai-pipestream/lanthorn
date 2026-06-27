@@ -367,6 +367,10 @@ impl Machine {
             // Block zero / copy.
             0x170 => self.op_mzero(),
             0x171 => self.op_mcopy(),
+            // Search opcodes.
+            0x150 => self.op_linearsearch(),
+            0x151 => self.op_binarysearch(),
+            0x152 => self.op_linkedsearch(),
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
             0x41 => self.copy_sized(2),                                // copys
@@ -966,6 +970,116 @@ impl Machine {
             self.heap_start = 0;
         }
         Ok(())
+    }
+
+    // ── search opcodes (GLULX_NOTES §12) ──────────────────────────────────────
+
+    const KEY_INDIRECT: u32 = 0x01;
+    const ZERO_KEY_TERMINATES: u32 = 0x02;
+    const RETURN_INDEX: u32 = 0x04;
+
+    /// Build the search key as a byte vector: either read indirectly from the
+    /// key address, or take the low `size` bytes of the immediate value.
+    fn search_key(&self, key: u32, size: u32, options: u32) -> R<Vec<u8>> {
+        if options & Self::KEY_INDIRECT != 0 {
+            self.read_bytes(key, size)
+        } else {
+            match size {
+                1 | 2 | 4 => Ok(key.to_be_bytes()[(4 - size as usize)..].to_vec()),
+                _ => Err(format!("search: KeySize {size} must be 1, 2, or 4 for a direct key")),
+            }
+        }
+    }
+
+    /// Read `n` bytes from main memory into a vector (bounds-checked).
+    fn read_bytes(&self, addr: u32, n: u32) -> R<Vec<u8>> {
+        let mut v = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            v.push(self.m8(addr + i)? as u8);
+        }
+        Ok(v)
+    }
+
+    fn op_linearsearch(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(7, 1)?;
+        let (key, key_size, start, struct_size, num, key_off, opts) =
+            (l[0], l[1], l[2], l[3], l[4], l[5], l[6]);
+        let want = self.search_key(key, key_size, opts)?;
+        let mut found: Option<(u32, u32)> = None; // (addr, index)
+        let mut index = 0u32;
+        loop {
+            if num != 0xFFFF_FFFF && index >= num {
+                break;
+            }
+            let saddr = start.wrapping_add(index.wrapping_mul(struct_size));
+            let have = self.read_bytes(saddr + key_off, key_size)?;
+            if have == want {
+                found = Some((saddr, index));
+                break;
+            }
+            if opts & Self::ZERO_KEY_TERMINATES != 0 && have.iter().all(|&b| b == 0) {
+                break;
+            }
+            index += 1;
+        }
+        let r = Self::search_result(found, opts);
+        self.store(s[0], r)
+    }
+
+    fn op_binarysearch(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(7, 1)?;
+        let (key, key_size, start, struct_size, num, key_off, opts) =
+            (l[0], l[1], l[2], l[3], l[4], l[5], l[6]);
+        let want = self.search_key(key, key_size, opts)?;
+        let mut found: Option<(u32, u32)> = None;
+        let (mut lo, mut hi) = (0u32, num);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let saddr = start.wrapping_add(mid.wrapping_mul(struct_size));
+            let have = self.read_bytes(saddr + key_off, key_size)?;
+            match have.cmp(&want) {
+                std::cmp::Ordering::Equal => {
+                    found = Some((saddr, mid));
+                    break;
+                }
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        let r = Self::search_result(found, opts);
+        self.store(s[0], r)
+    }
+
+    fn op_linkedsearch(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(6, 1)?;
+        let (key, key_size, start, key_off, next_off, opts) =
+            (l[0], l[1], l[2], l[3], l[4], l[5]);
+        let want = self.search_key(key, key_size, opts)?;
+        let mut node = start;
+        let mut result = 0u32;
+        while node != 0 {
+            let have = self.read_bytes(node + key_off, key_size)?;
+            if have == want {
+                result = node;
+                break;
+            }
+            if opts & Self::ZERO_KEY_TERMINATES != 0 && have.iter().all(|&b| b == 0) {
+                break;
+            }
+            node = self.m32(node + next_off)?;
+        }
+        self.store(s[0], result)
+    }
+
+    /// Map a found `(addr, index)` (or `None`) to the result value per the
+    /// ReturnIndex option.
+    fn search_result(found: Option<(u32, u32)>, options: u32) -> u32 {
+        match (found, options & Self::RETURN_INDEX != 0) {
+            (Some((_, idx)), true) => idx,
+            (Some((addr, _)), false) => addr,
+            (None, true) => 0xFFFF_FFFF,
+            (None, false) => 0,
+        }
     }
 
     // ── stack-manipulation opcodes ────────────────────────────────────────────
@@ -2425,5 +2539,146 @@ mod tests {
         m.run();
         assert_eq!(m.heap_start, 0, "heap should be inactive again");
         assert_eq!(m.mem.mem_size(), floor, "memory shrinks back to heap start");
+    }
+
+    // ── Task 4 (2b): search opcodes ───────────────────────────────────────────
+
+    /// Run `linearsearch` with the given operands; return the stored result.
+    fn linear(
+        key: asm::Op,
+        keysize: i8,
+        start: u16,
+        structsize: i8,
+        numstructs: asm::Op,
+        keyoffset: i8,
+        options: i8,
+        setup: impl FnOnce(&mut Machine),
+    ) -> u32 {
+        use asm::Op::{C16, C8, Mem16};
+        let mut body = asm::ins(
+            0x150,
+            &[
+                key,
+                C8(keysize),
+                C16(start as i16),
+                C8(structsize),
+                numstructs,
+                C8(keyoffset),
+                C8(options),
+                Mem16(0x0100),
+            ],
+        );
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x300, setup);
+        m.mem.read32(0x100).unwrap()
+    }
+
+    /// Three 8-byte structs at 0x140 with 4-byte keys at offset 0.
+    fn three_structs(m: &mut Machine) {
+        poke(m, 0x140, &0x1111u32.to_be_bytes());
+        poke(m, 0x148, &0x2222u32.to_be_bytes());
+        poke(m, 0x150, &0x3333u32.to_be_bytes());
+    }
+
+    #[test]
+    fn linearsearch_finds_and_reports_absence() {
+        use asm::Op::{C32, C8};
+        // Present key → struct address.
+        assert_eq!(
+            linear(C32(0x2222), 4, 0x140, 8, C8(3), 0, 0, three_structs),
+            0x148
+        );
+        // Absent key → 0.
+        assert_eq!(linear(C32(0x9999), 4, 0x140, 8, C8(3), 0, 0, three_structs), 0);
+        // ReturnIndex (0x04): present → index 2.
+        assert_eq!(
+            linear(C32(0x3333), 4, 0x140, 8, C8(3), 0, 0x04, three_structs),
+            2
+        );
+        // ReturnIndex + absent → 0xFFFFFFFF.
+        assert_eq!(
+            linear(C32(0x9999), 4, 0x140, 8, C8(3), 0, 0x04, three_structs),
+            0xFFFF_FFFF
+        );
+    }
+
+    #[test]
+    fn linearsearch_key_indirect_and_zero_terminates() {
+        use asm::Op::{C32, C8};
+        // KeyIndirect (0x01): key bytes live at 0x110.
+        let r = linear(C32(0x0110), 4, 0x140, 8, C8(3), 0, 0x01, |m| {
+            three_structs(m);
+            poke(m, 0x110, &0x2222u32.to_be_bytes());
+        });
+        assert_eq!(r, 0x148);
+
+        // ZeroKeyTerminates (0x02): a zero key at index 1 halts before 0x3333.
+        // NumStructs -1 (no limit) so only the zero key stops it.
+        let r = linear(C32(0x3333), 4, 0x140, 8, C8(-1), 0, 0x02, |m| {
+            poke(m, 0x140, &0x1111u32.to_be_bytes());
+            poke(m, 0x148, &0u32.to_be_bytes()); // zero key terminates here
+            poke(m, 0x150, &0x3333u32.to_be_bytes());
+        });
+        assert_eq!(r, 0, "search should fail at the zero key");
+    }
+
+    #[test]
+    fn binarysearch_on_sorted_table() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        // Sorted keys 0x10,0x20,0x30,0x40 in 8-byte structs at 0x140.
+        let setup = |m: &mut Machine| {
+            for (i, k) in [0x10u32, 0x20, 0x30, 0x40].iter().enumerate() {
+                poke(m, 0x140 + 8 * i as u32, &k.to_be_bytes());
+            }
+        };
+        let run = |key: u32, options: i8| -> u32 {
+            let mut body = asm::ins(
+                0x151,
+                &[
+                    C32(key),
+                    C8(4),
+                    C16(0x0140),
+                    C8(8),
+                    C8(4),
+                    C8(0),
+                    C8(options),
+                    Mem16(0x0100),
+                ],
+            );
+            body.extend(asm::ins(0x120, &[]));
+            run_with_ram(body, 0x300, setup).mem.read32(0x100).unwrap()
+        };
+        assert_eq!(run(0x30, 0), 0x150); // address of the 3rd struct
+        assert_eq!(run(0x30, 0x04), 2); // ReturnIndex
+        assert_eq!(run(0x25, 0), 0); // absent
+        assert_eq!(run(0x10, 0x04), 0); // first element, index 0
+        assert_eq!(run(0x40, 0x04), 3); // last element
+        assert_eq!(run(0x50, 0x04), 0xFFFF_FFFF); // absent past end
+    }
+
+    #[test]
+    fn linkedsearch_over_a_linked_list() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        // Nodes: key at offset 0, next pointer at offset 4.
+        let setup = |m: &mut Machine| {
+            poke(m, 0x140, &0xAAAAu32.to_be_bytes());
+            poke(m, 0x144, &0x0150u32.to_be_bytes());
+            poke(m, 0x150, &0xBBBBu32.to_be_bytes());
+            poke(m, 0x154, &0x0160u32.to_be_bytes());
+            poke(m, 0x160, &0xCCCCu32.to_be_bytes());
+            poke(m, 0x164, &0u32.to_be_bytes()); // end of list
+        };
+        let run = |key: u32| -> u32 {
+            let mut body = asm::ins(
+                0x152,
+                &[C32(key), C8(4), C16(0x0140), C8(0), C8(4), C8(0), Mem16(0x0100)],
+            );
+            body.extend(asm::ins(0x120, &[]));
+            run_with_ram(body, 0x300, setup).mem.read32(0x100).unwrap()
+        };
+        assert_eq!(run(0xBBBB), 0x150); // middle node
+        assert_eq!(run(0xAAAA), 0x140); // head
+        assert_eq!(run(0xCCCC), 0x160); // tail
+        assert_eq!(run(0x9999), 0); // absent → 0
     }
 }

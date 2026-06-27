@@ -337,3 +337,27 @@ end. Coalescing is implicit: a freed block simply leaves a gap that the next
 `malloc` can reuse or grow across. Allocation fails (stores 0) for a
 non-positive size or if the block would push memory past a fixed ceiling
 (`MAX_MEMSIZE`). `mfree` of an address that is not an extant block faults.
+
+## 12. Search opcodes (Phase 2b, spec §2.16)
+
+A collection of fixed-size structs each hold a `KeySize`-byte key at byte
+`KeyOffset`. Searches find a struct whose key matches the given key.
+
+| Opcode       | Num   | L | S | Operands                                            |
+|--------------|-------|---|---|-----------------------------------------------------|
+| linearsearch | 0x150 | 7 | 1 | Key, KeySize, Start, StructSize, NumStructs, KeyOffset, Options |
+| binarysearch | 0x151 | 7 | 1 | same; structs sorted ascending by key; NumStructs exact |
+| linkedsearch | 0x152 | 6 | 1 | Key, KeySize, Start, KeyOffset, NextOffset, Options |
+
+**Options bitfield:**
+- `KeyIndirect` (0x01): Key is the *address* of the key bytes. Otherwise Key is
+  the value itself and KeySize must be 1/2/4 (its low bytes are used).
+- `ZeroKeyTerminates` (0x02): stop and fail at an all-zero struct key (a real
+  match on an all-zero search key still takes precedence). linear/linked only.
+- `ReturnIndex` (0x04): return the array index (or 0xFFFFFFFF on failure)
+  instead of the struct address (or 0 on failure). linear/binary only.
+
+`linearsearch` scans in order; `NumStructs` may be 0xFFFFFFFF for no limit.
+`binarysearch` compares keys as big-endian unsigned integers (byte-wise
+lexicographic on equal-length keys). `linkedsearch` follows the 4-byte link at
+`NextOffset` until it is zero. All key reads are bounds-checked.
