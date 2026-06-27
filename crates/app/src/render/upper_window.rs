@@ -88,7 +88,7 @@ pub fn draw_grid(
     let uw_area = Rect::new(area.x + x_off, area.y, uw_w, needed);
 
     // Draw the optional border and get the inner content rect.
-    let frame = draw_framed(buf, uw_area, border_style, colors.upper_window_border_sides, border_color, false);
+    let frame = draw_framed(buf, uw_area, border_style, colors.upper_window_border_sides, &colors.upper_window_border_glyphs, border_color, false);
     let content = frame.content;
 
     if content.height == 0 || content.width == 0 {

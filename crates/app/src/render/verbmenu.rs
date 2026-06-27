@@ -83,6 +83,7 @@ pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<
     let st = DialogStyle {
         frame: state.colors.dialog,
         box_style: state.colors.dialog_box_style,
+        glyphs: state.colors.dialog_glyphs.clone(),
         title: state.colors.dialog_title,
         button: state.colors.dialog_button,
         button_active: state.colors.dialog_button_active,

@@ -522,7 +522,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 
     if status_boxed {
         // Draw a pane frame around the status region.
-        let frame = draw_framed(buf, status_region, status_style_kind, state.colors.status_header_sides, state.colors.status_header, false);
+        let frame = draw_framed(buf, status_region, status_style_kind, state.colors.status_header_sides, &state.colors.status_header_glyphs, state.colors.status_header, false);
         // Render status text into the inner content row.
         render_status_content(machine, state, buf, frame.content);
     } else {
@@ -539,7 +539,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     let input_region = Rect::new(area.x, input_region_top, area.width, input_rows.min(area.height));
 
     if input_boxed {
-        let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, state.colors.input_line, false);
+        let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
         render_input_content(machine, state, buf, frame.content, normal_style);
     } else {
         render_input_content(machine, state, buf, input_region, normal_style);
@@ -1899,13 +1899,13 @@ mod tests {
     /// "plain borderless" mode that reproduces the pre-beautification pane appearance.
     #[test]
     fn panes_none_reproduce_plain_borderless() {
-        use crate::render::paneframe::{draw_pane_frame, BorderStyle};
+        use crate::render::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
         use ratatui::style::Style;
 
         // Resolve a color scheme with none borders (simulate `map_border = none`).
         let area = Rect::new(0, 0, 20, 10);
         let mut buf_map = Buffer::empty(area);
-        let frame = draw_pane_frame(&mut buf_map, area, BorderStyle::None, Style::default());
+        let frame = draw_pane_frame(&mut buf_map, area, BorderStyle::None, &PaneGlyphs::default(), Style::default());
 
         // Content must equal the full area (no inset).
         assert_eq!(
@@ -1931,7 +1931,7 @@ mod tests {
 
         // Same for story pane simulation.
         let mut buf_story = Buffer::empty(area);
-        let story_frame = draw_pane_frame(&mut buf_story, area, BorderStyle::None, Style::default());
+        let story_frame = draw_pane_frame(&mut buf_story, area, BorderStyle::None, &PaneGlyphs::default(), Style::default());
         assert_eq!(story_frame.content, area, "story pane None border must also have content == area");
     }
 

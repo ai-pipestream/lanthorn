@@ -11,6 +11,7 @@ pub enum BorderStyle {
     Double,
     Thick,
     PictureFrame,
+    Rounded,
 }
 
 pub fn parse_border_style(s: &str) -> BorderStyle {
@@ -20,6 +21,7 @@ pub fn parse_border_style(s: &str) -> BorderStyle {
         "double" => BorderStyle::Double,
         "thick" => BorderStyle::Thick,
         "picture-frame" => BorderStyle::PictureFrame,
+        "rounded" => BorderStyle::Rounded,
         _ => BorderStyle::Single,
     }
 }
@@ -32,6 +34,7 @@ pub fn border_style_name(style: BorderStyle) -> &'static str {
         BorderStyle::Double => "double",
         BorderStyle::Thick => "thick",
         BorderStyle::PictureFrame => "picture-frame",
+        BorderStyle::Rounded => "rounded",
     }
 }
 
@@ -55,9 +58,10 @@ struct Glyphs {
     br: &'static str,
 }
 
-const SINGLE: Glyphs = Glyphs { tl: "┌", top: "─", tr: "┐", side: "│", bl: "└", br: "┘" };
-const DOUBLE: Glyphs = Glyphs { tl: "╔", top: "═", tr: "╗", side: "║", bl: "╚", br: "╝" };
-const THICK: Glyphs  = Glyphs { tl: "┏", top: "━", tr: "┓", side: "┃", bl: "┗", br: "┛" };
+const SINGLE:  Glyphs = Glyphs { tl: "┌", top: "─", tr: "┐", side: "│", bl: "└", br: "┘" };
+const DOUBLE:  Glyphs = Glyphs { tl: "╔", top: "═", tr: "╗", side: "║", bl: "╚", br: "╝" };
+const THICK:   Glyphs = Glyphs { tl: "┏", top: "━", tr: "┓", side: "┃", bl: "┗", br: "┛" };
+const ROUNDED: Glyphs = Glyphs { tl: "╭", top: "─", tr: "╮", side: "│", bl: "╰", br: "╯" };
 
 // Picture-frame outer-border block glyphs.
 // `RAMP` is the lower one-eighth block series, level 1 (thin) .. 8 (full). These
@@ -131,7 +135,7 @@ fn draw_picture_frame(buf: &mut Buffer, area: Rect, color: Style) -> PaneFrame {
 
 // ── draw_pane_frame ────────────────────────────────────────────────────────────
 
-pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, color: Style) -> PaneFrame {
+pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, glyphs: &PaneGlyphs, color: Style) -> PaneFrame {
     let effective = match style {
         BorderStyle::None => {
             // No border drawn; content == area; top_inset is the top row
@@ -155,10 +159,11 @@ pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, color: 
         return PaneFrame { area, content: area, top_inset };
     }
 
-    let glyphs = match effective {
+    let g = match effective {
         BorderStyle::Single => &SINGLE,
         BorderStyle::Double => &DOUBLE,
         BorderStyle::Thick  => &THICK,
+        BorderStyle::Rounded => &ROUNDED,
         _ => unreachable!(),
     };
 
@@ -170,23 +175,23 @@ pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, color: 
     let bottom = y + h - 1;
 
     // Draw top row
-    if let Some(cell) = buf.cell_mut((x, y)) { cell.set_symbol(glyphs.tl).set_style(color); }
-    if let Some(cell) = buf.cell_mut((right, y)) { cell.set_symbol(glyphs.tr).set_style(color); }
+    if let Some(cell) = buf.cell_mut((x, y)) { cell.set_symbol(cell_sym(&glyphs.tl, g.tl)).set_style(color); }
+    if let Some(cell) = buf.cell_mut((right, y)) { cell.set_symbol(cell_sym(&glyphs.tr, g.tr)).set_style(color); }
     for cx in (x + 1)..right {
-        if let Some(cell) = buf.cell_mut((cx, y)) { cell.set_symbol(glyphs.top).set_style(color); }
+        if let Some(cell) = buf.cell_mut((cx, y)) { cell.set_symbol(cell_sym(&glyphs.top, g.top)).set_style(color); }
     }
 
     // Draw bottom row
-    if let Some(cell) = buf.cell_mut((x, bottom)) { cell.set_symbol(glyphs.bl).set_style(color); }
-    if let Some(cell) = buf.cell_mut((right, bottom)) { cell.set_symbol(glyphs.br).set_style(color); }
+    if let Some(cell) = buf.cell_mut((x, bottom)) { cell.set_symbol(cell_sym(&glyphs.bl, g.bl)).set_style(color); }
+    if let Some(cell) = buf.cell_mut((right, bottom)) { cell.set_symbol(cell_sym(&glyphs.br, g.br)).set_style(color); }
     for cx in (x + 1)..right {
-        if let Some(cell) = buf.cell_mut((cx, bottom)) { cell.set_symbol(glyphs.top).set_style(color); }
+        if let Some(cell) = buf.cell_mut((cx, bottom)) { cell.set_symbol(cell_sym(&glyphs.bottom, g.top)).set_style(color); }
     }
 
     // Draw left and right sides
     for cy in (y + 1)..bottom {
-        if let Some(cell) = buf.cell_mut((x, cy)) { cell.set_symbol(glyphs.side).set_style(color); }
-        if let Some(cell) = buf.cell_mut((right, cy)) { cell.set_symbol(glyphs.side).set_style(color); }
+        if let Some(cell) = buf.cell_mut((x, cy)) { cell.set_symbol(cell_sym(&glyphs.left, g.side)).set_style(color); }
+        if let Some(cell) = buf.cell_mut((right, cy)) { cell.set_symbol(cell_sym(&glyphs.right, g.side)).set_style(color); }
     }
 
     // content = area inset by 1 on each side
@@ -250,7 +255,7 @@ fn border_weight(s: BorderStyle) -> u8 {
     match s {
         BorderStyle::Thick => 3,
         BorderStyle::Double => 2,
-        BorderStyle::Single => 1,
+        BorderStyle::Single | BorderStyle::Rounded => 1,
         _ => 0, // None / PictureFrame never reach the per-side corner path
     }
 }
@@ -259,8 +264,18 @@ fn glyphs_for(style: BorderStyle) -> &'static Glyphs {
     match style {
         BorderStyle::Double => &DOUBLE,
         BorderStyle::Thick => &THICK,
+        BorderStyle::Rounded => &ROUNDED,
         _ => &SINGLE,
     }
+}
+
+/// Return `over`'s string if set, otherwise `fallback`.
+///
+/// Used at every border cell write to apply a per-cell glyph override from
+/// [`PaneGlyphs`] on top of the style-computed default glyph.
+#[inline]
+fn cell_sym<'a>(over: &'a Option<String>, fallback: &'a str) -> &'a str {
+    over.as_deref().unwrap_or(fallback)
 }
 
 /// Which corner of the frame, for `corner_glyph`.
@@ -289,7 +304,7 @@ fn corner_glyph(h: BorderStyle, v: BorderStyle, which: Corner) -> &'static str {
 /// its straight glyph; corners resolve via `corner_glyph`; `content` is inset by
 /// 1 only on sides that have a border; `top_inset` is the top row (between the
 /// left/right insets) only when the top side is present, else zero-height.
-pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, color: Style) -> PaneFrame {
+pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, glyphs: &PaneGlyphs, color: Style) -> PaneFrame {
     if area.width < 2 || area.height < 2 {
         let top_inset = Rect::new(area.x, area.y, area.width, 1.min(area.height));
         return PaneFrame { area, content: area, top_inset };
@@ -304,26 +319,26 @@ pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, col
     if on(sides.top) {
         let g = glyphs_for(sides.top);
         for cx in (x + 1)..right {
-            if let Some(c) = buf.cell_mut((cx, y)) { c.set_symbol(g.top).set_style(color); }
+            if let Some(c) = buf.cell_mut((cx, y)) { c.set_symbol(cell_sym(&glyphs.top, g.top)).set_style(color); }
         }
     }
     if on(sides.bottom) {
         let g = glyphs_for(sides.bottom);
         for cx in (x + 1)..right {
-            if let Some(c) = buf.cell_mut((cx, bottom)) { c.set_symbol(g.top).set_style(color); }
+            if let Some(c) = buf.cell_mut((cx, bottom)) { c.set_symbol(cell_sym(&glyphs.bottom, g.top)).set_style(color); }
         }
     }
     // Vertical runs (left/right).
     if on(sides.left) {
         let g = glyphs_for(sides.left);
         for cy in (y + 1)..bottom {
-            if let Some(c) = buf.cell_mut((x, cy)) { c.set_symbol(g.side).set_style(color); }
+            if let Some(c) = buf.cell_mut((x, cy)) { c.set_symbol(cell_sym(&glyphs.left, g.side)).set_style(color); }
         }
     }
     if on(sides.right) {
         let g = glyphs_for(sides.right);
         for cy in (y + 1)..bottom {
-            if let Some(c) = buf.cell_mut((right, cy)) { c.set_symbol(g.side).set_style(color); }
+            if let Some(c) = buf.cell_mut((right, cy)) { c.set_symbol(cell_sym(&glyphs.right, g.side)).set_style(color); }
         }
     }
     // Corners.
@@ -332,10 +347,10 @@ pub fn draw_pane_frame_sides(buf: &mut Buffer, area: Rect, sides: PaneSides, col
             if let Some(c) = buf.cell_mut((px, py)) { c.set_symbol(sym).set_style(color); }
         }
     };
-    set(buf, x, y, corner_glyph(sides.top, sides.left, Corner::Tl));
-    set(buf, right, y, corner_glyph(sides.top, sides.right, Corner::Tr));
-    set(buf, x, bottom, corner_glyph(sides.bottom, sides.left, Corner::Bl));
-    set(buf, right, bottom, corner_glyph(sides.bottom, sides.right, Corner::Br));
+    set(buf, x, y,       cell_sym(&glyphs.tl, corner_glyph(sides.top,    sides.left,  Corner::Tl)));
+    set(buf, right, y,   cell_sym(&glyphs.tr, corner_glyph(sides.top,    sides.right, Corner::Tr)));
+    set(buf, x, bottom,  cell_sym(&glyphs.bl, corner_glyph(sides.bottom, sides.left,  Corner::Bl)));
+    set(buf, right, bottom, cell_sym(&glyphs.br, corner_glyph(sides.bottom, sides.right, Corner::Br)));
 
     // Content: inset 1 on each bordered side only.
     let l = if on(sides.left) { 1 } else { 0 };
@@ -713,16 +728,16 @@ pub struct FramedPane {
 
 /// Draw a pane frame choosing the composited path for `picture-frame` or the
 /// per-side path otherwise, and resolve header placement from `header_on`.
-pub fn draw_framed(buf: &mut Buffer, area: Rect, base: BorderStyle, sides: PaneSides, color: Style, header_on: bool) -> FramedPane {
+pub fn draw_framed(buf: &mut Buffer, area: Rect, base: BorderStyle, sides: PaneSides, glyphs: &PaneGlyphs, color: Style, header_on: bool) -> FramedPane {
     if base == BorderStyle::PictureFrame {
-        let frame = draw_pane_frame(buf, area, BorderStyle::PictureFrame, color);
+        let frame = draw_pane_frame(buf, area, BorderStyle::PictureFrame, glyphs, color);
         return FramedPane {
             content: frame.content,
             header: if header_on { Some(frame.top_inset) } else { None },
             header_bordered: true,
         };
     }
-    let frame = draw_pane_frame_sides(buf, area, sides, color);
+    let frame = draw_pane_frame_sides(buf, area, sides, glyphs, color);
     let top_present = sides.top != BorderStyle::None;
     if !header_on {
         FramedPane { content: frame.content, header: None, header_bordered: false }
@@ -781,7 +796,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::Style};
         let area = Rect::new(0, 0, 6, 4);
         let mut buf = Buffer::empty(area);
-        let f = draw_pane_frame(&mut buf, area, BorderStyle::Single, Style::default());
+        let f = draw_pane_frame(&mut buf, area, BorderStyle::Single, &PaneGlyphs::default(), Style::default());
         assert_eq!(buf.cell((0,0)).unwrap().symbol(), "┌");
         assert_eq!(buf.cell((5,0)).unwrap().symbol(), "┐");
         assert_eq!(buf.cell((0,3)).unwrap().symbol(), "└");
@@ -794,7 +809,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::Style};
         let area = Rect::new(0,0,6,4);
         let mut buf = Buffer::empty(area);
-        let f = draw_pane_frame(&mut buf, area, BorderStyle::None, Style::default());
+        let f = draw_pane_frame(&mut buf, area, BorderStyle::None, &PaneGlyphs::default(), Style::default());
         assert_eq!(f.content, area);
     }
 
@@ -810,7 +825,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::Style};
         let area = Rect::new(0,0,9,8); // w=9,h=8,right=8,bottom=7
         let mut buf = Buffer::empty(area);
-        let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, Style::default());
+        let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, &PaneGlyphs::default(), Style::default());
         // Top outer border: lower-block ramp, thin at the corners rising to centre.
         assert_eq!(buf.cell((0,0)).unwrap().symbol(), "▁"); // corner, level 1
         assert_eq!(buf.cell((8,0)).unwrap().symbol(), "▁"); // corner, level 1
@@ -836,7 +851,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::Style};
         let area = Rect::new(0,0,5,5);
         let mut buf = Buffer::empty(area);
-        let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, Style::default());
+        let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, &PaneGlyphs::default(), Style::default());
         assert_eq!(buf.cell((0,0)).unwrap().symbol(), "┌"); // single, not ┏
         assert_eq!(f.content, Rect::new(1,1,3,3));
     }
@@ -886,7 +901,7 @@ mod tests {
         let sides = PaneSides { top: BorderStyle::None, bottom: BorderStyle::None, left: BorderStyle::Single, right: BorderStyle::Single };
         let area = Rect::new(0, 0, 10, 4);
         let mut buf = Buffer::empty(area);
-        let frame = draw_pane_frame_sides(&mut buf, area, sides, Style::default());
+        let frame = draw_pane_frame_sides(&mut buf, area, sides, &PaneGlyphs::default(), Style::default());
         // sides present on every row; corners are NOT drawn (no ┌ at 0,0).
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "│");
         assert_eq!(buf.cell((9, 0)).unwrap().symbol(), "│");
@@ -903,7 +918,7 @@ mod tests {
         let sides = PaneSides { top: BorderStyle::Thick, bottom: BorderStyle::None, left: BorderStyle::Single, right: BorderStyle::None };
         let area = Rect::new(0, 0, 6, 4);
         let mut buf = Buffer::empty(area);
-        let frame = draw_pane_frame_sides(&mut buf, area, sides, Style::default());
+        let frame = draw_pane_frame_sides(&mut buf, area, sides, &PaneGlyphs::default(), Style::default());
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┏"); // thick tl corner
         // top row interior is the thick horizontal; left side is the single vertical.
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "━");
@@ -933,7 +948,7 @@ mod tests {
 
         // header on + top present → header is the top border row (bordered).
         let mut b1 = Buffer::empty(area);
-        let f1 = draw_framed(&mut b1, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), Style::default(), true);
+        let f1 = draw_framed(&mut b1, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), &PaneGlyphs::default(), Style::default(), true);
         assert!(f1.header_bordered);
         assert_eq!(f1.header.unwrap().y, 0);
         assert_eq!(f1.content, Rect::new(1, 1, 10, 4));
@@ -941,7 +956,7 @@ mod tests {
         // header on + top none → header on reclaimed first content row (plain); content drops a row.
         let sides_no_top = PaneSides { top: BorderStyle::None, bottom: BorderStyle::Single, left: BorderStyle::Single, right: BorderStyle::Single };
         let mut b2 = Buffer::empty(area);
-        let f2 = draw_framed(&mut b2, area, BorderStyle::None, sides_no_top, Style::default(), true);
+        let f2 = draw_framed(&mut b2, area, BorderStyle::None, sides_no_top, &PaneGlyphs::default(), Style::default(), true);
         assert!(!f2.header_bordered);
         let h2 = f2.header.unwrap();
         assert_eq!(h2.height, 1);
@@ -950,9 +965,31 @@ mod tests {
 
         // header off → no header; content uses the inner area.
         let mut b3 = Buffer::empty(area);
-        let f3 = draw_framed(&mut b3, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), Style::default(), false);
+        let f3 = draw_framed(&mut b3, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), &PaneGlyphs::default(), Style::default(), false);
         assert!(f3.header.is_none());
         assert_eq!(f3.content, Rect::new(1, 1, 10, 4));
+    }
+
+    #[test]
+    fn glyph_override_beats_style_and_base() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let area = Rect::new(0, 0, 6, 4);
+        let mut buf = Buffer::empty(area);
+        let sides = PaneSides { top: BorderStyle::Single, bottom: BorderStyle::Single, left: BorderStyle::Single, right: BorderStyle::Single };
+        let glyphs = PaneGlyphs { top: Some("═".into()), tl: Some("╔".into()), ..Default::default() };
+        draw_pane_frame_sides(&mut buf, area, sides, &glyphs, Style::default());
+        // top edge cell uses the override "═", not the single "─"; tl corner uses "╔"
+        assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "═");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "╔");
+        // an un-overridden corner falls back to the adaptive single glyph
+        assert_eq!(buf.cell((5, 0)).unwrap().symbol(), "┐");
+    }
+
+    #[test]
+    fn rounded_border_uses_rounded_corners() {
+        assert_eq!(glyphs_for(BorderStyle::Rounded).tl, "╭");
+        assert_eq!(glyphs_for(BorderStyle::Rounded).br, "╯");
+        assert_eq!(parse_border_style("rounded"), BorderStyle::Rounded);
     }
 
 }

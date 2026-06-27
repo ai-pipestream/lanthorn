@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::paneframe::{BorderStyle, InsetSegment, draw_pane_frame, draw_top_inset};
+use super::paneframe::{BorderStyle, InsetSegment, PaneGlyphs, draw_pane_frame, draw_top_inset};
 
 // ── centered_rect ─────────────────────────────────────────────────────────────
 
@@ -50,6 +50,7 @@ pub struct DialogButton {
 pub struct DialogStyle {
     pub frame: Style,
     pub box_style: BorderStyle,
+    pub glyphs: PaneGlyphs,
     pub title: Style,
     pub button: Style,
     pub button_active: Style,
@@ -132,7 +133,7 @@ pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> Dia
     }
 
     // (4) draw_pane_frame for the border
-    let pane = draw_pane_frame(buf, area, box_style, st.frame);
+    let pane = draw_pane_frame(buf, area, box_style, &st.glyphs, st.frame);
 
     // (5) Overlay the centered title via draw_top_inset
     let title_seg = InsetSegment { text: spec.title, active: false };
@@ -216,6 +217,7 @@ pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> Dia
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::paneframe::PaneGlyphs;
 
     #[test]
     fn dialog_opaque_bg_covers_underlying_and_records_rects() {
@@ -224,7 +226,7 @@ mod tests {
         let mut buf = Buffer::empty(full);
         // pre-fill a REVERSED cell where the dialog will sit
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false };
+        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false };
         let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None };
         let r = draw_dialog(&mut buf, &spec, &st);
         // opaque: the covered cell no longer REVERSED
@@ -246,7 +248,7 @@ mod tests {
     fn dialog_shadow_paints_offset_cells_when_on() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style,Color}};
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true };
+        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true };
         let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None };
         let r = draw_dialog(&mut buf, &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
@@ -262,6 +264,7 @@ mod tests {
         let st = DialogStyle {
             frame: Style::default(),
             box_style: BorderStyle::Single,
+            glyphs: PaneGlyphs::default(),
             title: Style::default(),
             button: Style::default(),
             button_active: Style::default().add_modifier(Modifier::REVERSED),

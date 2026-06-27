@@ -325,7 +325,7 @@ fn draw_frame(
 
         match state.layout {
             Layout::TranscriptFull => {
-                let story_fp = draw_framed(buf, main_area, state.colors.story_border_style, state.colors.story_border_sides, story_border_style, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, main_area, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
@@ -354,7 +354,7 @@ fn draw_frame(
                 };
                 let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                 let active_layer = state.active_layer(graph);
-                let map_fp = draw_framed(buf, main_area, state.colors.map_border_style, state.colors.map_border_sides, state.colors.map_border, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, main_area, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -395,7 +395,7 @@ fn draw_frame(
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
                     .split(main_area);
 
-                let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, story_border_style, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let used = draw_upper_window(&session.machine, state.char_mode, &state.colors, c, buf);
                 let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
@@ -412,7 +412,7 @@ fn draw_frame(
                 }
                 story_area = story_fp.content;
 
-                let map_fp = draw_framed(buf, chunks[1], state.colors.map_border_style, state.colors.map_border_sides, state.colors.map_border, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, chunks[1], state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -3236,6 +3236,7 @@ fn make_dialog_style(state: &AppState) -> DialogStyle {
     DialogStyle {
         frame: state.colors.dialog,
         box_style: state.colors.dialog_box_style,
+        glyphs: state.colors.dialog_glyphs.clone(),
         title: state.colors.dialog_title,
         button: state.colors.dialog_button,
         button_active: state.colors.dialog_button_active,
@@ -3674,7 +3675,7 @@ mod tests {
     use super::{aux_dialog_key_focused, dim_area, hint_bar, hint_key_routes, is_slash, key_to_zscii, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, AuxDialogAction, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Command, Context, HotkeyLayout, KeyMap};
-    use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
+    use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
 
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
 
@@ -3690,7 +3691,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
-        let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, cs.map_border);
+        let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, &PaneGlyphs::default(), cs.map_border);
         // DEFAULT_STYLE_TOML sets map_border to picture-frame: top outer row is the
         // lower-block ramp (▁ at the corner), the sides are thin one-eighth blocks.
         assert_eq!(
@@ -3723,7 +3724,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
 
         // Draw the story pane frame (same as draw_frame does).
-        let frame = draw_pane_frame(&mut buf, area, cs.story_border_style, cs.story_border);
+        let frame = draw_pane_frame(&mut buf, area, cs.story_border_style, &PaneGlyphs::default(), cs.story_border);
 
         // Overlay the adventure title (single centered segment, not active).
         draw_top_inset(
