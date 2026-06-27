@@ -44,6 +44,12 @@ pub fn wants_raw_char(stdin_is_tty: bool) -> bool {
     stdin_is_tty
 }
 
+/// True once `lines` reaches the page limit (`page_height - 1`); a height < 2
+/// never pages (avoids a zero/looping page).
+pub fn should_page(lines: u16, page_height: u16) -> bool {
+    page_height >= 2 && lines >= page_height - 1
+}
+
 /// Map the bytes AFTER an ESC into a Z-machine input code (ZMSD §3.8):
 /// cursor keys 129-132 (up/down/left/right), F1-F4 133-136. `None` if unknown.
 pub fn decode_escape_seq(seq: &[u8]) -> Option<u8> {
@@ -436,6 +442,15 @@ mod tests {
             ansi.contains("\x1b[1m") && ansi.ends_with("\x1b[0m"),
             "ansi: {ansi:?}"
         );
+    }
+
+    #[test]
+    fn should_page_at_threshold() {
+        assert!(!should_page(0, 24));
+        assert!(!should_page(22, 24));
+        assert!(should_page(23, 24)); // page_height - 1
+        assert!(should_page(99, 24));
+        assert!(!should_page(5, 1)); // degenerate height never pages
     }
 
     #[test]

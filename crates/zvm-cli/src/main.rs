@@ -31,24 +31,46 @@ mod aux; // implemented in Task 5; declared now so the module tree is stable
 /// On a TTY it wraps styled lower-window text in SGR; when piped it stays plain.
 struct StdoutOutput {
     is_tty: bool,
+    paging: bool,
+    page_height: u16,
+    lines: u16,
+    orig_mode: Option<String>,
 }
 
 impl StdoutOutput {
-    fn new(is_tty: bool) -> Self {
-        StdoutOutput { is_tty }
+    fn new(is_tty: bool, paging: bool, page_height: u16, orig_mode: Option<String>) -> Self {
+        StdoutOutput { is_tty, paging, page_height, lines: 0, orig_mode }
+    }
+
+    /// Emit `s`, counting newlines; pause with `[MORE]` when a page fills.
+    fn write_counted(&mut self, s: &str) {
+        for (i, segment) in s.split('\n').enumerate() {
+            if i > 0 {
+                print!("\n");
+                self.lines += 1;
+                if self.paging && crate::screen::should_page(self.lines, self.page_height) {
+                    let _ = io::stdout().flush();
+                    print!("\x1b[7m[MORE]\x1b[0m");
+                    let _ = io::stdout().flush();
+                    let _ = read_char_input(true, &self.orig_mode); // wait for a key
+                    print!("\r\x1b[2K"); // erase the [MORE] prompt
+                    self.lines = 0;
+                }
+            }
+            print!("{}", segment);
+        }
+        let _ = io::stdout().flush();
     }
 }
 
 impl Output for StdoutOutput {
     fn print(&mut self, s: &str) {
-        print!("{}", s);
-        let _ = io::stdout().flush();
+        self.write_counted(s);
     }
 
     fn print_styled(&mut self, s: &str, style: u8) {
         let out = crate::screen::style_wrap(s, style, self.is_tty);
-        print!("{}", out);
-        let _ = io::stdout().flush();
+        self.write_counted(&out);
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -62,7 +84,13 @@ impl Output for StdoutOutput {
 
 // ── build_machine ─────────────────────────────────────────────────────────────
 
-fn build_machine(story: Vec<u8>, stdout_is_tty: bool) -> Result<Machine, String> {
+fn build_machine(
+    story: Vec<u8>,
+    stdout_is_tty: bool,
+    paging: bool,
+    page_height: u16,
+    orig_mode: Option<String>,
+) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
         ZError::GraphicalV6 => "Error: Z-machine v6 graphical games are not supported.".to_string(),
@@ -71,7 +99,12 @@ fn build_machine(story: Vec<u8>, stdout_is_tty: bool) -> Result<Machine, String>
         ZError::Truncated => "Error: story file is truncated.".to_string(),
         _ => format!("Error loading story: {e:?}"),
     })?;
-    let mut machine = Machine::with_output(mem, Box::new(StdoutOutput::new(stdout_is_tty)));
+    let mut machine = Machine::with_output(mem, Box::new(StdoutOutput::new(
+        stdout_is_tty,
+        paging,
+        page_height,
+        orig_mode,
+    )));
     machine.init_caps();
     Ok(machine)
 }
@@ -82,14 +115,16 @@ struct Args {
     story: Option<String>,
     no_status: bool,
     no_aux: bool,
+    no_more: bool,
 }
 
 fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, no_status: false, no_aux: false };
+    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false };
     for arg in &argv[1..] {
         match arg.as_str() {
             "--no-status" | "--lower-only" => a.no_status = true,
             "--no-aux" => a.no_aux = true,
+            "--no-more" | "--no-page" => a.no_more = true,
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
             _ => {}
         }
@@ -240,7 +275,19 @@ fn main() {
         None
     };
 
-    let mut machine = match build_machine(story_bytes, stdout_is_tty) {
+    // Paging is only safe when BOTH ends are TTYs (else it would block the
+    // headless harness); --no-more disables it.
+    let term_rows = detect_term_rows();
+    let paging = stdout_is_tty && stdin_is_tty && !args.no_more;
+    let page_height = term_rows.saturating_sub(2).max(2);
+
+    let mut machine = match build_machine(
+        story_bytes,
+        stdout_is_tty,
+        paging,
+        page_height,
+        orig_mode.clone(),
+    ) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
@@ -249,7 +296,7 @@ fn main() {
     };
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
-    let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, detect_term_rows());
+    let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, term_rows);
     print!("{}", view.start());
     let _ = io::stdout().flush();
 
@@ -285,7 +332,13 @@ fn main() {
             }
 
             StepResult::Restart => {
-                machine = match build_machine(original_bytes.clone(), stdout_is_tty) {
+                machine = match build_machine(
+                    original_bytes.clone(),
+                    stdout_is_tty,
+                    paging,
+                    page_height,
+                    orig_mode.clone(),
+                ) {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("{e}");
@@ -300,6 +353,9 @@ fn main() {
                 let _ = io::stdout().flush();
                 let line = read_line_stdin();
                 machine.supply_line(line.trim_end());
+                if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+                    o.lines = 0;
+                }
             }
 
             StepResult::NeedChar => {
@@ -307,6 +363,9 @@ fn main() {
                 let _ = io::stdout().flush();
                 let ch = read_char_input(stdin_is_tty, &orig_mode);
                 machine.supply_char(ch);
+                if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+                    o.lines = 0;
+                }
             }
 
             StepResult::SaveRequest => {
@@ -361,6 +420,14 @@ mod arg_tests {
 
         let c = parse_args(&["zvm-cli".into(), "g".into()]);
         assert!(!c.no_status && !c.no_aux);
+    }
+
+    #[test]
+    fn parses_no_more_flag() {
+        let a = parse_args(&["zvm-cli".into(), "--no-more".into(), "g".into()]);
+        assert!(a.no_more);
+        let b = parse_args(&["zvm-cli".into(), "g".into()]);
+        assert!(!b.no_more);
     }
 }
 
