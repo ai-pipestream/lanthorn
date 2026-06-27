@@ -36,6 +36,28 @@ const ENTRY_TRANSCRIPT: &str = "transcript.json";
 const ENTRY_COMMAND_HISTORY: &str = "command_history.json";
 const ENTRY_SCREEN: &str = "screen.json";
 const ENTRY_AUX: &str = "aux.dat";
+/// Engine tag (the `EngineSave` engine string) the save was written by.
+const ENTRY_ENGINE: &str = "engine.txt";
+
+/// The engine tag stamped into archives written before the tag existed (and the
+/// only engine that exists today). Used as the default when an archive has no
+/// `engine.txt` entry, so legacy saves restore unchanged.
+pub const DEFAULT_ENGINE: &str = "zmachine";
+
+/// Whether an archive written by `archive_engine` may be restored while the app
+/// is running `current_engine`. The `.babelmap` archive records the engine that
+/// produced the save (see [`ArchiveContents::engine`]); a save from a different
+/// engine is refused so a future Glulx save can't be fed to the Z-machine (or
+/// vice-versa). Only `"zmachine"` exists today, so this always allows in 3b-i.
+pub fn restore_engine_allowed(archive_engine: &str, current_engine: &str) -> Result<(), String> {
+    if archive_engine == current_engine {
+        Ok(())
+    } else {
+        Err(format!(
+            "this save was written by the \"{archive_engine}\" engine, but babelmap is running the \"{current_engine}\" engine"
+        ))
+    }
+}
 const HISTORY_INDEX: &str = "history/index.json";
 
 pub const CURRENT_FORMAT_VERSION: u32 = 2;
@@ -149,6 +171,11 @@ pub struct ArchiveContents {
     pub aux: std::collections::BTreeMap<String, Vec<u8>>,
     /// Shell-style command history (empty for archives without `command_history.json`).
     pub command_history: Vec<String>,
+    /// The engine that wrote the save (`engine.txt`), defaulting to
+    /// [`DEFAULT_ENGINE`] for archives written before the tag existed. The
+    /// restore path refuses a save from a different engine (see
+    /// [`restore_engine_allowed`]).
+    pub engine: String,
 }
 
 /// Write a `.babelmap` archive containing the current map and VM save.
@@ -206,6 +233,10 @@ pub fn save_archive_meta(
     let save_bytes = machine.save_quetzal();
     zip.start_file(ENTRY_SAVE, options)?;
     zip.write_all(&save_bytes)?;
+
+    // engine.txt — the EngineSave tag (which engine produced this save).
+    zip.start_file(ENTRY_ENGINE, options)?;
+    zip.write_all(DEFAULT_ENGINE.as_bytes())?;
 
     // meta.json
     let meta_json =
@@ -441,7 +472,18 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history })
+    // engine.txt — optional; absent in archives written before the tag → default.
+    let engine = match zip.by_name(ENTRY_ENGINE) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            let _ = entry.read_to_string(&mut buf);
+            let t = buf.trim();
+            if t.is_empty() { DEFAULT_ENGINE.to_string() } else { t.to_string() }
+        }
+        Err(_) => DEFAULT_ENGINE.to_string(),
+    };
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history, engine })
 }
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
@@ -505,6 +547,27 @@ mod tests {
         let got = read_quetzal_from_file(&path).expect("read raw");
         let _ = std::fs::remove_file(&path);
         assert_eq!(got, b"FORM\x00\x00fake-quetzal");
+    }
+
+    #[test]
+    fn restore_engine_allowed_refuses_foreign_tag() {
+        // The running engine restoring its own save is allowed.
+        assert!(restore_engine_allowed(DEFAULT_ENGINE, DEFAULT_ENGINE).is_ok());
+        // A save written by a different (faked) engine is refused.
+        let err = restore_engine_allowed("glulx", DEFAULT_ENGINE)
+            .expect_err("a foreign-engine save must be refused");
+        assert!(err.contains("glulx") && err.contains(DEFAULT_ENGINE), "message names both engines: {err}");
+    }
+
+    #[test]
+    fn archive_records_and_loads_engine_tag() {
+        let machine = dummy_machine();
+        let path = temp_archive_path("engine-tag");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.engine, DEFAULT_ENGINE, "archive records the zmachine engine tag");
+        assert!(restore_engine_allowed(&ac.engine, DEFAULT_ENGINE).is_ok());
     }
 
     fn dummy_machine() -> zvm::cpu::exec::Machine {

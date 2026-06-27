@@ -7,12 +7,11 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use zvm::cpu::exec::Machine;
-use zvm::screen::StatusRight;
 
 use ratatui::style::Color;
 use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
+use crate::engine::{Introspect, StatusField, StatusModel};
 use crate::state::{AppState, Focus, StyleRun, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
@@ -658,16 +657,16 @@ pub(crate) fn format_inventory_line(
     show_inventory: bool,
     player_obj: Option<u16>,
     inventory_fallback: &[String],
-    machine: &zvm::cpu::exec::Machine,
+    introspect: Option<&dyn Introspect>,
 ) -> Option<String> {
     if !show_inventory {
         return None;
     }
-    // Use live object-tree children when player_obj is locked.
-    let items: Vec<String> = if let Some(obj) = player_obj {
-        crate::inventory::list_inventory(&machine.mem, obj)
-    } else {
-        inventory_fallback.to_vec()
+    // Use the engine's live object-tree contents when player_obj is locked and
+    // the engine exposes introspection; otherwise fall back to the parsed list.
+    let items: Vec<String> = match (player_obj, introspect) {
+        (Some(obj), Some(intro)) => intro.contents(obj),
+        _ => inventory_fallback.to_vec(),
     };
 
     if items.is_empty() {
@@ -698,7 +697,13 @@ pub(crate) fn format_inventory_line(
 /// Renders the GAME pane. Returns `(scrollbar_drawn, max_scroll)`: whether the
 /// transcript drew a scrollbar gutter (so the caller can exclude that column
 /// from text selection) and the largest meaningful `transcript_scroll` value.
-pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &mut Buffer) -> (bool, u16) {
+pub fn render_transcript(
+    status: &StatusModel,
+    introspect: Option<&dyn Introspect>,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) -> (bool, u16) {
     if area.height == 0 || area.width == 0 {
         return (false, 0);
     }
@@ -714,7 +719,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
     // For v4+ it's hidable (ToggleStatusBar / config show_status_bar) because
     // the v3 globals are garbage there — but it still pops up for a transient
     // status message so copy/slash feedback isn't lost.
-    let status_visible = machine.mem.version() <= 3
+    let status_visible = matches!(status, StatusModel::Classic { .. })
         || state.show_status_bar
         || state.status_msg.is_some();
 
@@ -734,9 +739,9 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         // Draw a pane frame around the status region.
         let frame = draw_framed(buf, status_region, status_style_kind, state.colors.status_header_sides, &state.colors.status_header_glyphs, state.colors.status_header, false);
         // Render status text into the inner content row.
-        render_status_content(machine, state, buf, frame.content);
+        render_status_content(status, state, buf, frame.content);
     } else {
-        render_status_content(machine, state, buf, status_region);
+        render_status_content(status, state, buf, status_region);
     }
 
     if area.height < status_rows + 1 {
@@ -750,9 +755,9 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 
     if input_boxed {
         let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
-        render_input_content(machine, state, buf, frame.content, normal_style);
+        render_input_content(state, buf, frame.content, normal_style);
     } else {
-        render_input_content(machine, state, buf, input_region, normal_style);
+        render_input_content(state, buf, input_region, normal_style);
     }
 
     // ── Middle area: transcript + inventory + suggestion ─────────────────────
@@ -763,7 +768,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
         return (false, 0);
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
-    render_middle(machine, state, buf, middle_area, normal_style)
+    render_middle(introspect, state, buf, middle_area, normal_style)
 }
 
 /// Draw the status bar into `region`.
@@ -774,7 +779,7 @@ pub fn render_transcript(machine: &Machine, state: &AppState, area: Rect, buf: &
 /// ones hidden), styled (base patched with the segment style), and packed into
 /// left/center/right clusters.
 fn render_status_content(
-    machine: &Machine,
+    status: &StatusModel,
     state: &AppState,
     buf: &mut Buffer,
     region: Rect,
@@ -800,37 +805,39 @@ fn render_status_content(
         return;
     }
 
-    // v4+ games have no automatic status line — the globals are not location /
-    // score / turns, so the v3 status_line() reads garbage. Show babelmap-owned
+    // Engines without an automatic status line (Z-machine v4+) have no
+    // location/score/turns globals to read, so the app shows babelmap-owned
     // info instead: the DETECTED room (left); turn counter, detection method,
     // and the filter indicator (right).
-    if machine.mem.version() >= 4 {
-        let loc = state.current_room_name.clone().unwrap_or_default();
-        let mut right = format!("turn {}", state.turns);
-        if let Some(m) = state.loc_method {
-            right.push_str("  ");
-            right.push_str(crate::render::map::loc_method_label(m));
+    let (location, right_field) = match status {
+        StatusModel::HostManaged => {
+            let loc = state.current_room_name.clone().unwrap_or_default();
+            let mut right = format!("turn {}", state.turns);
+            if let Some(m) = state.loc_method {
+                right.push_str("  ");
+                right.push_str(crate::render::map::loc_method_label(m));
+            }
+            match state.transcript_filter {
+                TranscriptFilter::Both => {}
+                TranscriptFilter::Story => right.push_str("  [filter: story]"),
+                TranscriptFilter::Meta => right.push_str("  [filter: meta]"),
+            }
+            let visible: Vec<(String, Style, crate::colors::Align)> = vec![
+                (loc, base, crate::colors::Align::Left),
+                (right, base, crate::colors::Align::Right),
+            ];
+            for (x, txt, style) in pack_status_clusters(&visible, w) {
+                draw_str_clipped(buf, region.x + x, status_y, &txt, style, region);
+            }
+            return;
         }
-        match state.transcript_filter {
-            TranscriptFilter::Both => {}
-            TranscriptFilter::Story => right.push_str("  [filter: story]"),
-            TranscriptFilter::Meta => right.push_str("  [filter: meta]"),
-        }
-        let visible: Vec<(String, Style, crate::colors::Align)> = vec![
-            (loc, base, crate::colors::Align::Left),
-            (right, base, crate::colors::Align::Right),
-        ];
-        for (x, txt, style) in pack_status_clusters(&visible, w) {
-            draw_str_clipped(buf, region.x + x, status_y, &txt, style, region);
-        }
-        return;
-    }
+        StatusModel::Classic { location, right } => (location.clone(), *right),
+    };
 
-    // Build the field values for this turn (v3 automatic status line).
-    let sl = machine.status_line();
-    let (score, moves, time) = match sl.right {
-        StatusRight::ScoreTurns { score, turns } => (Some(score.to_string()), Some(turns.to_string()), None),
-        StatusRight::Time { hours, minutes } => (None, None, Some(format!("{:02}:{:02}", hours, minutes))),
+    // Build the field values for this turn (classic automatic status line).
+    let (score, moves, time) = match right_field {
+        StatusField::ScoreTurns { score, turns } => (Some(score.to_string()), Some(turns.to_string()), None),
+        StatusField::Time { hours, minutes } => (None, None, Some(format!("{:02}:{:02}", hours, minutes))),
     };
     let filter = match state.transcript_filter {
         TranscriptFilter::Both => String::new(),
@@ -838,7 +845,7 @@ fn render_status_content(
         TranscriptFilter::Meta => "[filter: meta]".to_string(),
     };
     let fields = StatusFields {
-        location: sl.location,
+        location,
         score,
         moves,
         time,
@@ -869,7 +876,6 @@ fn render_status_content(
 /// Hidden during char-input mode (`state.char_mode == true`) because the game
 /// is awaiting a single keypress, not a typed line.
 fn render_input_content(
-    _machine: &Machine,
     state: &AppState,
     buf: &mut Buffer,
     region: Rect,
@@ -912,7 +918,7 @@ fn render_input_content(
 /// drawn in the rightmost column, and the largest meaningful `transcript_scroll`
 /// value (total wrapped rows minus the viewport) so the caller can clamp it.
 fn render_middle(
-    machine: &Machine,
+    introspect: Option<&dyn Introspect>,
     state: &AppState,
     buf: &mut Buffer,
     area: Rect,
@@ -932,7 +938,7 @@ fn render_middle(
         state.show_inventory,
         state.player_obj,
         &state.inventory_fallback,
-        machine,
+        introspect,
     );
     let has_inventory = inv_line.is_some();
     let inventory_y = middle_bottom.saturating_sub(1);
@@ -1105,6 +1111,7 @@ fn render_middle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zvm::cpu::exec::Machine;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
@@ -1185,7 +1192,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         let row: String = (0..40u16)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -1493,7 +1500,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 60, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         let top: String = (0..area.width)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -1513,7 +1520,7 @@ mod tests {
         s.current_room_name = Some("Outside".to_string());
         s.transcript = vec!["FIRSTLINE".to_string()];
         let mut buf = Buffer::empty(area);
-        render_transcript(&mv4, &s, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&mv4), None, &s, area, &mut buf);
         let top: String = (0..area.width)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
@@ -1524,7 +1531,7 @@ mod tests {
         let mut s3 = AppState::default();
         s3.show_status_bar = false;
         let mut buf3 = Buffer::empty(area);
-        render_transcript(&mv3, &s3, area, &mut buf3);
+        render_transcript(&crate::session::status_model_from_machine(&mv3), None, &s3, area, &mut buf3);
         let top3_reversed = buf3.cell((0, 0)).map(|c| c.modifier.contains(Modifier::REVERSED)).unwrap_or(false);
         assert!(top3_reversed, "v3 status bar always renders (reversed status row) regardless of toggle");
     }
@@ -1541,7 +1548,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Find the row index (1..8) for each tagged line by its first glyph / content.
         let row_text = |y: u16| -> String {
@@ -1580,7 +1587,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 20, 12); // narrow → the 40-char line wraps
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         let mut checked = 0;
         for y in 1u16..10 {
@@ -1610,7 +1617,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         let y = (1u16..9).find(|&y| {
             let row: String = (0..40u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect();
@@ -1632,7 +1639,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Bottom row (y=9) should contain "> open mailbox".
         let bottom_row: String = (0..40u16)
@@ -1663,7 +1670,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Cursor at position 4 ("> hi" = 4 chars → cursor at x=4).
         let cursor_cell = buf.cell((4, 4)).expect("cursor cell should exist");
@@ -1683,7 +1690,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Position x=4 should not have '_'.
         let cell = buf.cell((4, 4)).expect("cell should exist");
@@ -1702,7 +1709,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Position x=4 (after "> hi") should NOT have '_' because an overlay is open.
         let cell = buf.cell((4, 4)).expect("cell should exist");
@@ -1724,7 +1731,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Top row (y=0) should all have REVERSED modifier (status line background).
         let top_cell = buf.cell((0, 0)).expect("top-left cell should exist");
@@ -1745,7 +1752,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Find the '>' prompt cell and the typed 'z' cell; check their fg.
         let mut prompt_fg = None;
@@ -1775,7 +1782,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // The scrollbar gutter is the rightmost column; its thumb glyph is '█'.
         let mut thumb_fg = None;
@@ -1800,7 +1807,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         let gutter: String = (0..area.height)
             .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -1819,7 +1826,7 @@ mod tests {
         // 7-row area: 1 status + 5 transcript + 1 input
         let area = Rect::new(0, 0, 40, 7);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Middle rows y=1..5: should NOT show L9 (newest) but should show L4 or earlier.
         let found_l9 = (1u16..6u16).any(|y| {
@@ -1922,7 +1929,7 @@ mod tests {
         // 10-row area: row 0=status, rows 1..7=transcript, row 8=suggestion, row 9=input
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Row 9 (bottom) must contain the input.
         let input_row: String = (0..40u16)
@@ -1945,7 +1952,7 @@ mod tests {
         state.push_transcript_styled("connector sample", TranscriptKind::Meta, Style::new().fg(Color::Cyan));
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
         // Find a cell of the line and assert its fg is Cyan (the override), not transcript_meta.
         let found = (0..area.height).any(|y| (0..area.width).any(|x| {
             let c = &buf[(x, y)];
@@ -1971,7 +1978,7 @@ mod tests {
         let state = AppState::default();
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Top row should have at least one non-space character (status line text or reversed bg).
         // We verify the REVERSED modifier is present on the whole row.
@@ -1998,7 +2005,7 @@ mod tests {
         // 10-row area: row0=status, rows1..7=transcript, row8=inventory, row9=input.
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Row 9 (bottom) must contain the input prompt.
         let input_row: String = (0..40u16)
@@ -2023,7 +2030,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // No row should contain "Inv:".
         let found_inv = (0..10u16).any(|y| {
@@ -2050,7 +2057,7 @@ mod tests {
         // Without inventory.
         let mut buf_no = Buffer::empty(area);
         state.show_inventory = false;
-        render_transcript(&machine, &state, area, &mut buf_no);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf_no);
         let transcript_rows_no = (1u16..6u16).filter(|&y| {
             let row: String = (0..40u16)
                 .map(|x| buf_no.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -2061,7 +2068,7 @@ mod tests {
         // With inventory.
         let mut buf_yes = Buffer::empty(area);
         state.show_inventory = true;
-        render_transcript(&machine, &state, area, &mut buf_yes);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf_yes);
         let transcript_rows_yes = (1u16..6u16).filter(|&y| {
             let row: String = (0..40u16)
                 .map(|x| buf_yes.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -2080,16 +2087,16 @@ mod tests {
     fn format_inventory_line_live_vs_fallback_vs_hint() {
         let machine = minimal_machine();
         // No player_obj, no fallback → "(press i)" hint.
-        let line = format_inventory_line(true, None, &[], &machine);
+        let line = format_inventory_line(true, None, &[], None);
         assert_eq!(line, Some("Inv: (press i)".to_string()));
 
         // No player_obj but fallback available.
         let items = vec!["brass lamp".to_string()];
-        let line2 = format_inventory_line(true, None, &items, &machine);
+        let line2 = format_inventory_line(true, None, &items, None);
         assert!(line2.unwrap().contains("brass lamp"));
 
         // show_inventory = false → None.
-        let line3 = format_inventory_line(false, None, &items, &machine);
+        let line3 = format_inventory_line(false, None, &items, None);
         assert_eq!(line3, None);
     }
 
@@ -2104,7 +2111,7 @@ mod tests {
         // 10-row area; status row is y=0.
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Row 0 (status line) must contain the word "saved".
         let status_row: String = (0..40u16)
@@ -2137,7 +2144,7 @@ mod tests {
 
             let area = Rect::new(0, 0, 40, 10);
             let mut buf = Buffer::empty(area);
-            render_transcript(&machine, &state, area, &mut buf);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
             // Row 0 (status) must have REVERSED modifier (plain bar style).
             let top_cell = buf.cell((0, 0)).expect("top-left must exist");
@@ -2168,7 +2175,7 @@ mod tests {
             // Use a large enough area so boxing is not suppressed (needs >= 5 rows).
             let area = Rect::new(0, 0, 40, 12);
             let mut buf = Buffer::empty(area);
-            render_transcript(&machine, &state, area, &mut buf);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
             // Row 0 must be the top border: top-left corner must be "┌".
             assert_eq!(
@@ -2209,7 +2216,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
         // Bottom row (y=9) must contain "> go north" (plain, no box).
         let bottom_row: String = (0..40u16)
@@ -2289,7 +2296,7 @@ mod tests {
         };
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
-        render_transcript(&machine, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
         // The left side bar must actually be drawn in column 0 of the boxed status
         // region (rows 0..3) — this is the headline left/right-only use case and
         // must NOT be inert. (Regression guard: with the old base-only boxing gate
@@ -2439,5 +2446,71 @@ mod tests {
         for cont in &rows[1..] {
             assert!(cont.starts_with("  "), "continuation '{cont}' is indented 2");
         }
+    }
+
+    // ── Engine-abstraction equivalence (3b-i) ─────────────────────────────────
+    //
+    // These prove the new ScreenModel-fed render path carries exactly the same
+    // facts the old machine-fed path read, so output stays byte-identical.
+
+    /// The v3 status model carries the same location + score/turns the render
+    /// path formerly read from `machine.status_line()`.
+    #[test]
+    fn status_model_mirrors_v3_status_line() {
+        let m = minimal_machine(); // v3
+        let model = crate::session::status_model_from_machine(&m);
+        let sl = m.status_line();
+        match model {
+            StatusModel::Classic { location, right } => {
+                assert_eq!(location, sl.location);
+                match (right, sl.right) {
+                    (
+                        StatusField::ScoreTurns { score, turns },
+                        zvm::screen::StatusRight::ScoreTurns { score: s2, turns: t2 },
+                    ) => assert_eq!((score, turns), (s2, t2)),
+                    (
+                        StatusField::Time { hours, minutes },
+                        zvm::screen::StatusRight::Time { hours: h2, minutes: m2 },
+                    ) => assert_eq!((hours, minutes), (h2, m2)),
+                    _ => panic!("right-field variant mismatch"),
+                }
+            }
+            other => panic!("v3 must yield Classic, got {other:?}"),
+        }
+    }
+
+    /// A v4+ machine has no automatic status line in the model (the app draws
+    /// its own room/turn info), matching the old `version() >= 4` branch.
+    #[test]
+    fn status_model_is_host_managed_for_v4() {
+        let m = minimal_machine_v4();
+        assert_eq!(crate::session::status_model_from_machine(&m), StatusModel::HostManaged);
+    }
+
+    /// Painting the engine upper window then rendering through the ScreenModel
+    /// grid reproduces those cells exactly (the v4+ upper-window render path).
+    #[test]
+    fn upper_window_model_render_reproduces_painted_grid() {
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        let mut m = minimal_machine_v4();
+        m.screen.upper.resize(1, 3);
+        m.screen.upper.put(1, 1, 'A', 0);
+        m.screen.upper.put(1, 3, 'Z', 0);
+        m.screen.upper_window_rows = 1;
+
+        let model = crate::session::screen_model_from_machine(&m);
+        let grid = model.grid().expect("model carries a grid");
+
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = PaneSides::all(BorderStyle::None);
+
+        let area = Rect::new(0, 0, 9, 3);
+        let mut buf = Buffer::empty(area);
+        let used = crate::render::upper_window::draw_upper_window(grid, false, &colors, area, &mut buf);
+        assert_eq!(used, 1, "one active upper row consumed");
+        // cols=3 centered in 9 → x_off = 3.
+        assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "A");
+        assert_eq!(buf.cell((5, 0)).unwrap().symbol(), "Z");
     }
 }

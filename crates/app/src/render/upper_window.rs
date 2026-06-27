@@ -1,14 +1,13 @@
-/// Render the Z-machine upper-window grid atop the story pane transcript.
+/// Render the engine's text-grid (upper) window atop the story pane transcript.
 ///
-/// Public entry point: `draw_upper_window` — reads from `Machine` and delegates
-/// to the testable `draw_grid` helper.
+/// Public entry point: `draw_upper_window` — reads a neutral [`GridWindow`] from
+/// the engine's `ScreenModel` and delegates to the testable `draw_grid` helper.
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
-use zvm::cpu::exec::Machine;
-use zvm::screen::UpperWindow;
 
 use crate::colors::ColorScheme;
+use crate::engine::GridWindow;
 use crate::render::apply_text_style;
 use crate::render::paneframe::{draw_framed, BorderStyle};
 
@@ -16,9 +15,9 @@ use crate::render::paneframe::{draw_framed, BorderStyle};
 
 /// Draw the upper-window grid into `area`.
 ///
-/// - `upper`: the grid to render (from `machine.screen.upper`).
-/// - `upper_rows`: the active row count (`machine.screen.upper_window_rows`).
-/// - `cursor`: 1-based (row, col) of the upper-window cursor.
+/// - `upper`: the neutral grid to render (the `ScreenModel`'s text-grid window).
+/// - `upper_rows`: the active row count (`GridWindow::active_rows`).
+/// - `cursor`: 1-based (row, col) of the grid cursor.
 /// - `show_cursor`: when true, mark the cursor cell (e.g. while the game is
 ///   awaiting input in the upper window) so forms show where typing lands.
 /// - `colors`: resolved color scheme.
@@ -26,7 +25,7 @@ use crate::render::paneframe::{draw_framed, BorderStyle};
 ///
 /// Returns the number of terminal rows consumed (0 when `upper_rows == 0`).
 pub fn draw_grid(
-    upper: &UpperWindow,
+    upper: &GridWindow,
     upper_rows: u16,
     cursor: (u16, u16),
     show_cursor: bool,
@@ -152,25 +151,25 @@ pub fn draw_grid(
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Draw the Z-machine upper-window grid into the top of `area`, returning the
-/// number of story-pane rows consumed (0 when the upper window is inactive).
+/// Draw the engine's text-grid (upper) window into the top of `area`, returning
+/// the number of story-pane rows consumed (0 when the grid is inactive).
 ///
 /// `char_mode` is true when the game is awaiting a keypress; combined with the
-/// upper window being the current window, it decides whether to show the
-/// cursor (so in-place forms reveal where typed characters land).
+/// grid being the engine's currently selected window (`GridWindow::cursor_active`),
+/// it decides whether to show the cursor (so in-place forms reveal where typed
+/// characters land).
 pub fn draw_upper_window(
-    machine: &Machine,
+    grid: &GridWindow,
     char_mode: bool,
     colors: &ColorScheme,
     area: Rect,
     buf: &mut Buffer,
 ) -> u16 {
-    let screen = &machine.screen;
-    let show_cursor = char_mode && screen.current_window == 1;
+    let show_cursor = char_mode && grid.cursor_active;
     draw_grid(
-        &screen.upper,
-        screen.upper_window_rows,
-        (screen.cursor_row, screen.cursor_col),
+        grid,
+        grid.active_rows,
+        grid.cursor,
         show_cursor,
         colors,
         area,
@@ -184,15 +183,14 @@ pub fn draw_upper_window(
 mod tests {
     use super::*;
     use ratatui::{buffer::Buffer, layout::Rect};
-    use zvm::screen::UpperWindow;
 
     fn make_colors() -> ColorScheme {
         ColorScheme::terminal_default()
     }
 
-    /// Build a 2-row × 5-col UpperWindow with "HI" starting at (1,1).
-    fn make_upper_hi() -> UpperWindow {
-        let mut w = UpperWindow::default();
+    /// Build a 2-row × 5-col grid with "HI" starting at (1,1).
+    fn make_upper_hi() -> GridWindow {
+        let mut w = GridWindow::default();
         w.resize(2, 5);
         w.put(1, 1, 'H', 0);
         w.put(1, 2, 'I', 0);
@@ -227,7 +225,7 @@ mod tests {
         // Regression (bug #79): a game-screen-width upper window must render at its
         // own width centered in a wider pane — not stretched to the pane, which
         // made Bureaucracy's border too wide and its centered content off-place.
-        let mut upper = UpperWindow::default();
+        let mut upper = GridWindow::default();
         upper.resize(1, 10); // game screen is 10 cols wide
         upper.put(1, 1, 'A', 0);
         upper.put(1, 10, 'Z', 0); // content spans the full game screen
@@ -277,7 +275,7 @@ mod tests {
 
     #[test]
     fn viewport_scrolls_when_cursor_exceeds_height() {
-        let mut upper = UpperWindow::default();
+        let mut upper = GridWindow::default();
         upper.resize(5, 5);
         // Put 'A' at row 5 (last row, 1-based).
         upper.put(5, 1, 'A', 0);
@@ -301,7 +299,7 @@ mod tests {
 
     #[test]
     fn bold_and_reverse_style_applied() {
-        let mut upper = UpperWindow::default();
+        let mut upper = GridWindow::default();
         upper.resize(1, 3);
         // ZMSD §8.7.2 operand values: 1 = reverse-video, 2 = bold
         upper.put(1, 1, 'X', 0x02); // bold
@@ -325,7 +323,7 @@ mod tests {
 
     #[test]
     fn cursor_cell_is_marked_when_show_cursor() {
-        let mut upper = UpperWindow::default();
+        let mut upper = GridWindow::default();
         upper.resize(2, 5);
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;

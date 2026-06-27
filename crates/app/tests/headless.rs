@@ -128,9 +128,10 @@ fn headless_e2e_smoke() {
     // ── Step 3: Render transcript into TestBackend buffer ─────────────────────
 
     let machine = minimal_machine();
+    let status = app::session::status_model_from_machine(&machine);
     let transcript_area = Rect::new(0, 0, 80, 10);
     let mut trans_buf = Buffer::empty(transcript_area);
-    render_transcript(&machine, &state, transcript_area, &mut trans_buf);
+    render_transcript(&status, None, &state, transcript_area, &mut trans_buf);
 
     // Check that the pushed line appears somewhere in the buffer.
     let buf_text: String = trans_buf.content.iter()

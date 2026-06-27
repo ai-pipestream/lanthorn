@@ -1,0 +1,435 @@
+//! Engine abstraction (Glulx 3b-i).
+//!
+//! The app talks to a running game through the engine-neutral [`Engine`] trait
+//! and a small family of app-owned, engine-agnostic types ([`KeyInput`],
+//! [`ScreenModel`], [`Introspect`], the reserved [`Debugger`], and the
+//! engine-tagged [`EngineSave`]).  `zvm`'s `GameSession` implements `Engine`
+//! (see `session.rs`); a future `gvm` (Glulx) session will slot in beside it.
+//!
+//! These types deliberately carry **no** `Glk` / `Glulx` / `Z-machine` specifics
+//! in their public surface: a `GridWindow` is a grid of style-bit cells, a
+//! status line is a location plus a score/turns or clock field, an object
+//! handle is an opaque `u16`.  Each engine adapts its own world into them.
+
+use std::any::Any;
+use std::collections::BTreeMap;
+
+use crate::session::{InputKind, TurnResult};
+
+// ── Neutral key input ───────────────────────────────────────────────────────
+
+/// A neutral, terminal-agnostic key press.
+///
+/// The app maps a crossterm `KeyEvent` into this with [`key_event_to_input`];
+/// each engine converts it into its own input encoding (the `zvm` adapter maps
+/// it to ZSCII; a Glk adapter would map it to Glk keycodes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyInput {
+    Char(char),
+    Enter,
+    Backspace,
+    Tab,
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Delete,
+    Insert,
+    /// Function key F1..=F12 (carries the digit, e.g. `Func(1)` for F1).
+    Func(u8),
+}
+
+/// Map a crossterm `KeyEvent` to a neutral [`KeyInput`].
+///
+/// Returns `None` for keys with no neutral representation (media keys, modifier
+/// presses, etc.).  Modifiers are not encoded here — the caller decides whether
+/// a Ctrl/Alt combo is app routing or game input before forwarding.
+pub fn key_event_to_input(key: crossterm::event::KeyEvent) -> Option<KeyInput> {
+    use crossterm::event::KeyCode;
+    Some(match key.code {
+        KeyCode::Char(c) => KeyInput::Char(c),
+        KeyCode::Enter => KeyInput::Enter,
+        KeyCode::Backspace => KeyInput::Backspace,
+        KeyCode::Tab => KeyInput::Tab,
+        KeyCode::Esc => KeyInput::Escape,
+        KeyCode::Up => KeyInput::Up,
+        KeyCode::Down => KeyInput::Down,
+        KeyCode::Left => KeyInput::Left,
+        KeyCode::Right => KeyInput::Right,
+        KeyCode::Home => KeyInput::Home,
+        KeyCode::End => KeyInput::End,
+        KeyCode::PageUp => KeyInput::PageUp,
+        KeyCode::PageDown => KeyInput::PageDown,
+        KeyCode::Delete => KeyInput::Delete,
+        KeyCode::Insert => KeyInput::Insert,
+        KeyCode::F(n) => KeyInput::Func(n),
+        _ => return None,
+    })
+}
+
+// ── Neutral screen model (window tree) ──────────────────────────────────────
+
+/// One styled character cell in a [`GridWindow`].
+///
+/// `style` is a neutral text-style bitset following the common interactive-
+/// fiction convention (bit 1 = reverse, 2 = bold, 4 = italic, 8 = fixed-pitch).
+#[derive(Debug, Clone, Copy)]
+pub struct GridCell {
+    pub ch: char,
+    pub style: u8,
+}
+
+impl Default for GridCell {
+    fn default() -> Self {
+        GridCell { ch: ' ', style: 0 }
+    }
+}
+
+/// A text-grid window: fixed-size positioned cells with a cursor (a status line
+/// or a Glk text-grid).  The renderer applies a viewport over the logical grid
+/// and auto-follows the cursor.
+#[derive(Debug, Clone, Default)]
+pub struct GridWindow {
+    /// Logical grid width in columns.
+    pub cols: u16,
+    /// Logical grid height in rows (allocation height).
+    pub rows: u16,
+    /// `rows * cols` cells in row-major order.
+    pub cells: Vec<GridCell>,
+    /// Active row count to render (e.g. the Z-machine `upper_window_rows`); may
+    /// be less than `rows`.
+    pub active_rows: u16,
+    /// 1-based cursor (row, col).
+    pub cursor: (u16, u16),
+    /// True when this grid is the engine's currently selected output window
+    /// (drives whether the cursor is shown while awaiting a keypress).
+    pub cursor_active: bool,
+}
+
+impl GridWindow {
+    /// Resize to `rows` × `cols`, clearing all cells.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        self.rows = rows;
+        self.cols = cols;
+        self.cells = vec![GridCell::default(); rows as usize * cols as usize];
+    }
+
+    /// Cell at 1-based (`row`, `col`), or a blank default when out of bounds.
+    pub fn cell(&self, row: u16, col: u16) -> GridCell {
+        if row == 0 || col == 0 || row > self.rows || col > self.cols {
+            return GridCell::default();
+        }
+        let idx = ((row - 1) as usize) * self.cols as usize + (col - 1) as usize;
+        self.cells.get(idx).copied().unwrap_or_default()
+    }
+
+    /// Write `ch`/`style` at 1-based (`row`, `col`).  Out-of-bounds is a no-op.
+    pub fn put(&mut self, row: u16, col: u16, ch: char, style: u8) {
+        if row == 0 || col == 0 || row > self.rows || col > self.cols {
+            return;
+        }
+        let idx = ((row - 1) as usize) * self.cols as usize + (col - 1) as usize;
+        if let Some(c) = self.cells.get_mut(idx) {
+            *c = GridCell { ch, style };
+        }
+    }
+}
+
+/// A text-buffer window: the scrolling, wrapped, styled lower window.
+///
+/// In 3b-i the app keeps its own transcript buffer, so this node is a marker;
+/// 3b-ii's generic renderer drives a real buffer stream through it.
+#[derive(Debug, Clone, Default)]
+pub struct BufferWindow {}
+
+/// How a [`WinNode::Pair`] divides its space.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Split {
+    /// Size (rows or cols, per `vertical`) given to the first child.
+    pub fixed: u16,
+}
+
+/// A node in the engine-neutral window tree.
+#[derive(Debug, Clone)]
+pub enum WinNode {
+    /// A split of two child windows.
+    Pair {
+        vertical: bool,
+        split: Split,
+        first: Box<WinNode>,
+        second: Box<WinNode>,
+    },
+    /// A text-grid window.
+    Grid(GridWindow),
+    /// A text-buffer window.
+    Buffer(BufferWindow),
+    /// An empty placeholder.
+    Blank,
+}
+
+/// The right-hand field of a classic (v3-style) status line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusField {
+    ScoreTurns { score: i16, turns: u16 },
+    Time { hours: u8, minutes: u8 },
+}
+
+/// The status the app draws above the transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusModel {
+    /// A classic automatic status line (location + score/turns or clock); the
+    /// app renders it through its configurable status-bar layout.
+    Classic { location: String, right: StatusField },
+    /// The engine has no automatic status line; the app shows its own
+    /// (detected room + turn counter) info instead.
+    HostManaged,
+}
+
+/// The whole screen as an engine-neutral window tree plus the status the app
+/// draws as chrome.
+#[derive(Debug, Clone)]
+pub struct ScreenModel {
+    /// The window tree.  In 3b-i this is the degenerate `Pair { Grid, Buffer }`.
+    pub root: WinNode,
+    /// The status line the app draws above the transcript.
+    pub status: StatusModel,
+}
+
+impl ScreenModel {
+    /// Borrow the first [`GridWindow`] in the tree (the upper/status grid), if any.
+    pub fn grid(&self) -> Option<&GridWindow> {
+        fn find(node: &WinNode) -> Option<&GridWindow> {
+            match node {
+                WinNode::Grid(g) => Some(g),
+                WinNode::Pair { first, second, .. } => find(first).or_else(|| find(second)),
+                _ => None,
+            }
+        }
+        find(&self.root)
+    }
+}
+
+// ── Introspection capability ────────────────────────────────────────────────
+
+/// Read-only introspection into the game world that drives the play-aids
+/// (autocomplete vocabulary, inventory strip, room inspector, inventory
+/// tracking).  An engine without introspection (e.g. an Inform-7 Glulx game
+/// before symbol support exists) returns `None` from [`Engine::introspect`] and
+/// the aids degrade gracefully.
+///
+/// Object handles are opaque `u16` identifiers; their meaning is engine-defined.
+pub trait Introspect {
+    /// The parser vocabulary (used to seed autocomplete at startup).
+    fn vocabulary(&self) -> Vec<String>;
+    /// The display names of the direct children of `container` (the inventory
+    /// strip passes the player object here).
+    fn contents(&self, container: u16) -> Vec<String>;
+    /// The objects located directly in `room`, formatted for the inspector.
+    fn room_objects(&self, room: u16) -> Vec<String>;
+    /// The object handles whose parent is `parent` (drives inventory tracking).
+    fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16>;
+    /// The player object, if it can be identified.
+    fn player_object(&self) -> Option<u16>;
+}
+
+// ── Debugger capability (reserved) ──────────────────────────────────────────
+
+/// Reserved single-step / inspection capability for a future Story Debug +
+/// Disassembly feature.  Declared so the trait surface is future-proof; no
+/// engine implements it in 3b-i and [`Engine::debugger`] returns `None`
+/// everywhere.
+pub trait Debugger {
+    /// Execute a single instruction.
+    fn step(&mut self);
+    /// Disassemble one instruction at `addr`, returning its textual form.
+    fn decode_at(&self, addr: u32) -> String;
+}
+
+// ── Engine-tagged save ──────────────────────────────────────────────────────
+
+/// The location/room currency shared between the engine and the mapper.
+pub type LocationInfo = zvm::ObjectSnapshot;
+
+/// A persisted game state, tagged with the engine that produced it.
+///
+/// The archive records [`engine`](Self::engine) so a restore can refuse a save
+/// written by a different engine.  `bytes` is the engine-defined save blob
+/// (Quetzal for `zvm`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineSave {
+    /// The engine tag (e.g. `"zmachine"`).
+    pub engine: String,
+    /// The save format version within that engine.
+    pub format_version: u32,
+    /// The engine-defined save bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl EngineSave {
+    /// Build a save tagged for `engine`.
+    pub fn new(engine: impl Into<String>, format_version: u32, bytes: Vec<u8>) -> Self {
+        EngineSave { engine: engine.into(), format_version, bytes }
+    }
+
+    /// True when this save was produced by `engine`.
+    pub fn is_engine(&self, engine: &str) -> bool {
+        self.engine == engine
+    }
+}
+
+/// An engine operation error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineError {
+    /// A save written by a different engine was offered for restore.
+    EngineMismatch { expected: String, found: String },
+    /// The save bytes were rejected by the engine (corrupt / wrong story).
+    BadSave(String),
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::EngineMismatch { expected, found } => write!(
+                f,
+                "save engine mismatch: expected {expected}, found {found}"
+            ),
+            EngineError::BadSave(msg) => write!(f, "bad save: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}
+
+// ── The Engine trait ────────────────────────────────────────────────────────
+
+/// The app-facing handle to a running game, independent of the underlying VM.
+///
+/// The app holds a `Box<dyn Engine>` where it once held a concrete
+/// `GameSession`.  The `zvm` adapter lives in `session.rs`.
+pub trait Engine {
+    // ── turn cycle ──
+    /// Supply a player command and run to the next input request / quit.
+    fn submit(&mut self, command: &str) -> TurnResult;
+    /// Supply a single keypress.  Returns `None` when the key has no input
+    /// meaning for this engine (e.g. an arrow key under the Z-machine), in
+    /// which case the caller leaves the turn untouched.
+    fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult>;
+    /// Drain the transcript accumulated since the last drain.
+    fn take_transcript(&mut self) -> String;
+    /// Which kind of input the VM is currently waiting for.
+    fn pending_input(&self) -> InputKind;
+    /// Resume after the host performed an in-game SAVE.
+    fn resume_save(&mut self, wrote_ok: bool) -> TurnResult;
+    /// Resume after the host performed an in-game RESTORE.
+    fn resume_restore(&mut self, data: Option<&[u8]>) -> TurnResult;
+    /// Whether the game has ended.
+    fn has_quit(&self) -> bool;
+
+    // ── screen ──
+    /// The current screen as a neutral window tree + status.
+    fn screen(&self) -> ScreenModel;
+
+    // ── persistence (engine-tagged) ──
+    /// Capture the game state as an engine-tagged save.
+    fn save_state(&self) -> EngineSave;
+    /// Restore from an engine-tagged save.  Refuses a foreign-engine save.
+    fn restore_state(&mut self, save: &EngineSave) -> Result<(), EngineError>;
+
+    // ── auxiliary persistent data (neutral byte map) ──
+    /// The engine's auxiliary persistent data table.
+    fn aux_data(&self) -> &BTreeMap<String, Vec<u8>>;
+    /// Replace the auxiliary persistent data table.
+    fn set_aux_data(&mut self, data: BTreeMap<String, Vec<u8>>);
+    /// Whether the auxiliary data changed since the last clear.
+    fn aux_dirty(&self) -> bool;
+    /// Clear the auxiliary-data dirty flag.
+    fn clear_aux_dirty(&mut self);
+
+    // ── mapping ──
+    /// The player's current location, for the mapper.
+    fn current_location(&self) -> Option<LocationInfo>;
+
+    // ── capabilities / escape hatch ──
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    /// Introspection capability, when the engine has one.
+    fn introspect(&self) -> Option<&dyn Introspect> {
+        None
+    }
+    /// Debugger capability (reserved); `None` everywhere in 3b-i.
+    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+        None
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn key_event_to_input_maps_named_keys() {
+        assert_eq!(key_event_to_input(key(KeyCode::Enter)), Some(KeyInput::Enter));
+        assert_eq!(key_event_to_input(key(KeyCode::Backspace)), Some(KeyInput::Backspace));
+        assert_eq!(key_event_to_input(key(KeyCode::Esc)), Some(KeyInput::Escape));
+        assert_eq!(key_event_to_input(key(KeyCode::Up)), Some(KeyInput::Up));
+        assert_eq!(key_event_to_input(key(KeyCode::Char('y'))), Some(KeyInput::Char('y')));
+        assert_eq!(key_event_to_input(key(KeyCode::F(3))), Some(KeyInput::Func(3)));
+        // A key with no neutral form maps to None.
+        assert_eq!(key_event_to_input(key(KeyCode::CapsLock)), None);
+    }
+
+    #[test]
+    fn screen_model_builds_and_finds_grid() {
+        let mut grid = GridWindow::default();
+        grid.resize(1, 5);
+        grid.put(1, 1, 'H', 0);
+        grid.put(1, 2, 'I', 2); // bold
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                first: Box::new(WinNode::Grid(grid)),
+                second: Box::new(WinNode::Buffer(BufferWindow::default())),
+            },
+            status: StatusModel::HostManaged,
+        };
+        let g = model.grid().expect("tree has a grid");
+        assert_eq!(g.cell(1, 1).ch, 'H');
+        assert_eq!(g.cell(1, 2).ch, 'I');
+        assert_eq!(g.cell(1, 2).style, 2);
+        // Out-of-bounds is a blank default.
+        assert_eq!(g.cell(9, 9).ch, ' ');
+    }
+
+    #[test]
+    fn engine_save_round_trips_its_tag() {
+        let save = EngineSave::new("zmachine", 1, vec![1, 2, 3]);
+        assert_eq!(save.engine, "zmachine");
+        assert_eq!(save.format_version, 1);
+        assert_eq!(save.bytes, vec![1, 2, 3]);
+        assert!(save.is_engine("zmachine"));
+        assert!(!save.is_engine("glulx"));
+    }
+
+    #[test]
+    fn engine_mismatch_error_displays() {
+        let e = EngineError::EngineMismatch {
+            expected: "zmachine".into(),
+            found: "glulx".into(),
+        };
+        assert!(e.to_string().contains("zmachine"));
+        assert!(e.to_string().contains("glulx"));
+    }
+}
