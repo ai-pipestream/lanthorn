@@ -246,6 +246,31 @@ struct PaneRects {
     pub transcript_viewport_rows: u16,
 }
 
+/// Escape hatch: borrow the concrete Z-machine `GameSession` behind a
+/// `dyn Engine`.
+///
+/// Used ONLY by the persistence layer — archive save/restore, `.qzl`
+/// import/export, and the saved-screen snapshot — because the on-disk archive
+/// format serializes the Z-machine `ScreenState` and cannot change without
+/// breaking compatibility with existing saves (a no-behavior-change
+/// requirement). Everything else (gameplay, render, input, introspection,
+/// `save_state`/`restore_state`, `current_location`, aux) goes through the
+/// neutral `Engine` trait.
+fn zvm_session(engine: &dyn Engine) -> &GameSession {
+    engine
+        .as_any()
+        .downcast_ref::<GameSession>()
+        .expect("babelmap drives a Z-machine GameSession")
+}
+
+/// Mutable counterpart of [`zvm_session`]; same persistence-only rationale.
+fn zvm_session_mut(engine: &mut dyn Engine) -> &mut GameSession {
+    engine
+        .as_any_mut()
+        .downcast_mut::<GameSession>()
+        .expect("babelmap drives a Z-machine GameSession")
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -1204,6 +1229,12 @@ fn main() {
         }
     }
 
+    // From here on the app drives the game through the engine-neutral trait.
+    // (Construction above touches the concrete GameSession directly — applying
+    // the configured screen dims, undo cap, archive auto-restore, dictionary
+    // seed and starting room — which the plan allows as pre-boxing setup.)
+    let mut session: Box<dyn Engine> = Box::new(session);
+
     'event_loop: loop {
         // ── Style watch: drain events, debounce, then reload ──────────────────
         if let Some(w) = &style_watcher {
@@ -1289,7 +1320,7 @@ fn main() {
         }
 
         // Draw.
-        match draw_frame(&mut terminal, &session, &mapper, &state) {
+        match draw_frame(&mut terminal, &*session, &mapper, &state) {
             Ok(panes) => {
                 // Clamp scrollback to what the frame can actually show, so an
                 // over-scroll past the top doesn't accumulate (and lag on the
@@ -1366,7 +1397,7 @@ fn main() {
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                session.machine.aux_dirty = false;
+                                session.clear_aux_dirty();
                             }
                             AuxDialogAction::Global => {
                                 let mode = app::config::AuxStorage::Global;
@@ -1374,8 +1405,8 @@ fn main() {
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, &session.machine.aux_data);
-                                session.machine.aux_dirty = false;
+                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, session.aux_data());
+                                session.clear_aux_dirty();
                             }
                             AuxDialogAction::None => {}
                         },
@@ -1399,22 +1430,22 @@ fn main() {
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                session.machine.aux_dirty = false;
+                                session.clear_aux_dirty();
                             } else if in_archive {
                                 let mode = app::config::AuxStorage::Archive;
                                 state.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                session.machine.aux_dirty = false;
+                                session.clear_aux_dirty();
                             } else if in_global {
                                 let mode = app::config::AuxStorage::Global;
                                 state.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, &session.machine.aux_data);
-                                session.machine.aux_dirty = false;
+                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, session.aux_data());
+                                session.clear_aux_dirty();
                             }
                         }
                     }
@@ -1440,7 +1471,7 @@ fn main() {
                             ResetDialogAction::Confirm => {
                                 let clear = state.reset_clear_map;
                                 state.reset_dialog = false;
-                                reset_game(&mut session, &mut mapper, &mut state, &story_bytes, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, clear);
                             }
                             ResetDialogAction::Cancel => {
                                 state.reset_dialog = false;
@@ -1470,7 +1501,7 @@ fn main() {
                             } else if in_reset {
                                 let clear = state.reset_clear_map;
                                 state.reset_dialog = false;
-                                reset_game(&mut session, &mut mapper, &mut state, &story_bytes, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, clear);
                             } else if in_checkbox {
                                 state.reset_clear_map = !state.reset_clear_map;
                             } else if !in_dialog {
@@ -1511,7 +1542,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
                                 break;
                             }
                             QuitDialogAction::Quit => {
@@ -1548,7 +1579,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
                                 break;
                             } else if in_quit {
                                 break;
@@ -1581,7 +1612,7 @@ fn main() {
                             LaunchDialogAction::Resume => {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
                                     state.launch_dialog = false;
-                                    apply_launch_resume(&save, lines, kinds, screen, &mut session, &mut mapper, &mut state, &last_panes);
+                                    apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes);
                                 }
                             }
                             LaunchDialogAction::NewGame => {
@@ -1604,7 +1635,7 @@ fn main() {
                             if in_resume {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
                                     state.launch_dialog = false;
-                                    apply_launch_resume(&save, lines, kinds, screen, &mut session, &mut mapper, &mut state, &last_panes);
+                                    apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes);
                                 }
                             } else if in_new_game || in_close {
                                 // [X] (close) and [New game] both discard the save.
@@ -1918,9 +1949,12 @@ fn main() {
                     // escape a read_char form. Only plain keypresses reach the VM.
                     let app_combo = k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
                     if spec != state.hotkeys.prefix && !app_combo {
-                        // Map to ZSCII and forward; unknown keys are silently ignored.
-                        if let Some(byte) = key_to_zscii(*k) {
-                            let result = session.submit_char(byte);
+                        // Map to a neutral KeyInput and forward; the engine
+                        // converts it (ZSCII for the Z-machine) and returns None
+                        // for keys with no input meaning, which are ignored.
+                        if let Some(result) = app::engine::key_event_to_input(*k)
+                            .and_then(|ki| session.submit_key(ki))
+                        {
                             state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
                             apply_turn_events(&mut state, &result);
                             if let Some(note) = &result.info {
@@ -1966,7 +2000,7 @@ fn main() {
                     KeyResolve::Command(s, ctx) => {
                         let outcome = slash::parse_in_context(&s, state.config.command_prefix, ctx);
                         if dispatch_slash_outcome(
-                            outcome, &mut state, &mut mapper, &mut session, &mut style_watcher,
+                            outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
                             &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
                             last_panes.map, last_panes.story, true,
                         ) {
@@ -2187,12 +2221,12 @@ fn main() {
                     // Handle any saves-manager or reset prompt that was submitted.
                     if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
                         handle_saves_prompt(
-                            kind, buf, &save_dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes,
+                            kind, buf, &save_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes,
                         );
                     }
                     // Resume an in-game save/restore if this prompt resolved it.
-                    let quit = resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
-                    persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
+                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
                     if quit { break; }
                     continue;
                 }
@@ -2217,7 +2251,7 @@ fn main() {
                     let body = &cmd[state.config.command_prefix.len_utf8()..];
                     let outcome = slash::parse(body, state.config.command_prefix);
                     if dispatch_slash_outcome(
-                        outcome, &mut state, &mut mapper, &mut session, &mut style_watcher,
+                        outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
                         &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
                         last_panes.map, last_panes.story, false,
                     ) {
@@ -2261,10 +2295,10 @@ fn main() {
 
                 // ── Post-turn bookkeeping (history / inventory / auto-save) ──
                 post_turn_bookkeeping(
-                    &mut state, &mapper, &session, &result, &cmd,
+                    &mut state, &mapper, &*session, &result, &cmd,
                     rooms_before, conns_before, &ifid, &arc_file,
                 );
-                persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
+                persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
 
                 // Background tidy: silently re-tidy the active layer when the
                 // configured mode calls for it. Only runs in Auto layout mode.
@@ -2347,7 +2381,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+                match save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -2365,7 +2399,7 @@ fn main() {
                 // Restore map + game from the .babelmap archive.
                 match load_archive(&arc_file) {
                     Ok(ac) => {
-                        let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
+                        let restore_err = zvm_session_mut(&mut *session).machine.restore_file(&ac.save).map_err(|e| {
                             match e {
                                 zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
                                 other => format!("restore failed: {:?}", other),
@@ -2373,9 +2407,9 @@ fn main() {
                         });
                         match restore_err {
                             Ok(()) => {
-                                if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                if let Some(scr) = ac.screen.clone() { zvm_session_mut(&mut *session).machine.screen = scr; }
                                 if state.config.aux_storage != app::config::AuxStorage::Global {
-                                    session.machine.aux_data = ac.aux.clone();
+                                    session.set_aux_data(ac.aux.clone());
                                 }
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
@@ -2384,7 +2418,7 @@ fn main() {
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
-                                let loc = zvm::current_location(&session.machine);
+                                let loc = session.current_location();
                                 if let Some(snap) = loc {
                                     let rid = snap.number as mapper::graph::RoomId;
                                     let restore_result = TurnResult {
@@ -2515,10 +2549,10 @@ fn main() {
                     }
                     Some(FbEntryAction::ImportFile(path)) => {
                         state.file_browser = None;
-                        match restore_game(&path, &mut session.machine) {
+                        match restore_game(&path, &mut zvm_session_mut(&mut *session).machine) {
                             Ok(()) => {
                                 // Re-observe current location (same as RestoreGame/SavesLoad).
-                                let loc = zvm::current_location(&session.machine);
+                                let loc = session.current_location();
                                 if let Some(snap) = loc {
                                     let rid = snap.number as mapper::graph::RoomId;
                                     let restore_result = TurnResult {
@@ -2587,7 +2621,7 @@ fn main() {
                             // For a .babelmap, also load its map (as Ctrl+R does).
                             if let Ok(ac) = load_archive(&path) {
                                 if state.config.aux_storage != app::config::AuxStorage::Global {
-                                    session.machine.aux_data = ac.aux.clone();
+                                    session.set_aux_data(ac.aux.clone());
                                 }
                                 mapper = ac.mapper;
                                 if !ac.command_history.is_empty() {
@@ -2602,8 +2636,8 @@ fn main() {
                             session.resume_restore(None)
                         }
                     };
-                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, &session, &save_dir, &ifid, last_panes.map);
-                    persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
+                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &save_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &save_dir, &ifid, &mut state);
                     }
@@ -2614,7 +2648,7 @@ fn main() {
                 if let Some((path, entry_name)) = load_info {
                     match load_archive(&path) {
                         Ok(ac) => {
-                            let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
+                            let restore_err = zvm_session_mut(&mut *session).machine.restore_file(&ac.save).map_err(|e| {
                                 match e {
                                     zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
                                     other => format!("restore failed: {:?}", other),
@@ -2622,9 +2656,9 @@ fn main() {
                             });
                             match restore_err {
                                 Ok(()) => {
-                                    if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                    if let Some(scr) = ac.screen.clone() { zvm_session_mut(&mut *session).machine.screen = scr; }
                                     if state.config.aux_storage != app::config::AuxStorage::Global {
-                                        session.machine.aux_data = ac.aux.clone();
+                                        session.set_aux_data(ac.aux.clone());
                                     }
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
@@ -2639,7 +2673,7 @@ fn main() {
                                     // Restore turn counter from the loaded archive.
                                     state.turns = ac.meta.turns;
                                     // Re-observe current location.
-                                    let loc = zvm::current_location(&session.machine);
+                                    let loc = session.current_location();
                                     if let Some(snap) = loc {
                                         let rid = snap.number as mapper::graph::RoomId;
                                         let restore_result = TurnResult {
@@ -2683,7 +2717,7 @@ fn main() {
                 if let Some(r) = state.replay.take() {
                     if r.idx < state.history.len() {
                         let plan = app::history::resume_plan(&state.history, r.idx);
-                        match session.machine.restore_file(&plan.save) {
+                        match zvm_session_mut(&mut *session).machine.restore_file(&plan.save) {
                             Ok(()) => {
                                 if let Some(json) = &plan.map_json {
                                     if let Ok(m) = mapper::persist::from_json(json) {
@@ -2702,7 +2736,7 @@ fn main() {
                                 state.turns = plan.turn;
                                 state.graph_gen = state.graph_gen.wrapping_add(1);
                                 // Re-observe current location (mirror the restore path).
-                                if let Some(snap) = zvm::current_location(&session.machine) {
+                                if let Some(snap) = session.current_location() {
                                     let rid = snap.number as mapper::graph::RoomId;
                                     let restore_result = TurnResult {
                                         transcript: String::new(),
@@ -2758,13 +2792,13 @@ fn main() {
         // After apply_action: check for saves-manager or reset prompt that was submitted.
         // (This covers the case where apply_action routed a saves/reset prompt submit.)
         if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
-            handle_saves_prompt(kind, buf, &save_dir, &ifid, &mut mapper, &mut session, &mut state, &story_bytes);
+            handle_saves_prompt(kind, buf, &save_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes);
         }
 
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was
         // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
-        let quit = resolve_ingame_dialog(&mut session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
-        persist_aux_after_turn(&mut session, &mut state, &save_dir, &ifid);
+        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
+        persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
         if quit {
             break;
         }
@@ -2834,7 +2868,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+        match save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }
@@ -2866,7 +2900,7 @@ fn dispatch_slash_outcome(
     outcome: SlashOutcome,
     state: &mut AppState,
     mapper: &mut Mapper,
-    session: &mut GameSession,
+    session: &mut dyn Engine,
     style_watcher: &mut Option<app::watch::StyleWatcher>,
     save_dir: &std::path::Path,
     ifid: &str,
@@ -2905,7 +2939,7 @@ fn dispatch_slash_outcome(
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
-                    save_named(save_dir, ifid, name, &*mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
+                    save_named(save_dir, ifid, name, &*mapper, &zvm_session(&*session).machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -2922,7 +2956,7 @@ fn dispatch_slash_outcome(
                                 .unwrap_or(0),
                         ),
                     };
-                    save_archive_meta(arc_file, &*mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history)
+                    save_archive_meta(arc_file, &*mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history)
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -2951,7 +2985,7 @@ fn dispatch_slash_outcome(
                 Some(ref path) => {
                     match load_archive(path) {
                         Ok(ac) => {
-                            let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
+                            let restore_err = zvm_session_mut(&mut *session).machine.restore_file(&ac.save).map_err(|e| {
                                 match e {
                                     zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
                                     other => format!("restore failed: {:?}", other),
@@ -2959,9 +2993,9 @@ fn dispatch_slash_outcome(
                             });
                             match restore_err {
                                 Ok(()) => {
-                                    if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                    if let Some(scr) = ac.screen.clone() { zvm_session_mut(&mut *session).machine.screen = scr; }
                                     if state.config.aux_storage != app::config::AuxStorage::Global {
-                                        session.machine.aux_data = ac.aux.clone();
+                                        session.set_aux_data(ac.aux.clone());
                                     }
                                     *mapper = ac.mapper;
                                     state.transcript = ac.transcript;
@@ -2971,7 +3005,7 @@ fn dispatch_slash_outcome(
                                     if !ac.command_history.is_empty() {
                                         state.command_history = ac.command_history;
                                     }
-                                    let loc = zvm::current_location(&session.machine);
+                                    let loc = session.current_location();
                                     if let Some(snap) = loc {
                                         let rid = snap.number as mapper::graph::RoomId;
                                         let restore_result = TurnResult {
@@ -3112,7 +3146,7 @@ fn dispatch_slash_outcome(
 }
 
 fn reset_game(
-    session: &mut GameSession,
+    session: &mut dyn Engine,
     mapper: &mut Mapper,
     state: &mut AppState,
     story_bytes: &[u8],
@@ -3120,9 +3154,10 @@ fn reset_game(
 ) {
     match GameSession::new(story_bytes.to_vec()) {
         Ok(new_session) => {
-            *session = new_session;
-            session.machine.undo_cap = state.config.undo_levels;
-            let start_loc = zvm::current_location(&session.machine);
+            // Replace the GameSession behind the engine box (restart).
+            *zvm_session_mut(session) = new_session;
+            zvm_session_mut(session).machine.undo_cap = state.config.undo_levels;
+            let start_loc = session.current_location();
             state.turns = 0;
             state.input.clear();
             state.suggestions.clear();
@@ -3172,7 +3207,7 @@ fn handle_saves_prompt(
     dir: &std::path::Path,
     ifid: &str,
     mapper: &mut Mapper,
-    session: &mut app::session::GameSession,
+    session: &mut dyn Engine,
     state: &mut AppState,
     _story_bytes: &[u8],
 ) {
@@ -3190,7 +3225,7 @@ fn handle_saves_prompt(
                 }
                 return;
             }
-            match save_named(dir, ifid, &buf, mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs) {
+            match save_named(dir, ifid, &buf, mapper, &zvm_session(&*session).machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs) {
                 Ok(()) => {
                     state.push_transcript(&format!("[Saved as: {}]", buf));
                     // Refresh saves list.
@@ -3243,7 +3278,7 @@ fn handle_saves_prompt(
                 return;
             }
             let target = export_dir.join(&filename);
-            match save_game(&target, &session.machine) {
+            match save_game(&target, &zvm_session(&*session).machine) {
                 Ok(()) => {
                     state.push_transcript(&format!("[Exported to {}]", target.display()));
                 }
@@ -3312,7 +3347,7 @@ fn list_qzl(dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
 fn post_turn_bookkeeping(
     state: &mut AppState,
     mapper: &Mapper,
-    session: &GameSession,
+    session: &dyn Engine,
     result: &TurnResult,
     cmd: &str,
     rooms_before: usize,
@@ -3330,7 +3365,7 @@ fn post_turn_bookkeeping(
             &mut state.history,
             state.turns,
             cmd,
-            session.machine.save_quetzal(),
+            session.save_state().bytes,
             mapper,
             map_changed,
             &result.transcript,
@@ -3340,28 +3375,18 @@ fn post_turn_bookkeeping(
     // ── Inventory tracking ────────────────────────────────────────
     {
         use app::inventory::{detect_player_obj, parse_inventory_output};
-        use zvm::objects::get_parent;
 
-        let current_loc = zvm::current_location(&session.machine)
+        let current_loc = session.current_location()
             .map(|s| s.number)
             .unwrap_or(0);
 
         if current_loc != 0 {
-            // Compute objects whose parent is the current room.
-            let max_obj = {
-                // Infer max by scanning (same approach as location.rs).
-                // We stop at the first entry whose prop-table ptr is before the entry.
-                // Quick safe upper bound: iterate until parent==0 fails.
-                // We use zvm::object_tree_view to avoid duplicating the logic.
-                zvm::object_tree_view(&session.machine)
-                    .into_iter()
-                    .map(|s| s.number)
-                    .max()
-                    .unwrap_or(0)
-            };
-            let objects_here: std::collections::BTreeSet<u16> = (1..=max_obj)
-                .filter(|&o| get_parent(&session.machine.mem, o) == current_loc)
-                .collect();
+            // Objects whose parent is the current room, via the engine's
+            // introspection (the same object-tree walk as before).
+            let objects_here: std::collections::BTreeSet<u16> = session
+                .introspect()
+                .map(|i| i.children_of(current_loc))
+                .unwrap_or_default();
 
             // Lock the player object. Prefer the reliable name-based
             // lookup (the object short-named "you"/"yourself"/… — present
@@ -3370,7 +3395,7 @@ fn post_turn_bookkeeping(
             // take/drop immediately. Fall back to the movement heuristic
             // for games whose player object isn't named.
             if state.player_obj.is_none() {
-                state.player_obj = zvm::find_player_object(&session.machine)
+                state.player_obj = session.introspect().and_then(|i| i.player_object())
                     .or_else(|| detect_player_obj(
                         state.prev_location,
                         &state.prev_objects_here,
@@ -3406,7 +3431,7 @@ fn post_turn_bookkeeping(
                     .unwrap_or(0),
             ),
         };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+        if let Err(e) = save_archive_meta(arc_file, mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             state.push_transcript(&format!("[Auto-save failed: {}]", e));
         }
     }
@@ -3417,21 +3442,21 @@ fn post_turn_bookkeeping(
 /// global mode writes the per-game file here.  `Ask` opens the first-use
 /// prompt dialog (Task 6) and leaves `aux_dirty` set for the dialog to resolve.
 fn persist_aux_after_turn(
-    session: &mut app::session::GameSession,
+    session: &mut dyn Engine,
     state: &mut AppState,
     save_dir: &std::path::Path,
     ifid: &str,
 ) {
-    if !session.machine.aux_dirty {
+    if !session.aux_dirty() {
         return;
     }
     match state.config.aux_storage {
         app::config::AuxStorage::Global => {
-            let _ = app::aux_store::write_global_aux(save_dir, ifid, &session.machine.aux_data);
-            session.machine.aux_dirty = false;
+            let _ = app::aux_store::write_global_aux(save_dir, ifid, session.aux_data());
+            session.clear_aux_dirty();
         }
         app::config::AuxStorage::Archive => {
-            session.machine.aux_dirty = false; // archive auto-save already embedded it
+            session.clear_aux_dirty(); // archive auto-save already embedded it
         }
         app::config::AuxStorage::Ask => {
             state.aux_prompt = true; // resolve in the dialog; leave aux_dirty set
@@ -3449,7 +3474,7 @@ fn finish_resumed_turn(
     result: TurnResult,
     mapper: &mut Mapper,
     state: &mut AppState,
-    session: &GameSession,
+    session: &dyn Engine,
     save_dir: &std::path::Path,
     ifid: &str,
     map_area: Rect,
@@ -3492,7 +3517,7 @@ fn finish_resumed_turn(
 /// closed without a confirm is treated as a cancel and resumes with failure.
 /// Re-opens the dialog for a chained request. Returns true if the app should quit.
 fn resolve_ingame_dialog(
-    session: &mut GameSession,
+    session: &mut dyn Engine,
     mapper: &mut Mapper,
     state: &mut AppState,
     save_dir: &std::path::Path,
@@ -3890,25 +3915,25 @@ fn apply_launch_resume(
     lines: Vec<String>,
     kinds: Vec<TranscriptKind>,
     screen: Option<zvm::screen::ScreenState>,
-    session: &mut app::session::GameSession,
+    session: &mut dyn Engine,
     mapper: &mut Mapper,
     state: &mut AppState,
     last_panes: &PaneRects,
 ) {
-    match session.machine.restore_file(save) {
+    match zvm_session_mut(&mut *session).machine.restore_file(save) {
         Ok(()) => {
             // mapper was already loaded from the archive at startup (ac.mapper);
             // only the VM machine state needs restoring via restore_quetzal above.
             // Restore the saved screen too (mirrors the auto-load path), so a
             // once-split game's upper window/status line shows after resuming.
-            if let Some(scr) = screen { session.machine.screen = scr; }
+            if let Some(scr) = screen { zvm_session_mut(&mut *session).machine.screen = scr; }
             state.transcript = lines;
             state.transcript_kinds = kinds;
             // The launch-resume stash carries no style runs; keep the parallel
             // vec length-synced (unstyled rows).
             state.transcript_runs = vec![Vec::new(); state.transcript.len()];
             // Re-observe current location (same as Action::RestoreGame).
-            let loc = zvm::current_location(&session.machine);
+            let loc = session.current_location();
             if let Some(snap) = loc {
                 let rid = snap.number as mapper::graph::RoomId;
                 let restore_result = TurnResult {
@@ -3987,24 +4012,6 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }
 }
 
-/// Map a keyboard event to a ZSCII byte for `read_char` input.
-///
-/// Returns:
-/// - `Enter`        → 13
-/// - `Backspace`    → 8
-/// - `Esc`          → 27
-/// - `Char(c)` where c is ASCII → `c as u8`
-/// - Any other key (non-ASCII Char, arrow keys, etc.) → `None`
-pub(crate) fn key_to_zscii(key: crossterm::event::KeyEvent) -> Option<u8> {
-    use crossterm::event::KeyCode;
-    match key.code {
-        KeyCode::Enter     => Some(13),
-        KeyCode::Backspace => Some(8),
-        KeyCode::Esc       => Some(27),
-        KeyCode::Char(c) if c.is_ascii() => Some(c as u8),
-        _ => None,
-    }
-}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -4014,7 +4021,7 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{aux_dialog_key_focused, dim_area, hint_bar, hint_key_routes, is_slash, key_to_zscii, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, AuxDialogAction, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
+    use super::{aux_dialog_key_focused, dim_area, hint_bar, hint_key_routes, is_slash, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, scroll_for_match, should_prompt_save_on_quit, AuxDialogAction, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction};
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
@@ -4708,36 +4715,9 @@ mod tests {
         assert!(matches!(act, LaunchDialogAction::NewGame));
     }
 
-    // ── key_to_zscii tests ────────────────────────────────────────────────────
-
-    fn make_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent {
-            code,
-            modifiers: crossterm::event::KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        }
-    }
-
-    #[test]
-    fn key_to_zscii_enter_is_13() {
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Enter)), Some(13));
-    }
-
-    #[test]
-    fn key_to_zscii_backspace_is_8() {
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Backspace)), Some(8));
-    }
-
-    #[test]
-    fn key_to_zscii_esc_is_27() {
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Esc)), Some(27));
-    }
-
-    #[test]
-    fn key_to_zscii_ascii_char_y_is_121() {
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Char('y'))), Some(121));
-    }
+    // The former app-level `key_to_zscii` and its unit tests were relocated into
+    // the zvm engine adapter as `GameSession::key_input_to_zscii` (tested in
+    // session.rs); the neutral crossterm→KeyInput mapping is tested in engine.rs.
 
     #[test]
     fn saves_dir_is_user_dir_join_saves() {
@@ -4745,18 +4725,6 @@ mod tests {
         let d = super::saves_dir(std::path::Path::new("/tmp/bm"));
         assert_eq!(d, std::path::Path::new("/tmp/bm/saves"));
         assert_ne!(d, super::map_dir(std::path::Path::new("/tmp/bm")));
-    }
-
-    #[test]
-    fn key_to_zscii_non_ascii_char_returns_none() {
-        // U+00E9 'é' is not ASCII
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Char('\u{00E9}'))), None);
-    }
-
-    #[test]
-    fn key_to_zscii_arrow_key_returns_none() {
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Up)), None);
-        assert_eq!(key_to_zscii(make_key(crossterm::event::KeyCode::Down)), None);
     }
 
     // ── char-mode gate predicate test ─────────────────────────────────────────
@@ -4792,7 +4760,8 @@ mod tests {
         assert!(!is_prefix, "'y' must not be the default prefix (Ctrl+K)");
         assert!(s.char_mode && !s.any_overlay_open() && !is_prefix && !app_combo(y_key.modifiers),
             "char_mode gate should fire for 'y' with no overlays");
-        assert_eq!(key_to_zscii(y_key), Some(b'y'), "'y' should map to ZSCII 121");
+        // 'y' maps to a neutral KeyInput the engine then converts to input.
+        assert_eq!(app::engine::key_event_to_input(y_key), Some(app::engine::KeyInput::Char('y')));
 
         // Ctrl+Q (a quit binding) must NOT be forwarded to the VM — it falls
         // through to app routing so the user can escape the form.
