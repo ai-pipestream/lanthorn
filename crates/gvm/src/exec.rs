@@ -1,0 +1,1749 @@
+// Glulx execution engine — GLULX_NOTES.md §4 (stack, call frames, calling
+// convention). Instruction decode/dispatch and the run loop are layered on in
+// later tasks.
+//
+// The stack is a single byte-addressed buffer (`stack`) sized to the header's
+// stack size, with a stack pointer `sp` (bytes used) and a frame pointer `fp`.
+// A call frame is laid out exactly as the spec's diagram: FrameLen, LocalsPos,
+// the locals-format list, the locals (each at natural alignment), then the
+// value-stack region. A four-word "call stub" sits just below each non-start
+// frame so a return can restore the caller.
+
+use crate::io::Output;
+use crate::memory::Memory;
+
+/// A recoverable runtime fault. Carries a human-readable diagnostic; the run
+/// loop records it and Quits rather than panicking.
+type R<T> = Result<T, String>;
+
+/// The outcome of a single [`Machine::step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepResult {
+    /// Execution should continue with the next instruction.
+    Continue,
+    /// Execution has ended (`quit`, an outer return, or a recorded fault).
+    Quit,
+}
+
+/// Where a produced value (a function's return value, or an opcode's store
+/// operand) should go. Mirrors the spec's call-stub DestType encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dest {
+    /// Throw the value away (DestType 0).
+    Discard,
+    /// Push onto the value stack (DestType 3).
+    Push,
+    /// Store to main memory at this address (DestType 1).
+    Mem(u32),
+    /// Store to a call-frame local at this byte offset (DestType 2).
+    Local(u32),
+}
+
+impl Dest {
+    fn to_stub(self) -> (u32, u32) {
+        match self {
+            Dest::Discard => (0, 0),
+            Dest::Mem(a) => (1, a),
+            Dest::Local(a) => (2, a),
+            Dest::Push => (3, 0),
+        }
+    }
+}
+
+/// The Glulx virtual machine.
+pub struct Machine {
+    pub(crate) mem: Memory,
+    /// Byte-addressed stack (length = header stack size).
+    stack: Vec<u8>,
+    /// Stack pointer: number of bytes currently in use.
+    sp: usize,
+    /// Frame pointer: byte offset of the current call frame.
+    fp: usize,
+    /// Program counter (address in main memory).
+    pub(crate) pc: u32,
+    /// Current I/O system mode (0 null, 1 filter, 2 Glk).
+    pub(crate) iosys_mode: u32,
+    /// Current I/O system rock.
+    pub(crate) iosys_rock: u32,
+    /// The output sink.
+    pub(crate) out: Box<dyn Output>,
+    /// Recorded runtime faults / deferred-feature notices.
+    pub diagnostics: Vec<String>,
+    /// Set once execution has ended (outer return or quit/fault).
+    pub(crate) halted: bool,
+
+    // Cached layout of the current frame (recomputed whenever `fp` changes).
+    cur_frame_len: u32,
+    cur_localspos: u32,
+    /// `(offset_within_locals, size_bytes)` for each local of the current frame.
+    cur_locals: Vec<(u32, u8)>,
+}
+
+fn align_up(v: u32, to: u32) -> u32 {
+    (v + to - 1) / to * to
+}
+
+impl Machine {
+    /// Build a machine over `mem`, entering the start function (no arguments).
+    pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
+        let stack_len = (mem.stack_size().max(0x100)) as usize;
+        let start = mem.start_func();
+        let mut m = Machine {
+            mem,
+            stack: vec![0u8; stack_len],
+            sp: 0,
+            fp: 0,
+            pc: 0,
+            iosys_mode: 0,
+            iosys_rock: 0,
+            out,
+            diagnostics: Vec::new(),
+            halted: false,
+            cur_frame_len: 0,
+            cur_localspos: 0,
+            cur_locals: Vec::new(),
+        };
+        // Enter the start function directly (no call stub beneath it; its fp is 0).
+        if let Err(msg) = m.build_frame_and_enter(start, &[]) {
+            m.diagnostics.push(msg);
+            m.halted = true;
+        }
+        m
+    }
+
+    // ── main-memory read helpers (fault on out-of-range) ──────────────────────
+
+    fn m8(&self, a: u32) -> R<u32> {
+        self.mem.read8(a).ok_or_else(|| format!("memory fault: read8 @{a:#010x}"))
+    }
+    fn m16(&self, a: u32) -> R<u32> {
+        self.mem.read16(a).ok_or_else(|| format!("memory fault: read16 @{a:#010x}"))
+    }
+    fn m32(&self, a: u32) -> R<u32> {
+        self.mem.read32(a).ok_or_else(|| format!("memory fault: read32 @{a:#010x}"))
+    }
+
+    // ── instruction-stream readers (advance pc) ───────────────────────────────
+
+    fn take8(&mut self) -> R<u32> {
+        let v = self.m8(self.pc)?;
+        self.pc += 1;
+        Ok(v)
+    }
+    fn take16(&mut self) -> R<u32> {
+        let v = self.m16(self.pc)?;
+        self.pc += 2;
+        Ok(v)
+    }
+    fn take32(&mut self) -> R<u32> {
+        let v = self.m32(self.pc)?;
+        self.pc += 4;
+        Ok(v)
+    }
+
+    // ── opcode + operand decode (GLULX_NOTES §3) ──────────────────────────────
+
+    /// Decode the variable-length opcode number at `pc`, advancing past it.
+    pub(crate) fn decode_opcode(&mut self) -> R<u32> {
+        let b0 = self.m8(self.pc)?;
+        match b0 & 0xC0 {
+            0xC0 => Ok(self.take32()? - 0xC000_0000), // top bits 11 → 4 bytes
+            0x80 => Ok(self.take16()? - 0x8000),      // top bits 10 → 2 bytes
+            _ => self.take8(),                        // top bit 0 → 1 byte
+        }
+    }
+
+    /// Decode `n_load` load values then `n_store` store destinations from the
+    /// packed mode nibbles + operand data following `pc`.
+    pub(crate) fn read_operands(&mut self, n_load: usize, n_store: usize) -> R<(Vec<u32>, Vec<Dest>)> {
+        let total = n_load + n_store;
+        let mode_bytes = total.div_ceil(2);
+        // Slurp the mode nibbles first; operand data follows them, in order.
+        let mut modes = Vec::with_capacity(total);
+        let start = self.pc;
+        for i in 0..mode_bytes {
+            let byte = self.m8(start + i as u32)?;
+            modes.push((byte & 0x0F) as u8);
+            modes.push((byte >> 4) as u8);
+        }
+        self.pc += mode_bytes as u32;
+
+        let mut loads = Vec::with_capacity(n_load);
+        let mut stores = Vec::with_capacity(n_store);
+        for (i, &mode) in modes.iter().enumerate().take(total) {
+            if i < n_load {
+                loads.push(self.resolve_load(mode)?);
+            } else {
+                stores.push(self.resolve_store(mode)?);
+            }
+        }
+        Ok((loads, stores))
+    }
+
+    /// Resolve one LOAD operand of the given addressing mode to its value.
+    fn resolve_load(&mut self, mode: u8) -> R<u32> {
+        let ramstart = self.mem.ramstart();
+        Ok(match mode {
+            0x0 => 0,
+            0x1 => self.take8()? as u8 as i8 as i32 as u32, // sign-extend
+            0x2 => self.take16()? as u16 as i16 as i32 as u32,
+            0x3 => self.take32()?,
+            0x5 => {
+                let a = self.take8()?;
+                self.m32(a)?
+            }
+            0x6 => {
+                let a = self.take16()?;
+                self.m32(a)?
+            }
+            0x7 => {
+                let a = self.take32()?;
+                self.m32(a)?
+            }
+            0x8 => self.pop32()?,
+            0x9 => {
+                let o = self.take8()?;
+                self.local_load(o)?
+            }
+            0xA => {
+                let o = self.take16()?;
+                self.local_load(o)?
+            }
+            0xB => {
+                let o = self.take32()?;
+                self.local_load(o)?
+            }
+            0xD => {
+                let a = self.take8()? + ramstart;
+                self.m32(a)?
+            }
+            0xE => {
+                let a = self.take16()? + ramstart;
+                self.m32(a)?
+            }
+            0xF => {
+                let a = self.take32()? + ramstart;
+                self.m32(a)?
+            }
+            other => return Err(format!("illegal load operand mode {other:#x}")),
+        })
+    }
+
+    /// Resolve one STORE operand of the given addressing mode to a destination.
+    fn resolve_store(&mut self, mode: u8) -> R<Dest> {
+        let ramstart = self.mem.ramstart();
+        Ok(match mode {
+            0x0 => Dest::Discard,
+            0x8 => Dest::Push,
+            0x5 => Dest::Mem(self.take8()?),
+            0x6 => Dest::Mem(self.take16()?),
+            0x7 => Dest::Mem(self.take32()?),
+            0x9 => Dest::Local(self.take8()?),
+            0xA => Dest::Local(self.take16()?),
+            0xB => Dest::Local(self.take32()?),
+            0xD => Dest::Mem(self.take8()? + ramstart),
+            0xE => Dest::Mem(self.take16()? + ramstart),
+            0xF => Dest::Mem(self.take32()? + ramstart),
+            other => return Err(format!("illegal store operand mode {other:#x}")),
+        })
+    }
+
+    /// Write `v` to a resolved destination.
+    pub(crate) fn store(&mut self, dest: Dest, v: u32) -> R<()> {
+        match dest {
+            Dest::Discard => Ok(()),
+            Dest::Push => self.push32(v),
+            Dest::Mem(a) => self.store_mem(a, v),
+            Dest::Local(a) => self.local_store(a, v),
+        }
+    }
+
+    // ── single-instruction execution ──────────────────────────────────────────
+
+    /// Decode and execute one instruction. Grown task-by-task; `step()`/`run()`
+    /// (the public loop with fault handling) wrap this in Task 6.
+    pub(crate) fn step_once(&mut self) -> R<()> {
+        let opcode = self.decode_opcode()?;
+        self.execute(opcode)
+    }
+
+    /// Dispatch a decoded opcode to its handler.
+    fn execute(&mut self, opcode: u32) -> R<()> {
+        match opcode {
+            // Control / I/O system.
+            0x00 => Ok(()), // nop
+            0x120 => {
+                self.halted = true;
+                Ok(())
+            }
+            0x148 => {
+                let (_, s) = self.read_operands(0, 2)?;
+                let (mode, rock) = (self.iosys_mode, self.iosys_rock);
+                self.store(s[0], mode)?;
+                self.store(s[1], rock)
+            }
+            0x149 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                self.iosys_mode = l[0];
+                self.iosys_rock = l[1];
+                if l[0] == 1 {
+                    self.diagnostics.push("filter iosys deferred to a later phase".to_string());
+                }
+                Ok(())
+            }
+            // Stream output.
+            0x70 => self.op_streamchar(),
+            0x71 => self.op_streamnum(),
+            0x72 => self.op_streamstr(),
+            0x73 => self.op_streamunichar(),
+            0x130 => self.op_glk(),
+            // Arithmetic (2 load, 1 store) — 32-bit two's complement.
+            0x10 => self.binop(|a, b| a.wrapping_add(b)),
+            0x11 => self.binop(|a, b| a.wrapping_sub(b)),
+            0x12 => self.binop(|a, b| a.wrapping_mul(b)),
+            0x13 => self.divop(false),
+            0x14 => self.divop(true),
+            0x15 => self.unop(|a| (a as i32).wrapping_neg() as u32),
+            // Bitwise.
+            0x18 => self.binop(|a, b| a & b),
+            0x19 => self.binop(|a, b| a | b),
+            0x1A => self.binop(|a, b| a ^ b),
+            0x1B => self.unop(|a| !a),
+            0x1C => self.binop(|a, b| a.checked_shl(b).unwrap_or(0)),
+            0x1D => self.binop(|a, b| (a as i32).checked_shr(b).unwrap_or((a as i32) >> 31) as u32),
+            0x1E => self.binop(|a, b| a.checked_shr(b).unwrap_or(0)),
+            // Branches.
+            0x20 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.branch(l[0], true)
+            }
+            0x22 => self.branch1(|v| v == 0),
+            0x23 => self.branch1(|v| v != 0),
+            0x24 => self.branch2(|a, b| a == b),
+            0x25 => self.branch2(|a, b| a != b),
+            0x26 => self.branch2(|a, b| (a as i32) < (b as i32)),
+            0x27 => self.branch2(|a, b| (a as i32) >= (b as i32)),
+            0x28 => self.branch2(|a, b| (a as i32) > (b as i32)),
+            0x29 => self.branch2(|a, b| (a as i32) <= (b as i32)),
+            0x2A => self.branch2(|a, b| a < b),
+            0x2B => self.branch2(|a, b| a >= b),
+            0x2C => self.branch2(|a, b| a > b),
+            0x2D => self.branch2(|a, b| a <= b),
+            // Copy / sign-extend.
+            0x40 => self.unop(|a| a),                                  // copy
+            0x41 => self.copy_sized(2),                                // copys
+            0x42 => self.copy_sized(1),                                // copyb
+            0x44 => self.unop(|a| a as u16 as i16 as i32 as u32),      // sexs
+            0x45 => self.unop(|a| a as u8 as i8 as i32 as u32),        // sexb
+            // Stack manipulation.
+            0x50 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                let c = self.value_count();
+                self.store(s[0], c)
+            }
+            0x51 => self.op_stkpeek(),
+            0x52 => self.op_stkswap(),
+            0x53 => self.op_stkroll(),
+            0x54 => self.op_stkcopy(),
+            // Memory size.
+            0x102 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                let v = self.mem.mem_size();
+                self.store(s[0], v)
+            }
+            0x103 => {
+                let (l, s) = self.read_operands(1, 1)?;
+                let r = u32::from(self.mem.set_mem_size(l[0]).is_err());
+                self.store(s[0], r)
+            }
+            // Calls / return.
+            0x30 => self.op_call(),
+            0x31 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.return_value(l[0])
+            }
+            0x34 => self.op_tailcall(),
+            0x160 => self.op_callf(0),
+            0x161 => self.op_callf(1),
+            0x162 => self.op_callf(2),
+            0x163 => self.op_callf(3),
+            other => Err(format!("illegal/unimplemented opcode {other:#x}")),
+        }
+    }
+
+    fn binop(&mut self, f: impl Fn(u32, u32) -> u32) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let v = f(l[0], l[1]);
+        self.store(s[0], v)
+    }
+
+    fn unop(&mut self, f: impl Fn(u32) -> u32) -> R<()> {
+        let (l, s) = self.read_operands(1, 1)?;
+        let v = f(l[0]);
+        self.store(s[0], v)
+    }
+
+    /// `div` (false) / `mod` (true): signed, truncating toward zero, faulting on
+    /// a zero divisor.
+    fn divop(&mut self, is_mod: bool) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (a, b) = (l[0] as i32, l[1] as i32);
+        if b == 0 {
+            return Err(format!("division by zero ({})", if is_mod { "mod" } else { "div" }));
+        }
+        let v = if is_mod { a.wrapping_rem(b) } else { a.wrapping_div(b) };
+        self.store(s[0], v as u32)
+    }
+
+    /// A 1-value conditional branch (jz/jnz): value then offset.
+    fn branch1(&mut self, cond: impl Fn(u32) -> bool) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let taken = cond(l[0]);
+        self.branch(l[1], taken)
+    }
+
+    /// A 2-value conditional branch (jeq…jleu): two values then offset.
+    fn branch2(&mut self, cond: impl Fn(u32, u32) -> bool) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let taken = cond(l[0], l[1]);
+        self.branch(l[2], taken)
+    }
+
+    /// Apply the branch convention: offset 0 → return 0, 1 → return 1, else
+    /// `pc = pc_after_operands + offset - 2`. `pc` is already past the operands.
+    fn branch(&mut self, offset: u32, taken: bool) -> R<()> {
+        if !taken {
+            return Ok(());
+        }
+        match offset {
+            0 => self.return_value(0),
+            1 => self.return_value(1),
+            _ => {
+                self.pc = self.pc.wrapping_add(offset).wrapping_sub(2);
+                Ok(())
+            }
+        }
+    }
+
+    // ── stack byte accessors (offsets are guaranteed in-range by callers) ─────
+
+    fn st_w32(&mut self, off: usize, v: u32) {
+        self.stack[off..off + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    fn st_r32(&self, off: usize) -> u32 {
+        u32::from_be_bytes([
+            self.stack[off],
+            self.stack[off + 1],
+            self.stack[off + 2],
+            self.stack[off + 3],
+        ])
+    }
+
+    // ── value stack (operands above the current frame) ────────────────────────
+
+    /// Byte offset where the current frame's value stack begins.
+    fn value_base(&self) -> usize {
+        self.fp + self.cur_frame_len as usize
+    }
+
+    /// Push a 32-bit value onto the value stack.
+    pub(crate) fn push32(&mut self, v: u32) -> R<()> {
+        if self.sp + 4 > self.stack.len() {
+            return Err("stack overflow".to_string());
+        }
+        let off = self.sp;
+        self.st_w32(off, v);
+        self.sp += 4;
+        Ok(())
+    }
+
+    /// Pop a 32-bit value off the value stack.
+    pub(crate) fn pop32(&mut self) -> R<u32> {
+        if self.sp < self.value_base() + 4 {
+            return Err("stack underflow".to_string());
+        }
+        self.sp -= 4;
+        Ok(self.st_r32(self.sp))
+    }
+
+    /// Number of 32-bit values currently on the frame's value stack.
+    pub(crate) fn value_count(&self) -> u32 {
+        ((self.sp - self.value_base()) / 4) as u32
+    }
+
+    // ── call-frame locals (size-aware, per the locals format) ─────────────────
+
+    fn local_size(&self, offset: u32) -> R<u8> {
+        self.cur_locals
+            .iter()
+            .find(|(o, _)| *o == offset)
+            .map(|(_, s)| *s)
+            .ok_or_else(|| format!("bad local offset {offset:#x}"))
+    }
+
+    /// Read a local at byte `offset` within the locals region (size from format).
+    pub(crate) fn local_load(&self, offset: u32) -> R<u32> {
+        let size = self.local_size(offset)?;
+        let base = self.fp + self.cur_localspos as usize + offset as usize;
+        Ok(match size {
+            1 => self.stack[base] as u32,
+            2 => ((self.stack[base] as u32) << 8) | self.stack[base + 1] as u32,
+            _ => self.st_r32(base),
+        })
+    }
+
+    /// Write a local at byte `offset` (truncated to the local's declared size).
+    pub(crate) fn local_store(&mut self, offset: u32, v: u32) -> R<()> {
+        let size = self.local_size(offset)?;
+        let base = self.fp + self.cur_localspos as usize + offset as usize;
+        match size {
+            1 => self.stack[base] = v as u8,
+            2 => {
+                self.stack[base] = (v >> 8) as u8;
+                self.stack[base + 1] = v as u8;
+            }
+            _ => self.st_w32(base, v),
+        }
+        Ok(())
+    }
+
+    // ── frame construction ────────────────────────────────────────────────────
+
+    /// Recompute `cur_frame_len`/`cur_localspos`/`cur_locals` from the frame
+    /// header bytes at `fp`.
+    fn reload_frame_meta(&mut self) -> R<()> {
+        let fp = self.fp;
+        if fp + 8 > self.stack.len() {
+            return Err("corrupt frame pointer".to_string());
+        }
+        self.cur_frame_len = self.st_r32(fp);
+        self.cur_localspos = self.st_r32(fp + 4);
+        // Parse the locals-format pairs that begin at fp+8.
+        let mut locals = Vec::new();
+        let mut p = fp + 8;
+        let mut off = 0u32;
+        loop {
+            if p + 2 > self.stack.len() {
+                return Err("corrupt locals format".to_string());
+            }
+            let t = self.stack[p];
+            let c = self.stack[p + 1];
+            p += 2;
+            if t == 0 && c == 0 {
+                break;
+            }
+            for _ in 0..c {
+                off = align_up(off, t as u32);
+                locals.push((off, t));
+                off += t as u32;
+            }
+        }
+        self.cur_locals = locals;
+        Ok(())
+    }
+
+    /// Build a call frame for the function at `func_addr` at the current `sp`,
+    /// install it as the current frame, copy/push `args` per the function type,
+    /// and set `pc` to the first instruction. Does NOT push a call stub — the
+    /// caller does that for non-start calls.
+    fn build_frame_and_enter(&mut self, func_addr: u32, args: &[u32]) -> R<()> {
+        let func_type = self.m8(func_addr)?;
+        if func_type != 0xC0 && func_type != 0xC1 {
+            return Err(format!("not a function: type byte {func_type:#x} @{func_addr:#x}"));
+        }
+
+        // Parse the locals format; compute the format byte length and the
+        // per-local (offset, size) layout.
+        let mut pairs: Vec<(u8, u8)> = Vec::new();
+        let mut addr = func_addr + 1;
+        loop {
+            let t = self.m8(addr)? as u8;
+            let c = self.m8(addr + 1)? as u8;
+            addr += 2;
+            if t == 0 && c == 0 {
+                break;
+            }
+            if t != 1 && t != 2 && t != 4 {
+                return Err(format!("bad local type {t} @{func_addr:#x}"));
+            }
+            pairs.push((t, c));
+        }
+        let format_len = (pairs.len() + 1) * 2; // includes the (0,0) terminator
+        let localspos = align_up(8 + format_len as u32, 4);
+
+        // Lay out the locals (each at its natural alignment).
+        let mut locals_layout: Vec<(u32, u8)> = Vec::new();
+        let mut off = 0u32;
+        for &(t, c) in &pairs {
+            for _ in 0..c {
+                off = align_up(off, t as u32);
+                locals_layout.push((off, t));
+                off += t as u32;
+            }
+        }
+        let locals_size = off;
+        let frame_len = align_up(localspos + locals_size, 4);
+
+        let frameptr = self.sp;
+        if frameptr + frame_len as usize > self.stack.len() {
+            return Err("stack overflow building call frame".to_string());
+        }
+
+        // Zero the whole frame region, then write the header + format list.
+        for b in &mut self.stack[frameptr..frameptr + frame_len as usize] {
+            *b = 0;
+        }
+        self.st_w32(frameptr, frame_len);
+        self.st_w32(frameptr + 4, localspos);
+        for (i, &(t, c)) in pairs.iter().enumerate() {
+            self.stack[frameptr + 8 + 2 * i] = t;
+            self.stack[frameptr + 8 + 2 * i + 1] = c;
+        }
+        // (terminator pair already zero from the wipe above)
+
+        self.fp = frameptr;
+        self.sp = frameptr + frame_len as usize;
+        self.pc = addr;
+        self.cur_frame_len = frame_len;
+        self.cur_localspos = localspos;
+        self.cur_locals = locals_layout;
+
+        // Pass the arguments.
+        if func_type == 0xC1 {
+            // Copy args into locals in order, truncated to each local's size.
+            let layout = self.cur_locals.clone();
+            for (i, &(loff, _sz)) in layout.iter().enumerate() {
+                if i >= args.len() {
+                    break;
+                }
+                self.local_store(loff, args[i])?;
+            }
+        } else {
+            // C0: push args (last first → first on top), then the count.
+            for &a in args.iter().rev() {
+                self.push32(a)?;
+            }
+            self.push32(args.len() as u32)?;
+        }
+        Ok(())
+    }
+
+    /// Call the function at `func_addr` with `args`, storing its eventual return
+    /// value per `dest`. Pushes a call stub, then builds the callee frame.
+    pub(crate) fn call_function(&mut self, func_addr: u32, args: &[u32], dest: Dest) -> R<()> {
+        let (dtype, daddr) = dest.to_stub();
+        let ret_pc = self.pc;
+        let caller_fp = self.fp as u32;
+        // Push the stub: DestType, DestAddr, PC, FramePtr (FramePtr ends on top).
+        self.push32(dtype)?;
+        self.push32(daddr)?;
+        self.push32(ret_pc)?;
+        self.push32(caller_fp)?;
+        self.build_frame_and_enter(func_addr, args)
+    }
+
+    /// Return `v` from the current function. Pops the frame and its call stub,
+    /// restores the caller, and stores `v` per the stub's destination. Returning
+    /// from the start frame (`fp == 0`) halts the machine.
+    pub(crate) fn return_value(&mut self, v: u32) -> R<()> {
+        if self.fp == 0 {
+            self.halted = true;
+            return Ok(());
+        }
+        // Discard the current frame (and any pushed values).
+        self.sp = self.fp;
+        // Pop the stub: FramePtr, PC, DestAddr, DestType (reverse of the push).
+        if self.sp < 16 {
+            return Err("corrupt call stub on return".to_string());
+        }
+        self.sp -= 4;
+        let caller_fp = self.st_r32(self.sp);
+        self.sp -= 4;
+        let ret_pc = self.st_r32(self.sp);
+        self.sp -= 4;
+        let daddr = self.st_r32(self.sp);
+        self.sp -= 4;
+        let dtype = self.st_r32(self.sp);
+
+        self.fp = caller_fp as usize;
+        self.pc = ret_pc;
+        self.reload_frame_meta()?;
+
+        match dtype {
+            0 => {} // discard
+            1 => self.store_mem(daddr, v)?,
+            2 => self.local_store(daddr, v)?,
+            3 => self.push32(v)?,
+            other => return Err(format!("bad call-stub DestType {other}")),
+        }
+        Ok(())
+    }
+
+    /// Write a 32-bit `v` to main memory at `addr`.
+    pub(crate) fn store_mem(&mut self, addr: u32, v: u32) -> R<()> {
+        self.store_mem_sized(addr, v, 4)
+    }
+
+    /// Write the low `width` bytes of `v` to main memory at `addr`, mapping
+    /// ROM/out-of-range faults to a diagnostic (ROM) or a fault (out of range).
+    fn store_mem_sized(&mut self, addr: u32, v: u32, width: u32) -> R<()> {
+        use crate::memory::WriteFault;
+        let res = match width {
+            1 => self.mem.write8(addr, v),
+            2 => self.mem.write16(addr, v),
+            _ => self.mem.write32(addr, v),
+        };
+        match res {
+            Ok(()) => Ok(()),
+            Err(WriteFault::Rom) => {
+                self.diagnostics.push(format!("ignored ROM write @{addr:#010x}"));
+                Ok(())
+            }
+            Err(WriteFault::OutOfRange) => Err(format!("memory fault: write @{addr:#010x}")),
+        }
+    }
+
+    fn read_width(&self, addr: u32, width: u32) -> R<u32> {
+        match width {
+            1 => self.m8(addr),
+            2 => self.m16(addr),
+            _ => self.m32(addr),
+        }
+    }
+
+    // ── copys/copyb (width-sized copies; no sign extension) ───────────────────
+
+    /// `copys` (width 2) / `copyb` (width 1): copy a sub-word value. Memory
+    /// operands access `width` bytes; stack operands stay 32-bit. (Local
+    /// operands — deprecated — are read/written at the local's declared size.)
+    fn copy_sized(&mut self, width: u32) -> R<()> {
+        let mode_byte = self.take8()? as u8;
+        let lmode = mode_byte & 0x0F;
+        let smode = mode_byte >> 4;
+        let v = self.resolve_load_sized(lmode, width)?;
+        let dest = self.resolve_store(smode)?;
+        match dest {
+            Dest::Mem(a) => self.store_mem_sized(a, v, width),
+            other => self.store(other, v),
+        }
+    }
+
+    fn resolve_load_sized(&mut self, mode: u8, width: u32) -> R<u32> {
+        let ramstart = self.mem.ramstart();
+        let mask = if width >= 4 { u32::MAX } else { (1u32 << (width * 8)) - 1 };
+        let v = match mode {
+            0x0 => 0,
+            0x1 => self.take8()?, // zero-extended (no sign extension for copys/copyb)
+            0x2 => self.take16()?,
+            0x3 => self.take32()?,
+            0x5 => {
+                let a = self.take8()?;
+                self.read_width(a, width)?
+            }
+            0x6 => {
+                let a = self.take16()?;
+                self.read_width(a, width)?
+            }
+            0x7 => {
+                let a = self.take32()?;
+                self.read_width(a, width)?
+            }
+            0x8 => self.pop32()?,
+            0x9 => {
+                let o = self.take8()?;
+                self.local_load(o)?
+            }
+            0xA => {
+                let o = self.take16()?;
+                self.local_load(o)?
+            }
+            0xB => {
+                let o = self.take32()?;
+                self.local_load(o)?
+            }
+            0xD => {
+                let a = self.take8()? + ramstart;
+                self.read_width(a, width)?
+            }
+            0xE => {
+                let a = self.take16()? + ramstart;
+                self.read_width(a, width)?
+            }
+            0xF => {
+                let a = self.take32()? + ramstart;
+                self.read_width(a, width)?
+            }
+            other => return Err(format!("illegal load operand mode {other:#x}")),
+        };
+        Ok(v & mask)
+    }
+
+    // ── stack-manipulation opcodes ────────────────────────────────────────────
+
+    fn op_stkpeek(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(1, 1)?;
+        let i = l[0];
+        if i >= self.value_count() {
+            return Err(format!("stkpeek index {i} out of range"));
+        }
+        let off = self.sp - 4 * (i as usize + 1);
+        let v = self.st_r32(off);
+        self.store(s[0], v)
+    }
+
+    fn op_stkswap(&mut self) -> R<()> {
+        if self.value_count() < 2 {
+            return Err("stkswap underflow".to_string());
+        }
+        let (a, b) = (self.sp - 4, self.sp - 8);
+        let (va, vb) = (self.st_r32(a), self.st_r32(b));
+        self.st_w32(a, vb);
+        self.st_w32(b, va);
+        Ok(())
+    }
+
+    fn op_stkcopy(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let n = l[0] as usize;
+        if l[0] > self.value_count() {
+            return Err("stkcopy out of range".to_string());
+        }
+        let base = self.sp;
+        for k in 0..n {
+            let v = self.st_r32(base - 4 * n + 4 * k);
+            self.push32(v)?;
+        }
+        Ok(())
+    }
+
+    fn op_stkroll(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let count = l[0];
+        let places = l[1] as i32;
+        if count > self.value_count() {
+            return Err("stkroll out of range".to_string());
+        }
+        if count == 0 {
+            return Ok(());
+        }
+        let count = count as usize;
+        // Positive places rotate "up" (topmost moves deeper) → rotate_right on the
+        // bottom→top ordering.
+        let eff = (((places % count as i32) + count as i32) % count as i32) as usize;
+        let base = self.sp - 4 * count;
+        let mut vals: Vec<u32> = (0..count).map(|k| self.st_r32(base + 4 * k)).collect();
+        vals.rotate_right(eff);
+        for (k, v) in vals.iter().enumerate() {
+            self.st_w32(base + 4 * k, *v);
+        }
+        Ok(())
+    }
+
+    // ── call variants ─────────────────────────────────────────────────────────
+
+    fn op_call(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (func, argc) = (l[0], l[1]);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop32()?); // first arg is topmost
+        }
+        self.call_function(func, &args, s[0])
+    }
+
+    fn op_callf(&mut self, nargs: usize) -> R<()> {
+        let (l, s) = self.read_operands(1 + nargs, 1)?;
+        let args = l[1..].to_vec();
+        self.call_function(l[0], &args, s[0])
+    }
+
+    fn op_tailcall(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let (func, argc) = (l[0], l[1]);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop32()?);
+        }
+        // Destroy the current frame but keep the call stub beneath it, so the new
+        // function returns to the current function's caller.
+        self.sp = self.fp;
+        self.build_frame_and_enter(func, &args)
+    }
+
+    // ── stream output (GLULX_NOTES §7) ────────────────────────────────────────
+
+    /// Route stream output to the sink, honoring the current I/O system: only
+    /// the Glk system (mode 2) prints; the null system (and the deferred filter
+    /// system) discard.
+    fn emit(&mut self, s: &str) {
+        if self.iosys_mode == 2 {
+            self.out.print(s);
+        }
+    }
+
+    fn op_streamchar(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let s = ((l[0] & 0xFF) as u8 as char).to_string();
+        self.emit(&s);
+        Ok(())
+    }
+
+    fn op_streamunichar(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let s = char::from_u32(l[0]).unwrap_or('\u{FFFD}').to_string();
+        self.emit(&s);
+        Ok(())
+    }
+
+    fn op_streamnum(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let s = (l[0] as i32).to_string();
+        self.emit(&s);
+        Ok(())
+    }
+
+    fn op_streamstr(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let addr = l[0];
+        match self.m8(addr)? {
+            0xE0 => {
+                let s = self.read_cstring(addr + 1)?;
+                self.emit(&s);
+            }
+            0xE2 => {
+                let s = self.read_ustring(addr + 4)?;
+                self.emit(&s);
+            }
+            0xE1 => self
+                .diagnostics
+                .push("compressed string (E1) decoding deferred to phase 2b".to_string()),
+            other => return Err(format!("bad string type {other:#x} @{addr:#010x}")),
+        }
+        Ok(())
+    }
+
+    /// Read a zero-terminated Latin-1 string from main memory.
+    fn read_cstring(&self, mut addr: u32) -> R<String> {
+        let mut s = String::new();
+        loop {
+            let b = self.m8(addr)?;
+            if b == 0 {
+                break;
+            }
+            s.push(b as u8 as char);
+            addr += 1;
+        }
+        Ok(s)
+    }
+
+    /// Read a zero-terminated array of big-endian 32-bit Unicode code points.
+    fn read_ustring(&self, mut addr: u32) -> R<String> {
+        let mut s = String::new();
+        loop {
+            let cp = self.m32(addr)?;
+            if cp == 0 {
+                break;
+            }
+            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            addr += 4;
+        }
+        Ok(s)
+    }
+
+    // ── minimal @glk dispatch (GLULX_NOTES §8) ────────────────────────────────
+
+    fn op_glk(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (selector, argc) = (l[0], l[1]);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop32()?); // first @glk arg is topmost
+        }
+        let result = self.glk_dispatch(selector, &args)?;
+        self.store(s[0], result)
+    }
+
+    /// Handle the put-char/buffer/string family; pop-and-ignore anything else and
+    /// return 0. Glk output prints regardless of the VM's I/O system.
+    fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
+        let a = |i: usize| args.get(i).copied().unwrap_or(0);
+        match selector {
+            0x0080 => self.put_latin1(a(0)), // glk_put_char(ch)
+            0x0081 => self.put_latin1(a(1)), // glk_put_char_stream(str, ch)
+            0x0082 => {
+                // glk_put_string(addr)
+                let s = self.read_cstring(a(0))?;
+                self.out.print(&s);
+            }
+            0x0084 => {
+                // glk_put_buffer(addr, len)
+                let (addr, len) = (a(0), a(1));
+                let mut s = String::new();
+                for i in 0..len {
+                    s.push(self.m8(addr + i)? as u8 as char);
+                }
+                self.out.print(&s);
+            }
+            0x0128 => self.put_uni(a(0)), // glk_put_char_uni(ch)
+            0x0129 => {
+                // glk_put_string_uni(addr)
+                let s = self.read_ustring(a(0))?;
+                self.out.print(&s);
+            }
+            0x012A => {
+                // glk_put_buffer_uni(addr, len)
+                let (addr, len) = (a(0), a(1));
+                let mut s = String::new();
+                for i in 0..len {
+                    let cp = self.m32(addr + i * 4)?;
+                    s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                }
+                self.out.print(&s);
+            }
+            other => self
+                .diagnostics
+                .push(format!("unhandled @glk selector {other:#06x} (returning 0)")),
+        }
+        Ok(0)
+    }
+
+    fn put_latin1(&mut self, v: u32) {
+        let s = ((v & 0xFF) as u8 as char).to_string();
+        self.out.print(&s);
+    }
+    fn put_uni(&mut self, v: u32) {
+        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
+        self.out.print(&s);
+    }
+
+    // ── the run loop ──────────────────────────────────────────────────────────
+
+    /// Execute one instruction. Returns [`StepResult::Quit`] on `quit`, an outer
+    /// return, or any fault (which is recorded in `diagnostics`); otherwise
+    /// [`StepResult::Continue`]. Never panics.
+    pub fn step(&mut self) -> StepResult {
+        if self.halted {
+            return StepResult::Quit;
+        }
+        match self.step_once() {
+            Ok(()) if self.halted => StepResult::Quit,
+            Ok(()) => StepResult::Continue,
+            Err(msg) => {
+                self.diagnostics.push(msg);
+                self.halted = true;
+                StepResult::Quit
+            }
+        }
+    }
+
+    /// Run until the machine quits.
+    pub fn run(&mut self) {
+        while self.step() == StepResult::Continue {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::asm;
+    use crate::io::BufferOutput;
+
+    fn machine(built: asm::Built) -> Machine {
+        let mem = Memory::new(built.image).expect("valid image");
+        Machine::with_output(mem, Box::new(BufferOutput::new()))
+    }
+
+    /// A machine whose start function has `locals` and whose body is `body`,
+    /// with `pc` positioned at the first body byte. RAMSTART is 0x100 (tiny
+    /// code), so tests can hardcode RAM addresses.
+    fn machine_with_body(locals: &[(u8, u8)], body: Vec<u8>) -> Machine {
+        let start = asm::func(0xC1, locals, &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let m = machine(built);
+        assert_eq!(m.mem.ramstart(), 0x100, "test assumes RAMSTART == 0x100");
+        m
+    }
+
+    #[test]
+    fn decode_opcode_1_2_4_byte_forms() {
+        let mut m = machine_with_body(&[], asm::opcode_bytes(0x10));
+        assert_eq!(m.decode_opcode().unwrap(), 0x10);
+        let mut m = machine_with_body(&[], asm::opcode_bytes(0x130));
+        assert_eq!(m.decode_opcode().unwrap(), 0x130);
+        let mut m = machine_with_body(&[], asm::opcode_bytes(0x0100_0000));
+        assert_eq!(m.decode_opcode().unwrap(), 0x0100_0000);
+    }
+
+    fn one_load(locals: &[(u8, u8)], op: asm::Op, setup: impl FnOnce(&mut Machine)) -> u32 {
+        let mut m = machine_with_body(locals, asm::operands(&[op]));
+        setup(&mut m);
+        let (loads, _) = m.read_operands(1, 0).unwrap();
+        loads[0]
+    }
+
+    #[test]
+    fn load_mode_constants_sign_extend() {
+        assert_eq!(one_load(&[], asm::Op::Zero, |_| {}), 0);
+        assert_eq!(one_load(&[], asm::Op::C8(-5), |_| {}), (-5i32) as u32);
+        assert_eq!(one_load(&[], asm::Op::C16(-1000), |_| {}), (-1000i32) as u32);
+        assert_eq!(one_load(&[], asm::Op::C32(0xDEAD_BEEF), |_| {}), 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn load_mode_contents_of_address() {
+        // Address 0 holds the "Glul" magic.
+        assert_eq!(one_load(&[], asm::Op::Mem8(0), |_| {}), 0x476C_756C);
+        // 2-/4-byte address forms read a value we plant in RAM at 0x100.
+        let plant = |m: &mut Machine| m.mem.write32(0x100, 0x0102_0304).unwrap();
+        assert_eq!(one_load(&[], asm::Op::Mem16(0x0100), plant), 0x0102_0304);
+        assert_eq!(one_load(&[], asm::Op::Mem32(0x0100), plant), 0x0102_0304);
+    }
+
+    #[test]
+    fn load_mode_ram_relative() {
+        let plant = |m: &mut Machine| m.mem.write32(0x100, 0x1111_2222).unwrap();
+        assert_eq!(one_load(&[], asm::Op::Ram8(0), plant), 0x1111_2222);
+        assert_eq!(one_load(&[], asm::Op::Ram16(0), plant), 0x1111_2222);
+        assert_eq!(one_load(&[], asm::Op::Ram32(0), plant), 0x1111_2222);
+    }
+
+    #[test]
+    fn load_mode_local_each_offset_size() {
+        let set = |m: &mut Machine| m.local_store(4, 0x55AA).unwrap();
+        assert_eq!(one_load(&[(4, 4)], asm::Op::Local8(4), set), 0x55AA);
+        assert_eq!(one_load(&[(4, 4)], asm::Op::Local16(4), set), 0x55AA);
+        assert_eq!(one_load(&[(4, 4)], asm::Op::Local32(4), set), 0x55AA);
+    }
+
+    #[test]
+    fn load_mode_stack_pops() {
+        let v = one_load(&[], asm::Op::Stack, |m| m.push32(0xFEED_FACE).unwrap());
+        assert_eq!(v, 0xFEED_FACE);
+    }
+
+    #[test]
+    fn store_mode_discard_and_push() {
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Zero]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Discard);
+        m.store(dests[0], 0x1234).unwrap(); // no-op
+
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Stack]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Push);
+        m.store(dests[0], 0x9).unwrap();
+        assert_eq!(m.pop32().unwrap(), 0x9);
+    }
+
+    #[test]
+    fn store_mode_memory_and_local() {
+        // Memory (2-byte addr form) → RAM at 0x100.
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Mem16(0x0100)]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Mem(0x100));
+        m.store(dests[0], 0xABCD_1234).unwrap();
+        assert_eq!(m.mem.read32(0x100), Some(0xABCD_1234));
+
+        // RAM-relative store maps to the same address.
+        let mut m = machine_with_body(&[], asm::operands(&[asm::Op::Ram8(0)]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Mem(0x100));
+
+        // Local store.
+        let mut m = machine_with_body(&[(4, 2)], asm::operands(&[asm::Op::Local8(4)]));
+        let (_, dests) = m.read_operands(0, 1).unwrap();
+        assert_eq!(dests[0], Dest::Local(4));
+        m.store(dests[0], 0x7777).unwrap();
+        assert_eq!(m.local_load(4).unwrap(), 0x7777);
+    }
+
+    // ── Task 4: arithmetic / bitwise / branch ─────────────────────────────────
+
+    /// Execute one binary-op instruction storing to RAM 0x100; return the result.
+    fn arith2(op: u32, a: asm::Op, b: asm::Op) -> u32 {
+        let body = asm::ins(op, &[a, b, asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        m.mem.read32(0x100).unwrap()
+    }
+    fn arith1(op: u32, a: asm::Op) -> u32 {
+        let body = asm::ins(op, &[a, asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        m.mem.read32(0x100).unwrap()
+    }
+
+    #[test]
+    fn arithmetic_core() {
+        use asm::Op::{C16, C32, C8};
+        assert_eq!(arith2(0x10, C8(5), C8(7)), 12); // add
+        assert_eq!(arith2(0x11, C8(5), C8(7)), (-2i32) as u32); // sub
+        assert_eq!(arith2(0x12, C16(1000), C16(1000)), 1_000_000); // mul
+        assert_eq!(arith2(0x12, C32(0x10000), C32(0x10000)), 0); // mul truncates
+        assert_eq!(arith2(0x13, C8(-7), C8(2)), (-3i32) as u32); // div trunc toward 0
+        assert_eq!(arith2(0x14, C8(-7), C8(2)), (-1i32) as u32); // mod sign of dividend
+        assert_eq!(arith1(0x15, C8(5)), (-5i32) as u32); // neg
+        assert_eq!(arith1(0x15, C8(-128)), 128); // neg of -128
+    }
+
+    #[test]
+    fn div_mod_by_zero_faults() {
+        let body = asm::ins(0x13, &[asm::Op::C8(5), asm::Op::C8(0), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        assert!(m.step_once().is_err());
+        let body = asm::ins(0x14, &[asm::Op::C8(5), asm::Op::C8(0), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        assert!(m.step_once().is_err());
+    }
+
+    #[test]
+    fn bitwise_and_shifts() {
+        use asm::Op::{C32, C8};
+        assert_eq!(arith2(0x18, C32(0xF0F0), C32(0xFF00)), 0xF000); // bitand
+        assert_eq!(arith2(0x19, C32(0xF0F0), C32(0x0F0F)), 0xFFFF); // bitor
+        assert_eq!(arith2(0x1A, C32(0xFF00), C32(0x0FF0)), 0xF0F0); // bitxor
+        assert_eq!(arith1(0x1B, C32(0x0000_FFFF)), 0xFFFF_0000); // bitnot
+        assert_eq!(arith2(0x1C, C8(1), C8(4)), 0x10); // shiftl
+        assert_eq!(arith2(0x1C, C8(1), C8(32)), 0); // shiftl >= 32 → 0
+        assert_eq!(arith2(0x1E, C32(0x8000_0000), C8(4)), 0x0800_0000); // ushiftr
+        assert_eq!(arith2(0x1E, C32(0x8000_0000), C8(40)), 0); // ushiftr >= 32 → 0
+        assert_eq!(arith2(0x1D, C32(0x8000_0000), C8(4)), 0xF800_0000); // sshiftr arith
+        assert_eq!(arith2(0x1D, C32(0x8000_0000), C8(40)), 0xFFFF_FFFF); // sshiftr >= 32 → sign
+    }
+
+    #[test]
+    fn jump_offset_math() {
+        // jump +5: [0x20, modes(0x01), data(0x05)] = 3 bytes → pc = pc0+3+5-2.
+        let body = asm::ins(0x20, &[asm::Op::C8(5)]);
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        m.step_once().unwrap();
+        assert_eq!(m.pc, pc0 + 6);
+    }
+
+    #[test]
+    fn conditional_branch_taken_and_not() {
+        // jz value=0 → taken (jumps forward).
+        let body = asm::ins(0x22, &[asm::Op::C8(0), asm::Op::C8(20)]);
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        let instr_len = body_len(0x22, 2);
+        m.step_once().unwrap();
+        assert_eq!(m.pc, pc0 + instr_len + 20 - 2);
+
+        // jz value=1 → not taken (falls through past the instruction).
+        let body = asm::ins(0x22, &[asm::Op::C8(1), asm::Op::C8(20)]);
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        m.step_once().unwrap();
+        assert_eq!(m.pc, pc0 + body_len(0x22, 2));
+    }
+
+    #[test]
+    fn signed_vs_unsigned_compares() {
+        // jlt(-1, 1) signed → taken; jltu(0xFFFFFFFF, 1) unsigned → not taken.
+        let taken = |op: u32, a: asm::Op, b: asm::Op| -> bool {
+            let body = asm::ins(op, &[a, b, asm::Op::C8(40)]);
+            let blen = body.len() as u32;
+            let mut m = machine_with_body(&[], body);
+            let pc0 = m.pc;
+            m.step_once().unwrap();
+            // Not taken → pc falls through to pc0+blen; taken → pc differs.
+            m.pc != pc0 + blen
+        };
+        assert!(taken(0x26, asm::Op::C8(-1), asm::Op::C8(1))); // jlt signed
+        assert!(!taken(0x2A, asm::Op::C32(0xFFFF_FFFF), asm::Op::C8(1))); // jltu unsigned
+        assert!(taken(0x2B, asm::Op::C32(0xFFFF_FFFF), asm::Op::C8(1))); // jgeu unsigned
+    }
+
+    #[test]
+    fn branch_offset_0_and_1_return_convention() {
+        // Inside a callee, `jump 0` returns 0 and `jump 1` returns 1 to the
+        // caller's destination (here, the value stack).
+        for (offset, expect) in [(0u32, 0u32), (1, 1)] {
+            let start = asm::func(0xC1, &[], &[]);
+            let off_op = if offset == 0 { asm::Op::Zero } else { asm::Op::C8(1) };
+            let callee = asm::func(0xC1, &[], &asm::ins(0x20, &[off_op]));
+            let built = asm::assemble(&[start, callee], 0, 0x100);
+            let callee_addr = built.addrs[1];
+            let mut m = machine(built);
+            m.call_function(callee_addr, &[], Dest::Push).unwrap();
+            m.step_once().unwrap(); // executes the jump → return
+            assert_eq!(m.pop32().unwrap(), expect);
+        }
+    }
+
+    /// Byte length of an instruction: 1-byte opcode (< 0x80) + ceil(n/2) mode
+    /// bytes + n single-byte (C8) operands.
+    fn body_len(_op: u32, n: u32) -> u32 {
+        1 + n.div_ceil(2) + n
+    }
+
+    #[test]
+    fn illegal_operand_mode_faults() {
+        // Mode 0x4 is unused/illegal for load.
+        let mut m = machine_with_body(&[], vec![0x04]);
+        assert!(m.read_operands(1, 0).is_err());
+        // Mode 0x1 (constant) is illegal as a store target.
+        let mut m = machine_with_body(&[], vec![0x01, 0x00]);
+        assert!(m.read_operands(0, 1).is_err());
+    }
+
+    // ── Task 5: stack ops, copy, memsize, call variants ───────────────────────
+
+    #[test]
+    fn copy_and_sign_extend() {
+        // copy: full 32-bit through RAM.
+        let body = asm::ins(0x40, &[asm::Op::C32(0xDEAD_BEEF), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF);
+
+        // copys: write only 2 bytes to memory (no sign extension).
+        let body = asm::ins(0x41, &[asm::Op::C32(0x1234_5678), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x100, 0xFFFF_FFFF).unwrap();
+        m.step_once().unwrap();
+        // Big-endian: the 2-byte write at 0x100 lands in the high-order bytes
+        // (0x5678), leaving the low half (0x102..0x104) unchanged (FFFF).
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x5678_FFFF);
+
+        // copyb: write only 1 byte (the top byte at 0x100).
+        let body = asm::ins(0x42, &[asm::Op::C32(0x1234_5678), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x100, 0).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x7800_0000);
+
+        // sexs / sexb sign-extend.
+        let sx = |op: u32, v: u32| {
+            let body = asm::ins(op, &[asm::Op::C32(v), asm::Op::Mem16(0x0100)]);
+            let mut m = machine_with_body(&[], body);
+            m.step_once().unwrap();
+            m.mem.read32(0x100).unwrap()
+        };
+        assert_eq!(sx(0x44, 0x0000_8000), 0xFFFF_8000); // sexs negative
+        assert_eq!(sx(0x44, 0x0000_7FFF), 0x0000_7FFF); // sexs positive
+        assert_eq!(sx(0x45, 0x0000_0080), 0xFFFF_FF80); // sexb negative
+        assert_eq!(sx(0x45, 0x0000_007F), 0x0000_007F); // sexb positive
+    }
+
+    #[test]
+    fn stkcount_peek_swap() {
+        // stkcount → RAM.
+        let body = asm::ins(0x50, &[asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(1).unwrap();
+        m.push32(2).unwrap();
+        m.push32(3).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 3);
+
+        // stkpeek index 1 (does not pop).
+        let body = asm::ins(0x51, &[asm::Op::C8(1), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(0xAA).unwrap();
+        m.push32(0xBB).unwrap();
+        m.push32(0xCC).unwrap(); // top
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xBB);
+        assert_eq!(m.value_count(), 3);
+
+        // stkswap.
+        let body = asm::ins(0x52, &[]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(1).unwrap();
+        m.push32(2).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.pop32().unwrap(), 1);
+        assert_eq!(m.pop32().unwrap(), 2);
+    }
+
+    #[test]
+    fn stkcopy_duplicates_top_n_in_order() {
+        let body = asm::ins(0x54, &[asm::Op::C8(2)]);
+        let mut m = machine_with_body(&[], body);
+        m.push32(10).unwrap();
+        m.push32(20).unwrap();
+        m.push32(30).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.value_count(), 5);
+        // ...10,20,30,20,30 (top).
+        for expect in [30, 20, 30, 20, 10] {
+            assert_eq!(m.pop32().unwrap(), expect);
+        }
+    }
+
+    #[test]
+    fn stkroll_rotates_per_spec_example() {
+        // Spec example: 8 7 6 5 4 3 2 1 0<top>; stkroll 5 1 → 8 7 6 5 0 4 3 2 1<top>.
+        let body = asm::ins(0x53, &[asm::Op::C8(5), asm::Op::C8(1)]);
+        let mut m = machine_with_body(&[], body);
+        for v in [8u32, 7, 6, 5, 4, 3, 2, 1, 0] {
+            m.push32(v).unwrap();
+        }
+        m.step_once().unwrap();
+        for expect in [1, 2, 3, 4, 0, 5, 6, 7, 8] {
+            assert_eq!(m.pop32().unwrap(), expect);
+        }
+    }
+
+    #[test]
+    fn get_and_set_memsize() {
+        let body = asm::ins(0x102, &[asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        let size = m.mem.mem_size();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), size);
+
+        // setmemsize success → result 0, size grows.
+        let body = asm::ins(0x103, &[asm::Op::C16(0x300), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0); // success
+        assert_eq!(m.mem.mem_size(), 0x300);
+
+        // setmemsize failure (unaligned) → result 1, size unchanged.
+        let body = asm::ins(0x103, &[asm::Op::C16(0x250), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        let before = m.mem.mem_size();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1); // failure
+        assert_eq!(m.mem.mem_size(), before);
+    }
+
+    #[test]
+    fn call_takes_args_from_stack_and_returns() {
+        // callee (index 0, addr 0x24) returns the constant 0x123.
+        let callee = asm::func(0xC1, &[], &asm::ins(0x31, &[asm::Op::C16(0x123)]));
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x30, &[asm::Op::C32(0x24), asm::Op::C8(0), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[callee, start], 1, 0x100);
+        assert_eq!(built.addrs[0], 0x24);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // call
+        m.step_once().unwrap(); // return
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x123);
+    }
+
+    #[test]
+    fn callfi_passes_one_arg() {
+        // callee returns its single local (the argument).
+        let callee = asm::func(0xC1, &[(4, 1)], &asm::ins(0x31, &[asm::Op::Local8(0)]));
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x161, &[asm::Op::C32(0x24), asm::Op::C16(0x99), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[callee, start], 1, 0x100);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // callfi
+        m.step_once().unwrap(); // return
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x99);
+    }
+
+    #[test]
+    fn callfii_sums_two_args() {
+        // callee: add local0 + local1 → stack, then return it.
+        let mut body = asm::ins(0x10, &[asm::Op::Local8(0), asm::Op::Local8(4), asm::Op::Stack]);
+        body.extend(asm::ins(0x31, &[asm::Op::Stack]));
+        let callee = asm::func(0xC1, &[(4, 2)], &body);
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(
+                0x162,
+                &[asm::Op::C32(0x24), asm::Op::C8(10), asm::Op::C8(20), asm::Op::Mem16(0x0100)],
+            ),
+        );
+        let built = asm::assemble(&[callee, start], 1, 0x100);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // callfii
+        m.step_once().unwrap(); // add
+        m.step_once().unwrap(); // return
+        assert_eq!(m.mem.read32(0x100).unwrap(), 30);
+    }
+
+    #[test]
+    fn tailcall_reuses_caller_stub() {
+        // f2 (addr 0x24) returns 0x77. f1 tailcalls f2. start calls f1 storing to
+        // RAM 0x100. Because tailcall reuses f1's stub, 0x77 lands at 0x100.
+        let f2 = asm::func(0xC1, &[], &asm::ins(0x31, &[asm::Op::C16(0x77)]));
+        let f1_addr = 0x24 + f2.len() as u32;
+        let f1 = asm::func(0xC1, &[], &asm::ins(0x34, &[asm::Op::C32(0x24), asm::Op::C8(0)]));
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x30, &[asm::Op::C32(f1_addr), asm::Op::C8(0), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[f2, f1, start], 2, 0x100);
+        assert_eq!(built.addrs[1], f1_addr);
+        let mut m = machine(built);
+        m.step_once().unwrap(); // start: call f1
+        m.step_once().unwrap(); // f1: tailcall f2
+        m.step_once().unwrap(); // f2: return 0x77
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x77);
+        assert!(!m.halted); // returned into start, not halted
+    }
+
+    // ── Task 6: output, iosys, @glk, run loop ─────────────────────────────────
+
+    fn out_str(m: &Machine) -> String {
+        m.out.as_any().downcast_ref::<BufferOutput>().unwrap().buf.clone()
+    }
+
+    /// Build + run a start function with body `body`; return its output.
+    fn run_program(body: Vec<u8>) -> Machine {
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        m.run();
+        m
+    }
+
+    #[test]
+    fn streamnum_and_streamchar_under_glk_iosys() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]); // setiosys glk
+        body.extend(asm::ins(0x71, &[asm::Op::C8(42)])); // streamnum 42
+        body.extend(asm::ins(0x71, &[asm::Op::C8(-7)])); // streamnum -7
+        body.extend(asm::ins(0x70, &[asm::Op::C8(65)])); // streamchar 'A'
+        body.extend(asm::ins(0x120, &[])); // quit
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "42-7A");
+        assert!(m.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn null_iosys_discards_output() {
+        // Default iosys is null (0); streamchar produces nothing.
+        let mut body = asm::ins(0x70, &[asm::Op::C8(88)]); // streamchar 'X'
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "");
+    }
+
+    #[test]
+    fn glk_put_char_and_put_buffer() {
+        // glk_put_char('B').
+        let mut body = asm::ins(0x40, &[asm::Op::C8(66), asm::Op::Stack]); // push 'B'
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x80), asm::Op::C8(1), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "B");
+
+        // glk_put_buffer(addr=0x100, len=2) over "Hi" planted via copyb.
+        let mut body = asm::ins(0x42, &[asm::Op::C8(b'H' as i8), asm::Op::Mem16(0x0100)]);
+        body.extend(asm::ins(0x42, &[asm::Op::C8(b'i' as i8), asm::Op::Mem16(0x0101)]));
+        body.extend(asm::ins(0x40, &[asm::Op::C8(2), asm::Op::Stack])); // push len (below)
+        body.extend(asm::ins(0x40, &[asm::Op::C16(0x0100), asm::Op::Stack])); // push addr (top)
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x84), asm::Op::C8(2), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "Hi");
+    }
+
+    #[test]
+    fn streamstr_prints_e0_cstring() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0100)])); // streamstr @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        for (i, b) in [0xE0u8, b'H', b'i', b'!', 0].iter().enumerate() {
+            m.mem.write8(0x100 + i as u32, *b as u32).unwrap();
+        }
+        m.run();
+        assert_eq!(out_str(&m), "Hi!");
+    }
+
+    #[test]
+    fn nop_and_quit() {
+        let mut body = asm::ins(0x00, &[]); // nop
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        assert_eq!(m.step(), StepResult::Continue); // nop
+        assert_eq!(m.step(), StepResult::Quit); // quit
+        assert_eq!(m.step(), StepResult::Quit); // stays quit
+    }
+
+    #[test]
+    fn unknown_opcode_records_diagnostic_and_quits() {
+        let m = run_program(asm::ins(0x1FF, &[])); // 0x1FF unimplemented
+        assert!(m.halted);
+        assert!(!m.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn memory_fault_records_diagnostic_and_quits() {
+        // Load contents of a wildly out-of-range address → fault, no panic.
+        let m = run_program(asm::ins(0x40, &[asm::Op::Mem32(0xFFFF_FFF0), asm::Op::Zero]));
+        assert!(m.halted);
+        assert!(m.diagnostics.iter().any(|d| d.contains("memory fault")));
+    }
+
+    #[test]
+    fn end_to_end_arith_call_output_branch_quit() {
+        // double(arg) = arg + arg (function at 0x24).
+        let mut dbody = asm::ins(0x10, &[asm::Op::Local8(0), asm::Op::Local8(0), asm::Op::Stack]);
+        dbody.extend(asm::ins(0x31, &[asm::Op::Stack])); // return
+        let double = asm::func(0xC1, &[(4, 1)], &dbody);
+
+        // start: setiosys glk; push 3+4; call double; streamnum result; a taken
+        // branch (jz 0, offset 1) returns from start (halts) before the poison.
+        let mut sbody = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        sbody.extend(asm::ins(0x10, &[asm::Op::C8(3), asm::Op::C8(4), asm::Op::Stack])); // 7
+        sbody.extend(asm::ins(0x30, &[asm::Op::C32(0x24), asm::Op::C8(1), asm::Op::Stack])); // 14
+        sbody.extend(asm::ins(0x71, &[asm::Op::Stack])); // streamnum 14 → "14"
+        sbody.extend(asm::ins(0x22, &[asm::Op::C8(0), asm::Op::C8(1)])); // jz 0,1 → return 1
+        sbody.extend(asm::ins(0x70, &[asm::Op::C8(b'!' as i8)])); // poison, unreached
+        let start = asm::func(0xC1, &[], &sbody);
+
+        let built = asm::assemble(&[double, start], 1, 0x100);
+        assert_eq!(built.addrs[0], 0x24);
+        let mut m = machine(built);
+        m.run();
+        assert_eq!(out_str(&m), "14");
+        assert!(m.halted);
+    }
+
+    #[test]
+    fn start_frame_entered_at_fp_zero() {
+        // A C1 start function with three 4-byte locals.
+        let start = asm::func(0xC1, &[(4, 3)], &[]);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let m = machine(built);
+        assert!(!m.halted);
+        assert_eq!(m.fp, 0);
+        // Locals are zero-initialized.
+        assert_eq!(m.local_load(0).unwrap(), 0);
+        assert_eq!(m.local_load(8).unwrap(), 0);
+    }
+
+    #[test]
+    fn c1_call_copies_args_into_locals_extras_zeroed() {
+        // start (C1, no locals) and a callee (C1, four 4-byte locals).
+        let start = asm::func(0xC1, &[], &[]);
+        let callee = asm::func(0xC1, &[(4, 4)], &[]);
+        let built = asm::assemble(&[start, callee], 0, 0x100);
+        let callee_addr = built.addrs[1];
+        let mut m = machine(built);
+        m.call_function(callee_addr, &[11, 22, 33], Dest::Discard).unwrap();
+        assert_eq!(m.local_load(0).unwrap(), 11);
+        assert_eq!(m.local_load(4).unwrap(), 22);
+        assert_eq!(m.local_load(8).unwrap(), 33);
+        assert_eq!(m.local_load(12).unwrap(), 0); // extra local zeroed
+    }
+
+    #[test]
+    fn c1_call_truncates_to_local_width() {
+        let start = asm::func(0xC1, &[], &[]);
+        // locals: one 1-byte, one 2-byte, one 4-byte.
+        let callee = asm::func(0xC1, &[(1, 1), (2, 1), (4, 1)], &[]);
+        let built = asm::assemble(&[start, callee], 0, 0x100);
+        let callee_addr = built.addrs[1];
+        let mut m = machine(built);
+        m.call_function(callee_addr, &[0x1234_5678, 0xABCD, 0xDEAD_BEEF], Dest::Discard)
+            .unwrap();
+        assert_eq!(m.local_load(0).unwrap(), 0x78); // 1-byte truncation
+        assert_eq!(m.local_load(2).unwrap(), 0xABCD); // 2-byte, aligned to even
+        assert_eq!(m.local_load(4).unwrap(), 0xDEAD_BEEF); // 4-byte, aligned to 4
+    }
+
+    #[test]
+    fn c0_call_pushes_args_and_count() {
+        let start = asm::func(0xC1, &[], &[]);
+        let callee = asm::func(0xC0, &[], &[]);
+        let built = asm::assemble(&[start, callee], 0, 0x100);
+        let callee_addr = built.addrs[1];
+        let mut m = machine(built);
+        m.call_function(callee_addr, &[100, 200, 300], Dest::Discard).unwrap();
+        // Count on top, then first arg, then second, then third.
+        assert_eq!(m.value_count(), 4);
+        assert_eq!(m.pop32().unwrap(), 3); // count
+        assert_eq!(m.pop32().unwrap(), 100); // first arg topmost
+        assert_eq!(m.pop32().unwrap(), 200);
+        assert_eq!(m.pop32().unwrap(), 300);
+    }
+
+    #[test]
+    fn return_writes_value_to_local_dest() {
+        let start = asm::func(0xC1, &[(4, 1)], &[]); // start has one local
+        let callee = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start, callee], 0, 0x100);
+        let callee_addr = built.addrs[1];
+        let mut m = machine(built);
+        // Call storing the return value into start's local at offset 0.
+        m.call_function(callee_addr, &[], Dest::Local(0)).unwrap();
+        m.return_value(0x4242).unwrap();
+        assert_eq!(m.fp, 0); // back in the start frame
+        assert_eq!(m.local_load(0).unwrap(), 0x4242);
+    }
+
+    #[test]
+    fn return_writes_value_to_stack_dest() {
+        let start = asm::func(0xC1, &[], &[]);
+        let callee = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start, callee], 0, 0x100);
+        let callee_addr = built.addrs[1];
+        let mut m = machine(built);
+        m.call_function(callee_addr, &[], Dest::Push).unwrap();
+        m.return_value(0x99).unwrap();
+        assert_eq!(m.value_count(), 1);
+        assert_eq!(m.pop32().unwrap(), 0x99);
+    }
+
+    #[test]
+    fn return_writes_value_to_memory_dest() {
+        let start = asm::func(0xC1, &[], &[]);
+        let callee = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start, callee], 0, 0x100);
+        let callee_addr = built.addrs[1];
+        let ramstart = {
+            let mem = Memory::new(built.image.clone()).unwrap();
+            mem.ramstart()
+        };
+        let mut m = machine(built);
+        m.call_function(callee_addr, &[], Dest::Mem(ramstart)).unwrap();
+        m.return_value(0xCAFE_F00D).unwrap();
+        assert_eq!(m.mem.read32(ramstart), Some(0xCAFE_F00D));
+    }
+
+    #[test]
+    fn returning_from_outermost_halts() {
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        assert!(!m.halted);
+        m.return_value(0).unwrap();
+        assert!(m.halted);
+    }
+
+    #[test]
+    fn nested_calls_restore_pc_and_fp() {
+        let start = asm::func(0xC1, &[], &[]);
+        let f1 = asm::func(0xC1, &[(4, 1)], &[]);
+        let f2 = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start, f1, f2], 0, 0x100);
+        let (a1, a2) = (built.addrs[1], built.addrs[2]);
+        let mut m = machine(built);
+        let start_pc = m.pc;
+        m.pc = 0xDEAD; // pretend the caller is mid-instruction
+        m.call_function(a1, &[], Dest::Discard).unwrap();
+        let f1_fp = m.fp;
+        m.pc = 0xBEEF;
+        m.call_function(a2, &[], Dest::Discard).unwrap();
+        m.return_value(0).unwrap();
+        assert_eq!(m.fp, f1_fp); // back to f1
+        assert_eq!(m.pc, 0xBEEF); // f1's resume pc
+        m.return_value(0).unwrap();
+        assert_eq!(m.fp, 0); // back to start
+        assert_eq!(m.pc, 0xDEAD);
+        let _ = start_pc;
+    }
+}
