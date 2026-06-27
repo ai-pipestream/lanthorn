@@ -41,23 +41,38 @@ pub enum PendingIo {
 // ── CaptureSink ───────────────────────────────────────────────────────────────
 
 /// An output sink that accumulates printed text and lets the caller drain it.
+///
+/// `runs` records one `(char_count, text_style_bits)` chunk per `print`/
+/// `print_styled` call, in lockstep with the appended text, so callers can
+/// reconstruct which spans carried Z-machine emphasis.
 pub struct CaptureSink {
     pub text: String,
+    pub runs: Vec<(usize, u8)>,
 }
 
 impl CaptureSink {
     fn new() -> Self {
-        CaptureSink { text: String::new() }
+        CaptureSink { text: String::new(), runs: Vec::new() }
+    }
+
+    /// Drain accumulated text and style runs together, leaving both empty.
+    pub fn take_styled(&mut self) -> (String, Vec<(usize, u8)>) {
+        (std::mem::take(&mut self.text), std::mem::take(&mut self.runs))
     }
 
     /// Drain all accumulated text, leaving the buffer empty.
     pub fn take_text(&mut self) -> String {
-        std::mem::take(&mut self.text)
+        self.take_styled().0
     }
 }
 
 impl Output for CaptureSink {
     fn print(&mut self, s: &str) {
+        self.runs.push((s.chars().count(), 0));
+        self.text.push_str(s);
+    }
+    fn print_styled(&mut self, s: &str, style: u8) {
+        self.runs.push((s.chars().count(), style));
         self.text.push_str(s);
     }
     fn as_any(&self) -> &dyn Any {
@@ -68,11 +83,34 @@ impl Output for CaptureSink {
     }
 }
 
+/// Trim a `(char_count, bits)` chunk list so its total char-count equals
+/// `char_len` (used after `strip_read_prompt` shortens the captured text by a
+/// trailing prompt). Chunks past the limit are dropped; the boundary chunk is
+/// truncated. A list shorter than `char_len` is returned unchanged (the missing
+/// tail is treated as plain by `push_transcript_runs`).
+fn clamp_runs(runs: Vec<(usize, u8)>, char_len: usize) -> Vec<(usize, u8)> {
+    let mut out = Vec::with_capacity(runs.len());
+    let mut total = 0usize;
+    for (c, b) in runs {
+        if total >= char_len {
+            break;
+        }
+        let take = c.min(char_len - total);
+        out.push((take, b));
+        total += take;
+    }
+    out
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// Result of one player turn.
 pub struct TurnResult {
     pub transcript: String,
+    /// Z-machine text-style chunks for `transcript`: a `(char_count, bits)` list
+    /// covering every char of `transcript`, fed to `push_transcript_runs`. All
+    /// chunks carry bits 0 when the turn emitted no styling.
+    pub transcript_runs: Vec<(usize, u8)>,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
     /// Optional informational note to surface to the player (e.g. when the
@@ -188,8 +226,9 @@ impl GameSession {
         self.quit = quit;
         self.pending = pending;
 
-        let raw = sink_mut(&mut self.machine).take_text();
+        let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         let transcript = strip_read_prompt(&raw).to_owned();
+        let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         let detected = detect_location(&self.machine);
         let location = detected.as_ref().map(|loc| match loc {
             Location::NameOnly(name) => zvm::ObjectSnapshot {
@@ -211,7 +250,7 @@ impl GameSession {
         let beep = self.machine.pending_beeps.last().copied();
         self.machine.pending_beeps.clear();
 
-        TurnResult { transcript, location, quit, info, beep, diagnostics, location_method, pending_io }
+        TurnResult { transcript, transcript_runs, location, quit, info, beep, diagnostics, location_method, pending_io }
     }
 }
 
@@ -422,6 +461,26 @@ mod tests {
     use super::*;
     use mapper::direction::Direction;
 
+    // ── CaptureSink style-run capture ─────────────────────────────────────────
+
+    #[test]
+    fn capture_sink_records_style_runs() {
+        use zvm::io::Output;
+        let mut s = CaptureSink::new();
+        s.print("ab");
+        s.print_styled("CD", 0x02);
+        let (text, runs) = s.take_styled();
+        assert_eq!(text, "abCD");
+        assert_eq!(runs, vec![(2, 0), (2, 0x02)]);
+    }
+
+    #[test]
+    fn clamp_runs_trims_to_char_len() {
+        // strip_read_prompt removed 3 trailing chars ("\n> " etc.) → clamp.
+        let runs = vec![(2, 0u8), (5, 0x02u8)];
+        assert_eq!(clamp_runs(runs, 4), vec![(2, 0), (2, 0x02)]);
+    }
+
     // ── Pure bridge test ──────────────────────────────────────────────────────
 
     #[test]
@@ -431,6 +490,7 @@ mod tests {
         // First observation: set current room (no prior → no edge).
         let first = TurnResult {
             transcript: String::new(),
+            transcript_runs: Vec::new(),
             location: Some(ObjectSnapshot { number: 1, parent: 0, name: "Hall".into() }),
             quit: false,
             info: None,
@@ -447,6 +507,7 @@ mod tests {
         // Second observation: move north → directed N edge 1→2.
         let second = TurnResult {
             transcript: String::new(),
+            transcript_runs: Vec::new(),
             location: Some(ObjectSnapshot { number: 2, parent: 0, name: "Attic".into() }),
             quit: false,
             info: None,
@@ -471,6 +532,7 @@ mod tests {
         let mut m = Mapper::default();
         let result = TurnResult {
             transcript: String::new(),
+            transcript_runs: Vec::new(),
             location: None,
             quit: false,
             info: None,
@@ -494,6 +556,7 @@ mod tests {
         // wired...)" appears.
         let r = TurnResult {
             transcript: "You are in a maze.".to_string(),
+            transcript_runs: Vec::new(),
             location: None,
             quit: false,
             info: None,
@@ -511,6 +574,7 @@ mod tests {
     fn turn(number: u16, name: &str) -> TurnResult {
         TurnResult {
             transcript: String::new(),
+            transcript_runs: Vec::new(),
             location: Some(ObjectSnapshot { number, parent: 0, name: name.into() }),
             quit: false,
             info: None,

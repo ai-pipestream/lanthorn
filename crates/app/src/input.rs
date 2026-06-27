@@ -5648,6 +5648,7 @@ mod tests {
             let snap_number = snap.number;
             let seed_result = TurnResult {
                 transcript: String::new(),
+                transcript_runs: Vec::new(),
                 location: Some(snap),
                 quit: false,
                 info: None,
@@ -5664,7 +5665,7 @@ mod tests {
 
         // Simulate some game turns to advance state.
         let r1 = session.submit("look");
-        state.push_transcript(&r1.transcript);
+        state.push_transcript_runs(&r1.transcript, crate::state::TranscriptKind::Story, &r1.transcript_runs);
         state.turns = 5;
 
         // Rebuild session from story_bytes (what handle_saves_prompt does on confirm).
@@ -5686,6 +5687,7 @@ mod tests {
             let snap_number = snap.number;
             let seed_result = TurnResult {
                 transcript: String::new(),
+                transcript_runs: Vec::new(),
                 location: Some(snap),
                 quit: false,
                 info: None,

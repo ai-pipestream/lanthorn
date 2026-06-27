@@ -1095,6 +1095,7 @@ fn main() {
         let snap_number = snap.number;
         let seed_result = TurnResult {
             transcript: String::new(),
+            transcript_runs: Vec::new(),
             location: Some(snap),
             quit: session.quit,
             info: None,
@@ -1914,7 +1915,7 @@ fn main() {
                         // Map to ZSCII and forward; unknown keys are silently ignored.
                         if let Some(byte) = key_to_zscii(*k) {
                             let result = session.submit_char(byte);
-                            state.push_transcript(&result.transcript);
+                            state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
                             apply_turn_events(&mut state, &result);
                             if let Some(note) = &result.info {
                                 state.push_transcript(note);
@@ -2227,7 +2228,7 @@ fn main() {
 
                 let result = session.submit(&cmd);
                 state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
-                state.push_transcript(&result.transcript);
+                state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
                 apply_turn_events(&mut state, &result);
                 if let Some(note) = &result.info {
                     state.push_transcript(note);
@@ -2381,6 +2382,7 @@ fn main() {
                                     let rid = snap.number as mapper::graph::RoomId;
                                     let restore_result = TurnResult {
                                         transcript: String::new(),
+                                        transcript_runs: Vec::new(),
                                         location: Some(snap),
                                         quit: false,
                                         info: None,
@@ -2514,6 +2516,7 @@ fn main() {
                                     let rid = snap.number as mapper::graph::RoomId;
                                     let restore_result = TurnResult {
                                         transcript: String::new(),
+                                        transcript_runs: Vec::new(),
                                         location: Some(snap),
                                         quit: false,
                                         info: None,
@@ -2633,6 +2636,7 @@ fn main() {
                                         let rid = snap.number as mapper::graph::RoomId;
                                         let restore_result = TurnResult {
                                             transcript: String::new(),
+                                            transcript_runs: Vec::new(),
                                             location: Some(snap),
                                             quit: false,
                                             info: None,
@@ -2691,6 +2695,7 @@ fn main() {
                                     let rid = snap.number as mapper::graph::RoomId;
                                     let restore_result = TurnResult {
                                         transcript: String::new(),
+                                        transcript_runs: Vec::new(),
                                         location: Some(snap),
                                         quit: false,
                                         info: None,
@@ -2959,6 +2964,7 @@ fn dispatch_slash_outcome(
                                         let rid = snap.number as mapper::graph::RoomId;
                                         let restore_result = TurnResult {
                                             transcript: String::new(),
+                                            transcript_runs: Vec::new(),
                                             location: Some(snap),
                                             quit: false,
                                             info: None,
@@ -3122,6 +3128,7 @@ fn reset_game(
                 let snap_number = snap.number;
                 let seed_result = TurnResult {
                     transcript: String::new(),
+                    transcript_runs: Vec::new(),
                     location: Some(snap),
                     quit: false,
                     info: None,
@@ -3890,6 +3897,7 @@ fn apply_launch_resume(
                 let rid = snap.number as mapper::graph::RoomId;
                 let restore_result = TurnResult {
                     transcript: String::new(),
+                    transcript_runs: Vec::new(),
                     location: Some(snap),
                     quit: false,
                     info: None,
