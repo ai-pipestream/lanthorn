@@ -2,7 +2,8 @@
 
 **Date:** 2026-06-27
 **Status:** Approved, ready for planning
-**Crate:** `crates/zvm-cli` (frontend only — no `zvm` engine changes)
+**Crate:** `crates/zvm-cli` + one additive, backward-compatible `zvm` method
+(`Output::print_styled`, §10) shared with a future app feature
 
 ## Goal
 
@@ -138,9 +139,34 @@ restored. `Restart` resets the `ScreenView` (new machine, region cleared).
 After each `step()` (next to the existing `diagnostics` drain), drain
 `machine.pending_beeps` and emit the bleep bytes (§8).
 
-Input stays **cooked line input** (echoes in the lower region). The
-`ScreenView` render functions are pure (`&ScreenState`/`&StatusLine` + dims →
-`String`); `main` writes the returned strings to stdout.
+`NeedLine` keeps **cooked line input** (echoes in the lower region). `NeedChar`
+uses **raw single-key input** when `stdin` is a TTY (§9); when piped it reads a
+byte as today. The `ScreenView` render functions are pure
+(`&ScreenState`/`&StatusLine` + dims → `String`); `main` writes the returned
+strings to stdout.
+
+### 9. Raw single-key input for `read_char`
+
+A `read_char` (`StepResult::NeedChar`) reads one keypress without requiring
+Enter, so v4+ menus (the hint screen, Bureaucracy) navigate as on DOS.
+
+- Only when `std::io::stdin().is_terminal()`. Piped input falls back to today's
+  byte-from-line read (harness output stays deterministic).
+- Tight per-read window via `stty` (zero-dep, already used for §6): capture the
+  current mode with `stty -g`, set raw-no-echo
+  (`stty -icanon -echo min 1 time 0`), read exactly one byte from stdin, then
+  restore the captured mode immediately. The terminal is in raw mode only for
+  the single keypress.
+- Because raw mode clears `ISIG`, Ctrl-C arrives as a byte (`0x03`) rather than
+  a signal; it is handled like any other key (and the mode is already restored
+  after the read), so the terminal is never left in a broken state on normal
+  paths. The captured mode is also restored on `Quit`/exit.
+- One byte is passed to `machine.supply_char`. Multi-byte escape sequences
+  (arrow/function keys) are **not** decoded — only the first byte is consumed
+  (the documented basic limitation; menus using letter/number + Enter work).
+- Helper `wants_raw_char(stdin_is_tty: bool) -> bool` is the unit-testable
+  decision point; the `stty`/read side effects are exercised by manual/
+  integration runs, not unit tests.
 
 ### 8. Sound bleep (terminal BEL)
 
@@ -152,6 +178,33 @@ terminal bell is a single tone). Independent of `--no-status` (audio, not the
 status display); sampled/Blorb sounds remain unsupported (engine still records
 a diagnostic for those). A pure helper `bleep_bytes(count, is_tty) -> &str`
 returns `"\x07"`-repeated or empty.
+
+### 10. Lower-window text styles (the one shared engine seam)
+
+The DOS interpreters showed `set_text_style` emphasis (reverse/bold; italic
+approximated) in the main text, not just the status line. The lower-window
+branch of `print_text` currently calls `self.out.print(s)` with no style, so
+the sink cannot style it. Add **one additive, backward-compatible** method to
+the `zvm::io::Output` trait:
+
+```rust
+fn print_styled(&mut self, s: &str, style: u8) { self.print(s); }  // default: ignore
+```
+
+`print_text`'s lower-window branch calls `self.out.print_styled(s,
+self.screen.text_style)` instead of `self.out.print(s)`. Existing sinks
+(`BufferOutput`, the app's `CaptureSink`) inherit the default and are
+**byte-for-byte unchanged** until they opt in — no signature churn, no ripple.
+
+`zvm-cli`'s `StdoutOutput` overrides `print_styled`: when stdout is a TTY, wrap
+`s` in SGR derived from the style bits (`1` → reverse `ESC[7m`, `2` → bold
+`ESC[1m`, `4` → italic `ESC[3m`; `8` fixed-pitch ignored), reset `ESC[0m` after
+a non-zero style; when piped, print `s` plain (harness output unchanged). The
+sink stores its `is_tty` flag at construction.
+
+This same seam is what the separate **app** feature (honor `set_text_style` in
+the transcript) will consume — that work is its own spec (it requires per-span
+style runs in the transcript) and is **not** part of this push.
 
 ## Testing
 
@@ -174,6 +227,10 @@ no real terminal:
   region producer yields nothing in both modes.
 - `bleep_bytes`: N bleeps with `is_tty = true` → N `\x07`; `is_tty = false` →
   empty regardless of count.
+- `StdoutOutput::print_styled`: TTY + style `1`/`2`/`4` wraps the text in the
+  expected SGR with an `ESC[0m` reset; style `0` and non-TTY emit plain text.
+  A `zvm` test confirms the default `print_styled` (e.g. on `BufferOutput`)
+  produces output identical to `print`.
 
 A headless integration check (piped story) confirms the inline block appears
 for a v3 game's status line and that `--no-status` reproduces the legacy
@@ -181,12 +238,13 @@ output.
 
 ## Out of scope (this feature)
 
-- Raw single-key input for `read_char` menu navigation (cooked input means a
-  key press needs Enter) — possible future enhancement.
+- Decoding multi-byte terminal escape sequences (arrow/function keys) into
+  Z-machine function-key codes for `read_char`; only the first byte is consumed
+  (§9). Letter/number + Enter menu navigation works.
 - `[MORE]` paging at screen bottom.
-- Lower-window text styling (bold/italic/reverse on the scrolling stream) —
-  would require threading `text_style` through the `Output` sink; the top
-  region styles are honored, the lower stream stays plain.
+- Honoring `set_text_style` in the **app** transcript — a separate, larger
+  feature (per-span style runs); this push only adds the shared engine seam
+  (§10) and `zvm-cli`'s consumption of it.
 - Sampled / Blorb sound (numbers ≥ 3), distinct bleep pitches, graphics, v6,
   and the automap — `zvm-cli` stays a text interpreter (only the built-in
   bleeps ring a single terminal BEL per §8).
@@ -203,7 +261,10 @@ output.
 - 0 warnings (`cargo build`, `cargo doc`) + full `cargo test` green per task.
 - `zvm-cli` stays **zero-dependency** (std only; ANSI is bytes, `IsTerminal` is
   std, terminal size via `stty`/env). No new crates.
-- **No `zvm` engine changes** — frontend only.
+- One **additive, backward-compatible** `zvm` engine change: the
+  `Output::print_styled` default method (§10). It must leave every existing
+  sink (`BufferOutput`, the app's `CaptureSink`) byte-for-byte unchanged. No
+  other engine changes.
 - Default (no `--no-status`, piped) keeps the lower-window stream byte-identical
   to today except for the added, deduped inline status/upper block; with
   `--no-status` it is byte-for-byte identical to today.
