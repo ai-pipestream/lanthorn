@@ -8,6 +8,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::input::{AttrKind, is_bordered_selector};
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
@@ -147,6 +148,14 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         .saturating_sub(visible_rows.saturating_sub(1))
         .min(max_scroll);
 
+    // When the list overflows, reserve the board's rightmost column as a scrollbar gutter.
+    let scrollbar_visible = total_lines > visible_rows && board_area.width >= 2;
+    let draw_area = if scrollbar_visible {
+        Rect::new(board_area.x, board_area.y, board_area.width.saturating_sub(1), board_area.height)
+    } else {
+        board_area
+    };
+
     // Render only the visible slice; record hit-rects for rendered selector rows.
     let mut samples: Vec<(usize, Rect)> = Vec::new();
     let end = (scroll + visible_rows).min(total_lines);
@@ -159,14 +168,14 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             (None, group_label) => {
                 // Group header line.
                 let hdr = format!(" {}", group_label);
-                crate::render::draw_str_clipped(buf, board_area.x, row_y, &hdr, header_style, board_area);
+                crate::render::draw_str_clipped(buf, board_area.x, row_y, &hdr, header_style, draw_area);
             }
             (Some(idx), sel) => {
                 let is_active = *idx == ed.active;
                 let label_style = if is_active { active_style } else { normal_style };
 
-                // Fill row background.
-                for col in board_area.x..board_area.right() {
+                // Fill row background (stop before the scrollbar gutter when visible).
+                for col in board_area.x..draw_area.right() {
                     if let Some(cell) = buf.cell_mut((col, row_y)) {
                         cell.set_symbol(" ").set_style(label_style);
                     }
@@ -177,14 +186,14 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                 let marker = if is_active { ">" } else { " " };
                 let name_trunc: String = sel.chars().take(name_w).collect();
                 let label = format!("{} {:<width$}", marker, name_trunc, width = name_w);
-                crate::render::draw_str_clipped(buf, board_area.x, row_y, &label, label_style, board_area);
+                crate::render::draw_str_clipped(buf, board_area.x, row_y, &label, label_style, draw_area);
 
                 // Sample swatch: render a short styled text after the name.
                 let swatch_x = board_area.x + label.chars().count() as u16 + 1;
                 let sample_style = style_for_selector(&ed.preview, sel);
                 let swatch_text = " Sample ";
-                if swatch_x < board_area.right() {
-                    let swatch_area = Rect::new(swatch_x, row_y, board_area.right().saturating_sub(swatch_x), 1);
+                if swatch_x < draw_area.right() {
+                    let swatch_area = Rect::new(swatch_x, row_y, draw_area.right().saturating_sub(swatch_x), 1);
                     crate::render::draw_str_clipped(buf, swatch_x, row_y, swatch_text, sample_style, swatch_area);
                 }
 
@@ -193,6 +202,25 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                 samples.push((*idx, row_rect));
             }
         }
+    }
+
+    // ── Scrollbar (only when the selector list overflows the board height) ────
+    if scrollbar_visible {
+        let sb_area = Rect::new(board_area.right().saturating_sub(1), board_area.y, 1, board_area.height);
+        // content_len = max_scroll + 1 so position ranges 0..=max_scroll (matching transcript.rs).
+        let content_len = total_lines.saturating_sub(visible_rows) + 1;
+        let mut sb_state = ScrollbarState::new(content_len)
+            .viewport_content_length(visible_rows)
+            .position(scroll);
+        StatefulWidget::render(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(state.colors.scrollbar),
+            sb_area,
+            buf,
+            &mut sb_state,
+        );
     }
 
     // ── Property pane ─────────────────────────────────────────────────────────
@@ -698,6 +726,47 @@ mod tests {
         let rects2 = draw_style_editor(&s2, area, &mut buf2).expect("drawn");
         assert!(rects2.border_shadow.is_some(), "dialog shows shadow chip");
         assert!(rects2.border_header.is_none(), "dialog hides header chip");
+    }
+
+    #[test]
+    fn selector_list_draws_scrollbar_when_overflowing() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        // A short area forces the selector list (~39+ visual lines) to overflow.
+        let area = Rect::new(0, 0, 120, 12);
+        let mut buf = Buffer::empty(area);
+        let _ = draw_style_editor(&s, area, &mut buf);
+        // The scrollbar thumb glyph (█) must appear somewhere; it is unambiguous
+        // because border lines use │/─ and selector text never contains █.
+        let mut drew = false;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if buf[(x, y)].symbol() == "█" {
+                    drew = true;
+                }
+            }
+        }
+        assert!(drew, "selector list must draw a scrollbar thumb when the list overflows");
+    }
+
+    #[test]
+    fn selector_list_no_scrollbar_when_not_overflowing() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        // A very tall area fits all selectors; should not panic and should not draw a thumb.
+        let area = Rect::new(0, 0, 120, 80);
+        let mut buf = Buffer::empty(area);
+        let result = draw_style_editor(&s, area, &mut buf);
+        assert!(result.is_some(), "draw_style_editor must succeed on a large area");
+        let mut drew = false;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if buf[(x, y)].symbol() == "█" {
+                    drew = true;
+                }
+            }
+        }
+        assert!(!drew, "no scrollbar thumb expected when all selectors fit in the board area");
     }
 
     #[test]
