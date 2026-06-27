@@ -85,6 +85,13 @@ pub struct Machine {
     protect: (u32, u32),
     /// Bounded stack of undo snapshots (oldest first); see [`Machine::UNDO_CAP`].
     undo_stack: Vec<Vec<u8>>,
+    /// Accelerated-function assignments: VM function address → accel number
+    /// (`accelfunc`). Stored only; interception is deferred (see GLULX_NOTES §17).
+    accel_funcs: std::collections::HashMap<u32, u32>,
+    /// Acceleration parameter table: index → value (`accelparam`).
+    accel_params: std::collections::HashMap<u32, u32>,
+    /// PRNG state (xorshift32); seeded by `setrandom`.
+    rng: u32,
 
     // Cached layout of the current frame (recomputed whenever `fp` changes).
     cur_frame_len: u32,
@@ -138,6 +145,10 @@ impl Machine {
     /// Maximum number of in-memory undo snapshots retained (oldest dropped).
     const UNDO_CAP: usize = 16;
 
+    /// Deterministic default PRNG seed (also used for `setrandom(0)`, whose
+    /// true-entropy reseed is deferred — see GLULX_NOTES §18).
+    const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
+
     /// Build a machine over `mem`, entering the start function (no arguments).
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
@@ -159,6 +170,9 @@ impl Machine {
             halted: false,
             protect: (0, 0),
             undo_stack: Vec::new(),
+            accel_funcs: std::collections::HashMap::new(),
+            accel_params: std::collections::HashMap::new(),
+            rng: Self::DEFAULT_SEED,
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
@@ -424,7 +438,41 @@ impl Machine {
             }
             0x121 => {
                 let (_, s) = self.read_operands(0, 1)?;
-                self.store(s[0], 0) // verify: report success
+                let v = u32::from(!self.mem.checksum_ok()); // 0 = good, 1 = problem
+                self.store(s[0], v)
+            }
+            // PRNG.
+            0x110 => {
+                let (l, s) = self.read_operands(1, 1)?;
+                let v = self.rand_range(l[0]);
+                self.store(s[0], v)
+            }
+            0x111 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                if l[0] == 0 {
+                    self.rng = Self::DEFAULT_SEED;
+                    self.diagnostics
+                        .push("setrandom(0): true-entropy seeding deferred; using a fixed seed".to_string());
+                } else {
+                    self.rng = l[0];
+                }
+                Ok(())
+            }
+            // Acceleration (storage only; interception deferred — GLULX_NOTES §17).
+            0x180 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                let (funcnum, addr) = (l[0], l[1]);
+                if funcnum == 0 {
+                    self.accel_funcs.remove(&addr);
+                } else {
+                    self.accel_funcs.insert(addr, funcnum);
+                }
+                Ok(())
+            }
+            0x181 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                self.accel_params.insert(l[0], l[1]);
+                Ok(())
             }
             // Undo (in-memory; @save/@restore stream opcodes are sub-project 3).
             0x125 => self.op_saveundo(),
@@ -994,7 +1042,7 @@ impl Machine {
             0 => Self::GLULX_VERSION,                  // GlulxVersion
             1 => Self::TERP_VERSION,                   // TerpVersion
             2 => 1,                                    // ResizeMem
-            3 => 0,                                    // Undo (2c)
+            3 => 1,                                    // Undo (saveundo/restoreundo)
             4 => u32::from(arg == 0 || arg == 2),      // IOSystem: null + Glk
             5 => 1,                                    // Unicode
             6 => 1,                                    // MemCopy
@@ -1289,6 +1337,45 @@ impl Machine {
             2 => self.local_store(daddr, 0xFFFF_FFFF),
             3 => self.push32(0xFFFF_FFFF),
             other => Err(format!("bad restoreundo stub DestType {other}")),
+        }
+    }
+
+    // ── acceleration storage + PRNG (GLULX_NOTES §17, §18) ────────────────────
+
+    /// The accelerated-function number assigned to the VM function at `addr` via
+    /// `accelfunc`, or `None`. Acceleration interception is not implemented, so
+    /// this is advisory storage (gestalt reports Acceleration unsupported).
+    pub fn accel_func_for(&self, addr: u32) -> Option<u32> {
+        self.accel_funcs.get(&addr).copied()
+    }
+
+    /// The acceleration parameter stored at `index` via `accelparam`, or `None`.
+    pub fn accel_param(&self, index: u32) -> Option<u32> {
+        self.accel_params.get(&index).copied()
+    }
+
+    /// Advance the xorshift32 PRNG and return the next 32-bit value.
+    fn next_rand(&mut self) -> u32 {
+        let mut x = if self.rng == 0 { Self::DEFAULT_SEED } else { self.rng };
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        x
+    }
+
+    /// `random(L1)` per the spec: `[0, L1)` for `L1 > 0`, `(L1, 0]` for `L1 < 0`,
+    /// any 32-bit value for `L1 == 0`.
+    fn rand_range(&mut self, l1: u32) -> u32 {
+        let r = self.next_rand();
+        let n = l1 as i32;
+        if n == 0 {
+            r
+        } else if n > 0 {
+            r % n as u32
+        } else {
+            // (L1, 0] → -(r mod |L1|), so values from L1+1 up to 0.
+            0i32.wrapping_sub((r % n.unsigned_abs()) as i32) as u32
         }
     }
 
@@ -3067,7 +3154,7 @@ mod tests {
         assert_eq!(m.gestalt(0, 0), 0x0003_0102); // GlulxVersion 3.1.2
         assert_eq!(m.gestalt(1, 0), 0x0000_0100); // TerpVersion 0.1.0
         assert_eq!(m.gestalt(2, 0), 1); // ResizeMem
-        assert_eq!(m.gestalt(3, 0), 0); // Undo (deferred)
+        assert_eq!(m.gestalt(3, 0), 1); // Undo (saveundo/restoreundo)
         assert_eq!(m.gestalt(4, 0), 1); // IOSystem null
         assert_eq!(m.gestalt(4, 2), 1); // IOSystem Glk
         assert_eq!(m.gestalt(4, 1), 0); // IOSystem filter (not implemented)
@@ -3259,5 +3346,83 @@ mod tests {
         m.step_once().unwrap(); // restoreundo, resumes just after saveundo
         assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // protected → kept current value
         assert_eq!(m.protect, (0x110, 4));
+    }
+
+    // ── Task 4 (2c): accel storage, PRNG, verify, gestalt ─────────────────────
+
+    #[test]
+    fn accelfunc_accelparam_store_assignments() {
+        let mut body = asm::ins(0x180, &[asm::Op::C8(7), asm::Op::C32(0x24)]); // accelfunc 7 @0x24
+        body.extend(asm::ins(0x181, &[asm::Op::C8(3), asm::Op::C16(0x99)])); // accelparam 3 = 0x99
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.accel_func_for(0x24), Some(7));
+        assert_eq!(m.accel_param(3), Some(0x99));
+
+        // accelfunc(0, addr) cancels the assignment.
+        let mut body = asm::ins(0x180, &[asm::Op::C8(7), asm::Op::C32(0x24)]);
+        body.extend(asm::ins(0x180, &[asm::Op::C8(0), asm::Op::C32(0x24)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.accel_func_for(0x24), None);
+    }
+
+    #[test]
+    fn state_roundtrips_with_accel_assignments() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.accel_funcs.insert(0x24, 7);
+        m.accel_params.insert(3, 0x99);
+        let snap = m.save_state();
+        m.mem.write32(0x110, 0xDEAD).unwrap();
+        m.restore_state(&snap).unwrap();
+        // Accel assignments are interpreter config, untouched by save/restore.
+        assert_eq!(m.accel_func_for(0x24), Some(7));
+        assert_eq!(m.accel_param(3), Some(0x99));
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0); // RAM restored
+    }
+
+    #[test]
+    fn random_honors_range_bounds() {
+        let mut m = machine_with_body(&[], vec![]);
+        for _ in 0..2000 {
+            assert!((0..10).contains(&(m.rand_range(10) as i32))); // [0, 10)
+            assert!((-9..=0).contains(&(m.rand_range((-10i32) as u32) as i32))); // (-10, 0]
+        }
+        let _ = m.rand_range(0); // full 32-bit range: just exercise (no panic)
+    }
+
+    #[test]
+    fn setrandom_seed_is_reproducible() {
+        let run = |seed: u32| {
+            let mut body = asm::ins(0x111, &[asm::Op::C32(seed)]); // setrandom
+            body.extend(asm::ins(0x110, &[asm::Op::C32(1_000_000), asm::Op::Mem16(0x0100)]));
+            body.extend(asm::ins(0x110, &[asm::Op::C32(1_000_000), asm::Op::Mem16(0x0104)]));
+            body.extend(asm::ins(0x120, &[]));
+            let m = run_program(body);
+            (m.mem.read32(0x100).unwrap(), m.mem.read32(0x104).unwrap())
+        };
+        assert_eq!(run(0x1234), run(0x1234)); // same seed → same sequence
+        assert_ne!(run(0x1234), run(0x4321)); // different seed → different sequence
+        assert_eq!(run(0), run(0)); // setrandom(0): deterministic reseed (entropy deferred)
+    }
+
+    #[test]
+    fn verify_detects_a_bad_checksum() {
+        let mut vbody = asm::ins(0x121, &[asm::Op::Mem16(0x0100)]);
+        vbody.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &vbody);
+        let mut built = asm::assemble(&[start], 0, 0x100);
+        built.image[0x20] ^= 0xFF; // corrupt the stored checksum
+        let mut m = machine(built);
+        m.run();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1); // problem detected
+    }
+
+    #[test]
+    fn gestalt_reports_undo_supported_accel_not() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(3, 0), 1); // Undo now supported
+        assert_eq!(m.gestalt(9, 0), 0); // Acceleration: not intercepted
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc: not intercepted
     }
 }

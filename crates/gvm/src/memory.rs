@@ -111,6 +111,28 @@ impl Memory {
         self.bytes[addr as usize] = val;
     }
 
+    /// True if the stored header checksum (field 0x20) matches the sum of the
+    /// initial memory as big-endian 32-bit words, with the checksum field itself
+    /// treated as zero (spec §1.4). Backs the `verify` opcode.
+    pub(crate) fn checksum_ok(&self) -> bool {
+        let mut sum = 0u32;
+        let mut a = 0;
+        while a + 4 <= self.orig.len() {
+            let mut w = u32::from_be_bytes([
+                self.orig[a],
+                self.orig[a + 1],
+                self.orig[a + 2],
+                self.orig[a + 3],
+            ]);
+            if a == 0x20 {
+                w = 0; // the checksum field is excluded from its own sum
+            }
+            sum = sum.wrapping_add(w);
+            a += 4;
+        }
+        sum == self.header.checksum
+    }
+
     // ── reads (big-endian, bounds-checked) ────────────────────────────────────
 
     /// Read one byte; `None` if `addr` is out of range.
