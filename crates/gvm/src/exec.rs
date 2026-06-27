@@ -254,6 +254,108 @@ impl Machine {
         }
     }
 
+    // ── single-instruction execution ──────────────────────────────────────────
+
+    /// Decode and execute one instruction. Grown task-by-task; `step()`/`run()`
+    /// (the public loop with fault handling) wrap this in Task 6.
+    pub(crate) fn step_once(&mut self) -> R<()> {
+        let opcode = self.decode_opcode()?;
+        self.execute(opcode)
+    }
+
+    /// Dispatch a decoded opcode to its handler.
+    fn execute(&mut self, opcode: u32) -> R<()> {
+        match opcode {
+            // Arithmetic (2 load, 1 store) — 32-bit two's complement.
+            0x10 => self.binop(|a, b| a.wrapping_add(b)),
+            0x11 => self.binop(|a, b| a.wrapping_sub(b)),
+            0x12 => self.binop(|a, b| a.wrapping_mul(b)),
+            0x13 => self.divop(false),
+            0x14 => self.divop(true),
+            0x15 => self.unop(|a| (a as i32).wrapping_neg() as u32),
+            // Bitwise.
+            0x18 => self.binop(|a, b| a & b),
+            0x19 => self.binop(|a, b| a | b),
+            0x1A => self.binop(|a, b| a ^ b),
+            0x1B => self.unop(|a| !a),
+            0x1C => self.binop(|a, b| a.checked_shl(b).unwrap_or(0)),
+            0x1D => self.binop(|a, b| (a as i32).checked_shr(b).unwrap_or((a as i32) >> 31) as u32),
+            0x1E => self.binop(|a, b| a.checked_shr(b).unwrap_or(0)),
+            // Branches.
+            0x20 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.branch(l[0], true)
+            }
+            0x22 => self.branch1(|v| v == 0),
+            0x23 => self.branch1(|v| v != 0),
+            0x24 => self.branch2(|a, b| a == b),
+            0x25 => self.branch2(|a, b| a != b),
+            0x26 => self.branch2(|a, b| (a as i32) < (b as i32)),
+            0x27 => self.branch2(|a, b| (a as i32) >= (b as i32)),
+            0x28 => self.branch2(|a, b| (a as i32) > (b as i32)),
+            0x29 => self.branch2(|a, b| (a as i32) <= (b as i32)),
+            0x2A => self.branch2(|a, b| a < b),
+            0x2B => self.branch2(|a, b| a >= b),
+            0x2C => self.branch2(|a, b| a > b),
+            0x2D => self.branch2(|a, b| a <= b),
+            other => Err(format!("illegal/unimplemented opcode {other:#x}")),
+        }
+    }
+
+    fn binop(&mut self, f: impl Fn(u32, u32) -> u32) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let v = f(l[0], l[1]);
+        self.store(s[0], v)
+    }
+
+    fn unop(&mut self, f: impl Fn(u32) -> u32) -> R<()> {
+        let (l, s) = self.read_operands(1, 1)?;
+        let v = f(l[0]);
+        self.store(s[0], v)
+    }
+
+    /// `div` (false) / `mod` (true): signed, truncating toward zero, faulting on
+    /// a zero divisor.
+    fn divop(&mut self, is_mod: bool) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (a, b) = (l[0] as i32, l[1] as i32);
+        if b == 0 {
+            return Err(format!("division by zero ({})", if is_mod { "mod" } else { "div" }));
+        }
+        let v = if is_mod { a.wrapping_rem(b) } else { a.wrapping_div(b) };
+        self.store(s[0], v as u32)
+    }
+
+    /// A 1-value conditional branch (jz/jnz): value then offset.
+    fn branch1(&mut self, cond: impl Fn(u32) -> bool) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let taken = cond(l[0]);
+        self.branch(l[1], taken)
+    }
+
+    /// A 2-value conditional branch (jeq…jleu): two values then offset.
+    fn branch2(&mut self, cond: impl Fn(u32, u32) -> bool) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let taken = cond(l[0], l[1]);
+        self.branch(l[2], taken)
+    }
+
+    /// Apply the branch convention: offset 0 → return 0, 1 → return 1, else
+    /// `pc = pc_after_operands + offset - 2`. `pc` is already past the operands.
+    fn branch(&mut self, offset: u32, taken: bool) -> R<()> {
+        if !taken {
+            return Ok(());
+        }
+        match offset {
+            0 => self.return_value(0),
+            1 => self.return_value(1),
+            _ => {
+                self.pc = self.pc.wrapping_add(offset).wrapping_sub(2);
+                Ok(())
+            }
+        }
+    }
+
     // ── stack byte accessors (offsets are guaranteed in-range by callers) ─────
 
     fn st_w32(&mut self, off: usize, v: u32) {
@@ -636,6 +738,128 @@ mod tests {
         assert_eq!(dests[0], Dest::Local(4));
         m.store(dests[0], 0x7777).unwrap();
         assert_eq!(m.local_load(4).unwrap(), 0x7777);
+    }
+
+    // ── Task 4: arithmetic / bitwise / branch ─────────────────────────────────
+
+    /// Execute one binary-op instruction storing to RAM 0x100; return the result.
+    fn arith2(op: u32, a: asm::Op, b: asm::Op) -> u32 {
+        let body = asm::ins(op, &[a, b, asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        m.mem.read32(0x100).unwrap()
+    }
+    fn arith1(op: u32, a: asm::Op) -> u32 {
+        let body = asm::ins(op, &[a, asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        m.mem.read32(0x100).unwrap()
+    }
+
+    #[test]
+    fn arithmetic_core() {
+        use asm::Op::{C16, C32, C8};
+        assert_eq!(arith2(0x10, C8(5), C8(7)), 12); // add
+        assert_eq!(arith2(0x11, C8(5), C8(7)), (-2i32) as u32); // sub
+        assert_eq!(arith2(0x12, C16(1000), C16(1000)), 1_000_000); // mul
+        assert_eq!(arith2(0x12, C32(0x10000), C32(0x10000)), 0); // mul truncates
+        assert_eq!(arith2(0x13, C8(-7), C8(2)), (-3i32) as u32); // div trunc toward 0
+        assert_eq!(arith2(0x14, C8(-7), C8(2)), (-1i32) as u32); // mod sign of dividend
+        assert_eq!(arith1(0x15, C8(5)), (-5i32) as u32); // neg
+        assert_eq!(arith1(0x15, C8(-128)), 128); // neg of -128
+    }
+
+    #[test]
+    fn div_mod_by_zero_faults() {
+        let body = asm::ins(0x13, &[asm::Op::C8(5), asm::Op::C8(0), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        assert!(m.step_once().is_err());
+        let body = asm::ins(0x14, &[asm::Op::C8(5), asm::Op::C8(0), asm::Op::Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        assert!(m.step_once().is_err());
+    }
+
+    #[test]
+    fn bitwise_and_shifts() {
+        use asm::Op::{C32, C8};
+        assert_eq!(arith2(0x18, C32(0xF0F0), C32(0xFF00)), 0xF000); // bitand
+        assert_eq!(arith2(0x19, C32(0xF0F0), C32(0x0F0F)), 0xFFFF); // bitor
+        assert_eq!(arith2(0x1A, C32(0xFF00), C32(0x0FF0)), 0xF0F0); // bitxor
+        assert_eq!(arith1(0x1B, C32(0x0000_FFFF)), 0xFFFF_0000); // bitnot
+        assert_eq!(arith2(0x1C, C8(1), C8(4)), 0x10); // shiftl
+        assert_eq!(arith2(0x1C, C8(1), C8(32)), 0); // shiftl >= 32 → 0
+        assert_eq!(arith2(0x1E, C32(0x8000_0000), C8(4)), 0x0800_0000); // ushiftr
+        assert_eq!(arith2(0x1E, C32(0x8000_0000), C8(40)), 0); // ushiftr >= 32 → 0
+        assert_eq!(arith2(0x1D, C32(0x8000_0000), C8(4)), 0xF800_0000); // sshiftr arith
+        assert_eq!(arith2(0x1D, C32(0x8000_0000), C8(40)), 0xFFFF_FFFF); // sshiftr >= 32 → sign
+    }
+
+    #[test]
+    fn jump_offset_math() {
+        // jump +5: [0x20, modes(0x01), data(0x05)] = 3 bytes → pc = pc0+3+5-2.
+        let body = asm::ins(0x20, &[asm::Op::C8(5)]);
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        m.step_once().unwrap();
+        assert_eq!(m.pc, pc0 + 6);
+    }
+
+    #[test]
+    fn conditional_branch_taken_and_not() {
+        // jz value=0 → taken (jumps forward).
+        let body = asm::ins(0x22, &[asm::Op::C8(0), asm::Op::C8(20)]);
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        let instr_len = body_len(0x22, 2);
+        m.step_once().unwrap();
+        assert_eq!(m.pc, pc0 + instr_len + 20 - 2);
+
+        // jz value=1 → not taken (falls through past the instruction).
+        let body = asm::ins(0x22, &[asm::Op::C8(1), asm::Op::C8(20)]);
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        m.step_once().unwrap();
+        assert_eq!(m.pc, pc0 + body_len(0x22, 2));
+    }
+
+    #[test]
+    fn signed_vs_unsigned_compares() {
+        // jlt(-1, 1) signed → taken; jltu(0xFFFFFFFF, 1) unsigned → not taken.
+        let taken = |op: u32, a: asm::Op, b: asm::Op| -> bool {
+            let body = asm::ins(op, &[a, b, asm::Op::C8(40)]);
+            let blen = body.len() as u32;
+            let mut m = machine_with_body(&[], body);
+            let pc0 = m.pc;
+            m.step_once().unwrap();
+            // Not taken → pc falls through to pc0+blen; taken → pc differs.
+            m.pc != pc0 + blen
+        };
+        assert!(taken(0x26, asm::Op::C8(-1), asm::Op::C8(1))); // jlt signed
+        assert!(!taken(0x2A, asm::Op::C32(0xFFFF_FFFF), asm::Op::C8(1))); // jltu unsigned
+        assert!(taken(0x2B, asm::Op::C32(0xFFFF_FFFF), asm::Op::C8(1))); // jgeu unsigned
+    }
+
+    #[test]
+    fn branch_offset_0_and_1_return_convention() {
+        // Inside a callee, `jump 0` returns 0 and `jump 1` returns 1 to the
+        // caller's destination (here, the value stack).
+        for (offset, expect) in [(0u32, 0u32), (1, 1)] {
+            let start = asm::func(0xC1, &[], &[]);
+            let off_op = if offset == 0 { asm::Op::Zero } else { asm::Op::C8(1) };
+            let callee = asm::func(0xC1, &[], &asm::ins(0x20, &[off_op]));
+            let built = asm::assemble(&[start, callee], 0, 0x100);
+            let callee_addr = built.addrs[1];
+            let mut m = machine(built);
+            m.call_function(callee_addr, &[], Dest::Push).unwrap();
+            m.step_once().unwrap(); // executes the jump → return
+            assert_eq!(m.pop32().unwrap(), expect);
+        }
+    }
+
+    /// Byte length of an instruction: 1-byte opcode (< 0x80) + ceil(n/2) mode
+    /// bytes + n single-byte (C8) operands.
+    fn body_len(_op: u32, n: u32) -> u32 {
+        1 + n.div_ceil(2) + n
     }
 
     #[test]
