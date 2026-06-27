@@ -1749,6 +1749,20 @@ box_style = "rounded"
     }
 
     #[test]
+    fn per_game_reset_freezes_over_global_color() {
+        // Global sets room.fg = white; per-game sets room.fg = reset (the editor's
+        // serialized form of an explicit "default"). Merge must let per-game win, and
+        // resolve must produce a terminal-default (Reset) fg, NOT white.
+        let global = parse_style_toml("[colors]\n\"room\" = { fg = \"white\" }\n[symbols]\n").unwrap();
+        let per_game = parse_style_toml("[colors]\n\"room\" = { fg = \"reset\" }\n[symbols]\n").unwrap();
+        let merged = merge(&global, &per_game);
+        let dir = std::env::temp_dir();
+        let (cs, _set, _w) = resolve(&merged, &dir);
+        assert_eq!(cs.room_normal.fg, Some(ratatui::style::Color::Reset),
+            "per-game reset must win over the global color and resolve to terminal default");
+    }
+
+    #[test]
     fn load_style_default_name_parses_builtin() {
         let (doc, warns) = load_style(Some("default"), std::path::Path::new("/nonexistent"));
         assert!(warns.is_empty());

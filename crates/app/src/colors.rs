@@ -715,6 +715,7 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
     match v {
         "background" => return Some(scheme.background),
         "foreground" => return Some(scheme.foreground),
+        "default" => return Some(Color::Reset),
         _ => {}
     }
 
@@ -871,6 +872,13 @@ mod tests {
         assert_eq!(parse_color_value("red", &scheme), Some(Color::Red));
         assert_eq!(parse_color_value("bright-blue", &scheme), Some(Color::LightBlue));
         assert_eq!(parse_color_value("white", &scheme), Some(Color::White));
+    }
+
+    #[test]
+    fn parse_color_value_maps_default_and_reset_to_reset() {
+        let gs = GhosttyScheme::default();
+        assert_eq!(parse_color_value("default", &gs), Some(Color::Reset));
+        assert_eq!(parse_color_value("reset", &gs), Some(Color::Reset));
     }
 
     // ── GhosttyScheme::parse ──────────────────────────────────────────────────
