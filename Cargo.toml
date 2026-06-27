@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/zvm", "crates/zvm-cli", "crates/mapper", "crates/app", "crates/blorb", "crates/gvm"]
+members = ["crates/zvm", "crates/zvm-cli", "crates/mapper", "crates/app", "crates/blorb", "crates/gvm", "crates/gvm-cli"]
 resolver = "2"

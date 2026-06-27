@@ -532,6 +532,14 @@ name = "gvm"
 version = "0.1.0"
 
 [[package]]
+name = "gvm-cli"
+version = "0.1.0"
+dependencies = [
+ "blorb",
+ "gvm",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
