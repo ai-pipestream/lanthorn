@@ -1,0 +1,832 @@
+//! The Glk window/stream/output model — the interactive-fiction subset of Glk
+//! (Andrew Plotkin's Glk spec 0.7.5), transcribed into `GLULX_NOTES.md` §19.
+//!
+//! The model ([`Model`]) owns the window tree, the streams, the current output
+//! stream, and per-stream styles. It is pure bookkeeping: it never touches
+//! Glulx main memory (memory-stream byte moves are done by the execution engine,
+//! which holds both the model and the [`Memory`](crate::memory::Memory)) and it
+//! never renders — a pluggable [`GlkBackend`] does the display. `@glk` selectors
+//! in `exec.rs` operate on this model and drive the backend for output.
+//!
+//! All constant values (window types, split methods, style classes, gestalt
+//! selectors, dispatch selector codes) are the values from `glk.h`, recorded in
+//! `GLULX_NOTES.md` §19.
+
+use std::any::Any;
+use std::collections::BTreeMap;
+
+// ── Window types (`wintype_*`, the `wintype` argument to glk_window_open) ──────
+
+/// The window kinds this subset supports. (Blank/Graphics are out of scope.)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WinType {
+    /// Internal layout node created by a split (`wintype_Pair` = 1).
+    Pair,
+    /// Scrolling main text window (`wintype_TextBuffer` = 3).
+    TextBuffer,
+    /// Fixed character grid / status window (`wintype_TextGrid` = 4).
+    TextGrid,
+}
+
+impl WinType {
+    /// Map a `wintype` argument value to a supported type (None if unsupported).
+    pub fn from_arg(v: u32) -> Option<WinType> {
+        match v {
+            1 => Some(WinType::Pair),
+            3 => Some(WinType::TextBuffer),
+            4 => Some(WinType::TextGrid),
+            _ => None,
+        }
+    }
+    /// The `glk_window_get_type` value for this type.
+    pub fn to_arg(self) -> u32 {
+        match self {
+            WinType::Pair => 1,
+            WinType::TextBuffer => 3,
+            WinType::TextGrid => 4,
+        }
+    }
+}
+
+// ── Split methods (`winmethod_*`) ─────────────────────────────────────────────
+
+/// Mask selecting the split direction bits of a `winmethod`.
+pub const WINMETHOD_DIRMASK: u32 = 0x0f;
+/// New window to the left of the split window.
+pub const WINMETHOD_LEFT: u32 = 0x00;
+/// New window to the right of the split window.
+pub const WINMETHOD_RIGHT: u32 = 0x01;
+/// New window above the split window.
+pub const WINMETHOD_ABOVE: u32 = 0x02;
+/// New window below the split window.
+pub const WINMETHOD_BELOW: u32 = 0x03;
+/// Mask selecting the division (sizing) bits of a `winmethod`.
+pub const WINMETHOD_DIVISIONMASK: u32 = 0xf0;
+/// Fixed-size split: `size` is a character count.
+pub const WINMETHOD_FIXED: u32 = 0x10;
+/// Proportional split: `size` is a percentage (0–100) of the parent.
+pub const WINMETHOD_PROPORTIONAL: u32 = 0x20;
+
+// ── Style classes (`style_*`) ─────────────────────────────────────────────────
+
+/// A Glk style class (the `style_*` constants 0–10).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GlkStyle {
+    /// `style_Normal` = 0.
+    Normal,
+    /// `style_Emphasized` = 1.
+    Emphasized,
+    /// `style_Preformatted` = 2.
+    Preformatted,
+    /// `style_Header` = 3.
+    Header,
+    /// `style_Subheader` = 4.
+    Subheader,
+    /// `style_Alert` = 5.
+    Alert,
+    /// `style_Note` = 6.
+    Note,
+    /// `style_BlockQuote` = 7.
+    BlockQuote,
+    /// `style_Input` = 8.
+    Input,
+    /// `style_User1` = 9.
+    User1,
+    /// `style_User2` = 10.
+    User2,
+}
+
+/// Number of standard style classes (`style_NUMSTYLES`).
+pub const NUMSTYLES: u32 = 11;
+
+impl GlkStyle {
+    /// Map a style number to a class (out-of-range falls back to Normal).
+    pub fn from_num(v: u32) -> GlkStyle {
+        match v {
+            1 => GlkStyle::Emphasized,
+            2 => GlkStyle::Preformatted,
+            3 => GlkStyle::Header,
+            4 => GlkStyle::Subheader,
+            5 => GlkStyle::Alert,
+            6 => GlkStyle::Note,
+            7 => GlkStyle::BlockQuote,
+            8 => GlkStyle::Input,
+            9 => GlkStyle::User1,
+            10 => GlkStyle::User2,
+            _ => GlkStyle::Normal,
+        }
+    }
+    /// The style number for this class.
+    pub fn to_num(self) -> u32 {
+        match self {
+            GlkStyle::Normal => 0,
+            GlkStyle::Emphasized => 1,
+            GlkStyle::Preformatted => 2,
+            GlkStyle::Header => 3,
+            GlkStyle::Subheader => 4,
+            GlkStyle::Alert => 5,
+            GlkStyle::Note => 6,
+            GlkStyle::BlockQuote => 7,
+            GlkStyle::Input => 8,
+            GlkStyle::User1 => 9,
+            GlkStyle::User2 => 10,
+        }
+    }
+}
+
+/// A window's resolved rectangle, in characters, within the display.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Rect {
+    /// Left edge column (0-based).
+    pub left: u32,
+    /// Top edge row (0-based).
+    pub top: u32,
+    /// Width in characters.
+    pub width: u32,
+    /// Height in characters (rows).
+    pub height: u32,
+}
+
+// ── Backend trait ─────────────────────────────────────────────────────────────
+
+/// A display backend the VM drives for all output-side effects. The Glk state
+/// (window tree, streams, current style) lives in [`Model`]; the backend renders
+/// it. Every method has a no-op default so a backend implements only what it
+/// needs; `as_any_mut` supports downcasting in tests.
+pub trait GlkBackend {
+    /// Total display size available to the root window, in characters
+    /// `(width, height)`. The model lays the window tree out within this.
+    fn screen_size(&self) -> (u32, u32) {
+        (80, 24)
+    }
+    /// A window was opened.
+    fn window_open(&mut self, _id: u32, _wintype: WinType) {}
+    /// A window was closed.
+    fn window_close(&mut self, _id: u32) {}
+    /// The resolved layout changed: each entry is `(window id, type, rect)` for
+    /// every non-pair window, in window-id order.
+    fn window_layout(&mut self, _wins: &[(u32, WinType, Rect)]) {}
+    /// Append `s` (already style-tagged) to a text-buffer window.
+    fn put_text(&mut self, _win: u32, _style: GlkStyle, _s: &str) {}
+    /// Write `s` to a text-grid window's cells starting at `(x, y)`.
+    fn grid_put(&mut self, _win: u32, _x: u32, _y: u32, _style: GlkStyle, _s: &str) {}
+    /// Clear a text-grid window.
+    fn grid_clear(&mut self, _win: u32) {}
+    /// Clear a text-buffer window.
+    fn window_clear(&mut self, _win: u32) {}
+    /// Flush any buffered output to the display.
+    fn flush(&mut self) {}
+    /// Immutable downcast support (used by tests to read recorded output).
+    fn as_any(&self) -> &dyn Any;
+    /// Mutable downcast support.
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+// ── Test backend ──────────────────────────────────────────────────────────────
+
+/// A [`GlkBackend`] that records each window's text/grid in memory, replacing
+/// the old `BufferOutput`: tests downcast to it and read the asserted strings.
+pub struct TestBackend {
+    /// Reported display size.
+    pub screen: (u32, u32),
+    /// Accumulated text per text-buffer window id.
+    text: BTreeMap<u32, String>,
+    /// Grid cells per text-grid window id, keyed `(row, col) -> char`.
+    grid: BTreeMap<u32, BTreeMap<(u32, u32), char>>,
+    /// Last laid-out rect per window id.
+    dims: BTreeMap<u32, Rect>,
+}
+
+impl Default for TestBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TestBackend {
+    /// A backend with a default 80×24 display.
+    pub fn new() -> Self {
+        TestBackend { screen: (80, 24), text: BTreeMap::new(), grid: BTreeMap::new(), dims: BTreeMap::new() }
+    }
+    /// A backend reporting a specific display size.
+    pub fn with_screen(width: u32, height: u32) -> Self {
+        TestBackend { screen: (width, height), ..Self::new() }
+    }
+    /// Accumulated text for one text-buffer window (empty if none).
+    pub fn text(&self, win: u32) -> String {
+        self.text.get(&win).cloned().unwrap_or_default()
+    }
+    /// All text-buffer windows' text concatenated in window-id order — the
+    /// migration replacement for `BufferOutput::buf` (there is one window in the
+    /// migrated tests, so this is exactly that window's text).
+    pub fn all_text(&self) -> String {
+        self.text.values().cloned().collect()
+    }
+    /// The resolved rect last reported for a window.
+    pub fn rect(&self, win: u32) -> Option<Rect> {
+        self.dims.get(&win).copied()
+    }
+    /// One row of a text-grid window as a string (trailing spaces trimmed).
+    pub fn grid_line(&self, win: u32, row: u32) -> String {
+        let Some(cells) = self.grid.get(&win) else { return String::new() };
+        let width = self.dims.get(&win).map(|r| r.width).unwrap_or(0);
+        let mut s = String::new();
+        for col in 0..width {
+            s.push(cells.get(&(row, col)).copied().unwrap_or(' '));
+        }
+        s.trim_end().to_string()
+    }
+}
+
+impl GlkBackend for TestBackend {
+    fn screen_size(&self) -> (u32, u32) {
+        self.screen
+    }
+    fn window_open(&mut self, id: u32, wintype: WinType) {
+        match wintype {
+            WinType::TextBuffer => {
+                self.text.entry(id).or_default();
+            }
+            WinType::TextGrid => {
+                self.grid.entry(id).or_default();
+            }
+            WinType::Pair => {}
+        }
+    }
+    fn window_close(&mut self, id: u32) {
+        self.text.remove(&id);
+        self.grid.remove(&id);
+        self.dims.remove(&id);
+    }
+    fn window_layout(&mut self, wins: &[(u32, WinType, Rect)]) {
+        for &(id, _ty, rect) in wins {
+            self.dims.insert(id, rect);
+        }
+    }
+    fn put_text(&mut self, win: u32, _style: GlkStyle, s: &str) {
+        self.text.entry(win).or_default().push_str(s);
+    }
+    fn grid_put(&mut self, win: u32, x: u32, y: u32, _style: GlkStyle, s: &str) {
+        let cells = self.grid.entry(win).or_default();
+        for (i, ch) in s.chars().enumerate() {
+            cells.insert((y, x + i as u32), ch);
+        }
+    }
+    fn grid_clear(&mut self, win: u32) {
+        if let Some(cells) = self.grid.get_mut(&win) {
+            cells.clear();
+        }
+    }
+    fn window_clear(&mut self, win: u32) {
+        if let Some(t) = self.text.get_mut(&win) {
+            t.clear();
+        }
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ── The model ─────────────────────────────────────────────────────────────────
+
+/// What a stream writes to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StreamKind {
+    /// A window's output stream (text routed to that window).
+    Window(u32),
+    /// A Glulx-memory stream: bytes/words land in main memory `[addr, addr+len)`.
+    /// `unicode` selects 32-bit elements; `pos` is the element cursor.
+    Memory { addr: u32, len: u32, pos: u32, unicode: bool },
+}
+
+/// A Glk stream.
+#[derive(Clone, Debug)]
+struct Stream {
+    id: u32,
+    rock: u32,
+    kind: StreamKind,
+    style: GlkStyle,
+    read_count: u32,
+    write_count: u32,
+}
+
+/// Text-grid cursor + dimensions (the cells themselves live in the backend).
+#[derive(Clone, Copy, Default)]
+struct Grid {
+    width: u32,
+    height: u32,
+    cx: u32,
+    cy: u32,
+}
+
+/// A Glk window (tree node).
+#[derive(Clone)]
+struct Window {
+    id: u32,
+    wintype: WinType,
+    rock: u32,
+    parent: u32,
+    /// The window's own output stream (0 for pair windows).
+    stream: u32,
+    rect: Rect,
+    grid: Grid,
+    // Pair-window fields (all 0 for leaf windows):
+    child1: u32,
+    child2: u32,
+    key: u32,
+    method: u32,
+    size: u32,
+}
+
+/// The Glk window/stream model.
+pub struct Model {
+    /// Windows indexed by `id - 1` (None = a freed slot).
+    windows: Vec<Option<Window>>,
+    /// Streams indexed by `id - 1`.
+    streams: Vec<Option<Stream>>,
+    /// Root window id (0 = no windows open).
+    root: u32,
+    /// Current output stream id (0 = none).
+    cur_stream: u32,
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Model {
+    /// A fresh, empty model (no windows, no streams).
+    pub fn new() -> Model {
+        Model { windows: Vec::new(), streams: Vec::new(), root: 0, cur_stream: 0 }
+    }
+
+    // ── slot accessors ────────────────────────────────────────────────────────
+
+    fn win(&self, id: u32) -> Option<&Window> {
+        if id == 0 {
+            return None;
+        }
+        self.windows.get((id - 1) as usize).and_then(|w| w.as_ref())
+    }
+    fn win_mut(&mut self, id: u32) -> Option<&mut Window> {
+        if id == 0 {
+            return None;
+        }
+        self.windows.get_mut((id - 1) as usize).and_then(|w| w.as_mut())
+    }
+    fn stream(&self, id: u32) -> Option<&Stream> {
+        if id == 0 {
+            return None;
+        }
+        self.streams.get((id - 1) as usize).and_then(|s| s.as_ref())
+    }
+    fn stream_mut(&mut self, id: u32) -> Option<&mut Stream> {
+        if id == 0 {
+            return None;
+        }
+        self.streams.get_mut((id - 1) as usize).and_then(|s| s.as_mut())
+    }
+
+    fn alloc_window(&mut self, wintype: WinType, rock: u32) -> u32 {
+        let id = (self.windows.len() + 1) as u32;
+        self.windows.push(Some(Window {
+            id,
+            wintype,
+            rock,
+            parent: 0,
+            stream: 0,
+            rect: Rect::default(),
+            grid: Grid::default(),
+            child1: 0,
+            child2: 0,
+            key: 0,
+            method: 0,
+            size: 0,
+        }));
+        id
+    }
+    fn alloc_stream(&mut self, kind: StreamKind, rock: u32) -> u32 {
+        let id = (self.streams.len() + 1) as u32;
+        self.streams.push(Some(Stream {
+            id,
+            rock,
+            kind,
+            style: GlkStyle::Normal,
+            read_count: 0,
+            write_count: 0,
+        }));
+        id
+    }
+
+    // ── windows ───────────────────────────────────────────────────────────────
+
+    /// Open a window. `split` is the window to split (0 for the first/root
+    /// window). Returns the new window's id, or `None` on a malformed call.
+    ///
+    /// On a split a new [`WinType::Pair`] node replaces `split` in the tree, with
+    /// `split` and the new window as its children. The new window is the key
+    /// window for the split's sizing. Geometry is recomputed by the caller via
+    /// [`Model::relayout`].
+    pub fn window_open(&mut self, split: u32, method: u32, size: u32, wintype: u32, rock: u32) -> Option<u32> {
+        let wt = WinType::from_arg(wintype)?;
+        if wt == WinType::Pair {
+            return None; // pair windows are created implicitly, never by request
+        }
+        let nid = self.alloc_window(wt, rock);
+        let sid = self.alloc_stream(StreamKind::Window(nid), 0);
+        self.win_mut(nid).unwrap().stream = sid;
+
+        if split == 0 {
+            if self.root != 0 {
+                // A root already exists; opening a second root is malformed.
+                self.free_window_subtree(nid);
+                return None;
+            }
+            self.root = nid;
+            return Some(nid);
+        }
+
+        if self.win(split).is_none() {
+            self.free_window_subtree(nid);
+            return None;
+        }
+
+        let pid = self.alloc_window(WinType::Pair, 0);
+        let old_parent = self.win(split).unwrap().parent;
+        {
+            let p = self.win_mut(pid).unwrap();
+            p.parent = old_parent;
+            p.child1 = split;
+            p.child2 = nid;
+            p.key = nid;
+            p.method = method;
+            p.size = size;
+        }
+        self.win_mut(split).unwrap().parent = pid;
+        self.win_mut(nid).unwrap().parent = pid;
+        if old_parent == 0 {
+            self.root = pid;
+        } else {
+            // Replace `split` with the new pair in its old parent's child links.
+            let op = self.win_mut(old_parent).unwrap();
+            if op.child1 == split {
+                op.child1 = pid;
+            } else if op.child2 == split {
+                op.child2 = pid;
+            }
+        }
+        Some(nid)
+    }
+
+    /// Close window `win` (and its whole subtree); collapse the parent pair so
+    /// the sibling takes its place. Returns the closed window stream's
+    /// `(read_count, write_count)`, or `None` if `win` is invalid.
+    pub fn window_close(&mut self, win: u32) -> Option<(u32, u32)> {
+        let w = self.win(win)?;
+        let stream_id = w.stream;
+        let counts = self
+            .stream(stream_id)
+            .map(|s| (s.read_count, s.write_count))
+            .unwrap_or((0, 0));
+        let parent = w.parent;
+
+        if parent == 0 {
+            // Closing the root empties the whole display.
+            self.free_window_subtree(win);
+            self.root = 0;
+        } else {
+            // The parent is a pair; promote the sibling into the pair's place.
+            let pw = self.win(parent).unwrap();
+            let sibling = if pw.child1 == win { pw.child2 } else { pw.child1 };
+            let grandparent = pw.parent;
+            self.free_window_subtree(win);
+            self.win_mut(sibling).unwrap().parent = grandparent;
+            if grandparent == 0 {
+                self.root = sibling;
+            } else {
+                let gp = self.win_mut(grandparent).unwrap();
+                if gp.child1 == parent {
+                    gp.child1 = sibling;
+                } else if gp.child2 == parent {
+                    gp.child2 = sibling;
+                }
+            }
+            // Free the now-defunct pair node.
+            self.windows[(parent - 1) as usize] = None;
+        }
+
+        // A closed window's stream must not remain current.
+        if self.cur_stream == stream_id {
+            self.cur_stream = 0;
+        }
+        Some(counts)
+    }
+
+    /// Free `win` and all descendant windows, plus their streams.
+    fn free_window_subtree(&mut self, win: u32) {
+        let Some(w) = self.win(win) else { return };
+        let (c1, c2, stream_id, is_pair) = (w.child1, w.child2, w.stream, w.wintype == WinType::Pair);
+        if is_pair {
+            self.free_window_subtree(c1);
+            self.free_window_subtree(c2);
+        }
+        if stream_id != 0 {
+            self.streams[(stream_id - 1) as usize] = None;
+            if self.cur_stream == stream_id {
+                self.cur_stream = 0;
+            }
+        }
+        self.windows[(win - 1) as usize] = None;
+    }
+
+    /// Recompute every window's rectangle from the tree and `(width, height)`,
+    /// returning the leaf-window layout `(id, type, rect)` in id order (to hand
+    /// to [`GlkBackend::window_layout`]).
+    pub fn relayout(&mut self, width: u32, height: u32) -> Vec<(u32, WinType, Rect)> {
+        if self.root != 0 {
+            let r = Rect { left: 0, top: 0, width, height };
+            self.layout_window(self.root, r);
+        }
+        let mut out = Vec::new();
+        for slot in &self.windows {
+            if let Some(w) = slot {
+                if w.wintype != WinType::Pair {
+                    out.push((w.id, w.wintype, w.rect));
+                }
+            }
+        }
+        out
+    }
+
+    fn layout_window(&mut self, id: u32, rect: Rect) {
+        let (wintype, method, size, child1, child2, key) = {
+            let w = self.win_mut(id).unwrap();
+            w.rect = rect;
+            (w.wintype, w.method, w.size, w.child1, w.child2, w.key)
+        };
+        match wintype {
+            WinType::TextGrid => {
+                let w = self.win_mut(id).unwrap();
+                w.grid.width = rect.width;
+                w.grid.height = rect.height;
+                if w.grid.cx >= rect.width {
+                    w.grid.cx = 0;
+                }
+                if w.grid.cy >= rect.height {
+                    w.grid.cy = 0;
+                }
+            }
+            WinType::TextBuffer => {}
+            WinType::Pair => {
+                let _ = key;
+                let (r_old, r_new) = split_rect(rect, method, size);
+                self.layout_window(child1, r_old);
+                self.layout_window(child2, r_new);
+            }
+        }
+    }
+
+    /// Root window id (0 if none).
+    pub fn root(&self) -> u32 {
+        self.root
+    }
+    /// A window's type, if it exists.
+    pub fn window_type(&self, win: u32) -> Option<WinType> {
+        self.win(win).map(|w| w.wintype)
+    }
+    /// A window's rock, if it exists.
+    pub fn window_rock(&self, win: u32) -> Option<u32> {
+        self.win(win).map(|w| w.rock)
+    }
+    /// A window's parent (0 = none / root). `None` if `win` is invalid.
+    pub fn window_parent(&self, win: u32) -> Option<u32> {
+        self.win(win).map(|w| w.parent)
+    }
+    /// A window's sibling within its parent pair (0 if it is the root).
+    pub fn window_sibling(&self, win: u32) -> Option<u32> {
+        let w = self.win(win)?;
+        if w.parent == 0 {
+            return Some(0);
+        }
+        let p = self.win(w.parent)?;
+        Some(if p.child1 == win { p.child2 } else { p.child1 })
+    }
+    /// A window's `(width, height)` in characters. `None` if invalid.
+    pub fn window_size(&self, win: u32) -> Option<(u32, u32)> {
+        self.win(win).map(|w| (w.rect.width, w.rect.height))
+    }
+    /// A window's own output stream id (0 for a pair window).
+    pub fn window_stream(&self, win: u32) -> Option<u32> {
+        self.win(win).map(|w| w.stream)
+    }
+    /// Iterate windows: the smallest existing id greater than `prev`
+    /// (`prev == 0` → the first), or 0 when exhausted. Returns `(id, rock)`.
+    pub fn window_iterate(&self, prev: u32) -> (u32, u32) {
+        // ids are 1-based; slot index = id-1, so the next candidate is slot `prev`.
+        for slot in self.windows.iter().skip(prev as usize) {
+            if let Some(w) = slot {
+                return (w.id, w.rock);
+            }
+        }
+        (0, 0)
+    }
+
+    /// Set the grid cursor of a text-grid window (clamped to its bounds).
+    pub fn window_move_cursor(&mut self, win: u32, x: u32, y: u32) {
+        if let Some(w) = self.win_mut(win) {
+            if w.wintype == WinType::TextGrid {
+                w.grid.cx = x;
+                w.grid.cy = y;
+            }
+        }
+    }
+    /// Clear a window: reset a grid's cursor to the origin. Returns the type so
+    /// the caller can tell the backend which clear to issue.
+    pub fn window_clear(&mut self, win: u32) -> Option<WinType> {
+        let w = self.win_mut(win)?;
+        if w.wintype == WinType::TextGrid {
+            w.grid.cx = 0;
+            w.grid.cy = 0;
+        }
+        Some(w.wintype)
+    }
+
+    /// Set/get a pair window's arrangement (the split method/size). Geometry is
+    /// recomputed by the caller.
+    pub fn window_set_arrangement(&mut self, win: u32, method: u32, size: u32, keywin: u32) {
+        if let Some(w) = self.win_mut(win) {
+            if w.wintype == WinType::Pair {
+                w.method = method;
+                w.size = size;
+                if keywin != 0 {
+                    w.key = keywin;
+                }
+            }
+        }
+    }
+    /// A pair window's `(method, size, keywin)`. `None` if not a pair.
+    pub fn window_arrangement(&self, win: u32) -> Option<(u32, u32, u32)> {
+        let w = self.win(win)?;
+        if w.wintype == WinType::Pair {
+            Some((w.method, w.size, w.key))
+        } else {
+            None
+        }
+    }
+
+    // ── grid cursor advance (for routing text-grid output) ────────────────────
+
+    /// A text-grid window's `(width, height, cx, cy)`. `None` if not a grid.
+    pub fn grid_state(&self, win: u32) -> Option<(u32, u32, u32, u32)> {
+        let w = self.win(win)?;
+        if w.wintype == WinType::TextGrid {
+            Some((w.grid.width, w.grid.height, w.grid.cx, w.grid.cy))
+        } else {
+            None
+        }
+    }
+    /// Set a text-grid window's cursor (no clamping; the router manages wrap).
+    pub fn set_grid_cursor(&mut self, win: u32, cx: u32, cy: u32) {
+        if let Some(w) = self.win_mut(win) {
+            w.grid.cx = cx;
+            w.grid.cy = cy;
+        }
+    }
+
+    // ── streams ───────────────────────────────────────────────────────────────
+
+    /// Open a Glulx-memory stream over `[addr, addr+len)` (in elements).
+    /// `unicode` selects 32-bit elements. Returns the stream id.
+    pub fn stream_open_memory(&mut self, addr: u32, len: u32, unicode: bool, rock: u32) -> u32 {
+        self.alloc_stream(StreamKind::Memory { addr, len, pos: 0, unicode }, rock)
+    }
+    /// Close a stream, returning its `(read_count, write_count)`. The current
+    /// stream is cleared if it was this one.
+    pub fn stream_close(&mut self, id: u32) -> Option<(u32, u32)> {
+        let counts = self.stream(id).map(|s| (s.read_count, s.write_count))?;
+        // Window streams are owned by their window; only free memory streams here.
+        if let Some(s) = self.stream(id) {
+            if matches!(s.kind, StreamKind::Memory { .. }) {
+                self.streams[(id - 1) as usize] = None;
+            }
+        }
+        if self.cur_stream == id {
+            self.cur_stream = 0;
+        }
+        Some(counts)
+    }
+    /// The current output stream (0 = none).
+    pub fn current_stream(&self) -> u32 {
+        self.cur_stream
+    }
+    /// Set the current output stream (0 = none).
+    pub fn set_current_stream(&mut self, id: u32) {
+        self.cur_stream = id;
+    }
+    /// A stream's rock, if it exists.
+    pub fn stream_rock(&self, id: u32) -> Option<u32> {
+        self.stream(id).map(|s| s.rock)
+    }
+    /// Iterate streams: smallest existing id greater than `prev`, with its rock.
+    pub fn stream_iterate(&self, prev: u32) -> (u32, u32) {
+        for slot in self.streams.iter().skip(prev as usize) {
+            if let Some(s) = slot {
+                return (s.id, s.rock);
+            }
+        }
+        (0, 0)
+    }
+    /// A memory stream's current position (element index). `None` otherwise.
+    pub fn stream_position(&self, id: u32) -> Option<u32> {
+        match self.stream(id)?.kind {
+            StreamKind::Memory { pos, .. } => Some(pos),
+            StreamKind::Window(_) => Some(self.stream(id)?.write_count),
+        }
+    }
+    /// Seek a memory stream. `seekmode`: 0 = from start, 1 = from current,
+    /// 2 = from end; clamped to `[0, len]`.
+    pub fn stream_set_position(&mut self, id: u32, pos: i32, seekmode: u32) {
+        if let Some(s) = self.stream_mut(id) {
+            if let StreamKind::Memory { len, pos: ref mut p, .. } = s.kind {
+                let base = match seekmode {
+                    1 => *p as i64,
+                    2 => len as i64,
+                    _ => 0,
+                };
+                let np = (base + pos as i64).clamp(0, len as i64);
+                *p = np as u32;
+            }
+        }
+    }
+
+    /// The kind + current style of a stream, for output routing.
+    pub fn stream_kind_style(&self, id: u32) -> Option<(StreamKind, GlkStyle)> {
+        self.stream(id).map(|s| (s.kind, s.style))
+    }
+    /// Set a stream's current style.
+    pub fn set_stream_style(&mut self, id: u32, style: GlkStyle) {
+        if let Some(s) = self.stream_mut(id) {
+            s.style = style;
+        }
+    }
+    /// Advance a memory stream's position by `n` elements (after the engine has
+    /// written the bytes), bumping the write count.
+    pub fn memory_stream_advance(&mut self, id: u32, n: u32) {
+        if let Some(s) = self.stream_mut(id) {
+            if let StreamKind::Memory { ref mut pos, .. } = s.kind {
+                *pos = pos.saturating_add(n);
+            }
+            s.write_count = s.write_count.saturating_add(n);
+        }
+    }
+    /// Bump a window stream's write count by `n` characters.
+    pub fn window_stream_advance(&mut self, id: u32, n: u32) {
+        if let Some(s) = self.stream_mut(id) {
+            s.write_count = s.write_count.saturating_add(n);
+        }
+    }
+}
+
+/// Split `rect` into `(rect_for_old_window, rect_for_new_window)` per a
+/// `winmethod`. The new (key) window is placed on the side named by the
+/// direction; its size is `size` characters (Fixed) or `size`% (Proportional)
+/// of the split axis. An oversized request collapses the old window to zero
+/// (Glk spec §3.3: undersized windows get zero, not renegotiation).
+fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
+    let dir = method & WINMETHOD_DIRMASK;
+    let division = method & WINMETHOD_DIVISIONMASK;
+    let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
+    let total = if vertical { rect.height } else { rect.width };
+    let new_size = if division == WINMETHOD_PROPORTIONAL {
+        (total * size) / 100
+    } else {
+        size
+    }
+    .min(total);
+    let old_size = total - new_size;
+
+    match dir {
+        WINMETHOD_LEFT => (
+            Rect { left: rect.left + new_size, width: old_size, ..rect },
+            Rect { left: rect.left, width: new_size, ..rect },
+        ),
+        WINMETHOD_RIGHT => (
+            Rect { left: rect.left, width: old_size, ..rect },
+            Rect { left: rect.left + old_size, width: new_size, ..rect },
+        ),
+        WINMETHOD_ABOVE => (
+            Rect { top: rect.top + new_size, height: old_size, ..rect },
+            Rect { top: rect.top, height: new_size, ..rect },
+        ),
+        // WINMETHOD_BELOW (and any unknown direction defaults to below).
+        _ => (
+            Rect { top: rect.top, height: old_size, ..rect },
+            Rect { top: rect.top + old_size, height: new_size, ..rect },
+        ),
+    }
+}

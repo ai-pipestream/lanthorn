@@ -10,7 +10,7 @@
 // frame so a return can restore the caller.
 
 use crate::error::GError;
-use crate::io::Output;
+use crate::glk::{GlkBackend, GlkStyle, Model, StreamKind, WinType};
 use crate::memory::Memory;
 
 /// A recoverable runtime fault. Carries a human-readable diagnostic; the run
@@ -74,8 +74,10 @@ pub struct Machine {
     pub(crate) heap_start: u32,
     /// Extant allocated blocks `(addr, size)`, kept sorted by address.
     heap_blocks: Vec<(u32, u32)>,
-    /// The output sink.
-    pub(crate) out: Box<dyn Output>,
+    /// The Glk window/stream model (the output target for all printing).
+    pub(crate) glk: Model,
+    /// The display backend the Glk model drives.
+    pub(crate) backend: Box<dyn GlkBackend>,
     /// Recorded runtime faults / deferred-feature notices.
     pub diagnostics: Vec<String>,
     /// Set once execution has ended (outer return or quit/fault).
@@ -150,7 +152,8 @@ impl Machine {
     const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
 
     /// Build a machine over `mem`, entering the start function (no arguments).
-    pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
+    /// Text output flows through the Glk model to `backend`.
+    pub fn with_glk(mem: Memory, backend: Box<dyn GlkBackend>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
         let start = mem.start_func();
         let decode_table = mem.decode_table();
@@ -165,7 +168,8 @@ impl Machine {
             cur_stringtbl: decode_table,
             heap_start: 0,
             heap_blocks: Vec::new(),
-            out,
+            glk: Model::new(),
+            backend,
             diagnostics: Vec::new(),
             halted: false,
             protect: (0, 0),
@@ -1640,13 +1644,77 @@ impl Machine {
 
     // ── stream output (GLULX_NOTES §7) ────────────────────────────────────────
 
-    /// Route stream output to the sink, honoring the current I/O system: only
-    /// the Glk system (mode 2) prints; the null system (and the deferred filter
-    /// system) discard.
+    /// Route `streamchar`/`streamnum`/`streamstr` output, honoring the current
+    /// I/O system: only the Glk system (mode 2) prints (to the current Glk
+    /// stream); the null system (and the deferred filter system) discard.
     fn emit(&mut self, s: &str) {
         if self.iosys_mode == 2 {
-            self.out.print(s);
+            let sid = self.glk.current_stream();
+            self.glk_stream_put(sid, s);
         }
+    }
+
+    /// Write `s` to Glk stream `sid` (its current style). A window stream routes
+    /// to that window via the backend; a memory stream writes Glulx memory; an
+    /// invalid/zero stream is safely discarded (no panic). This is the single
+    /// output funnel for both the `@glk` put selectors and the stream opcodes.
+    fn glk_stream_put(&mut self, sid: u32, s: &str) {
+        if sid == 0 {
+            return; // no current stream → discard
+        }
+        let Some((kind, style)) = self.glk.stream_kind_style(sid) else {
+            return; // bad stream id → discard
+        };
+        match kind {
+            StreamKind::Window(win) => {
+                match self.glk.window_type(win) {
+                    Some(WinType::TextBuffer) => self.backend.put_text(win, style, s),
+                    Some(WinType::TextGrid) => self.grid_put_str(win, style, s),
+                    _ => {} // pair window or stale: nothing to display
+                }
+                self.glk.window_stream_advance(sid, s.chars().count() as u32);
+            }
+            StreamKind::Memory { addr, len, pos, unicode } => {
+                let elsize = if unicode { 4 } else { 1 };
+                let mut p = pos;
+                for ch in s.chars() {
+                    if p < len {
+                        let ea = addr + p * elsize;
+                        let v = ch as u32;
+                        if unicode {
+                            let _ = self.store_mem_sized(ea, v, 4);
+                        } else {
+                            let _ = self.store_mem_sized(ea, v & 0xFF, 1);
+                        }
+                    }
+                    p = p.saturating_add(1);
+                }
+                self.glk.memory_stream_advance(sid, s.chars().count() as u32);
+            }
+        }
+    }
+
+    /// Write `s` to a text-grid window starting at its cursor, advancing the
+    /// cursor and wrapping at the window edge (output past the bottom is
+    /// discarded). `\n` moves to the next row, column 0.
+    fn grid_put_str(&mut self, win: u32, style: GlkStyle, s: &str) {
+        let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
+        for ch in s.chars() {
+            if ch == '\n' {
+                cx = 0;
+                cy += 1;
+                continue;
+            }
+            if cx >= w {
+                cx = 0;
+                cy += 1;
+            }
+            if cy < h && cx < w {
+                self.backend.grid_put(win, cx, cy, style, &ch.to_string());
+            }
+            cx += 1;
+        }
+        self.glk.set_grid_cursor(win, cx, cy);
     }
 
     fn op_streamchar(&mut self) -> R<()> {
@@ -1837,7 +1905,7 @@ impl Machine {
         Ok(s)
     }
 
-    // ── minimal @glk dispatch (GLULX_NOTES §8) ────────────────────────────────
+    // ── @glk dispatch (GLULX_NOTES §19) ───────────────────────────────────────
 
     fn op_glk(&mut self) -> R<()> {
         let (l, s) = self.read_operands(2, 1)?;
@@ -1850,57 +1918,134 @@ impl Machine {
         self.store(s[0], result)
     }
 
-    /// Handle the put-char/buffer/string family; pop-and-ignore anything else and
-    /// return 0. Glk output prints regardless of the VM's I/O system.
+    /// Dispatch one `@glk` selector against the Glk model + backend. Output-side
+    /// selectors only (input/events are phase 3a-2). Unknown selectors record a
+    /// diagnostic and return 0; nothing here panics on bad ids.
     fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
-        match selector {
-            0x0080 => self.put_latin1(a(0)), // glk_put_char(ch)
-            0x0081 => self.put_latin1(a(1)), // glk_put_char_stream(str, ch)
+        let ret = match selector {
+            // ── output (put) ──────────────────────────────────────────────────
+            0x0080 => {
+                // glk_put_char(ch)
+                let s = ((a(0) & 0xFF) as u8 as char).to_string();
+                self.glk_put_current(&s);
+                0
+            }
+            0x0081 => {
+                // glk_put_char_stream(str, ch)
+                let s = ((a(1) & 0xFF) as u8 as char).to_string();
+                self.glk_stream_put(a(0), &s);
+                0
+            }
             0x0082 => {
                 // glk_put_string(addr)
                 let s = self.read_cstring(a(0))?;
-                self.out.print(&s);
+                self.glk_put_current(&s);
+                0
+            }
+            0x0083 => {
+                // glk_put_string_stream(str, addr)
+                let s = self.read_cstring(a(1))?;
+                self.glk_stream_put(a(0), &s);
+                0
             }
             0x0084 => {
                 // glk_put_buffer(addr, len)
-                let (addr, len) = (a(0), a(1));
-                let mut s = String::new();
-                for i in 0..len {
-                    s.push(self.m8(addr + i)? as u8 as char);
-                }
-                self.out.print(&s);
+                let s = self.read_latin1_buffer(a(0), a(1))?;
+                self.glk_put_current(&s);
+                0
             }
-            0x0128 => self.put_uni(a(0)), // glk_put_char_uni(ch)
+            0x0085 => {
+                // glk_put_buffer_stream(str, addr, len)
+                let s = self.read_latin1_buffer(a(1), a(2))?;
+                self.glk_stream_put(a(0), &s);
+                0
+            }
+            0x0128 => {
+                // glk_put_char_uni(ch)
+                let s = char::from_u32(a(0)).unwrap_or('\u{FFFD}').to_string();
+                self.glk_put_current(&s);
+                0
+            }
             0x0129 => {
                 // glk_put_string_uni(addr)
                 let s = self.read_ustring(a(0))?;
-                self.out.print(&s);
+                self.glk_put_current(&s);
+                0
             }
             0x012A => {
                 // glk_put_buffer_uni(addr, len)
-                let (addr, len) = (a(0), a(1));
-                let mut s = String::new();
-                for i in 0..len {
-                    let cp = self.m32(addr + i * 4)?;
-                    s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
-                }
-                self.out.print(&s);
+                let s = self.read_uni_buffer(a(0), a(1))?;
+                self.glk_put_current(&s);
+                0
             }
-            other => self
-                .diagnostics
-                .push(format!("unhandled @glk selector {other:#06x} (returning 0)")),
-        }
-        Ok(0)
+            // ── windows ───────────────────────────────────────────────────────
+            0x0023 => self.glk_open_window(a(0), a(1), a(2), a(3), a(4)), // glk_window_open
+            0x002F => {
+                // glk_set_window(win)
+                let win = a(0);
+                let sid = if win == 0 { 0 } else { self.glk.window_stream(win).unwrap_or(0) };
+                self.glk.set_current_stream(sid);
+                0
+            }
+            other => {
+                self.diagnostics
+                    .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
+                0
+            }
+        };
+        Ok(ret)
     }
 
-    fn put_latin1(&mut self, v: u32) {
-        let s = ((v & 0xFF) as u8 as char).to_string();
-        self.out.print(&s);
+    /// Write `s` to the current Glk stream (used by the put-to-current
+    /// selectors). Glk output is independent of the VM's I/O system.
+    fn glk_put_current(&mut self, s: &str) {
+        let sid = self.glk.current_stream();
+        self.glk_stream_put(sid, s);
     }
-    fn put_uni(&mut self, v: u32) {
-        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
-        self.out.print(&s);
+
+    /// Read `len` Latin-1 bytes at `addr` into a String.
+    fn read_latin1_buffer(&self, addr: u32, len: u32) -> R<String> {
+        let mut s = String::with_capacity(len as usize);
+        for i in 0..len {
+            s.push(self.m8(addr + i)? as u8 as char);
+        }
+        Ok(s)
+    }
+    /// Read `len` big-endian 32-bit code points at `addr` into a String.
+    fn read_uni_buffer(&self, addr: u32, len: u32) -> R<String> {
+        let mut s = String::with_capacity(len as usize);
+        for i in 0..len {
+            let cp = self.m32(addr + i * 4)?;
+            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+        }
+        Ok(s)
+    }
+
+    /// `glk_window_open`: open a window in the model, tell the backend, and
+    /// recompute the layout. Returns the new window id (0 on a malformed call).
+    fn glk_open_window(&mut self, split: u32, method: u32, size: u32, wintype: u32, rock: u32) -> u32 {
+        match self.glk.window_open(split, method, size, wintype, rock) {
+            Some(id) => {
+                if let Some(ty) = self.glk.window_type(id) {
+                    self.backend.window_open(id, ty);
+                }
+                self.relayout_glk();
+                id
+            }
+            None => {
+                self.diagnostics
+                    .push(format!("glk_window_open(split={split}, wintype={wintype}) failed"));
+                0
+            }
+        }
+    }
+
+    /// Recompute the window layout from the backend's screen size and notify it.
+    fn relayout_glk(&mut self) {
+        let (w, h) = self.backend.screen_size();
+        let layout = self.glk.relayout(w, h);
+        self.backend.window_layout(&layout);
     }
 
     // ── the run loop ──────────────────────────────────────────────────────────
@@ -1927,17 +2072,35 @@ impl Machine {
     pub fn run(&mut self) {
         while self.step() == StepResult::Continue {}
     }
+
+    /// Flush the display backend (e.g. at the end of a run).
+    pub fn flush(&mut self) {
+        self.backend.flush();
+    }
+
+    /// Mutable access to the display backend (e.g. to downcast in tests/host).
+    pub fn backend_mut(&mut self) -> &mut dyn GlkBackend {
+        &mut *self.backend
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asm;
-    use crate::io::BufferOutput;
+    use crate::glk::TestBackend;
 
+    /// Build a test machine over `built` with a [`TestBackend`], then run the
+    /// Glk prelude: open a TextBuffer window and make its stream current, so the
+    /// hand-assembled programs (which print via `streamchar`/`glk_put_*`) have a
+    /// window to print into — exactly as a real game does at startup.
     fn machine(built: asm::Built) -> Machine {
         let mem = Memory::new(built.image).expect("valid image");
-        Machine::with_output(mem, Box::new(BufferOutput::new()))
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer = 3
+        let sid = m.glk.window_stream(win).expect("buffer window has a stream");
+        m.glk.set_current_stream(sid);
+        m
     }
 
     /// A machine whose start function has `locals` and whose body is `body`,
@@ -2378,8 +2541,10 @@ mod tests {
 
     // ── Task 6: output, iosys, @glk, run loop ─────────────────────────────────
 
+    /// All text the program printed: the migrated `TestBackend`'s accumulated
+    /// text-buffer content (the prelude opens exactly one window).
     fn out_str(m: &Machine) -> String {
-        m.out.as_any().downcast_ref::<BufferOutput>().unwrap().buf.clone()
+        m.backend.as_any().downcast_ref::<TestBackend>().unwrap().all_text()
     }
 
     /// Build + run a start function with body `body`; return its output.
@@ -3424,5 +3589,44 @@ mod tests {
         assert_eq!(m.gestalt(3, 0), 1); // Undo now supported
         assert_eq!(m.gestalt(9, 0), 0); // Acceleration: not intercepted
         assert_eq!(m.gestalt(10, 0), 0); // AccelFunc: not intercepted
+    }
+
+    // ── Task 1 (Glk model): seam migration behaviors ──────────────────────────
+
+    /// With no window open and no current stream, Glk output is safely discarded
+    /// (no panic). Build a raw machine WITHOUT the test prelude.
+    #[test]
+    fn glk_output_with_no_current_stream_is_discarded() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]); // setiosys glk
+        body.extend(asm::ins(0x71, &[asm::Op::C8(42)])); // streamnum 42 (no window!)
+        // glk_put_char('B') directly — also routes to the (absent) current stream.
+        body.extend(asm::ins(0x40, &[asm::Op::C8(66), asm::Op::Stack]));
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x80), asm::Op::C8(1), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new())); // no prelude
+        m.run();
+        assert!(m.halted);
+        let backend = m.backend.as_any().downcast_ref::<TestBackend>().unwrap();
+        assert_eq!(backend.all_text(), ""); // nothing printed, no panic
+    }
+
+    /// `glk_window_open` builds a TextBuffer window whose stream `glk_set_window`
+    /// makes current; subsequent `glk_put_char` lands in that window.
+    #[test]
+    fn glk_window_open_and_set_window_route_output() {
+        // The shared `machine()` prelude already opens window 1 + sets it current,
+        // so a bare glk_put_char prints there.
+        let mut body = asm::ins(0x40, &[asm::Op::C8(b'Z' as i8), asm::Op::Stack]); // push 'Z'
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x80), asm::Op::C8(1), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        // Window 1 is the prelude TextBuffer; its recorded text is "Z".
+        let backend = m.backend.as_any().downcast_ref::<TestBackend>().unwrap();
+        assert_eq!(backend.text(1), "Z");
+        assert_eq!(m.glk.root(), 1);
+        assert_eq!(m.glk.window_type(1), Some(WinType::TextBuffer));
     }
 }

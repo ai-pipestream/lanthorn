@@ -499,3 +499,95 @@ return `next() mod L1`; for `L1 < 0` return `-(next() mod |L1|)` (values from
 fully reproducible sequence. `setrandom(0)` is specified to seed from true
 entropy; that needs `std::time`/a dependency and is **deferred**, so we reseed
 from a fixed deterministic default (`DEFAULT_SEED`) and record a diagnostic.
+
+## 19. Glk I/O model (Glulx sub-project 3a, Glk spec 0.7.5)
+
+The Glulx `@glk` opcode (0x130) dispatches to the Glk library: a window/stream/
+event model. We implement the **interactive-fiction subset** in `glk.rs` (the
+`Model` — window tree, streams, current stream, per-stream style) plus a
+pluggable `GlkBackend` display trait. The `Output`/`BufferOutput` placeholder is
+gone; printing routes **current stream → window → backend** (or → Glulx memory,
+for a memory stream). Phase 3a-1 is **output-only** (input events + `glk_select`
+suspend/resume are 3a-2). All constant values below are from `glk.h`.
+
+### Window types (`wintype`, the glk_window_open argument)
+
+| Type             | Value | Notes                                  |
+|------------------|-------|----------------------------------------|
+| wintype_Pair     | 1     | internal layout node (split-created)   |
+| wintype_Blank    | 2     | out of scope                           |
+| wintype_TextBuffer | 3   | scrolling main window                  |
+| wintype_TextGrid | 4     | fixed character grid / status window   |
+| wintype_Graphics | 5     | out of scope                           |
+
+### Split methods (`winmethod`, bitfield)
+
+Direction (`winmethod_DirMask` = 0x0f): Left 0x00, Right 0x01, Above 0x02,
+Below 0x03. Division (`winmethod_DivisionMask` = 0xf0): Fixed 0x10
+(`size` = a character count), Proportional 0x20 (`size` = percent 0–100).
+Border 0x000 / NoBorder 0x100 (ignored). On `glk_window_open(split, method,
+size, wintype, rock)` a new **Pair** node replaces `split` in the tree, with
+`split` and the new window as its children; the new window is the **key** window
+and gets `size` units on the side named by the direction; the old window gets the
+rest. An oversized request collapses the old window to zero (spec §3.3 — no
+ancestor renegotiation). The root window fills the screen; the model computes
+child rects top-down (`Model::relayout`), and the backend supplies the screen
+size (`GlkBackend::screen_size`).
+
+### Style classes (`style_*`, 0–10; `style_NUMSTYLES` = 11)
+
+Normal 0, Emphasized 1, Preformatted 2, Header 3, Subheader 4, Alert 5, Note 6,
+BlockQuote 7, Input 8, User1 9, User2 10. A style is carried on the **stream**
+(`glk_set_style` sets the current stream's style); every `put_text`/`grid_put`
+is tagged with it. The backend maps classes → display attributes (SGR in the CLI).
+
+### gestalt selectors (the `glk_gestalt` selector, distinct from the Glulx
+### `gestalt` opcode)
+
+Version 0, CharInput 1, LineInput 2, CharOutput 3 (returns CannotPrint 0 /
+ApproxPrint 1 / ExactPrint 2), MouseInput 4, Timer 5, Graphics 6, Unicode 15,
+LineInputEcho 17, LineTerminators 18, … We report `Version` = 0x00000705,
+`CharOutput` = ExactPrint for any code point (Unicode capable), `Unicode` = 1,
+and **0** for input/timer/graphics/sound in 3a-1 (truthful: not yet supported).
+
+### Dispatch selector codes implemented (output subset; from `gi_dispa.c`)
+
+| Selector | Code | Selector | Code |
+|----------|------|----------|------|
+| glk_exit | 0x0001 | glk_gestalt | 0x0004 |
+| glk_gestalt_ext | 0x0005 | glk_window_iterate | 0x0020 |
+| glk_window_get_rock | 0x0021 | glk_window_get_root | 0x0022 |
+| glk_window_open | 0x0023 | glk_window_close | 0x0024 |
+| glk_window_get_size | 0x0025 | glk_window_set_arrangement | 0x0026 |
+| glk_window_get_arrangement | 0x0027 | glk_window_get_type | 0x0028 |
+| glk_window_get_parent | 0x0029 | glk_window_clear | 0x002A |
+| glk_window_move_cursor | 0x002B | glk_window_get_stream | 0x002C |
+| glk_set_window | 0x002F | glk_window_get_sibling | 0x0030 |
+| glk_stream_iterate | 0x0040 | glk_stream_get_rock | 0x0041 |
+| glk_stream_open_memory | 0x0043 | glk_stream_close | 0x0044 |
+| glk_stream_set_position | 0x0045 | glk_stream_get_position | 0x0046 |
+| glk_stream_set_current | 0x0047 | glk_stream_get_current | 0x0048 |
+| glk_put_char | 0x0080 | glk_put_char_stream | 0x0081 |
+| glk_put_string | 0x0082 | glk_put_string_stream | 0x0083 |
+| glk_put_buffer | 0x0084 | glk_put_buffer_stream | 0x0085 |
+| glk_set_style | 0x0086 | glk_set_style_stream | 0x0087 |
+| glk_stylehint_set | 0x00B0 | glk_stylehint_clear | 0x00B1 |
+| glk_put_char_uni | 0x0128 | glk_put_string_uni | 0x0129 |
+| glk_put_buffer_uni | 0x012A | glk_stream_open_memory_uni | 0x0139 |
+
+### Output routing
+
+`@glk` put selectors write to the current stream (or an explicit stream for the
+`_stream` variants), **independent** of the VM's I/O system. The Glulx
+`streamchar`/`streamnum`/`streamstr` opcodes (§7) emit through the **current Glk
+stream** only under I/O system 2 (Glk). A window stream → `put_text` (text
+buffer) or grid-cursor writes with wrap (text grid) via the backend; a memory
+stream → Glulx main memory at `addr + pos·elsize` (1 byte, or 4 for a Unicode
+stream), advancing `pos` and the write count; a null/invalid/zero stream is
+discarded. Nothing here panics on a bad window/stream id.
+
+### Deferred to 3a-2 (NOT in 3a-1)
+
+Input events (`glk_request_line_event`/`char_event`), `glk_select`
+suspend/resume, filerefs/file streams, echo streams, timers, the full
+`glk_gestalt` input capabilities, and the glulxercise compliance run.
