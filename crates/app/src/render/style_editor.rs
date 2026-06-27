@@ -113,58 +113,77 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let active_style = state.colors.dialog_button_active
         .add_modifier(Modifier::BOLD);
 
-    // Walk groups and draw samples in the board area.
-    let mut samples: Vec<(usize, Rect)> = Vec::new();
-    let mut global_idx: usize = 0;
-    let mut row_y = board_area.y;
-
+    // Build an ordered list of visual lines: None = group header, Some(idx) = selector row.
+    // Tag each with a display string (&str from static data).
+    // Simultaneously record which visual-line index holds the active selector.
+    let mut visual_lines: Vec<(Option<usize>, &str)> = Vec::new();
+    let mut active_line_idx: usize = 0;
+    let mut g: usize = 0;
     for (group_label, selectors) in SELECTOR_GROUPS {
+        visual_lines.push((None, group_label));
+        for sel in *selectors {
+            if g == ed.active {
+                active_line_idx = visual_lines.len();
+            }
+            visual_lines.push((Some(g), sel));
+            g += 1;
+        }
+    }
+
+    // Compute stateless auto-follow scroll so the active line is always visible.
+    let total_lines = visual_lines.len();
+    let visible_rows = board_area.height as usize;
+    let max_scroll = total_lines.saturating_sub(visible_rows);
+    // Put active line at the bottom of the visible window if it would be off-screen.
+    let scroll = active_line_idx
+        .saturating_sub(visible_rows.saturating_sub(1))
+        .min(max_scroll);
+
+    // Render only the visible slice; record hit-rects for rendered selector rows.
+    let mut samples: Vec<(usize, Rect)> = Vec::new();
+    let end = (scroll + visible_rows).min(total_lines);
+    for (offset, line) in visual_lines[scroll..end].iter().enumerate() {
+        let row_y = board_area.y + offset as u16;
         if row_y >= board_area.bottom() {
             break;
         }
-
-        // Group header line.
-        let hdr = format!(" {}", group_label);
-        crate::render::draw_str_clipped(buf, board_area.x, row_y, &hdr, header_style, board_area);
-        row_y += 1;
-
-        for sel in *selectors {
-            if row_y >= board_area.bottom() {
-                break;
+        match line {
+            (None, group_label) => {
+                // Group header line.
+                let hdr = format!(" {}", group_label);
+                crate::render::draw_str_clipped(buf, board_area.x, row_y, &hdr, header_style, board_area);
             }
+            (Some(idx), sel) => {
+                let is_active = *idx == ed.active;
+                let label_style = if is_active { active_style } else { normal_style };
 
-            let is_active = global_idx == ed.active;
-            let label_style = if is_active { active_style } else { normal_style };
-
-            // Fill row background.
-            for col in board_area.x..board_area.right() {
-                if let Some(cell) = buf.cell_mut((col, row_y)) {
-                    cell.set_symbol(" ").set_style(label_style);
+                // Fill row background.
+                for col in board_area.x..board_area.right() {
+                    if let Some(cell) = buf.cell_mut((col, row_y)) {
+                        cell.set_symbol(" ").set_style(label_style);
+                    }
                 }
+
+                // Name column: up to 28 chars.
+                let name_w = 28usize;
+                let marker = if is_active { ">" } else { " " };
+                let name_trunc: String = sel.chars().take(name_w).collect();
+                let label = format!("{} {:<width$}", marker, name_trunc, width = name_w);
+                crate::render::draw_str_clipped(buf, board_area.x, row_y, &label, label_style, board_area);
+
+                // Sample swatch: render a short styled text after the name.
+                let swatch_x = board_area.x + label.chars().count() as u16 + 1;
+                let sample_style = style_for_selector(&ed.preview, sel);
+                let swatch_text = " Sample ";
+                if swatch_x < board_area.right() {
+                    let swatch_area = Rect::new(swatch_x, row_y, board_area.right().saturating_sub(swatch_x), 1);
+                    crate::render::draw_str_clipped(buf, swatch_x, row_y, swatch_text, sample_style, swatch_area);
+                }
+
+                // Record the full row rect as the hit-rect for this selector.
+                let row_rect = Rect::new(board_area.x, row_y, board_area.width, 1);
+                samples.push((*idx, row_rect));
             }
-
-            // Name column: up to 28 chars.
-            let name_w = 28usize;
-            let marker = if is_active { ">" } else { " " };
-            let name_trunc: String = sel.chars().take(name_w).collect();
-            let label = format!("{} {:<width$}", marker, name_trunc, width = name_w);
-            crate::render::draw_str_clipped(buf, board_area.x, row_y, &label, label_style, board_area);
-
-            // Sample swatch: render a short styled text after the name.
-            let swatch_x = board_area.x + label.chars().count() as u16 + 1;
-            let sample_style = style_for_selector(&ed.preview, sel);
-            let swatch_text = " Sample ";
-            if swatch_x < board_area.right() {
-                let swatch_area = Rect::new(swatch_x, row_y, board_area.right().saturating_sub(swatch_x), 1);
-                crate::render::draw_str_clipped(buf, swatch_x, row_y, swatch_text, sample_style, swatch_area);
-            }
-
-            // Record the full row rect as the hit-rect for this selector.
-            let row_rect = Rect::new(board_area.x, row_y, board_area.width, 1);
-            samples.push((global_idx, row_rect));
-
-            global_idx += 1;
-            row_y += 1;
         }
     }
 
@@ -415,6 +434,20 @@ mod tests {
             (0..ed.selectors.len()).collect::<Vec<_>>(),
             "every selector has exactly one sample at its own index (board order == ed.selectors)"
         );
+    }
+
+    #[test]
+    fn board_scrolls_to_keep_active_visible() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        let n = s.style_editor.as_ref().unwrap().selectors.len();
+        s.style_editor.as_mut().unwrap().active = n - 1; // last selector
+        // Small area that cannot show all selectors at once:
+        let area = Rect::new(0, 0, 90, 18);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_style_editor(&s, area, &mut buf).expect("drawn");
+        assert!(rects.samples.iter().any(|(i, _)| *i == n - 1),
+            "the active (last) selector must be rendered with a hit-rect even on a short board");
     }
 
     #[test]
