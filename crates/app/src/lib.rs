@@ -9,6 +9,7 @@ pub mod slash;
 pub mod colors;
 pub mod complete;
 pub mod config;
+pub mod engine;
 pub mod inventory;
 pub mod export_dot;
 pub mod export_svg;
