@@ -827,4 +827,20 @@ use_defaults = false
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn shipped_keymap_example_parses() {
+        let toml = r#"
+[keymap]
+use_defaults = true
+[keymap.map]
+"+" = "zoom-map in"
+"c" = "center-map"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (km, warns) = crate::keymap::KeyMap::resolve(&cfg.keymap);
+        assert!(warns.is_empty());
+        let c: crate::keymap::KeySpec = "c".parse().unwrap();
+        assert_eq!(km.lookup(&c, crate::keymap::Context::Map), Some("center-map"));
+    }
 }

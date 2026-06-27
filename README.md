@@ -103,10 +103,11 @@ and unsupported; v1/v2 are not supported.)
 - **Reset** — restart the story from the beginning via a confirmation dialog with
   an opt-in "also clear the map" checkbox (the map is kept by default).
 - **Slash commands** — type a leading prefix (default `/`, configurable) to run
-  app commands by name: `/save`, `/load`, `/reset [map]`, `/panh`, `/panv`,
-  `/zoom`, `/center`, `/tidy`, `/layer`, plus every command by its kebab name.
-  `/help` lists them, with Tab autocomplete over the names and quiet status-line
-  feedback.
+  app commands by name: `/save-game`, `/load-game`, `/reset-game [map]`,
+  `/pan-map <dx> <dy>`, `/zoom-map in|out|reset`, `/center-map`, `/tidy-map`,
+  `/cycle-layer next|prev`. `/help` lists all commands grouped by category;
+  `/help <command>` shows one command's usage and description. Tab autocomplete
+  over the names and quiet status-line feedback.
 - **Transcript search / filter / export** — `/search <query>` highlights matches
   (case-insensitive) and lands on the most recent; `n`/`N` step back/forward
   (configurable), `Esc` clears. `/filter story|meta|both` shows only game output
@@ -156,6 +157,11 @@ and unsupported; v1/v2 are not supported.)
 - **Configurable keymap** via a leader-key model: a configurable prefix
   (default `Ctrl+K`) opens a sticky **hotkey dialog** listing every command;
   any command can be made directly available or routed through the dialog.
+  Key bindings live in `[keymap.global]`, `[keymap.map]`, and `[keymap.anim]`
+  sections of `config.toml` as `"key" = "command args"` — each value is a
+  slash command string (with any arguments) that the key will run. Set
+  `use_defaults = false` under `[keymap]` to clear all built-in bindings and
+  define your own from scratch.
 - **Shareable style files** — all visual settings (colors + symbols) live in a
   standalone `style.toml`, referenced from `config.toml` by `style = "<name or
   path>"` (the single styling source — `config.toml` no longer carries style). Colors
