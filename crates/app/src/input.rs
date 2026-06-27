@@ -3049,7 +3049,22 @@ pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config
 /// Does not touch `state.colors` — the live theme is untouched until Save.
 pub fn open_style_editor(state: &mut AppState) {
     let user_dir = state.config.user_dir.clone();
-    let (doc, _warnings) = crate::style::load_style(state.config.style.as_deref(), &user_dir);
+    let (global, _warnings) = crate::style::load_style(state.config.style.as_deref(), &user_dir);
+    // Layer the per-game override (user_dir/styles/<ifid>.toml) over the global so
+    // the editor opens showing the live look. A missing or unparseable per-game
+    // file falls back to the global doc.
+    let doc = if !state.ifid.is_empty() {
+        let pg_path = crate::styles::per_game_style_path(&user_dir, &state.ifid);
+        match std::fs::read_to_string(&pg_path) {
+            Ok(text) => match crate::style::parse_style_toml(&text) {
+                Ok(over) => crate::style::merge(&global, &over),
+                Err(_) => global,
+            },
+            Err(_) => global,
+        }
+    } else {
+        global
+    };
     let (preview, _set, _w2) = crate::style::resolve(&doc, &user_dir);
     let selectors: Vec<&'static str> =
         crate::style::SELECTOR_GROUPS.iter().flat_map(|(_, s)| s.iter().copied()).collect();
@@ -3230,6 +3245,46 @@ mod tests {
         let (a, b, c) = (p(180), p(80), p(81));
         assert!(a.0 < b.0 && a.1 < b.1, "180 {a:?} must be NW of 80 {b:?}");
         assert!(a.0 < c.0 && a.1 > c.1, "180 {a:?} must be SW of 81 {c:?}");
+    }
+
+    #[test]
+    fn editor_opens_over_merged_per_game_style() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("bm-merge-open-{}-{}", std::process::id(), n));
+        let styles_dir = dir.join("styles");
+        std::fs::create_dir_all(&styles_dir).unwrap();
+        // Global: room fg = white, connector fg = cyan.
+        std::fs::write(
+            dir.join("style.toml"),
+            "[colors]\n\"room\" = { fg = \"white\" }\n\"connector\" = { fg = \"cyan\" }\n[symbols]\n",
+        ).unwrap();
+        // Per-game override for IFID: room fg = red (connector untouched).
+        let ifid = "ZCODE-1-ABCDEF-0001";
+        std::fs::write(
+            styles_dir.join(format!("{ifid}.toml")),
+            "[colors]\n\"room\" = { fg = \"red\" }\n[symbols]\n",
+        ).unwrap();
+
+        let mut s = AppState::default();
+        s.config.user_dir = dir;
+        s.config.style = None; // load global from user_dir/style.toml
+        s.ifid = ifid.to_string();
+        open_style_editor(&mut s);
+
+        let ed = s.style_editor.as_ref().unwrap();
+        assert_eq!(
+            ed.doc.colors.selectors.get("room").and_then(|d| d.fg.as_deref()),
+            Some("red"),
+            "per-game override wins for room",
+        );
+        assert_eq!(
+            ed.doc.colors.selectors.get("connector").and_then(|d| d.fg.as_deref()),
+            Some("cyan"),
+            "global value survives for non-overridden connector",
+        );
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
