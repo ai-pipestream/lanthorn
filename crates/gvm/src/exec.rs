@@ -345,6 +345,18 @@ impl Machine {
             0x2B => self.branch2(|a, b| a >= b),
             0x2C => self.branch2(|a, b| a > b),
             0x2D => self.branch2(|a, b| a <= b),
+            // Memory-array load/store (L2 is a signed index).
+            0x48 => self.op_aload(4),
+            0x49 => self.op_aload(2),
+            0x4A => self.op_aload(1),
+            0x4B => self.op_aloadbit(),
+            0x4C => self.op_astore(4),
+            0x4D => self.op_astore(2),
+            0x4E => self.op_astore(1),
+            0x4F => self.op_astorebit(),
+            // Block zero / copy.
+            0x170 => self.op_mzero(),
+            0x171 => self.op_mcopy(),
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
             0x41 => self.copy_sized(2),                                // copys
@@ -792,6 +804,85 @@ impl Machine {
             other => return Err(format!("illegal load operand mode {other:#x}")),
         };
         Ok(v & mask)
+    }
+
+    // ── memory-array opcodes (GLULX_NOTES; L2 is a signed index) ──────────────
+
+    /// `aload`/`aloads`/`aloadb` (width 4/2/1): load from `L1 + width*L2`
+    /// (L2 signed), zero-extended to 32 bits.
+    fn op_aload(&mut self, width: u32) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let addr = Self::array_addr(l[0], l[1], width);
+        let v = self.read_width(addr, width)?;
+        self.store(s[0], v)
+    }
+
+    /// `astore`/`astores`/`astoreb` (width 4/2/1): store the low `width` bytes
+    /// of L3 at `L1 + width*L2` (L2 signed).
+    fn op_astore(&mut self, width: u32) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let addr = Self::array_addr(l[0], l[1], width);
+        self.store_mem_sized(addr, l[2], width)
+    }
+
+    /// `aloadbit`: store bit `(L2 mod 8)` of byte `(L1 + L2/8)` (L2 signed,
+    /// flooring division) as 0/1.
+    fn op_aloadbit(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (addr, bit) = Self::bit_addr(l[0], l[1]);
+        let byte = self.m8(addr)?;
+        self.store(s[0], (byte >> bit) & 1)
+    }
+
+    /// `astorebit`: set (L3 nonzero) or clear (L3 zero) bit `(L2 mod 8)` of byte
+    /// `(L1 + L2/8)` (L2 signed).
+    fn op_astorebit(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let (addr, bit) = Self::bit_addr(l[0], l[1]);
+        let byte = self.m8(addr)?;
+        let v = if l[2] != 0 { byte | (1 << bit) } else { byte & !(1 << bit) };
+        self.store_mem_sized(addr, v, 1)
+    }
+
+    /// Compute `base + scale*index` with `index` taken as signed.
+    fn array_addr(base: u32, index: u32, scale: u32) -> u32 {
+        (base as i64 + scale as i64 * (index as i32 as i64)) as u32
+    }
+
+    /// Compute `(byte_address, bit_number)` for the signed bit index `L2`.
+    fn bit_addr(base: u32, index: u32) -> (u32, u32) {
+        let idx = index as i32;
+        let byte = (base as i64 + idx.div_euclid(8) as i64) as u32;
+        (byte, idx.rem_euclid(8) as u32)
+    }
+
+    /// `mzero count addr`: zero `count` bytes starting at `addr`.
+    fn op_mzero(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let (count, addr) = (l[0], l[1]);
+        for i in 0..count {
+            self.store_mem_sized(addr + i, 0, 1)?;
+        }
+        Ok(())
+    }
+
+    /// `mcopy count from to`: copy `count` bytes, choosing the copy direction so
+    /// overlapping ranges move correctly (spec §2.6).
+    fn op_mcopy(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(3, 0)?;
+        let (count, from, to) = (l[0], l[1], l[2]);
+        if to < from {
+            for i in 0..count {
+                let b = self.m8(from + i)?;
+                self.store_mem_sized(to + i, b, 1)?;
+            }
+        } else {
+            for i in (0..count).rev() {
+                let b = self.m8(from + i)?;
+                self.store_mem_sized(to + i, b, 1)?;
+            }
+        }
+        Ok(())
     }
 
     // ── stack-manipulation opcodes ────────────────────────────────────────────
@@ -2048,5 +2139,139 @@ mod tests {
         let m = run_with_ram(body, 0x200, |m| poke(m, 0x100, &[0xE1, 0x00]));
         assert!(m.halted);
         assert!(m.diagnostics.iter().any(|d| d.contains("decoding table")));
+    }
+
+    // ── Task 2 (2b): memory-array opcodes + mzero/mcopy ───────────────────────
+
+    #[test]
+    fn aload_astore_32bit_roundtrip_signed_index() {
+        use asm::Op::{C16, C32, C8, Mem16};
+        // astore base=0x140 index=2 → 0x148; aload reads it back to 0x100.
+        let mut body = asm::ins(0x4C, &[C16(0x0140), C8(2), C32(0xDEAD_BEEF)]);
+        body.extend(asm::ins(0x48, &[C16(0x0140), C8(2), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x148).unwrap(), 0xDEAD_BEEF);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF);
+
+        // Negative index: astore base=0x148 index=-1 → 0x144.
+        let mut body = asm::ins(0x4C, &[C16(0x0148), C8(-1), C32(0x1234_5678)]);
+        body.extend(asm::ins(0x48, &[C16(0x0148), C8(-1), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x144).unwrap(), 0x1234_5678);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn aloads_astores_16bit_and_aloadb_astoreb_8bit() {
+        use asm::Op::{C16, C8, Mem16};
+        // 16-bit: astores base=0x140 index=3 → 0x146; loads expand WITHOUT sign.
+        let mut body = asm::ins(0x4D, &[C16(0x0140), C8(3), C16(-2)]); // 0xFFFE truncated
+        body.extend(asm::ins(0x49, &[C16(0x0140), C8(3), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read16(0x146).unwrap(), 0xFFFE);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_FFFE); // zero-extended
+
+        // 8-bit at a negative index.
+        let mut body = asm::ins(0x4E, &[C16(0x0150), C8(-1), C16(0xAB)]); // → 0x14F
+        body.extend(asm::ins(0x4A, &[C16(0x0150), C8(-1), Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read8(0x14F).unwrap(), 0xAB);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_00AB);
+    }
+
+    #[test]
+    fn aloadbit_astorebit_signed_bit_index() {
+        use asm::Op::{C16, C8, Mem16};
+        // Set bit 0 of 0x142, bit 7 of 0x142, bit 0 of 0x143 (index 8), bit 7 of
+        // 0x141 (index -1) — mirrors the spec's astorebit examples.
+        let sets: &[(u16, i8)] = &[(0x142, 0), (0x142, 7), (0x142, 8), (0x142, -1)];
+        let mut body = Vec::new();
+        for &(base, idx) in sets {
+            body.extend(asm::ins(0x4F, &[C16(base as i16), C8(idx), C8(1)]));
+        }
+        // Read them back: bit 7 of 0x141 should be 1; bit 0 of 0x142 should be 1.
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(0), Mem16(0x0100)]));
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(-1), Mem16(0x0104)])); // bit7 of 0x141
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(8), Mem16(0x0108)])); // bit0 of 0x143
+        body.extend(asm::ins(0x4B, &[C16(0x0142), C8(1), Mem16(0x010C)])); // clear bit → 0
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read8(0x142).unwrap(), 0b1000_0001); // bits 0 and 7 set
+        assert_eq!(m.mem.read8(0x143).unwrap(), 0b0000_0001); // bit 0 set
+        assert_eq!(m.mem.read8(0x141).unwrap(), 0b1000_0000); // bit 7 set
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x108).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0);
+    }
+
+    #[test]
+    fn aload_out_of_range_faults() {
+        use asm::Op::{C32, Zero};
+        // base near the top of memory + a big index → out of range.
+        let m = run_program(asm::ins(0x48, &[C32(0xFFFF_FFF0), Zero, Zero]));
+        assert!(m.halted);
+        assert!(m.diagnostics.iter().any(|d| d.contains("memory fault")));
+    }
+
+    #[test]
+    fn mzero_clears_a_span() {
+        use asm::Op::{C16, C32, C8};
+        // Plant a value, then mzero 4 bytes over it.
+        let mut body = asm::ins(0x4C, &[C16(0x0140), C8(0), C32(0xFFFF_FFFF)]);
+        body.extend(asm::ins(0x170, &[asm::Op::C8(4), C16(0x0140)])); // mzero count=4 addr=0x140
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.mem.read32(0x140).unwrap(), 0);
+    }
+
+    #[test]
+    fn mcopy_handles_forward_and_backward_overlap() {
+        use asm::Op::{C16, C8};
+        // Source bytes 1,2,3,4 at 0x140. mcopy 4 from 0x140 to 0x142 (to > from →
+        // backward copy) must yield 1,2,1,2,3,4 across 0x140..0x146.
+        let plant = |body: &mut Vec<u8>| {
+            for (i, v) in [1u8, 2, 3, 4].iter().enumerate() {
+                body.extend(asm::ins(0x4E, &[C16(0x0140), C8(i as i8), C8(*v as i8)]));
+            }
+        };
+        let mut body = Vec::new();
+        plant(&mut body);
+        body.extend(asm::ins(0x171, &[C8(4), C16(0x0140), C16(0x0142)])); // count,from,to
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(
+            [
+                m.mem.read8(0x140).unwrap(),
+                m.mem.read8(0x141).unwrap(),
+                m.mem.read8(0x142).unwrap(),
+                m.mem.read8(0x143).unwrap(),
+                m.mem.read8(0x144).unwrap(),
+                m.mem.read8(0x145).unwrap(),
+            ],
+            [1, 2, 1, 2, 3, 4]
+        );
+
+        // to < from → forward copy. 1,2,3,4 at 0x142; copy to 0x140 → 1,2,3,4.
+        let mut body = Vec::new();
+        for (i, v) in [1u8, 2, 3, 4].iter().enumerate() {
+            body.extend(asm::ins(0x4E, &[C16(0x0142), C8(i as i8), C8(*v as i8)]));
+        }
+        body.extend(asm::ins(0x171, &[C8(4), C16(0x0142), C16(0x0140)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(
+            [
+                m.mem.read8(0x140).unwrap(),
+                m.mem.read8(0x141).unwrap(),
+                m.mem.read8(0x142).unwrap(),
+                m.mem.read8(0x143).unwrap(),
+            ],
+            [1, 2, 3, 4]
+        );
     }
 }
