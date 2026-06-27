@@ -14,9 +14,20 @@ pub enum AuxError {
     Truncated,
 }
 
-/// Aux file path: the story file's directory + stem + `.aux`.
-pub fn aux_path(story: &Path) -> PathBuf {
-    story.with_extension("aux")
+/// Replace any character that is not ASCII-alphanumeric / `-` / `_` with `_`.
+pub fn sanitize_ifid(ifid: &str) -> String {
+    ifid.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Aux file path: the story file's directory + the sanitized IFID + `.aux`.
+pub fn aux_path(story_path: &Path, ifid: &str) -> PathBuf {
+    let dir = story_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    dir.join(format!("{}.aux", sanitize_ifid(ifid)))
 }
 
 /// Encode the aux-table map as the length-prefixed `ZAUX` v1 format.
@@ -74,9 +85,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn path_uses_stem_and_aux_ext() {
-        assert_eq!(aux_path(Path::new("/g/story.z5")), Path::new("/g/story.aux"));
-        assert_eq!(aux_path(Path::new("story")), Path::new("story.aux"));
+    fn aux_path_uses_ifid_in_story_dir() {
+        assert_eq!(
+            aux_path(Path::new("/g/story.z5"), "ZCODE-1-840726-ABCD"),
+            Path::new("/g/ZCODE-1-840726-ABCD.aux")
+        );
+        // unsafe characters in an IFID are sanitized
+        assert_eq!(sanitize_ifid("ZCODE-1-../x"), "ZCODE-1-___x");
     }
 
     #[test]

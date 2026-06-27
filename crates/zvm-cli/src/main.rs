@@ -137,31 +137,29 @@ fn read_char_input(stdin_is_tty: bool) -> u8 {
 
 // ── aux ("global state") persistence ──────────────────────────────────────────
 
-/// Load `<stem>.aux` into the machine's aux_data (preload); warn on decode error.
-fn aux_preload(machine: &mut Machine, story_path: &Path, no_aux: bool) {
+/// Load the IFID-keyed aux file into the machine's aux_data (preload); warn on decode error.
+fn aux_preload(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
     if no_aux {
         return;
     }
-    let path = aux::aux_path(story_path);
-    if let Ok(bytes) = fs::read(&path) {
+    if let Ok(bytes) = fs::read(aux_file) {
         match aux::decode_aux(&bytes) {
             Ok(map) => {
                 machine.aux_data = map;
                 machine.aux_dirty = false;
             }
-            Err(e) => eprintln!("zvm: warning: ignoring corrupt {}: {:?}", path.display(), e),
+            Err(e) => eprintln!("zvm: warning: ignoring corrupt {}: {:?}", aux_file.display(), e),
         }
     }
 }
 
-/// Flush aux_data to `<stem>.aux` when dirty; clear the flag regardless.
-fn aux_flush(machine: &mut Machine, story_path: &Path, no_aux: bool) {
+/// Flush aux_data to the IFID-keyed aux file when dirty; clear the flag regardless.
+fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
     if no_aux || !machine.aux_dirty {
         return;
     }
-    let path = aux::aux_path(story_path);
-    if let Err(e) = fs::write(&path, aux::encode_aux(&machine.aux_data)) {
-        eprintln!("zvm: warning: aux save to {} failed: {}", path.display(), e);
+    if let Err(e) = fs::write(aux_file, aux::encode_aux(&machine.aux_data)) {
+        eprintln!("zvm: warning: aux save to {} failed: {}", aux_file.display(), e);
     }
     machine.aux_dirty = false;
 }
@@ -214,6 +212,10 @@ fn main() {
     // Keep the original bytes for Restart.
     let original_bytes = story_bytes.clone();
 
+    // Compute the IFID once; the aux file lives next to the story, keyed by IFID.
+    let ifid = zvm::ifid::compute_ifid(&original_bytes);
+    let aux_file = aux::aux_path(&story_path, &ifid);
+
     let stdout_is_tty = io::stdout().is_terminal();
     let stdin_is_tty = io::stdin().is_terminal();
 
@@ -224,7 +226,7 @@ fn main() {
             process::exit(1);
         }
     };
-    aux_preload(&mut machine, &story_path, args.no_aux);
+    aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, detect_term_rows());
 
@@ -247,7 +249,7 @@ fn main() {
             machine.screen.show_status_requested = false;
         }
         // Persist aux tables as soon as the game commits one.
-        aux_flush(&mut machine, &story_path, args.no_aux);
+        aux_flush(&mut machine, &aux_file, args.no_aux);
 
         match step {
             StepResult::Continue => {}
@@ -266,7 +268,7 @@ fn main() {
                         process::exit(1);
                     }
                 };
-                aux_preload(&mut machine, &story_path, args.no_aux);
+                aux_preload(&mut machine, &aux_file, args.no_aux);
             }
 
             StepResult::NeedLine { .. } => {

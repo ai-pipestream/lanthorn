@@ -3,6 +3,7 @@ pub mod dictionary;
 pub mod error;
 pub mod fixtures;
 pub mod header;
+pub mod ifid;
 pub mod io;
 pub mod location;
 pub mod memory;
