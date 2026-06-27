@@ -14,7 +14,7 @@
 use std::any::Any;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 use std::process;
 
@@ -28,11 +28,26 @@ mod aux; // implemented in Task 5; declared now so the module tree is stable
 // ── StdoutOutput ──────────────────────────────────────────────────────────────
 
 /// Output sink that writes directly to stdout and flushes after each call.
-struct StdoutOutput;
+/// On a TTY it wraps styled lower-window text in SGR; when piped it stays plain.
+struct StdoutOutput {
+    is_tty: bool,
+}
+
+impl StdoutOutput {
+    fn new(is_tty: bool) -> Self {
+        StdoutOutput { is_tty }
+    }
+}
 
 impl Output for StdoutOutput {
     fn print(&mut self, s: &str) {
         print!("{}", s);
+        let _ = io::stdout().flush();
+    }
+
+    fn print_styled(&mut self, s: &str, style: u8) {
+        let out = crate::screen::style_wrap(s, style, self.is_tty);
+        print!("{}", out);
         let _ = io::stdout().flush();
     }
 
@@ -47,7 +62,7 @@ impl Output for StdoutOutput {
 
 // ── build_machine ─────────────────────────────────────────────────────────────
 
-fn build_machine(story: Vec<u8>) -> Result<Machine, String> {
+fn build_machine(story: Vec<u8>, stdout_is_tty: bool) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
         ZError::GraphicalV6 => "Error: Z-machine v6 graphical games are not supported.".to_string(),
@@ -56,7 +71,7 @@ fn build_machine(story: Vec<u8>) -> Result<Machine, String> {
         ZError::Truncated => "Error: story file is truncated.".to_string(),
         _ => format!("Error loading story: {e:?}"),
     })?;
-    let mut machine = Machine::with_output(mem, Box::new(StdoutOutput));
+    let mut machine = Machine::with_output(mem, Box::new(StdoutOutput::new(stdout_is_tty)));
     machine.init_caps();
     Ok(machine)
 }
@@ -108,7 +123,9 @@ fn main() {
     // Keep the original bytes for Restart.
     let original_bytes = story_bytes.clone();
 
-    let mut machine = match build_machine(story_bytes) {
+    let stdout_is_tty = io::stdout().is_terminal();
+
+    let mut machine = match build_machine(story_bytes, stdout_is_tty) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
@@ -129,7 +146,7 @@ fn main() {
             }
 
             StepResult::Restart => {
-                machine = match build_machine(original_bytes.clone()) {
+                machine = match build_machine(original_bytes.clone(), stdout_is_tty) {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("{e}");
@@ -182,5 +199,16 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stdout_tests {
+    // The sink writes to the real stdout, so its behavior is exercised by the
+    // manual smoke in Task 6; this pins the wrapping helper the sink must use.
+    #[test]
+    fn print_styled_wraps_only_on_tty() {
+        assert_eq!(crate::screen::style_wrap("hi", 2, true), "\x1b[1mhi\x1b[0m");
+        assert_eq!(crate::screen::style_wrap("hi", 2, false), "hi");
     }
 }
