@@ -5,7 +5,7 @@
 //! stripped. It does not know what the prefix was.
 
 use crate::input::Action;
-use crate::keymap::{Context, ALL_COMMANDS};
+use crate::keymap::Context;
 
 // ── SlashOutcome ──────────────────────────────────────────────────────────────
 
@@ -36,6 +36,8 @@ pub enum SlashOutcome {
     Export(Option<String>),
     /// Open the Hints panel (caller-handled, like Save/Load). Task D wires the real behavior.
     OpenHints,
+    /// Show per-command detail for `help <name>`.
+    HelpCommand(String),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -333,199 +335,6 @@ pub fn find_command(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS.iter().find(|c| c.name == name)
 }
 
-// ── Curated table (compat shim — parse/slash_names/help_text rewritten in later tasks) ──
-
-/// One entry in the curated table: a command name (or alias) and a builder
-/// that converts the remaining argument tokens into a `SlashOutcome`.
-struct CuratedEntry {
-    name: &'static str,
-    help: &'static str,
-    #[allow(dead_code)] // Task 4 removes this shim entirely; parse no longer routes here.
-    build: fn(&[&str]) -> SlashOutcome,
-}
-
-/// The full curated table. Entries are matched in order; first match wins.
-/// Curated entries WIN over the kebab `Command::from_name` fallback.
-static CURATED: &[CuratedEntry] = &[
-    CuratedEntry {
-        name: "panh",
-        help: "panh <n>  — pan the map horizontally by n cells",
-        build: |args| {
-            match args.first().and_then(|s| s.parse::<i32>().ok()) {
-                Some(n) => SlashOutcome::Action(Action::Pan(n, 0)),
-                None => SlashOutcome::Error("panh requires an integer argument (e.g. panh -3)".into()),
-            }
-        },
-    },
-    CuratedEntry {
-        name: "panv",
-        help: "panv <n>  — pan the map vertically by n cells",
-        build: |args| {
-            match args.first().and_then(|s| s.parse::<i32>().ok()) {
-                Some(n) => SlashOutcome::Action(Action::Pan(0, n)),
-                None => SlashOutcome::Error("panv requires an integer argument (e.g. panv -3)".into()),
-            }
-        },
-    },
-    CuratedEntry {
-        name: "zoom",
-        help: "zoom in|out|reset|<n>  — zoom the map; <n> steps in (positive) or out (negative)",
-        build: |args| {
-            match args.first().copied() {
-                Some("in") => SlashOutcome::Action(Action::ZoomIn),
-                Some("out") => SlashOutcome::Action(Action::ZoomOut),
-                Some("reset") => SlashOutcome::Action(Action::ZoomReset),
-                Some(s) => {
-                    // Interpret a signed integer as ZoomIn (positive) or ZoomOut (negative).
-                    // There is no single "zoom to level N" Action, so we dispatch ZoomIn/ZoomOut
-                    // for the first step; repeated steps would require the caller to loop.
-                    // For /zoom 0 we treat it as a reset.
-                    match s.parse::<i32>() {
-                        Ok(0) => SlashOutcome::Action(Action::ZoomReset),
-                        Ok(n) if n > 0 => SlashOutcome::Action(Action::ZoomIn),
-                        Ok(_) => SlashOutcome::Action(Action::ZoomOut),
-                        Err(_) => SlashOutcome::Error(
-                            format!("zoom: expected in|out|reset|<integer>, got '{s}'")
-                        ),
-                    }
-                }
-                None => SlashOutcome::Error("zoom requires an argument: in|out|reset|<n>".into()),
-            }
-        },
-    },
-    CuratedEntry {
-        name: "center",
-        help: "center  — re-center the map on the selected room",
-        build: |_args| SlashOutcome::Action(Action::Recenter),
-    },
-    CuratedEntry {
-        name: "tidy",
-        help: "tidy  — re-tidy the map layout",
-        build: |_args| SlashOutcome::Action(Action::Retidy),
-    },
-    CuratedEntry {
-        name: "layer",
-        help: "layer next|prev|<n>  — cycle to next/prev layer, or jump by n steps",
-        build: |args| {
-            match args.first().copied() {
-                Some("next") => SlashOutcome::Action(Action::CycleLayer(1)),
-                Some("prev") => SlashOutcome::Action(Action::CycleLayer(-1)),
-                Some(s) => {
-                    // There is no "jump to absolute layer N" Action; CycleLayer(delta) is
-                    // the only available primitive. We interpret the integer as a delta
-                    // (positive = forward, negative = backward).
-                    match s.parse::<i32>() {
-                        Ok(n) => SlashOutcome::Action(Action::CycleLayer(n)),
-                        Err(_) => SlashOutcome::Error(
-                            format!("layer: expected next|prev|<integer delta>, got '{s}'")
-                        ),
-                    }
-                }
-                None => SlashOutcome::Error("layer requires an argument: next|prev|<n>".into()),
-            }
-        },
-    },
-    CuratedEntry {
-        name: "save",
-        help: "save [name]  — save the game, optionally to a named slot",
-        build: |args| SlashOutcome::Save(args.first().map(|s| s.to_string())),
-    },
-    CuratedEntry {
-        name: "load",
-        help: "load [name]  — load a save, optionally a named slot",
-        build: |args| SlashOutcome::Load(args.first().map(|s| s.to_string())),
-    },
-    CuratedEntry {
-        name: "reset",
-        help: "reset [map]  — reset the game; 'reset map' also clears the automapper",
-        build: |args| {
-            let map = args.first().copied() == Some("map");
-            SlashOutcome::Reset { map }
-        },
-    },
-    CuratedEntry {
-        name: "quit",
-        help: "quit  — exit the application",
-        build: |_args| SlashOutcome::Quit,
-    },
-    CuratedEntry {
-        name: "help",
-        help: "help  — show this help text",
-        build: |_args| SlashOutcome::Help,
-    },
-    CuratedEntry {
-        name: "search",
-        help: "search [query]  — search transcript (case-insensitive); no query repeats last search",
-        build: |args| {
-            if args.is_empty() {
-                SlashOutcome::Search(None)
-            } else {
-                SlashOutcome::Search(Some(args.join(" ")))
-            }
-        },
-    },
-    CuratedEntry {
-        name: "filter",
-        help: "filter story|meta|both  — filter transcript by category",
-        build: |args| match args.first().copied() {
-            Some("story") => SlashOutcome::Filter(TranscriptFilterArg::Story),
-            Some("meta")  => SlashOutcome::Filter(TranscriptFilterArg::Meta),
-            Some("both")  => SlashOutcome::Filter(TranscriptFilterArg::Both),
-            _ => SlashOutcome::Error("filter: use story | meta | both".into()),
-        },
-    },
-    CuratedEntry {
-        name: "export",
-        help: "export [file]  — export visible transcript to a file (default: ~/.babelmap/exports/)",
-        build: |args| SlashOutcome::Export(args.first().map(|s| s.to_string())),
-    },
-    CuratedEntry {
-        name: "hint",
-        help: "hint  — open the Hints panel (companion Invisiclues / hint-file mini-terminal)",
-        build: |_args| SlashOutcome::OpenHints,
-    },
-    CuratedEntry {
-        name: "hints",
-        help: "hints  — alias for hint",
-        build: |_args| SlashOutcome::OpenHints,
-    },
-    // ── Aliases ───────────────────────────────────────────────────────────────
-    CuratedEntry {
-        name: "q",
-        help: "q  — alias for quit",
-        build: |_args| SlashOutcome::Quit,
-    },
-    CuratedEntry {
-        name: "h",
-        help: "h  — alias for help",
-        build: |_args| SlashOutcome::Help,
-    },
-    CuratedEntry {
-        name: "recenter",
-        help: "recenter  — alias for center",
-        build: |_args| SlashOutcome::Action(Action::Recenter),
-    },
-    CuratedEntry {
-        name: "retidy",
-        help: "retidy  — alias for tidy",
-        build: |_args| SlashOutcome::Action(Action::Retidy),
-    },
-    CuratedEntry {
-        name: "pan",
-        help: "pan <dx> <dy>  — pan the map by dx cols and dy rows",
-        build: |args| {
-            let dx = args.first().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-            let dy = args.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-            SlashOutcome::Action(Action::Pan(dx, dy))
-        },
-    },
-    CuratedEntry {
-        name: "style",
-        help: "style  — open the live style editor",
-        build: |_args| SlashOutcome::Action(Action::OpenStyleEditor),
-    },
-];
-
 // ── parse ─────────────────────────────────────────────────────────────────────
 
 /// Parse a slash-command body (the text AFTER the leading prefix, e.g. `/`).
@@ -544,6 +353,15 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
     let Some(t0) = body.split_whitespace().next() else {
         return SlashOutcome::Error(format!("type {prefix}help for commands"));
     };
+
+    // help: bare `help` → Help; `help <name>` → HelpCommand.
+    if t0 == "help" {
+        let rest = body.split_whitespace().nth(1);
+        return match rest {
+            Some(name) => SlashOutcome::HelpCommand(name.to_string()),
+            None => SlashOutcome::Help,
+        };
+    }
 
     // search-transcript: preserve internal whitespace in the query.
     if t0 == "search-transcript" {
@@ -573,38 +391,39 @@ pub fn slash_names() -> Vec<String> {
     COMMANDS.iter().map(|c| c.name.to_string()).collect()
 }
 
-// ── help_text ─────────────────────────────────────────────────────────────────
+// ── help_text / help_for_command ──────────────────────────────────────────────
 
 /// Lines to display when the user types the help command.
 ///
 /// `prefix` is the configured command prefix character used in all display strings.
+/// Commands are grouped by category in `Category::ORDER` order, sorted by name
+/// within each group.
 pub fn help_text(prefix: char) -> Vec<String> {
     let mut lines = vec![
         format!("Slash commands (type {prefix}<command> [args]):"),
         String::new(),
     ];
-    for entry in CURATED {
-        lines.push(format!("  {prefix}{}", entry.help));
-    }
-
-    // Keymap commands, available by their kebab name. Deduped against the
-    // curated names above — the same union slash_names() builds for Tab
-    // autocomplete — so /help and the actual command set stay in sync, and a
-    // new keymap command shows up here automatically.
-    let curated: Vec<&str> = CURATED.iter().map(|e| e.name).collect();
-    let mut extras: Vec<String> = Vec::new();
-    for cmd in ALL_COMMANDS {
-        let kebab = cmd.name().replace('_', "-");
-        if !curated.contains(&kebab.as_str()) {
-            extras.push(format!("  {prefix}{kebab}  — {}", cmd.label()));
+    for cat in Category::ORDER {
+        let mut group: Vec<&CommandSpec> = COMMANDS.iter().filter(|c| c.category == cat).collect();
+        if group.is_empty() { continue; }
+        group.sort_by_key(|c| c.name);
+        lines.push(format!("{}:", cat.title()));
+        for c in group {
+            lines.push(format!("  {prefix}{}  — {}", c.usage, c.description));
         }
-    }
-    if !extras.is_empty() {
         lines.push(String::new());
-        lines.push("Keymap commands (also available by kebab name):".to_string());
-        lines.extend(extras);
     }
     lines
+}
+
+/// Lines to display for a single command's detail.
+///
+/// Returns the command's usage and description, or an unknown-command message.
+pub fn help_for_command(prefix: char, name: &str) -> Vec<String> {
+    match find_command(name) {
+        Some(c) => vec![format!("  {prefix}{}  — {}", c.usage, c.description)],
+        None => vec![format!("unknown command: {prefix}{name} — try {prefix}help")],
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -655,16 +474,21 @@ mod tests {
     }
 
     #[test]
-    fn help_text_lists_keymap_kebab_commands() {
-        // /help must enumerate the keymap fallback commands, not just the
-        // curated ones — every name slash_names() offers should be findable.
+    fn help_text_lists_registry_commands() {
+        // Every registry command's usage must appear in /help.
         let lines = help_text('/');
         assert!(
             lines.iter().any(|l| l.contains("/open-config")),
-            "a keymap kebab command (open-config) should appear in /help"
+            "open-config should appear in /help"
         );
-        // Curated commands are still present.
-        assert!(lines.iter().any(|l| l.contains("/panh")));
+        assert!(
+            lines.iter().any(|l| l.contains("/save-game")),
+            "save-game should appear in /help"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("/zoom-map")),
+            "zoom-map should appear in /help"
+        );
     }
 
     #[test]
@@ -754,5 +578,28 @@ mod tests {
         // Total count matches the spec table (48 commands: Game 8, Map 20, View 4,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
         assert_eq!(COMMANDS.len(), 48, "registry must match the spec's Full command table");
+    }
+
+    #[test]
+    fn help_text_grouped_and_per_command() {
+        let lines = help_text('/');
+        // Category headers appear in order.
+        let game_at = lines.iter().position(|l| l.contains("Game")).unwrap();
+        let map_at = lines.iter().position(|l| l.contains("Map")).unwrap();
+        assert!(game_at < map_at, "Game group precedes Map group");
+        // Every command's usage shows up.
+        assert!(lines.iter().any(|l| l.contains("/zoom-map")));
+        assert!(lines.iter().any(|l| l.contains("/create-game-style")));
+
+        // Per-command detail.
+        let one = help_for_command('/', "zoom-map");
+        assert!(one.iter().any(|l| l.contains("zoom-map in|out|reset")));
+        assert!(one.iter().any(|l| l.contains("zoom the map")));
+        let bad = help_for_command('/', "nope");
+        assert!(bad.iter().any(|l| l.contains("unknown command")));
+
+        // `help <command>` parses to HelpCommand; bare help to Help.
+        assert!(matches!(parse("help", '/'), SlashOutcome::Help));
+        assert!(matches!(parse("help zoom-map", '/'), SlashOutcome::HelpCommand(n) if n == "zoom-map"));
     }
 }

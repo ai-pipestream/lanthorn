@@ -2350,6 +2350,8 @@ fn main() {
                             let ud = state.config.user_dir.clone();
                             open_hints(&mut state, &sp, &id, &ud);
                         }
+                        // Task 5 wires the full behavior; this arm keeps the build green.
+                        SlashOutcome::HelpCommand(_) => {}
                     }
                     continue;
                 }
