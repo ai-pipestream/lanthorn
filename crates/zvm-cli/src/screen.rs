@@ -261,6 +261,16 @@ impl ScreenView {
         }
     }
 
+    /// Clear+home the screen at startup (interactive only), so existing
+    /// scrollback is not overwritten by the pinned region.
+    pub fn start(&self) -> String {
+        if self.is_tty && !self.no_status {
+            "\x1b[2J\x1b[H".to_string()
+        } else {
+            String::new()
+        }
+    }
+
     /// Restore the terminal at quit.
     pub fn leave(&mut self) -> String {
         if self.is_tty && self.active_rows > 0 {
@@ -316,6 +326,13 @@ mod view_tests {
         assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
         assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
         assert!(v.leave().contains("\x1b[r"), "leave resets region");
+    }
+
+    #[test]
+    fn start_clears_screen_only_when_interactive() {
+        assert_eq!(ScreenView::new(true, false, 24).start(), "\x1b[2J\x1b[H");
+        assert_eq!(ScreenView::new(false, false, 24).start(), ""); // piped
+        assert_eq!(ScreenView::new(true, true, 24).start(), ""); // --no-status
     }
 
     #[test]

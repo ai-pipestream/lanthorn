@@ -229,6 +229,8 @@ fn main() {
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, detect_term_rows());
+    print!("{}", view.start());
+    let _ = io::stdout().flush();
 
     loop {
         let step = machine.step();
