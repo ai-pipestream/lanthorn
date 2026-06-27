@@ -2350,8 +2350,11 @@ fn main() {
                             let ud = state.config.user_dir.clone();
                             open_hints(&mut state, &sp, &id, &ud);
                         }
-                        // Task 5 wires the full behavior; this arm keeps the build green.
-                        SlashOutcome::HelpCommand(_) => {}
+                        SlashOutcome::HelpCommand(name) => {
+                            for line in slash::help_for_command(state.config.command_prefix, &name) {
+                                state.push_transcript_kind(&line, TranscriptKind::Meta);
+                            }
+                        }
                     }
                     continue;
                 }

@@ -602,4 +602,11 @@ mod tests {
         assert!(matches!(parse("help", '/'), SlashOutcome::Help));
         assert!(matches!(parse("help zoom-map", '/'), SlashOutcome::HelpCommand(n) if n == "zoom-map"));
     }
+
+    #[test]
+    fn help_for_command_round_trip() {
+        // The run loop calls help_for_command on a HelpCommand(name); verify the
+        // function exists with the expected signature and returns non-empty lines.
+        assert!(!help_for_command('/', "save-game").is_empty());
+    }
 }
