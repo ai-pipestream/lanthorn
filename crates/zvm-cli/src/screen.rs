@@ -149,6 +149,190 @@ pub fn leave_region() -> String {
     "\x1b[r".to_string()
 }
 
+// ---------------------------------------------------------------------------
+// ScreenView — stateful top-region rendering
+// ---------------------------------------------------------------------------
+
+use zvm::cpu::exec::Machine;
+
+/// Tracks the pinned top-region state and produces the bytes to emit before an
+/// input prompt: an ANSI scroll-region update on a TTY, or a deduped inline
+/// plain-text block when piped.
+pub struct ScreenView {
+    is_tty: bool,
+    no_status: bool,
+    term_rows: u16,
+    active_rows: u16,           // current scroll-region top height (TTY)
+    last_block: Option<String>, // last inline block emitted (non-TTY dedupe)
+}
+
+impl ScreenView {
+    pub fn new(is_tty: bool, no_status: bool, term_rows: u16) -> Self {
+        ScreenView { is_tty, no_status, term_rows, active_rows: 0, last_block: None }
+    }
+
+    /// Number of pinned top rows for the current machine state.
+    fn top_rows(machine: &Machine) -> u16 {
+        if machine.mem.version() < 4 {
+            1 // v1-v3: a status line is always shown
+        } else {
+            machine.screen.upper_window_rows
+        }
+    }
+
+    /// Plain-text rows of the top region (status row for v3, the upper grid for
+    /// v4+). Empty vec when there is no region.
+    fn rows_plain(machine: &Machine, top: u16) -> Vec<String> {
+        if top == 0 {
+            return Vec::new();
+        }
+        if machine.mem.version() < 4 {
+            vec![status_text(&machine.status_line(), DEFAULT_COLS)]
+        } else {
+            (1..=top).map(|r| upper_row_text(&machine.screen.upper, r)).collect()
+        }
+    }
+
+    /// ANSI rows of the top region (reverse-video bar for v3, per-cell SGR runs
+    /// for v4+).
+    fn rows_ansi(machine: &Machine, top: u16) -> Vec<String> {
+        if top == 0 {
+            return Vec::new();
+        }
+        if machine.mem.version() < 4 {
+            vec![format!("\x1b[7m{}\x1b[0m", status_text(&machine.status_line(), DEFAULT_COLS))]
+        } else {
+            (1..=top).map(|r| upper_row_ansi(&machine.screen.upper, r)).collect()
+        }
+    }
+
+    /// Bytes to emit just before an input prompt.
+    pub fn frame(&mut self, machine: &Machine) -> String {
+        if self.no_status {
+            return String::new();
+        }
+        let top = Self::top_rows(machine);
+        let plain = Self::rows_plain(machine, top);
+        let ansi = Self::rows_ansi(machine, top);
+        self.render(top, &plain, &ansi)
+    }
+
+    /// Pure-core renderer: given the pinned-row count and the already-formatted
+    /// plain/ANSI rows, advance the view's state and return the bytes to write.
+    fn render(&mut self, top: u16, rows_plain: &[String], rows_ansi: &[String]) -> String {
+        if self.no_status {
+            return String::new();
+        }
+        if self.is_tty {
+            let mut out = String::new();
+            if top != self.active_rows {
+                out.push_str(&if top == 0 {
+                    leave_region()
+                } else {
+                    enter_region(top, self.term_rows)
+                });
+                self.active_rows = top;
+            }
+            if top > 0 {
+                out.push_str("\x1b7"); // DECSC save cursor
+                for (i, row) in rows_ansi.iter().enumerate() {
+                    out.push_str(&format!("\x1b[{};1H\x1b[2K", i as u16 + 1)); // row, clear
+                    out.push_str(row);
+                }
+                out.push_str("\x1b8"); // DECRC restore cursor
+            }
+            out
+        } else {
+            if top == 0 {
+                return String::new();
+            }
+            let block = {
+                let mut rows: Vec<String> =
+                    rows_plain.iter().map(|r| r.trim_end().to_string()).collect();
+                while rows.last().map(|r| r.is_empty()).unwrap_or(false) {
+                    rows.pop();
+                }
+                if rows.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n", rows.join("\n"))
+                }
+            };
+            if block.is_empty() || self.last_block.as_deref() == Some(block.as_str()) {
+                return String::new();
+            }
+            self.last_block = Some(block.clone());
+            block
+        }
+    }
+
+    /// Restore the terminal at quit.
+    pub fn leave(&mut self) -> String {
+        if self.is_tty && self.active_rows > 0 {
+            self.active_rows = 0;
+            format!("{}\x1b[{};1H", leave_region(), self.term_rows)
+        } else {
+            String::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use super::*;
+    use zvm::screen::{StatusLine, StatusRight};
+
+    /// A hand-built v3 status region (plain + reverse-video ANSI rows).
+    fn v3_rows() -> (Vec<String>, Vec<String>) {
+        let st = StatusLine {
+            location: "West of House".into(),
+            right: StatusRight::ScoreTurns { score: 0, turns: 1 },
+        };
+        let plain = vec![status_text(&st, DEFAULT_COLS)];
+        let ansi = vec![format!("\x1b[7m{}\x1b[0m", status_text(&st, DEFAULT_COLS))];
+        (plain, ansi)
+    }
+
+    #[test]
+    fn no_status_suppresses_everything() {
+        let (p, a) = v3_rows();
+        let mut piped = ScreenView::new(false, true, 24);
+        assert_eq!(piped.render(1, &p, &a), "");
+        let mut tty = ScreenView::new(true, true, 24);
+        assert_eq!(tty.render(1, &p, &a), "");
+    }
+
+    #[test]
+    fn piped_emits_inline_block_once_then_dedupes() {
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(false, false, 24);
+        let first = v.render(1, &p, &a);
+        assert!(first.contains("West of House"), "first frame emits block: {first:?}");
+        assert!(!first.contains('\x1b'), "inline block carries no ANSI: {first:?}");
+        let second = v.render(1, &p, &a);
+        assert_eq!(second, "", "unchanged region dedupes to empty");
+    }
+
+    #[test]
+    fn tty_enters_region_then_resets_on_leave() {
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(true, false, 24);
+        let f = v.render(1, &p, &a);
+        assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
+        assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
+        assert!(v.leave().contains("\x1b[r"), "leave resets region");
+    }
+
+    #[test]
+    fn tty_dropping_to_zero_rows_resets_region() {
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(true, false, 24);
+        let _ = v.render(1, &p, &a); // activate region
+        let out = v.render(0, &[], &[]);
+        assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
