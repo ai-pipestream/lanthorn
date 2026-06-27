@@ -109,10 +109,13 @@ mod tests {
 
     #[test]
     fn push_mru_keeps_position_of_existing() {
-        let mut v = vec!["#aaaaaa".to_string(), "#bbbbbb".to_string()];
-        push_mru(&mut v, "#aaaaaa"); // re-use the first entry
-        assert_eq!(v, vec!["#aaaaaa".to_string(), "#bbbbbb".to_string()],
-            "re-using an existing color must not reorder the list");
+        let mut v = vec!["#aaaaaa".to_string(), "#bbbbbb".to_string(), "#cccccc".to_string()];
+        push_mru(&mut v, "#bbbbbb"); // re-use a NON-front entry
+        assert_eq!(
+            v,
+            vec!["#aaaaaa".to_string(), "#bbbbbb".to_string(), "#cccccc".to_string()],
+            "re-using an existing color must not move it to the front (would fail under move-to-front)"
+        );
     }
 
     #[test]
@@ -135,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn push_dedups_caps_16_newest_first() {
+    fn push_dedups_caps_16_newest_last() {
         let mut v = Vec::new();
         for i in 0..20 { push_mru(&mut v, &format!("#{:06x}", i)); }
         assert_eq!(v.len(), 16);
