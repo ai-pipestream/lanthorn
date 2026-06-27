@@ -267,9 +267,12 @@ cargo run -p zvm-cli -- story.z5 # DOS-style CLI player (no map)
 ```
 
 `zvm-cli` renders a basic DOS-style screen (pinned status line / upper window
-via ANSI when interactive) and degrades to a clean line stream when piped;
-`--no-status` restores byte-identical lower-stream output and `--no-aux`
-disables aux-table persistence — both handy for the headless test harness.
+via ANSI when interactive, clearing the screen on start) and degrades to a clean
+line stream when piped. Interactively it does single-key input (arrow/function
+keys decoded for `read_char` menus) and `[MORE]` paging on long output; aux save
+tables persist per game by IFID. The flags `--no-status` (byte-identical
+lower-stream output), `--no-aux`, and `--no-more` keep the headless test harness
+deterministic.
 
 The crates are layered `zvm` → `mapper` → `app`; `zvm-cli` is a thin VM
 front-end. The mapper has no dependency on the VM, so layout logic can be tested
