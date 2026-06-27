@@ -24,3 +24,4 @@ toml_edit = "0.22"
 regex = "1"
 clap = { version = "4", features = ["derive"] }
 notify = "6"
+unicode-width = "0.1"
