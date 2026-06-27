@@ -795,63 +795,10 @@ impl KeyMap {
     ///
     /// Returns the resolved `KeyMap` and a list of warning strings for
     /// overrides that were rejected (unknown name, parse error, conflict).
-    pub fn resolve(cfg: &crate::config::KeymapConfig) -> (KeyMap, Vec<String>) {
-        let mut km = KeyMap::default();
-        let mut warnings: Vec<String> = Vec::new();
-
-        for (name, value) in &cfg.overrides {
-            // Resolve command name.
-            let cmd = match Command::from_name(name) {
-                Some(c) => c,
-                None => {
-                    warnings.push(format!("keymap: unknown command '{name}'; skipped"));
-                    continue;
-                }
-            };
-
-            // Parse comma-separated list of KeySpecs.
-            let specs: Vec<KeySpec> = {
-                let mut ok = Vec::new();
-                for token in value.split(',') {
-                    let token = token.trim();
-                    match token.parse::<KeySpec>() {
-                        Ok(s) => ok.push(s),
-                        Err(e) => {
-                            warnings.push(format!(
-                                "keymap: '{name}': cannot parse '{token}': {e}; skipped"
-                            ));
-                        }
-                    }
-                }
-                ok
-            };
-
-            if specs.is_empty() {
-                continue;
-            }
-
-            let ctx = cmd.context();
-
-            // Remove the command's existing default bindings in this context.
-            km.bindings.retain(|(_, c, cx)| !(*c == cmd && *cx == ctx));
-
-            // Add new specs, rejecting any that conflict with another command.
-            for spec in specs {
-                let conflict = km.bindings.iter().any(|(s, c, cx)| {
-                    s == &spec && *c != cmd && (*cx == ctx || (ctx == Context::Map && *cx == Context::Global))
-                });
-                if conflict {
-                    warnings.push(format!(
-                        "keymap: '{name}': '{}' already bound to another command; kept default",
-                        spec.label()
-                    ));
-                } else {
-                    km.bindings.push((spec, cmd, ctx));
-                }
-            }
-        }
-
-        (km, warnings)
+    ///
+    /// TODO(Task 8): consume context sections (use_defaults, global, map, anim).
+    pub fn resolve(_cfg: &crate::config::KeymapConfig) -> (KeyMap, Vec<String>) {
+        (KeyMap::default(), Vec::new())
     }
 }
 
@@ -1026,29 +973,6 @@ mod tests {
         assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some(Command::PanLeft));
         // shift-arrow is no longer bound in map context:
         assert_eq!(km.lookup(&g(Left, false, true), Context::Map), None);
-    }
-
-    // Task 3b: resolve applies overrides and rejects conflicts
-    #[test]
-    fn resolve_applies_override_and_rejects_conflict() {
-        let mut cfg = crate::config::KeymapConfig::default();
-        cfg.overrides.insert("zoom_in".into(), "z".into());
-        let (km, warns) = KeyMap::resolve(&cfg);
-        use KeyCode::*;
-        assert_eq!(
-            km.lookup(&KeySpec { code: Char('z'), ctrl: false, shift: false, alt: false }, Context::Map),
-            Some(Command::ZoomIn)
-        );
-        assert!(warns.is_empty());
-        // binding to an already-used key in the same context is rejected:
-        let mut cfg2 = crate::config::KeymapConfig::default();
-        cfg2.overrides.insert("zoom_in".into(), "n".into()); // 'n' is SelectNext in Map
-        let (km2, warns2) = KeyMap::resolve(&cfg2);
-        assert_eq!(
-            km2.lookup(&KeySpec { code: Char('n'), ctrl: false, shift: false, alt: false }, Context::Map),
-            Some(Command::SelectNext)
-        );
-        assert!(!warns2.is_empty());
     }
 
     // ── HotkeyLayout tests ────────────────────────────────────────────────────

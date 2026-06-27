@@ -4027,19 +4027,6 @@ mod tests {
         assert!(s.gallery.is_some(), "gallery should be open");
     }
 
-    #[test]
-    fn hint_line_reflects_rebinding() {
-        let mut cfg = app::config::KeymapConfig::default();
-        cfg.overrides.insert("zoom_in".into(), "z".into());
-        let (km, _) = KeyMap::resolve(&cfg);
-        let layout = HotkeyLayout::default();
-        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
-        // After rebinding, 'z' is the primary key for ZoomIn; label is "zoom in"
-        assert!(line.contains("Z: zoom in"), "expected 'Z: zoom in' in '{line}'");
-        // The old '+' key should NOT appear as the primary
-        assert!(!line.contains("+: zoom in"), "old binding should not be primary");
-    }
-
     // ── hint_bar invariant: no dead keys, no tidy, is_direct gating, truncation ─
 
     #[test]

@@ -6,17 +6,39 @@ use serde::{Deserialize, Deserializer};
 
 // ── Keymap config ─────────────────────────────────────────────────────────────
 
-/// The [keymap] section of config.toml.  Maps snake_case command names to
-/// comma-separated key-spec strings.  Absent commands keep their defaults.
+/// The [keymap] section of config.toml.
 ///
-/// Keys are written flat under [keymap] in the TOML file, e.g.:
+/// `use_defaults = true` (the default) layers user bindings on top of the
+/// built-in defaults. Set `use_defaults = false` for a clean-slate keymap.
+///
+/// Per-context override tables map key-spec strings to command strings:
+///
 ///   [keymap]
-///   zoom_in = "z"
-///   save_game = "ctrl+s"
-#[derive(Debug, Default, Deserialize, Clone)]
+///   use_defaults = true
+///   [keymap.global]
+///   "ctrl+s" = "save-game"
+///   [keymap.map]
+///   "left" = "pan-map -1 0"
+///   [keymap.anim]
+///   "l" = "anim-step forward"
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct KeymapConfig {
-    #[serde(flatten)]
-    pub overrides: BTreeMap<String, String>,
+    pub use_defaults: bool,
+    pub global: std::collections::BTreeMap<String, String>,
+    pub map: std::collections::BTreeMap<String, String>,
+    pub anim: std::collections::BTreeMap<String, String>,
+}
+
+impl Default for KeymapConfig {
+    fn default() -> Self {
+        Self {
+            use_defaults: true,
+            global: Default::default(),
+            map: Default::default(),
+            anim: Default::default(),
+        }
+    }
 }
 
 // ── Symbol config ─────────────────────────────────────────────────────────────
@@ -624,10 +646,21 @@ mod tests {
     }
 
     #[test]
-    fn flat_keymap_toml_parses_into_overrides() {
-        let toml = "[keymap]\nzoom_in = \"z\"";
+    fn keymap_config_parses_context_sections() {
+        let toml = r#"
+[keymap]
+use_defaults = false
+[keymap.global]
+"ctrl+s" = "save-game"
+[keymap.map]
+"left" = "pan-map -1 0"
+"#;
         let cfg: Config = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.keymap.overrides.get("zoom_in").map(String::as_str), Some("z"));
+        assert!(!cfg.keymap.use_defaults);
+        assert_eq!(cfg.keymap.global.get("ctrl+s").map(String::as_str), Some("save-game"));
+        assert_eq!(cfg.keymap.map.get("left").map(String::as_str), Some("pan-map -1 0"));
+        // Default keeps use_defaults true.
+        assert!(Config::default().keymap.use_defaults);
     }
 
     #[test]
@@ -689,20 +722,6 @@ mod tests {
         assert_eq!(c.aux_storage, AuxStorage::Archive);
         let c: Config = toml::from_str("aux_storage = \"global\"").unwrap();
         assert_eq!(c.aux_storage, AuxStorage::Global);
-    }
-
-    #[test]
-    fn flat_keymap_resolve_binds_override() {
-        let toml = "[keymap]\nzoom_in = \"z\"";
-        let cfg: Config = toml::from_str(toml).unwrap();
-        let (km, warns) = crate::keymap::KeyMap::resolve(&cfg.keymap);
-        assert!(warns.is_empty(), "unexpected warnings: {:?}", warns);
-        // ZoomIn should now be bound to 'z'
-        use crate::keymap::{Command, Context, KeySpec};
-        use crossterm::event::KeyCode;
-        let spec = KeySpec { code: KeyCode::Char('z'), ctrl: false, shift: false, alt: false };
-        let cmd = km.lookup(&spec, Context::Map);
-        assert_eq!(cmd, Some(Command::ZoomIn), "z should map to ZoomIn");
     }
 
     #[test]
