@@ -24,7 +24,7 @@ babelmap is a Rust workspace of four crates:
 | `zvm` | A from-scratch Z-machine virtual machine — executes story files, standard Quetzal save/restore. |
 | `mapper` | A VM-agnostic map model: rooms, connections, layered 2-D layout, overlap removal, edge routing. Serializable. |
 | `app` | The `babelmap` TUI binary (ratatui + crossterm): play loop, live map rendering, all interactive features. |
-| `zvm-cli` | A headless command-line runner for the VM (no map), useful for testing and scripting. |
+| `zvm-cli` | A standalone DOS-style command-line interpreter (no map): pinned v3 status line / v4+ upper window, save/restore, cross-session aux tables, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. |
 
 The interpreter and the mapper are deliberately decoupled: the VM reports *where
 you are*, and the mapper turns the stream of locations and movements into a
@@ -263,8 +263,13 @@ config file, which takes precedence over built-in defaults.
 ```bash
 cargo build --workspace          # build everything
 cargo test --workspace           # run the full test suite
-cargo run -p zvm-cli -- story.z5 # headless VM runner (no map)
+cargo run -p zvm-cli -- story.z5 # DOS-style CLI player (no map)
 ```
+
+`zvm-cli` renders a basic DOS-style screen (pinned status line / upper window
+via ANSI when interactive) and degrades to a clean line stream when piped;
+`--no-status` restores byte-identical lower-stream output and `--no-aux`
+disables aux-table persistence — both handy for the headless test harness.
 
 The crates are layered `zvm` → `mapper` → `app`; `zvm-cli` is a thin VM
 front-end. The mapper has no dependency on the VM, so layout logic can be tested
