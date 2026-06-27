@@ -83,6 +83,8 @@ pub struct Machine {
     /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
     /// `len == 0` means no protection (set by the `protect` opcode).
     protect: (u32, u32),
+    /// Bounded stack of undo snapshots (oldest first); see [`Machine::UNDO_CAP`].
+    undo_stack: Vec<Vec<u8>>,
 
     // Cached layout of the current frame (recomputed whenever `fp` changes).
     cur_frame_len: u32,
@@ -133,6 +135,9 @@ impl Machine {
     /// Ceiling on the memory-map size; `malloc` fails rather than grow past it.
     const MAX_MEMSIZE: u32 = 0x1000_0000; // 256 MiB
 
+    /// Maximum number of in-memory undo snapshots retained (oldest dropped).
+    const UNDO_CAP: usize = 16;
+
     /// Build a machine over `mem`, entering the start function (no arguments).
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
@@ -153,6 +158,7 @@ impl Machine {
             diagnostics: Vec::new(),
             halted: false,
             protect: (0, 0),
+            undo_stack: Vec::new(),
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
@@ -420,6 +426,9 @@ impl Machine {
                 let (_, s) = self.read_operands(0, 1)?;
                 self.store(s[0], 0) // verify: report success
             }
+            // Undo (in-memory; @save/@restore stream opcodes are sub-project 3).
+            0x125 => self.op_saveundo(),
+            0x126 => self.op_restoreundo(),
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
             0x41 => self.copy_sized(2),                                // copys
@@ -1215,6 +1224,66 @@ impl Machine {
         self.heap_start = heap_start;
         self.heap_blocks = blocks;
         Ok(())
+    }
+
+    // ── undo (GLULX_NOTES §15) ────────────────────────────────────────────────
+
+    /// `saveundo S1`: snapshot the VM state for a later `restoreundo`. A
+    /// four-value call stub (the result destination S1, the resume PC, and the
+    /// frame pointer) is pushed before snapshotting so `restoreundo` can resume
+    /// here; the snapshot is bounded to [`Machine::UNDO_CAP`]. Stores 0 (success).
+    fn op_saveundo(&mut self) -> R<()> {
+        let (_, s) = self.read_operands(0, 1)?;
+        let (dtype, daddr) = s[0].to_stub();
+        // Push the call stub (FramePtr ends on top), snapshot, then pop it off.
+        self.push32(dtype)?;
+        self.push32(daddr)?;
+        self.push32(self.pc)?;
+        self.push32(self.fp as u32)?;
+        let snap = self.save_state();
+        self.sp -= 16;
+
+        if self.undo_stack.len() >= Self::UNDO_CAP {
+            self.undo_stack.remove(0); // drop the oldest
+        }
+        self.undo_stack.push(snap);
+        self.store(s[0], 0) // success
+    }
+
+    /// `restoreundo S1`: pop the newest snapshot and restore it. On success the
+    /// snapshot's call stub is consumed and the original `saveundo`'s destination
+    /// receives -1 (per the spec, the `saveundo` "returns again"); `restoreundo`
+    /// itself stores nothing. With no snapshot, stores 1 (failure), state intact.
+    fn op_restoreundo(&mut self) -> R<()> {
+        let (_, s) = self.read_operands(0, 1)?;
+        let snap = match self.undo_stack.pop() {
+            None => return self.store(s[0], 1), // failure
+            Some(snap) => snap,
+        };
+        self.restore_state(&snap).map_err(|e| format!("restoreundo: {e:?}"))?;
+        // Consume the four-value call stub the snapshot left on top.
+        if self.sp < self.value_base() + 16 {
+            return Err("restoreundo: snapshot is missing its call stub".to_string());
+        }
+        self.sp -= 4;
+        let caller_fp = self.st_r32(self.sp);
+        self.sp -= 4;
+        let ret_pc = self.st_r32(self.sp);
+        self.sp -= 4;
+        let daddr = self.st_r32(self.sp);
+        self.sp -= 4;
+        let dtype = self.st_r32(self.sp);
+        self.fp = caller_fp as usize;
+        self.pc = ret_pc;
+        self.reload_frame_meta()?;
+        // The original saveundo destination receives -1.
+        match dtype {
+            0 => Ok(()),
+            1 => self.store_mem(daddr, 0xFFFF_FFFF),
+            2 => self.local_store(daddr, 0xFFFF_FFFF),
+            3 => self.push32(0xFFFF_FFFF),
+            other => Err(format!("bad restoreundo stub DestType {other}")),
+        }
     }
 
     // ── allocation heap (GLULX_NOTES §11) ─────────────────────────────────────
@@ -3091,5 +3160,50 @@ mod tests {
         let mut good = m.save_state();
         good.truncate(good.len() - 10); // sever a chunk
         assert!(matches!(m.restore_state(&good), Err(GError::BadSave(_))));
+    }
+
+    // ── Task 2 (2c): saveundo / restoreundo ───────────────────────────────────
+
+    #[test]
+    fn saveundo_then_restoreundo_restores_and_returns_minus_one() {
+        let mut body = asm::ins(0x125, &[asm::Op::Local8(0)]); // saveundo -> local0
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0xDEAD), asm::Op::Mem16(0x0110)])); // mutate
+        body.extend(asm::ins(0x126, &[asm::Op::Mem16(0x0104)])); // restoreundo -> mem 0x104
+        body.extend(asm::ins(0x120, &[])); // quit
+        let mut m = machine_with_body(&[(4, 1)], body);
+
+        m.step_once().unwrap(); // saveundo
+        assert_eq!(m.local_load(0).unwrap(), 0); // success stores 0
+
+        m.step_once().unwrap(); // mutate
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xDEAD);
+
+        m.step_once().unwrap(); // restoreundo → resumes just after saveundo
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0); // prior state restored
+        assert_eq!(m.local_load(0).unwrap(), 0xFFFF_FFFF); // saveundo "returns" -1
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0); // restoreundo stored nothing on success
+    }
+
+    #[test]
+    fn restoreundo_empty_fails_with_one() {
+        let mut body = asm::ins(0x126, &[asm::Op::Mem16(0x0100)]); // no prior saveundo
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x110, 0x1234).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1); // failure stores 1
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x1234); // state unchanged
+    }
+
+    #[test]
+    fn undo_stack_is_bounded() {
+        let mut body = Vec::new();
+        for _ in 0..(Machine::UNDO_CAP + 3) {
+            body.extend(asm::ins(0x125, &[asm::Op::Zero])); // saveundo, discard result
+        }
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.run();
+        assert_eq!(m.undo_stack.len(), Machine::UNDO_CAP);
     }
 }

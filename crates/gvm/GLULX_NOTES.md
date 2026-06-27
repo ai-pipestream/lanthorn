@@ -429,3 +429,27 @@ Per the spec, an interpreter's Glk state, RNG internal state, protect range, and
 I/O-system/string-table settings are not part of a real Quetzal *file*; our
 internal snapshot additionally carries iosys/string-table/protect in `GReg` so
 that `saveundo`/`restoreundo` (§15) restore the full VM state exactly.
+
+## 15. Undo (Phase 2c, spec §2.11)
+
+| Opcode      | Num   | L | S | Effect                                            |
+|-------------|-------|---|---|---------------------------------------------------|
+| saveundo    | 0x125 | 0 | 1 | snapshot state; store 0 (success), 1 (fail), or −1 (after restore) |
+| restoreundo | 0x126 | 0 | 1 | restore the newest snapshot; store 1 on failure   |
+
+These use the §14 core, entirely in memory (no Glk streams). The
+**destination-write convention** matches `@save`/`@restore` (spec §2.11):
+
+- Before snapshotting, `saveundo` pushes a four-value **call stub** (DestType,
+  DestAddr of S1; the resume PC; the FramePtr) so the snapshot records where the
+  result must go. It then pops the stub and stores **0** in S1 (normal success).
+- `restoreundo` pops the newest snapshot, restores it (the stub is back on the
+  stack), pops that stub, and stores **−1** (`0xFFFFFFFF`) at the *original
+  saveundo's* destination — i.e. the saved `saveundo` "returns again" with −1, so
+  the game can branch (continue vs. just-restored). `restoreundo` itself stores
+  nothing on success.
+- With no snapshot, `restoreundo` stores **1** (failure) and leaves state intact.
+
+The undo stack is bounded to `UNDO_CAP` (16) snapshots; the oldest is dropped
+when full. (`@save`/`@restore` to a real file/stream, `hasundo`, and
+`discardundo` are deferred to sub-project 3.)
