@@ -3559,16 +3559,7 @@ fn map_pane_dims(area: Rect) -> (u16, u16) {
 /// Build a `DialogStyle` from the current app colors.
 /// Note: `BorderStyle::None` is coerced to `Single` inside `draw_dialog`.
 fn make_dialog_style(state: &AppState) -> DialogStyle {
-    DialogStyle {
-        frame: state.colors.dialog,
-        box_style: state.colors.dialog_box_style,
-        glyphs: state.colors.dialog_glyphs.clone(),
-        title: state.colors.dialog_title,
-        button: state.colors.dialog_button,
-        button_active: state.colors.dialog_button_active,
-        shadow: state.colors.dialog_shadow,
-        shadow_on: state.colors.dialog_shadow_on,
-    }
+    DialogStyle::from_colors(&state.colors)
 }
 
 /// Apply `Modifier::DIM` to every cell in `area` of `buf`.

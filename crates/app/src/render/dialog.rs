@@ -59,6 +59,24 @@ pub struct DialogStyle {
     pub shadow_on: bool,
 }
 
+impl DialogStyle {
+    /// Build the dialog chrome from a `ColorScheme`. This is the single seam that
+    /// every modal uses, so cross-cutting dialog concerns (placement, later
+    /// animation) live in one place instead of being duplicated per modal.
+    pub fn from_colors(cs: &crate::colors::ColorScheme) -> DialogStyle {
+        DialogStyle {
+            frame: cs.dialog,
+            box_style: cs.dialog_box_style,
+            glyphs: cs.dialog_glyphs.clone(),
+            title: cs.dialog_title,
+            button: cs.dialog_button,
+            button_active: cs.dialog_button_active,
+            shadow: cs.dialog_shadow,
+            shadow_on: cs.dialog_shadow_on,
+        }
+    }
+}
+
 // ── DialogSpec ────────────────────────────────────────────────────────────────
 
 pub struct DialogSpec<'a> {
@@ -235,6 +253,22 @@ mod tests {
         assert!(r.close.is_some());
         assert_eq!(r.buttons.len(), 2);
         assert!(r.content.width > 0 && r.content.height > 0);
+    }
+
+    #[test]
+    fn from_colors_matches_inline_build() {
+        // Guard: DialogStyle::from_colors must reproduce the previous per-modal
+        // inline `DialogStyle { frame: cs.dialog, ... }` build byte-for-byte.
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let ds = DialogStyle::from_colors(&cs);
+        assert_eq!(ds.frame, cs.dialog);
+        assert_eq!(ds.box_style, cs.dialog_box_style);
+        assert_eq!(ds.glyphs, cs.dialog_glyphs);
+        assert_eq!(ds.title, cs.dialog_title);
+        assert_eq!(ds.button, cs.dialog_button);
+        assert_eq!(ds.button_active, cs.dialog_button_active);
+        assert_eq!(ds.shadow, cs.dialog_shadow);
+        assert_eq!(ds.shadow_on, cs.dialog_shadow_on);
     }
 
     #[test]

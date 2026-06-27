@@ -39,16 +39,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
         return None;
     }
 
-    let st = DialogStyle {
-        frame: state.colors.dialog,
-        box_style: state.colors.dialog_box_style,
-        glyphs: state.colors.dialog_glyphs.clone(),
-        title: state.colors.dialog_title,
-        button: state.colors.dialog_button,
-        button_active: state.colors.dialog_button_active,
-        shadow: state.colors.dialog_shadow,
-        shadow_on: state.colors.dialog_shadow_on,
-    };
+    let st = DialogStyle::from_colors(&state.colors);
 
     let buttons = &[
         DialogButton { id: ButtonId::Archive, label: "With each save" },
