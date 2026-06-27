@@ -2270,11 +2270,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // ── Transcript scroll ─────────────────────────────────────────────────
 
         Action::TranscriptScroll(delta) => {
-            if delta < 0 {
-                state.transcript_scroll = state.transcript_scroll.saturating_sub((-delta) as u16);
+            let target = if delta < 0 {
+                state.transcript_scroll.saturating_sub((-delta) as u16)
             } else {
-                state.transcript_scroll = state.transcript_scroll.saturating_add(delta as u16);
-            }
+                state.transcript_scroll.saturating_add(delta as u16)
+            };
+            state.scroll_transcript_to(target);
         }
 
         Action::ToggleInventory => {

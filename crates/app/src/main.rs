@@ -1318,6 +1318,17 @@ fn main() {
             if let Some(r) = &mut state.replay {
                 r.tick(Duration::from_millis(700), state.history.len());
             }
+            // Finalize a completed smooth-scroll: snap the logical offset to the
+            // target and drop the animation. The next iteration redraws.
+            let done_to = state
+                .scroll_anim
+                .as_ref()
+                .filter(|a| a.tween.done())
+                .map(|a| a.to);
+            if let Some(to) = done_to {
+                state.transcript_scroll = to.round() as u16;
+                state.scroll_anim = None;
+            }
             continue;
         }
 
@@ -2713,12 +2724,13 @@ fn main() {
             // Page the transcript by one screenful. Resolved here because it needs
             // the last-rendered transcript viewport height and max scroll.
             Action::TranscriptScrollPage(dir) => {
-                state.transcript_scroll = app::input::page_scroll(
+                let target = app::input::page_scroll(
                     state.transcript_scroll,
                     dir,
                     last_panes.transcript_viewport_rows,
                     last_panes.transcript_max_scroll,
                 );
+                state.scroll_transcript_to(target);
             }
 
             // ── apply_action handles everything else ───────────────────────────

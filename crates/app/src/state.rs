@@ -1038,6 +1038,42 @@ impl AppState {
         self.tidy_job.is_some() || self.sound_pulse.is_some() || self.scroll_anim.is_some()
     }
 
+    /// Set the transcript scroll target to `target`. When animation is enabled
+    /// and `scroll_ms > 0`, arm (or retarget) a smooth-scroll animation from the
+    /// current displayed offset toward `target`; otherwise jump instantly and
+    /// clear any in-flight animation (exactly today's instant scroll).
+    pub fn scroll_transcript_to(&mut self, target: u16) {
+        let from = self
+            .scroll_anim
+            .as_ref()
+            .map(|a| a.current())
+            .unwrap_or(self.transcript_scroll as f64);
+        self.transcript_scroll = target;
+        let anim = &self.config.animation;
+        if anim.enabled && anim.scroll_ms > 0 {
+            self.scroll_anim = Some(ScrollAnim {
+                from,
+                to: target as f64,
+                tween: crate::anim::Tween::new(
+                    std::time::Duration::from_millis(anim.scroll_ms),
+                    anim.easing,
+                ),
+            });
+        } else {
+            self.scroll_anim = None;
+        }
+    }
+
+    /// The transcript offset to render this frame: the animated displayed offset
+    /// (line-rounded) while a smooth scroll is in flight, else the logical target.
+    /// Still clamped to `[0, max_scroll]` by the renderer.
+    pub fn effective_transcript_scroll(&self) -> u16 {
+        self.scroll_anim
+            .as_ref()
+            .map(|a| a.current().round() as u16)
+            .unwrap_or(self.transcript_scroll)
+    }
+
     /// Return true if any modal, dialog, or overlay is currently open.
     ///
     /// Used to suppress the story input cursor while an overlay is covering the pane.
@@ -1556,6 +1592,63 @@ mod tests {
         assert!(s.has_active_animation(), "scroll anim counts as active");
         s.scroll_anim = None;
         assert!(!s.has_active_animation());
+    }
+
+    #[test]
+    fn scroll_transcript_to_arms_when_enabled() {
+        let mut s = AppState::default();
+        s.transcript_scroll = 3;
+        s.scroll_transcript_to(8);
+        assert_eq!(s.transcript_scroll, 8, "logical target updated immediately");
+        let a = s.scroll_anim.as_ref().expect("animation armed when enabled");
+        assert_eq!(a.from, 3.0, "from = previous displayed offset");
+        assert_eq!(a.to, 8.0, "to = new target");
+    }
+
+    #[test]
+    fn scroll_transcript_to_jumps_when_disabled() {
+        let mut s = AppState::default();
+        s.config.animation.enabled = false;
+        s.transcript_scroll = 3;
+        s.scroll_transcript_to(8);
+        assert_eq!(s.transcript_scroll, 8);
+        assert!(s.scroll_anim.is_none(), "disabled = instant, no animation");
+    }
+
+    #[test]
+    fn scroll_transcript_to_zero_ms_jumps() {
+        let mut s = AppState::default();
+        s.config.animation.scroll_ms = 0;
+        s.transcript_scroll = 2;
+        s.scroll_transcript_to(6);
+        assert_eq!(s.transcript_scroll, 6);
+        assert!(s.scroll_anim.is_none(), "scroll_ms = 0 = instant, no animation");
+    }
+
+    #[test]
+    fn scroll_transcript_to_retargets_from_current_displayed() {
+        let mut s = AppState::default();
+        s.transcript_scroll = 0;
+        s.scroll_transcript_to(10); // arm 0 -> 10
+        // Immediately retarget: progress is ~0, so the new `from` is ~current (~0).
+        s.scroll_transcript_to(4);
+        let a = s.scroll_anim.as_ref().unwrap();
+        assert!(a.from >= 0.0 && a.from < 1.0, "retarget starts from current displayed offset, got {}", a.from);
+        assert_eq!(a.to, 4.0);
+    }
+
+    #[test]
+    fn effective_transcript_scroll_uses_target_or_rounded_anim() {
+        let mut s = AppState::default();
+        s.transcript_scroll = 9;
+        assert_eq!(s.effective_transcript_scroll(), 9, "no anim = logical target");
+        // A done tween reports current() == to; the offset is line-rounded.
+        s.scroll_anim = Some(ScrollAnim {
+            from: 0.0,
+            to: 4.0,
+            tween: crate::anim::Tween::new(std::time::Duration::ZERO, crate::anim::Easing::Linear),
+        });
+        assert_eq!(s.effective_transcript_scroll(), 4, "done tween shows rounded target");
     }
 
     #[test]

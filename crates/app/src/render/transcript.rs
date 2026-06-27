@@ -847,12 +847,15 @@ fn render_middle(
     } else {
         area
     };
+    // Effective scroll: the animated displayed offset (line-rounded) while a
+    // smooth scroll is in flight, else the logical target. Clamped below.
+    let effective_scroll = state.effective_transcript_scroll();
     let (lines, total_rows) = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
         &filtered_styles,
         transcript_rows,
-        state.transcript_scroll,
+        effective_scroll,
         body_area.width,
     );
     // Search highlight style: black text on yellow background.
@@ -889,7 +892,7 @@ fn render_middle(
     let drew_scrollbar = total_rows > transcript_rows && area.width >= 2 && transcript_bottom > transcript_top;
     if drew_scrollbar {
         let start = total_rows
-            .saturating_sub(state.transcript_scroll as usize)
+            .saturating_sub(effective_scroll as usize)
             .saturating_sub(transcript_rows);
         let sb_area = Rect {
             x: area.right() - 1,
