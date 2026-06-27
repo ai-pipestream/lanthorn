@@ -1927,7 +1927,7 @@ fn main() {
                         if dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut session, &mut style_watcher,
                             &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
-                            last_panes.map, last_panes.story,
+                            last_panes.map, last_panes.story, true,
                         ) {
                             break;
                         }
@@ -2168,7 +2168,7 @@ fn main() {
                     if dispatch_slash_outcome(
                         outcome, &mut state, &mut mapper, &mut session, &mut style_watcher,
                         &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
-                        last_panes.map, last_panes.story,
+                        last_panes.map, last_panes.story, false,
                     ) {
                         break;
                     }
@@ -2278,6 +2278,7 @@ fn main() {
             }
 
             Action::SaveGame => {
+                // Dead post-unification: keys now route through SlashOutcome::Save. Retained as a no-cost match arm.
                 // Bundle map + game into a single .babelmap archive, with turn metadata.
                 let meta = app::archive::Meta {
                     format_version: app::archive::CURRENT_FORMAT_VERSION,
@@ -2309,6 +2310,7 @@ fn main() {
             }
 
             Action::RestoreGame => {
+                // Dead post-unification: keys now route through SlashOutcome::Load. Retained as a no-cost match arm.
                 // Restore map + game from the .babelmap archive.
                 match load_archive(&arc_file) {
                     Ok(ac) => {
@@ -2781,6 +2783,7 @@ fn dispatch_slash_outcome(
     story_path: &std::path::Path,
     map_rect: Rect,
     story_rect: Rect,
+    from_key: bool,
 ) -> bool {
     match outcome {
         SlashOutcome::Action(a) => {
@@ -2898,10 +2901,15 @@ fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Reset { map: reset_map } => {
-            // Immediate reset: no dialog (keybinding path has the dialog; slash is instant).
-            reset_game(session, mapper, state, story_bytes, reset_map);
-            let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
-            state.set_status(status_msg);
+            // Source-aware: a key press (e.g. F5) opens the confirmation dialog with
+            // its "also clear map" checkbox; a typed `/reset-game [map]` acts immediately.
+            if from_key {
+                apply_action(Action::ResetGame, state, mapper);
+            } else {
+                reset_game(session, mapper, state, story_bytes, reset_map);
+                let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
+                state.set_status(status_msg);
+            }
         }
         SlashOutcome::Quit => {
             if should_prompt_save_on_quit(state) {

@@ -5021,6 +5021,30 @@ mod tests {
         assert!(s.prompt.is_none(), "no text prompt should be opened");
     }
 
+    // ── Regression: F5 (key-bound reset-game) must reach the confirmation dialog ──
+    // The command-system unification routes F5 through key_to_command -> "reset-game"
+    // -> SlashOutcome::Reset. The from_key branch of dispatch_slash_outcome calls
+    // apply_action(Action::ResetGame), which opens the dialog. This test pins both
+    // halves of that link so an instant-wipe regression (F5 silently resetting with
+    // no confirmation) cannot return unnoticed.
+    #[test]
+    fn f5_key_resolves_to_reset_game_command_and_opens_dialog() {
+        use crate::state::AppState;
+        let s = AppState::default();
+        // (a) F5 resolves to the "reset-game" command (the key-dispatch half).
+        match key_to_command(&s, key(KeyCode::F(5))) {
+            KeyResolve::Command(cmd, _) => {
+                assert_eq!(cmd, "reset-game", "F5 must resolve to the reset-game command");
+            }
+            other => panic!("F5 must resolve to KeyResolve::Command(\"reset-game\"), got {:?}", other),
+        }
+        // (b) The from_key Reset branch opens the dialog via Action::ResetGame.
+        let mut s2 = AppState::default();
+        let mut m = Mapper::default();
+        apply_action(Action::ResetGame, &mut s2, &mut m);
+        assert!(s2.reset_dialog, "key-bound reset-game must open the confirmation dialog, not instant-wipe");
+    }
+
     // ── Leaf 2: minizork fixture reset test ───────────────────────────────────
 
     #[test]

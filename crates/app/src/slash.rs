@@ -438,6 +438,8 @@ mod tests {
         assert!(matches!(parse("pan-map -1 0", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
         assert!(matches!(parse("pan-map 0 2", '/'), SlashOutcome::Action(Action::Pan(0, 2))));
         assert!(matches!(parse("zoom-map reset", '/'), SlashOutcome::Action(Action::ZoomReset)));
+        assert!(matches!(parse("nudge-room -1 0", '/'), SlashOutcome::Action(Action::NudgeSelected(-1, 0))));
+        assert!(matches!(parse("cycle-layer next", '/'), SlashOutcome::Action(Action::CycleLayer(1))));
         assert!(matches!(parse("save-game foo", '/'), SlashOutcome::Save(Some(_))));
         assert!(matches!(parse("save-game", '/'), SlashOutcome::Save(None)));
         assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
