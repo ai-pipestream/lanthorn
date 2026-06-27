@@ -2053,6 +2053,42 @@ impl Machine {
                 self.glk.set_current_stream(sid);
                 0
             }
+            // ── streams ───────────────────────────────────────────────────────
+            0x0040 => {
+                // glk_stream_iterate(str, rockptr) -> next stream id
+                let (next, rock) = self.glk.stream_iterate(a(0));
+                self.glk_store_ptr(a(1), rock)?;
+                next
+            }
+            0x0041 => self.glk.stream_rock(a(0)).unwrap_or(0), // glk_stream_get_rock
+            0x0043 => self.glk.stream_open_memory(a(0), a(1), false, a(3)), // open_memory(addr,len,fmode,rock)
+            0x0139 => self.glk.stream_open_memory(a(0), a(1), true, a(3)),  // open_memory_uni
+            0x0044 => {
+                // glk_stream_close(str, resultptr{readcount, writecount})
+                match self.glk.stream_close(a(0)) {
+                    Some((r, w)) => {
+                        let ptr = a(1);
+                        if ptr != 0 {
+                            self.store_mem(ptr, r)?;
+                            self.store_mem(ptr + 4, w)?;
+                        }
+                    }
+                    None => self.diagnostics.push(format!("glk_stream_close: bad stream {}", a(0))),
+                }
+                0
+            }
+            0x0045 => {
+                // glk_stream_set_position(str, pos, seekmode)
+                self.glk.stream_set_position(a(0), a(1) as i32, a(2));
+                0
+            }
+            0x0046 => self.glk.stream_position(a(0)).unwrap_or(0), // glk_stream_get_position
+            0x0047 => {
+                // glk_stream_set_current(str)
+                self.glk.set_current_stream(a(0));
+                0
+            }
+            0x0048 => self.glk.current_stream(), // glk_stream_get_current
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -3789,5 +3825,64 @@ mod tests {
         let m = run_with_ram(body, 0x100, |_| {});
         assert_eq!(backend_of(&m).text(1), "Y", "buffer clear wiped 'X'");
         assert_eq!(backend_of(&m).grid_line(2, 0), "", "grid clear wiped 'Q'");
+    }
+
+    // ── Task 3 (Glk streams: window + memory) ─────────────────────────────────
+
+    #[test]
+    fn glk_memory_stream_write_position_and_close() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Prelude made window stream 1; open_memory -> stream 2 over [0x180,0x188).
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // stream_set_current(2)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi") -> memory
+        body.extend(glk_call(0x46, &[C8(2)], Mem16(0x0104))); // stream_get_position(2)
+        body.extend(glk_call(0x44, &[C8(2), C16(0x0108)], Zero)); // stream_close -> result@0x108
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open_memory returns stream id 2");
+        assert_eq!(m.mem.read8(0x180).unwrap(), b'H' as u32);
+        assert_eq!(m.mem.read8(0x181).unwrap(), b'i' as u32);
+        assert_eq!(m.mem.read32(0x104).unwrap(), 2, "position advanced by 2");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "read count");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "write count");
+    }
+
+    #[test]
+    fn glk_memory_stream_uni_writes_words_and_seeks() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // open_memory_uni -> stream 2 over 4 words at 0x180; write 'A','B'.
+        let mut body = glk_call(0x139, &[C16(0x0180), C8(4), C8(1), C8(0)], Zero);
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // set current
+        body.extend(glk_call(0x128, &[C8(b'A' as i8)], Zero)); // put_char_uni 'A'
+        body.extend(glk_call(0x128, &[C8(b'B' as i8)], Zero)); // put_char_uni 'B'
+        body.extend(glk_call(0x46, &[C8(2)], Mem16(0x0100))); // position -> 0x100
+        // seek back to word 0 (seekmode 0), overwrite with 'C'.
+        body.extend(glk_call(0x45, &[C8(2), C8(0), C8(0)], Zero)); // set_position(2, 0, start)
+        body.extend(glk_call(0x128, &[C8(b'C' as i8)], Zero)); // put_char_uni 'C'
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x180).unwrap(), b'C' as u32, "word 0 reseeked + overwritten");
+        assert_eq!(m.mem.read32(0x184).unwrap(), b'B' as u32, "word 1 = 'B'");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "uni position counts words");
+    }
+
+    #[test]
+    fn glk_stream_current_and_explicit_routing() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // open_memory -> stream 2; current stays the window (stream 1).
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x48, &[], Mem16(0x0104))); // get_current (expect 1, the window)
+        body.extend(glk_call(0x81, &[C8(2), C8(b'Z' as i8)], Zero)); // put_char_stream(2,'Z') -> memory
+        body.extend(glk_call(0x80, &[C8(b'Y' as i8)], Zero)); // put_char 'Y' -> current window
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // set_current(2)
+        body.extend(glk_call(0x48, &[], Mem16(0x0108))); // get_current (expect 2)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "memory stream id");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "current stream is the window");
+        assert_eq!(m.mem.read8(0x180).unwrap(), b'Z' as u32, "explicit stream routing");
+        assert_eq!(backend_of(&m).text(1), "Y", "current routing untouched");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 2, "set_current took effect");
     }
 }
