@@ -327,98 +327,93 @@ pub enum Action {
     ReplayResume,
 }
 
-// ── key_to_action ─────────────────────────────────────────────────────────────
+// ── key_to_command ────────────────────────────────────────────────────────────
 
-/// Task 9 bridge: map a full command-string to its Command enum for dispatch.
-/// Removed in Task 9 when the dispatch path is rewritten.
-fn cmd_str_to_command(s: &str) -> Option<crate::keymap::Command> {
-    crate::keymap::ALL_COMMANDS.iter().copied().find(|c| c.full_cmd_string() == s)
+/// The result of resolving a `KeyEvent` against the current `AppState`.
+///
+/// Hardwired keys, modal sub-modes, and per-focus text entry resolve directly
+/// to an `Action`. KeyMap lookups resolve to a command-string plus the context
+/// it was looked up in, so the run loop can dispatch it through
+/// `slash::parse_in_context` exactly as if the user had typed the command.
+#[derive(Debug)]
+pub enum KeyResolve {
+    /// A hardwired / modal / text-entry action to apply directly.
+    Action(crate::input::Action),
+    /// A keymap-resolved command string to dispatch through the slash parser,
+    /// together with the context it was resolved in.
+    Command(String, crate::keymap::Context),
+    /// The key produced nothing.
+    None,
 }
 
-/// Map a crossterm `KeyEvent` to an `Action` given the current `AppState`.
+/// Resolve a crossterm `KeyEvent` to a `KeyResolve` given the current `AppState`.
 ///
 /// Routing order:
 /// 1. Ctrl+Q / Ctrl+C → Quit (hardwired, always wins).
 /// 2. Prompt active → prompt_key_to_action; everything else absorbed.
-/// 3. Tidy-anim active → Anim context lookup; no fallthrough.
-/// 4. Gallery open → gallery_key_to_action.
-/// 5. Saves modal open → saves_key_to_action.
-/// 6. Hotkey dialog open → hotkey_dialog_key_to_action.
+/// 3. Tidy-anim active → Anim context lookup (Ctrl+Left/Right stage-jump hardwired).
+/// 4-6. Modal sub-modes (gallery/saves/replay/file-browser/verb-menu/style-editor/
+///      config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
 /// 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 /// 8. Tab (no modifiers) → autocomplete-or-ToggleFocus.
-/// 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct.
+/// 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct_name.
 /// 10. Per-focus routing:
 ///     - Game: game_key_to_action, then Global fallthrough (non-ctrl non-printable).
-///     - Map: Map context lookup, filtered by hotkeys.is_direct.
-pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
+///     - Map: Map context lookup, filtered by hotkeys.is_direct_name.
+pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // 1. Quit always wins — even while a prompt is active.
     if ctrl && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('c')) {
-        return Action::Quit;
+        return KeyResolve::Action(Action::Quit);
     }
 
     // 2. Prompt sub-mode: consume all keys; only prompt-relevant ones produce
     //    an action, everything else (Tab, Ctrl+S/R/E/L, …) is absorbed.
     if state.prompt.is_some() {
-        return prompt_key_to_action(key);
+        return KeyResolve::Action(prompt_key_to_action(key));
     }
 
     // 3. Tidy-animation sub-mode: KeyMap lookup in Anim context; no fallthrough.
     if state.tidy_anim.is_some() {
         if key.modifiers == KeyModifiers::CONTROL {
             match key.code {
-                KeyCode::Left => return Action::AnimStageJump(-1),
-                KeyCode::Right => return Action::AnimStageJump(1),
+                KeyCode::Left => return KeyResolve::Action(Action::AnimStageJump(-1)),
+                KeyCode::Right => return KeyResolve::Action(Action::AnimStageJump(1)),
                 _ => {}
             }
         }
         let spec = KeySpec::from_key_event(key);
-        // Task 9 bridge: cmd_str_to_command removed in Task 9
         return match state.keymap.lookup(&spec, Context::Anim) {
-            Some(s) => cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None),
-            None => Action::None,
+            Some(s) => KeyResolve::Command(s.to_string(), Context::Anim),
+            None => KeyResolve::None,
         };
     }
 
-    // 4. Gallery sub-mode: when gallery is open, route to gallery keys.
+    // 4-6. Modal sub-modes: route to their handlers (all hardwired Actions).
     if state.gallery.is_some() {
-        return gallery_key_to_action(key);
+        return KeyResolve::Action(gallery_key_to_action(key));
     }
-
-    // 5. Saves-manager sub-mode: when saves modal is open, route to saves keys.
     if state.saves.is_some() {
-        return saves_key_to_action(key, state.dialog_focus);
+        return KeyResolve::Action(saves_key_to_action(key, state.dialog_focus));
     }
-
-    // Replay/rewind sub-mode: when the history modal is open, route to replay keys.
     if state.replay.is_some() {
-        return history_key_to_action(key);
+        return KeyResolve::Action(history_key_to_action(key));
     }
-
-    // 5.1. File-browser sub-mode: when the browser is open, route to browser keys.
     if state.file_browser.is_some() {
-        return filebrowser_key_to_action(key);
+        return KeyResolve::Action(filebrowser_key_to_action(key));
     }
-
-    // 5.5. Verb-menu sub-mode: when the token palette is open, route to verb-menu keys.
     if state.verb_menu.is_some() {
-        return verb_menu_key_to_action(key);
+        return KeyResolve::Action(verb_menu_key_to_action(key));
     }
-
-    // 5.6. Style-editor sub-mode: when the style editor is open, route to its keys.
     if state.style_editor.is_some() {
-        return style_editor_key_to_action(key, state);
+        return KeyResolve::Action(style_editor_key_to_action(key, state));
     }
-
-    // 5.7. Config-screen sub-mode: when config screen is open, route to config keys.
     if state.config_screen.is_some() {
-        return config_screen_key_to_action(key, state.dialog_focus);
+        return KeyResolve::Action(config_screen_key_to_action(key, state.dialog_focus));
     }
-
-    // 6. Hotkey dialog open: route to dialog handler.
     if state.hotkey_dialog {
-        return hotkey_dialog_key_to_action(state, key);
+        return KeyResolve::Action(hotkey_dialog_key_to_action(state, key));
     }
 
     // 6.5. Room panel close: Esc or Enter while a panel is open.
@@ -427,14 +422,14 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     // Room panel is read-only (no text input), so Enter is safe as a close key.
     if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE {
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-            return Action::CloseRoomPanel;
+            return KeyResolve::Action(Action::CloseRoomPanel);
         }
     }
 
     // 7. Prefix key → open the hotkey dialog.
     let spec = KeySpec::from_key_event(key);
     if spec == state.hotkeys.prefix {
-        return Action::OpenHotkeyDialog;
+        return KeyResolve::Action(Action::OpenHotkeyDialog);
     }
 
     // 8. Tab (no modifiers): stateful autocomplete-or-ToggleFocus (hardwired).
@@ -446,21 +441,20 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             && !state.current_partial().is_empty()
             && !state.suggestions.is_empty()
         {
-            return Action::Autocomplete;
+            return KeyResolve::Action(Action::Autocomplete);
         }
-        return Action::ToggleFocus;
+        return KeyResolve::Action(Action::ToggleFocus);
     }
 
-    // 9. Ctrl modifier: Global KeyMap lookup, filtered by is_direct — same rule
-    //    as Map context. A command is reachable directly iff it is in the direct
-    //    set, regardless of whether it uses a Ctrl modifier.
+    // 9. Ctrl modifier: Global KeyMap lookup, filtered by is_direct_name — same
+    //    rule as Map context. A command is reachable directly iff it is in the
+    //    direct set, regardless of whether it uses a Ctrl modifier.
     if ctrl {
-        // Task 9 bridge: cmd_str_to_command removed in Task 9
         return match state.keymap.lookup(&spec, Context::Global) {
-            Some(s) if cmd_str_to_command(s).map_or(false, |c| state.hotkeys.is_direct(c)) => {
-                cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None)
+            Some(s) if state.hotkeys.is_direct_name(s) => {
+                KeyResolve::Command(s.to_string(), Context::Global)
             }
-            _ => Action::None,
+            _ => KeyResolve::None,
         };
     }
 
@@ -472,27 +466,45 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             // Global KeyMap lookup so that non-ctrl global bindings reach Game focus.
             let a = game_key_to_action(state, key);
             if a != Action::None {
-                return a;
+                return KeyResolve::Action(a);
             }
             // Global fallthrough for non-ctrl non-Tab non-printable keys.
-            // Task 9 bridge: cmd_str_to_command removed in Task 9
             match state.keymap.lookup(&spec, Context::Global) {
-                Some(s) => cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None),
-                None => Action::None,
+                Some(s) => KeyResolve::Command(s.to_string(), Context::Global),
+                None => KeyResolve::None,
             }
         }
         Focus::Map => {
-            // Map context lookup with direct filter: only return the action if the
-            // command is in the direct (always-available) set. Dialog-only commands
-            // return None when the dialog is closed.
-            // Task 9 bridge: cmd_str_to_command removed in Task 9
+            // Map context lookup with direct filter: only return the command if it
+            // is in the direct (always-available) set. Dialog-only commands return
+            // None when the dialog is closed.
             match state.keymap.lookup(&spec, Context::Map) {
-                Some(s) if cmd_str_to_command(s).map_or(false, |c| state.hotkeys.is_direct(c)) => {
-                    cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None)
+                Some(s) if state.hotkeys.is_direct_name(s) => {
+                    KeyResolve::Command(s.to_string(), Context::Map)
                 }
+                _ => KeyResolve::None,
+            }
+        }
+    }
+}
+
+/// Backward-compatible shim: resolve a key straight to an `Action`.
+///
+/// Production dispatch consumes `key_to_command` directly so command-strings
+/// flow through the slash parser. This wrapper is retained for tests and any
+/// caller that only needs the `Action` form: command-strings that parse to a
+/// plain `Action` are returned as such; Save/Load/Reset/Quit outcomes (and
+/// parse errors) collapse to `Action::None`.
+pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
+    match key_to_command(state, key) {
+        KeyResolve::Action(a) => a,
+        KeyResolve::Command(s, ctx) => {
+            match crate::slash::parse_in_context(&s, state.config.command_prefix, ctx) {
+                crate::slash::SlashOutcome::Action(a) => a,
                 _ => Action::None,
             }
         }
+        KeyResolve::None => Action::None,
     }
 }
 
@@ -986,10 +998,10 @@ fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
     }
 
     // Look up the key across all contexts (Global, Map, Anim) so that commands
-    // in any context can be triggered from the dialog.
-    // Task 9 bridge: cmd_str_to_command removed in Task 9
+    // in any context can be triggered from the dialog. The dialog stays an
+    // Action-producing modal, so resolve the command-string to its Action here.
     if let Some(s) = state.keymap.lookup_any(&spec) {
-        if let Some(cmd) = cmd_str_to_command(s) {
+        if let Some(cmd) = crate::keymap::ALL_COMMANDS.iter().copied().find(|c| c.full_cmd_string() == s) {
             return cmd.to_action();
         }
     }
@@ -3368,8 +3380,8 @@ mod tests {
         s.toggle_focus();
         // Direct commands fire without the dialog.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-game"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "load-game"));
         // Non-direct commands return None when dialog is closed.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
@@ -3381,6 +3393,22 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::ExportDump));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::CycleLayout));
+    }
+
+    #[test]
+    fn key_resolves_to_command_string() {
+        // '+' in Map focus resolves to the zoom-map command string (not an Action).
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        match key_to_command(&s, key(KeyCode::Char('+'))) {
+            KeyResolve::Command(c, ctx) => {
+                assert_eq!(c, "zoom-map in");
+                assert_eq!(ctx, crate::keymap::Context::Map);
+            }
+            other => panic!("expected Command, got {other:?}"),
+        }
+        // Hardwired Ctrl+Q stays an Action.
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('q'))), KeyResolve::Action(Action::Quit)));
     }
 
     #[test]
@@ -4020,8 +4048,8 @@ mod tests {
         // ── Game focus (default) ──────────────────────────────────────────────
         let s = AppState::default(); // focus = Game
         // Direct ctrl commands work without the dialog.
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('r'))), Action::RestoreGame));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-game"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "load-game"));
         // Non-direct ctrl commands return None when dialog is closed.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
@@ -4088,7 +4116,7 @@ mod tests {
         // Esc → ToggleFocus (direct, always works)
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
         // Direct ctrl globals work in map focus (save/restore kept with ctrl).
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::SaveGame));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-game"));
         // Ctrl+Left no longer nudges (nudge moved to F6-F9).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         // F6-F9 nudge work in map focus via Global fallthrough.

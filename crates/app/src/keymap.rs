@@ -1010,6 +1010,17 @@ impl HotkeyLayout {
     pub fn is_direct(&self, cmd: Command) -> bool {
         self.direct.contains(&cmd)
     }
+
+    /// Check whether a full keymap command-string resolves to a direct command.
+    ///
+    /// `cmd_str` is the full binding string as returned by `KeyMap::lookup`
+    /// (e.g. `"zoom-map in"`, `"save-game"`). Resolves direct-ness the same way
+    /// `is_direct` does — by matching the command's `full_cmd_string()` — so a
+    /// command with arguments is matched as a whole (e.g. `"cycle-layout"` is
+    /// not direct even though `"cycle-layout reverse"` is).
+    pub fn is_direct_name(&self, cmd_str: &str) -> bool {
+        self.direct.iter().any(|c| c.full_cmd_string() == cmd_str)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

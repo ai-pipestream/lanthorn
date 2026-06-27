@@ -19,7 +19,7 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
-use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome};
+use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
@@ -1913,7 +1913,23 @@ fn main() {
 
         // Route event to an Action.
         let action = match event {
-            Event::Key(k) if k.kind == KeyEventKind::Press => key_to_action(&state, k),
+            Event::Key(k) if k.kind == KeyEventKind::Press => {
+                match key_to_command(&state, k) {
+                    KeyResolve::Action(a) => a,
+                    KeyResolve::Command(s, ctx) => {
+                        let outcome = slash::parse_in_context(&s, state.config.command_prefix, ctx);
+                        if dispatch_slash_outcome(
+                            outcome, &mut state, &mut mapper, &mut session, &mut style_watcher,
+                            &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                            last_panes.map, last_panes.story,
+                        ) {
+                            break;
+                        }
+                        continue 'event_loop;
+                    }
+                    KeyResolve::None => Action::None,
+                }
+            }
             Event::Mouse(m) => {
                 // Style-editor board: intercept left-clicks on sample rows and property pane.
                 if state.style_editor.is_some() {
@@ -2142,220 +2158,13 @@ fn main() {
                 if is_slash(&cmd, state.config.command_prefix) {
                     // Strip the leading prefix character before parsing.
                     let body = &cmd[state.config.command_prefix.len_utf8()..];
-                    match slash::parse(body, state.config.command_prefix) {
-                        SlashOutcome::Action(a) => {
-                            if matches!(a, Action::ToggleWatch) {
-                                toggle_style_watch(&mut state, &mut style_watcher);
-                            } else {
-                                apply_action(a, &mut state, &mut mapper);
-                            }
-                        }
-                        SlashOutcome::Message(m) | SlashOutcome::Error(m) => {
-                            state.set_status(m);
-                        }
-                        SlashOutcome::Help => {
-                            for line in slash::help_text(state.config.command_prefix) {
-                                state.push_transcript_kind(&line, TranscriptKind::Meta);
-                            }
-                        }
-                        SlashOutcome::Save(name_opt) => {
-                            // Named save or default archive save.
-                            let result = match name_opt {
-                                Some(ref name) => {
-                                    save_named(&save_dir, &ifid, name, &mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds)
-                                        .map(|()| format!("saved as \"{}\"", name))
-                                        .map_err(|e| format!("save failed: {}", e))
-                                }
-                                None => {
-                                    let meta = app::archive::Meta {
-                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
-                                        ifid: Some(ifid.clone()),
-                                        name: None,
-                                        turns: state.turns,
-                                        saved_at: format_rfc3339(
-                                            std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_secs())
-                                                .unwrap_or(0),
-                                        ),
-                                    };
-                                    save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history)
-                                        .map(|()| "saved".to_string())
-                                        .map_err(|e| format!("save failed: {}", e))
-                                }
-                            };
-                            match result {
-                                Ok(msg) => state.set_status(msg),
-                                Err(e) => state.set_status(e),
-                            }
-                        }
-                        SlashOutcome::Load(name_opt) => {
-                            // Named-slot load or default archive load.
-                            let archive_to_load = match name_opt {
-                                None => Some(arc_file.clone()),
-                                Some(ref name) => {
-                                    // Find the first named save whose display name matches.
-                                    let saves = list_saves(&save_dir, &ifid);
-                                    saves.into_iter()
-                                        .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
-                                        .map(|e| e.path)
-                                }
-                            };
-                            match archive_to_load {
-                                None => {
-                                    state.set_status("load failed: no save found with that name");
-                                }
-                                Some(ref path) => {
-                                    match load_archive(path) {
-                                        Ok(ac) => {
-                                            let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
-                                                match e {
-                                                    zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
-                                                    other => format!("restore failed: {:?}", other),
-                                                }
-                                            });
-                                            match restore_err {
-                                                Ok(()) => {
-                                                    if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
-                                                    if state.config.aux_storage != app::config::AuxStorage::Global {
-                                                        session.machine.aux_data = ac.aux.clone();
-                                                    }
-                                                    mapper = ac.mapper;
-                                                    state.transcript = ac.transcript;
-                                                    state.transcript_kinds = ac.transcript_kinds;
-                                                    state.history = ac.history;
-                                                    let loc = zvm::current_location(&session.machine);
-                                                    if let Some(snap) = loc {
-                                                        let rid = snap.number as mapper::graph::RoomId;
-                                                        let restore_result = TurnResult {
-                                                            transcript: String::new(),
-                                                            location: Some(snap),
-                                                            quit: false,
-                                                            info: None,
-                                                            beep: None,
-                                                            diagnostics: vec![],
-                                                            location_method: None,
-                                                            pending_io: None,
-                                                        };
-                                                        apply_turn(&mut mapper, "", &restore_result);
-                                                        state.set_viewed_layer(None);
-                                                        state.select_room(Some(rid));
-                                                        if let Some(room) = mapper.graph.room(rid) {
-                                                            if let Some(pos) = room.pos {
-                                                                let (pw, ph) = map_pane_dims(last_panes.map);
-                                                                state.recenter_on(pos, pw, ph);
-                                                            }
-                                                        }
-                                                    }
-                                                    state.set_status("loaded");
-                                                }
-                                                Err(e) => state.set_status(format!("load failed: {}", e)),
-                                            }
-                                        }
-                                        Err(e) => state.set_status(format!("load failed: {}", e)),
-                                    }
-                                }
-                            }
-                        }
-                        SlashOutcome::Reset { map: reset_map } => {
-                            // Immediate reset: no dialog (keybinding path has the dialog; slash is instant).
-                            reset_game(&mut session, &mut mapper, &mut state, &story_bytes, reset_map);
-                            let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
-                            state.set_status(status_msg);
-                        }
-                        SlashOutcome::Quit => {
-                            if should_prompt_save_on_quit(&state) {
-                                state.quit_dialog = true;
-                                state.dialog_focus = 0;
-                            } else {
-                                break;
-                            }
-                        }
-                        SlashOutcome::Search(q_opt) => {
-                            let query_to_run: Option<String> = match q_opt {
-                                Some(q) => Some(q),
-                                None => state.search_query.clone(),
-                            };
-                            match query_to_run {
-                                None => {
-                                    state.set_status("search: no previous search");
-                                }
-                                Some(query) => {
-                                    let count = state.run_search(&query, state.config.search.start_backward);
-                                    if count == 0 {
-                                        state.set_status("search: no matches");
-                                    } else {
-                                        state.set_status(format!("search: {} match{}", count, if count == 1 { "" } else { "es" }));
-                                        // Scroll to the current match.
-                                        let pos = state.search_matches[state.search_idx];
-                                        let total_vis = state.visible_transcript_indices().len();
-                                        let pane_rows = if last_panes.story.height > 0 {
-                                            last_panes.story.height as usize
-                                        } else {
-                                            24
-                                        };
-                                        state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
-                                    }
-                                }
-                            }
-                        }
-                        SlashOutcome::Filter(arg) => {
-                            state.transcript_filter = match arg {
-                                TranscriptFilterArg::Both  => TranscriptFilter::Both,
-                                TranscriptFilterArg::Story => TranscriptFilter::Story,
-                                TranscriptFilterArg::Meta  => TranscriptFilter::Meta,
-                            };
-                            let label = match state.transcript_filter {
-                                TranscriptFilter::Both  => "both",
-                                TranscriptFilter::Story => "story",
-                                TranscriptFilter::Meta  => "meta",
-                            };
-                            // If a search is active, recompute it against the new filter
-                            // so highlights and the [i/N] hint stay consistent.
-                            if let Some(query) = state.search_query.clone() {
-                                let count = state.run_search(&query, state.config.search.start_backward);
-                                if count > 0 {
-                                    let pos = state.search_matches[state.search_idx];
-                                    let total_vis = state.visible_transcript_indices().len();
-                                    let pane_rows = if last_panes.story.height > 0 {
-                                        last_panes.story.height as usize
-                                    } else {
-                                        24
-                                    };
-                                    state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
-                                }
-                            }
-                            state.set_status(format!("filter: {}", label));
-                        }
-                        SlashOutcome::Export(dest) => {
-                            let lines: Vec<String> = state
-                                .visible_transcript_indices()
-                                .into_iter()
-                                .map(|i| state.transcript[i].clone())
-                                .collect();
-                            let exports_dir = state.config.user_dir.join("exports");
-                            let stamp = format_stamp(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs())
-                                    .unwrap_or(0),
-                            );
-                            match export_transcript(&lines, dest.as_deref(), &exports_dir, &stamp) {
-                                Ok(path) => state.set_status(format!("exported: {}", path.display())),
-                                Err(e)   => state.set_status(format!("export failed: {}", e)),
-                            }
-                        }
-                        SlashOutcome::OpenHints => {
-                            let sp = story_path.clone();
-                            let id = ifid.clone();
-                            let ud = state.config.user_dir.clone();
-                            open_hints(&mut state, &sp, &id, &ud);
-                        }
-                        SlashOutcome::HelpCommand(name) => {
-                            for line in slash::help_for_command(state.config.command_prefix, &name) {
-                                state.push_transcript_kind(&line, TranscriptKind::Meta);
-                            }
-                        }
+                    let outcome = slash::parse(body, state.config.command_prefix);
+                    if dispatch_slash_outcome(
+                        outcome, &mut state, &mut mapper, &mut session, &mut style_watcher,
+                        &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                        last_panes.map, last_panes.story,
+                    ) {
+                        break;
                     }
                     continue;
                 }
@@ -2946,6 +2755,243 @@ fn main() {
 /// re-seed the mapper with the start room.  When `clear_map` is true, the
 /// accumulated map is wiped first (same effect as `/reset map`) so only the
 /// start room remains after the re-seed.
+/// Handle a parsed `SlashOutcome` from either typed input or a key dispatch.
+///
+/// Both the typed-command path and the keybinding path resolve to a
+/// `SlashOutcome` and funnel through here so the two share one behaviour. The
+/// run loop owns the actual loop, so the `Quit` outcome cannot `break` directly:
+/// this returns `true` when the loop should break (a non-dialog quit).
+#[allow(clippy::too_many_arguments)]
+fn dispatch_slash_outcome(
+    outcome: SlashOutcome,
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    session: &mut GameSession,
+    style_watcher: &mut Option<app::watch::StyleWatcher>,
+    save_dir: &std::path::Path,
+    ifid: &str,
+    arc_file: &std::path::Path,
+    story_bytes: &[u8],
+    story_path: &std::path::Path,
+    map_rect: Rect,
+    story_rect: Rect,
+) -> bool {
+    match outcome {
+        SlashOutcome::Action(a) => {
+            if matches!(a, Action::ToggleWatch) {
+                toggle_style_watch(state, style_watcher);
+            } else {
+                apply_action(a, state, mapper);
+            }
+        }
+        SlashOutcome::Message(m) | SlashOutcome::Error(m) => {
+            state.set_status(m);
+        }
+        SlashOutcome::Help => {
+            for line in slash::help_text(state.config.command_prefix) {
+                state.push_transcript_kind(&line, TranscriptKind::Meta);
+            }
+        }
+        SlashOutcome::Save(name_opt) => {
+            // Named save or default archive save.
+            let result = match name_opt {
+                Some(ref name) => {
+                    save_named(save_dir, ifid, name, &*mapper, &session.machine, state.turns, &state.transcript, &state.transcript_kinds)
+                        .map(|()| format!("saved as \"{}\"", name))
+                        .map_err(|e| format!("save failed: {}", e))
+                }
+                None => {
+                    let meta = app::archive::Meta {
+                        format_version: app::archive::CURRENT_FORMAT_VERSION,
+                        ifid: Some(ifid.to_string()),
+                        name: None,
+                        turns: state.turns,
+                        saved_at: format_rfc3339(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        ),
+                    };
+                    save_archive_meta(arc_file, &*mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history)
+                        .map(|()| "saved".to_string())
+                        .map_err(|e| format!("save failed: {}", e))
+                }
+            };
+            match result {
+                Ok(msg) => state.set_status(msg),
+                Err(e) => state.set_status(e),
+            }
+        }
+        SlashOutcome::Load(name_opt) => {
+            // Named-slot load or default archive load.
+            let archive_to_load = match name_opt {
+                None => Some(arc_file.to_path_buf()),
+                Some(ref name) => {
+                    // Find the first named save whose display name matches.
+                    let saves = list_saves(save_dir, ifid);
+                    saves.into_iter()
+                        .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
+                        .map(|e| e.path)
+                }
+            };
+            match archive_to_load {
+                None => {
+                    state.set_status("load failed: no save found with that name");
+                }
+                Some(ref path) => {
+                    match load_archive(path) {
+                        Ok(ac) => {
+                            let restore_err = session.machine.restore_file(&ac.save).map_err(|e| {
+                                match e {
+                                    zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+                                    other => format!("restore failed: {:?}", other),
+                                }
+                            });
+                            match restore_err {
+                                Ok(()) => {
+                                    if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
+                                    if state.config.aux_storage != app::config::AuxStorage::Global {
+                                        session.machine.aux_data = ac.aux.clone();
+                                    }
+                                    *mapper = ac.mapper;
+                                    state.transcript = ac.transcript;
+                                    state.transcript_kinds = ac.transcript_kinds;
+                                    state.history = ac.history;
+                                    let loc = zvm::current_location(&session.machine);
+                                    if let Some(snap) = loc {
+                                        let rid = snap.number as mapper::graph::RoomId;
+                                        let restore_result = TurnResult {
+                                            transcript: String::new(),
+                                            location: Some(snap),
+                                            quit: false,
+                                            info: None,
+                                            beep: None,
+                                            diagnostics: vec![],
+                                            location_method: None,
+                                            pending_io: None,
+                                        };
+                                        apply_turn(mapper, "", &restore_result);
+                                        state.set_viewed_layer(None);
+                                        state.select_room(Some(rid));
+                                        if let Some(room) = mapper.graph.room(rid) {
+                                            if let Some(pos) = room.pos {
+                                                let (pw, ph) = map_pane_dims(map_rect);
+                                                state.recenter_on(pos, pw, ph);
+                                            }
+                                        }
+                                    }
+                                    state.set_status("loaded");
+                                }
+                                Err(e) => state.set_status(format!("load failed: {}", e)),
+                            }
+                        }
+                        Err(e) => state.set_status(format!("load failed: {}", e)),
+                    }
+                }
+            }
+        }
+        SlashOutcome::Reset { map: reset_map } => {
+            // Immediate reset: no dialog (keybinding path has the dialog; slash is instant).
+            reset_game(session, mapper, state, story_bytes, reset_map);
+            let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
+            state.set_status(status_msg);
+        }
+        SlashOutcome::Quit => {
+            if should_prompt_save_on_quit(state) {
+                state.quit_dialog = true;
+                state.dialog_focus = 0;
+            } else {
+                return true;
+            }
+        }
+        SlashOutcome::Search(q_opt) => {
+            let query_to_run: Option<String> = match q_opt {
+                Some(q) => Some(q),
+                None => state.search_query.clone(),
+            };
+            match query_to_run {
+                None => {
+                    state.set_status("search: no previous search");
+                }
+                Some(query) => {
+                    let count = state.run_search(&query, state.config.search.start_backward);
+                    if count == 0 {
+                        state.set_status("search: no matches");
+                    } else {
+                        state.set_status(format!("search: {} match{}", count, if count == 1 { "" } else { "es" }));
+                        // Scroll to the current match.
+                        let pos = state.search_matches[state.search_idx];
+                        let total_vis = state.visible_transcript_indices().len();
+                        let pane_rows = if story_rect.height > 0 {
+                            story_rect.height as usize
+                        } else {
+                            24
+                        };
+                        state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
+                    }
+                }
+            }
+        }
+        SlashOutcome::Filter(arg) => {
+            state.transcript_filter = match arg {
+                TranscriptFilterArg::Both  => TranscriptFilter::Both,
+                TranscriptFilterArg::Story => TranscriptFilter::Story,
+                TranscriptFilterArg::Meta  => TranscriptFilter::Meta,
+            };
+            let label = match state.transcript_filter {
+                TranscriptFilter::Both  => "both",
+                TranscriptFilter::Story => "story",
+                TranscriptFilter::Meta  => "meta",
+            };
+            // If a search is active, recompute it against the new filter
+            // so highlights and the [i/N] hint stay consistent.
+            if let Some(query) = state.search_query.clone() {
+                let count = state.run_search(&query, state.config.search.start_backward);
+                if count > 0 {
+                    let pos = state.search_matches[state.search_idx];
+                    let total_vis = state.visible_transcript_indices().len();
+                    let pane_rows = if story_rect.height > 0 {
+                        story_rect.height as usize
+                    } else {
+                        24
+                    };
+                    state.transcript_scroll = scroll_for_match(pos, total_vis, pane_rows);
+                }
+            }
+            state.set_status(format!("filter: {}", label));
+        }
+        SlashOutcome::Export(dest) => {
+            let lines: Vec<String> = state
+                .visible_transcript_indices()
+                .into_iter()
+                .map(|i| state.transcript[i].clone())
+                .collect();
+            let exports_dir = state.config.user_dir.join("exports");
+            let stamp = format_stamp(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            );
+            match export_transcript(&lines, dest.as_deref(), &exports_dir, &stamp) {
+                Ok(path) => state.set_status(format!("exported: {}", path.display())),
+                Err(e)   => state.set_status(format!("export failed: {}", e)),
+            }
+        }
+        SlashOutcome::OpenHints => {
+            let ud = state.config.user_dir.clone();
+            open_hints(state, story_path, ifid, &ud);
+        }
+        SlashOutcome::HelpCommand(name) => {
+            for line in slash::help_for_command(state.config.command_prefix, &name) {
+                state.push_transcript_kind(&line, TranscriptKind::Meta);
+            }
+        }
+    }
+    false
+}
+
 fn reset_game(
     session: &mut GameSession,
     mapper: &mut Mapper,
