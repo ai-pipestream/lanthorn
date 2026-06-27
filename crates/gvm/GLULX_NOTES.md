@@ -365,27 +365,137 @@ lexicographic on equal-length keys). `linkedsearch` follows the 4-byte link at
 ## 13. gestalt + verify (Phase 2b, spec §2.18)
 
 `gestalt L1 L2 S1` (0x100) — test selector L1 (with optional arg L2). Unknown
-selectors return 0. `verify S1` (0x121) — image checksum check; we store 0
-(success). Selector numbers and meanings are from the spec; the **returned
-capability values reflect what this VM actually implements** (2a/2b features
-report 1; save/undo/accel/float are deferred to 2c+ and report 0).
+selectors return 0. `verify S1` (0x121) — a **real image checksum check** (spec
+§1.4: sum the initial memory as big-endian 32-bit words with the 0x20 field
+zeroed, compare to the stored checksum); stores 0 if it matches, else 1.
+Selector numbers and meanings are from the spec; the **returned capability values
+reflect what this VM actually implements** (accel/float remain deferred → 0).
 
 | Sel | Name         | Num | Returns                                              |
 |-----|--------------|-----|------------------------------------------------------|
 | 0   | GlulxVersion | 0   | 0x00030102 (spec 3.1.2)                              |
 | 1   | TerpVersion  | 1   | 0x00000100 (this terp, v0.1.0)                       |
 | 2   | ResizeMem    | 2   | 1 (setmemsize supported)                            |
-| 3   | Undo         | 3   | 0 (deferred to 2c)                                  |
+| 3   | Undo         | 3   | 1 (saveundo/restoreundo — 2c)                       |
 | 4   | IOSystem     | 4   | 1 if L2 ∈ {0 null, 2 Glk}, else 0                   |
 | 5   | Unicode      | 5   | 1                                                    |
 | 6   | MemCopy      | 6   | 1 (mzero/mcopy)                                      |
 | 7   | MAlloc       | 7   | 1 (malloc/mfree)                                     |
 | 8   | MAllocHeap   | 8   | heap-start address (0 if the heap is inactive)      |
-| 9   | Acceleration | 9   | 0 (deferred to 2c)                                  |
-| 10  | AccelFunc    | 10  | 0 (deferred to 2c)                                  |
+| 9   | Acceleration | 9   | 0 (accelfunc/accelparam stored but not intercepted) |
+| 10  | AccelFunc    | 10  | 0 (no accelerated function is intercepted)          |
 | 11  | Float        | 11  | 0 (floating point deferred)                         |
 
 **Deviation note:** for selector 4 (IOSystem) the spec states the null (0) and
 filter (1) systems "will always succeed." This VM has not implemented the filter
 I/O system (it is stubbed with a diagnostic), so we honestly report 0 for L2=1
 and 1 only for the systems we run (null and Glk). Update this when filter lands.
+
+## 14. Save / restore serialization (Phase 2c, spec §1.8)
+
+The save state is a Glulx-Quetzal `FORM IFZS` container (IFF: a 4-byte type,
+4-byte big-endian length, then chunks, each `id(4) · len(4) · data · even-pad`).
+`Machine::save_state()` produces these bytes; `restore_state()` consumes them and
+returns `GError::BadSave` on any corruption (never a panic).
+
+| Chunk  | Contents                                                              |
+|--------|----------------------------------------------------------------------|
+| `IFhd` | the first 128 bytes of memory (identity / game-file header)          |
+| `CMem` | 4-byte current memsize, then the RLE-compressed RAM diff             |
+| `Stks` | the live stack bytes `[0, sp)`, big-endian, padding included         |
+| `MAll` | heap-start (4), block count (4), then `(addr, len)` per block        |
+| `GReg` | sp, fp, pc, iosys_mode, iosys_rock, cur_stringtbl, protect_addr, protect_len (8×u32) |
+
+**`CMem` compression (spec §1.8 / Quetzal RLE):** the memory area saved is
+`[RAMSTART, memsize)`. Each byte is XORed against the **original loaded image**
+(extended with zeros at/above EXTSTART). The resulting diff stream is
+run-length-encoded: a non-zero byte is literal; a run of 1..=256 zero bytes is a
+`0x00` byte followed by `(count − 1)`. Restore reverses this: reset RAM to the
+original image, then apply the diff (so bytes absent from the save return to
+their load-time values).
+
+**`Stks` (spec §1.8 / §1.3.1):** the stack is one byte-addressed buffer already
+in the spec's call-frame layout, so the chunk is simply `stack[0..sp]`. We store
+sp/fp/pc explicitly in `GReg` rather than deriving them from a top-of-stack call
+stub (a real Quetzal reader's job); `GReg` is this implementation's extension to
+keep `save_state`/`restore_state` self-contained for headless testing.
+
+**Restore order:** parse chunks → snapshot the currently-protected bytes →
+decompress `CMem` (reset+diff) → re-impose the protected bytes → load the stack
+and registers from `Stks`/`GReg` → rebuild the heap from `MAll` → recompute the
+frame cache. The **protected range** (§16) is preserved across restore: bytes in
+the current protect range keep their pre-restore values.
+
+Per the spec, an interpreter's Glk state, RNG internal state, protect range, and
+I/O-system/string-table settings are not part of a real Quetzal *file*; our
+internal snapshot additionally carries iosys/string-table/protect in `GReg` so
+that `saveundo`/`restoreundo` (§15) restore the full VM state exactly.
+
+## 15. Undo (Phase 2c, spec §2.11)
+
+| Opcode      | Num   | L | S | Effect                                            |
+|-------------|-------|---|---|---------------------------------------------------|
+| saveundo    | 0x125 | 0 | 1 | snapshot state; store 0 (success), 1 (fail), or −1 (after restore) |
+| restoreundo | 0x126 | 0 | 1 | restore the newest snapshot; store 1 on failure   |
+
+These use the §14 core, entirely in memory (no Glk streams). The
+**destination-write convention** matches `@save`/`@restore` (spec §2.11):
+
+- Before snapshotting, `saveundo` pushes a four-value **call stub** (DestType,
+  DestAddr of S1; the resume PC; the FramePtr) so the snapshot records where the
+  result must go. It then pops the stub and stores **0** in S1 (normal success).
+- `restoreundo` pops the newest snapshot, restores it (the stub is back on the
+  stack), pops that stub, and stores **−1** (`0xFFFFFFFF`) at the *original
+  saveundo's* destination — i.e. the saved `saveundo` "returns again" with −1, so
+  the game can branch (continue vs. just-restored). `restoreundo` itself stores
+  nothing on success.
+- With no snapshot, `restoreundo` stores **1** (failure) and leaves state intact.
+
+The undo stack is bounded to `UNDO_CAP` (16) snapshots; the oldest is dropped
+when full. (`@save`/`@restore` to a real file/stream, `hasundo`, and
+`discardundo` are deferred to sub-project 3.)
+
+## 16. protect (Phase 2c, spec §2.11)
+
+| Opcode  | Num   | L | S | Effect                                              |
+|---------|-------|---|---|-----------------------------------------------------|
+| protect | 0x127 | 2 | 0 | preserve RAM `[L1, L1+L2)` across restore/restoreundo; `L2 == 0` clears |
+
+The protected range `(addr, len)` lives on the `Machine`. During restore (§14)
+the bytes currently in the protected range are snapshotted before RAM is reset,
+then written back after the saved diff is applied — so a protected byte keeps its
+**current** value rather than the restored image's. `protect(_, 0)` clears
+protection. Our internal snapshot also carries the range in `GReg`, so a
+`saveundo`/`restoreundo` round-trip preserves it. (The spec also lists `restart`
+among the operations protect guards; `restart` is not implemented in 2c.)
+
+## 17. Acceleration (Phase 2c, spec §2.18 / §1.4)
+
+| Opcode     | Num   | L | S | Effect                                              |
+|------------|-------|---|---|-----------------------------------------------------|
+| accelfunc  | 0x180 | 2 | 0 | assign accelerated-function number L1 to the VM function at address L2 (L1 == 0 cancels) |
+| accelparam | 0x181 | 2 | 0 | store value L2 in the accel parameter table at index L1 |
+
+Acceleration is a pure **speed optimization**; Inform 7 games run correctly
+without it. 2c **stores** the assignments (`accel_funcs`: address → number) and
+parameters (`accel_params`: index → value) so the opcodes succeed and state
+round-trips, but does **not** intercept the accelerated functions — the real
+veneer functions run normally. Accordingly the `Acceleration` (9) and `AccelFunc`
+(10) gestalt selectors report **0** (truthful: nothing is intercepted), so a
+spec-conformant game won't call these opcodes anyway. The stored assignments are
+readable via `Machine::accel_func_for` / `accel_param`. Interception of the
+well-known functions (1–13) is deferred.
+
+## 18. PRNG (Phase 2c, spec §2.7)
+
+| Opcode    | Num   | L | S | Effect                                              |
+|-----------|-------|---|---|-----------------------------------------------------|
+| random    | 0x110 | 1 | 1 | `[0, L1)` if L1 > 0; `(L1, 0]` if L1 < 0; any 32-bit value if L1 == 0 |
+| setrandom | 0x111 | 1 | 0 | seed the generator with L1 (L1 == 0 → reseed)       |
+
+A deterministic xorshift32 generator on the `Machine`. `random(L1)`: for `L1 > 0`
+return `next() mod L1`; for `L1 < 0` return `-(next() mod |L1|)` (values from
+`L1+1` to 0); for `L1 == 0` return the raw 32-bit value. A fixed seed yields a
+fully reproducible sequence. `setrandom(0)` is specified to seed from true
+entropy; that needs `std::time`/a dependency and is **deferred**, so we reseed
+from a fixed deterministic default (`DEFAULT_SEED`) and record a diagnostic.

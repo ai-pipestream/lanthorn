@@ -9,6 +9,7 @@
 // value-stack region. A four-word "call stub" sits just below each non-start
 // frame so a return can restore the caller.
 
+use crate::error::GError;
 use crate::io::Output;
 use crate::memory::Memory;
 
@@ -79,6 +80,18 @@ pub struct Machine {
     pub diagnostics: Vec<String>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
+    /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
+    /// `len == 0` means no protection (set by the `protect` opcode).
+    protect: (u32, u32),
+    /// Bounded stack of undo snapshots (oldest first); see [`Machine::UNDO_CAP`].
+    undo_stack: Vec<Vec<u8>>,
+    /// Accelerated-function assignments: VM function address → accel number
+    /// (`accelfunc`). Stored only; interception is deferred (see GLULX_NOTES §17).
+    accel_funcs: std::collections::HashMap<u32, u32>,
+    /// Acceleration parameter table: index → value (`accelparam`).
+    accel_params: std::collections::HashMap<u32, u32>,
+    /// PRNG state (xorshift32); seeded by `setrandom`.
+    rng: u32,
 
     // Cached layout of the current frame (recomputed whenever `fp` changes).
     cur_frame_len: u32,
@@ -91,9 +104,50 @@ fn align_up(v: u32, to: u32) -> u32 {
     (v + to - 1) / to * to
 }
 
+/// Append one IFF chunk (`id`, 4-byte big-endian length, data, even-pad).
+fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(id);
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        out.push(0); // IFF chunks are padded to an even length
+    }
+}
+
+/// Parse a `FORM IFZS` container into its `(id, data)` chunks. Never panics;
+/// returns a [`GError::BadSave`] on any structural problem.
+fn parse_ifzs(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>, GError> {
+    let bad = |m: &str| GError::BadSave(m.to_string());
+    if data.len() < 12 || &data[0..4] != b"FORM" || &data[8..12] != b"IFZS" {
+        return Err(bad("not a FORM IFZS container"));
+    }
+    let form_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let end = (8 + form_len).min(data.len());
+    let mut chunks = Vec::new();
+    let mut p = 12;
+    while p + 8 <= end {
+        let id = [data[p], data[p + 1], data[p + 2], data[p + 3]];
+        let len = u32::from_be_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]) as usize;
+        let start = p + 8;
+        if start + len > data.len() {
+            return Err(bad("chunk length overruns the data"));
+        }
+        chunks.push((id, &data[start..start + len]));
+        p = start + len + (len & 1); // skip the even-pad byte
+    }
+    Ok(chunks)
+}
+
 impl Machine {
     /// Ceiling on the memory-map size; `malloc` fails rather than grow past it.
     const MAX_MEMSIZE: u32 = 0x1000_0000; // 256 MiB
+
+    /// Maximum number of in-memory undo snapshots retained (oldest dropped).
+    const UNDO_CAP: usize = 16;
+
+    /// Deterministic default PRNG seed (also used for `setrandom(0)`, whose
+    /// true-entropy reseed is deferred — see GLULX_NOTES §18).
+    const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
 
     /// Build a machine over `mem`, entering the start function (no arguments).
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
@@ -114,6 +168,11 @@ impl Machine {
             out,
             diagnostics: Vec::new(),
             halted: false,
+            protect: (0, 0),
+            undo_stack: Vec::new(),
+            accel_funcs: std::collections::HashMap::new(),
+            accel_params: std::collections::HashMap::new(),
+            rng: Self::DEFAULT_SEED,
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
@@ -379,7 +438,50 @@ impl Machine {
             }
             0x121 => {
                 let (_, s) = self.read_operands(0, 1)?;
-                self.store(s[0], 0) // verify: report success
+                let v = u32::from(!self.mem.checksum_ok()); // 0 = good, 1 = problem
+                self.store(s[0], v)
+            }
+            // PRNG.
+            0x110 => {
+                let (l, s) = self.read_operands(1, 1)?;
+                let v = self.rand_range(l[0]);
+                self.store(s[0], v)
+            }
+            0x111 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                if l[0] == 0 {
+                    self.rng = Self::DEFAULT_SEED;
+                    self.diagnostics
+                        .push("setrandom(0): true-entropy seeding deferred; using a fixed seed".to_string());
+                } else {
+                    self.rng = l[0];
+                }
+                Ok(())
+            }
+            // Acceleration (storage only; interception deferred — GLULX_NOTES §17).
+            0x180 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                let (funcnum, addr) = (l[0], l[1]);
+                if funcnum == 0 {
+                    self.accel_funcs.remove(&addr);
+                } else {
+                    self.accel_funcs.insert(addr, funcnum);
+                }
+                Ok(())
+            }
+            0x181 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                self.accel_params.insert(l[0], l[1]);
+                Ok(())
+            }
+            // Undo (in-memory; @save/@restore stream opcodes are sub-project 3).
+            0x125 => self.op_saveundo(),
+            0x126 => self.op_restoreundo(),
+            // Protect a RAM range across restore/restoreundo (L2 == 0 clears).
+            0x127 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                self.protect = (l[0], l[1]);
+                Ok(())
             }
             // Copy / sign-extend.
             0x40 => self.unop(|a| a),                                  // copy
@@ -940,7 +1042,7 @@ impl Machine {
             0 => Self::GLULX_VERSION,                  // GlulxVersion
             1 => Self::TERP_VERSION,                   // TerpVersion
             2 => 1,                                    // ResizeMem
-            3 => 0,                                    // Undo (2c)
+            3 => 1,                                    // Undo (saveundo/restoreundo)
             4 => u32::from(arg == 0 || arg == 2),      // IOSystem: null + Glk
             5 => 1,                                    // Unicode
             6 => 1,                                    // MemCopy
@@ -950,6 +1052,330 @@ impl Machine {
             10 => 0,                                   // AccelFunc (2c)
             11 => 0,                                   // Float
             _ => 0,
+        }
+    }
+
+    // ── save / restore serialization core (GLULX_NOTES §14) ───────────────────
+
+    /// Serialize the VM's mutable state as Glulx-Quetzal bytes (`FORM IFZS`:
+    /// `IFhd` identity, `CMem` compressed RAM, `Stks` stack, `MAll` heap, plus a
+    /// `GReg` register chunk). Round-trips exactly via [`Machine::restore_state`].
+    pub fn save_state(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+
+        // IFhd: the first 128 bytes of memory (identity).
+        let mut ifhd = Vec::with_capacity(128);
+        for a in 0..128 {
+            ifhd.push(self.mem.read8(a).unwrap_or(0) as u8);
+        }
+        push_chunk(&mut body, b"IFhd", &ifhd);
+
+        // CMem: current memsize, then the RLE-compressed diff against the
+        // original image over [RAMSTART, memsize).
+        push_chunk(&mut body, b"CMem", &self.compress_ram());
+
+        // Stks: the live stack bytes [0, sp).
+        push_chunk(&mut body, b"Stks", &self.stack[..self.sp]);
+
+        // MAll: heap-start, block count, then (addr, len) per block.
+        let mut mall = Vec::new();
+        mall.extend_from_slice(&self.heap_start.to_be_bytes());
+        mall.extend_from_slice(&(self.heap_blocks.len() as u32).to_be_bytes());
+        for &(a, sz) in &self.heap_blocks {
+            mall.extend_from_slice(&a.to_be_bytes());
+            mall.extend_from_slice(&sz.to_be_bytes());
+        }
+        push_chunk(&mut body, b"MAll", &mall);
+
+        // GReg: registers not derivable from the stack (sp, fp, pc, iosys,
+        // string table, protect range).
+        let mut greg = Vec::with_capacity(32);
+        for v in [
+            self.sp as u32,
+            self.fp as u32,
+            self.pc,
+            self.iosys_mode,
+            self.iosys_rock,
+            self.cur_stringtbl,
+            self.protect.0,
+            self.protect.1,
+        ] {
+            greg.extend_from_slice(&v.to_be_bytes());
+        }
+        push_chunk(&mut body, b"GReg", &greg);
+
+        let mut out = Vec::with_capacity(body.len() + 12);
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(b"IFZS");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// RLE-compress the RAM diff `[RAMSTART, memsize)` against the original
+    /// image (`CMem` body: 4-byte memsize then the compressed bytes). A run of
+    /// 1..=256 zero bytes is `0x00` followed by `(count-1)`; non-zero diff bytes
+    /// are literal (spec §1.8 / Quetzal).
+    fn compress_ram(&self) -> Vec<u8> {
+        let ramstart = self.mem.ramstart();
+        let memsize = self.mem.mem_size();
+        let mut diff = Vec::with_capacity((memsize - ramstart) as usize);
+        for a in ramstart..memsize {
+            let cur = self.mem.read8(a).unwrap_or(0) as u8;
+            diff.push(cur ^ self.mem.orig_byte(a));
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(&memsize.to_be_bytes());
+        let mut i = 0;
+        while i < diff.len() {
+            if diff[i] == 0 {
+                let mut run = 1usize;
+                while i + run < diff.len() && diff[i + run] == 0 && run < 256 {
+                    run += 1;
+                }
+                out.push(0);
+                out.push((run - 1) as u8);
+                i += run;
+            } else {
+                out.push(diff[i]);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// Restore VM state from [`Machine::save_state`] bytes. Resets RAM to the
+    /// original image, applies the saved diff, rebuilds the stack/heap/registers,
+    /// preserves the protected range, and recomputes the frame cache. Corrupt or
+    /// truncated data yields a [`GError`] (never a panic).
+    pub fn restore_state(&mut self, data: &[u8]) -> Result<(), GError> {
+        let chunks = parse_ifzs(data)?;
+        let find = |id: &[u8; 4]| chunks.iter().find(|(cid, _)| cid == id).map(|(_, d)| *d);
+        let cmem = find(b"CMem").ok_or_else(|| GError::BadSave("missing CMem chunk".into()))?;
+        let stks = find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
+        let greg = find(b"GReg").ok_or_else(|| GError::BadSave("missing GReg chunk".into()))?;
+        if greg.len() != 32 {
+            return Err(GError::BadSave("GReg chunk has wrong length".into()));
+        }
+        let g = |i: usize| u32::from_be_bytes([greg[i], greg[i + 1], greg[i + 2], greg[i + 3]]);
+        let (sp, fp, pc) = (g(0), g(4), g(8));
+        let (iosys_mode, iosys_rock, stringtbl) = (g(12), g(16), g(20));
+        let (paddr, plen) = (g(24), g(28));
+
+        // Snapshot the currently-protected bytes (preserved across restore).
+        let (cur_paddr, cur_plen) = self.protect;
+        let mut protected: Vec<(u32, u8)> = Vec::new();
+        for a in cur_paddr..cur_paddr.saturating_add(cur_plen) {
+            if let Some(b) = self.mem.read8(a) {
+                protected.push((a, b as u8));
+            }
+        }
+
+        // Reset RAM to the original image and apply the saved CMem diff.
+        self.decompress_ram(cmem)?;
+
+        // Re-impose the protected bytes' pre-restore values.
+        for (a, b) in protected {
+            if a >= self.mem.ramstart() && a < self.mem.mem_size() {
+                self.mem.write_byte_raw(a, b);
+            }
+        }
+
+        // Stack: the Stks bytes must fit the buffer and match the saved sp.
+        if stks.len() != sp as usize {
+            return Err(GError::BadSave("Stks length disagrees with sp".into()));
+        }
+        if sp as usize > self.stack.len() {
+            return Err(GError::BadSave("saved sp exceeds the stack size".into()));
+        }
+        self.stack[..sp as usize].copy_from_slice(stks);
+        self.sp = sp as usize;
+        self.fp = fp as usize;
+        self.pc = pc;
+        self.iosys_mode = iosys_mode;
+        self.iosys_rock = iosys_rock;
+        self.cur_stringtbl = stringtbl;
+        self.protect = (paddr, plen);
+
+        // Heap: rebuild from MAll (absent/empty → inactive).
+        self.heap_start = 0;
+        self.heap_blocks.clear();
+        if let Some(mall) = find(b"MAll") {
+            self.restore_heap(mall)?;
+        }
+
+        // Recompute the current-frame cache from the restored stack.
+        self.reload_frame_meta().map_err(GError::BadSave)?;
+        Ok(())
+    }
+
+    /// Decompress a `CMem` body into RAM: read the saved memsize, resize memory,
+    /// and rebuild `[RAMSTART, memsize)` as `original XOR diff`. Faults on a
+    /// truncated/over-long stream.
+    fn decompress_ram(&mut self, cmem: &[u8]) -> Result<(), GError> {
+        if cmem.len() < 4 {
+            return Err(GError::BadSave("CMem chunk too short".into()));
+        }
+        let memsize = u32::from_be_bytes([cmem[0], cmem[1], cmem[2], cmem[3]]);
+        let ramstart = self.mem.ramstart();
+        if memsize < ramstart || memsize > Self::MAX_MEMSIZE {
+            return Err(GError::BadSave("CMem memsize out of range".into()));
+        }
+        self.mem.set_raw_size(memsize);
+        let mut addr = ramstart;
+        let mut i = 4;
+        while addr < memsize {
+            if i >= cmem.len() {
+                return Err(GError::BadSave("CMem data truncated".into()));
+            }
+            let b = cmem[i];
+            i += 1;
+            if b == 0 {
+                if i >= cmem.len() {
+                    return Err(GError::BadSave("CMem zero-run truncated".into()));
+                }
+                let run = cmem[i] as u32 + 1;
+                i += 1;
+                for _ in 0..run {
+                    if addr >= memsize {
+                        return Err(GError::BadSave("CMem data overruns memory".into()));
+                    }
+                    let base = self.mem.orig_byte(addr);
+                    self.mem.write_byte_raw(addr, base);
+                    addr += 1;
+                }
+            } else {
+                let base = self.mem.orig_byte(addr);
+                self.mem.write_byte_raw(addr, base ^ b);
+                addr += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild the allocation heap from a `MAll` chunk body.
+    fn restore_heap(&mut self, mall: &[u8]) -> Result<(), GError> {
+        if mall.len() < 8 {
+            if mall.is_empty() {
+                return Ok(()); // omitted/empty heap → inactive
+            }
+            return Err(GError::BadSave("MAll chunk too short".into()));
+        }
+        let rd = |i: usize| u32::from_be_bytes([mall[i], mall[i + 1], mall[i + 2], mall[i + 3]]);
+        let heap_start = rd(0);
+        let nblocks = rd(4) as usize;
+        if mall.len() != 8 + nblocks * 8 {
+            return Err(GError::BadSave("MAll block count disagrees with length".into()));
+        }
+        if heap_start == 0 && nblocks == 0 {
+            return Ok(()); // inactive
+        }
+        let mut blocks = Vec::with_capacity(nblocks);
+        for k in 0..nblocks {
+            let base = 8 + k * 8;
+            blocks.push((rd(base), rd(base + 4)));
+        }
+        self.heap_start = heap_start;
+        self.heap_blocks = blocks;
+        Ok(())
+    }
+
+    // ── undo (GLULX_NOTES §15) ────────────────────────────────────────────────
+
+    /// `saveundo S1`: snapshot the VM state for a later `restoreundo`. A
+    /// four-value call stub (the result destination S1, the resume PC, and the
+    /// frame pointer) is pushed before snapshotting so `restoreundo` can resume
+    /// here; the snapshot is bounded to [`Machine::UNDO_CAP`]. Stores 0 (success).
+    fn op_saveundo(&mut self) -> R<()> {
+        let (_, s) = self.read_operands(0, 1)?;
+        let (dtype, daddr) = s[0].to_stub();
+        // Push the call stub (FramePtr ends on top), snapshot, then pop it off.
+        self.push32(dtype)?;
+        self.push32(daddr)?;
+        self.push32(self.pc)?;
+        self.push32(self.fp as u32)?;
+        let snap = self.save_state();
+        self.sp -= 16;
+
+        if self.undo_stack.len() >= Self::UNDO_CAP {
+            self.undo_stack.remove(0); // drop the oldest
+        }
+        self.undo_stack.push(snap);
+        self.store(s[0], 0) // success
+    }
+
+    /// `restoreundo S1`: pop the newest snapshot and restore it. On success the
+    /// snapshot's call stub is consumed and the original `saveundo`'s destination
+    /// receives -1 (per the spec, the `saveundo` "returns again"); `restoreundo`
+    /// itself stores nothing. With no snapshot, stores 1 (failure), state intact.
+    fn op_restoreundo(&mut self) -> R<()> {
+        let (_, s) = self.read_operands(0, 1)?;
+        let snap = match self.undo_stack.pop() {
+            None => return self.store(s[0], 1), // failure
+            Some(snap) => snap,
+        };
+        self.restore_state(&snap).map_err(|e| format!("restoreundo: {e:?}"))?;
+        // Consume the four-value call stub the snapshot left on top.
+        if self.sp < self.value_base() + 16 {
+            return Err("restoreundo: snapshot is missing its call stub".to_string());
+        }
+        self.sp -= 4;
+        let caller_fp = self.st_r32(self.sp);
+        self.sp -= 4;
+        let ret_pc = self.st_r32(self.sp);
+        self.sp -= 4;
+        let daddr = self.st_r32(self.sp);
+        self.sp -= 4;
+        let dtype = self.st_r32(self.sp);
+        self.fp = caller_fp as usize;
+        self.pc = ret_pc;
+        self.reload_frame_meta()?;
+        // The original saveundo destination receives -1.
+        match dtype {
+            0 => Ok(()),
+            1 => self.store_mem(daddr, 0xFFFF_FFFF),
+            2 => self.local_store(daddr, 0xFFFF_FFFF),
+            3 => self.push32(0xFFFF_FFFF),
+            other => Err(format!("bad restoreundo stub DestType {other}")),
+        }
+    }
+
+    // ── acceleration storage + PRNG (GLULX_NOTES §17, §18) ────────────────────
+
+    /// The accelerated-function number assigned to the VM function at `addr` via
+    /// `accelfunc`, or `None`. Acceleration interception is not implemented, so
+    /// this is advisory storage (gestalt reports Acceleration unsupported).
+    pub fn accel_func_for(&self, addr: u32) -> Option<u32> {
+        self.accel_funcs.get(&addr).copied()
+    }
+
+    /// The acceleration parameter stored at `index` via `accelparam`, or `None`.
+    pub fn accel_param(&self, index: u32) -> Option<u32> {
+        self.accel_params.get(&index).copied()
+    }
+
+    /// Advance the xorshift32 PRNG and return the next 32-bit value.
+    fn next_rand(&mut self) -> u32 {
+        let mut x = if self.rng == 0 { Self::DEFAULT_SEED } else { self.rng };
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        x
+    }
+
+    /// `random(L1)` per the spec: `[0, L1)` for `L1 > 0`, `(L1, 0]` for `L1 < 0`,
+    /// any 32-bit value for `L1 == 0`.
+    fn rand_range(&mut self, l1: u32) -> u32 {
+        let r = self.next_rand();
+        let n = l1 as i32;
+        if n == 0 {
+            r
+        } else if n > 0 {
+            r % n as u32
+        } else {
+            // (L1, 0] → -(r mod |L1|), so values from L1+1 up to 0.
+            0i32.wrapping_sub((r % n.unsigned_abs()) as i32) as u32
         }
     }
 
@@ -2728,7 +3154,7 @@ mod tests {
         assert_eq!(m.gestalt(0, 0), 0x0003_0102); // GlulxVersion 3.1.2
         assert_eq!(m.gestalt(1, 0), 0x0000_0100); // TerpVersion 0.1.0
         assert_eq!(m.gestalt(2, 0), 1); // ResizeMem
-        assert_eq!(m.gestalt(3, 0), 0); // Undo (deferred)
+        assert_eq!(m.gestalt(3, 0), 1); // Undo (saveundo/restoreundo)
         assert_eq!(m.gestalt(4, 0), 1); // IOSystem null
         assert_eq!(m.gestalt(4, 2), 1); // IOSystem Glk
         assert_eq!(m.gestalt(4, 1), 0); // IOSystem filter (not implemented)
@@ -2764,5 +3190,239 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert_eq!(m.mem.read32(0x100).unwrap(), 0);
+    }
+
+    // ── Task 1 (2c): save / restore serialization core ────────────────────────
+
+    #[test]
+    fn save_restore_roundtrips_ram_stack_heap_registers() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.mem.write32(0x100, 0xCAFE_BABE).unwrap();
+        m.push32(0x1111_2222).unwrap();
+        m.push32(0x3333_4444).unwrap();
+        m.iosys_mode = 2;
+        m.iosys_rock = 0x99;
+        m.cur_stringtbl = 0x1234;
+        m.pc = 0x40;
+        let blk = m.heap_malloc(16);
+        assert_ne!(blk, 0);
+
+        let snap = m.save_state();
+
+        // Diverge from the saved state.
+        m.mem.write32(0x100, 0).unwrap();
+        m.pop32().unwrap();
+        m.iosys_mode = 0;
+        m.iosys_rock = 0;
+        m.cur_stringtbl = 0;
+        m.pc = 0;
+        m.heap_free(blk).unwrap();
+
+        m.restore_state(&snap).unwrap();
+
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xCAFE_BABE);
+        assert_eq!(m.iosys_mode, 2);
+        assert_eq!(m.iosys_rock, 0x99);
+        assert_eq!(m.cur_stringtbl, 0x1234);
+        assert_eq!(m.pc, 0x40);
+        assert_eq!(m.heap_start, blk);
+        assert_eq!(m.heap_blocks, vec![(blk, 16)]);
+        assert_eq!(m.value_count(), 2);
+        assert_eq!(m.pop32().unwrap(), 0x3333_4444);
+        assert_eq!(m.pop32().unwrap(), 0x1111_2222);
+    }
+
+    #[test]
+    fn cmem_resets_to_original_then_applies_diff() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.mem.write8(0x150, 0xAB).unwrap();
+        let snap = m.save_state();
+        // A byte changed after the save must be reset to the original image (0).
+        m.mem.write8(0x150, 0x00).unwrap();
+        m.mem.write8(0x108, 0xFF).unwrap();
+        m.restore_state(&snap).unwrap();
+        assert_eq!(m.mem.read8(0x150).unwrap(), 0xAB); // saved diff re-applied
+        assert_eq!(m.mem.read8(0x108).unwrap(), 0x00); // not in the save → original
+    }
+
+    #[test]
+    fn restore_rejects_corrupt_save_without_panic() {
+        let mut m = machine_with_body(&[], vec![]);
+        assert!(matches!(m.restore_state(b"not a save"), Err(GError::BadSave(_))));
+        assert!(matches!(m.restore_state(&[]), Err(GError::BadSave(_))));
+        let mut good = m.save_state();
+        good.truncate(good.len() - 10); // sever a chunk
+        assert!(matches!(m.restore_state(&good), Err(GError::BadSave(_))));
+    }
+
+    // ── Task 2 (2c): saveundo / restoreundo ───────────────────────────────────
+
+    #[test]
+    fn saveundo_then_restoreundo_restores_and_returns_minus_one() {
+        let mut body = asm::ins(0x125, &[asm::Op::Local8(0)]); // saveundo -> local0
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0xDEAD), asm::Op::Mem16(0x0110)])); // mutate
+        body.extend(asm::ins(0x126, &[asm::Op::Mem16(0x0104)])); // restoreundo -> mem 0x104
+        body.extend(asm::ins(0x120, &[])); // quit
+        let mut m = machine_with_body(&[(4, 1)], body);
+
+        m.step_once().unwrap(); // saveundo
+        assert_eq!(m.local_load(0).unwrap(), 0); // success stores 0
+
+        m.step_once().unwrap(); // mutate
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xDEAD);
+
+        m.step_once().unwrap(); // restoreundo → resumes just after saveundo
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0); // prior state restored
+        assert_eq!(m.local_load(0).unwrap(), 0xFFFF_FFFF); // saveundo "returns" -1
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0); // restoreundo stored nothing on success
+    }
+
+    #[test]
+    fn restoreundo_empty_fails_with_one() {
+        let mut body = asm::ins(0x126, &[asm::Op::Mem16(0x0100)]); // no prior saveundo
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x110, 0x1234).unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1); // failure stores 1
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x1234); // state unchanged
+    }
+
+    #[test]
+    fn undo_stack_is_bounded() {
+        let mut body = Vec::new();
+        for _ in 0..(Machine::UNDO_CAP + 3) {
+            body.extend(asm::ins(0x125, &[asm::Op::Zero])); // saveundo, discard result
+        }
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.run();
+        assert_eq!(m.undo_stack.len(), Machine::UNDO_CAP);
+    }
+
+    // ── Task 3 (2c): protect ──────────────────────────────────────────────────
+
+    #[test]
+    fn protect_opcode_sets_and_clears() {
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(4)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        assert_eq!(m.protect, (0x110, 4));
+
+        // protect(_, 0) clears protection.
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.protect = (0x110, 4);
+        m.step_once().unwrap();
+        assert_eq!(m.protect, (0x110, 0));
+    }
+
+    #[test]
+    fn protect_preserves_range_across_restore() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.protect = (0x110, 4);
+        m.mem.write32(0x110, 0xAAAA).unwrap();
+        let snap = m.save_state();
+        m.mem.write32(0x110, 0xBEEF).unwrap(); // change the protected word
+        m.restore_state(&snap).unwrap();
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // kept current, not restored 0xAAAA
+        assert_eq!(m.protect, (0x110, 4)); // range survives
+    }
+
+    #[test]
+    fn protect_survives_restoreundo() {
+        let mut body = asm::ins(0x127, &[asm::Op::C16(0x0110), asm::Op::C8(4)]); // protect
+        body.extend(asm::ins(0x125, &[asm::Op::Zero])); // saveundo
+        body.extend(asm::ins(0x40, &[asm::Op::C32(0xBEEF), asm::Op::Mem16(0x0110)])); // change
+        body.extend(asm::ins(0x126, &[asm::Op::Mem16(0x0104)])); // restoreundo
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap(); // protect
+        m.step_once().unwrap(); // saveundo
+        m.step_once().unwrap(); // change → 0xBEEF
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF);
+        m.step_once().unwrap(); // restoreundo, resumes just after saveundo
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // protected → kept current value
+        assert_eq!(m.protect, (0x110, 4));
+    }
+
+    // ── Task 4 (2c): accel storage, PRNG, verify, gestalt ─────────────────────
+
+    #[test]
+    fn accelfunc_accelparam_store_assignments() {
+        let mut body = asm::ins(0x180, &[asm::Op::C8(7), asm::Op::C32(0x24)]); // accelfunc 7 @0x24
+        body.extend(asm::ins(0x181, &[asm::Op::C8(3), asm::Op::C16(0x99)])); // accelparam 3 = 0x99
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.accel_func_for(0x24), Some(7));
+        assert_eq!(m.accel_param(3), Some(0x99));
+
+        // accelfunc(0, addr) cancels the assignment.
+        let mut body = asm::ins(0x180, &[asm::Op::C8(7), asm::Op::C32(0x24)]);
+        body.extend(asm::ins(0x180, &[asm::Op::C8(0), asm::Op::C32(0x24)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(m.accel_func_for(0x24), None);
+    }
+
+    #[test]
+    fn state_roundtrips_with_accel_assignments() {
+        let mut m = machine_with_body(&[], vec![]);
+        m.accel_funcs.insert(0x24, 7);
+        m.accel_params.insert(3, 0x99);
+        let snap = m.save_state();
+        m.mem.write32(0x110, 0xDEAD).unwrap();
+        m.restore_state(&snap).unwrap();
+        // Accel assignments are interpreter config, untouched by save/restore.
+        assert_eq!(m.accel_func_for(0x24), Some(7));
+        assert_eq!(m.accel_param(3), Some(0x99));
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0); // RAM restored
+    }
+
+    #[test]
+    fn random_honors_range_bounds() {
+        let mut m = machine_with_body(&[], vec![]);
+        for _ in 0..2000 {
+            assert!((0..10).contains(&(m.rand_range(10) as i32))); // [0, 10)
+            assert!((-9..=0).contains(&(m.rand_range((-10i32) as u32) as i32))); // (-10, 0]
+        }
+        let _ = m.rand_range(0); // full 32-bit range: just exercise (no panic)
+    }
+
+    #[test]
+    fn setrandom_seed_is_reproducible() {
+        let run = |seed: u32| {
+            let mut body = asm::ins(0x111, &[asm::Op::C32(seed)]); // setrandom
+            body.extend(asm::ins(0x110, &[asm::Op::C32(1_000_000), asm::Op::Mem16(0x0100)]));
+            body.extend(asm::ins(0x110, &[asm::Op::C32(1_000_000), asm::Op::Mem16(0x0104)]));
+            body.extend(asm::ins(0x120, &[]));
+            let m = run_program(body);
+            (m.mem.read32(0x100).unwrap(), m.mem.read32(0x104).unwrap())
+        };
+        assert_eq!(run(0x1234), run(0x1234)); // same seed → same sequence
+        assert_ne!(run(0x1234), run(0x4321)); // different seed → different sequence
+        assert_eq!(run(0), run(0)); // setrandom(0): deterministic reseed (entropy deferred)
+    }
+
+    #[test]
+    fn verify_detects_a_bad_checksum() {
+        let mut vbody = asm::ins(0x121, &[asm::Op::Mem16(0x0100)]);
+        vbody.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &vbody);
+        let mut built = asm::assemble(&[start], 0, 0x100);
+        built.image[0x20] ^= 0xFF; // corrupt the stored checksum
+        let mut m = machine(built);
+        m.run();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1); // problem detected
+    }
+
+    #[test]
+    fn gestalt_reports_undo_supported_accel_not() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(3, 0), 1); // Undo now supported
+        assert_eq!(m.gestalt(9, 0), 0); // Acceleration: not intercepted
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc: not intercepted
     }
 }

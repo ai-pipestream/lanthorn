@@ -184,5 +184,24 @@ pub fn assemble(funcs: &[Vec<u8>], start_index: usize, ram_bytes: u32) -> Built 
     rom[0x14..0x18].copy_from_slice(&0x1000u32.to_be_bytes());
     rom[0x18..0x1C].copy_from_slice(&start.to_be_bytes());
     rom[0x1C..0x20].copy_from_slice(&0u32.to_be_bytes());
+    rom[0x20..0x24].copy_from_slice(&0u32.to_be_bytes()); // zero before summing
+    let cksum = checksum(&rom);
+    rom[0x20..0x24].copy_from_slice(&cksum.to_be_bytes());
     Built { image: rom, addrs }
+}
+
+/// The Glulx header checksum: the sum of the image as big-endian 32-bit words,
+/// with the checksum field (offset 0x20) treated as zero (spec §1.4).
+pub fn checksum(image: &[u8]) -> u32 {
+    let mut sum = 0u32;
+    let mut a = 0;
+    while a + 4 <= image.len() {
+        let mut w = u32::from_be_bytes([image[a], image[a + 1], image[a + 2], image[a + 3]]);
+        if a == 0x20 {
+            w = 0;
+        }
+        sum = sum.wrapping_add(w);
+        a += 4;
+    }
+    sum
 }
