@@ -7,7 +7,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::input::{GLYPH_BLOCKS, picker_block_range};
+use crate::input::{GLYPH_BLOCKS, GLYPH_GRID_COLS, picker_block_range};
 use crate::state::AppState;
 
 // Modal dimensions.
@@ -15,9 +15,6 @@ const MODAL_W: u16 = 62;
 const MODAL_H: u16 = 22;
 const MIN_W: u16 = 40;
 const MIN_H: u16 = 14;
-
-// Grid columns — how many glyph cells per row.
-const GRID_COLS: usize = 16;
 
 // ── GlyphPickerRects ──────────────────────────────────────────────────────────
 
@@ -161,8 +158,8 @@ pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             if let Some(c) = char::from_u32(cp) {
                 let s = c.to_string();
                 if crate::style_mru::is_valid_glyph(&s) {
-                    let col = grid_idx % GRID_COLS;
-                    let row = grid_idx / GRID_COLS;
+                    let col = grid_idx % GLYPH_GRID_COLS;
+                    let row = grid_idx / GLYPH_GRID_COLS;
                     let gx = content.x + col as u16 * 2;
                     let gy = grid_start_y + row as u16;
 
@@ -224,12 +221,17 @@ pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let custom_y = content.bottom().saturating_sub(2);
     let mut custom_rect: Option<Rect> = None;
     if content.height >= 3 {
-        let label = if let Some(start) = picker.custom_start {
+        let label = if picker.custom_focus {
+            // Show typed hex digits padded to at least 4 underscores.
+            let padded = format!("{:_<4}", &picker.custom_buf);
+            format!("custom: U+{}", padded)
+        } else if let Some(start) = picker.custom_start {
             format!("custom: U+{:04X}", start)
         } else {
             "custom: U+____".to_string()
         };
-        crate::render::draw_str_clipped(buf, content.x, custom_y, &label, frame_style, content);
+        let custom_style = if picker.custom_focus { cursor_style } else { frame_style };
+        crate::render::draw_str_clipped(buf, content.x, custom_y, &label, custom_style, content);
         let llen = label.chars().count() as u16;
         custom_rect = Some(Rect::new(content.x, custom_y, llen.min(cw), 1));
     }

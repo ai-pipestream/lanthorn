@@ -1701,28 +1701,55 @@ fn main() {
                     use crossterm::event::KeyCode;
                     match k.code {
                         KeyCode::Esc => {
-                            apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
+                            // In custom-entry focus: exit focus only; otherwise cancel picker.
+                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                if let Some(p) = &mut state.glyph_picker {
+                                    p.custom_focus = false;
+                                }
+                            } else {
+                                apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
+                            }
                         }
                         KeyCode::Enter => {
-                            apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
+                            // In custom-entry focus: commit the typed range (custom_start already
+                            // updated on each digit) and exit focus so the grid is browsable.
+                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                if let Some(p) = &mut state.glyph_picker {
+                                    p.custom_focus = false;
+                                }
+                            } else {
+                                apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
+                            }
                         }
                         KeyCode::Delete | KeyCode::Backspace => {
-                            // Clear the pending selection (revert to grid cursor).
-                            if let Some(p) = &mut state.glyph_picker {
-                                p.pending = None;
+                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                apply_action(Action::GlyphPickerCustomBackspace, &mut state, &mut mapper);
+                            } else {
+                                // Clear the pending selection (revert to grid cursor).
+                                if let Some(p) = &mut state.glyph_picker {
+                                    p.pending = None;
+                                }
                             }
                         }
                         KeyCode::Left => {
-                            apply_action(Action::GlyphPickerNav(-1), &mut state, &mut mapper);
+                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                apply_action(Action::GlyphPickerNav(-1), &mut state, &mut mapper);
+                            }
                         }
                         KeyCode::Right => {
-                            apply_action(Action::GlyphPickerNav(1), &mut state, &mut mapper);
+                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                apply_action(Action::GlyphPickerNav(1), &mut state, &mut mapper);
+                            }
                         }
                         KeyCode::Up => {
-                            apply_action(Action::GlyphPickerNav(-(app::input::GLYPH_GRID_COLS as i32)), &mut state, &mut mapper);
+                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                apply_action(Action::GlyphPickerNav(-(app::input::GLYPH_GRID_COLS as i32)), &mut state, &mut mapper);
+                            }
                         }
                         KeyCode::Down => {
-                            apply_action(Action::GlyphPickerNav(app::input::GLYPH_GRID_COLS as i32), &mut state, &mut mapper);
+                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                apply_action(Action::GlyphPickerNav(app::input::GLYPH_GRID_COLS as i32), &mut state, &mut mapper);
+                            }
                         }
                         KeyCode::Char(',') | KeyCode::Char('[') => {
                             apply_action(Action::GlyphPickerBlock(-1), &mut state, &mut mapper);
@@ -1731,7 +1758,15 @@ fn main() {
                             apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
                         }
                         KeyCode::Char(c) => {
-                            apply_action(Action::GlyphPickerChar(c), &mut state, &mut mapper);
+                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                                // In custom-entry mode: only hex digits are accepted.
+                                if c.is_ascii_hexdigit() {
+                                    apply_action(Action::GlyphPickerCustomChar(c), &mut state, &mut mapper);
+                                }
+                                // Non-hex chars swallowed (modal intercept).
+                            } else {
+                                apply_action(Action::GlyphPickerChar(c), &mut state, &mut mapper);
+                            }
                         }
                         _ => {}
                     }
@@ -1772,6 +1807,8 @@ fn main() {
                                         apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
                                     } else if gp.clear.map_or(false, |r| r.contains(pt)) {
                                         apply_action(Action::GlyphPickerClear, &mut state, &mut mapper);
+                                    } else if gp.custom.map_or(false, |r| r.contains(pt)) {
+                                        apply_action(Action::GlyphPickerCustomFocus, &mut state, &mut mapper);
                                     }
                                     // Clicks outside modal area: swallow (modal is top).
                                 }

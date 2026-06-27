@@ -246,6 +246,12 @@ pub enum Action {
     GlyphPickerClear,
     /// Cancel: close without any change.
     GlyphPickerCancel,
+    /// Enter the custom-range hex-entry mode (focus the U+____ field).
+    GlyphPickerCustomFocus,
+    /// Feed a hex digit into the custom-range codepoint buffer.
+    GlyphPickerCustomChar(char),
+    /// Remove the last hex digit from the custom-range codepoint buffer.
+    GlyphPickerCustomBackspace,
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -2358,6 +2364,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     target_zone: zone,
                     block: 0,
                     custom_start: None,
+                    custom_focus: false,
+                    custom_buf: String::new(),
                     cursor: 0,
                     pending: None,
                     mru,
@@ -2379,6 +2387,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::GlyphPickerBlock(delta) => {
             if let Some(picker) = &mut state.glyph_picker {
                 picker.custom_start = None; // return to curated blocks
+                picker.custom_focus = false;
+                picker.custom_buf.clear();
                 let n = GLYPH_BLOCKS.len() as i32;
                 picker.block = ((picker.block as i32 + delta).rem_euclid(n)) as usize;
                 picker.cursor = 0;
@@ -2388,7 +2398,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::GlyphPickerChar(c) => {
             if let Some(picker) = &mut state.glyph_picker {
-                picker.pending = Some(c.to_string());
+                if !picker.custom_focus {
+                    picker.pending = Some(c.to_string());
+                }
             }
         }
 
@@ -2448,6 +2460,36 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::GlyphPickerCancel => {
             state.glyph_picker = None;
+        }
+
+        Action::GlyphPickerCustomFocus => {
+            if let Some(picker) = &mut state.glyph_picker {
+                picker.custom_focus = true;
+                picker.pending = None;
+            }
+        }
+
+        Action::GlyphPickerCustomChar(c) => {
+            if let Some(picker) = &mut state.glyph_picker {
+                if c.is_ascii_hexdigit() && picker.custom_buf.len() < 6 {
+                    picker.custom_buf.push(c.to_ascii_uppercase());
+                    if let Ok(cp) = u32::from_str_radix(&picker.custom_buf, 16) {
+                        picker.custom_start = Some(cp);
+                        picker.cursor = 0;
+                    }
+                }
+            }
+        }
+
+        Action::GlyphPickerCustomBackspace => {
+            if let Some(picker) = &mut state.glyph_picker {
+                picker.custom_buf.pop();
+                picker.custom_start = if picker.custom_buf.is_empty() {
+                    None
+                } else {
+                    u32::from_str_radix(&picker.custom_buf, 16).ok()
+                };
+            }
         }
 
         // ── Config screen actions ─────────────────────────────────────────────
@@ -6191,6 +6233,67 @@ mod tests {
             ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
             None,
             "glyph cleared from the doc",
+        );
+    }
+
+    #[test]
+    fn glyph_picker_custom_range_entry() {
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        apply_action(
+            Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
+            &mut s,
+            &mut Mapper::default(),
+        );
+        assert!(s.glyph_picker.is_some(), "picker opens");
+
+        // Enter custom-entry focus via the action.
+        apply_action(Action::GlyphPickerCustomFocus, &mut s, &mut Mapper::default());
+        assert!(s.glyph_picker.as_ref().unwrap().custom_focus, "custom_focus set");
+
+        // Type '2', '5', '0', '0' → U+2500.
+        for c in ['2', '5', '0', '0'] {
+            apply_action(Action::GlyphPickerCustomChar(c), &mut s, &mut Mapper::default());
+        }
+        {
+            let picker = s.glyph_picker.as_ref().unwrap();
+            assert_eq!(picker.custom_buf, "2500", "buf accumulates hex digits");
+            assert_eq!(picker.custom_start, Some(0x2500), "custom_start set to U+2500");
+        }
+
+        // Backspace removes last digit; custom_start updates.
+        apply_action(Action::GlyphPickerCustomBackspace, &mut s, &mut Mapper::default());
+        {
+            let picker = s.glyph_picker.as_ref().unwrap();
+            assert_eq!(picker.custom_buf, "250");
+            assert_eq!(picker.custom_start, Some(0x250));
+        }
+
+        // Block navigation clears custom state.
+        apply_action(Action::GlyphPickerBlock(1), &mut s, &mut Mapper::default());
+        {
+            let picker = s.glyph_picker.as_ref().unwrap();
+            assert!(!picker.custom_focus, "block nav exits custom focus");
+            assert!(picker.custom_buf.is_empty(), "block nav clears custom_buf");
+            assert_eq!(picker.custom_start, None, "block nav clears custom_start");
+        }
+    }
+
+    #[test]
+    fn glyph_picker_custom_focus_blocks_pending() {
+        // Verify that GlyphPickerChar is ignored when custom_focus is active.
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        apply_action(
+            Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
+            &mut s,
+            &mut Mapper::default(),
+        );
+        apply_action(Action::GlyphPickerCustomFocus, &mut s, &mut Mapper::default());
+        apply_action(Action::GlyphPickerChar('═'), &mut s, &mut Mapper::default());
+        assert!(
+            s.glyph_picker.as_ref().unwrap().pending.is_none(),
+            "GlyphPickerChar should not set pending while in custom focus",
         );
     }
 

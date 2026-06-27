@@ -523,6 +523,10 @@ pub struct GlyphPickerState {
     pub block: usize,
     /// When `Some`, overrides the curated block with a custom U+start range.
     pub custom_start: Option<u32>,
+    /// Whether the custom-range hex-entry field has keyboard focus.
+    pub custom_focus: bool,
+    /// Accumulates hex digits for a custom codepoint (U+XXXXXX, up to 6 chars).
+    pub custom_buf: String,
     /// Cursor position within the current glyph grid (0-based index).
     pub cursor: usize,
     /// A pending glyph set via direct character input (`GlyphPickerChar`).
