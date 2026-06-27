@@ -844,6 +844,54 @@ pub fn mouse_to_action(
     let ctrl = m.modifiers.contains(KeyModifiers::CONTROL);
     let shift = m.modifiers.contains(KeyModifiers::SHIFT);
 
+    // Honor the user's wheel-direction preference: when mouse_wheel_invert is
+    // set, swap scroll up/down (some terminals report "natural" scrolling).
+    // Computed once here and reused by both the modal-precedence branch below
+    // and the map/story wheel arms; never invert twice for one event.
+    let kind = match (m.kind, state.config.mouse_wheel_invert) {
+        (MouseEventKind::ScrollUp, true) => MouseEventKind::ScrollDown,
+        (MouseEventKind::ScrollDown, true) => MouseEventKind::ScrollUp,
+        (k, _) => k,
+    };
+
+    // ── Mouse-wheel precedence for open scrollable modals ─────────────────────
+    // When a scrollable overlay is open, the wheel drives THAT surface's vertical
+    // navigation, ahead of the underlying map/story and ahead of the dialog
+    // chrome hit-testing below. Wheel up → previous/up; wheel down → next/down.
+    // Each list modal reuses its existing Up/Down nav action (no new scroll
+    // state). Corner overlays (room panel, tidy) are intentionally absent — the
+    // wheel still pans the map under them, as before.
+    let wheel_up = match kind {
+        MouseEventKind::ScrollUp => Some(true),
+        MouseEventKind::ScrollDown => Some(false),
+        _ => None,
+    };
+    if let Some(up) = wheel_up {
+        // Priority mirrors the keyboard modal routing order above.
+        if state.gallery.is_some() {
+            return if up { Action::GalleryPrev } else { Action::GalleryNext };
+        }
+        if state.saves.is_some() {
+            return if up { Action::SavesNav(-1) } else { Action::SavesNav(1) };
+        }
+        if state.replay.is_some() {
+            return if up { Action::ReplayStep(-1) } else { Action::ReplayStep(1) };
+        }
+        if state.file_browser.is_some() {
+            return if up { Action::FbNav(-1) } else { Action::FbNav(1) };
+        }
+        if state.verb_menu.is_some() {
+            return if up {
+                Action::VerbMenuNav(VerbMenuNavKind::Up)
+            } else {
+                Action::VerbMenuNav(VerbMenuNavKind::Down)
+            };
+        }
+        if state.style_editor.is_some() {
+            return if up { Action::StyleNav(-1) } else { Action::StyleNav(1) };
+        }
+    }
+
     // ── Dialog chrome hit-testing (checked FIRST) ─────────────────────────────
     if let Some(rects) = dialog {
         if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -924,14 +972,6 @@ pub fn mouse_to_action(
     let in_story = story.width > 0 && story.height > 0
         && col >= story.x && col < story.right()
         && row >= story.y && row < story.bottom();
-
-    // Honor the user's wheel-direction preference: when mouse_wheel_invert is
-    // set, swap scroll up/down (some terminals report "natural" scrolling).
-    let kind = match (m.kind, state.config.mouse_wheel_invert) {
-        (MouseEventKind::ScrollUp, true) => MouseEventKind::ScrollDown,
-        (MouseEventKind::ScrollDown, true) => MouseEventKind::ScrollUp,
-        (k, _) => k,
-    };
 
     match kind {
         // ── Left-down in story: activate game pane + begin text selection ─────
@@ -4776,6 +4816,160 @@ mod tests {
         assert!(matches!(
             mouse_to_action(&s, m2, map_rect(), story_rect(), &[], &None),
             Action::TranscriptScroll(-1)
+        ));
+    }
+
+    // ── Mouse-wheel modal precedence tests ─────────────────────────────────────
+    //
+    // When a scrollable overlay is open, the wheel must drive THAT surface's
+    // vertical nav (one item per tick) ahead of the underlying map/story, reusing
+    // each modal's existing Up/Down action. A wheel position over the MAP area is
+    // used so the same events also exercise precedence over map pan/zoom.
+
+    fn wheel_up() -> crossterm::event::MouseEvent {
+        // Position (10, 10) is inside map_rect (0,0,80,40).
+        mouse_event(crossterm::event::MouseEventKind::ScrollUp, 10, 10, KeyModifiers::NONE)
+    }
+    fn wheel_down() -> crossterm::event::MouseEvent {
+        mouse_event(crossterm::event::MouseEventKind::ScrollDown, 10, 10, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn wheel_drives_gallery_selection() {
+        use crate::state::GalleryState;
+        let mut s = AppState::default();
+        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::GalleryPrev
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::GalleryNext
+        ));
+    }
+
+    #[test]
+    fn wheel_drives_saves_selection() {
+        use crate::state::SavesState;
+        let mut s = AppState::default();
+        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::SavesNav(-1)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::SavesNav(1)
+        ));
+    }
+
+    #[test]
+    fn wheel_drives_replay_step() {
+        use crate::state::ReplayState;
+        let mut s = AppState::default();
+        s.replay = Some(ReplayState::new(0));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::ReplayStep(-1)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::ReplayStep(1)
+        ));
+    }
+
+    #[test]
+    fn wheel_drives_file_browser_selection() {
+        use crate::state::{FbMode, FileBrowserState};
+        let mut s = AppState::default();
+        s.file_browser = Some(FileBrowserState::build(
+            std::env::temp_dir(),
+            FbMode::PickFile,
+            "test.qzl".to_string(),
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::FbNav(-1)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::FbNav(1)
+        ));
+    }
+
+    #[test]
+    fn wheel_drives_verb_menu_selection() {
+        use crate::state::{VerbMenuPane, VerbMenuState};
+        let mut s = AppState::default();
+        s.verb_menu = Some(VerbMenuState {
+            pane: VerbMenuPane::Verbs,
+            verb_idx: 0,
+            noun_idx: 0,
+            prep_idx: 0,
+            nouns: Vec::new(),
+        });
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::VerbMenuNav(VerbMenuNavKind::Up)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::VerbMenuNav(VerbMenuNavKind::Down)
+        ));
+    }
+
+    #[test]
+    fn wheel_drives_style_editor_selection() {
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s);
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::StyleNav(-1)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::StyleNav(1)
+        ));
+    }
+
+    #[test]
+    fn wheel_modal_precedence_beats_open_dialog_chrome() {
+        // Saves open WITH a dialog present: the wheel must still drive the saves
+        // list (not be swallowed by the dialog chrome block).
+        use crate::state::SavesState;
+        use crate::render::dialog::DialogRects;
+        use ratatui::layout::Rect;
+        let mut s = AppState::default();
+        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        let dialog = Some(DialogRects {
+            area: Rect::new(10, 5, 40, 15),
+            content: Rect::new(11, 7, 38, 10),
+            close: Some(Rect::new(48, 5, 1, 1)),
+            buttons: Vec::new(),
+        });
+        // Wheel over the map area, with the dialog open.
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &dialog),
+            Action::SavesNav(-1)
+        ));
+    }
+
+    #[test]
+    fn wheel_invert_swaps_modal_nav_direction() {
+        // Representative modal (saves): with mouse_wheel_invert set, ScrollUp maps
+        // to the DOWN action and ScrollDown to the UP action.
+        use crate::state::SavesState;
+        let mut s = AppState::default();
+        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.config.mouse_wheel_invert = true;
+        assert!(matches!(
+            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
+            Action::SavesNav(1)
+        ));
+        assert!(matches!(
+            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
+            Action::SavesNav(-1)
         ));
     }
 

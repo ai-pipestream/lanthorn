@@ -40,6 +40,17 @@ pub struct HintSession {
     pub builtin_hint: bool,
 }
 
+impl HintSession {
+    /// Scroll the transcript by `delta` rows, clamped to `[0, max]`.
+    ///
+    /// `delta > 0` scrolls toward older content (matching the story transcript's
+    /// wheel-up direction); `max` is the last-rendered maximum scroll offset.
+    pub fn scroll_by(&mut self, delta: i32, max: u16) {
+        let next = (self.scroll as i32 + delta).clamp(0, max as i32);
+        self.scroll = next as u16;
+    }
+}
+
 // GameSession does not implement Debug, so we implement Debug manually for HintSession.
 impl std::fmt::Debug for HintSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1921,6 +1932,37 @@ mod tests {
         assert!(s.any_overlay_open(), "hints open => any_overlay_open true");
         s.hints = None;
         assert!(!s.any_overlay_open(), "hints closed => any_overlay_open false");
+    }
+
+    #[test]
+    fn hint_session_scroll_by_clamps_to_range() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture_path.exists() {
+            return; // fixture absent — skip
+        }
+        let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
+        let session = crate::session::GameSession::new(story_bytes).expect("GameSession::new");
+        let mut hs = HintSession {
+            source: HintSource::Zcode(session),
+            transcript: vec![],
+            scroll: 0,
+            input: String::new(),
+            label: "Hints: Test".to_string(),
+            builtin_hint: false,
+        };
+        // Scrolling down (negative) at the top is clamped to 0.
+        hs.scroll_by(-1, 5);
+        assert_eq!(hs.scroll, 0, "scroll cannot go below 0");
+        // Scrolling up (positive) advances within range.
+        hs.scroll_by(3, 5);
+        assert_eq!(hs.scroll, 3);
+        // Scrolling past max is clamped to max.
+        hs.scroll_by(10, 5);
+        assert_eq!(hs.scroll, 5, "scroll clamps to max");
+        // A max of 0 (nothing to scroll) pins scroll at 0.
+        hs.scroll_by(4, 0);
+        assert_eq!(hs.scroll, 0);
     }
 
     #[test]

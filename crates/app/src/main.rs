@@ -1654,6 +1654,18 @@ fn main() {
                             }
                             // Clicks inside the dialog but not on close: swallow.
                         }
+                    } else if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                        // Wheel drives the hint transcript's own scroll. The panel
+                        // is intercepted before mouse_to_action, so apply the
+                        // mouse_wheel_invert preference here (mirroring that helper).
+                        let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
+                        let up = raw_up ^ state.config.mouse_wheel_invert;
+                        let max = last_panes.hints_panel.as_ref().map_or(0, |hp| hp.max_scroll);
+                        if let Some(hs) = &mut state.hints {
+                            // Wheel up → older content (increase scroll), matching
+                            // the story transcript's wheel direction.
+                            hs.scroll_by(if up { 1 } else { -1 }, max);
+                        }
                     }
                 }
                 Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
@@ -2079,9 +2091,14 @@ fn main() {
                             }
                         }
                     }
-                    // Swallow all other mouse events while style editor is open;
-                    // deliver dialog-button actions through the normal run-loop path.
-                    click_action
+                    // Wheel drives the selector list via mouse_to_action's
+                    // modal-precedence branch; swallow all other unhandled mouse
+                    // events. Dialog-button actions flow through the run-loop path.
+                    if matches!(m.kind, crossterm::event::MouseEventKind::ScrollUp | crossterm::event::MouseEventKind::ScrollDown) {
+                        mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
+                    } else {
+                        click_action
+                    }
                 } else {
                     mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
                 }

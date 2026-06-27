@@ -31,6 +31,9 @@ pub struct HintsPanelRects {
     pub close: Option<Rect>,
     /// The input row inside the dialog content area.
     pub input: Rect,
+    /// Maximum transcript scroll offset for this render (wrapped lines minus the
+    /// visible body height). Used to clamp wheel-driven scrolling.
+    pub max_scroll: u16,
 }
 
 // ── draw_hints_panel ──────────────────────────────────────────────────────────
@@ -80,6 +83,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
             area: rects.area,
             close: rects.close,
             input: Rect::new(content.x, content.y, content.width, 0),
+            max_scroll: 0,
         });
     }
 
@@ -96,7 +100,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 
     // The transcript display area: content rows above the input row.
     if content.height < 2 {
-        return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect });
+        return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll: 0 });
     }
     let transcript_area = Rect::new(content.x, content.y, content.width, content.height - 1);
 
@@ -126,7 +130,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 
     // Transcript body area: below the hint suggestion line.
     if transcript_area.height <= hint_row_count {
-        return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect });
+        return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll: 0 });
     }
     let body_top = transcript_area.y + hint_row_count;
     let body_h = transcript_area.bottom() - body_top;
@@ -143,6 +147,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     let n = wrapped.len();
     let scroll = session.scroll as usize;
     let rows = body_h as usize;
+    let max_scroll = n.saturating_sub(rows).min(u16::MAX as usize) as u16;
     let end = n.saturating_sub(scroll);
     let start = end.saturating_sub(rows);
     let visible = &wrapped[start..end];
@@ -156,7 +161,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         crate::render::draw_str_clipped(buf, body_area.x, row_y, line, body_style, body_area);
     }
 
-    Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect })
+    Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
