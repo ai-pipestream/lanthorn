@@ -332,12 +332,14 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let cstyle = if custom_focused { active_style } else { normal_style };
             let prefix = if ed.color_target { " hex \u{2192}bg " } else { " hex \u{2192}fg " };
             let prefix_w = prefix.chars().count() as u16;
-            let max_buf_w = prop.right().saturating_sub(prop.x + prefix_w) as usize;
+            let max_buf_w = prop.right().saturating_sub(prop.x + prefix_w + 4) as usize; // 4 = "[ " + " ]"
             let buf_display: String = ed.custom_buf.chars().take(max_buf_w).collect();
-            let custom_text = format!("{}{}", prefix, buf_display);
+            let cursor = if custom_focused { "\u{258f}" } else { "" }; // ▏
+            let field = format!("[ {}{} ]", buf_display, cursor);
+            let custom_text = format!("{}{}", prefix, field);
             crate::render::draw_str_clipped(buf, prop.x, custom_y, &custom_text, cstyle, prop);
-            // Record the rect of the editable portion.
-            let field_w = (buf_display.chars().count() as u16).max(1);
+            // Hit-rect covers the bracketed field (interior + brackets).
+            let field_w = field.chars().count() as u16;
             custom_rect = Some(Rect::new(prop.x + prefix_w, custom_y, field_w, 1));
         }
 
@@ -788,6 +790,23 @@ mod tests {
         let _ = draw_style_editor(&s, area, &mut buf2);
         let bg_text: String = buf2.content().iter().flat_map(|c| c.symbol().chars()).collect();
         assert!(bg_text.contains("\u{2192}bg"), "custom row tags the bg target when color_target is bg");
+    }
+
+    #[test]
+    fn custom_hex_renders_bracketed_box_with_cursor_when_focused() {
+        let mut s = AppState::default();
+        crate::input::open_style_editor_hermetic(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.focus = crate::state::StyleFocus::Custom;
+            ed.custom_buf = "#ab12cd".to_string();
+        }
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        let _ = draw_style_editor(&s, area, &mut buf);
+        let text: String = buf.content().iter().flat_map(|c| c.symbol().chars()).collect();
+        assert!(text.contains("[ #ab12cd"), "hex field is drawn as a bracketed box");
+        assert!(text.contains("\u{258f}"), "a cursor glyph shows when the custom field is focused");
     }
 
     #[test]
