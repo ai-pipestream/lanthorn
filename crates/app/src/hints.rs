@@ -201,21 +201,45 @@ const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
 /// but contains no story entry.
 pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
     let raw = std::fs::read(path)?;
-    if raw.starts_with(ZIP_MAGIC) {
+    let bytes = if raw.starts_with(ZIP_MAGIC) {
         // It's a ZIP — find the first story entry.
         let pred = |name: &str| {
             let lower = name.to_ascii_lowercase();
             lower.ends_with(".z3") || lower.ends_with(".z5") || lower.ends_with(".z8")
         };
         match read_zip_entry(path, pred)? {
-            Some(bytes) => Ok(bytes),
-            None => Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("no .z3/.z5/.z8 entry found in zip: {}", path.display()),
-            )),
+            Some(bytes) => bytes,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("no .z3/.z5/.z8 entry found in zip: {}", path.display()),
+                ))
+            }
         }
     } else {
-        Ok(raw)
+        raw
+    };
+    extract_story(bytes)
+}
+
+/// If `bytes` is a Blorb, return its Z-code executable; reject Glulx with a
+/// clear error; otherwise pass the bytes through unchanged (a raw story file).
+pub fn extract_story(bytes: Vec<u8>) -> io::Result<Vec<u8>> {
+    if !blorb::Blorb::is_blorb(&bytes) {
+        return Ok(bytes);
+    }
+    let b = blorb::Blorb::parse(bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid Blorb: {e:?}")))?;
+    match b.executable() {
+        Ok((blorb::ExecKind::ZCode, data)) => Ok(data.to_vec()),
+        Ok((blorb::ExecKind::Glulx, _)) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Glulx story files are not yet supported".to_string(),
+        )),
+        Err(e) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Blorb has no executable: {e:?}"),
+        )),
     }
 }
 
@@ -307,6 +331,67 @@ mod tests {
         }
         let loaded_zip = load_story_bytes(&zip_path).expect("zip load");
         assert_eq!(loaded_zip, story_bytes, "zip entry bytes must match the original");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Build a minimal Blorb wrapping a single Exec chunk of the given type.
+    // Mirrors the blorb crate's builder shape: FORM/IFRS + RIdx + Exec/0 chunk.
+    fn make_blorb(exec_type: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        // RIdx has one entry; the Exec chunk follows it.
+        let ridx_data_len = 4 + 12;
+        let exec_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes()); // count
+        ridx.extend_from_slice(b"Exec");
+        ridx.extend_from_slice(&0u32.to_be_bytes()); // number
+        ridx.extend_from_slice(&(exec_off as u32).to_be_bytes());
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(exec_type, payload));
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    #[test]
+    fn load_story_bytes_extracts_zblorb_executable() {
+        let base = std::env::temp_dir().join(format!("bm-zblorb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let zcode = b"ZCODE-PAYLOAD";
+        let path = base.join("game.zblorb");
+        std::fs::write(&path, make_blorb(b"ZCOD", zcode)).unwrap();
+        let out = load_story_bytes(&path).expect("zblorb load");
+        assert_eq!(out, zcode);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn load_story_bytes_rejects_glulx_blorb() {
+        let base = std::env::temp_dir().join(format!("bm-gblorb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let path = base.join("game.gblorb");
+        std::fs::write(&path, make_blorb(b"GLUL", b"GLULPAYLOAD")).unwrap();
+        let err = load_story_bytes(&path).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("glulx"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

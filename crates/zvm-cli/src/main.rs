@@ -82,6 +82,24 @@ impl Output for StdoutOutput {
     }
 }
 
+// ── Blorb extraction ──────────────────────────────────────────────────────────
+
+/// If `bytes` is a Blorb, return its Z-code executable; reject Glulx with a
+/// clear error; otherwise pass the bytes through unchanged (a raw story file).
+fn extract_story(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    if !blorb::Blorb::is_blorb(&bytes) {
+        return Ok(bytes);
+    }
+    let b = blorb::Blorb::parse(bytes).map_err(|e| format!("Error: invalid Blorb: {e:?}"))?;
+    match b.executable() {
+        Ok((blorb::ExecKind::ZCode, data)) => Ok(data.to_vec()),
+        Ok((blorb::ExecKind::Glulx, _)) => {
+            Err("Error: Glulx story files are not yet supported.".to_string())
+        }
+        Err(e) => Err(format!("Error: Blorb has no executable: {e:?}")),
+    }
+}
+
 // ── build_machine ─────────────────────────────────────────────────────────────
 
 fn build_machine(
@@ -248,6 +266,16 @@ fn main() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Error: cannot read '{}': {}", story_path.display(), e);
+            process::exit(1);
+        }
+    };
+
+    // A .zblorb is a raw Blorb container; extract the embedded Z-code (reject
+    // Glulx cleanly). Non-Blorb bytes (a raw .z5) pass through unchanged.
+    let story_bytes = match extract_story(story_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
             process::exit(1);
         }
     };
