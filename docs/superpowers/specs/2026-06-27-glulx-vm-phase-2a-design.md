@@ -178,8 +178,18 @@ that writes a header + a function + instructions as bytes):
 - A small end-to-end program (arith + branch + call + output + quit) yields the
   right transcript via `gvm`'s `run()`.
 
-(If a reference glulxercise/`.ulx` binary can be vendored as a test fixture,
-add a smoke that runs it and checks for its known "pass" output — optional.)
+**Compliance suite.** `glulxercise` (Andrew Plotkin) is the Glulx conformance
+program, analogous to the Z-machine's `czech`/`praxix`. Plan of record across the
+VM sub-project:
+- Each phase (2a/2b/2c) is validated by **hand-assembled per-opcode unit tests**
+  (above) — precise and free of any I/O dependency.
+- The **full `glulxercise` smoke is a capstone landed at Phase 2c** (when the
+  opcode set is complete), driven headlessly. If `glulxercise` requires
+  interactive Glk input to select test groups, the full run shifts to
+  sub-project 3 (Glk input); at 2c we then assert it executes its
+  non-interactive prefix without faulting. The implementing agent confirms
+  `glulxercise`'s exact driving requirements when it fetches the Glulx spec, and
+  vendors the `.ulx` fixture at the phase it first becomes runnable.
 
 ## Out of scope (this phase)
 
