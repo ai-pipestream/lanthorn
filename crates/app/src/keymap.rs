@@ -382,6 +382,69 @@ impl Command {
     pub fn from_name(s: &str) -> Option<Command> {
         ALL_COMMANDS.iter().copied().find(|c| c.name() == s)
     }
+
+    /// The full command string as used in keymap bindings.
+    /// Task 10 bridge: removed in Task 10 when dispatch is rewritten.
+    pub fn full_cmd_string(self) -> &'static str {
+        match self {
+            Command::Quit => "quit",
+            Command::SaveGame => "save-game",
+            Command::RestoreGame => "load-game",
+            Command::ExportSvg => "export-svg",
+            Command::ExportDot => "export-dot",
+            Command::ExportDump => "export-dump",
+            Command::CycleLayout => "cycle-layout",
+            Command::Retidy => "tidy-map",
+            Command::ReloadStyle => "reload-style",
+            Command::GameStyle => "create-game-style",
+            Command::ToggleWatch => "toggle-watch",
+            Command::AnimateTidy => "animate-tidy",
+            Command::ToggleAlignment => "toggle-alignment",
+            Command::TogglePortalLabels => "toggle-portal-labels",
+            Command::ToggleFocus => "toggle-focus",
+            Command::NudgeLeft => "nudge-room -1 0",
+            Command::NudgeRight => "nudge-room 1 0",
+            Command::NudgeUp => "nudge-room 0 -1",
+            Command::NudgeDown => "nudge-room 0 1",
+            Command::OpenGallery => "open-gallery",
+            Command::ZoomIn => "zoom-map in",
+            Command::ZoomOut => "zoom-map out",
+            Command::ZoomReset => "zoom-map reset",
+            Command::Recenter => "center-map",
+            Command::SelectNext => "select-room next",
+            Command::SelectPrev => "select-room prev",
+            Command::RenameRoom => "rename-room",
+            Command::RenameLayer => "rename-layer",
+            Command::EditNotes => "edit-notes",
+            Command::DeleteSelectedConnection => "delete-connection",
+            Command::RelabelSelectedEdge => "relabel-edge",
+            Command::ToggleInspector => "toggle-inspector",
+            Command::PeelLayer => "peel-layer",
+            Command::MergeLayer => "merge-layer",
+            Command::PanLeft => "pan-map -1 0",
+            Command::PanRight => "pan-map 1 0",
+            Command::PanUp => "pan-map 0 -1",
+            Command::PanDown => "pan-map 0 1",
+            Command::CycleLayerNext => "cycle-layer next",
+            Command::CycleLayerPrev => "cycle-layer prev",
+            Command::AnimStepFwd => "anim-step forward",
+            Command::AnimStepBack => "anim-step back",
+            Command::AnimTogglePlay => "anim-play",
+            Command::AnimExit => "anim-exit",
+            Command::OpenSaves => "open-saves",
+            Command::ToggleInventory => "toggle-inventory",
+            Command::CycleLayoutReverse => "cycle-layout reverse",
+            Command::ResetGame => "reset-game",
+            Command::OpenVerbMenu => "open-verb-menu",
+            Command::OpenStyleEditor => "open-style-editor",
+            Command::OpenConfig => "open-config",
+            Command::ToggleRoomNumbers => "toggle-room-numbers",
+            Command::ToggleLocMethod => "toggle-loc-method",
+            Command::ToggleStatusBar => "toggle-status-bar",
+            Command::OpenHints => "open-hints",
+            Command::OpenHistory => "open-history",
+        }
+    }
 }
 
 /// All commands in a single slice, for iteration.
@@ -599,11 +662,11 @@ impl std::str::FromStr for KeySpec {
 
 // ── KeyMap ─────────────────────────────────────────────────────────────────────
 
-/// The full binding table. Each entry is `(KeySpec, Command, Context)`.
-/// Multiple specs may map to the same command (multi-bind defaults).
+/// The full binding table. Each entry is `(KeySpec, String, Context)`.
+/// Multiple specs may map to the same command string (multi-bind defaults).
 #[derive(Debug)]
 pub struct KeyMap {
-    pub bindings: Vec<(KeySpec, Command, Context)>,
+    pub bindings: Vec<(KeySpec, String, Context)>,
 }
 
 impl KeyMap {
@@ -620,112 +683,112 @@ impl KeyMap {
         let ctrl = |code| g(code, true, false);
         let shift = |code| g(code, false, true);
 
-        let mut b: Vec<(KeySpec, Command, Context)> = Vec::new();
+        let mut b: Vec<(KeySpec, String, Context)> = Vec::new();
 
         macro_rules! bind {
             ($spec:expr, $cmd:expr, $ctx:expr) => {
-                b.push(($spec, $cmd, $ctx));
+                b.push(($spec, $cmd.to_string(), $ctx));
             };
         }
 
         // ── Global ────────────────────────────────────────────────────────────
-        // Tab → ToggleFocus (the Tab KEY itself stays hardwired in key_to_action;
+        // Tab → toggle-focus (the Tab KEY itself stays hardwired in key_to_action;
         // this entry lets the keymap advertise it for hints/help).
-        bind!(plain(Tab), Command::ToggleFocus, Context::Global);
+        bind!(plain(Tab), "toggle-focus", Context::Global);
 
-        bind!(ctrl(Char('s')), Command::SaveGame, Context::Global);
-        bind!(ctrl(Char('r')), Command::RestoreGame, Context::Global);
-        bind!(ctrl(Char('e')), Command::ExportSvg, Context::Global);
-        bind!(ctrl(Char('g')), Command::ExportDot, Context::Global);
-        bind!(ctrl(Char('d')), Command::ExportDump, Context::Global);
-        bind!(ctrl(Char('l')), Command::CycleLayout, Context::Global);
-        bind!(ctrl(Char('t')), Command::Retidy, Context::Global);
-        bind!(ctrl(Char('y')), Command::AnimateTidy, Context::Global);
-        bind!(ctrl(Char('a')), Command::ToggleAlignment, Context::Global);
-        bind!(ctrl(Char('p')), Command::TogglePortalLabels, Context::Global);
+        bind!(ctrl(Char('s')), "save-game", Context::Global);
+        bind!(ctrl(Char('r')), "load-game", Context::Global);
+        bind!(ctrl(Char('e')), "export-svg", Context::Global);
+        bind!(ctrl(Char('g')), "export-dot", Context::Global);
+        bind!(ctrl(Char('d')), "export-dump", Context::Global);
+        bind!(ctrl(Char('l')), "cycle-layout", Context::Global);
+        bind!(ctrl(Char('t')), "tidy-map", Context::Global);
+        bind!(ctrl(Char('y')), "animate-tidy", Context::Global);
+        bind!(ctrl(Char('a')), "toggle-alignment", Context::Global);
+        bind!(ctrl(Char('p')), "toggle-portal-labels", Context::Global);
         // Ctrl+O → open saves manager (free key; not used by any other command).
-        bind!(ctrl(Char('o')), Command::OpenSaves, Context::Global);
+        bind!(ctrl(Char('o')), "open-saves", Context::Global);
         // v → toggle inventory strip (free key; not used in any context).
-        bind!(plain(Char('v')), Command::ToggleInventory, Context::Global);
+        bind!(plain(Char('v')), "toggle-inventory", Context::Global);
         // m → open verb/item token-palette modal (free key; not used by any other command).
-        bind!(plain(Char('m')), Command::OpenVerbMenu, Context::Global);
+        bind!(plain(Char('m')), "open-verb-menu", Context::Global);
         // F2 → open config screen.
-        bind!(plain(F(2)), Command::OpenConfig, Context::Global);
+        bind!(plain(F(2)), "open-config", Context::Global);
         // F3 → open style editor (F3 is unbound; F2/F4–F9 are taken).
-        bind!(plain(F(3)), Command::OpenStyleEditor, Context::Global);
+        bind!(plain(F(3)), "open-style-editor", Context::Global);
         // Shift+Tab (BackTab) → cycle layout in reverse (inverse of Ctrl+L forward cycle).
         // BackTab is delivered by crossterm as KeyCode::BackTab, typically with no SHIFT modifier.
-        bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, Command::CycleLayoutReverse, Context::Global);
+        bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, "cycle-layout reverse", Context::Global);
         // F5 → reset game (free key; opens a confirmation prompt before acting).
-        bind!(plain(F(5)), Command::ResetGame, Context::Global);
+        bind!(plain(F(5)), "reset-game", Context::Global);
         // F4 → open rewind/replay history modal (free function key).
-        bind!(plain(F(4)), Command::OpenHistory, Context::Global);
+        bind!(plain(F(4)), "open-history", Context::Global);
 
         // F6-F9 → Nudge (plain function keys; ctrl+arrow removed so all direct
         // bindings remain modifier-free).
-        bind!(plain(F(6)), Command::NudgeLeft, Context::Global);
-        bind!(plain(F(7)), Command::NudgeRight, Context::Global);
-        bind!(plain(F(8)), Command::NudgeUp, Context::Global);
-        bind!(plain(F(9)), Command::NudgeDown, Context::Global);
+        bind!(plain(F(6)), "nudge-room -1 0", Context::Global);
+        bind!(plain(F(7)), "nudge-room 1 0", Context::Global);
+        bind!(plain(F(8)), "nudge-room 0 -1", Context::Global);
+        bind!(plain(F(9)), "nudge-room 0 1", Context::Global);
 
         // ── Map ───────────────────────────────────────────────────────────────
         // Pan: plain arrows + hjkl (two sets; shift-arrows removed so all
         // direct bindings remain modifier-free).
-        bind!(plain(Left), Command::PanLeft, Context::Map);
-        bind!(plain(Right), Command::PanRight, Context::Map);
-        bind!(plain(Up), Command::PanUp, Context::Map);
-        bind!(plain(Down), Command::PanDown, Context::Map);
+        bind!(plain(Left), "pan-map -1 0", Context::Map);
+        bind!(plain(Right), "pan-map 1 0", Context::Map);
+        bind!(plain(Up), "pan-map 0 -1", Context::Map);
+        bind!(plain(Down), "pan-map 0 1", Context::Map);
 
-        bind!(plain(Char('h')), Command::PanLeft, Context::Map);
-        bind!(plain(Char('l')), Command::PanRight, Context::Map);
-        bind!(plain(Char('k')), Command::PanUp, Context::Map);
-        bind!(plain(Char('j')), Command::PanDown, Context::Map);
+        bind!(plain(Char('h')), "pan-map -1 0", Context::Map);
+        bind!(plain(Char('l')), "pan-map 1 0", Context::Map);
+        bind!(plain(Char('k')), "pan-map 0 -1", Context::Map);
+        bind!(plain(Char('j')), "pan-map 0 1", Context::Map);
 
         // Zoom: + / = (shift(+) alias removed; plain alternatives cover it).
-        bind!(plain(Char('+')), Command::ZoomIn, Context::Map);
-        bind!(plain(Char('=')), Command::ZoomIn, Context::Map);
-        bind!(plain(Char('-')), Command::ZoomOut, Context::Map);
+        bind!(plain(Char('+')), "zoom-map in", Context::Map);
+        bind!(plain(Char('=')), "zoom-map in", Context::Map);
+        bind!(plain(Char('-')), "zoom-map out", Context::Map);
         // '0' (zero) resets zoom to default (Boxes) and clears char-pan offset.
-        bind!(plain(Char('0')), Command::ZoomReset, Context::Map);
+        bind!(plain(Char('0')), "zoom-map reset", Context::Map);
 
         // Map commands
-        bind!(plain(Char('c')), Command::Recenter, Context::Map);
-        bind!(plain(Char('n')), Command::SelectNext, Context::Map);
-        bind!(plain(Char('p')), Command::SelectPrev, Context::Map);
-        bind!(shift(Char('N')), Command::RenameLayer, Context::Map);
-        bind!(shift(Char('P')), Command::PeelLayer, Context::Map);
-        bind!(shift(Char('M')), Command::MergeLayer, Context::Map);
-        bind!(shift(Char('R')), Command::Retidy, Context::Map);
-        bind!(plain(Char(']')), Command::CycleLayerNext, Context::Map);
-        bind!(plain(Char('[')), Command::CycleLayerPrev, Context::Map);
-        bind!(plain(Char('r')), Command::RenameRoom, Context::Map);
-        bind!(plain(Char('o')), Command::EditNotes, Context::Map);
-        bind!(plain(Char('d')), Command::DeleteSelectedConnection, Context::Map);
-        bind!(plain(Char('e')), Command::RelabelSelectedEdge, Context::Map);
-        bind!(plain(Char('i')), Command::ToggleInspector, Context::Map);
-        bind!(plain(Char('g')), Command::OpenGallery, Context::Map);
-        // Esc → ToggleFocus (in map context)
-        bind!(plain(Esc), Command::ToggleFocus, Context::Map);
+        bind!(plain(Char('c')), "center-map", Context::Map);
+        bind!(plain(Char('n')), "select-room next", Context::Map);
+        bind!(plain(Char('p')), "select-room prev", Context::Map);
+        bind!(shift(Char('N')), "rename-layer", Context::Map);
+        bind!(shift(Char('P')), "peel-layer", Context::Map);
+        bind!(shift(Char('M')), "merge-layer", Context::Map);
+        bind!(shift(Char('R')), "tidy-map", Context::Map);
+        bind!(plain(Char(']')), "cycle-layer next", Context::Map);
+        bind!(plain(Char('[')), "cycle-layer prev", Context::Map);
+        bind!(plain(Char('r')), "rename-room", Context::Map);
+        bind!(plain(Char('o')), "edit-notes", Context::Map);
+        bind!(plain(Char('d')), "delete-connection", Context::Map);
+        bind!(plain(Char('e')), "relabel-edge", Context::Map);
+        bind!(plain(Char('i')), "toggle-inspector", Context::Map);
+        bind!(plain(Char('g')), "open-gallery", Context::Map);
+        // Esc → toggle-focus (in map context)
+        bind!(plain(Esc), "toggle-focus", Context::Map);
 
         // ── Anim ──────────────────────────────────────────────────────────────
         // Pan in anim: hjkl only (plain arrows are bound to step; shift-arrows
         // removed so all direct bindings remain modifier-free).
-        bind!(plain(Char('h')), Command::PanLeft, Context::Anim);
-        bind!(plain(Char('l')), Command::PanRight, Context::Anim);
-        bind!(plain(Char('k')), Command::PanUp, Context::Anim);
-        bind!(plain(Char('j')), Command::PanDown, Context::Anim);
+        bind!(plain(Char('h')), "pan-map -1 0", Context::Anim);
+        bind!(plain(Char('l')), "pan-map 1 0", Context::Anim);
+        bind!(plain(Char('k')), "pan-map 0 -1", Context::Anim);
+        bind!(plain(Char('j')), "pan-map 0 1", Context::Anim);
 
         // Zoom in anim
-        bind!(plain(Char('+')), Command::ZoomIn, Context::Anim);
-        bind!(plain(Char('=')), Command::ZoomIn, Context::Anim);
-        bind!(plain(Char('-')), Command::ZoomOut, Context::Anim);
+        bind!(plain(Char('+')), "zoom-map in", Context::Anim);
+        bind!(plain(Char('=')), "zoom-map in", Context::Anim);
+        bind!(plain(Char('-')), "zoom-map out", Context::Anim);
 
         // Step / play / exit
-        bind!(plain(Left), Command::AnimStepBack, Context::Anim);
-        bind!(plain(Right), Command::AnimStepFwd, Context::Anim);
-        bind!(plain(Char(' ')), Command::AnimTogglePlay, Context::Anim);
-        bind!(plain(Esc), Command::AnimExit, Context::Anim);
-        bind!(plain(Enter), Command::AnimExit, Context::Anim);
+        bind!(plain(Left), "anim-step back", Context::Anim);
+        bind!(plain(Right), "anim-step forward", Context::Anim);
+        bind!(plain(Char(' ')), "anim-play", Context::Anim);
+        bind!(plain(Esc), "anim-exit", Context::Anim);
+        bind!(plain(Enter), "anim-exit", Context::Anim);
 
         KeyMap { bindings: b }
     }
@@ -734,71 +797,93 @@ impl KeyMap {
     ///
     /// - `Context::Map` also searches `Context::Global` on miss (fall-through).
     /// - `Context::Global` and `Context::Anim` do not fall through.
-    pub fn lookup(&self, spec: &KeySpec, ctx: Context) -> Option<Command> {
+    pub fn lookup(&self, spec: &KeySpec, ctx: Context) -> Option<&str> {
         // Exact context match first.
         for (s, cmd, c) in &self.bindings {
             if c == &ctx && s == spec {
-                return Some(*cmd);
+                return Some(cmd.as_str());
             }
         }
         // Map falls through to Global.
         if ctx == Context::Map {
             for (s, cmd, c) in &self.bindings {
                 if c == &Context::Global && s == spec {
-                    return Some(*cmd);
+                    return Some(cmd.as_str());
                 }
             }
         }
         None
     }
 
-    /// Return the first (primary) `KeySpec` bound to `cmd`.
-    ///
-    /// Prefers the binding in the command's own context; falls back to any context.
-    pub fn primary_key(&self, cmd: Command) -> Option<KeySpec> {
-        let preferred_ctx = cmd.context();
-        // Try the command's own context first.
-        if let Some((s, _, _)) = self.bindings.iter().find(|(_, c, cx)| *c == cmd && *cx == preferred_ctx) {
-            return Some(*s);
-        }
-        // Fall back to any context.
+    /// Return the first (primary) `KeySpec` whose command string starts with `command_name`.
+    pub fn primary_key(&self, command_name: &str) -> Option<KeySpec> {
         self.bindings.iter()
-            .find(|(_, c, _)| *c == cmd)
-            .map(|(s, _, _)| *s)
+            .find(|(_, s, _)| s.split_whitespace().next() == Some(command_name))
+            .map(|(spec, _, _)| *spec)
+    }
+
+    /// Return the first (primary) `KeySpec` bound to `cmd` by matching `full_cmd_string()`.
+    /// Task 10 bridge: removed in Task 10 when dispatch is rewritten.
+    pub fn primary_key_cmd(&self, cmd: Command) -> Option<KeySpec> {
+        let full = cmd.full_cmd_string();
+        let preferred_ctx = cmd.context();
+        self.bindings.iter()
+            .find(|(_, s, c)| s.as_str() == full && *c == preferred_ctx)
+            .or_else(|| self.bindings.iter().find(|(_, s, _)| s.as_str() == full))
+            .map(|(spec, _, _)| *spec)
     }
 
     /// Look up a key across ALL contexts (Global → Map → Anim) and return the
     /// first match. Used by the hotkey dialog so that commands in any context
     /// can be triggered from the dialog.
-    pub fn lookup_any(&self, spec: &KeySpec) -> Option<Command> {
+    pub fn lookup_any(&self, spec: &KeySpec) -> Option<&str> {
         for ctx in [Context::Global, Context::Map, Context::Anim] {
             // Use exact context match only (no Map→Global fallthrough here,
             // since we already iterate Global first).
             for (s, cmd, c) in &self.bindings {
                 if c == &ctx && s == spec {
-                    return Some(*cmd);
+                    return Some(cmd.as_str());
                 }
             }
         }
         None
     }
 
-    /// Iterate all `(KeySpec, Command)` pairs that belong to `ctx`
+    /// Iterate all `(KeySpec, &str)` pairs that belong to `ctx`
     /// (for the help screen's per-context listing).
-    pub fn for_context(&self, ctx: Context) -> impl Iterator<Item = (&KeySpec, &Command)> {
+    pub fn for_context(&self, ctx: Context) -> impl Iterator<Item = (&KeySpec, &str)> {
         self.bindings.iter()
             .filter(move |(_, _, c)| *c == ctx)
-            .map(|(s, cmd, _)| (s, cmd))
+            .map(|(s, cmd, _)| (s, cmd.as_str()))
     }
 
     /// Build a keymap from config overrides.
     ///
     /// Returns the resolved `KeyMap` and a list of warning strings for
     /// overrides that were rejected (unknown name, parse error, conflict).
-    ///
-    /// TODO(Task 8): consume context sections (use_defaults, global, map, anim).
-    pub fn resolve(_cfg: &crate::config::KeymapConfig) -> (KeyMap, Vec<String>) {
-        (KeyMap::default(), Vec::new())
+    pub fn resolve(cfg: &crate::config::KeymapConfig) -> (KeyMap, Vec<String>) {
+        let mut km = if cfg.use_defaults { KeyMap::default() } else { KeyMap { bindings: Vec::new() } };
+        let mut warnings = Vec::new();
+        for (ctx, section) in [
+            (Context::Global, &cfg.global),
+            (Context::Map, &cfg.map),
+            (Context::Anim, &cfg.anim),
+        ] {
+            for (key, command) in section {
+                let spec = match key.parse::<KeySpec>() {
+                    Ok(s) => s,
+                    Err(e) => { warnings.push(format!("keymap: cannot parse key '{key}': {e}; skipped")); continue; }
+                };
+                let cmd_name = command.split_whitespace().next().unwrap_or("");
+                if crate::slash::find_command(cmd_name).is_none() {
+                    warnings.push(format!("keymap: unknown command '{command}'; skipped"));
+                    continue;
+                }
+                km.bindings.retain(|(s, _, c)| !(*s == spec && *c == ctx));
+                km.bindings.push((spec, command.clone(), ctx));
+            }
+        }
+        (km, warnings)
     }
 }
 
@@ -964,13 +1049,13 @@ mod tests {
         let km = KeyMap::default();
         let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
         use KeyCode::*;
-        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Global), Some(Command::SaveGame));
-        assert_eq!(km.lookup(&g(Char('n'), false, false), Context::Map), Some(Command::SelectNext));
-        assert_eq!(km.lookup(&g(Char('h'), false, false), Context::Map), Some(Command::PanLeft));
+        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Global), Some("save-game"));
+        assert_eq!(km.lookup(&g(Char('n'), false, false), Context::Map), Some("select-room next"));
+        assert_eq!(km.lookup(&g(Char('h'), false, false), Context::Map), Some("pan-map -1 0"));
         // Map falls through to Global:
-        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some(Command::SaveGame));
+        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-game"));
         // shift-arrow pan aliases were removed; plain arrow still works:
-        assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some(Command::PanLeft));
+        assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some("pan-map -1 0"));
         // shift-arrow is no longer bound in map context:
         assert_eq!(km.lookup(&g(Left, false, true), Context::Map), None);
     }
@@ -1102,7 +1187,7 @@ mod tests {
         // F5 is the default key
         let km = KeyMap::default();
         let f5 = KeySpec { code: KeyCode::F(5), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f5, Context::Global), Some(Command::ResetGame));
+        assert_eq!(km.lookup(&f5, Context::Global), Some("reset-game"));
     }
 
     #[test]
@@ -1114,7 +1199,7 @@ mod tests {
         // F4 is the default key.
         let km = KeyMap::default();
         let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f4, Context::Global), Some(Command::OpenHistory));
+        assert_eq!(km.lookup(&f4, Context::Global), Some("open-history"));
         // It appears in the Files hotkey group.
         let layout = HotkeyLayout::default();
         let files = layout.groups.iter().find(|(t, _)| t == "Files").expect("Files group");
@@ -1135,7 +1220,7 @@ mod tests {
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::Char('v'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, Context::Global);
-        assert_eq!(cmd, Some(Command::ToggleInventory), "v should be bound to ToggleInventory");
+        assert_eq!(cmd, Some("toggle-inventory"), "v should be bound to toggle-inventory");
         assert!(matches!(Command::ToggleInventory.to_action(), Action::ToggleInventory));
     }
 
@@ -1178,8 +1263,8 @@ mod tests {
         let zero = KeySpec { code: KeyCode::Char('0'), ctrl: false, shift: false, alt: false };
         assert_eq!(
             km.lookup(&zero, Context::Map),
-            Some(Command::ZoomReset),
-            "'0' key must be bound to ZoomReset in Map context"
+            Some("zoom-map reset"),
+            "'0' key must be bound to zoom-map reset in Map context"
         );
     }
 
@@ -1210,8 +1295,8 @@ mod tests {
         assert!(matches!(state.zoom, Zoom::Boxes), "ZoomReset must restore Zoom::Boxes");
     }
 
-    /// Every default binding for a DIRECT command (excluding save_game and
-    /// restore_game, which intentionally use Ctrl) must have ctrl=false and
+    /// Every default binding for a DIRECT command (excluding save-game and
+    /// load-game, which intentionally use Ctrl) must have ctrl=false and
     /// shift=false. This invariant ensures that direct commands are reachable
     /// with plain (unmodified) keystrokes.
     #[test]
@@ -1220,20 +1305,24 @@ mod tests {
         let layout = HotkeyLayout::default();
 
         // Commands excluded from this invariant by design.
-        let excluded = [Command::SaveGame, Command::RestoreGame];
+        let excluded = ["save-game", "load-game"];
 
         let mut violations: Vec<String> = Vec::new();
-        for (spec, cmd, _ctx) in &km.bindings {
-            if excluded.contains(cmd) {
+        for (spec, cmd_str, _ctx) in &km.bindings {
+            let first = cmd_str.split_whitespace().next().unwrap_or("");
+            if excluded.contains(&first) {
                 continue;
             }
-            if !layout.is_direct(*cmd) {
+            // Check is_direct by mapping command string back to Command via full_cmd_string.
+            let is_direct = ALL_COMMANDS.iter().copied()
+                .any(|c| c.full_cmd_string() == cmd_str.as_str() && layout.is_direct(c));
+            if !is_direct {
                 continue;
             }
             if spec.ctrl || spec.shift {
                 violations.push(format!(
                     "{} ({}): ctrl={} shift={}",
-                    cmd.name(),
+                    cmd_str,
                     spec.label(),
                     spec.ctrl,
                     spec.shift,
@@ -1243,8 +1332,33 @@ mod tests {
 
         assert!(
             violations.is_empty(),
-            "direct bindings with modifier keys found (should be plain):\n  {}",
+            "direct bindings with modifier keys found:\n  {}",
             violations.join("\n  ")
         );
+    }
+
+    #[test]
+    fn keymap_default_and_resolve_command_strings() {
+        use crate::config::KeymapConfig;
+        let km = KeyMap::default();
+        let plus: KeySpec = "+".parse().unwrap();
+        assert_eq!(km.lookup(&plus, Context::Map), Some("zoom-map in"));
+        let left: KeySpec = "left".parse().unwrap();
+        assert_eq!(km.lookup(&left, Context::Map), Some("pan-map -1 0"));
+
+        // use_defaults=false → empty base; only the user binding exists.
+        let mut cfg = KeymapConfig { use_defaults: false, ..Default::default() };
+        cfg.global.insert("ctrl+s".into(), "save-game".into());
+        let (km2, warns) = KeyMap::resolve(&cfg);
+        let cs: KeySpec = "ctrl+s".parse().unwrap();
+        assert_eq!(km2.lookup(&cs, Context::Global), Some("save-game"));
+        assert!(km2.lookup(&plus, Context::Map).is_none(), "no defaults loaded");
+        assert!(warns.is_empty());
+
+        // Unknown command name → skip + warn.
+        let mut cfg3 = KeymapConfig::default();
+        cfg3.global.insert("ctrl+z".into(), "frobnicate".into());
+        let (_km3, warns3) = KeyMap::resolve(&cfg3);
+        assert!(warns3.iter().any(|w| w.contains("frobnicate")));
     }
 }

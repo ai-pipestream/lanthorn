@@ -329,6 +329,12 @@ pub enum Action {
 
 // ── key_to_action ─────────────────────────────────────────────────────────────
 
+/// Task 9 bridge: map a full command-string to its Command enum for dispatch.
+/// Removed in Task 9 when the dispatch path is rewritten.
+fn cmd_str_to_command(s: &str) -> Option<crate::keymap::Command> {
+    crate::keymap::ALL_COMMANDS.iter().copied().find(|c| c.full_cmd_string() == s)
+}
+
 /// Map a crossterm `KeyEvent` to an `Action` given the current `AppState`.
 ///
 /// Routing order:
@@ -368,8 +374,9 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             }
         }
         let spec = KeySpec::from_key_event(key);
+        // Task 9 bridge: cmd_str_to_command removed in Task 9
         return match state.keymap.lookup(&spec, Context::Anim) {
-            Some(cmd) => cmd.to_action(),
+            Some(s) => cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None),
             None => Action::None,
         };
     }
@@ -448,8 +455,11 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
     //    as Map context. A command is reachable directly iff it is in the direct
     //    set, regardless of whether it uses a Ctrl modifier.
     if ctrl {
+        // Task 9 bridge: cmd_str_to_command removed in Task 9
         return match state.keymap.lookup(&spec, Context::Global) {
-            Some(cmd) if state.hotkeys.is_direct(cmd) => cmd.to_action(),
+            Some(s) if cmd_str_to_command(s).map_or(false, |c| state.hotkeys.is_direct(c)) => {
+                cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None)
+            }
             _ => Action::None,
         };
     }
@@ -465,8 +475,9 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
                 return a;
             }
             // Global fallthrough for non-ctrl non-Tab non-printable keys.
+            // Task 9 bridge: cmd_str_to_command removed in Task 9
             match state.keymap.lookup(&spec, Context::Global) {
-                Some(cmd) => cmd.to_action(),
+                Some(s) => cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None),
                 None => Action::None,
             }
         }
@@ -474,10 +485,12 @@ pub fn key_to_action(state: &AppState, key: KeyEvent) -> Action {
             // Map context lookup with direct filter: only return the action if the
             // command is in the direct (always-available) set. Dialog-only commands
             // return None when the dialog is closed.
+            // Task 9 bridge: cmd_str_to_command removed in Task 9
             match state.keymap.lookup(&spec, Context::Map) {
-                Some(cmd) if state.hotkeys.is_direct(cmd) => cmd.to_action(),
-                Some(_) => Action::None,
-                None => Action::None,
+                Some(s) if cmd_str_to_command(s).map_or(false, |c| state.hotkeys.is_direct(c)) => {
+                    cmd_str_to_command(s).map(|c| c.to_action()).unwrap_or(Action::None)
+                }
+                _ => Action::None,
             }
         }
     }
@@ -974,8 +987,11 @@ fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> Action {
 
     // Look up the key across all contexts (Global, Map, Anim) so that commands
     // in any context can be triggered from the dialog.
-    if let Some(cmd) = state.keymap.lookup_any(&spec) {
-        return cmd.to_action();
+    // Task 9 bridge: cmd_str_to_command removed in Task 9
+    if let Some(s) = state.keymap.lookup_any(&spec) {
+        if let Some(cmd) = cmd_str_to_command(s) {
+            return cmd.to_action();
+        }
     }
 
     Action::None
@@ -5210,7 +5226,7 @@ mod tests {
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::Char('m'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, crate::keymap::Context::Global);
-        assert_eq!(cmd, Some(crate::keymap::Command::OpenVerbMenu), "m should be bound to OpenVerbMenu");
+        assert_eq!(cmd, Some("open-verb-menu"), "m should be bound to OpenVerbMenu");
         assert!(matches!(crate::keymap::Command::OpenVerbMenu.to_action(), Action::OpenVerbMenu));
     }
 

@@ -164,9 +164,10 @@ pub fn hint_bar(
                 return None;
             }
             // Gate 2: command must have a primary key binding.
-            let k = keymap.primary_key(cmd)?;
+            // Task 10 bridge: primary_key_cmd removed in Task 10
+            let k = keymap.primary_key_cmd(cmd)?;
             // Gate 3: pressing that key in this context must resolve back to this command.
-            if keymap.lookup(&k, ctx) != Some(cmd) {
+            if keymap.lookup(&k, ctx) != Some(cmd.full_cmd_string()) {
                 return None;
             }
             Some(format!("{}: {}", k.label(), cmd.label()))
@@ -4059,9 +4060,10 @@ mod tests {
                 if !layout.is_direct(cmd) {
                     continue;
                 }
-                if let Some(k) = km.primary_key(cmd) {
+                // Task 10 bridge: primary_key_cmd removed in Task 10
+                if let Some(k) = km.primary_key_cmd(cmd) {
                     let resolved = km.lookup(&k, ctx);
-                    if resolved == Some(cmd) {
+                    if resolved == Some(cmd.full_cmd_string()) {
                         // This entry would be shown — verify label format.
                         let entry = format!("{}: {}", k.label(), cmd.label());
                         let bar = hint_bar(&km, &layout, ctx, hints, 200);

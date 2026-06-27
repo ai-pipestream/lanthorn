@@ -123,7 +123,8 @@ fn build_rows(state: &AppState) -> Vec<String> {
 
 /// Find the primary key label for a command in the state's keymap.
 fn primary_key_label(state: &AppState, cmd: Command) -> String {
-    state.keymap.primary_key(cmd)
+    // Task 10 bridge: primary_key_cmd removed in Task 10
+    state.keymap.primary_key_cmd(cmd)
         .map(|k| k.label())
         .unwrap_or_else(|| "?".to_string())
 }
