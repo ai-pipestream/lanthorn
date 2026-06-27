@@ -15,6 +15,7 @@ use std::path::Path;
 use ratatui::style::{Color, Modifier, Style};
 use regex::Regex;
 
+use crate::render::dialog::DialogPlacement;
 use crate::render::paneframe::{BorderStyle, PaneGlyphs, PaneSides};
 
 /// A compiled user transcript-styling rule: a regex matched whole-line against
@@ -274,6 +275,10 @@ pub struct ColorScheme {
     pub dialog_box_style: BorderStyle,
     /// Whether the dialog drop-shadow is enabled.
     pub dialog_shadow_on: bool,
+    /// Where centered modals are anchored on screen (default `Center`).
+    pub dialog_placement: DialogPlacement,
+    /// Cells of gap from the anchored edge(s); ignored for `Center` (default `0`).
+    pub dialog_margin: u16,
     /// Upper (virtual) window content style.
     pub upper_window: Style,
     /// Upper (virtual) window border style.
@@ -370,6 +375,8 @@ impl ColorScheme {
             dialog_shadow: Style::new().bg(Color::DarkGray),
             dialog_box_style: BorderStyle::None,
             dialog_shadow_on: false,
+            dialog_placement: DialogPlacement::Center,
+            dialog_margin: 0,
             upper_window: Style::new(),
             upper_window_border: Style::new().fg(Color::Cyan),
             virtual_window_border: BorderStyle::Single,
@@ -523,6 +530,8 @@ impl ColorScheme {
             dialog_shadow: Style::new().bg(scheme.palette[8]),
             dialog_box_style: BorderStyle::None,
             dialog_shadow_on: false,
+            dialog_placement: DialogPlacement::Center,
+            dialog_margin: 0,
             upper_window: Style::new().fg(fg),
             upper_window_border: Style::new().fg(scheme.palette[6]),
             virtual_window_border: BorderStyle::Single,

@@ -47,6 +47,14 @@ pub struct Decl {
     /// Optional shadow flag. Only interpreted for the `dialog` selector.
     #[serde(default)]
     pub shadow: Option<bool>,
+    /// Optional placement token (center/top/bottom/left/right/corners). Only
+    /// interpreted for the `dialog` selector.
+    #[serde(default)]
+    pub placement: Option<String>,
+    /// Optional placement margin (cells from the anchored edge). Only interpreted
+    /// for the `dialog` selector.
+    #[serde(default)]
+    pub margin: Option<u16>,
     /// Per-side/corner glyph overrides (border selectors only).
     #[serde(default)]
     pub glyph_top: Option<String>,
@@ -425,6 +433,12 @@ pub fn apply_color_decls(
                 if let Some(shadow_on) = decl.shadow {
                     cs.dialog_shadow_on = shadow_on;
                 }
+                if let Some(ref p) = decl.placement {
+                    cs.dialog_placement = crate::render::dialog::DialogPlacement::from_token(p);
+                }
+                if let Some(m) = decl.margin {
+                    cs.dialog_margin = m;
+                }
                 cs.dialog_glyphs = decl_glyphs(decl);
             }
             "dialog:title"         => cs.dialog_title = cs.dialog_title.patch(style),
@@ -617,6 +631,8 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
         style_right:  over.style_right.clone().or(base.style_right.clone()),
         header:       over.header.or(base.header),
         shadow:    over.shadow.or(base.shadow),
+        placement: over.placement.clone().or(base.placement.clone()),
+        margin:    over.margin.or(base.margin),
         glyph_top:    over.glyph_top.clone().or(base.glyph_top.clone()),
         glyph_bottom: over.glyph_bottom.clone().or(base.glyph_bottom.clone()),
         glyph_left:   over.glyph_left.clone().or(base.glyph_left.clone()),
@@ -736,6 +752,8 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
         style_right:  t.get("style_right").and_then(toml::Value::as_str).map(str::to_string),
         header:       t.get("header").and_then(toml::Value::as_bool),
         shadow:    t.get("shadow").and_then(toml::Value::as_bool),
+        placement: t.get("placement").and_then(toml::Value::as_str).map(str::to_string),
+        margin:    t.get("margin").and_then(toml::Value::as_integer).map(|n| n as u16),
         glyph_top:    t.get("glyph_top").and_then(toml::Value::as_str).map(str::to_string),
         glyph_bottom: t.get("glyph_bottom").and_then(toml::Value::as_str).map(str::to_string),
         glyph_left:   t.get("glyph_left").and_then(toml::Value::as_str).map(str::to_string),
@@ -962,6 +980,8 @@ fn style_to_decl(s: &Style) -> Decl {
         style_right: None,
         header: None,
         shadow: None, // callers set this for the dialog selector
+        placement: None, // callers set this for the dialog selector
+        margin: None,    // callers set this for the dialog selector
         glyph_top: None,
         glyph_bottom: None,
         glyph_left: None,
@@ -1669,6 +1689,54 @@ fg = "green"
         assert_eq!(cs.connector.fg, Some(Color::Magenta));
         assert_eq!(cs.focused_border.fg, Some(Color::Yellow));
         assert!(cs.focused_border.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn decl_parses_placement_and_margin() {
+        let t: toml::value::Table = toml::from_str(
+            "placement = \"bottom\"\nmargin = 2\n",
+        ).unwrap();
+        let d = parse_decl_from_table(&t);
+        assert_eq!(d.placement.as_deref(), Some("bottom"));
+        assert_eq!(d.margin, Some(2));
+        // Absent keys parse to None.
+        let empty: toml::value::Table = toml::from_str("fg = \"cyan\"\n").unwrap();
+        let d2 = parse_decl_from_table(&empty);
+        assert_eq!(d2.placement, None);
+        assert_eq!(d2.margin, None);
+    }
+
+    #[test]
+    fn apply_color_decls_resolves_dialog_placement_and_margin() {
+        use crate::render::dialog::DialogPlacement;
+        let scheme = crate::colors::GhosttyScheme::default();
+
+        // Absent -> defaults Center / 0.
+        let cs0 = crate::colors::ColorScheme::terminal_default();
+        assert_eq!(cs0.dialog_placement, DialogPlacement::Center);
+        assert_eq!(cs0.dialog_margin, 0);
+
+        // Resolved from the dialog selector's Decl.
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        let mut decls = std::collections::BTreeMap::new();
+        decls.insert(
+            "dialog".to_string(),
+            Decl { placement: Some("top-right".into()), margin: Some(3), ..Default::default() },
+        );
+        let warns = apply_color_decls(&mut cs, &decls, &scheme);
+        assert!(warns.is_empty());
+        assert_eq!(cs.dialog_placement, DialogPlacement::TopRight);
+        assert_eq!(cs.dialog_margin, 3);
+
+        // Unknown token falls back to Center.
+        let mut cs2 = crate::colors::ColorScheme::terminal_default();
+        let mut decls2 = std::collections::BTreeMap::new();
+        decls2.insert(
+            "dialog".to_string(),
+            Decl { placement: Some("nonsense".into()), ..Default::default() },
+        );
+        apply_color_decls(&mut cs2, &decls2, &scheme);
+        assert_eq!(cs2.dialog_placement, DialogPlacement::Center);
     }
 
     #[test]

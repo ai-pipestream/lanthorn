@@ -22,6 +22,57 @@ pub enum Placement {
     Positioned(Rect),
 }
 
+// ── DialogPlacement ─────────────────────────────────────────────────────────────
+
+/// Where a centered modal is anchored within the screen. `Center` (the default)
+/// reproduces today's behavior exactly; the edges/corners anchor the modal to the
+/// matching side(s) with a configurable margin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DialogPlacement {
+    #[default]
+    Center,
+    Top,
+    Bottom,
+    Left,
+    Right,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl DialogPlacement {
+    /// Parse a placement token. Unknown tokens (and `center`) map to `Center`.
+    pub fn from_token(s: &str) -> DialogPlacement {
+        match s.trim().to_lowercase().as_str() {
+            "top" => DialogPlacement::Top,
+            "bottom" => DialogPlacement::Bottom,
+            "left" => DialogPlacement::Left,
+            "right" => DialogPlacement::Right,
+            "top-left" => DialogPlacement::TopLeft,
+            "top-right" => DialogPlacement::TopRight,
+            "bottom-left" => DialogPlacement::BottomLeft,
+            "bottom-right" => DialogPlacement::BottomRight,
+            _ => DialogPlacement::Center,
+        }
+    }
+
+    /// The canonical token for this placement (inverse of `from_token`).
+    pub fn as_token(self) -> &'static str {
+        match self {
+            DialogPlacement::Center => "center",
+            DialogPlacement::Top => "top",
+            DialogPlacement::Bottom => "bottom",
+            DialogPlacement::Left => "left",
+            DialogPlacement::Right => "right",
+            DialogPlacement::TopLeft => "top-left",
+            DialogPlacement::TopRight => "top-right",
+            DialogPlacement::BottomLeft => "bottom-left",
+            DialogPlacement::BottomRight => "bottom-right",
+        }
+    }
+}
+
 // ── ButtonId ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +304,32 @@ mod tests {
         assert!(r.close.is_some());
         assert_eq!(r.buttons.len(), 2);
         assert!(r.content.width > 0 && r.content.height > 0);
+    }
+
+    #[test]
+    fn dialog_placement_token_round_trips_and_defaults() {
+        assert_eq!(DialogPlacement::from_token("center"), DialogPlacement::Center);
+        assert_eq!(DialogPlacement::from_token("top"), DialogPlacement::Top);
+        assert_eq!(DialogPlacement::from_token("bottom"), DialogPlacement::Bottom);
+        assert_eq!(DialogPlacement::from_token("left"), DialogPlacement::Left);
+        assert_eq!(DialogPlacement::from_token("right"), DialogPlacement::Right);
+        assert_eq!(DialogPlacement::from_token("top-left"), DialogPlacement::TopLeft);
+        assert_eq!(DialogPlacement::from_token("top-right"), DialogPlacement::TopRight);
+        assert_eq!(DialogPlacement::from_token("bottom-left"), DialogPlacement::BottomLeft);
+        assert_eq!(DialogPlacement::from_token("bottom-right"), DialogPlacement::BottomRight);
+        // Unknown and case/whitespace handling.
+        assert_eq!(DialogPlacement::from_token("nonsense"), DialogPlacement::Center);
+        assert_eq!(DialogPlacement::from_token("  TOP-LEFT  "), DialogPlacement::TopLeft);
+        // Default is Center.
+        assert_eq!(DialogPlacement::default(), DialogPlacement::Center);
+        // as_token is the inverse for every variant.
+        for p in [
+            DialogPlacement::Center, DialogPlacement::Top, DialogPlacement::Bottom,
+            DialogPlacement::Left, DialogPlacement::Right, DialogPlacement::TopLeft,
+            DialogPlacement::TopRight, DialogPlacement::BottomLeft, DialogPlacement::BottomRight,
+        ] {
+            assert_eq!(DialogPlacement::from_token(p.as_token()), p);
+        }
     }
 
     #[test]
