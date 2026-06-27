@@ -586,8 +586,50 @@ stream → Glulx main memory at `addr + pos·elsize` (1 byte, or 4 for a Unicode
 stream), advancing `pos` and the write count; a null/invalid/zero stream is
 discarded. Nothing here panics on a bad window/stream id.
 
-### Deferred to 3a-2 (NOT in 3a-1)
+### Input events + `glk_select` (3a-2)
 
-Input events (`glk_request_line_event`/`char_event`), `glk_select`
-suspend/resume, filerefs/file streams, echo streams, timers, the full
-`glk_gestalt` input capabilities, and the glulxercise compliance run.
+The IF input subset: **line** and **character** input, delivered through
+`glk_select`. The model mirrors `zvm`'s `NeedLine`/`NeedChar` suspend/resume.
+
+**The `event_t` struct** (4 `glui32` words, big-endian, written at the address
+passed to `glk_select`):
+
+| Offset | Field | Line input        | Char input          |
+|--------|-------|-------------------|---------------------|
+| +0     | type  | `evtype_LineInput` 3 | `evtype_CharInput` 2 |
+| +4     | win   | the window id     | the window id       |
+| +8     | val1  | chars entered     | the key code        |
+| +12    | val2  | 0 (terminator)    | 0                   |
+
+`evtype_*`: None 0, Timer 1, CharInput 2, LineInput 3, MouseInput 4, Arrange 5,
+Redraw 6, SoundNotify 7, Hyperlink 8.
+
+**Special keycodes** (`keycode_*`, from glk.h) occupy the top of the `glui32`
+range, `keycode_Func12` `0xffffffe4` … `keycode_Unknown` `0xffffffff`
+(`keycode_MAXVAL` = 28): Unknown ffffffff, Left fffffffe, Right fffffffd, Up
+fffffffc, Down fffffffb, Return fffffffa, Delete fffffff9, Escape fffffff8, Tab
+fffffff7, PageUp fffffff6, PageDown fffffff5, Home fffffff4, End fffffff3,
+Func1 ffffffef … Func12 ffffffe4.
+
+**Request selectors:** `glk_request_line_event` 0x00D0 (`win, buf, maxlen,
+initlen`), `glk_request_line_event_uni` 0x0141, `glk_request_char_event`
+0x00D2 (`win`), `glk_request_char_event_uni` 0x0140, `glk_select` 0x00C0
+(`event`). A request is recorded on the window (line and char are mutually
+exclusive per window). `glk_select` then: (1) delivers any queued non-input
+event (arrange) first; else (2) **suspends** on the first window with a pending
+request — `step()` returns `NeedLine{win}` / `NeedChar{win, unicode}` — until the
+host calls `supply_line(text)` / `supply_char(key)`, which writes the buffer +
+`event_t` and resumes; else (3) with nothing to wait for, writes `evtype_None`
+and continues (a malformed program would otherwise deadlock).
+
+`supply_line` writes `text` into the request buffer (truncated to `maxlen`;
+Latin-1 bytes, or 32-bit words for `_uni`) and sets `val1` to the char count.
+`supply_char` maps the key for a non-Unicode request: a Latin-1 code (≤ 0xff) or
+a special keycode passes through; any other code point becomes `keycode_Unknown`.
+A `_uni` char request passes the full code point. The model does **not** echo
+line input — like a stdio Glk, the display backend/terminal handles echo.
+
+### Deferred / out of scope
+
+Filerefs/file streams (`@save`/`@restore` via Glk), echo streams, timers,
+hyperlinks, mouse, graphics, and sound remain out of scope.

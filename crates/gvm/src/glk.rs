@@ -134,6 +134,96 @@ impl GlkStyle {
     }
 }
 
+// ── Event types + keycodes (`evtype_*`, `keycode_*`, from glk.h) ──────────────
+
+/// Glk event type codes (`evtype_*`), as written into the `type` field of the
+/// `event_t` struct delivered by `glk_select`. (Timer/Sound/Hyperlink are listed
+/// for completeness; this subset delivers only Char/Line/Arrange.)
+pub mod evtype {
+    /// `evtype_None` — placeholder; never returned by a (blocking) `glk_select`.
+    pub const NONE: u32 = 0;
+    /// `evtype_Timer`.
+    pub const TIMER: u32 = 1;
+    /// `evtype_CharInput` — a single keystroke.
+    pub const CHAR_INPUT: u32 = 2;
+    /// `evtype_LineInput` — a completed line of text.
+    pub const LINE_INPUT: u32 = 3;
+    /// `evtype_MouseInput`.
+    pub const MOUSE_INPUT: u32 = 4;
+    /// `evtype_Arrange` — window sizes changed.
+    pub const ARRANGE: u32 = 5;
+    /// `evtype_Redraw`.
+    pub const REDRAW: u32 = 6;
+    /// `evtype_SoundNotify`.
+    pub const SOUND_NOTIFY: u32 = 7;
+    /// `evtype_Hyperlink`.
+    pub const HYPERLINK: u32 = 8;
+}
+
+/// Glk special keycodes for character input (`keycode_*`). These occupy the top
+/// of the 32-bit range: `keycode_Func12` (`0xffff_ffe4`) up to `keycode_Unknown`
+/// (`0xffff_ffff`) — `keycode_MAXVAL` (28) distinct codes. A non-Unicode char
+/// request reports a Latin-1 code (≤ 0xff) or one of these; anything else
+/// becomes [`keycode::UNKNOWN`].
+pub mod keycode {
+    /// `keycode_Unknown`.
+    pub const UNKNOWN: u32 = 0xffff_ffff;
+    /// `keycode_Left`.
+    pub const LEFT: u32 = 0xffff_fffe;
+    /// `keycode_Right`.
+    pub const RIGHT: u32 = 0xffff_fffd;
+    /// `keycode_Up`.
+    pub const UP: u32 = 0xffff_fffc;
+    /// `keycode_Down`.
+    pub const DOWN: u32 = 0xffff_fffb;
+    /// `keycode_Return` (Enter).
+    pub const RETURN: u32 = 0xffff_fffa;
+    /// `keycode_Delete` (Backspace).
+    pub const DELETE: u32 = 0xffff_fff9;
+    /// `keycode_Escape`.
+    pub const ESCAPE: u32 = 0xffff_fff8;
+    /// `keycode_Tab`.
+    pub const TAB: u32 = 0xffff_fff7;
+    /// `keycode_PageUp`.
+    pub const PAGE_UP: u32 = 0xffff_fff6;
+    /// `keycode_PageDown`.
+    pub const PAGE_DOWN: u32 = 0xffff_fff5;
+    /// `keycode_Home`.
+    pub const HOME: u32 = 0xffff_fff4;
+    /// `keycode_End`.
+    pub const END: u32 = 0xffff_fff3;
+    /// `keycode_Func1`.
+    pub const FUNC1: u32 = 0xffff_ffef;
+    /// `keycode_Func12` — the lowest-valued special keycode.
+    pub const FUNC12: u32 = 0xffff_ffe4;
+    /// `keycode_MAXVAL` — the number of special keycodes.
+    pub const MAXVAL: u32 = 28;
+    /// The lowest value in the special-keycode block (`keycode_Func12`); any
+    /// `glui32` ≥ this is a special key rather than a Unicode code point.
+    pub const SPECIAL_FLOOR: u32 = FUNC12;
+}
+
+/// A delivered Glk event: the four `glui32` words written at the `event_t*`
+/// passed to `glk_select` — `type`, the window id (`winid_t`), and `val1`/`val2`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GlkEvent {
+    /// The `evtype_*` code.
+    pub etype: u32,
+    /// The window that generated the event (0 = none).
+    pub win: u32,
+    /// First event-specific value (line: char count; char: the key code).
+    pub val1: u32,
+    /// Second event-specific value (line terminator key, else 0).
+    pub val2: u32,
+}
+
+impl GlkEvent {
+    /// The `evtype_None` event (no event available).
+    pub fn none() -> GlkEvent {
+        GlkEvent { etype: evtype::NONE, win: 0, val1: 0, val2: 0 }
+    }
+}
+
 /// A window's resolved rectangle, in characters, within the display.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Rect {
@@ -332,6 +422,28 @@ struct Grid {
     cy: u32,
 }
 
+/// A pending line-input request on a window (`glk_request_line_event`). The
+/// engine fills `buf` (in Glulx memory) when the host supplies the line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineReq {
+    /// Glulx address of the input buffer.
+    pub buf: u32,
+    /// Maximum element count the buffer holds.
+    pub maxlen: u32,
+    /// Pre-filled element count already in the buffer at request time.
+    pub initlen: u32,
+    /// `true` for `_uni` (32-bit elements); `false` for Latin-1 bytes.
+    pub unicode: bool,
+}
+
+/// A pending character-input request on a window (`glk_request_char_event`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CharReq {
+    /// `true` for `_uni` (full Unicode code point); `false` reports Latin-1 or a
+    /// special keycode (else `keycode_Unknown`).
+    pub unicode: bool,
+}
+
 /// A Glk window (tree node).
 #[derive(Clone)]
 struct Window {
@@ -343,6 +455,10 @@ struct Window {
     stream: u32,
     rect: Rect,
     grid: Grid,
+    /// A pending line-input request (None when not awaiting a line).
+    line_req: Option<LineReq>,
+    /// A pending char-input request (None when not awaiting a key).
+    char_req: Option<CharReq>,
     // Pair-window fields (all 0 for leaf windows):
     child1: u32,
     child2: u32,
@@ -361,6 +477,8 @@ pub struct Model {
     root: u32,
     /// Current output stream id (0 = none).
     cur_stream: u32,
+    /// Queued non-input events (arrange/redraw) awaiting the next `glk_select`.
+    events: std::collections::VecDeque<GlkEvent>,
 }
 
 impl Default for Model {
@@ -372,7 +490,13 @@ impl Default for Model {
 impl Model {
     /// A fresh, empty model (no windows, no streams).
     pub fn new() -> Model {
-        Model { windows: Vec::new(), streams: Vec::new(), root: 0, cur_stream: 0 }
+        Model {
+            windows: Vec::new(),
+            streams: Vec::new(),
+            root: 0,
+            cur_stream: 0,
+            events: std::collections::VecDeque::new(),
+        }
     }
 
     // ── slot accessors ────────────────────────────────────────────────────────
@@ -412,6 +536,8 @@ impl Model {
             stream: 0,
             rect: Rect::default(),
             grid: Grid::default(),
+            line_req: None,
+            char_req: None,
             child1: 0,
             child2: 0,
             key: 0,
@@ -799,6 +925,84 @@ impl Model {
         if let Some(s) = self.stream_mut(id) {
             s.write_count = s.write_count.saturating_add(n);
         }
+    }
+
+    // ── input requests (3a-2) ─────────────────────────────────────────────────
+
+    /// Record a pending line-input request on `win` (replacing any prior line or
+    /// char request on it). Returns `false` for a non-existent or pair window.
+    pub fn request_line_event(&mut self, win: u32, buf: u32, maxlen: u32, initlen: u32, unicode: bool) -> bool {
+        match self.win_mut(win) {
+            Some(w) if w.wintype != WinType::Pair => {
+                w.char_req = None;
+                w.line_req = Some(LineReq { buf, maxlen, initlen: initlen.min(maxlen), unicode });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Record a pending char-input request on `win` (replacing any prior request
+    /// on it). Returns `false` for a non-existent or pair window.
+    pub fn request_char_event(&mut self, win: u32, unicode: bool) -> bool {
+        match self.win_mut(win) {
+            Some(w) if w.wintype != WinType::Pair => {
+                w.line_req = None;
+                w.char_req = Some(CharReq { unicode });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The pending line request on `win`, if any.
+    pub fn line_request(&self, win: u32) -> Option<LineReq> {
+        self.win(win).and_then(|w| w.line_req)
+    }
+    /// The pending char request on `win`, if any.
+    pub fn char_request(&self, win: u32) -> Option<CharReq> {
+        self.win(win).and_then(|w| w.char_req)
+    }
+
+    /// Take (and clear) the pending line request on `win`.
+    pub fn take_line_request(&mut self, win: u32) -> Option<LineReq> {
+        self.win_mut(win).and_then(|w| w.line_req.take())
+    }
+    /// Take (and clear) the pending char request on `win`.
+    pub fn take_char_request(&mut self, win: u32) -> Option<CharReq> {
+        self.win_mut(win).and_then(|w| w.char_req.take())
+    }
+
+    /// The first window (lowest id) with a pending line request: `(win, unicode)`.
+    pub fn first_line_request(&self) -> Option<(u32, bool)> {
+        self.windows
+            .iter()
+            .flatten()
+            .find_map(|w| w.line_req.map(|r| (w.id, r.unicode)))
+    }
+    /// The first window (lowest id) with a pending char request: `(win, unicode)`.
+    pub fn first_char_request(&self) -> Option<(u32, bool)> {
+        self.windows
+            .iter()
+            .flatten()
+            .find_map(|w| w.char_req.map(|r| (w.id, r.unicode)))
+    }
+
+    // ── event queue (arrange/redraw; input events are delivered directly) ─────
+
+    /// Queue a non-input event for the next `glk_select`. Arrange/Redraw events
+    /// dedupe (one of each suffices until consumed).
+    pub fn push_event(&mut self, ev: GlkEvent) {
+        if (ev.etype == evtype::ARRANGE || ev.etype == evtype::REDRAW)
+            && self.events.iter().any(|e| e.etype == ev.etype && e.win == ev.win)
+        {
+            return;
+        }
+        self.events.push_back(ev);
+    }
+    /// Pop the next queued non-input event, if any.
+    pub fn pop_event(&mut self) -> Option<GlkEvent> {
+        self.events.pop_front()
     }
 }
 

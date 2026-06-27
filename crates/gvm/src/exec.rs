@@ -10,7 +10,7 @@
 // frame so a return can restore the caller.
 
 use crate::error::GError;
-use crate::glk::{GlkBackend, GlkStyle, Model, StreamKind, WinType};
+use crate::glk::{self, GlkBackend, GlkEvent, GlkStyle, Model, StreamKind, WinType};
 use crate::memory::Memory;
 
 /// A recoverable runtime fault. Carries a human-readable diagnostic; the run
@@ -24,6 +24,21 @@ pub enum StepResult {
     Continue,
     /// Execution has ended (`quit`, an outer return, or a recorded fault).
     Quit,
+    /// A `glk_select` is pending a **line**-input event on window `win`. The host
+    /// supplies the typed line via [`Machine::supply_line`], then resumes.
+    NeedLine {
+        /// The window awaiting line input.
+        win: u32,
+    },
+    /// A `glk_select` is pending a **character**-input event on window `win`. The
+    /// host supplies the keystroke via [`Machine::supply_char`], then resumes.
+    /// `unicode` is set for the `_uni` request (a full code point is accepted).
+    NeedChar {
+        /// The window awaiting a keystroke.
+        win: u32,
+        /// Whether the request was the Unicode (`_uni`) variant.
+        unicode: bool,
+    },
 }
 
 /// Where a produced value (a function's return value, or an opcode's store
@@ -38,6 +53,18 @@ pub(crate) enum Dest {
     Mem(u32),
     /// Store to a call-frame local at this byte offset (DestType 2).
     Local(u32),
+}
+
+/// A suspended `glk_select` awaiting a host-supplied event.
+struct PendingInput {
+    /// Glulx address of the `event_t` to fill when the event arrives.
+    event_addr: u32,
+    /// The window the input was requested on.
+    win: u32,
+    /// `true` = line input awaited; `false` = char input.
+    line: bool,
+    /// Whether the request was the Unicode (`_uni`) variant.
+    unicode: bool,
 }
 
 impl Dest {
@@ -76,6 +103,10 @@ pub struct Machine {
     heap_blocks: Vec<(u32, u32)>,
     /// The Glk window/stream model (the output target for all printing).
     pub(crate) glk: Model,
+    /// A suspended `glk_select`: the event address + which window/kind of input
+    /// is awaited. Set when `glk_select` finds a pending request; cleared when
+    /// the host supplies the event ([`Machine::supply_line`]/[`supply_char`]).
+    pending_input: Option<PendingInput>,
     /// The display backend the Glk model drives.
     pub(crate) backend: Box<dyn GlkBackend>,
     /// Recorded runtime faults / deferred-feature notices.
@@ -169,6 +200,7 @@ impl Machine {
             heap_start: 0,
             heap_blocks: Vec::new(),
             glk: Model::new(),
+            pending_input: None,
             backend,
             diagnostics: Vec::new(),
             halted: false,
@@ -2102,6 +2134,32 @@ impl Machine {
                 0
             }
             0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
+            // ── input requests + select (3a-2) ────────────────────────────────
+            0x00D0 => {
+                // glk_request_line_event(win, buf, maxlen, initlen)
+                self.glk_request_line(a(0), a(1), a(2), a(3), false);
+                0
+            }
+            0x0141 => {
+                // glk_request_line_event_uni(win, buf, maxlen, initlen)
+                self.glk_request_line(a(0), a(1), a(2), a(3), true);
+                0
+            }
+            0x00D2 => {
+                // glk_request_char_event(win)
+                self.glk_request_char(a(0), false);
+                0
+            }
+            0x0140 => {
+                // glk_request_char_event_uni(win)
+                self.glk_request_char(a(0), true);
+                0
+            }
+            0x00C0 => {
+                // glk_select(event) — suspend until an event arrives
+                self.glk_select(a(0))?;
+                0
+            }
             0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
             0x0005 => self.glk_gestalt(a(0), a(1)), // glk_gestalt_ext(sel, val, arr, len)
             0x0001 => {
@@ -2178,6 +2236,143 @@ impl Machine {
         Ok(())
     }
 
+    // ── input requests + glk_select suspend/resume (3a-2) ─────────────────────
+
+    /// Record a pending line-input request; diagnose a bad window.
+    fn glk_request_line(&mut self, win: u32, buf: u32, maxlen: u32, initlen: u32, unicode: bool) {
+        if !self.glk.request_line_event(win, buf, maxlen, initlen, unicode) {
+            self.diagnostics
+                .push(format!("glk_request_line_event: bad window {win}"));
+        }
+    }
+
+    /// Record a pending char-input request; diagnose a bad window.
+    fn glk_request_char(&mut self, win: u32, unicode: bool) {
+        if !self.glk.request_char_event(win, unicode) {
+            self.diagnostics
+                .push(format!("glk_request_char_event: bad window {win}"));
+        }
+    }
+
+    /// `glk_select(event_addr)`: deliver a queued non-input event immediately, or
+    /// suspend on the first pending input request, or — with nothing to wait for
+    /// — write `evtype_None` and continue (a malformed program would otherwise
+    /// deadlock). Suspension is signaled to [`Machine::step`] via `pending_input`.
+    fn glk_select(&mut self, event_addr: u32) -> R<()> {
+        if event_addr == 0 {
+            self.diagnostics.push("glk_select with a null event pointer".to_string());
+            return Ok(());
+        }
+        if let Some(ev) = self.glk.pop_event() {
+            return self.write_event(event_addr, ev); // arrange/redraw, no suspend
+        }
+        if let Some((win, unicode)) = self.glk.first_line_request() {
+            self.pending_input = Some(PendingInput { event_addr, win, line: true, unicode });
+        } else if let Some((win, unicode)) = self.glk.first_char_request() {
+            self.pending_input = Some(PendingInput { event_addr, win, line: false, unicode });
+        } else {
+            self.diagnostics
+                .push("glk_select with no pending input request (returning evtype_None)".to_string());
+            self.write_event(event_addr, GlkEvent::none())?;
+        }
+        Ok(())
+    }
+
+    /// Write the 4-word Glk `event_t` (`type`, `win`, `val1`, `val2`) at `addr`.
+    fn write_event(&mut self, addr: u32, ev: GlkEvent) -> R<()> {
+        self.store_mem(addr, ev.etype)?;
+        self.store_mem(addr + 4, ev.win)?;
+        self.store_mem(addr + 8, ev.val1)?;
+        self.store_mem(addr + 12, ev.val2)
+    }
+
+    /// The [`StepResult`] for the current suspended `glk_select`, if any.
+    fn suspend_result(&self) -> Option<StepResult> {
+        self.pending_input.as_ref().map(|pi| {
+            if pi.line {
+                StepResult::NeedLine { win: pi.win }
+            } else {
+                StepResult::NeedChar { win: pi.win, unicode: pi.unicode }
+            }
+        })
+    }
+
+    /// Complete a suspended line-input `glk_select`: write `text` into the
+    /// request's Glulx buffer (truncated to `maxlen`, Latin-1 or 32-bit), fill
+    /// the `event_t` with `evtype_LineInput` + the character count, and resume.
+    /// A no-op (with a diagnostic) if no line request is pending.
+    pub fn supply_line(&mut self, text: &str) {
+        let pi = match self.pending_input.take() {
+            Some(pi) if pi.line => pi,
+            Some(pi) => {
+                self.diagnostics
+                    .push("supply_line called while a char event is pending".to_string());
+                self.pending_input = Some(pi);
+                return;
+            }
+            None => {
+                self.diagnostics.push("supply_line with no pending line request".to_string());
+                return;
+            }
+        };
+        let req = self.glk.take_line_request(pi.win);
+        let (buf, maxlen, unicode) = match req {
+            Some(r) => (r.buf, r.maxlen, r.unicode),
+            None => (0, 0, pi.unicode), // request vanished; still close the event safely
+        };
+        let chars: Vec<char> = text.chars().take(maxlen as usize).collect();
+        let n = chars.len() as u32;
+        for (i, &ch) in chars.iter().enumerate() {
+            let cp = ch as u32;
+            let res = if unicode {
+                self.store_mem_sized(buf + i as u32 * 4, cp, 4)
+            } else {
+                self.store_mem_sized(buf + i as u32, cp & 0xFF, 1)
+            };
+            if let Err(e) = res {
+                self.diagnostics.push(e);
+                break;
+            }
+        }
+        let ev = GlkEvent { etype: glk::evtype::LINE_INPUT, win: pi.win, val1: n, val2: 0 };
+        if let Err(e) = self.write_event(pi.event_addr, ev) {
+            self.diagnostics.push(e);
+        }
+    }
+
+    /// Complete a suspended char-input `glk_select`: fill the `event_t` with
+    /// `evtype_CharInput` + the key code (mapped for a non-Unicode request: a
+    /// Latin-1 code or a special keycode passes through; anything else becomes
+    /// `keycode_Unknown`), and resume. A no-op (with a diagnostic) if no char
+    /// request is pending.
+    pub fn supply_char(&mut self, key: u32) {
+        let pi = match self.pending_input.take() {
+            Some(pi) if !pi.line => pi,
+            Some(pi) => {
+                self.diagnostics
+                    .push("supply_char called while a line event is pending".to_string());
+                self.pending_input = Some(pi);
+                return;
+            }
+            None => {
+                self.diagnostics.push("supply_char with no pending char request".to_string());
+                return;
+            }
+        };
+        let _ = self.glk.take_char_request(pi.win);
+        let val = if pi.unicode {
+            key
+        } else if key <= 0xFF || key >= glk::keycode::SPECIAL_FLOOR {
+            key // a Latin-1 code or a special keycode
+        } else {
+            glk::keycode::UNKNOWN // an out-of-range Unicode key a Latin-1 request can't carry
+        };
+        let ev = GlkEvent { etype: glk::evtype::CHAR_INPUT, win: pi.win, val1: val, val2: 0 };
+        if let Err(e) = self.write_event(pi.event_addr, ev) {
+            self.diagnostics.push(e);
+        }
+    }
+
     /// The Glk version this layer implements (0.7.5), reported by
     /// `glk_gestalt(gestalt_Version)`.
     const GLK_VERSION: u32 = 0x0000_0705;
@@ -2204,9 +2399,14 @@ impl Machine {
         if self.halted {
             return StepResult::Quit;
         }
+        // Still suspended on a prior glk_select: re-report until the host supplies.
+        if let Some(sr) = self.suspend_result() {
+            return sr;
+        }
         match self.step_once() {
             Ok(()) if self.halted => StepResult::Quit,
-            Ok(()) => StepResult::Continue,
+            // A glk_select this step may have suspended for input.
+            Ok(()) => self.suspend_result().unwrap_or(StepResult::Continue),
             Err(msg) => {
                 self.diagnostics.push(msg);
                 self.halted = true;
@@ -3982,5 +4182,153 @@ mod tests {
         let m = run_program(body);
         assert!(m.halted, "glk_exit halted the machine");
         assert_eq!(backend_of(&m).text(1), "", "nothing printed after glk_exit");
+    }
+
+    // ── Task 1 (3a-2): input requests + glk_select suspend/resume ─────────────
+
+    /// Build (but do not run) a start function over `body` with `ram_bytes` of
+    /// RAM, with the Glk prelude window already current.
+    fn machine_ram(body: Vec<u8>, ram_bytes: u32) -> Machine {
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, ram_bytes);
+        machine(built)
+    }
+
+    /// Step until the machine suspends for input or quits.
+    fn step_to_event(m: &mut Machine) -> StepResult {
+        loop {
+            match m.step() {
+                StepResult::Continue => {}
+                other => return other,
+            }
+        }
+    }
+
+    /// Read a 4-word Glk event struct `(type, win, val1, val2)` at `addr`.
+    fn read_event(m: &Machine, addr: u32) -> (u32, u32, u32, u32) {
+        (
+            m.mem.read32(addr).unwrap(),
+            m.mem.read32(addr + 4).unwrap(),
+            m.mem.read32(addr + 8).unwrap(),
+            m.mem.read32(addr + 12).unwrap(),
+        )
+    }
+
+    #[test]
+    fn glk_line_input_suspends_resumes_and_writes_event() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event(win=1, buf=0x180, maxlen=10, initlen=0); select(@0x100).
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // glk_select(event @0x100)
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "select suspends");
+        m.supply_line("north");
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "resumes and quits");
+
+        // Buffer holds the Latin-1 line; event = LineInput, win 1, val1 = 5 chars.
+        let buf: String = (0..5).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
+        assert_eq!(buf, "north");
+        assert_eq!(read_event(&m, 0x100), (3, 1, 5, 0), "evtype_LineInput, win, count");
+    }
+
+    #[test]
+    fn glk_line_input_truncates_to_maxlen() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(3), C8(0)], Zero); // maxlen 3
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line("verbose");
+        step_to_event(&mut m);
+        let buf: String = (0..3).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
+        assert_eq!(buf, "ver", "truncated to maxlen");
+        assert_eq!(read_event(&m, 0x100).2, 3, "val1 = chars actually stored");
+    }
+
+    #[test]
+    fn glk_line_input_uni_writes_words() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event_uni(0x0141): 32-bit elements at 0x180.
+        let mut body = glk_call(0x141, &[C8(1), C16(0x0180), C8(8), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line("AB");
+        step_to_event(&mut m);
+        assert_eq!(m.mem.read32(0x180).unwrap(), b'A' as u32, "word 0 = 'A'");
+        assert_eq!(m.mem.read32(0x184).unwrap(), b'B' as u32, "word 1 = 'B'");
+        assert_eq!(read_event(&m, 0x100), (3, 1, 2, 0));
+    }
+
+    #[test]
+    fn glk_char_input_suspends_resumes_and_writes_event() {
+        use asm::Op::{C16, C8, Zero};
+        // request_char_event(0x00D2, win=1); select.
+        let mut body = glk_call(0xD2, &[C8(1)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false }, "char suspend");
+        m.supply_char(b'Z' as u32);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        assert_eq!(read_event(&m, 0x100), (2, 1, b'Z' as u32, 0), "evtype_CharInput, win, key");
+    }
+
+    #[test]
+    fn glk_char_input_non_uni_maps_special_and_unknown() {
+        use asm::Op::{C16, C8, Zero};
+        // Two char requests back-to-back: deliver a special key, then a high
+        // Unicode code point (which a non-Unicode request cannot represent).
+        let mut body = glk_call(0xD2, &[C8(1)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(glk_call(0xD2, &[C8(1)], Zero));
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false });
+        m.supply_char(crate::glk::keycode::LEFT); // a special keycode passes through
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false });
+        m.supply_char(0x1F600); // emoji → not Latin-1, non-uni request → Unknown
+        step_to_event(&mut m);
+        assert_eq!(read_event(&m, 0x100).2, crate::glk::keycode::LEFT, "special key preserved");
+        assert_eq!(read_event(&m, 0x110).2, crate::glk::keycode::UNKNOWN, "non-latin1 → Unknown");
+    }
+
+    #[test]
+    fn glk_char_input_uni_passes_full_codepoint() {
+        use asm::Op::{C16, C8, Zero};
+        // request_char_event_uni(0x0140).
+        let mut body = glk_call(0x140, &[C8(1)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: true });
+        m.supply_char(0x1F600); // a Unicode request preserves the full code point
+        step_to_event(&mut m);
+        assert_eq!(read_event(&m, 0x100), (2, 1, 0x1F600, 0));
+    }
+
+    #[test]
+    fn glk_select_with_no_request_is_safe() {
+        use asm::Op::{C16, Zero};
+        // select with nothing requested: deliver evtype_None, diagnostic, continue.
+        let mut body = glk_call(0xC0, &[C16(0x0100)], Zero);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "no suspend without a request");
+        assert_eq!(read_event(&m, 0x100).0, 0, "evtype_None written");
+        assert!(!m.diagnostics.is_empty(), "diagnostic recorded");
+    }
+
+    #[test]
+    fn supply_without_pending_request_is_safe() {
+        let mut m = machine_ram(asm::ins(0x120, &[]), 0x200);
+        m.supply_line("ignored"); // no panic, no effect
+        m.supply_char(b'x' as u32);
+        assert!(!m.diagnostics.is_empty(), "diagnostics noted the stray supply");
     }
 }
