@@ -44,6 +44,22 @@ pub fn wants_raw_char(stdin_is_tty: bool) -> bool {
     stdin_is_tty
 }
 
+/// Map the bytes AFTER an ESC into a Z-machine input code (ZMSD §3.8):
+/// cursor keys 129-132 (up/down/left/right), F1-F4 133-136. `None` if unknown.
+pub fn decode_escape_seq(seq: &[u8]) -> Option<u8> {
+    match seq {
+        b"[A" | b"OA" => Some(129),
+        b"[B" | b"OB" => Some(130),
+        b"[D" | b"OD" => Some(131),
+        b"[C" | b"OC" => Some(132),
+        b"OP" => Some(133),
+        b"OQ" => Some(134),
+        b"OR" => Some(135),
+        b"OS" => Some(136),
+        _ => None,
+    }
+}
+
 /// Parse `stty size` output ("rows cols").
 pub fn parse_stty_size(out: &str) -> Option<(u16, u16)> {
     let mut it = out.split_whitespace();
@@ -420,6 +436,19 @@ mod tests {
             ansi.contains("\x1b[1m") && ansi.ends_with("\x1b[0m"),
             "ansi: {ansi:?}"
         );
+    }
+
+    #[test]
+    fn decode_escape_seq_maps_arrows_and_fkeys() {
+        assert_eq!(decode_escape_seq(b"[A"), Some(129)); // up
+        assert_eq!(decode_escape_seq(b"[B"), Some(130)); // down
+        assert_eq!(decode_escape_seq(b"[D"), Some(131)); // left
+        assert_eq!(decode_escape_seq(b"[C"), Some(132)); // right
+        assert_eq!(decode_escape_seq(b"OA"), Some(129)); // up (SS3)
+        assert_eq!(decode_escape_seq(b"OP"), Some(133)); // F1
+        assert_eq!(decode_escape_seq(b"OS"), Some(136)); // F4
+        assert_eq!(decode_escape_seq(b"[Z"), None); // unknown
+        assert_eq!(decode_escape_seq(b""), None);
     }
 
     #[test]

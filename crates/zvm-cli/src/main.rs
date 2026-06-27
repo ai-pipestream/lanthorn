@@ -109,30 +109,38 @@ fn detect_term_rows() -> u16 {
     screen::term_rows(stty.as_deref(), env_lines.as_deref())
 }
 
-/// Read one keypress in raw mode via stty (TTY only); fall back to a line byte.
-fn read_char_input(stdin_is_tty: bool) -> u8 {
+/// Restore the terminal to the captured original (cooked+echo) mode.
+fn restore_mode(orig: &Option<String>) {
+    if let Some(s) = orig {
+        let _ = process::Command::new("stty").arg(s).status();
+    }
+}
+
+/// Read one keypress (TTY: raw, decoding escape sequences); always restores the
+/// original cooked mode afterward. Piped: a byte from a line, as before.
+fn read_char_input(stdin_is_tty: bool, orig: &Option<String>) -> u8 {
     use std::io::Read;
     if !screen::wants_raw_char(stdin_is_tty) {
         return read_byte_stdin();
     }
-    let saved = process::Command::new("stty")
-        .arg("-g")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok());
     let _ = process::Command::new("stty")
         .args(["-icanon", "-echo", "min", "1", "time", "0"])
         .status();
-    let mut buf = [0u8; 1];
-    let n = io::stdin().read(&mut buf).unwrap_or(0);
-    if let Some(s) = saved {
-        let _ = process::Command::new("stty").arg(s.trim()).status();
-    }
-    if n == 0 {
+    let mut first = [0u8; 1];
+    let n = io::stdin().read(&mut first).unwrap_or(0);
+    let key = if n == 0 {
         b'\n'
+    } else if first[0] == 0x1B {
+        // Read the (brief, non-blocking) continuation and decode it.
+        let _ = process::Command::new("stty").args(["min", "0", "time", "1"]).status();
+        let mut rest = [0u8; 8];
+        let m = io::stdin().read(&mut rest).unwrap_or(0);
+        screen::decode_escape_seq(&rest[..m]).unwrap_or(0x1B)
     } else {
-        buf[0]
-    }
+        first[0]
+    };
+    restore_mode(orig); // always back to the known-good cooked+echo mode
+    key
 }
 
 // ── aux ("global state") persistence ──────────────────────────────────────────
@@ -219,6 +227,19 @@ fn main() {
     let stdout_is_tty = io::stdout().is_terminal();
     let stdin_is_tty = io::stdin().is_terminal();
 
+    // Capture the original terminal mode ONCE; every raw read restores to this,
+    // and we restore it again on exit so echo is always returned.
+    let orig_mode: Option<String> = if stdin_is_tty {
+        process::Command::new("stty")
+            .arg("-g")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+    } else {
+        None
+    };
+
     let mut machine = match build_machine(story_bytes, stdout_is_tty) {
         Ok(m) => m,
         Err(e) => {
@@ -259,6 +280,7 @@ fn main() {
             StepResult::Quit => {
                 print!("{}", view.leave());
                 let _ = io::stdout().flush();
+                restore_mode(&orig_mode);
                 break;
             }
 
@@ -283,7 +305,7 @@ fn main() {
             StepResult::NeedChar => {
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
-                let ch = read_char_input(stdin_is_tty);
+                let ch = read_char_input(stdin_is_tty, &orig_mode);
                 machine.supply_char(ch);
             }
 
