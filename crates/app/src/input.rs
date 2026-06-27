@@ -1790,6 +1790,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if state.focus == Focus::Game {
                 recompute_suggestions(state);
                 state.suggestion_idx = 0;
+                state.suggestion_active = false;
             }
         }
         Action::Backspace => {
@@ -1798,6 +1799,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if state.focus == Focus::Game {
                 recompute_suggestions(state);
                 state.suggestion_idx = 0;
+                state.suggestion_active = false;
             }
         }
         Action::Autocomplete => {
@@ -1805,7 +1807,16 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // replacing the partial word being typed. Then advance the index
             // so repeated Tab cycles through candidates.
             if !state.suggestions.is_empty() {
-                let idx = state.suggestion_idx % state.suggestions.len();
+                let len = state.suggestions.len();
+                // First Tab applies the highlighted candidate (the preview at
+                // `suggestion_idx`); only later presses advance so the bracket
+                // stays on the word now in the input.
+                if state.suggestion_active {
+                    state.suggestion_idx = (state.suggestion_idx + 1) % len;
+                } else {
+                    state.suggestion_active = true;
+                }
+                let idx = state.suggestion_idx % len;
                 let completion = state.suggestions[idx].clone();
                 let prefix = state.config.command_prefix;
                 // Slash-command name suggestions hold the bare command name (no
@@ -1824,8 +1835,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     state.input.truncate(new_len);
                     state.input.push_str(&completion);
                 }
-                // Advance index for next Tab press (cycles).
-                state.suggestion_idx = (idx + 1) % state.suggestions.len();
             }
         }
         Action::AutocompletePrev => {
@@ -1834,6 +1843,13 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // through candidates in reverse.
             if !state.suggestions.is_empty() {
                 let len = state.suggestions.len();
+                // First Shift-Tab applies the highlighted candidate; only later
+                // presses step backward so the bracket stays on the applied word.
+                if state.suggestion_active {
+                    state.suggestion_idx = (state.suggestion_idx + len - 1) % len;
+                } else {
+                    state.suggestion_active = true;
+                }
                 let idx = state.suggestion_idx % len;
                 let completion = state.suggestions[idx].clone();
                 let prefix = state.config.command_prefix;
@@ -1849,8 +1865,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     state.input.truncate(new_len);
                     state.input.push_str(&completion);
                 }
-                // Step index backward for next Shift-Tab press (wraps).
-                state.suggestion_idx = (idx + len - 1) % len;
             }
         }
         Action::HistoryPrev => state.history_prev(),
@@ -4107,8 +4121,10 @@ mod tests {
         apply_action(Action::Autocomplete, &mut s, &mut m);
         // "nor" should be replaced with "north" (index 0 suggestion).
         assert_eq!(s.input, "go north");
-        // Index should advance to 1 for next Tab.
-        assert_eq!(s.suggestion_idx, 1);
+        // The highlight stays on the applied candidate (index 0), so the bracket
+        // matches the command line; the next Tab advances.
+        assert_eq!(s.suggestion_idx, 0);
+        assert!(s.suggestion_active);
     }
 
     #[test]
@@ -4122,7 +4138,7 @@ mod tests {
         apply_action(Action::Autocomplete, &mut s, &mut m);
         // The leading prefix must survive completion.
         assert_eq!(s.input, "/save");
-        assert_eq!(s.suggestion_idx, 1);
+        assert_eq!(s.suggestion_idx, 0);
     }
 
     #[test]
@@ -4132,15 +4148,42 @@ mod tests {
         s.input = "go nor".to_string();
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         s.suggestion_idx = 0;
-        // First Tab: north
+        // First Tab: north (applies the highlighted candidate, no advance).
         apply_action(Action::Autocomplete, &mut s, &mut m);
         assert_eq!(s.input, "go north");
-        assert_eq!(s.suggestion_idx, 1);
-        // Second Tab: northeast
-        s.input = "go nor".to_string(); // simulate user going back to partial
+        assert_eq!(s.suggestion_idx, 0);
+        // Second Tab: advances to northeast, replacing the prior completion in
+        // place (no need to retype the partial).
         apply_action(Action::Autocomplete, &mut s, &mut m);
         assert_eq!(s.input, "go northeast");
-        assert_eq!(s.suggestion_idx, 0); // wrapped
+        assert_eq!(s.suggestion_idx, 1);
+        // Third Tab: wraps back to north.
+        apply_action(Action::Autocomplete, &mut s, &mut m);
+        assert_eq!(s.input, "go north");
+        assert_eq!(s.suggestion_idx, 0);
+    }
+
+    #[test]
+    fn autocomplete_highlight_tracks_command_line() {
+        // Regression: the bracketed suggestion must highlight the word that is
+        // currently on the command line, not the next one. Cycling forward with
+        // repeated Tab keeps the highlight in sync at every step.
+        use crate::render::transcript::format_suggestion_line;
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.input = "go nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string(), "nowhere".to_string()];
+        s.suggestion_idx = 0;
+        for expected in ["north", "northeast", "nowhere", "north"] {
+            apply_action(Action::Autocomplete, &mut s, &mut m);
+            assert_eq!(s.input, format!("go {expected}"));
+            // The bracketed entry on the suggestion line equals the applied word.
+            let line = format_suggestion_line(&s.suggestions, s.suggestion_idx);
+            assert!(
+                line.contains(&format!("[{expected}]")),
+                "suggestion line {line:?} must bracket the word now on the command line ({expected})"
+            );
+        }
     }
 
     // ── Shift-Tab reverse cycling (feature A) ──────────────────────────────────
@@ -4187,10 +4230,11 @@ mod tests {
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         s.suggestion_idx = 0;
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
-        // Applies the current (index 0) suggestion, like Autocomplete.
+        // Applies the current (index 0) suggestion, like Autocomplete; the
+        // highlight stays put so the bracket matches the command line.
         assert_eq!(s.input, "go north");
-        // Index steps backward, wrapping from 0 to len-1.
-        assert_eq!(s.suggestion_idx, 1);
+        assert_eq!(s.suggestion_idx, 0);
+        assert!(s.suggestion_active);
     }
 
     #[test]
@@ -4200,15 +4244,14 @@ mod tests {
         s.input = "go nor".to_string();
         s.suggestions = vec!["north".to_string(), "northeast".to_string(), "nowhere".to_string()];
         s.suggestion_idx = 0;
-        // First Shift-Tab: applies index 0 (north), steps to 2 (wrap).
+        // First Shift-Tab: applies the highlighted index 0 (north), no step.
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
         assert_eq!(s.input, "go north");
-        assert_eq!(s.suggestion_idx, 2);
-        // Second Shift-Tab: applies index 2 (nowhere), steps to 1.
-        s.input = "go nor".to_string();
+        assert_eq!(s.suggestion_idx, 0);
+        // Second Shift-Tab: steps backward to index 2 (nowhere), replacing in place.
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
         assert_eq!(s.input, "go nowhere");
-        assert_eq!(s.suggestion_idx, 1);
+        assert_eq!(s.suggestion_idx, 2);
     }
 
     #[test]
@@ -4220,7 +4263,7 @@ mod tests {
         s.suggestion_idx = 0;
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
         assert_eq!(s.input, "/save");
-        assert_eq!(s.suggestion_idx, 1);
+        assert_eq!(s.suggestion_idx, 0);
     }
 
     #[test]

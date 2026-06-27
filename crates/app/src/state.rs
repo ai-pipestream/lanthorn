@@ -839,6 +839,12 @@ pub struct AppState {
     /// Index into `suggestions` of the currently-highlighted candidate.
     /// `Tab` advances this (cycling); typing resets it to 0.
     pub suggestion_idx: usize,
+    /// Whether a suggestion has been applied to `input` in the current cycle.
+    /// `false` after typing (the candidate at `suggestion_idx` is only a preview);
+    /// the first Tab/Shift-Tab applies that candidate and sets this `true`, and
+    /// only subsequent presses advance `suggestion_idx`. This keeps the bracketed
+    /// highlight aligned with the word actually on the command line.
+    pub suggestion_active: bool,
 
     // ── Command history (shell-style Up/Down recall) ──────────────────────────
 
@@ -999,6 +1005,7 @@ impl Default for AppState {
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
+            suggestion_active: false,
             command_history: Vec::new(),
             history_cursor: None,
             history_draft: String::new(),
@@ -1253,6 +1260,7 @@ impl AppState {
     pub fn take_input(&mut self) -> String {
         self.suggestions.clear();
         self.suggestion_idx = 0;
+        self.suggestion_active = false;
         std::mem::take(&mut self.input)
     }
 
@@ -1260,6 +1268,7 @@ impl AppState {
     pub fn clear_suggestions(&mut self) {
         self.suggestions.clear();
         self.suggestion_idx = 0;
+        self.suggestion_active = false;
     }
 
     /// Return the partial word the player is currently typing (the last

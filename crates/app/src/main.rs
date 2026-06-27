@@ -3109,6 +3109,7 @@ fn reset_game(
             state.input.clear();
             state.suggestions.clear();
             state.suggestion_idx = 0;
+            state.suggestion_active = false;
             state.transcript.clear();
             state.transcript_kinds.clear();
             state.transcript_scroll = 0;
