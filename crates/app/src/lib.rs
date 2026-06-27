@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod archive;
 pub mod aux_store;
 pub mod clipboard;
