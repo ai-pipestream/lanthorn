@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use clap::Parser;
 use serde::{Deserialize, Deserializer};
 
+use crate::anim::Easing;
+
 // ── Keymap config ─────────────────────────────────────────────────────────────
 
 /// The `[keymap]` section of config.toml.
@@ -235,6 +237,47 @@ pub enum AuxStorage {
     Global,
 }
 
+// ── Animation config ──────────────────────────────────────────────────────────
+
+fn default_scroll_ms() -> u64 { 120 }
+fn default_easing() -> Easing { Easing::EaseOut }
+
+/// Deserialize an easing token string (e.g. "ease-out") into an [`Easing`].
+/// Unknown tokens fall back to `EaseOut` (via `parse_easing`).
+fn deserialize_easing<'de, D>(d: D) -> Result<Easing, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(d)?;
+    Ok(crate::anim::parse_easing(&s))
+}
+
+/// The `[animation]` section of config.toml. Controls the shared TUI animation
+/// engine. With `enabled = false` (or `scroll_ms = 0`) every animation is
+/// instant, exactly reproducing the pre-animation behavior.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AnimationConfig {
+    /// Master switch (default true). When false, every animation is instant.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Easing curve token (default "ease-out").
+    #[serde(default = "default_easing", deserialize_with = "deserialize_easing")]
+    pub easing: Easing,
+    /// Smooth-scroll duration in milliseconds (default 120). Zero = instant.
+    #[serde(default = "default_scroll_ms")]
+    pub scroll_ms: u64,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            easing: Easing::EaseOut,
+            scroll_ms: 120,
+        }
+    }
+}
+
 /// User preferences loaded from TOML.  Every field has a default so a missing
 /// config file (or a file with only some fields) is always valid.
 #[derive(Debug, Deserialize, Clone)]
@@ -324,6 +367,9 @@ pub struct Config {
     /// Virtual screen height reported to the Z-machine (lines). Default 24.
     #[serde(default = "default_virtual_screen_rows")]
     pub virtual_screen_rows: u16,
+    /// Animation engine settings: enable switch, easing curve, scroll duration.
+    #[serde(default)]
+    pub animation: AnimationConfig,
 }
 
 impl Default for Config {
@@ -352,6 +398,7 @@ impl Default for Config {
             search: SearchConfig::default(),
             virtual_screen_cols: default_virtual_screen_cols(),
             virtual_screen_rows: default_virtual_screen_rows(),
+            animation: AnimationConfig::default(),
         }
     }
 }
@@ -415,6 +462,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
+            cfg.animation = from_file.animation;
         }
         // If the file exists but is malformed, silently keep defaults.
         // Production code could warn here; for now, YAGNI.
@@ -483,6 +531,14 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         tbl["start_backward"] = toml_edit::value(cfg.search.start_backward);
         tbl["key_back"] = toml_edit::value(cfg.search.key_back.to_string());
         tbl["key_forward"] = toml_edit::value(cfg.search.key_forward.to_string());
+    }
+
+    // [animation] table.
+    {
+        let tbl = doc["animation"].or_insert(toml_edit::table());
+        tbl["enabled"] = toml_edit::value(cfg.animation.enabled);
+        tbl["easing"] = toml_edit::value(crate::anim::easing_token(cfg.animation.easing));
+        tbl["scroll_ms"] = toml_edit::value(cfg.animation.scroll_ms as i64);
     }
 
     std::fs::write(&config_path, doc.to_string())
@@ -756,6 +812,7 @@ use_defaults = false
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,
+            animation: AnimationConfig::default(),
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -825,6 +882,61 @@ use_defaults = false
         assert!(!text.contains("[symbols]"));
         assert!(text.contains("[keymap]")); // functional sections preserved
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn animation_config_defaults() {
+        let c = Config::default();
+        assert!(c.animation.enabled);
+        assert_eq!(c.animation.easing, Easing::EaseOut);
+        assert_eq!(c.animation.scroll_ms, 120);
+    }
+
+    #[test]
+    fn animation_config_absent_uses_defaults() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.animation.enabled);
+        assert_eq!(cfg.animation.easing, Easing::EaseOut);
+        assert_eq!(cfg.animation.scroll_ms, 120);
+    }
+
+    #[test]
+    fn animation_config_parses_table() {
+        let cfg: Config = toml::from_str(
+            "[animation]\nenabled = false\neasing = \"linear\"\nscroll_ms = 200\n",
+        )
+        .unwrap();
+        assert!(!cfg.animation.enabled);
+        assert_eq!(cfg.animation.easing, Easing::Linear);
+        assert_eq!(cfg.animation.scroll_ms, 200);
+    }
+
+    #[test]
+    fn animation_config_unknown_easing_falls_back_to_ease_out() {
+        let cfg: Config = toml::from_str("[animation]\neasing = \"wobble\"\n").unwrap();
+        assert_eq!(cfg.animation.easing, Easing::EaseOut);
+    }
+
+    #[test]
+    fn write_config_round_trips_animation() {
+        let dir = std::env::temp_dir().join(format!(
+            "babelmap_write_config_anim_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = Config::default();
+        cfg.animation = AnimationConfig {
+            enabled: false,
+            easing: Easing::EaseInOut,
+            scroll_ms: 250,
+        };
+        write_config(&dir, &cfg).unwrap();
+        let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = content.parse().unwrap();
+        assert_eq!(doc["animation"]["enabled"].as_bool(), Some(false));
+        assert_eq!(doc["animation"]["easing"].as_str(), Some("ease-in-out"));
+        assert_eq!(doc["animation"]["scroll_ms"].as_integer(), Some(250));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
