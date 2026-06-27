@@ -240,6 +240,9 @@ struct PaneRects {
     /// viewport). The loop clamps `state.transcript_scroll` to this so the view
     /// can't over-scroll past the top.
     pub transcript_max_scroll: u16,
+    /// Visible transcript rows this frame (the transcript viewport height). Used
+    /// to size a PageUp/PageDown step. 0 when no transcript is shown (MapFull).
+    pub transcript_viewport_rows: u16,
 }
 
 /// Render one frame. Returns both pane inner-content rects so the event loop
@@ -265,6 +268,7 @@ fn draw_frame(
     let mut selection_text_out: Option<String> = None;
     let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
+    let mut transcript_viewport_rows: u16 = 0;
 
     terminal.draw(|f| {
         let full = f.area();
@@ -342,6 +346,7 @@ fn draw_frame(
                 let (sb_, ms_) = render_transcript(&session.machine, state, tarea, buf);
                 story_scrollbar = sb_;
                 transcript_max_scroll = ms_;
+                transcript_viewport_rows = tarea.height;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -412,6 +417,7 @@ fn draw_frame(
                 let (sb_, ms_) = render_transcript(&session.machine, state, tarea, buf);
                 story_scrollbar = sb_;
                 transcript_max_scroll = ms_;
+                transcript_viewport_rows = tarea.height;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -714,7 +720,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1164,7 +1170,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -2667,6 +2673,17 @@ fn main() {
                 let id = ifid.clone();
                 let ud = state.config.user_dir.clone();
                 open_hints(&mut state, &sp, &id, &ud);
+            }
+
+            // Page the transcript by one screenful. Resolved here because it needs
+            // the last-rendered transcript viewport height and max scroll.
+            Action::TranscriptScrollPage(dir) => {
+                state.transcript_scroll = app::input::page_scroll(
+                    state.transcript_scroll,
+                    dir,
+                    last_panes.transcript_viewport_rows,
+                    last_panes.transcript_max_scroll,
+                );
             }
 
             // ── apply_action handles everything else ───────────────────────────

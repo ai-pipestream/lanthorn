@@ -322,6 +322,10 @@ pub enum Action {
     EndSelection,
     /// Scroll the transcript by delta lines (positive = down, negative = up).
     TranscriptScroll(i32),
+    /// Page the transcript by one screenful (PageUp/PageDown). `+1` scrolls toward
+    /// older lines, `-1` toward newer. Resolved by the run loop, which knows the
+    /// last-rendered transcript viewport height and max scroll (see `page_scroll`).
+    TranscriptScrollPage(i8),
     /// Open the Hints panel. Real behavior wired in Task D; stub here keeps match exhaustive.
     OpenHints,
     /// Open the rewind/replay history modal (seeds `replay` at the last turn).
@@ -1273,16 +1277,18 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
     let shift = key.modifiers == KeyModifiers::SHIFT;
     match key.code {
         // Map navigation is available WITHOUT leaving the story line: Shift+Arrows
-        // pan, and the non-typeable Home / PageUp / PageDown centre and zoom. None of
-        // these clash with typing a command (arrows/Home/PageX aren't printable, and
-        // Shift+Arrow is distinct from a Shift+letter capital).
+        // pan and the non-typeable Home recenters; PageUp/PageDown page the
+        // transcript. None of these clash with typing a command (arrows/Home/PageX
+        // aren't printable, and Shift+Arrow is distinct from a Shift+letter capital).
         KeyCode::Left if shift => Action::Pan(-1, 0),
         KeyCode::Right if shift => Action::Pan(1, 0),
         KeyCode::Up if shift => Action::Pan(0, -1),
         KeyCode::Down if shift => Action::Pan(0, 1),
         KeyCode::Home => Action::Recenter,
-        KeyCode::PageUp => Action::ZoomIn,
-        KeyCode::PageDown => Action::ZoomOut,
+        // PageUp/PageDown page the transcript (toward older / newer). Zoom stays
+        // on +/=/-/0, Ctrl+wheel, and /zoom-map.
+        KeyCode::PageUp => Action::TranscriptScrollPage(1),
+        KeyCode::PageDown => Action::TranscriptScrollPage(-1),
         // Enter submits the current input buffer content as the command.
         KeyCode::Enter => Action::SubmitCommand(state.input.clone()),
         KeyCode::Backspace => Action::Backspace,
@@ -1297,6 +1303,22 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
 }
 
 // ── Focus cycling ─────────────────────────────────────────────────────────────
+
+/// Compute the new transcript scroll offset for a one-page step.
+///
+/// `dir > 0` scrolls toward older lines (increasing the offset); `dir < 0` toward
+/// newer. The step is `viewport_rows - 1` (a one-line overlap for reading
+/// continuity), floored at 1 so paging always progresses, and the result is
+/// clamped to `[0, max_scroll]` — the same bounds the mouse-wheel scroll uses.
+pub fn page_scroll(current: u16, dir: i8, viewport_rows: u16, max_scroll: u16) -> u16 {
+    let page = viewport_rows.saturating_sub(1).max(1);
+    let next = if dir > 0 {
+        current.saturating_add(page)
+    } else {
+        current.saturating_sub(page)
+    };
+    next.min(max_scroll)
+}
 
 /// Cycle a button-focus index by `delta` (+1 Tab, -1 Shift-Tab), wrapping within
 /// `0..len`. Returns 0 when `len` is 0.
@@ -2759,6 +2781,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::FbEnter
         | Action::FbChooseDir
         | Action::GalleryExportStyle
+        | Action::TranscriptScrollPage(_)
         | Action::Quit => {}
 
         // TODO Task D: wire the real open/discover/sub-session behavior.
@@ -3393,8 +3416,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Home)), Action::Recenter));
-        assert!(matches!(key_to_action(&s, key(KeyCode::PageUp)), Action::ZoomIn));
-        assert!(matches!(key_to_action(&s, key(KeyCode::PageDown)), Action::ZoomOut));
+        // PageUp/PageDown now page the transcript (older/newer), not zoom.
+        assert!(matches!(key_to_action(&s, key(KeyCode::PageUp)), Action::TranscriptScrollPage(1)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::PageDown)), Action::TranscriptScrollPage(-1)));
         // Retidy (Ctrl+T) is not in the direct set: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None));
         // Typing still reaches the command line (plain and shifted/capital letters).
@@ -4789,6 +4813,46 @@ mod tests {
             matches!(action, Action::ShowRoomDiagnostics(2)),
             "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
         );
+    }
+
+    // ── PageUp/PageDown transcript paging (feature C) ──────────────────────────
+
+    #[test]
+    fn page_scroll_toward_older_advances_by_page_clamped() {
+        // viewport 20 rows → page = 19. From 0 toward older (dir > 0): 0 + 19 = 19.
+        assert_eq!(page_scroll(0, 1, 20, 100), 19);
+        // Next page: 19 + 19 = 38.
+        assert_eq!(page_scroll(19, 1, 20, 100), 38);
+        // Clamped to max_scroll.
+        assert_eq!(page_scroll(90, 1, 20, 100), 100);
+        assert_eq!(page_scroll(100, 1, 20, 100), 100);
+    }
+
+    #[test]
+    fn page_scroll_toward_newer_recedes_by_page_to_zero() {
+        // dir < 0 moves toward newer (smaller offset), saturating at 0.
+        assert_eq!(page_scroll(38, -1, 20, 100), 19);
+        assert_eq!(page_scroll(19, -1, 20, 100), 0);
+        assert_eq!(page_scroll(5, -1, 20, 100), 0);
+    }
+
+    #[test]
+    fn page_scroll_tiny_viewport_steps_at_least_one() {
+        // viewport of 0 or 1 → page floors at 1 line so paging still progresses.
+        assert_eq!(page_scroll(0, 1, 1, 100), 1);
+        assert_eq!(page_scroll(0, 1, 0, 100), 1);
+    }
+
+    #[test]
+    fn page_up_down_do_not_zoom() {
+        // Regression guard: PageUp/PageDown must not produce zoom actions.
+        let s = AppState::default();
+        let up = key_to_action(&s, key(KeyCode::PageUp));
+        let dn = key_to_action(&s, key(KeyCode::PageDown));
+        assert!(!matches!(up, Action::ZoomIn | Action::ZoomOut));
+        assert!(!matches!(dn, Action::ZoomIn | Action::ZoomOut));
+        assert!(matches!(up, Action::TranscriptScrollPage(1)));
+        assert!(matches!(dn, Action::TranscriptScrollPage(-1)));
     }
 
     #[test]
