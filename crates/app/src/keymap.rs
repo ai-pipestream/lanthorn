@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn backtab_keyevent_maps_to_cycle_layout_reverse() {
+    fn backtab_keyevent_maps_to_toggle_focus_back() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         use crate::input::{key_to_action, Action};
         use crate::state::AppState;
@@ -624,22 +624,22 @@ mod tests {
             state: KeyEventState::NONE,
         };
 
-        // In Game focus: BackTab falls through game_key_to_action → Global lookup → CycleLayoutReverse.
+        // BackTab is now intercepted (step 8b) as the reverse pane-switch — the
+        // symmetric partner of Tab — before any keymap lookup. (The former
+        // cycle-layout-reverse binding on BackTab is thereby shadowed.)
         state.focus = crate::state::Focus::Game;
         let action = key_to_action(&state, backtab);
         assert!(
-            matches!(action, Action::CycleLayoutReverse),
-            "BackTab in Game focus should produce CycleLayoutReverse, got {:?}",
+            matches!(action, Action::ToggleFocusBack),
+            "BackTab in Game focus should produce ToggleFocusBack, got {:?}",
             action
         );
 
-        // In Map focus: Map context lookup falls through to Global then checks is_direct.
-        // CycleLayoutReverse is in the direct set so it fires without the dialog.
         state.focus = crate::state::Focus::Map;
         let action_map = key_to_action(&state, backtab);
         assert!(
-            matches!(action_map, Action::CycleLayoutReverse),
-            "BackTab in Map focus should produce CycleLayoutReverse, got {:?}",
+            matches!(action_map, Action::ToggleFocusBack),
+            "BackTab in Map focus should produce ToggleFocusBack, got {:?}",
             action_map
         );
     }

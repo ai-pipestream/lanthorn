@@ -74,6 +74,10 @@ pub enum Action {
     Backspace,
     /// Toggle between Game and Map focus.
     ToggleFocus,
+    /// Reverse pane-switch (Shift-Tab fallback). With the current two-pane layout
+    /// this is identical to `ToggleFocus`; named distinctly so Tab/Shift-Tab read
+    /// as a symmetric pair and to stay correct if more panes are ever added.
+    ToggleFocusBack,
     /// Cycle the UI layout (Split → TranscriptFull → MapFull → Split).
     CycleLayout,
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
@@ -154,6 +158,11 @@ pub enum Action {
     /// typed AND suggestions are available; otherwise Tab keeps its ToggleFocus
     /// role).
     Autocomplete,
+    /// Step autocomplete to the previous suggestion, applying the current one to
+    /// the input buffer (game focus, Shift-Tab key — the reverse of `Autocomplete`,
+    /// active under the same mid-word-with-suggestions condition; otherwise
+    /// Shift-Tab keeps its `ToggleFocus` role).
+    AutocompletePrev,
     /// Open the hotkey dialog overlay.
     OpenHotkeyDialog,
     /// Close the hotkey dialog overlay.
@@ -444,6 +453,19 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
             return KeyResolve::Action(Action::Autocomplete);
         }
         return KeyResolve::Action(Action::ToggleFocus);
+    }
+
+    // 8b. Shift-Tab (BackTab): the reverse of step 8. Mid-word with suggestions
+    //     in game focus → AutocompletePrev (step the suggestion backward);
+    //     otherwise the reverse pane-switch.
+    if key.code == KeyCode::BackTab {
+        if state.focus == Focus::Game
+            && !state.current_partial().is_empty()
+            && !state.suggestions.is_empty()
+        {
+            return KeyResolve::Action(Action::AutocompletePrev);
+        }
+        return KeyResolve::Action(Action::ToggleFocusBack);
     }
 
     // 9. Ctrl modifier: Global KeyMap lookup, filtered by is_direct_name — same
@@ -1743,7 +1765,33 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 state.suggestion_idx = (idx + 1) % state.suggestions.len();
             }
         }
+        Action::AutocompletePrev => {
+            // Inverse of Autocomplete: apply the currently-highlighted suggestion,
+            // then step the index BACKWARD (wrapping) so repeated Shift-Tab cycles
+            // through candidates in reverse.
+            if !state.suggestions.is_empty() {
+                let len = state.suggestions.len();
+                let idx = state.suggestion_idx % len;
+                let completion = state.suggestions[idx].clone();
+                let prefix = state.config.command_prefix;
+                if state.input.starts_with(prefix)
+                    && !state.input[prefix.len_utf8()..].contains(' ')
+                {
+                    state.input.clear();
+                    state.input.push(prefix);
+                    state.input.push_str(&completion);
+                } else {
+                    let partial_len = state.current_partial().len();
+                    let new_len = state.input.len() - partial_len;
+                    state.input.truncate(new_len);
+                    state.input.push_str(&completion);
+                }
+                // Step index backward for next Shift-Tab press (wraps).
+                state.suggestion_idx = (idx + len - 1) % len;
+            }
+        }
         Action::ToggleFocus => state.toggle_focus(),
+        Action::ToggleFocusBack => state.toggle_focus(),
         Action::CycleLayout => state.cycle_layout(),
         Action::CycleLayoutReverse => state.cycle_layout_reverse(),
         Action::ZoomIn => state.zoom_in(),
@@ -4026,6 +4074,84 @@ mod tests {
         apply_action(Action::Autocomplete, &mut s, &mut m);
         assert_eq!(s.input, "go northeast");
         assert_eq!(s.suggestion_idx, 0); // wrapped
+    }
+
+    // ── Shift-Tab reverse cycling (feature A) ──────────────────────────────────
+
+    #[test]
+    fn shift_tab_is_autocomplete_prev_when_suggestions_available() {
+        // Game focus, non-empty partial, suggestions populated → Shift-Tab is
+        // AutocompletePrev (the inverse of Tab's Autocomplete).
+        let mut s = AppState::default();
+        s.input = "nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string()];
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::AutocompletePrev));
+    }
+
+    #[test]
+    fn shift_tab_is_toggle_focus_back_with_no_suggestions() {
+        // Game focus, partial typed but no suggestions → Shift-Tab toggles focus back.
+        let mut s = AppState::default();
+        s.input = "nor".to_string();
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::ToggleFocusBack));
+    }
+
+    #[test]
+    fn shift_tab_is_toggle_focus_back_with_empty_input() {
+        let s = AppState::default(); // Game focus, empty input, no suggestions
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::ToggleFocusBack));
+    }
+
+    #[test]
+    fn shift_tab_is_toggle_focus_back_in_map_focus_even_with_suggestions() {
+        let mut s = AppState::default();
+        s.focus = Focus::Map;
+        s.suggestions = vec!["north".to_string()];
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::ToggleFocusBack));
+    }
+
+    #[test]
+    fn autocomplete_prev_action_replaces_partial_and_steps_back() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.input = "go nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string()];
+        s.suggestion_idx = 0;
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        // Applies the current (index 0) suggestion, like Autocomplete.
+        assert_eq!(s.input, "go north");
+        // Index steps backward, wrapping from 0 to len-1.
+        assert_eq!(s.suggestion_idx, 1);
+    }
+
+    #[test]
+    fn autocomplete_prev_cycles_backward_with_wrap() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.input = "go nor".to_string();
+        s.suggestions = vec!["north".to_string(), "northeast".to_string(), "nowhere".to_string()];
+        s.suggestion_idx = 0;
+        // First Shift-Tab: applies index 0 (north), steps to 2 (wrap).
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        assert_eq!(s.input, "go north");
+        assert_eq!(s.suggestion_idx, 2);
+        // Second Shift-Tab: applies index 2 (nowhere), steps to 1.
+        s.input = "go nor".to_string();
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        assert_eq!(s.input, "go nowhere");
+        assert_eq!(s.suggestion_idx, 1);
+    }
+
+    #[test]
+    fn autocomplete_prev_slash_command_preserves_prefix() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.input = "/sav".to_string();
+        s.suggestions = vec!["save".to_string(), "save-as".to_string()];
+        s.suggestion_idx = 0;
+        apply_action(Action::AutocompletePrev, &mut s, &mut m);
+        assert_eq!(s.input, "/save");
+        assert_eq!(s.suggestion_idx, 1);
     }
 
     #[test]
