@@ -81,8 +81,6 @@ pub enum Action {
     Retidy,
     /// Re-read style.toml and swap the live colors/symbols (keeps current look on error).
     ReloadStyle,
-    /// Scaffold the per-game style file (user_dir/styles/<ifid>.toml) for this game.
-    GameStyle,
     /// Toggle the opt-in style.toml file-watcher (handled in the run loop).
     ToggleWatch,
     /// Run the tidy pipeline and start animated playback of its stages (Auto only).
@@ -634,9 +632,10 @@ pub fn style_dialog_action(
     for (id, rect) in &rects.buttons {
         if hit(*rect, col, row) {
             return Some(match id {
-                ButtonId::Save   => Action::StyleSave,
-                ButtonId::Cancel => Action::StyleEditorCancel,
-                _                => Action::None,
+                ButtonId::Save     => Action::StyleSave,
+                ButtonId::SaveGame => Action::StyleSaveGame,
+                ButtonId::Cancel   => Action::StyleEditorCancel,
+                _                  => Action::None,
             });
         }
     }
@@ -1213,6 +1212,7 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
             Action::StyleBorderToggleShadow
         }
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::StyleSave,
+        KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => Action::StyleSaveGame,
         KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => Action::StyleReset,
         KeyCode::Esc  => Action::StyleEditorCancel,
         _ => Action::None,
@@ -1792,21 +1792,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                         crate::state::TranscriptKind::Warning,
                     );
                     state.set_status("reload failed — keeping current style");
-                }
-            }
-        }
-
-        Action::GameStyle => {
-            if state.ifid.is_empty() {
-                state.set_status("no game loaded");
-            } else {
-                let user_dir = state.config.user_dir.clone();
-                let ifid = state.ifid.clone();
-                let title = state.title.clone();
-                match crate::styles::scaffold_per_game_style(&user_dir, &ifid, &title) {
-                    Ok((path, true))  => state.set_status(format!("created {}", path.display())),
-                    Ok((path, false)) => state.set_status(format!("per-game style: {}", path.display())),
-                    Err(e)            => state.set_status(format!("game-style failed: {}", e)),
                 }
             }
         }
@@ -3675,24 +3660,6 @@ mod tests {
 
         apply_action(Action::ReloadStyle, &mut state, &mut mapper);
         assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Magenta));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn game_style_action_scaffolds_file() {
-        let dir = std::env::temp_dir().join(format!("babelmap-gamestyle-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut state = AppState::default();
-        state.config.user_dir = dir.clone();
-        state.ifid = "ZCODE-1-GS-0001".to_string();
-        state.title = "Zork I".to_string();
-        let mut mapper = Mapper::default();
-
-        apply_action(Action::GameStyle, &mut state, &mut mapper);
-        let path = crate::styles::per_game_style_path(&dir, &state.ifid);
-        assert!(path.is_file(), "scaffold created the per-game file");
-        assert!(std::fs::read_to_string(&path).unwrap().contains("Zork I"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6475,6 +6442,29 @@ mod tests {
             style_dialog_action(&rects, 0, 0).is_none(),
             "miss must return None"
         );
+    }
+
+    #[test]
+    fn style_dialog_action_maps_save_game() {
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use ratatui::layout::Rect;
+        let save_rect     = Rect { x: 10, y: 5, width: 18, height: 1 };
+        let savegame_rect = Rect { x: 30, y: 5, width: 16, height: 1 };
+        let cancel_rect   = Rect { x: 48, y: 5, width: 10, height: 1 };
+        let rects = DialogRects {
+            area: Rect::default(),
+            content: Rect::default(),
+            close: None,
+            buttons: vec![
+                (ButtonId::Save,     save_rect),
+                (ButtonId::SaveGame, savegame_rect),
+                (ButtonId::Cancel,   cancel_rect),
+            ],
+        };
+        assert!(matches!(style_dialog_action(&rects, 31, 5), Some(Action::StyleSaveGame)),
+            "clicking Save Game Style maps to StyleSaveGame");
+        assert!(matches!(style_dialog_action(&rects, 11, 5), Some(Action::StyleSave)),
+            "clicking Save Global Style maps to StyleSave");
     }
 
     #[test]

@@ -84,8 +84,9 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     };
 
     let buttons = &[
-        DialogButton { id: ButtonId::Save,   label: "Save"   },
-        DialogButton { id: ButtonId::Cancel, label: "Cancel" },
+        DialogButton { id: ButtonId::Save,     label: "Save Global Style" },
+        DialogButton { id: ButtonId::SaveGame, label: "Save Game Style"   },
+        DialogButton { id: ButtonId::Cancel,   label: "Cancel"            },
     ];
 
     let spec = DialogSpec {

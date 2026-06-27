@@ -27,6 +27,7 @@ pub enum Placement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ButtonId {
     Save,
+    SaveGame,
     Cancel,
     Ok,
     Done,

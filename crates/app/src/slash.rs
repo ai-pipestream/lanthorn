@@ -309,9 +309,6 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "reload-style", category: Category::Style, context: Context::Global,
         usage: "reload-style", description: "reload style.toml from disk",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ReloadStyle) },
-    CommandSpec { name: "create-game-style", category: Category::Style, context: Context::Global,
-        usage: "create-game-style", description: "scaffold a per-game style file",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::GameStyle) },
     CommandSpec { name: "toggle-watch", category: Category::Style, context: Context::Global,
         usage: "toggle-watch", description: "toggle live style-file watching",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleWatch) },
@@ -598,11 +595,10 @@ mod tests {
         let by = |n: &str| COMMANDS.iter().find(|c| c.name == n).expect(n);
         assert_eq!(by("save-game").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
-        assert_eq!(by("create-game-style").category, Category::Style);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (48 commands: Game 8, Map 20, View 4,
-        // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 48, "registry must match the spec's Full command table");
+        // Total count matches the spec table (47 commands: Game 8, Map 20, View 4,
+        // Transcript 3, Style 4, Export 3, Animation 4, Help 1).
+        assert_eq!(COMMANDS.len(), 47, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -614,7 +610,6 @@ mod tests {
         assert!(game_at < map_at, "Game group precedes Map group");
         // Every command's usage shows up.
         assert!(lines.iter().any(|l| l.contains("/zoom-map")));
-        assert!(lines.iter().any(|l| l.contains("/create-game-style")));
 
         // Per-command detail.
         let one = help_for_command('/', "zoom-map");
@@ -633,5 +628,11 @@ mod tests {
         // The run loop calls help_for_command on a HelpCommand(name); verify the
         // function exists with the expected signature and returns non-empty lines.
         assert!(!help_for_command('/', "save-game").is_empty());
+    }
+
+    #[test]
+    fn create_game_style_command_removed() {
+        assert!(find_command("create-game-style").is_none(),
+            "create-game-style is replaced by the Save Game Style button");
     }
 }
