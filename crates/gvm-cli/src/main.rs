@@ -1,34 +1,19 @@
-// gvm-cli — a headless Glulx runner.
+// gvm-cli — a Glulx runner.
 //
 // Usage: gvm-cli <story.ulx | story.gblorb>
 //
 // Loads a raw `.ulx` Glulx image or extracts the `GLUL` executable from a Blorb,
-// runs it to completion (Phase 2a is non-interactive), streams output to stdout,
-// and prints any diagnostics to stderr.
+// runs it, routing Glk output to a terminal backend, and prints any diagnostics
+// to stderr.
 
-use std::any::Any;
 use std::env;
 use std::fs;
-use std::io::{self, Write};
 use std::process;
 
-use gvm::{Machine, Memory, Output};
+use gvm::{GlkBackend, Machine, Memory};
 
-/// Output sink that writes directly to stdout.
-struct StdoutOutput;
-
-impl Output for StdoutOutput {
-    fn print(&mut self, s: &str) {
-        print!("{s}");
-        let _ = io::stdout().flush();
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+mod glk_term;
+use glk_term::TerminalBackend;
 
 /// Get the runnable Glulx image: the `GLUL` executable inside a Blorb, or the
 /// raw bytes when they aren't a Blorb (a plain `.ulx`).
@@ -46,11 +31,11 @@ fn extract_executable(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Build a machine from story bytes, sending output to `out`.
-fn build_machine(bytes: Vec<u8>, out: Box<dyn Output>) -> Result<Machine, String> {
+/// Build a machine from story bytes, sending Glk output to `backend`.
+fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine, String> {
     let image = extract_executable(bytes)?;
     let mem = Memory::new(image).map_err(|e| format!("Error loading Glulx image: {e:?}"))?;
-    Ok(Machine::with_output(mem, out))
+    Ok(Machine::with_glk(mem, backend))
 }
 
 fn main() {
@@ -68,7 +53,7 @@ fn main() {
         }
     };
 
-    let mut machine = match build_machine(bytes, Box::new(StdoutOutput)) {
+    let mut machine = match build_machine(bytes, Box::new(TerminalBackend::new())) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
@@ -77,6 +62,7 @@ fn main() {
     };
 
     machine.run();
+    machine.flush();
 
     for d in &machine.diagnostics {
         eprintln!("gvm: {d}");
@@ -86,19 +72,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gvm::BufferOutput;
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use gvm::TestBackend;
 
-    /// A hand-assembled Glulx image: print "Hi" then quit.
+    /// A hand-assembled Glulx image: open a TextBuffer window, make it current,
+    /// print "Hi", then quit. Start function at 0x24 with one 4-byte local.
+    ///
+    /// Operand mode nibbles are packed low-nibble-first; opcodes ≥ 0x80 use the
+    /// 2-byte form `opcode + 0x8000`. (See `crates/gvm/asm.rs` for the encoder
+    /// the in-crate tests use; this crate hand-encodes one tiny program.)
     fn hi_image() -> Vec<u8> {
-        // Start function (at 0x24): setiosys(2,0); streamchar 'H'; streamchar 'i'; quit.
         let func: Vec<u8> = vec![
-            0xC1, 0x00, 0x00, // type C1, empty locals format
-            0x81, 0x49, 0x11, 0x02, 0x00, // setiosys glk, rock 0
-            0x70, 0x01, b'H', // streamchar 'H'
-            0x70, 0x01, b'i', // streamchar 'i'
-            0x81, 0x20, // quit
+            0xC1, 0x04, 0x01, 0x00, 0x00, // type C1; one 4-byte local; terminator
+            // setiosys 2, 0   (opcode 0x149 → 81 49; modes C8,C8)
+            0x81, 0x49, 0x11, 0x02, 0x00,
+            // push window_open args (last pushed is popped first = args[0]=split):
+            //   rock=0, wintype=3, size=0, method=0, split=0
+            0x40, 0x80, // copy const0 -> push (rock)
+            0x40, 0x81, 0x03, // copy C8(3) -> push (wintype TextBuffer)
+            0x40, 0x80, // size 0
+            0x40, 0x80, // method 0
+            0x40, 0x80, // split 0
+            // @glk glk_window_open (sel 0x23, argc 5) -> local0
+            0x81, 0x30, 0x11, 0x09, 0x23, 0x05, 0x00,
+            // push local0; @glk glk_set_window (sel 0x2F, argc 1), discard
+            0x40, 0x89, 0x00, // copy local0 -> push
+            0x81, 0x30, 0x11, 0x00, 0x2F, 0x01,
+            // streamchar 'H'; streamchar 'i'  (opcode 0x70; mode C8)
+            0x70, 0x01, b'H',
+            0x70, 0x01, b'i',
+            // quit (0x120 → 81 20)
+            0x81, 0x20,
         ];
         let (ramstart, endmem) = (0x100u32, 0x200u32);
         let mut img = vec![0u8; ramstart as usize];
@@ -149,27 +152,15 @@ mod tests {
         file
     }
 
-    /// Sink that captures output into a shared buffer (the machine's own sink is
-    /// not reachable from this crate).
-    struct CaptureSink(Rc<RefCell<String>>);
-    impl Output for CaptureSink {
-        fn print(&mut self, s: &str) {
-            self.0.borrow_mut().push_str(s);
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-        fn as_any_mut(&mut self) -> &mut dyn Any {
-            self
-        }
-    }
-
+    /// Run `bytes` against a [`TestBackend`] and return the buffer-window text.
     fn run_capturing(bytes: Vec<u8>) -> String {
-        let buf = Rc::new(RefCell::new(String::new()));
-        let mut m = build_machine(bytes, Box::new(CaptureSink(buf.clone()))).unwrap();
+        let mut m = build_machine(bytes, Box::new(TestBackend::new())).unwrap();
         m.run();
-        let out = buf.borrow().clone();
-        out
+        m.backend_mut()
+            .as_any_mut()
+            .downcast_mut::<TestBackend>()
+            .unwrap()
+            .all_text()
     }
 
     #[test]
@@ -187,7 +178,7 @@ mod tests {
     #[test]
     fn rejects_zcode_blorb() {
         let zblorb = build_blorb(b"ZCOD", b"fake z-code");
-        let err = match build_machine(zblorb, Box::new(BufferOutput::new())) {
+        let err = match build_machine(zblorb, Box::new(TestBackend::new())) {
             Err(e) => e,
             Ok(_) => panic!("expected the Z-code Blorb to be rejected"),
         };

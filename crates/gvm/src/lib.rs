@@ -1,21 +1,22 @@
-//! `gvm` — a zero-dependency Glulx virtual machine (Phase 2a: foundation +
-//! headless runner). Structured like `zvm`: a [`memory::Memory`] over the loaded
-//! image and a pluggable [`io::Output`] sink. The `Machine` (execution engine)
-//! is added in later tasks.
+//! `gvm` — a zero-dependency Glulx virtual machine. Structured like `zvm`: a
+//! [`memory::Memory`] over the loaded image and the [`Machine`] execution
+//! engine. Text output flows through the [`glk`] window/stream model to a
+//! pluggable [`glk::GlkBackend`] display.
 //!
-//! All opcode numbers, addressing modes, and the header/call-frame layout are
-//! transcribed from the Glulx specification into `GLULX_NOTES.md`, and the code
-//! is implemented against that file.
+//! All opcode numbers, addressing modes, the header/call-frame layout, and the
+//! Glk window/stream/style model are transcribed from the Glulx and Glk
+//! specifications into `GLULX_NOTES.md`, and the code is implemented against
+//! that file.
 
 #[cfg(test)]
 mod asm;
 pub mod error;
 pub mod exec;
+pub mod glk;
 pub mod header;
-pub mod io;
 pub mod memory;
 
 pub use error::GError;
 pub use exec::{Machine, StepResult};
-pub use io::{BufferOutput, Output};
+pub use glk::{GlkBackend, GlkStyle, Model as GlkModel, TestBackend, WinType};
 pub use memory::{Memory, WriteFault};

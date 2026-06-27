@@ -10,7 +10,7 @@
 // frame so a return can restore the caller.
 
 use crate::error::GError;
-use crate::io::Output;
+use crate::glk::{GlkBackend, GlkStyle, Model, StreamKind, WinType};
 use crate::memory::Memory;
 
 /// A recoverable runtime fault. Carries a human-readable diagnostic; the run
@@ -74,8 +74,10 @@ pub struct Machine {
     pub(crate) heap_start: u32,
     /// Extant allocated blocks `(addr, size)`, kept sorted by address.
     heap_blocks: Vec<(u32, u32)>,
-    /// The output sink.
-    pub(crate) out: Box<dyn Output>,
+    /// The Glk window/stream model (the output target for all printing).
+    pub(crate) glk: Model,
+    /// The display backend the Glk model drives.
+    pub(crate) backend: Box<dyn GlkBackend>,
     /// Recorded runtime faults / deferred-feature notices.
     pub diagnostics: Vec<String>,
     /// Set once execution has ended (outer return or quit/fault).
@@ -150,7 +152,8 @@ impl Machine {
     const DEFAULT_SEED: u32 = 0x2BAD_C0DE;
 
     /// Build a machine over `mem`, entering the start function (no arguments).
-    pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
+    /// Text output flows through the Glk model to `backend`.
+    pub fn with_glk(mem: Memory, backend: Box<dyn GlkBackend>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
         let start = mem.start_func();
         let decode_table = mem.decode_table();
@@ -165,7 +168,8 @@ impl Machine {
             cur_stringtbl: decode_table,
             heap_start: 0,
             heap_blocks: Vec::new(),
-            out,
+            glk: Model::new(),
+            backend,
             diagnostics: Vec::new(),
             halted: false,
             protect: (0, 0),
@@ -1640,13 +1644,77 @@ impl Machine {
 
     // ── stream output (GLULX_NOTES §7) ────────────────────────────────────────
 
-    /// Route stream output to the sink, honoring the current I/O system: only
-    /// the Glk system (mode 2) prints; the null system (and the deferred filter
-    /// system) discard.
+    /// Route `streamchar`/`streamnum`/`streamstr` output, honoring the current
+    /// I/O system: only the Glk system (mode 2) prints (to the current Glk
+    /// stream); the null system (and the deferred filter system) discard.
     fn emit(&mut self, s: &str) {
         if self.iosys_mode == 2 {
-            self.out.print(s);
+            let sid = self.glk.current_stream();
+            self.glk_stream_put(sid, s);
         }
+    }
+
+    /// Write `s` to Glk stream `sid` (its current style). A window stream routes
+    /// to that window via the backend; a memory stream writes Glulx memory; an
+    /// invalid/zero stream is safely discarded (no panic). This is the single
+    /// output funnel for both the `@glk` put selectors and the stream opcodes.
+    fn glk_stream_put(&mut self, sid: u32, s: &str) {
+        if sid == 0 {
+            return; // no current stream → discard
+        }
+        let Some((kind, style)) = self.glk.stream_kind_style(sid) else {
+            return; // bad stream id → discard
+        };
+        match kind {
+            StreamKind::Window(win) => {
+                match self.glk.window_type(win) {
+                    Some(WinType::TextBuffer) => self.backend.put_text(win, style, s),
+                    Some(WinType::TextGrid) => self.grid_put_str(win, style, s),
+                    _ => {} // pair window or stale: nothing to display
+                }
+                self.glk.window_stream_advance(sid, s.chars().count() as u32);
+            }
+            StreamKind::Memory { addr, len, pos, unicode } => {
+                let elsize = if unicode { 4 } else { 1 };
+                let mut p = pos;
+                for ch in s.chars() {
+                    if p < len {
+                        let ea = addr + p * elsize;
+                        let v = ch as u32;
+                        if unicode {
+                            let _ = self.store_mem_sized(ea, v, 4);
+                        } else {
+                            let _ = self.store_mem_sized(ea, v & 0xFF, 1);
+                        }
+                    }
+                    p = p.saturating_add(1);
+                }
+                self.glk.memory_stream_advance(sid, s.chars().count() as u32);
+            }
+        }
+    }
+
+    /// Write `s` to a text-grid window starting at its cursor, advancing the
+    /// cursor and wrapping at the window edge (output past the bottom is
+    /// discarded). `\n` moves to the next row, column 0.
+    fn grid_put_str(&mut self, win: u32, style: GlkStyle, s: &str) {
+        let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
+        for ch in s.chars() {
+            if ch == '\n' {
+                cx = 0;
+                cy += 1;
+                continue;
+            }
+            if cx >= w {
+                cx = 0;
+                cy += 1;
+            }
+            if cy < h && cx < w {
+                self.backend.grid_put(win, cx, cy, style, &ch.to_string());
+            }
+            cx += 1;
+        }
+        self.glk.set_grid_cursor(win, cx, cy);
     }
 
     fn op_streamchar(&mut self) -> R<()> {
@@ -1837,7 +1905,7 @@ impl Machine {
         Ok(s)
     }
 
-    // ── minimal @glk dispatch (GLULX_NOTES §8) ────────────────────────────────
+    // ── @glk dispatch (GLULX_NOTES §19) ───────────────────────────────────────
 
     fn op_glk(&mut self) -> R<()> {
         let (l, s) = self.read_operands(2, 1)?;
@@ -1850,57 +1918,281 @@ impl Machine {
         self.store(s[0], result)
     }
 
-    /// Handle the put-char/buffer/string family; pop-and-ignore anything else and
-    /// return 0. Glk output prints regardless of the VM's I/O system.
+    /// Dispatch one `@glk` selector against the Glk model + backend. Output-side
+    /// selectors only (input/events are phase 3a-2). Unknown selectors record a
+    /// diagnostic and return 0; nothing here panics on bad ids.
     fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
-        match selector {
-            0x0080 => self.put_latin1(a(0)), // glk_put_char(ch)
-            0x0081 => self.put_latin1(a(1)), // glk_put_char_stream(str, ch)
+        let ret = match selector {
+            // ── output (put) ──────────────────────────────────────────────────
+            0x0080 => {
+                // glk_put_char(ch)
+                let s = ((a(0) & 0xFF) as u8 as char).to_string();
+                self.glk_put_current(&s);
+                0
+            }
+            0x0081 => {
+                // glk_put_char_stream(str, ch)
+                let s = ((a(1) & 0xFF) as u8 as char).to_string();
+                self.glk_stream_put(a(0), &s);
+                0
+            }
             0x0082 => {
                 // glk_put_string(addr)
                 let s = self.read_cstring(a(0))?;
-                self.out.print(&s);
+                self.glk_put_current(&s);
+                0
+            }
+            0x0083 => {
+                // glk_put_string_stream(str, addr)
+                let s = self.read_cstring(a(1))?;
+                self.glk_stream_put(a(0), &s);
+                0
             }
             0x0084 => {
                 // glk_put_buffer(addr, len)
-                let (addr, len) = (a(0), a(1));
-                let mut s = String::new();
-                for i in 0..len {
-                    s.push(self.m8(addr + i)? as u8 as char);
-                }
-                self.out.print(&s);
+                let s = self.read_latin1_buffer(a(0), a(1))?;
+                self.glk_put_current(&s);
+                0
             }
-            0x0128 => self.put_uni(a(0)), // glk_put_char_uni(ch)
+            0x0085 => {
+                // glk_put_buffer_stream(str, addr, len)
+                let s = self.read_latin1_buffer(a(1), a(2))?;
+                self.glk_stream_put(a(0), &s);
+                0
+            }
+            0x0128 => {
+                // glk_put_char_uni(ch)
+                let s = char::from_u32(a(0)).unwrap_or('\u{FFFD}').to_string();
+                self.glk_put_current(&s);
+                0
+            }
             0x0129 => {
                 // glk_put_string_uni(addr)
                 let s = self.read_ustring(a(0))?;
-                self.out.print(&s);
+                self.glk_put_current(&s);
+                0
             }
             0x012A => {
                 // glk_put_buffer_uni(addr, len)
-                let (addr, len) = (a(0), a(1));
-                let mut s = String::new();
-                for i in 0..len {
-                    let cp = self.m32(addr + i * 4)?;
-                    s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
-                }
-                self.out.print(&s);
+                let s = self.read_uni_buffer(a(0), a(1))?;
+                self.glk_put_current(&s);
+                0
             }
-            other => self
-                .diagnostics
-                .push(format!("unhandled @glk selector {other:#06x} (returning 0)")),
-        }
-        Ok(0)
+            // ── windows ───────────────────────────────────────────────────────
+            0x0020 => {
+                // glk_window_iterate(win, rockptr) -> next window id
+                let (next, rock) = self.glk.window_iterate(a(0));
+                self.glk_store_ptr(a(1), rock)?;
+                next
+            }
+            0x0021 => self.glk.window_rock(a(0)).unwrap_or(0), // glk_window_get_rock
+            0x0022 => self.glk.root(),                         // glk_window_get_root
+            0x0023 => self.glk_open_window(a(0), a(1), a(2), a(3), a(4)), // glk_window_open
+            0x0024 => {
+                // glk_window_close(win, streamresultptr{readcount, writecount})
+                match self.glk.window_close(a(0)) {
+                    Some((r, w)) => {
+                        let ptr = a(1);
+                        if ptr != 0 {
+                            self.store_mem(ptr, r)?;
+                            self.store_mem(ptr + 4, w)?;
+                        }
+                        self.backend.window_close(a(0));
+                        self.relayout_glk();
+                    }
+                    None => self.diagnostics.push(format!("glk_window_close: bad window {}", a(0))),
+                }
+                0
+            }
+            0x0025 => {
+                // glk_window_get_size(win, awidthptr, aheightptr)
+                if let Some((w, h)) = self.glk.window_size(a(0)) {
+                    self.glk_store_ptr(a(1), w)?;
+                    self.glk_store_ptr(a(2), h)?;
+                }
+                0
+            }
+            0x0026 => {
+                // glk_window_set_arrangement(win, method, size, keywin)
+                self.glk.window_set_arrangement(a(0), a(1), a(2), a(3));
+                self.relayout_glk();
+                0
+            }
+            0x0027 => {
+                // glk_window_get_arrangement(win, methodptr, sizeptr, keywinptr)
+                if let Some((m, s, k)) = self.glk.window_arrangement(a(0)) {
+                    self.glk_store_ptr(a(1), m)?;
+                    self.glk_store_ptr(a(2), s)?;
+                    self.glk_store_ptr(a(3), k)?;
+                }
+                0
+            }
+            0x0028 => self.glk.window_type(a(0)).map(|t| t.to_arg()).unwrap_or(0), // get_type
+            0x0029 => self.glk.window_parent(a(0)).unwrap_or(0),                   // get_parent
+            0x002A => {
+                // glk_window_clear(win)
+                match self.glk.window_clear(a(0)) {
+                    Some(WinType::TextGrid) => self.backend.grid_clear(a(0)),
+                    Some(WinType::TextBuffer) => self.backend.window_clear(a(0)),
+                    _ => {}
+                }
+                0
+            }
+            0x002B => {
+                // glk_window_move_cursor(win, xpos, ypos)
+                self.glk.window_move_cursor(a(0), a(1), a(2));
+                0
+            }
+            0x002C => self.glk.window_stream(a(0)).unwrap_or(0), // glk_window_get_stream
+            0x0030 => self.glk.window_sibling(a(0)).unwrap_or(0), // glk_window_get_sibling
+            0x002F => {
+                // glk_set_window(win)
+                let win = a(0);
+                let sid = if win == 0 { 0 } else { self.glk.window_stream(win).unwrap_or(0) };
+                self.glk.set_current_stream(sid);
+                0
+            }
+            // ── streams ───────────────────────────────────────────────────────
+            0x0040 => {
+                // glk_stream_iterate(str, rockptr) -> next stream id
+                let (next, rock) = self.glk.stream_iterate(a(0));
+                self.glk_store_ptr(a(1), rock)?;
+                next
+            }
+            0x0041 => self.glk.stream_rock(a(0)).unwrap_or(0), // glk_stream_get_rock
+            0x0043 => self.glk.stream_open_memory(a(0), a(1), false, a(3)), // open_memory(addr,len,fmode,rock)
+            0x0139 => self.glk.stream_open_memory(a(0), a(1), true, a(3)),  // open_memory_uni
+            0x0044 => {
+                // glk_stream_close(str, resultptr{readcount, writecount})
+                match self.glk.stream_close(a(0)) {
+                    Some((r, w)) => {
+                        let ptr = a(1);
+                        if ptr != 0 {
+                            self.store_mem(ptr, r)?;
+                            self.store_mem(ptr + 4, w)?;
+                        }
+                    }
+                    None => self.diagnostics.push(format!("glk_stream_close: bad stream {}", a(0))),
+                }
+                0
+            }
+            0x0045 => {
+                // glk_stream_set_position(str, pos, seekmode)
+                self.glk.stream_set_position(a(0), a(1) as i32, a(2));
+                0
+            }
+            0x0046 => self.glk.stream_position(a(0)).unwrap_or(0), // glk_stream_get_position
+            0x0047 => {
+                // glk_stream_set_current(str)
+                self.glk.set_current_stream(a(0));
+                0
+            }
+            0x0048 => self.glk.current_stream(), // glk_stream_get_current
+            // ── styles / gestalt / control ────────────────────────────────────
+            0x0086 => {
+                // glk_set_style(style) — on the current stream
+                let sid = self.glk.current_stream();
+                self.glk.set_stream_style(sid, GlkStyle::from_num(a(0)));
+                0
+            }
+            0x0087 => {
+                // glk_set_style_stream(str, style)
+                self.glk.set_stream_style(a(0), GlkStyle::from_num(a(1)));
+                0
+            }
+            0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
+            0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
+            0x0005 => self.glk_gestalt(a(0), a(1)), // glk_gestalt_ext(sel, val, arr, len)
+            0x0001 => {
+                // glk_exit — end the program
+                self.halted = true;
+                0
+            }
+            other => {
+                self.diagnostics
+                    .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
+                0
+            }
+        };
+        Ok(ret)
     }
 
-    fn put_latin1(&mut self, v: u32) {
-        let s = ((v & 0xFF) as u8 as char).to_string();
-        self.out.print(&s);
+    /// Write `s` to the current Glk stream (used by the put-to-current
+    /// selectors). Glk output is independent of the VM's I/O system.
+    fn glk_put_current(&mut self, s: &str) {
+        let sid = self.glk.current_stream();
+        self.glk_stream_put(sid, s);
     }
-    fn put_uni(&mut self, v: u32) {
-        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
-        self.out.print(&s);
+
+    /// Read `len` Latin-1 bytes at `addr` into a String.
+    fn read_latin1_buffer(&self, addr: u32, len: u32) -> R<String> {
+        let mut s = String::with_capacity(len as usize);
+        for i in 0..len {
+            s.push(self.m8(addr + i)? as u8 as char);
+        }
+        Ok(s)
+    }
+    /// Read `len` big-endian 32-bit code points at `addr` into a String.
+    fn read_uni_buffer(&self, addr: u32, len: u32) -> R<String> {
+        let mut s = String::with_capacity(len as usize);
+        for i in 0..len {
+            let cp = self.m32(addr + i * 4)?;
+            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+        }
+        Ok(s)
+    }
+
+    /// `glk_window_open`: open a window in the model, tell the backend, and
+    /// recompute the layout. Returns the new window id (0 on a malformed call).
+    fn glk_open_window(&mut self, split: u32, method: u32, size: u32, wintype: u32, rock: u32) -> u32 {
+        match self.glk.window_open(split, method, size, wintype, rock) {
+            Some(id) => {
+                if let Some(ty) = self.glk.window_type(id) {
+                    self.backend.window_open(id, ty);
+                }
+                self.relayout_glk();
+                id
+            }
+            None => {
+                self.diagnostics
+                    .push(format!("glk_window_open(split={split}, wintype={wintype}) failed"));
+                0
+            }
+        }
+    }
+
+    /// Recompute the window layout from the backend's screen size and notify it.
+    fn relayout_glk(&mut self) {
+        let (w, h) = self.backend.screen_size();
+        let layout = self.glk.relayout(w, h);
+        self.backend.window_layout(&layout);
+    }
+
+    /// Store `v` at the Glulx-memory pointer `ptr`, unless `ptr` is 0 (the Glk
+    /// convention for "don't store this result").
+    fn glk_store_ptr(&mut self, ptr: u32, v: u32) -> R<()> {
+        if ptr != 0 {
+            self.store_mem(ptr, v)?;
+        }
+        Ok(())
+    }
+
+    /// The Glk version this layer implements (0.7.5), reported by
+    /// `glk_gestalt(gestalt_Version)`.
+    const GLK_VERSION: u32 = 0x0000_0705;
+
+    /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
+    /// Unicode are supported; input/timer/graphics/sound are not yet (0).
+    fn glk_gestalt(&self, sel: u32, _val: u32) -> u32 {
+        match sel {
+            0 => Self::GLK_VERSION, // gestalt_Version
+            3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
+            15 => 1,                // gestalt_Unicode
+            // CharInput(1)/LineInput(2)/MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)
+            // and the rest are not supported in the output-only phase.
+            _ => 0,
+        }
     }
 
     // ── the run loop ──────────────────────────────────────────────────────────
@@ -1927,17 +2219,35 @@ impl Machine {
     pub fn run(&mut self) {
         while self.step() == StepResult::Continue {}
     }
+
+    /// Flush the display backend (e.g. at the end of a run).
+    pub fn flush(&mut self) {
+        self.backend.flush();
+    }
+
+    /// Mutable access to the display backend (e.g. to downcast in tests/host).
+    pub fn backend_mut(&mut self) -> &mut dyn GlkBackend {
+        &mut *self.backend
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::asm;
-    use crate::io::BufferOutput;
+    use crate::glk::TestBackend;
 
+    /// Build a test machine over `built` with a [`TestBackend`], then run the
+    /// Glk prelude: open a TextBuffer window and make its stream current, so the
+    /// hand-assembled programs (which print via `streamchar`/`glk_put_*`) have a
+    /// window to print into — exactly as a real game does at startup.
     fn machine(built: asm::Built) -> Machine {
         let mem = Memory::new(built.image).expect("valid image");
-        Machine::with_output(mem, Box::new(BufferOutput::new()))
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer = 3
+        let sid = m.glk.window_stream(win).expect("buffer window has a stream");
+        m.glk.set_current_stream(sid);
+        m
     }
 
     /// A machine whose start function has `locals` and whose body is `body`,
@@ -2378,8 +2688,10 @@ mod tests {
 
     // ── Task 6: output, iosys, @glk, run loop ─────────────────────────────────
 
+    /// All text the program printed: the migrated `TestBackend`'s accumulated
+    /// text-buffer content (the prelude opens exactly one window).
     fn out_str(m: &Machine) -> String {
-        m.out.as_any().downcast_ref::<BufferOutput>().unwrap().buf.clone()
+        m.backend.as_any().downcast_ref::<TestBackend>().unwrap().all_text()
     }
 
     /// Build + run a start function with body `body`; return its output.
@@ -3424,5 +3736,251 @@ mod tests {
         assert_eq!(m.gestalt(3, 0), 1); // Undo now supported
         assert_eq!(m.gestalt(9, 0), 0); // Acceleration: not intercepted
         assert_eq!(m.gestalt(10, 0), 0); // AccelFunc: not intercepted
+    }
+
+    // ── Task 1 (Glk model): seam migration behaviors ──────────────────────────
+
+    /// With no window open and no current stream, Glk output is safely discarded
+    /// (no panic). Build a raw machine WITHOUT the test prelude.
+    #[test]
+    fn glk_output_with_no_current_stream_is_discarded() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]); // setiosys glk
+        body.extend(asm::ins(0x71, &[asm::Op::C8(42)])); // streamnum 42 (no window!)
+        // glk_put_char('B') directly — also routes to the (absent) current stream.
+        body.extend(asm::ins(0x40, &[asm::Op::C8(66), asm::Op::Stack]));
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x80), asm::Op::C8(1), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new())); // no prelude
+        m.run();
+        assert!(m.halted);
+        let backend = m.backend.as_any().downcast_ref::<TestBackend>().unwrap();
+        assert_eq!(backend.all_text(), ""); // nothing printed, no panic
+    }
+
+    /// `glk_window_open` builds a TextBuffer window whose stream `glk_set_window`
+    /// makes current; subsequent `glk_put_char` lands in that window.
+    #[test]
+    fn glk_window_open_and_set_window_route_output() {
+        // The shared `machine()` prelude already opens window 1 + sets it current,
+        // so a bare glk_put_char prints there.
+        let mut body = asm::ins(0x40, &[asm::Op::C8(b'Z' as i8), asm::Op::Stack]); // push 'Z'
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x80), asm::Op::C8(1), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        // Window 1 is the prelude TextBuffer; its recorded text is "Z".
+        let backend = m.backend.as_any().downcast_ref::<TestBackend>().unwrap();
+        assert_eq!(backend.text(1), "Z");
+        assert_eq!(m.glk.root(), 1);
+        assert_eq!(m.glk.window_type(1), Some(WinType::TextBuffer));
+    }
+
+    // ── Task 2 (Glk window tree, sizing, TextGrid) ────────────────────────────
+
+    /// Emit code calling `@glk(selector, args)` storing the result via `store`.
+    /// Args are pushed so `args[0]` is topmost (the first value `@glk` pops).
+    fn glk_call(selector: u32, args: &[asm::Op], store: asm::Op) -> Vec<u8> {
+        let mut body = Vec::new();
+        for &arg in args.iter().rev() {
+            body.extend(asm::ins(0x40, &[arg, asm::Op::Stack])); // copy arg -> push
+        }
+        body.extend(asm::ins(0x130, &[asm::Op::C32(selector), asm::Op::C8(args.len() as i8), store]));
+        body
+    }
+
+    fn backend_of(m: &Machine) -> &TestBackend {
+        m.backend.as_any().downcast_ref::<TestBackend>().unwrap()
+    }
+
+    #[test]
+    fn glk_split_builds_pair_tree_with_fixed_sizes() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Prelude opens window 1 (TextBuffer root, 80x24). Split it: a TextGrid
+        // ABOVE | FIXED (0x12), 3 rows. New grid = window 2; pair = window 3.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x22, &[], Mem16(0x0104))); // get_root
+        body.extend(glk_call(0x25, &[C8(2), C16(0x0108), C16(0x010C)], Zero)); // get_size(grid)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open returns the new grid window id");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 3, "root is the pair window");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 80, "grid width = full screen");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 3, "grid height = fixed 3 rows");
+    }
+
+    #[test]
+    fn glk_window_tree_queries_and_proportional_split() {
+        use asm::Op::{C16, C8, Zero};
+        // Split window 1 RIGHT | PROPORTIONAL (0x21), 25% of 80 = 20 cols.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x21), C8(25), C8(4), C8(0)], asm::Op::Mem16(0x0100));
+        // get_size(grid=2) -> 0x108,0x10C ; get_size(buf=1) -> 0x110,0x114
+        body.extend(glk_call(0x25, &[C8(2), C16(0x0108), C16(0x010C)], Zero));
+        body.extend(glk_call(0x25, &[C8(1), C16(0x0110), C16(0x0114)], Zero));
+        body.extend(glk_call(0x28, &[C8(2)], asm::Op::Mem16(0x0118))); // get_type(2)
+        body.extend(glk_call(0x29, &[C8(2)], asm::Op::Mem16(0x011C))); // get_parent(2)
+        body.extend(glk_call(0x30, &[C8(2)], asm::Op::Mem16(0x0120))); // get_sibling(2)
+        body.extend(glk_call(0x28, &[C8(3)], asm::Op::Mem16(0x0124))); // get_type(pair)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x108).unwrap(), 20, "grid width = 25% of 80");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 24, "grid height = full");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 60, "buffer width = remainder");
+        assert_eq!(m.mem.read32(0x118).unwrap(), 4, "grid type = wintype_TextGrid");
+        assert_eq!(m.mem.read32(0x11C).unwrap(), 3, "grid parent = pair window");
+        assert_eq!(m.mem.read32(0x120).unwrap(), 1, "grid sibling = buffer window");
+        assert_eq!(m.mem.read32(0x124).unwrap(), 1, "pair type = wintype_Pair");
+    }
+
+    #[test]
+    fn glk_textgrid_move_cursor_and_put_writes_cells() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Open a grid above; move its cursor to (x=2,y=1); make it current; print.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x2B, &[C8(2), C8(2), C8(1)], Zero)); // move_cursor(2, 2,1)
+        body.extend(glk_call(0x2F, &[C8(2)], Zero)); // set_window(2)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        assert_eq!(backend_of(&m).grid_line(2, 1), "  Hi"); // cols 2,3 hold "Hi"
+    }
+
+    #[test]
+    fn glk_window_clear_buffer_and_grid() {
+        use asm::Op::{C8, Zero};
+        // Buffer (window 1, current via prelude): put 'X', clear, put 'Y' -> "Y".
+        let mut body = glk_call(0x80, &[C8(b'X' as i8)], Zero);
+        body.extend(glk_call(0x2A, &[C8(1)], Zero)); // glk_window_clear(1)
+        body.extend(glk_call(0x80, &[C8(b'Y' as i8)], Zero));
+        // Grid: open above, write at (0,0), clear it -> grid line empty.
+        body.extend(glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Zero)); // grid=2
+        body.extend(glk_call(0x2F, &[C8(2)], Zero)); // set_window(2)
+        body.extend(glk_call(0x80, &[C8(b'Q' as i8)], Zero)); // grid (0,0)='Q'
+        body.extend(glk_call(0x2A, &[C8(2)], Zero)); // glk_window_clear(2)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x100, |_| {});
+        assert_eq!(backend_of(&m).text(1), "Y", "buffer clear wiped 'X'");
+        assert_eq!(backend_of(&m).grid_line(2, 0), "", "grid clear wiped 'Q'");
+    }
+
+    // ── Task 3 (Glk streams: window + memory) ─────────────────────────────────
+
+    #[test]
+    fn glk_memory_stream_write_position_and_close() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Prelude made window stream 1; open_memory -> stream 2 over [0x180,0x188).
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // stream_set_current(2)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi") -> memory
+        body.extend(glk_call(0x46, &[C8(2)], Mem16(0x0104))); // stream_get_position(2)
+        body.extend(glk_call(0x44, &[C8(2), C16(0x0108)], Zero)); // stream_close -> result@0x108
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open_memory returns stream id 2");
+        assert_eq!(m.mem.read8(0x180).unwrap(), b'H' as u32);
+        assert_eq!(m.mem.read8(0x181).unwrap(), b'i' as u32);
+        assert_eq!(m.mem.read32(0x104).unwrap(), 2, "position advanced by 2");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "read count");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "write count");
+    }
+
+    #[test]
+    fn glk_memory_stream_uni_writes_words_and_seeks() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // open_memory_uni -> stream 2 over 4 words at 0x180; write 'A','B'.
+        let mut body = glk_call(0x139, &[C16(0x0180), C8(4), C8(1), C8(0)], Zero);
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // set current
+        body.extend(glk_call(0x128, &[C8(b'A' as i8)], Zero)); // put_char_uni 'A'
+        body.extend(glk_call(0x128, &[C8(b'B' as i8)], Zero)); // put_char_uni 'B'
+        body.extend(glk_call(0x46, &[C8(2)], Mem16(0x0100))); // position -> 0x100
+        // seek back to word 0 (seekmode 0), overwrite with 'C'.
+        body.extend(glk_call(0x45, &[C8(2), C8(0), C8(0)], Zero)); // set_position(2, 0, start)
+        body.extend(glk_call(0x128, &[C8(b'C' as i8)], Zero)); // put_char_uni 'C'
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x180).unwrap(), b'C' as u32, "word 0 reseeked + overwritten");
+        assert_eq!(m.mem.read32(0x184).unwrap(), b'B' as u32, "word 1 = 'B'");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "uni position counts words");
+    }
+
+    #[test]
+    fn glk_stream_current_and_explicit_routing() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // open_memory -> stream 2; current stays the window (stream 1).
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100));
+        body.extend(glk_call(0x48, &[], Mem16(0x0104))); // get_current (expect 1, the window)
+        body.extend(glk_call(0x81, &[C8(2), C8(b'Z' as i8)], Zero)); // put_char_stream(2,'Z') -> memory
+        body.extend(glk_call(0x80, &[C8(b'Y' as i8)], Zero)); // put_char 'Y' -> current window
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // set_current(2)
+        body.extend(glk_call(0x48, &[], Mem16(0x0108))); // get_current (expect 2)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "memory stream id");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "current stream is the window");
+        assert_eq!(m.mem.read8(0x180).unwrap(), b'Z' as u32, "explicit stream routing");
+        assert_eq!(backend_of(&m).text(1), "Y", "current routing untouched");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 2, "set_current took effect");
+    }
+
+    // ── Task 4 (Glk styles, gestalt, output-selector completeness) ────────────
+
+    #[test]
+    fn glk_set_style_tags_subsequent_output() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0x86, &[C8(3)], Zero); // glk_set_style(Header)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        assert_eq!(backend_of(&m).runs(1), vec![(GlkStyle::Header, "Hi".to_string())]);
+    }
+
+    #[test]
+    fn glk_set_style_stream_targets_a_specific_stream() {
+        use asm::Op::{C8, Zero};
+        // window 1's stream is stream 1; tag it Alert, then print to current.
+        let mut body = glk_call(0x87, &[C8(1), C8(5)], Zero); // glk_set_style_stream(1, Alert)
+        body.extend(glk_call(0x80, &[C8(b'A' as i8)], Zero)); // glk_put_char('A')
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(backend_of(&m).runs(1), vec![(GlkStyle::Alert, "A".to_string())]);
+    }
+
+    #[test]
+    fn glk_gestalt_reports_output_capabilities() {
+        use asm::Op::{C8, Mem16, Zero};
+        let mut body = glk_call(0x04, &[C8(0), C8(0)], Mem16(0x0100)); // Version
+        body.extend(glk_call(0x04, &[C8(3), C8(b'A' as i8)], Mem16(0x0104))); // CharOutput 'A'
+        body.extend(glk_call(0x04, &[C8(15), C8(0)], Mem16(0x0108))); // Unicode
+        body.extend(glk_call(0x04, &[C8(2), C8(0)], Mem16(0x010C))); // LineInput (3a-2)
+        body.extend(glk_call(0x05, &[C8(0), C8(0), Zero, C8(0)], Mem16(0x0110))); // gestalt_ext Version
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0705, "glk version 0.7.5");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 2, "CharOutput = ExactPrint");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Unicode supported");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "LineInput not in 3a-1");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x0000_0705, "gestalt_ext mirrors gestalt");
+    }
+
+    #[test]
+    fn glk_stylehint_calls_are_accepted_silently() {
+        use asm::Op::{C8, Zero};
+        let mut body = glk_call(0xB0, &[C8(3), C8(3), C8(0), C8(1)], Zero); // stylehint_set
+        body.extend(glk_call(0xB1, &[C8(3), C8(3), C8(0)], Zero)); // stylehint_clear
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.diagnostics.is_empty(), "stylehints accepted: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_exit_halts_the_machine() {
+        use asm::Op::{C8, Zero};
+        let mut body = glk_call(0x01, &[], Zero); // glk_exit
+        body.extend(glk_call(0x80, &[C8(b'X' as i8)], Zero)); // poison: must not run
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.halted, "glk_exit halted the machine");
+        assert_eq!(backend_of(&m).text(1), "", "nothing printed after glk_exit");
     }
 }
