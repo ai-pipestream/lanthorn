@@ -1431,7 +1431,7 @@ impl Machine {
         }
         // Stream 3 is inactive; streams 1/2/4 apply.
         if self.streams.stream1 {
-            self.out.print(s);
+            self.out.print_styled(s, self.screen.text_style);
         }
     }
 

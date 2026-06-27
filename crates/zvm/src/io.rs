@@ -11,6 +11,13 @@ use std::any::Any;
 /// Trait for Z-machine text output sinks.
 pub trait Output: Any {
     fn print(&mut self, s: &str);
+    /// Print `s` carrying the current Z-machine text-style bitmask
+    /// (ZMSD §8.7.1: 1=reverse, 2=bold, 4=italic, 8=fixed-pitch). The default
+    /// ignores the style and delegates to `print`, so existing sinks are
+    /// unaffected until they override this.
+    fn print_styled(&mut self, s: &str, _style: u8) {
+        self.print(s);
+    }
     fn as_any(&self) -> &dyn Any;
     /// Mutable downcast support — required to drain sink state (e.g. `CaptureSink::take_text`).
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -42,5 +49,19 @@ impl Output for BufferOutput {
     }
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod print_styled_tests {
+    use super::*;
+
+    #[test]
+    fn default_print_styled_delegates_to_print() {
+        let mut a = BufferOutput::new();
+        let mut b = BufferOutput::new();
+        a.print("hello");
+        b.print_styled("hello", 0x02); // style ignored by default impl
+        assert_eq!(a.buf, b.buf, "default print_styled must equal print");
     }
 }
