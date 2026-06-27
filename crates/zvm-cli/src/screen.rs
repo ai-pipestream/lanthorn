@@ -1,11 +1,6 @@
 //! Basic DOS-style screen model for zvm-cli: pure formatting/SGR/terminal
 //! helpers (this module) plus the stateful `ScreenView` (Task 3).
 
-// Helpers are wired into the run loop in the final integration task; until then
-// they are only reachable from unit tests, which would dead-code-warn in a
-// binary crate. Removed once `main.rs` consumes them.
-#![allow(dead_code)]
-
 use zvm::screen::{StatusLine, StatusRight, UpperWindow};
 
 pub const DEFAULT_COLS: u16 = 80;

@@ -1,10 +1,6 @@
 //! Aux ("global state") persistence for zvm-cli: a per-story `<stem>.aux` file
 //! holding the v5 save/restore-table map (`Machine::aux_data`).
 
-// Wired into the run loop in the final integration task; until then these are
-// only reachable from unit tests, which would dead-code-warn in a binary crate.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

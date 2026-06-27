@@ -76,6 +76,96 @@ fn build_machine(story: Vec<u8>, stdout_is_tty: bool) -> Result<Machine, String>
     Ok(machine)
 }
 
+// ── argument parsing ──────────────────────────────────────────────────────────
+
+struct Args {
+    story: Option<String>,
+    no_status: bool,
+    no_aux: bool,
+}
+
+fn parse_args(argv: &[String]) -> Args {
+    let mut a = Args { story: None, no_status: false, no_aux: false };
+    for arg in &argv[1..] {
+        match arg.as_str() {
+            "--no-status" | "--lower-only" => a.no_status = true,
+            "--no-aux" => a.no_aux = true,
+            s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
+            _ => {}
+        }
+    }
+    a
+}
+
+// ── terminal size + raw single-key input ──────────────────────────────────────
+
+fn detect_term_rows() -> u16 {
+    let stty = process::Command::new("stty")
+        .arg("size")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok());
+    let env_lines = env::var("LINES").ok();
+    screen::term_rows(stty.as_deref(), env_lines.as_deref())
+}
+
+/// Read one keypress in raw mode via stty (TTY only); fall back to a line byte.
+fn read_char_input(stdin_is_tty: bool) -> u8 {
+    use std::io::Read;
+    if !screen::wants_raw_char(stdin_is_tty) {
+        return read_byte_stdin();
+    }
+    let saved = process::Command::new("stty")
+        .arg("-g")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok());
+    let _ = process::Command::new("stty")
+        .args(["-icanon", "-echo", "min", "1", "time", "0"])
+        .status();
+    let mut buf = [0u8; 1];
+    let n = io::stdin().read(&mut buf).unwrap_or(0);
+    if let Some(s) = saved {
+        let _ = process::Command::new("stty").arg(s.trim()).status();
+    }
+    if n == 0 {
+        b'\n'
+    } else {
+        buf[0]
+    }
+}
+
+// ── aux ("global state") persistence ──────────────────────────────────────────
+
+/// Load `<stem>.aux` into the machine's aux_data (preload); warn on decode error.
+fn aux_preload(machine: &mut Machine, story_path: &Path, no_aux: bool) {
+    if no_aux {
+        return;
+    }
+    let path = aux::aux_path(story_path);
+    if let Ok(bytes) = fs::read(&path) {
+        match aux::decode_aux(&bytes) {
+            Ok(map) => {
+                machine.aux_data = map;
+                machine.aux_dirty = false;
+            }
+            Err(e) => eprintln!("zvm: warning: ignoring corrupt {}: {:?}", path.display(), e),
+        }
+    }
+}
+
+/// Flush aux_data to `<stem>.aux` when dirty; clear the flag regardless.
+fn aux_flush(machine: &mut Machine, story_path: &Path, no_aux: bool) {
+    if no_aux || !machine.aux_dirty {
+        return;
+    }
+    let path = aux::aux_path(story_path);
+    if let Err(e) = fs::write(&path, aux::encode_aux(&machine.aux_data)) {
+        eprintln!("zvm: warning: aux save to {} failed: {}", path.display(), e);
+    }
+    machine.aux_dirty = false;
+}
+
 // ── prompt + read helpers ─────────────────────────────────────────────────────
 
 fn prompt_and_read_line(prompt: &str) -> String {
@@ -105,17 +195,18 @@ fn read_byte_stdin() -> u8 {
 // ── main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <story-file>", args[0]);
+    let argv: Vec<String> = env::args().collect();
+    let args = parse_args(&argv);
+    let Some(story_arg) = args.story.clone() else {
+        eprintln!("Usage: {} [--no-status] [--no-aux] <story-file>", argv[0]);
         process::exit(1);
-    }
+    };
+    let story_path = std::path::PathBuf::from(&story_arg);
 
-    let path = Path::new(&args[1]);
-    let story_bytes = match fs::read(path) {
+    let story_bytes = match fs::read(&story_path) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("Error: cannot read '{}': {}", path.display(), e);
+            eprintln!("Error: cannot read '{}': {}", story_path.display(), e);
             process::exit(1);
         }
     };
@@ -124,6 +215,7 @@ fn main() {
     let original_bytes = story_bytes.clone();
 
     let stdout_is_tty = io::stdout().is_terminal();
+    let stdin_is_tty = io::stdin().is_terminal();
 
     let mut machine = match build_machine(story_bytes, stdout_is_tty) {
         Ok(m) => m,
@@ -132,16 +224,37 @@ fn main() {
             process::exit(1);
         }
     };
+    aux_preload(&mut machine, &story_path, args.no_aux);
+
+    let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, detect_term_rows());
 
     loop {
         let step = machine.step();
         for d in machine.diagnostics.drain(..) {
             eprintln!("zvm: warning: {d}");
         }
+        // Bleeps: drain and ring (TTY only).
+        let beeps = machine.pending_beeps.len();
+        machine.pending_beeps.clear();
+        if beeps > 0 {
+            print!("{}", screen::bleep_bytes(beeps, stdout_is_tty));
+            let _ = io::stdout().flush();
+        }
+        // v3 show_status redraw request.
+        if machine.screen.show_status_requested {
+            print!("{}", view.frame(&machine));
+            let _ = io::stdout().flush();
+            machine.screen.show_status_requested = false;
+        }
+        // Persist aux tables as soon as the game commits one.
+        aux_flush(&mut machine, &story_path, args.no_aux);
+
         match step {
             StepResult::Continue => {}
 
             StepResult::Quit => {
+                print!("{}", view.leave());
+                let _ = io::stdout().flush();
                 break;
             }
 
@@ -153,15 +266,20 @@ fn main() {
                         process::exit(1);
                     }
                 };
+                aux_preload(&mut machine, &story_path, args.no_aux);
             }
 
             StepResult::NeedLine { .. } => {
+                print!("{}", view.frame(&machine));
+                let _ = io::stdout().flush();
                 let line = read_line_stdin();
                 machine.supply_line(line.trim_end());
             }
 
             StepResult::NeedChar => {
-                let ch = read_byte_stdin();
+                print!("{}", view.frame(&machine));
+                let _ = io::stdout().flush();
+                let ch = read_char_input(stdin_is_tty);
                 machine.supply_char(ch);
             }
 
@@ -199,6 +317,24 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    #[test]
+    fn parses_flags_and_story() {
+        let a = parse_args(&["zvm-cli".into(), "--no-status".into(), "game.z5".into()]);
+        assert_eq!(a.story.as_deref(), Some("game.z5"));
+        assert!(a.no_status && !a.no_aux);
+
+        let b = parse_args(&["zvm-cli".into(), "--no-aux".into(), "g".into()]);
+        assert!(b.no_aux && !b.no_status);
+
+        let c = parse_args(&["zvm-cli".into(), "g".into()]);
+        assert!(!c.no_status && !c.no_aux);
     }
 }
 
