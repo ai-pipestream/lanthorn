@@ -22,6 +22,9 @@ use zvm::cpu::exec::{Machine, StepResult};
 use zvm::io::Output;
 use zvm::memory::Memory;
 
+mod screen;
+mod aux; // implemented in Task 5; declared now so the module tree is stable
+
 // ── StdoutOutput ──────────────────────────────────────────────────────────────
 
 /// Output sink that writes directly to stdout and flushes after each call.
