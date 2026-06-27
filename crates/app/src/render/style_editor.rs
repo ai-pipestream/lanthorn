@@ -390,30 +390,23 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let is_picture_frame = style_name == "picture-frame";
 
             // Helper: get the display glyph for a zone.
-            let zone_glyph = |zone: BorderZone| -> &'static str {
+            let zone_glyph = |zone: BorderZone| -> String {
                 // Override from decl takes priority.
-                let override_g = active_decl.and_then(|d| {
-                    let s: Option<&str> = match zone {
-                        BorderZone::Top    => d.glyph_top.as_deref(),
-                        BorderZone::Bottom => d.glyph_bottom.as_deref(),
-                        BorderZone::Left   => d.glyph_left.as_deref(),
-                        BorderZone::Right  => d.glyph_right.as_deref(),
-                        BorderZone::Tl     => d.glyph_tl.as_deref(),
-                        BorderZone::Tr     => d.glyph_tr.as_deref(),
-                        BorderZone::Bl     => d.glyph_bl.as_deref(),
-                        BorderZone::Br     => d.glyph_br.as_deref(),
-                    };
-                    s
+                let override_g: Option<&str> = active_decl.and_then(|d| match zone {
+                    BorderZone::Top    => d.glyph_top.as_deref(),
+                    BorderZone::Bottom => d.glyph_bottom.as_deref(),
+                    BorderZone::Left   => d.glyph_left.as_deref(),
+                    BorderZone::Right  => d.glyph_right.as_deref(),
+                    BorderZone::Tl     => d.glyph_tl.as_deref(),
+                    BorderZone::Tr     => d.glyph_tr.as_deref(),
+                    BorderZone::Bl     => d.glyph_bl.as_deref(),
+                    BorderZone::Br     => d.glyph_br.as_deref(),
                 });
                 if let Some(g) = override_g {
-                    // Safety: override glyphs come from user input; we store them as String
-                    // but need &'static str for this closure. Use a leak here.
-                    // Actually we cannot do that easily — return a fixed placeholder for override.
-                    let _ = g;
-                    "•"
+                    g.to_string()
                 } else {
                     // Default glyph based on style.
-                    match style_name {
+                    let default: &'static str = match style_name {
                         "double" => match zone {
                             BorderZone::Top | BorderZone::Bottom => "═",
                             BorderZone::Left | BorderZone::Right => "║",
@@ -439,7 +432,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                             BorderZone::Tl => "┌", BorderZone::Tr => "┐",
                             BorderZone::Bl => "└", BorderZone::Br => "┘",
                         },
-                    }
+                    };
+                    default.to_string()
                 }
             };
 
@@ -496,6 +490,12 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             }
 
             // Row 18-19: header/shadow toggle chips.
+            // header applies to pane selectors (all bordered except dialog);
+            // shadow applies to dialog only.
+            let is_dialog = active_sel == "dialog";
+            let show_header = is_bordered_selector(active_sel) && !is_dialog;
+            let show_shadow = is_dialog;
+
             if prop.height > 18 {
                 let toggle_y = prop.y + 18;
                 let hdr_on = active_decl.and_then(|d| d.header).unwrap_or(false);
@@ -512,11 +512,11 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                 let hdr_style = if hdr_on { active_style } else { normal_style };
                 let shd_style = if shd_on { active_style } else { normal_style };
 
-                if hdr_x + hdr_w <= prop.right() {
+                if show_header && hdr_x + hdr_w <= prop.right() {
                     crate::render::draw_str_clipped(buf, hdr_x, toggle_y, hdr_text, hdr_style, prop);
                     border_header = Some(Rect::new(hdr_x, toggle_y, hdr_w, 1));
                 }
-                if shd_x + shd_w <= prop.right() {
+                if show_shadow && shd_x + shd_w <= prop.right() {
                     crate::render::draw_str_clipped(buf, shd_x, toggle_y, shd_text, shd_style, prop);
                     border_shadow = Some(Rect::new(shd_x, toggle_y, shd_w, 1));
                 }
@@ -667,5 +667,59 @@ mod tests {
 
         // MRU is empty initially, so no MRU rects.
         assert!(rects.mru_rects.is_empty(), "no MRU entries on fresh open");
+    }
+
+    #[test]
+    fn header_shadow_chips_are_selector_appropriate() {
+        let area = Rect::new(0, 0, 120, 40);
+
+        // PANE selector (map_border): header chip present, shadow chip absent.
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|&sel| sel == "map_border")
+                .expect("map_border exists");
+        }
+        let mut buf = Buffer::empty(area);
+        let rects = draw_style_editor(&s, area, &mut buf).expect("drawn");
+        assert!(rects.border_header.is_some(), "pane selector shows header chip");
+        assert!(rects.border_shadow.is_none(), "pane selector hides shadow chip");
+
+        // dialog selector: shadow chip present, header chip absent.
+        let mut s2 = AppState::default();
+        crate::input::open_style_editor(&mut s2);
+        {
+            let ed = s2.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|&sel| sel == "dialog")
+                .expect("dialog exists");
+        }
+        let mut buf2 = Buffer::empty(area);
+        let rects2 = draw_style_editor(&s2, area, &mut buf2).expect("drawn");
+        assert!(rects2.border_shadow.is_some(), "dialog shows shadow chip");
+        assert!(rects2.border_header.is_none(), "dialog hides header chip");
+    }
+
+    #[test]
+    fn mini_box_renders_actual_override_glyph() {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut s = AppState::default();
+        crate::input::open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            ed.active = ed.selectors.iter().position(|&sel| sel == "map_border")
+                .expect("map_border exists");
+            let decl = ed.doc.colors.selectors.entry("map_border".to_string()).or_default();
+            decl.glyph_top = Some("═".into());
+        }
+        let mut buf = Buffer::empty(area);
+        let _ = draw_style_editor(&s, area, &mut buf);
+        let mut found = false;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if buf[(x, y)].symbol() == "═" { found = true; }
+            }
+        }
+        assert!(found, "mini border-box must render the actual override glyph, not a placeholder");
     }
 }
