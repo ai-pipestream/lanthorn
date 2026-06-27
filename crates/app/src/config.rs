@@ -6,14 +6,14 @@ use serde::{Deserialize, Deserializer};
 
 // ── Keymap config ─────────────────────────────────────────────────────────────
 
-/// The [keymap] section of config.toml.
+/// The `[keymap]` section of config.toml.
 ///
 /// `use_defaults = true` (the default) layers user bindings on top of the
 /// built-in defaults. Set `use_defaults = false` for a clean-slate keymap.
 ///
 /// Per-context override tables map key-spec strings to command strings:
 ///
-///   [keymap]
+///   `[keymap]`
 ///   use_defaults = true
 ///   [keymap.global]
 ///   "ctrl+s" = "save-game"
@@ -48,7 +48,7 @@ pub(crate) fn default_arrow_set() -> String { "filled".into() }
 pub(crate) fn default_portal_icons() -> String { "ascii".into() }
 pub(crate) fn default_path_style() -> String { "light".into() }
 
-/// The [symbols] section of config.toml.  All fields default to the preset
+/// The `[symbols]` section of config.toml.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SymbolConfig {
@@ -105,7 +105,7 @@ where
     Ok(s.chars().next().unwrap_or('N'))
 }
 
-/// The [search] section of config.toml.
+/// The `[search]` section of config.toml.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SearchConfig {
     /// When true (default), a new /search starts backward from the bottom (most recent match).
@@ -156,7 +156,7 @@ pub struct HotkeyGroupConfig {
     pub commands: Vec<String>,
 }
 
-/// The [hotkeys] section of config.toml.
+/// The `[hotkeys]` section of config.toml.
 /// `prefix` overrides the dialog-open key (default: Ctrl+K).
 /// `direct` overrides which commands are always available (bypass dialog).
 /// `group` overrides the command groups shown in the dialog.
@@ -245,7 +245,7 @@ pub struct Config {
     pub user_dir: PathBuf,
     /// When false (default), a story with no .babelmap archive starts with an
     /// empty map (fog-of-war, self-contained).  When true, fall back to the
-    /// legacy shared <ifid>.map.json so pre-accumulated maps are still visible.
+    /// legacy shared `<ifid>.map.json` so pre-accumulated maps are still visible.
     #[serde(default)]
     pub use_default_map: bool,
     /// When true (default), restore the game state from the archive on startup so
@@ -433,7 +433,7 @@ pub fn resolve(cli: &Cli) -> Config {
 /// Write the functional config fields (and the `style` pointer) to `dir/config.toml`
 /// using toml_edit (format-preserving). Creates the file and parent directory if absent.
 /// Does NOT emit `[colors]`/`[symbols]` — those now live in the style file.
-/// Preserves all other content (comments, [keymap], [hotkeys], any visual sections, etc.).
+/// Preserves all other content (comments, `[keymap]`, `[hotkeys]`, any visual sections, etc.).
 pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let config_path = dir.join("config.toml");

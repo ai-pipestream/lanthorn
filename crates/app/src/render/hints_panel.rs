@@ -27,7 +27,7 @@ const DIALOG_H: u16 = 24;
 pub struct HintsPanelRects {
     /// Full dialog area (border included).
     pub area: Rect,
-    /// The [X] close button, if rendered.
+    /// The `[X]` close button, if rendered.
     pub close: Option<Rect>,
     /// The input row inside the dialog content area.
     pub input: Rect,

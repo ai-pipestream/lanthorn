@@ -16,7 +16,7 @@ const GALLERY_MIN_H: u16 = 18;
 
 /// Draw the symbol gallery modal centered over `area`.
 ///
-/// Uses `draw_dialog` for consistent chrome (border, title, [X], [Done]).
+/// Uses `draw_dialog` for consistent chrome (border, title, `[X]`, `[Done]`).
 /// The two-pane picker (category list + preset/preview) is drawn into the
 /// `content` rect returned by the dialog.
 ///

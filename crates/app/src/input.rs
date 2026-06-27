@@ -801,7 +801,7 @@ fn gallery_dialog_action(
 /// the active dialog chrome rects (if a dialog is open).
 ///
 /// When `dialog` is `Some`, dialog hit-testing runs FIRST:
-/// - close [X] click → the active modal's close action
+/// - close `[X]` click → the active modal's close action
 /// - button click → the button's mapped action
 /// - any click OUTSIDE the dialog `area` → swallowed (Action::None)
 /// Only when no dialog is open does normal map/room routing apply.

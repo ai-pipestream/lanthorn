@@ -61,7 +61,7 @@ pub const VERB_MENU_PREPS: &[&str] = &[
 
 /// Draw the verb/item token-palette modal overlay.
 ///
-/// Renders via `draw_dialog` (centered, [X] + [Done]) so the opaque fill
+/// Renders via `draw_dialog` (centered, `[X]` + `[Done]`) so the opaque fill
 /// prevents command-panel bleed. The verb|noun|prep palette is drawn into
 /// the returned content rect.
 ///

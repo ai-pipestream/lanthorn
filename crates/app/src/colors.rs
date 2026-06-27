@@ -6,7 +6,7 @@
 //! - [`ColorScheme`] holds the resolved per-element colors used by the renderer.
 //! - [`ColorScheme::terminal_default`] reproduces the hardcoded colors in the current renderer.
 //! - [`ColorScheme::from_ghostty`] maps a parsed scheme onto UI elements.
-//! - [`resolve_base`] is the live entry point: resolves a scheme name/path to a
+//! - `resolve_base` is the live entry point: resolves a scheme name/path to a
 //!   `(ColorScheme, GhosttyScheme, warnings)` triple used by `style::resolve`.
 
 use std::collections::BTreeMap;

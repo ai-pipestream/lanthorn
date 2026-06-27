@@ -112,7 +112,7 @@ pub fn decl_to_style(d: &Decl, scheme: &colors::GhosttyScheme) -> Style {
 ///
 /// Every preset field is `Option` so unset fields are distinguished from
 /// explicitly set ones. [`finalize_symbols`] fills `None` fields with the
-/// existing `config::default_*` values to produce a concrete [`config::SymbolConfig`].
+/// existing `config::default_*` values to produce a concrete [`config::SymbolConfig`](crate::config::SymbolConfig).
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 pub struct StyleSymbols {
     pub box_style: Option<String>,
@@ -125,7 +125,7 @@ pub struct StyleSymbols {
 
 // ── finalize_symbols ──────────────────────────────────────────────────────────
 
-/// Resolve a partial [`StyleSymbols`] into a concrete [`config::SymbolConfig`].
+/// Resolve a partial [`StyleSymbols`] into a concrete [`config::SymbolConfig`](crate::config::SymbolConfig).
 ///
 /// Each `None` preset is filled with the existing `config::default_*` value.
 /// The `overrides` map is copied as-is.
@@ -724,10 +724,10 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
 
 // ── resolve ───────────────────────────────────────────────────────────────────
 
-/// Resolve a [`StyleDoc`] into a concrete [`ColorScheme`], [`SymbolSet`], and warnings.
+/// Resolve a [`StyleDoc`] into a concrete [`ColorScheme`], [`SymbolSet`](crate::symbols::SymbolSet), and warnings.
 ///
 /// Resolution:
-/// 1. Build the base `ColorScheme` from `doc.colors.scheme` via [`colors::resolve_base`]
+/// 1. Build the base `ColorScheme` from `doc.colors.scheme` via `colors::resolve_base`
 ///    (handles `None` → terminal-default, built-in name, or file path).
 /// 2. Obtain the active `GhosttyScheme` returned by `resolve_base` (or
 ///    `GhosttyScheme::default()` for the terminal-default case).
@@ -1141,7 +1141,7 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
 /// Write a fully-expanded, self-contained style file.
 ///
 /// Encodes every [`ColorScheme`] field as a selector declaration (using
-/// [`style_to_decl`]) and every [`SymbolSet`] slot as an override so that
+/// `style_to_decl`) and every [`SymbolSet`](crate::symbols::SymbolSet) slot as an override so that
 /// re-parsing and resolving with no base scheme reproduces the same
 /// `ColorScheme`/`SymbolSet` exactly.
 ///

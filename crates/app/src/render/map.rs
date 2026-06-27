@@ -429,7 +429,7 @@ pub fn room_at_cell(
 
 /// Draw the map from `rm` into `buf` for `area`, using view state from `state`.
 ///
-/// The whole map is built in scroll-independent virtual space (see [`VRect`]) and
+/// The whole map is built in scroll-independent virtual space (see `VRect`) and
 /// blitted to the screen with a single translation, so panning never re-routes
 /// connectors — the routes are identical at every scroll offset.
 pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer) {

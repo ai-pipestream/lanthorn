@@ -1,7 +1,7 @@
 /// Configurable map symbols for the babelmap renderer.
 ///
 /// All glyphs the map renderer uses are centralized here. The defaults reproduce
-/// today's hardcoded literals exactly, so an absent [symbols] config changes nothing.
+/// today's hardcoded literals exactly, so an absent `[symbols]` config changes nothing.
 
 // ── Sub-structs ───────────────────────────────────────────────────────────────
 
