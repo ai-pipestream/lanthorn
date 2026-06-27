@@ -1020,7 +1020,9 @@ fn main() {
                 // Restore the machine from the saved game state only when auto_load is enabled.
                 // When auto_load = false the accumulated map still loads, but the game starts fresh.
                 if cfg.auto_load {
-                    if let Err(e) = session.machine.restore_file(&ac.save) {
+                    if let Err(msg) = app::archive::restore_engine_allowed(&ac.engine, app::session::ZMACHINE_ENGINE) {
+                        eprintln!("babelmap: warning: {msg}; starting fresh");
+                    } else if let Err(e) = session.machine.restore_file(&ac.save) {
                         eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
                     } else {
                         // Restore the saved screen so a once-split game's upper
@@ -1095,7 +1097,7 @@ fn main() {
     state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
-    state.dict_words = zvm::dictionary::load(&session.machine.mem).words(&session.machine.mem);
+    state.dict_words = Engine::introspect(&session).map(|i| i.vocabulary()).unwrap_or_default();
 
     // Push the game's opening banner and capture the title from it.
     let banner = session.take_transcript();
@@ -2985,12 +2987,13 @@ fn dispatch_slash_outcome(
                 Some(ref path) => {
                     match load_archive(path) {
                         Ok(ac) => {
-                            let restore_err = zvm_session_mut(&mut *session).machine.restore_file(&ac.save).map_err(|e| {
-                                match e {
-                                    zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
-                                    other => format!("restore failed: {:?}", other),
-                                }
-                            });
+                            let restore_err = app::archive::restore_engine_allowed(&ac.engine, app::session::ZMACHINE_ENGINE)
+                                .and_then(|()| zvm_session_mut(&mut *session).machine.restore_file(&ac.save).map_err(|e| {
+                                    match e {
+                                        zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
+                                        other => format!("restore failed: {:?}", other),
+                                    }
+                                }));
                             match restore_err {
                                 Ok(()) => {
                                     if let Some(scr) = ac.screen.clone() { zvm_session_mut(&mut *session).machine.screen = scr; }
