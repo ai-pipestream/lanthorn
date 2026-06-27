@@ -14,8 +14,10 @@ pub const ANSI_NAMES: &[&str] = &[
 
 pub fn is_valid_color_token(s: &str) -> bool {
     if s == "default" || ANSI_NAMES.contains(&s) { return true; }
-    let hex = s.strip_prefix('#').unwrap_or(s);
-    hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    match s.strip_prefix('#') {
+        Some(hex) => hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => false,
+    }
 }
 
 pub fn push_mru(v: &mut Vec<String>, value: &str) {
@@ -34,7 +36,8 @@ pub fn load_mru(dir: &Path) -> Vec<String> {
 
 pub fn save_mru(dir: &Path, v: &[String]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let arr = v.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
+    let arr = v.iter().filter(|s| is_valid_color_token(s))
+        .map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(", ");
     std::fs::write(sidecar(dir), format!("recent_colors = [{arr}]\n"))
 }
 
@@ -62,6 +65,14 @@ mod tests {
         assert!(is_valid_color_token("default"));
         assert!(!is_valid_color_token("#xyz"));
         assert!(!is_valid_color_token("notacolor"));
+    }
+
+    #[test]
+    fn is_valid_requires_hash_for_hex() {
+        assert!(is_valid_color_token("#a1b2c3"));
+        assert!(!is_valid_color_token("a1b2c3"), "bare hex without # is rejected");
+        assert!(is_valid_color_token("yellow"));
+        assert!(is_valid_color_token("default"));
     }
 
     #[test]

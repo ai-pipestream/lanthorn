@@ -302,7 +302,6 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let chip_y = prop.y + 10;
             let mut chip_x = prop.x + 1;
             let prop_focused = ed.focus == StyleFocus::Attrs;
-            let label_style = if prop_focused { active_style } else { normal_style };
 
             for (ci, (kind, label)) in ATTR_KINDS.iter().enumerate() {
                 let flag_on = active_decl
@@ -317,13 +316,12 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
 
                 let is_chip_cursor = prop_focused && ci == ed.attr_cursor;
 
-                let chip_style = if flag_on {
-                    active_style
-                } else if is_chip_cursor {
-                    label_style
-                } else {
-                    normal_style
-                };
+                // flag_on drives the on/off background; is_chip_cursor adds UNDERLINED
+                // so the cursor position is visible even on an off (flag=false) chip.
+                let mut chip_style = if flag_on { active_style } else { normal_style };
+                if is_chip_cursor {
+                    chip_style = chip_style.add_modifier(Modifier::UNDERLINED);
+                }
 
                 let chip_text = label.trim_end();
                 let chip_w = chip_text.chars().count() as u16;

@@ -233,6 +233,11 @@ static CURATED: &[CuratedEntry] = &[
             SlashOutcome::Action(Action::Pan(dx, dy))
         },
     },
+    CuratedEntry {
+        name: "style",
+        help: "style  — open the live style editor",
+        build: |_args| SlashOutcome::Action(Action::OpenStyleEditor),
+    },
 ];
 
 // ── parse ─────────────────────────────────────────────────────────────────────
@@ -409,6 +414,11 @@ mod tests {
     fn slash_hint_parses_to_open_hints() {
         assert!(matches!(crate::slash::parse("hint", '/'), crate::slash::SlashOutcome::OpenHints));
         assert!(matches!(crate::slash::parse("hints", '/'), crate::slash::SlashOutcome::OpenHints));
+    }
+
+    #[test]
+    fn slash_style_opens_editor() {
+        assert!(matches!(parse("style", '/'), SlashOutcome::Action(Action::OpenStyleEditor)));
     }
 
     #[test]
