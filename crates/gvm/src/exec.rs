@@ -55,6 +55,20 @@ pub(crate) enum Dest {
     Local(u32),
 }
 
+/// Which case fold a `glk_buffer_to_*_case_uni` selector performs.
+#[derive(Clone, Copy)]
+enum CaseOp {
+    /// `glk_buffer_to_lower_case_uni`.
+    Lower,
+    /// `glk_buffer_to_upper_case_uni`.
+    Upper,
+    /// `glk_buffer_to_title_case_uni` (`lower_rest` = lowercase the tail).
+    Title {
+        /// Whether to lowercase everything after the first character.
+        lower_rest: bool,
+    },
+}
+
 /// A suspended `glk_select` awaiting a host-supplied event.
 struct PendingInput {
     /// Glulx address of the `event_t` to fill when the event arrives.
@@ -135,6 +149,26 @@ pub struct Machine {
 
 fn align_up(v: u32, to: u32) -> u32 {
     (v + to - 1) / to * to
+}
+
+/// `glk_char_to_lower`: Latin-1 lowercasing (ASCII A–Z and the Latin-1 uppercase
+/// accented letters 0xC0–0xDE except 0xD7); other code points are unchanged.
+fn glk_char_to_lower(c: u32) -> u32 {
+    match c {
+        0x41..=0x5A => c + 0x20,
+        0xC0..=0xD6 | 0xD8..=0xDE => c + 0x20,
+        _ => c,
+    }
+}
+
+/// `glk_char_to_upper`: Latin-1 uppercasing (ASCII a–z and the Latin-1 lowercase
+/// accented letters 0xE0–0xFE except 0xF7); other code points are unchanged.
+fn glk_char_to_upper(c: u32) -> u32 {
+    match c {
+        0x61..=0x7A => c - 0x20,
+        0xE0..=0xF6 | 0xF8..=0xFE => c - 0x20,
+        _ => c,
+    }
 }
 
 /// Append one IFF chunk (`id`, 4-byte big-endian length, data, even-pad).
@@ -438,6 +472,12 @@ impl Machine {
                 let (l, _) = self.read_operands(1, 0)?;
                 self.branch(l[0], true)
             }
+            0x104 => {
+                // jumpabs L1 — jump to the absolute address L1 (no offset bias).
+                let (l, _) = self.read_operands(1, 0)?;
+                self.pc = l[0];
+                Ok(())
+            }
             0x22 => self.branch1(|v| v == 0),
             0x23 => self.branch1(|v| v != 0),
             0x24 => self.branch2(|a, b| a == b),
@@ -562,6 +602,9 @@ impl Machine {
                 let (l, _) = self.read_operands(1, 0)?;
                 self.heap_free(l[0])
             }
+            // Catch / throw (exception-style stack unwinding).
+            0x32 => self.op_catch(),
+            0x33 => self.op_throw(),
             // Calls / return.
             0x30 => self.op_call(),
             0x31 => {
@@ -883,6 +926,65 @@ impl Machine {
             other => return Err(format!("bad call-stub DestType {other}")),
         }
         Ok(())
+    }
+
+    /// `catch S L`: push a catch stub (so `@throw` can unwind here), store the
+    /// resulting **catch token** (the stack pointer) into `S`, then branch by `L`.
+    /// A later `@throw token` resumes just past this instruction, with the thrown
+    /// value stored into `S` instead. Operands are `store` then `load` (branch),
+    /// the reverse of the usual order, so decode them by hand.
+    fn op_catch(&mut self) -> R<()> {
+        let mode_byte = self.m8(self.pc)?;
+        self.pc += 1;
+        let smode = (mode_byte & 0x0F) as u8;
+        let lmode = (mode_byte >> 4) as u8;
+        let dest = self.resolve_store(smode)?;
+        let offset = self.resolve_load(lmode)?;
+        // Push the catch stub: DestType, DestAddr, PC (the no-branch resume),
+        // FramePtr — identical layout to a call stub.
+        let (dtype, daddr) = dest.to_stub();
+        let ret_pc = self.pc;
+        let caller_fp = self.fp as u32;
+        self.push32(dtype)?;
+        self.push32(daddr)?;
+        self.push32(ret_pc)?;
+        self.push32(caller_fp)?;
+        let token = self.sp as u32; // the catch token = sp just above the stub
+        self.store(dest, token)?;
+        self.branch(offset, true)
+    }
+
+    /// `throw value token`: restore the stack to `token` (the catch token), pop
+    /// the catch stub, store `value` per the stub's destination, and resume at the
+    /// stub's PC (just past the matching `@catch`). Faults on a corrupt token.
+    fn op_throw(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(2, 0)?;
+        let (value, token) = (l[0], l[1]);
+        let tok = token as usize;
+        if tok < 16 || tok > self.stack.len() {
+            return Err(format!("throw: invalid catch token {token:#x}"));
+        }
+        // Unwind, then pop the stub exactly as a return does.
+        self.sp = tok;
+        self.sp -= 4;
+        let caller_fp = self.st_r32(self.sp);
+        self.sp -= 4;
+        let ret_pc = self.st_r32(self.sp);
+        self.sp -= 4;
+        let daddr = self.st_r32(self.sp);
+        self.sp -= 4;
+        let dtype = self.st_r32(self.sp);
+
+        self.fp = caller_fp as usize;
+        self.pc = ret_pc;
+        self.reload_frame_meta()?;
+        match dtype {
+            0 => Ok(()),
+            1 => self.store_mem(daddr, value),
+            2 => self.local_store(daddr, value),
+            3 => self.push32(value),
+            other => Err(format!("throw: bad catch-stub DestType {other}")),
+        }
     }
 
     /// Write a 32-bit `v` to main memory at `addr`.
@@ -2025,11 +2127,7 @@ impl Machine {
                 // glk_window_close(win, streamresultptr{readcount, writecount})
                 match self.glk.window_close(a(0)) {
                     Some((r, w)) => {
-                        let ptr = a(1);
-                        if ptr != 0 {
-                            self.store_mem(ptr, r)?;
-                            self.store_mem(ptr + 4, w)?;
-                        }
+                        self.glk_out_ref(a(1), &[r, w])?;
                         self.backend.window_close(a(0));
                         self.relayout_glk();
                     }
@@ -2100,13 +2198,7 @@ impl Machine {
             0x0044 => {
                 // glk_stream_close(str, resultptr{readcount, writecount})
                 match self.glk.stream_close(a(0)) {
-                    Some((r, w)) => {
-                        let ptr = a(1);
-                        if ptr != 0 {
-                            self.store_mem(ptr, r)?;
-                            self.store_mem(ptr + 4, w)?;
-                        }
-                    }
+                    Some((r, w)) => self.glk_out_ref(a(1), &[r, w])?,
                     None => self.diagnostics.push(format!("glk_stream_close: bad stream {}", a(0))),
                 }
                 0
@@ -2135,6 +2227,11 @@ impl Machine {
                 self.glk.set_stream_style(a(0), GlkStyle::from_num(a(1)));
                 0
             }
+            0x00A0 => glk_char_to_lower(a(0)), // glk_char_to_lower(ch)
+            0x00A1 => glk_char_to_upper(a(0)), // glk_char_to_upper(ch)
+            0x0120 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Lower)?, // _to_lower_case_uni
+            0x0121 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Upper)?, // _to_upper_case_uni
+            0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
             0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
             // ── input requests + select (3a-2) ────────────────────────────────
             0x00D0 => {
@@ -2176,9 +2273,7 @@ impl Machine {
             0x00C1 => {
                 // glk_select_poll(event) — internal events only, never suspends
                 let ev = self.glk.pop_event().unwrap_or_else(GlkEvent::none);
-                if a(0) != 0 {
-                    self.write_event(a(0), ev)?;
-                }
+                self.write_event(a(0), ev)?;
                 0
             }
             0x00D6 => {
@@ -2269,16 +2364,70 @@ impl Machine {
         self.backend.window_layout(&layout);
     }
 
-    /// Store `v` at the Glulx-memory pointer `ptr`, unless `ptr` is 0 (the Glk
-    /// convention for "don't store this result").
-    fn glk_store_ptr(&mut self, ptr: u32, v: u32) -> R<()> {
-        if ptr != 0 {
-            self.store_mem(ptr, v)?;
+    /// Deliver Glk output reference/struct values `vals` for the pointer argument
+    /// `ptr`, following the Glulx Glk dispatch convention:
+    /// * `ptr == 0` → a NULL pointer: discard (no result wanted).
+    /// * `ptr == 0xFFFFFFFF` (-1) → push each value onto the VM stack, in order,
+    ///   so the **last** field ends up on top (the game pops them back).
+    /// * otherwise → write the values consecutively to memory at `ptr`, `ptr+4`, …
+    fn glk_out_ref(&mut self, ptr: u32, vals: &[u32]) -> R<()> {
+        if ptr == 0 {
+            return Ok(());
+        }
+        if ptr == 0xFFFF_FFFF {
+            for &v in vals {
+                self.push32(v)?;
+            }
+            return Ok(());
+        }
+        for (i, &v) in vals.iter().enumerate() {
+            self.store_mem(ptr + 4 * i as u32, v)?;
         }
         Ok(())
     }
 
+    /// Deliver a single Glk output reference value (see [`Machine::glk_out_ref`]).
+    fn glk_store_ptr(&mut self, ptr: u32, v: u32) -> R<()> {
+        self.glk_out_ref(ptr, &[v])
+    }
+
     // ── input requests + glk_select suspend/resume (3a-2) ─────────────────────
+
+    /// A Unicode buffer case conversion (`glk_buffer_to_*_case_uni`): read
+    /// `numchars` code points from the 32-bit array at `buf`, case-fold them
+    /// (Unicode-aware; a fold may change the character count), write the result
+    /// back (clamped to `buflen` elements), and return the full result length.
+    fn glk_buffer_case_uni(&mut self, buf: u32, buflen: u32, numchars: u32, op: CaseOp) -> R<u32> {
+        let mut s = String::new();
+        for i in 0..numchars {
+            let cp = self.m32(buf + i * 4)?;
+            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+        }
+        let result: Vec<char> = match op {
+            CaseOp::Lower => s.chars().flat_map(char::to_lowercase).collect(),
+            CaseOp::Upper => s.chars().flat_map(char::to_uppercase).collect(),
+            CaseOp::Title { lower_rest } => {
+                let mut out = Vec::new();
+                for (i, c) in s.chars().enumerate() {
+                    if i == 0 {
+                        out.extend(c.to_uppercase());
+                    } else if lower_rest {
+                        out.extend(c.to_lowercase());
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            }
+        };
+        for (i, &c) in result.iter().enumerate() {
+            if i as u32 >= buflen {
+                break;
+            }
+            self.store_mem_sized(buf + i as u32 * 4, c as u32, 4)?;
+        }
+        Ok(result.len() as u32)
+    }
 
     /// Record a pending line-input request; diagnose a bad window.
     fn glk_request_line(&mut self, win: u32, buf: u32, maxlen: u32, initlen: u32, unicode: bool) {
@@ -2344,12 +2493,11 @@ impl Machine {
         }
     }
 
-    /// Write the 4-word Glk `event_t` (`type`, `win`, `val1`, `val2`) at `addr`.
+    /// Deliver the 4-word Glk `event_t` (`type`, `win`, `val1`, `val2`) for the
+    /// pointer `addr` — to memory, NULL-discarded, or pushed to the stack for the
+    /// -1 convention (see [`Machine::glk_out_ref`]).
     fn write_event(&mut self, addr: u32, ev: GlkEvent) -> R<()> {
-        self.store_mem(addr, ev.etype)?;
-        self.store_mem(addr + 4, ev.win)?;
-        self.store_mem(addr + 8, ev.val1)?;
-        self.store_mem(addr + 12, ev.val2)
+        self.glk_out_ref(addr, &[ev.etype, ev.win, ev.val1, ev.val2])
     }
 
     /// The [`StepResult`] for the current suspended `glk_select`, if any.
@@ -4505,5 +4653,112 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert!(m.diagnostics.is_empty(), "accepted as best-effort: {:?}", m.diagnostics);
+    }
+
+    // ── Task 4 (glulxercise conformance fixes) ────────────────────────────────
+
+    #[test]
+    fn jumpabs_sets_pc_to_the_absolute_target() {
+        use asm::Op::{C32, C8, Mem16};
+        // jumpabs over a poisoned store; only the post-jump store should run.
+        let poison = asm::ins(0x40, &[C8(0x55), Mem16(0x0100)]); // copy 0x55 -> mem[0x100]
+        let body_start = 0x27u32; // start func @0x24: C1 + (0,0) header = 3 bytes
+        let jumpabs_len = 7u32; // 2-byte opcode + 1 mode + 4-byte C32
+        let target = body_start + jumpabs_len + poison.len() as u32;
+        let mut body = asm::ins(0x104, &[C32(target)]); // jumpabs target
+        body.extend(poison); // skipped
+        body.extend(asm::ins(0x40, &[C8(0x42), Mem16(0x0104)])); // copy 0x42 -> mem[0x104]
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "poisoned store was jumped over");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x42, "landed on the post-jump store");
+    }
+
+    #[test]
+    fn catch_and_throw_unwind_to_the_handler() {
+        use asm::Op::{C16, C8, Local8, Mem16};
+        // catch L0, <branch past the handler to the try-block>; the handler (the
+        // fall-through after catch) stores the thrown value; the try-block throws.
+        let handler = {
+            let mut h = asm::ins(0x40, &[Local8(0), Mem16(0x0100)]); // copy L0 -> mem[0x100]
+            h.extend(asm::ins(0x120, &[])); // quit
+            h
+        };
+        let tryblock = asm::ins(0x33, &[C8(42), Local8(0)]); // throw 42, token=L0
+        // Branch convention: pc = pc_after_operands + offset - 2. The try-block
+        // sits right after the handler, so offset = handler.len() + 2.
+        let offset = handler.len() as u32 + 2;
+        let mut body = asm::ins(0x32, &[Local8(0), C16(offset as i16)]); // catch L0, offset
+        body.extend(handler);
+        body.extend(tryblock);
+        let start = asm::func(0xC1, &[(4, 1)], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mut m = machine(built);
+        m.run();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 42, "throw delivered 42 to the catch dest");
+    }
+
+    #[test]
+    fn glk_char_to_lower_and_upper() {
+        use asm::Op::{C8, Mem16};
+        let mut body = glk_call(0xA0, &[C8(b'A' as i8)], Mem16(0x0100)); // char_to_lower('A')
+        body.extend(glk_call(0xA1, &[C8(b'z' as i8)], Mem16(0x0104))); // char_to_upper('z')
+        body.extend(glk_call(0xA0, &[C8(b'5' as i8)], Mem16(0x0108))); // non-letter unchanged
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), b'a' as u32);
+        assert_eq!(m.mem.read32(0x104).unwrap(), b'Z' as u32);
+        assert_eq!(m.mem.read32(0x108).unwrap(), b'5' as u32);
+    }
+
+    #[test]
+    fn glk_buffer_to_lower_case_uni_folds_in_place() {
+        use asm::Op::{C16, C8, Mem16};
+        // Buffer of 4 uni chars "HÉLO" at 0x180; lower-case the first 4.
+        let mut body = glk_call(0x120, &[C16(0x0180), C8(8), C8(4)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            for (i, c) in ['H', 'É', 'L', 'O'].iter().enumerate() {
+                m.mem.write32(0x180 + i as u32 * 4, *c as u32).unwrap();
+            }
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 4, "result length");
+        let got: String = (0..4).map(|i| char::from_u32(m.mem.read32(0x180 + i * 4).unwrap()).unwrap()).collect();
+        assert_eq!(got, "hélo", "lower-cased in place (Unicode-aware)");
+    }
+
+    #[test]
+    fn glk_stream_close_minus_one_pushes_counts_to_stack() {
+        use asm::Op::{C16, C8, Mem16, Stack, Zero};
+        // The Glulx Glk dispatch -1 convention: glk_stream_close(str, -1) pushes
+        // (readcount, writecount) so writecount is on top.
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(8), C8(1), C8(0)], Zero); // open_memory -> 2
+        body.extend(glk_call(0x47, &[C8(2)], Zero)); // set_current(2)
+        body.extend(glk_call(0x80, &[C8(b'A' as i8)], Zero)); // put 'A' -> memory
+        body.extend(glk_call(0x80, &[C8(b'B' as i8)], Zero)); // put 'B'
+        body.extend(glk_call(0x47, &[C8(1)], Zero)); // restore the window stream
+        body.extend(glk_call(0x44, &[C8(2), C8(-1)], Zero)); // close(2, -1): pushes 0 then 2
+        body.extend(asm::ins(0x40, &[Stack, Mem16(0x0100)])); // pop top (writecount) -> mem[0x100]
+        body.extend(asm::ins(0x40, &[Stack, Mem16(0x0104)])); // pop next (readcount) -> mem[0x104]
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "writecount on top");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0, "readcount beneath");
+    }
+
+    #[test]
+    fn glk_select_poll_with_minus_one_pushes_event_words() {
+        use asm::Op::{C8, Mem16, Stack};
+        // glk_select_poll(-1) with no queued event pushes the 4 evtype_None words
+        // (type, win, val1, val2 = 0,0,0,0) onto the stack.
+        let mut body = glk_call(0xC1, &[C8(-1)], asm::Op::Zero);
+        for addr in [0x0100u16, 0x0104, 0x0108, 0x010C] {
+            body.extend(asm::ins(0x40, &[Stack, Mem16(addr)]));
+        }
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        for addr in [0x0100u32, 0x0104, 0x0108, 0x010C] {
+            assert_eq!(m.mem.read32(addr).unwrap(), 0, "evtype_None word @{addr:#x}");
+        }
     }
 }

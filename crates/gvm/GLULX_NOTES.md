@@ -641,6 +641,40 @@ suspending for input. **Diagnosed no-ops (out of scope):**
 `glk_cancel_mouse_event` 0x00D5. **Accepted best-effort:**
 `glk_set_echo_line_event` 0x0150, `glk_set_terminators_line_event` 0x0151.
 
+### Unicode case + the dispatch reference convention (glulxercise conformance)
+
+The parser path (and glulxercise) needs three more pieces, all transcribed from
+the Glulx Glk dispatch (gi_dispa) and glk.h:
+
+- **Character case:** `glk_char_to_lower` 0x00A0 / `glk_char_to_upper` 0x00A1
+  (Latin-1 case folding), and the in-place Unicode buffer folds
+  `glk_buffer_to_lower_case_uni` 0x0120 / `_upper_` 0x0121 / `_title_` 0x0122
+  (a fold may change the length; the result is clamped to the buffer and the full
+  length returned).
+- **The dispatch -1 reference convention.** A Glk output reference/struct pointer
+  argument is **not** a plain address: `0` is a C NULL (discard the result);
+  **`0xFFFFFFFF` (-1) means "use the VM stack"** — the output value(s) are
+  **pushed** (last field on top), and the game pops them back. Otherwise the value
+  is written to memory at the address. This applies to `glk_stream_close` /
+  `glk_window_close` (push `readcount` then `writecount`), `glk_window_get_size`,
+  `glk_window_get_arrangement`, the `*_iterate` rocks, and the `event_t*` of
+  `glk_select`/`glk_select_poll`. Inform's veneer (`PrintAnyToArray`) relies on
+  this to read a memory stream's write count without a stat buffer.
+
+### Core opcodes completed alongside (Glulx spec §2)
+
+`jumpabs` 0x104 (jump to an absolute address) and the exception pair `catch`
+0x32 / `throw` 0x33 (a catch stub — DestType/DestAddr/PC/FramePtr, like a call
+stub — records a token = the stack pointer; `throw value token` unwinds the stack
+to the token and resumes at the catch with `value` stored to its destination).
+
+### glulxercise capstone
+
+`gvm-cli/tests/glulxercise.rs` drives the vendored `glulxercise.ulx` headlessly
+and asserts the in-scope groups pass. Out of scope: filter iosys
+(`iosys2`/`iosys3`/`filter`/`nullio`/`gestalt` filter sub-tests), the
+`gidispa` introspection layer, `acceleration`, float/double, and Glk file `restore`.
+
 ### Deferred / out of scope
 
 Filerefs/file streams (`@save`/`@restore` via Glk), echo streams, timers,
