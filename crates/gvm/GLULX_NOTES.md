@@ -547,8 +547,9 @@ is tagged with it. The backend maps classes → display attributes (SGR in the C
 Version 0, CharInput 1, LineInput 2, CharOutput 3 (returns CannotPrint 0 /
 ApproxPrint 1 / ExactPrint 2), MouseInput 4, Timer 5, Graphics 6, Unicode 15,
 LineInputEcho 17, LineTerminators 18, … We report `Version` = 0x00000705,
-`CharOutput` = ExactPrint for any code point (Unicode capable), `Unicode` = 1,
-and **0** for input/timer/graphics/sound in 3a-1 (truthful: not yet supported).
+`CharInput` = 1, `LineInput` = 1, `CharOutput` = ExactPrint for any code point
+(Unicode capable), `Unicode` = 1, and **0** for mouse/timer/graphics/sound/
+hyperlinks/echo/terminators (truthful: not supported).
 
 ### Dispatch selector codes implemented (output subset; from `gi_dispa.c`)
 
@@ -628,6 +629,17 @@ Latin-1 bytes, or 32-bit words for `_uni`) and sets `val1` to the char count.
 a special keycode passes through; any other code point becomes `keycode_Unknown`.
 A `_uni` char request passes the full code point. The model does **not** echo
 line input — like a stdio Glk, the display backend/terminal handles echo.
+
+**Cancel + other event selectors:** `glk_cancel_line_event` 0x00D1 (drops the
+request, reports `evtype_LineInput` with the `initlen` chars already in the
+buffer, else `evtype_None`), `glk_cancel_char_event` 0x00D3 (drops the request),
+`glk_select_poll` 0x00C1 (returns a queued internal event or `evtype_None`,
+never input, never suspends). **Arrange:** `glk_window_set_arrangement` queues an
+`evtype_Arrange` (win 0); `glk_select` delivers any queued non-input event before
+suspending for input. **Diagnosed no-ops (out of scope):**
+`glk_request_timer_events` 0x00D6, `glk_request_mouse_event` 0x00D4,
+`glk_cancel_mouse_event` 0x00D5. **Accepted best-effort:**
+`glk_set_echo_line_event` 0x0150, `glk_set_terminators_line_event` 0x0151.
 
 ### Deferred / out of scope
 

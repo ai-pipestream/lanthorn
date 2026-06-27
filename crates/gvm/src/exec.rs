@@ -2049,6 +2049,8 @@ impl Machine {
                 // glk_window_set_arrangement(win, method, size, keywin)
                 self.glk.window_set_arrangement(a(0), a(1), a(2), a(3));
                 self.relayout_glk();
+                // A program-driven rearrangement generates an arrange event.
+                self.glk.push_event(GlkEvent { etype: glk::evtype::ARRANGE, win: 0, val1: 0, val2: 0 });
                 0
             }
             0x0027 => {
@@ -2155,11 +2157,51 @@ impl Machine {
                 self.glk_request_char(a(0), true);
                 0
             }
+            0x00D1 => {
+                // glk_cancel_line_event(win, event)
+                self.glk_cancel_line(a(0), a(1))?;
+                0
+            }
+            0x00D3 => {
+                // glk_cancel_char_event(win)
+                self.glk.take_char_request(a(0));
+                self.clear_pending_input_for(a(0), false);
+                0
+            }
             0x00C0 => {
                 // glk_select(event) — suspend until an event arrives
                 self.glk_select(a(0))?;
                 0
             }
+            0x00C1 => {
+                // glk_select_poll(event) — internal events only, never suspends
+                let ev = self.glk.pop_event().unwrap_or_else(GlkEvent::none);
+                if a(0) != 0 {
+                    self.write_event(a(0), ev)?;
+                }
+                0
+            }
+            0x00D6 => {
+                // glk_request_timer_events(millisecs) — timers out of scope
+                if a(0) != 0 {
+                    self.diagnostics
+                        .push("glk_request_timer_events: timer events unsupported (ignored)".to_string());
+                }
+                0
+            }
+            0x00D4 => {
+                // glk_request_mouse_event(win) — mouse out of scope
+                self.diagnostics
+                    .push("glk_request_mouse_event: mouse input unsupported (ignored)".to_string());
+                0
+            }
+            0x00D5 => {
+                // glk_cancel_mouse_event(win) — mouse out of scope
+                self.diagnostics
+                    .push("glk_cancel_mouse_event: mouse input unsupported (ignored)".to_string());
+                0
+            }
+            0x0150 | 0x0151 => 0, // glk_set_echo_line_event / set_terminators_line_event: best-effort no-op
             0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
             0x0005 => self.glk_gestalt(a(0), a(1)), // glk_gestalt_ext(sel, val, arr, len)
             0x0001 => {
@@ -2278,6 +2320,30 @@ impl Machine {
         Ok(())
     }
 
+    /// `glk_cancel_line_event(win, event)`: drop the pending line request and
+    /// report what would have been the line event — `evtype_LineInput` with the
+    /// count of characters already in the buffer (the `initlen`), or `evtype_None`
+    /// if there was no request.
+    fn glk_cancel_line(&mut self, win: u32, event_addr: u32) -> R<()> {
+        let ev = match self.glk.take_line_request(win) {
+            Some(r) => GlkEvent { etype: glk::evtype::LINE_INPUT, win, val1: r.initlen, val2: 0 },
+            None => GlkEvent::none(),
+        };
+        self.clear_pending_input_for(win, true);
+        if event_addr != 0 {
+            self.write_event(event_addr, ev)?;
+        }
+        Ok(())
+    }
+
+    /// Clear a suspended `glk_select` if it was waiting on this window for the
+    /// given input kind (line = `true`), so a cancel during suspension is safe.
+    fn clear_pending_input_for(&mut self, win: u32, line: bool) {
+        if matches!(&self.pending_input, Some(pi) if pi.win == win && pi.line == line) {
+            self.pending_input = None;
+        }
+    }
+
     /// Write the 4-word Glk `event_t` (`type`, `win`, `val1`, `val2`) at `addr`.
     fn write_event(&mut self, addr: u32, ev: GlkEvent) -> R<()> {
         self.store_mem(addr, ev.etype)?;
@@ -2382,10 +2448,12 @@ impl Machine {
     fn glk_gestalt(&self, sel: u32, _val: u32) -> u32 {
         match sel {
             0 => Self::GLK_VERSION, // gestalt_Version
+            1 => 1,                 // gestalt_CharInput → supported
+            2 => 1,                 // gestalt_LineInput → supported
             3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
             15 => 1,                // gestalt_Unicode
-            // CharInput(1)/LineInput(2)/MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)
-            // and the rest are not supported in the output-only phase.
+            // MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)/Hyperlinks(11)/echo +
+            // terminators(17/18) and the rest are not supported.
             _ => 0,
         }
     }
@@ -4159,7 +4227,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0705, "glk version 0.7.5");
         assert_eq!(m.mem.read32(0x104).unwrap(), 2, "CharOutput = ExactPrint");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Unicode supported");
-        assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "LineInput not in 3a-1");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 1, "LineInput supported (3a-2)");
         assert_eq!(m.mem.read32(0x110).unwrap(), 0x0000_0705, "gestalt_ext mirrors gestalt");
     }
 
@@ -4330,5 +4398,112 @@ mod tests {
         m.supply_line("ignored"); // no panic, no effect
         m.supply_char(b'x' as u32);
         assert!(!m.diagnostics.is_empty(), "diagnostics noted the stray supply");
+    }
+
+    // ── Task 2 (3a-2): cancel, arrange, select_poll, gestalt, timer/mouse ─────
+
+    #[test]
+    fn glk_cancel_line_event_reports_partial_and_clears() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event(win=1, buf=0x180, maxlen=10, initlen=2), then cancel.
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(2)], Zero);
+        body.extend(glk_call(0xD1, &[C8(1), C16(0x0100)], Zero)); // glk_cancel_line_event
+        // A following select has nothing to wait for → evtype_None (request gone).
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "cancel does not suspend");
+        assert_eq!(read_event(&m, 0x100), (3, 1, 2, 0), "LineInput, win, initlen chars");
+        assert_eq!(read_event(&m, 0x110).0, 0, "request was cleared → None");
+    }
+
+    #[test]
+    fn glk_cancel_char_event_clears_request() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD2, &[C8(1)], Zero); // request_char_event(1)
+        body.extend(glk_call(0xD3, &[C8(1)], Zero)); // glk_cancel_char_event(1)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → None
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "cancelled char does not suspend");
+        assert_eq!(read_event(&m, 0x100).0, 0, "no pending request after cancel");
+    }
+
+    #[test]
+    fn glk_arrange_event_delivered_before_input() {
+        use asm::Op::{C16, C8, Zero};
+        // Open a TextGrid split (grid=2, pair=3), rearrange it (queues Arrange),
+        // request a char, then select twice: arrange first, then suspend.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Zero);
+        body.extend(glk_call(0x26, &[C8(3), C8(0x12), C8(5), C8(0)], Zero)); // set_arrangement
+        body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → Arrange
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select → suspend (char)
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false });
+        assert_eq!(read_event(&m, 0x100), (5, 0, 0, 0), "evtype_Arrange delivered first");
+        m.supply_char(b'q' as u32);
+        step_to_event(&mut m);
+        assert_eq!(read_event(&m, 0x110), (2, 1, b'q' as u32, 0), "then the char event");
+    }
+
+    #[test]
+    fn glk_select_poll_returns_internal_events_not_input() {
+        use asm::Op::{C16, C8, Zero};
+        // Arrange queued + a char requested. poll returns arrange, then None —
+        // never the char, and never suspends.
+        let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Zero);
+        body.extend(glk_call(0x26, &[C8(3), C8(0x12), C8(5), C8(0)], Zero)); // queue Arrange
+        body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1)
+        body.extend(glk_call(0xC1, &[C16(0x0100)], Zero)); // select_poll → Arrange
+        body.extend(glk_call(0xC1, &[C16(0x0110)], Zero)); // select_poll → None
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "poll never suspends");
+        assert_eq!(read_event(&m, 0x100).0, 5, "poll returns the Arrange event");
+        assert_eq!(read_event(&m, 0x110).0, 0, "poll never returns input → None");
+    }
+
+    #[test]
+    fn glk_gestalt_reports_input_capabilities() {
+        use asm::Op::{C8, Mem16};
+        let mut body = glk_call(0x04, &[C8(1), C8(0)], Mem16(0x0100)); // CharInput
+        body.extend(glk_call(0x04, &[C8(2), C8(0)], Mem16(0x0104))); // LineInput
+        body.extend(glk_call(0x04, &[C8(5), C8(0)], Mem16(0x0108))); // Timer
+        body.extend(glk_call(0x04, &[C8(4), C8(0)], Mem16(0x010C))); // MouseInput
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "CharInput supported");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "LineInput supported");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "Timer not supported");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "MouseInput not supported");
+    }
+
+    #[test]
+    fn glk_timer_and_mouse_are_diagnosed_noops() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD6, &[C16(100)], Zero); // request_timer_events(100)
+        body.extend(glk_call(0xD4, &[C8(1)], Zero)); // request_mouse_event(1)
+        body.extend(glk_call(0xD5, &[C8(1)], Zero)); // cancel_mouse_event(1)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.halted);
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("timer")),
+            "timer request diagnosed: {:?}",
+            m.diagnostics
+        );
+        assert!(m.diagnostics.iter().any(|d| d.contains("mouse")), "mouse diagnosed");
+    }
+
+    #[test]
+    fn glk_set_echo_and_terminators_accepted_silently() {
+        use asm::Op::{C8, Zero};
+        let mut body = glk_call(0x150, &[C8(1), C8(0)], Zero); // set_echo_line_event(1, 0)
+        body.extend(glk_call(0x151, &[C8(1), C8(0), C8(0)], Zero)); // set_terminators_line_event
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert!(m.diagnostics.is_empty(), "accepted as best-effort: {:?}", m.diagnostics);
     }
 }
