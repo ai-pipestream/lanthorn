@@ -552,6 +552,35 @@ fn filebrowser_dialog_action(
     None
 }
 
+/// Per-modal button-to-action mapping for the style editor.
+pub fn style_dialog_action(
+    rects: &crate::render::dialog::DialogRects,
+    col: u16,
+    row: u16,
+) -> Option<Action> {
+    use crate::render::dialog::ButtonId;
+
+    // Check close [X]
+    if let Some(close_rect) = rects.close {
+        if hit(close_rect, col, row) {
+            return Some(Action::StyleEditorCancel);
+        }
+    }
+
+    // Check buttons
+    for (id, rect) in &rects.buttons {
+        if hit(*rect, col, row) {
+            return Some(match id {
+                ButtonId::Save   => Action::StyleSave,
+                ButtonId::Cancel => Action::StyleEditorCancel,
+                _                => Action::None,
+            });
+        }
+    }
+
+    None
+}
+
 /// Per-modal button-to-action mapping for the verb menu.
 fn verbmenu_dialog_action(
     rects: &crate::render::dialog::DialogRects,
@@ -2613,6 +2642,7 @@ pub fn open_style_editor(state: &mut AppState) {
         mru: crate::style_mru::load_mru(&user_dir),
         attr_cursor: 0,
     });
+    state.dialog_focus = 0;
 }
 
 /// Re-resolve `ed.preview` from the current `ed.doc` + `user_dir`.
@@ -5767,6 +5797,60 @@ mod tests {
             ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
             default_doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
             "reset restores the default fg for selector '{}'", sel,
+        );
+    }
+
+    #[test]
+    fn open_style_editor_resets_dialog_focus() {
+        let mut s = AppState::default();
+        s.dialog_focus = 5; // non-zero stale value
+        open_style_editor(&mut s);
+        assert_eq!(s.dialog_focus, 0, "open_style_editor must reset dialog_focus to 0");
+    }
+
+    #[test]
+    fn style_dialog_action_buttons() {
+        use crate::render::dialog::{ButtonId, DialogRects};
+        use ratatui::layout::Rect;
+
+        // Build a minimal DialogRects with a Save button at (10,5), Cancel at (20,5),
+        // and a close [X] at (30,5).
+        let save_rect   = Rect { x: 10, y: 5, width: 4, height: 1 };
+        let cancel_rect = Rect { x: 20, y: 5, width: 6, height: 1 };
+        let close_rect  = Rect { x: 30, y: 5, width: 3, height: 1 };
+
+        let rects = DialogRects {
+            area: Rect::default(),
+            content: Rect::default(),
+            close: Some(close_rect),
+            buttons: vec![
+                (ButtonId::Save,   save_rect),
+                (ButtonId::Cancel, cancel_rect),
+            ],
+        };
+
+        // Save button click → StyleSave
+        assert!(
+            matches!(style_dialog_action(&rects, 11, 5), Some(Action::StyleSave)),
+            "Save button must return StyleSave"
+        );
+
+        // Cancel button click → StyleEditorCancel
+        assert!(
+            matches!(style_dialog_action(&rects, 22, 5), Some(Action::StyleEditorCancel)),
+            "Cancel button must return StyleEditorCancel"
+        );
+
+        // Close [X] click → StyleEditorCancel
+        assert!(
+            matches!(style_dialog_action(&rects, 31, 5), Some(Action::StyleEditorCancel)),
+            "Close [X] must return StyleEditorCancel"
+        );
+
+        // Miss → None
+        assert!(
+            style_dialog_action(&rects, 0, 0).is_none(),
+            "miss must return None"
         );
     }
 }

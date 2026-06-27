@@ -19,7 +19,7 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid, map_path};
-use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, tidy_layer_silent, Action, ApplyTidyOutcome};
+use app::input::{apply_action, apply_tidy_result, key_to_action, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome};
 use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
@@ -1778,6 +1778,9 @@ fn main() {
             Event::Mouse(m) => {
                 // Style-editor board: intercept left-clicks on sample rows and property pane.
                 if state.style_editor.is_some() {
+                    // Holds a dialog-button action that must flow through the normal
+                    // run-loop path (so the style_save flag fires save_style_and_repoint).
+                    let mut click_action = Action::None;
                     if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
                         if let Some(rects) = &last_panes.style_editor {
                             // Helper: is the cursor inside a rect?
@@ -1854,10 +1857,18 @@ fn main() {
                                     continue 'event_loop;
                                 }
                             }
+
+                            // Dialog buttons: Save / Cancel / close [X].
+                            // These must reach the run-loop action path so the style_save
+                            // flag fires and save_style_and_repoint writes style.toml.
+                            if let Some(act) = style_dialog_action(&rects.dialog, m.column, m.row) {
+                                click_action = act;
+                            }
                         }
                     }
-                    // Swallow all other mouse events while style editor is open.
-                    Action::None
+                    // Swallow all other mouse events while style editor is open;
+                    // deliver dialog-button actions through the normal run-loop path.
+                    click_action
                 } else {
                     mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
                 }
