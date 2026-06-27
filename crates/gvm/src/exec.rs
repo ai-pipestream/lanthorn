@@ -65,6 +65,9 @@ pub struct Machine {
     pub(crate) iosys_mode: u32,
     /// Current I/O system rock.
     pub(crate) iosys_rock: u32,
+    /// Current string-decoding-table address (0 = none). Initialized from the
+    /// header's decode_table; overridable by `setstringtbl`.
+    pub(crate) cur_stringtbl: u32,
     /// The output sink.
     pub(crate) out: Box<dyn Output>,
     /// Recorded runtime faults / deferred-feature notices.
@@ -88,6 +91,7 @@ impl Machine {
     pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
         let stack_len = (mem.stack_size().max(0x100)) as usize;
         let start = mem.start_func();
+        let decode_table = mem.decode_table();
         let mut m = Machine {
             mem,
             stack: vec![0u8; stack_len],
@@ -96,6 +100,7 @@ impl Machine {
             pc: 0,
             iosys_mode: 0,
             iosys_rock: 0,
+            cur_stringtbl: decode_table,
             out,
             diagnostics: Vec::new(),
             halted: false,
@@ -297,6 +302,17 @@ impl Machine {
             0x72 => self.op_streamstr(),
             0x73 => self.op_streamunichar(),
             0x130 => self.op_glk(),
+            // String-decoding table (get/set the current table address).
+            0x140 => {
+                let (_, s) = self.read_operands(0, 1)?;
+                let v = self.cur_stringtbl;
+                self.store(s[0], v)
+            }
+            0x141 => {
+                let (l, _) = self.read_operands(1, 0)?;
+                self.cur_stringtbl = l[0];
+                Ok(())
+            }
             // Arithmetic (2 load, 1 store) — 32-bit two's complement.
             0x10 => self.binop(|a, b| a.wrapping_add(b)),
             0x11 => self.binop(|a, b| a.wrapping_sub(b)),
@@ -904,22 +920,141 @@ impl Machine {
 
     fn op_streamstr(&mut self) -> R<()> {
         let (l, _) = self.read_operands(1, 0)?;
-        let addr = l[0];
+        self.print_object(l[0], &[], 0)
+    }
+
+    /// Print a "typable object" at `addr`: a string (E0/E1/E2) is decoded and
+    /// streamed; a function (C0/C1) is called with `args` and its output
+    /// streamed in its place. `depth` bounds indirect/recursive references.
+    fn print_object(&mut self, addr: u32, args: &[u32], depth: u32) -> R<()> {
+        if depth > 256 {
+            return Err(format!("string decode recursion too deep @{addr:#010x}"));
+        }
         match self.m8(addr)? {
             0xE0 => {
                 let s = self.read_cstring(addr + 1)?;
                 self.emit(&s);
+                Ok(())
             }
             0xE2 => {
                 let s = self.read_ustring(addr + 4)?;
                 self.emit(&s);
+                Ok(())
             }
-            0xE1 => self
-                .diagnostics
-                .push("compressed string (E1) decoding deferred to phase 2b".to_string()),
-            other => return Err(format!("bad string type {other:#x} @{addr:#010x}")),
+            0xE1 => self.decode_compressed(addr + 1, depth),
+            0xC0 | 0xC1 => self.run_call_to_return(addr, args),
+            other => Err(format!("bad string/function type {other:#x} @{addr:#010x}")),
+        }
+    }
+
+    /// Decode a compressed (E1) bit stream beginning at `start`, walking the
+    /// current string-decoding table. Bits are read low-bit-first (GLULX_NOTES
+    /// §9). Never panics: bad addresses/node types fault.
+    fn decode_compressed(&mut self, start: u32, depth: u32) -> R<()> {
+        let table = self.cur_stringtbl;
+        if table == 0 {
+            return Err("compressed string (E1) with no string-decoding table set".to_string());
+        }
+        let root = self.m32(table + 8)?;
+        let mut node = root;
+        let mut addr = start;
+        let mut bit = 0u32;
+        loop {
+            match self.m8(node)? {
+                0x00 => {
+                    // Branch: read one bit, go left (0) or right (1).
+                    let byte = self.m8(addr)?;
+                    let b = (byte >> bit) & 1;
+                    bit += 1;
+                    if bit == 8 {
+                        bit = 0;
+                        addr += 1;
+                    }
+                    node = if b == 0 { self.m32(node + 1)? } else { self.m32(node + 5)? };
+                }
+                0x01 => return Ok(()), // string terminator
+                0x02 => {
+                    let c = self.m8(node + 1)?;
+                    self.emit_latin1(c);
+                    node = root;
+                }
+                0x03 => {
+                    let s = self.read_cstring(node + 1)?;
+                    self.emit(&s);
+                    node = root;
+                }
+                0x04 => {
+                    let cp = self.m32(node + 1)?;
+                    self.emit_uni(cp);
+                    node = root;
+                }
+                0x05 => {
+                    // C-style Unicode string: 32-bit chars until a zero word.
+                    let s = self.read_ustring(node + 1)?;
+                    self.emit(&s);
+                    node = root;
+                }
+                0x08 => {
+                    let a = self.m32(node + 1)?;
+                    self.print_object(a, &[], depth + 1)?;
+                    node = root;
+                }
+                0x09 => {
+                    let a = self.m32(self.m32(node + 1)?)?;
+                    self.print_object(a, &[], depth + 1)?;
+                    node = root;
+                }
+                0x0A => {
+                    let a = self.m32(node + 1)?;
+                    let args = self.read_node_args(node + 5)?;
+                    self.print_object(a, &args, depth + 1)?;
+                    node = root;
+                }
+                0x0B => {
+                    let a = self.m32(self.m32(node + 1)?)?;
+                    let args = self.read_node_args(node + 5)?;
+                    self.print_object(a, &args, depth + 1)?;
+                    node = root;
+                }
+                other => return Err(format!("bad string node type {other:#x} @{node:#010x}")),
+            }
+        }
+    }
+
+    /// Read an argument list for a 0x0A/0x0B node: a 32-bit count then that many
+    /// 32-bit arguments.
+    fn read_node_args(&self, at: u32) -> R<Vec<u32>> {
+        let argc = self.m32(at)?;
+        let mut args = Vec::with_capacity(argc as usize);
+        for i in 0..argc {
+            args.push(self.m32(at + 4 + 4 * i)?);
+        }
+        Ok(args)
+    }
+
+    /// Call the function at `func` with `args`, running the VM run-loop until
+    /// that frame returns, then resume the caller. Used for string-embedded
+    /// function nodes (GLULX_NOTES §9); the return value is discarded.
+    fn run_call_to_return(&mut self, func: u32, args: &[u32]) -> R<()> {
+        let resume_fp = self.fp;
+        self.call_function(func, args, Dest::Discard)?;
+        // call_function installed a deeper callee frame; run until it returns.
+        while self.fp != resume_fp {
+            if self.halted {
+                return Err("function called within a string halted the machine".to_string());
+            }
+            self.step_once()?;
         }
         Ok(())
+    }
+
+    fn emit_latin1(&mut self, v: u32) {
+        let s = ((v & 0xFF) as u8 as char).to_string();
+        self.emit(&s);
+    }
+    fn emit_uni(&mut self, v: u32) {
+        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
+        self.emit(&s);
     }
 
     /// Read a zero-terminated Latin-1 string from main memory.
@@ -1745,5 +1880,173 @@ mod tests {
         assert_eq!(m.fp, 0); // back to start
         assert_eq!(m.pc, 0xDEAD);
         let _ = start_pc;
+    }
+
+    // ── Task 1 (2b): compressed-string decoding + full streamstr ──────────────
+
+    /// Write consecutive bytes into memory starting at `addr` (RAM).
+    fn poke(m: &mut Machine, addr: u32, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            m.mem.write8(addr + i as u32, b as u32).unwrap();
+        }
+    }
+
+    /// Run a start-function body that has already had its RAM populated by
+    /// `setup`; returns the machine. iosys is left to the body.
+    fn run_with_ram(body: Vec<u8>, ram_bytes: u32, setup: impl FnOnce(&mut Machine)) -> Machine {
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, ram_bytes);
+        let mut m = machine(built);
+        setup(&mut m);
+        m.run();
+        m
+    }
+
+    /// A standard tiny decoding table at RAM base `t` that decodes the bit
+    /// sequence 0,0,0,1,1 (packed byte 0x18) to "Hi": root branches
+    /// left→inner / right→terminator; inner branches left→'H' / right→'i'.
+    fn build_hi_table(m: &mut Machine, t: u32) {
+        // Header: length, numnodes, root.
+        let root = t + 12;
+        let inner = root + 9;
+        let h = inner + 9;
+        let i = h + 2;
+        let term = i + 2;
+        let len = (term + 1) - t;
+        poke(m, t, &len.to_be_bytes());
+        poke(m, t + 4, &5u32.to_be_bytes());
+        poke(m, t + 8, &root.to_be_bytes());
+        // root: branch left=inner right=term
+        poke(m, root, &[0x00]);
+        poke(m, root + 1, &inner.to_be_bytes());
+        poke(m, root + 5, &term.to_be_bytes());
+        // inner: branch left='H' right='i'
+        poke(m, inner, &[0x00]);
+        poke(m, inner + 1, &h.to_be_bytes());
+        poke(m, inner + 5, &i.to_be_bytes());
+        poke(m, h, &[0x02, b'H']);
+        poke(m, i, &[0x02, b'i']);
+        poke(m, term, &[0x01]);
+    }
+
+    #[test]
+    fn compressed_string_decodes_against_table() {
+        // setstringtbl 0x100; streamstr 0x140; quit.
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]); // setiosys glk
+        body.extend(asm::ins(0x141, &[asm::Op::C16(0x0100)])); // setstringtbl 0x100
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0140)])); // streamstr 0x140
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            build_hi_table(m, 0x100);
+            poke(m, 0x140, &[0xE1, 0x18]); // compressed "Hi": bits 0,0,0,1,1
+        });
+        assert_eq!(out_str(&m), "Hi");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn getstringtbl_reports_current_table() {
+        // setstringtbl 0x100; getstringtbl → RAM 0x160.
+        let mut body = asm::ins(0x141, &[asm::Op::C16(0x0100)]);
+        body.extend(asm::ins(0x140, &[asm::Op::Mem16(0x0160)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x160).unwrap(), 0x100);
+    }
+
+    #[test]
+    fn compressed_string_indirect_node_prints_e0() {
+        // root: left → 0x08 node (→ E0 "Ok"), right → terminator. bits 0,1 → 0x02.
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x141, &[asm::Op::C16(0x0100)]));
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0150)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            let t = 0x100u32;
+            let root = t + 12;
+            let indir = root + 9;
+            let term = indir + 5;
+            let estr = 0x170u32;
+            let len = (term + 1) - t;
+            poke(m, t, &len.to_be_bytes());
+            poke(m, t + 4, &3u32.to_be_bytes());
+            poke(m, t + 8, &root.to_be_bytes());
+            poke(m, root, &[0x00]);
+            poke(m, root + 1, &indir.to_be_bytes());
+            poke(m, root + 5, &term.to_be_bytes());
+            poke(m, indir, &[0x08]);
+            poke(m, indir + 1, &estr.to_be_bytes());
+            poke(m, term, &[0x01]);
+            poke(m, estr, &[0xE0, b'O', b'k', 0]);
+            poke(m, 0x150, &[0xE1, 0x02]); // bits 0,1
+        });
+        assert_eq!(out_str(&m), "Ok");
+    }
+
+    #[test]
+    fn compressed_string_function_node_calls_function() {
+        // A printer function (C1, no locals) that streams 'Z' and returns.
+        let printer = asm::func(
+            0xC1,
+            &[],
+            &{
+                let mut b = asm::ins(0x70, &[asm::Op::C8(b'Z' as i8)]); // streamchar 'Z'
+                b.extend(asm::ins(0x31, &[asm::Op::Zero])); // return 0
+                b
+            },
+        );
+        // start: setiosys glk; setstringtbl 0x100; streamstr 0x150; quit.
+        let mut sbody = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        sbody.extend(asm::ins(0x141, &[asm::Op::C16(0x0100)]));
+        sbody.extend(asm::ins(0x72, &[asm::Op::C16(0x0150)]));
+        sbody.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &sbody);
+        let built = asm::assemble(&[printer, start], 1, 0x200);
+        let printer_addr = built.addrs[0];
+        let mut m = machine(built);
+        // root: left → 0x08 node (→ printer fn), right → terminator. bits 0,1.
+        let t = 0x100u32;
+        let root = t + 12;
+        let fnode = root + 9;
+        let term = fnode + 5;
+        let len = (term + 1) - t;
+        poke(&mut m, t, &len.to_be_bytes());
+        poke(&mut m, t + 4, &3u32.to_be_bytes());
+        poke(&mut m, t + 8, &root.to_be_bytes());
+        poke(&mut m, root, &[0x00]);
+        poke(&mut m, root + 1, &fnode.to_be_bytes());
+        poke(&mut m, root + 5, &term.to_be_bytes());
+        poke(&mut m, fnode, &[0x08]);
+        poke(&mut m, fnode + 1, &printer_addr.to_be_bytes());
+        poke(&mut m, term, &[0x01]);
+        poke(&mut m, 0x150, &[0xE1, 0x02]); // bits 0,1 → call printer, then terminate
+        m.run();
+        assert_eq!(out_str(&m), "Z");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn streamstr_e2_unicode_still_works() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            // E2 + 3 pad bytes + 'A'(0x41) + 'λ'(0x3BB) + terminator word.
+            poke(m, 0x100, &[0xE2, 0, 0, 0]);
+            poke(m, 0x104, &0x41u32.to_be_bytes());
+            poke(m, 0x108, &0x3BBu32.to_be_bytes());
+            poke(m, 0x10C, &0u32.to_be_bytes());
+        });
+        assert_eq!(out_str(&m), "Aλ");
+    }
+
+    #[test]
+    fn compressed_string_with_no_table_faults() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x100, &[0xE1, 0x00]));
+        assert!(m.halted);
+        assert!(m.diagnostics.iter().any(|d| d.contains("decoding table")));
     }
 }

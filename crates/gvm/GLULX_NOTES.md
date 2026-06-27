@@ -218,3 +218,77 @@ Glk dispatch selectors (from `gi_dispa.c`):
 | glk_stream_set_current| 0x0047 | return 0                                     |
 | glk_stream_get_current| 0x0048 | return 0                                     |
 | (any other selector)  | —      | pop args, return 0                           |
+
+## 9. String objects + compressed-string decoding (Phase 2b)
+
+A string object is identified by its first byte (spec §1.6.1):
+
+- `0xE0` — unencoded Latin-1 C-string: the bytes follow, terminated by a `00`.
+- `0xE2` — unencoded Unicode: an `E2` byte, **three padding `00` bytes**, then
+  big-endian 32-bit code points, terminated by a `0000_0000` word.
+- `0xE1` — compressed: an `E1` byte, then a Huffman bit stream.
+
+`streamstr L1` (0x72) prints the string object at L1 to the current iosys. A
+"printable object" can also be a **function** (`0xC0`/`0xC1`); when an indirect
+decode node names a function it is *called* and its output streamed.
+
+### Compressed (E1) bit stream (spec §1.6.1.3)
+
+Bits are read **low bit first**: bit 0 is the `0x01` bit of the first byte after
+the `E1`, up through the `0x80` bit, then on to the next byte. Decoding walks the
+string-decoding table (a Huffman tree) from its root: at each branch read one
+bit, `0` → left child, `1` → right child, until a leaf. Print the leaf's entity,
+return to the root, repeat. The string-terminator leaf ends decoding.
+
+### String-decoding table (spec §1.6.1.4)
+
+Header (three big-endian 32-bit words), then the node data:
+
+| Offset | Field           |
+|--------|-----------------|
+| +0     | Table Length    |
+| +4     | Number of Nodes |
+| +8     | Root Node Addr (**absolute** address, not an offset) |
+| +12…   | Node data       |
+
+The table root is at `decode_table()` (header field 0x1C) but is **overridable**
+at run time by `setstringtbl`/`getstringtbl`; the current value lives on the
+Machine. Decoding an `E1` string with **no** table set is illegal (fault).
+
+### Node types (distinguished by their first byte)
+
+| Type | Name                         | Layout                                       |
+|------|------------------------------|----------------------------------------------|
+| 0x00 | Branch                       | `00` · Left addr (4) · Right addr (4)        |
+| 0x01 | String terminator            | `01`                                         |
+| 0x02 | Single character             | `02` · char (1)                              |
+| 0x03 | C-style string               | `03` · Latin-1 bytes… · NUL (1)              |
+| 0x04 | Single Unicode character     | `04` · char (4)                              |
+| 0x05 | C-style Unicode string       | `05` · 32-bit chars… · NUL word (4)          |
+| 0x08 | Indirect reference           | `08` · addr (4) → print string / call func   |
+| 0x09 | Double-indirect reference    | `09` · addr (4); `*addr` → object            |
+| 0x0A | Indirect, with arguments     | `0A` · addr (4) · argc (4) · args (4·argc)   |
+| 0x0B | Double-indirect, with args   | `0B` · addr (4) · argc (4) · args (4·argc)   |
+
+For 0x08/0x0A the address names the object directly; for 0x09/0x0B it names a
+4-byte field whose contents are the object address. If the object is a string it
+is printed (args ignored); if it is a function it is **called** (with the given
+args, or none for 0x08/0x09) and its output is streamed in place.
+
+### Calling functions from within strings (spec §1.3.4)
+
+The spec models a string-called function with type-10/11/13/14 call stubs so
+that a normal `return` resumes string decoding. We instead execute the call
+**synchronously**: decoding is a recursive Rust walk, and a function node calls
+the function and runs the VM run-loop until that frame returns (tracked by the
+frame pointer), then resumes the walk. This is observably equivalent for
+well-behaved veneer functions (their output is streamed in order). A recursion
+depth limit guards against pathological/cyclic tables (fault, never a Rust stack
+overflow).
+
+### `getstringtbl` / `setstringtbl`
+
+| Opcode       | Num   | L | S | Behavior                                       |
+|--------------|-------|---|---|------------------------------------------------|
+| getstringtbl | 0x140 | 0 | 1 | store the current decoding-table address (0=none) |
+| setstringtbl | 0x141 | 1 | 0 | set it (0 = none; does not touch the ROM header)  |
