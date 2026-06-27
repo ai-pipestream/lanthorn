@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn backtab_keyevent_maps_to_toggle_focus_back() {
+    fn backtab_keyevent_maps_to_cycle_layout_reverse() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         use crate::input::{key_to_action, Action};
         use crate::state::AppState;
@@ -624,22 +624,21 @@ mod tests {
             state: KeyEventState::NONE,
         };
 
-        // BackTab is now intercepted (step 8b) as the reverse pane-switch — the
-        // symmetric partner of Tab — before any keymap lookup. (The former
-        // cycle-layout-reverse binding on BackTab is thereby shadowed.)
+        // With no mid-word suggestions, the BackTab autocomplete intercept does not
+        // apply, so BackTab falls through to its Global binding: cycle-layout reverse.
         state.focus = crate::state::Focus::Game;
         let action = key_to_action(&state, backtab);
         assert!(
-            matches!(action, Action::ToggleFocusBack),
-            "BackTab in Game focus should produce ToggleFocusBack, got {:?}",
+            matches!(action, Action::CycleLayoutReverse),
+            "BackTab in Game focus should produce CycleLayoutReverse, got {:?}",
             action
         );
 
         state.focus = crate::state::Focus::Map;
         let action_map = key_to_action(&state, backtab);
         assert!(
-            matches!(action_map, Action::ToggleFocusBack),
-            "BackTab in Map focus should produce ToggleFocusBack, got {:?}",
+            matches!(action_map, Action::CycleLayoutReverse),
+            "BackTab in Map focus should produce CycleLayoutReverse, got {:?}",
             action_map
         );
     }

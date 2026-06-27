@@ -74,10 +74,6 @@ pub enum Action {
     Backspace,
     /// Toggle between Game and Map focus.
     ToggleFocus,
-    /// Reverse pane-switch (Shift-Tab fallback). With the current two-pane layout
-    /// this is identical to `ToggleFocus`; named distinctly so Tab/Shift-Tab read
-    /// as a symmetric pair and to stay correct if more panes are ever added.
-    ToggleFocusBack,
     /// Cycle the UI layout (Split → TranscriptFull → MapFull → Split).
     CycleLayout,
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
@@ -463,17 +459,15 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return KeyResolve::Action(Action::ToggleFocus);
     }
 
-    // 8b. Shift-Tab (BackTab): the reverse of step 8. Mid-word with suggestions
-    //     in game focus → AutocompletePrev (step the suggestion backward);
-    //     otherwise the reverse pane-switch.
-    if key.code == KeyCode::BackTab {
-        if state.focus == Focus::Game
-            && !state.current_partial().is_empty()
-            && !state.suggestions.is_empty()
-        {
-            return KeyResolve::Action(Action::AutocompletePrev);
-        }
-        return KeyResolve::Action(Action::ToggleFocusBack);
+    // 8b. Shift-Tab (BackTab): mid-word with suggestions in game focus →
+    //     AutocompletePrev (the reverse of step 8's Autocomplete). Otherwise fall
+    //     through so BackTab keeps its bound role (cycle-layout reverse).
+    if key.code == KeyCode::BackTab
+        && state.focus == Focus::Game
+        && !state.current_partial().is_empty()
+        && !state.suggestions.is_empty()
+    {
+        return KeyResolve::Action(Action::AutocompletePrev);
     }
 
     // 9. Ctrl modifier: Global KeyMap lookup, filtered by is_direct_name — same
@@ -1822,7 +1816,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::HistoryPrev => state.history_prev(),
         Action::HistoryNext => state.history_next(),
         Action::ToggleFocus => state.toggle_focus(),
-        Action::ToggleFocusBack => state.toggle_focus(),
         Action::CycleLayout => state.cycle_layout(),
         Action::CycleLayoutReverse => state.cycle_layout_reverse(),
         Action::ZoomIn => state.zoom_in(),
@@ -4122,25 +4115,27 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_is_toggle_focus_back_with_no_suggestions() {
-        // Game focus, partial typed but no suggestions → Shift-Tab toggles focus back.
+    fn shift_tab_is_cycle_layout_reverse_with_no_suggestions() {
+        // Game focus, partial typed but no suggestions → Shift-Tab falls through to
+        // its bound role (cycle the layout backward).
         let mut s = AppState::default();
         s.input = "nor".to_string();
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::ToggleFocusBack));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleLayoutReverse));
     }
 
     #[test]
-    fn shift_tab_is_toggle_focus_back_with_empty_input() {
+    fn shift_tab_is_cycle_layout_reverse_with_empty_input() {
         let s = AppState::default(); // Game focus, empty input, no suggestions
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::ToggleFocusBack));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleLayoutReverse));
     }
 
     #[test]
-    fn shift_tab_is_toggle_focus_back_in_map_focus_even_with_suggestions() {
+    fn shift_tab_is_cycle_layout_reverse_in_map_focus_even_with_suggestions() {
+        // Not in Game focus, so the autocomplete intercept does not apply → cycle layout.
         let mut s = AppState::default();
         s.focus = Focus::Map;
         s.suggestions = vec!["north".to_string()];
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::ToggleFocusBack));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleLayoutReverse));
     }
 
     #[test]
