@@ -20,7 +20,7 @@ pub struct StoryEntry {
 /// `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers some
 /// Infocom releases.
 const STORY_EXTS: &[&str] = &[
-    "z3", "z4", "z5", "z7", "z8", "zblorb", "blorb", "zlb", "dat",
+    "z3", "z4", "z5", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb",
 ];
 
 fn has_story_ext(path: &Path) -> bool {
@@ -44,12 +44,18 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
         if !path.is_file() || !has_story_ext(&path) {
             continue;
         }
-        let Ok(bytes) = crate::hints::load_story_bytes(&path) else {
+        let Ok(loaded) = crate::hints::load_story(&path) else {
             continue;
         };
-        // Only list stories babelmap can actually launch (parse_header accepts
-        // v3/4/5/7/8 and rejects v6/v1/v2).
-        if zvm::memory::Memory::new(bytes.clone()).is_err() {
+        // Only list stories babelmap can actually launch: Z-code via the
+        // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
+        // Glulx loader.
+        let bytes = loaded.bytes().to_vec();
+        let launchable = match &loaded {
+            crate::hints::LoadedStory::ZCode(b) => zvm::memory::Memory::new(b.clone()).is_ok(),
+            crate::hints::LoadedStory::Glulx(b) => gvm::Memory::new(b.clone()).is_ok(),
+        };
+        if !launchable {
             continue;
         }
         let filename = path

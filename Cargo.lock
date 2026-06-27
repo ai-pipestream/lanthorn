@@ -91,6 +91,7 @@ dependencies = [
  "blorb",
  "clap",
  "crossterm",
+ "gvm",
  "mapper",
  "notify",
  "ratatui",

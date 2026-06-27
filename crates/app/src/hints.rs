@@ -190,52 +190,98 @@ fn find_hint_entry_in_zip(zip_path: &Path) -> io::Result<Option<String>> {
 /// ZIP magic bytes (local file header signature).
 const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
 
-/// Load story bytes from `path`.
+/// A story image classified by the VM engine that runs it.
 ///
-/// - If the file begins with the ZIP magic (`PK\x03\x04`), opens it as a ZIP
-///   and returns the bytes of the first entry whose name ends in `.z3`, `.z5`,
-///   or `.z8`.
-/// - Otherwise returns the raw file bytes.
-///
-/// Returns `Err` if the file cannot be read, or if the path looks like a ZIP
-/// but contains no story entry.
-pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
+/// `extract_story` returns this so session creation can route a Z-code image to
+/// the Z-machine (`GameSession`) and a Glulx image to `GlulxSession`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadedStory {
+    /// A Z-machine story image (`.z*` / `ZCOD` Blorb).
+    ZCode(Vec<u8>),
+    /// A Glulx story image (`.ulx` / `GLUL` Blorb / `.gblorb`).
+    Glulx(Vec<u8>),
+}
+
+impl LoadedStory {
+    /// The raw executable bytes, regardless of engine.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            LoadedStory::ZCode(b) | LoadedStory::Glulx(b) => b,
+        }
+    }
+    /// Consume into the raw executable bytes, regardless of engine.
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            LoadedStory::ZCode(b) | LoadedStory::Glulx(b) => b,
+        }
+    }
+}
+
+/// Read a story file's executable bytes, transparently unwrapping a ZIP whose
+/// first `.z3/.z5/.z8` entry is the story. Does not classify the engine — see
+/// [`load_story`] / [`extract_story`].
+fn read_story_file(path: &Path) -> io::Result<Vec<u8>> {
     let raw = std::fs::read(path)?;
-    let bytes = if raw.starts_with(ZIP_MAGIC) {
+    if raw.starts_with(ZIP_MAGIC) {
         // It's a ZIP — find the first story entry.
         let pred = |name: &str| {
             let lower = name.to_ascii_lowercase();
             lower.ends_with(".z3") || lower.ends_with(".z5") || lower.ends_with(".z8")
         };
         match read_zip_entry(path, pred)? {
-            Some(bytes) => bytes,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no .z3/.z5/.z8 entry found in zip: {}", path.display()),
-                ))
-            }
+            Some(bytes) => Ok(bytes),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no .z3/.z5/.z8 entry found in zip: {}", path.display()),
+            )),
         }
     } else {
-        raw
-    };
-    extract_story(bytes)
+        Ok(raw)
+    }
 }
 
-/// If `bytes` is a Blorb, return its Z-code executable; reject Glulx with a
-/// clear error; otherwise pass the bytes through unchanged (a raw story file).
-pub fn extract_story(bytes: Vec<u8>) -> io::Result<Vec<u8>> {
+/// Load a story from `path`, classified by engine ([`LoadedStory`]).
+///
+/// Unwraps a ZIP (first `.z*` entry) and a Blorb container; a raw `.ulx`
+/// (`Glul` magic) is recognised as Glulx, and any other raw bytes are treated
+/// as Z-code (preserving the historical default).
+pub fn load_story(path: &Path) -> io::Result<LoadedStory> {
+    extract_story(read_story_file(path)?)
+}
+
+/// Load story bytes from `path`, restricted to **Z-code** images.
+///
+/// Convenience wrapper over [`load_story`] for the Z-machine-only call sites
+/// (the hint companion VM, the picker's legacy path). A Glulx image is rejected
+/// with a clear error so those sites behave exactly as before.
+pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
+    match load_story(path)? {
+        LoadedStory::ZCode(b) => Ok(b),
+        LoadedStory::Glulx(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Glulx story files are not supported on this path".to_string(),
+        )),
+    }
+}
+
+/// Classify `bytes` into a [`LoadedStory`].
+///
+/// A Blorb yields its embedded executable's kind; a raw image starting with the
+/// `Glul` magic is Glulx; anything else is treated as a raw Z-code story (the
+/// historical pass-through). Never errors for a non-Blorb input.
+pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     if !blorb::Blorb::is_blorb(&bytes) {
-        return Ok(bytes);
+        // Raw image: distinguish Glulx by its `Glul` magic; default to Z-code.
+        if bytes.starts_with(b"Glul") {
+            return Ok(LoadedStory::Glulx(bytes));
+        }
+        return Ok(LoadedStory::ZCode(bytes));
     }
     let b = blorb::Blorb::parse(bytes)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid Blorb: {e:?}")))?;
     match b.executable() {
-        Ok((blorb::ExecKind::ZCode, data)) => Ok(data.to_vec()),
-        Ok((blorb::ExecKind::Glulx, _)) => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Glulx story files are not yet supported".to_string(),
-        )),
+        Ok((blorb::ExecKind::ZCode, data)) => Ok(LoadedStory::ZCode(data.to_vec())),
+        Ok((blorb::ExecKind::Glulx, data)) => Ok(LoadedStory::Glulx(data.to_vec())),
         Err(e) => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Blorb has no executable: {e:?}"),
@@ -378,6 +424,49 @@ mod tests {
         std::fs::write(&path, make_blorb(b"ZCOD", zcode)).unwrap();
         let out = load_story_bytes(&path).expect("zblorb load");
         assert_eq!(out, zcode);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn extract_story_classifies_engine() {
+        // ZCOD Blorb → ZCode(payload).
+        let zblorb = make_blorb(b"ZCOD", b"ZCODE");
+        assert_eq!(extract_story(zblorb).unwrap(), LoadedStory::ZCode(b"ZCODE".to_vec()));
+        // GLUL Blorb → Glulx(payload).
+        let gblorb = make_blorb(b"GLUL", b"GLULX");
+        assert_eq!(extract_story(gblorb).unwrap(), LoadedStory::Glulx(b"GLULX".to_vec()));
+        // Raw Z-code (version byte, no Glul magic) → ZCode pass-through.
+        let raw_z: Vec<u8> = vec![5, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(extract_story(raw_z.clone()).unwrap(), LoadedStory::ZCode(raw_z));
+        // Raw .ulx (Glul magic) → Glulx pass-through.
+        let mut raw_ulx = b"Glul".to_vec();
+        raw_ulx.extend_from_slice(&[0, 3, 1, 2]);
+        assert_eq!(extract_story(raw_ulx.clone()).unwrap(), LoadedStory::Glulx(raw_ulx));
+    }
+
+    #[test]
+    fn load_story_routes_gblorb_and_ulx() {
+        let base = std::env::temp_dir().join(format!("bm-route-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A .gblorb (GLUL) routes to Glulx.
+        let gpath = base.join("game.gblorb");
+        std::fs::write(&gpath, make_blorb(b"GLUL", b"GLULPAYLOAD")).unwrap();
+        assert_eq!(load_story(&gpath).unwrap(), LoadedStory::Glulx(b"GLULPAYLOAD".to_vec()));
+
+        // A raw .ulx routes to Glulx by its magic.
+        let upath = base.join("game.ulx");
+        let mut ulx = b"Glul".to_vec();
+        ulx.extend_from_slice(&[0, 3, 1, 2, 9, 9]);
+        std::fs::write(&upath, &ulx).unwrap();
+        assert_eq!(load_story(&upath).unwrap(), LoadedStory::Glulx(ulx));
+
+        // A .zblorb (ZCOD) still routes to Z-code.
+        let zpath = base.join("game.zblorb");
+        std::fs::write(&zpath, make_blorb(b"ZCOD", b"ZP")).unwrap();
+        assert_eq!(load_story(&zpath).unwrap(), LoadedStory::ZCode(b"ZP".to_vec()));
 
         let _ = std::fs::remove_dir_all(&base);
     }
