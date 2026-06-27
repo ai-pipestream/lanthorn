@@ -1,5 +1,23 @@
-//! Slash-command parser: `parse`, the `COMMANDS` registry, `slash_names`,
-//! and `help_text`.
+//! Slash-command parser and the command registry.
+//!
+//! `COMMANDS` is the **single source of truth** for every command in the app.
+//! Both typed slash input and key presses are dispatched the same way:
+//! `parse_in_context(body, prefix, ctx)` looks the command up in `COMMANDS`
+//! and runs its `dispatch` closure, producing a [`SlashOutcome`]; the run
+//! loop's `dispatch_slash_outcome` (main.rs) then applies it. Key bindings are
+//! just stored command-strings (see `crate::keymap`) fed through this same
+//! `parse_in_context`. There is no separate command enum — execution flows
+//! through [`crate::input::Action`] via `SlashOutcome::Action`.
+//!
+//! To add a command: add ONE [`CommandSpec`] to `COMMANDS`. That alone gives
+//! it slash parsing, `/help` grouping + `help <command>` detail, and Tab
+//! autocomplete — there is no second place to register it, so a command can
+//! never be missing from `/help`. (Bump the count in the registry
+//! well-formedness test when you do.) Names are verb-noun kebab-case; `quit`
+//! and `help` are the only one-word exceptions. Directional behavior is
+//! expressed by arguments bound to keys, not by separate commands (e.g.
+//! `pan-map <dx> <dy>`), so prefer a parametric command over per-direction
+//! variants.
 //!
 //! `parse` receives the input AFTER the leading prefix character has been
 //! stripped. It does not know what the prefix was.
@@ -104,6 +122,11 @@ pub struct CommandSpec {
 
 fn err(s: impl Into<String>) -> SlashOutcome { SlashOutcome::Error(s.into()) }
 
+/// The command registry — the single source of truth for every command.
+/// Add a new command by adding one entry here (see the module docs); nothing
+/// else needs to change for it to appear in `/help`, Tab autocomplete, and the
+/// parser. Keep entries grouped by `Category` in the display order of
+/// `Category::ORDER`.
 pub static COMMANDS: &[CommandSpec] = &[
     // ── Game ──────────────────────────────────────────────────────────────
     CommandSpec { name: "save-game", category: Category::Game, context: Context::Global,
