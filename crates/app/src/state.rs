@@ -125,6 +125,9 @@ impl VerbMenuState {
 // ── Gallery constants ─────────────────────────────────────────────────────────
 
 /// Category index for box-style gallery column.
+/// Maximum number of submitted command lines retained in `command_history`.
+pub const COMMAND_HISTORY_CAP: usize = 500;
+
 pub const GALLERY_CATEGORY_BOX: usize = 0;
 /// Category index for arrow-set gallery column.
 pub const GALLERY_CATEGORY_ARROWS: usize = 1;
@@ -800,6 +803,20 @@ pub struct AppState {
     /// `Tab` advances this (cycling); typing resets it to 0.
     pub suggestion_idx: usize,
 
+    // ── Command history (shell-style Up/Down recall) ──────────────────────────
+
+    /// Every non-empty submitted line (game commands and slash commands), oldest
+    /// first. Capped at `COMMAND_HISTORY_CAP`; consecutive duplicates are skipped.
+    /// Persisted per-game in the `.babelmap` archive.
+    pub command_history: Vec<String>,
+    /// Navigation cursor into `command_history`. `None` means "not navigating"
+    /// (the input line holds the live draft); `Some(i)` means the input shows
+    /// `command_history[i]`.
+    pub history_cursor: Option<usize>,
+    /// In-progress input saved on the first Up press, restored when the player
+    /// pages Down past the newest entry.
+    pub history_draft: String,
+
     // ── Adventure title ───────────────────────────────────────────────────────
 
     /// Resolved adventure title (override > banner > filename stem).
@@ -944,6 +961,9 @@ impl Default for AppState {
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
+            command_history: Vec::new(),
+            history_cursor: None,
+            history_draft: String::new(),
             title: String::new(),
             ifid: String::new(),
             show_inventory: false,
@@ -1171,6 +1191,71 @@ impl AppState {
         }
     }
 
+    // ── Command history (Up/Down recall) ──────────────────────────────────────
+
+    /// Record a submitted command line into `command_history`.
+    ///
+    /// No-op when `line.trim()` is empty. A line equal to the current last entry
+    /// is skipped (consecutive-duplicate dedupe). The list is capped at
+    /// `COMMAND_HISTORY_CAP` (oldest dropped). Always resets the navigation cursor
+    /// and clears the saved draft.
+    pub fn record_command(&mut self, line: &str) {
+        self.history_cursor = None;
+        self.history_draft.clear();
+        if line.trim().is_empty() {
+            return;
+        }
+        if self.command_history.last().map(String::as_str) == Some(line) {
+            return;
+        }
+        self.command_history.push(line.to_string());
+        if self.command_history.len() > COMMAND_HISTORY_CAP {
+            let overflow = self.command_history.len() - COMMAND_HISTORY_CAP;
+            self.command_history.drain(0..overflow);
+        }
+    }
+
+    /// Recall the previous (older) command into the input buffer (Up arrow).
+    ///
+    /// The first Up saves the in-progress input as the draft. At the oldest entry
+    /// further Up is a no-op. No-op when the history is empty.
+    pub fn history_prev(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+        let next = match self.history_cursor {
+            None => {
+                self.history_draft = self.input.clone();
+                self.command_history.len() - 1
+            }
+            Some(0) => return, // oldest: stay
+            Some(i) => i - 1,
+        };
+        self.history_cursor = Some(next);
+        self.input = self.command_history[next].clone();
+        self.clear_suggestions();
+    }
+
+    /// Recall the next (newer) command into the input buffer (Down arrow).
+    ///
+    /// Stepping past the newest entry restores the saved draft and leaves
+    /// navigation. No-op when not currently navigating.
+    pub fn history_next(&mut self) {
+        let i = match self.history_cursor {
+            None => return,
+            Some(i) => i,
+        };
+        if i + 1 < self.command_history.len() {
+            self.history_cursor = Some(i + 1);
+            self.input = self.command_history[i + 1].clone();
+        } else {
+            // Past the newest entry: restore the draft.
+            self.history_cursor = None;
+            self.input = std::mem::take(&mut self.history_draft);
+        }
+        self.clear_suggestions();
+    }
+
     // ── Search helpers ────────────────────────────────────────────────────────
 
     /// Run a case-insensitive substring search over the visible transcript lines.
@@ -1232,6 +1317,83 @@ mod tests {
     fn appstate_history_defaults_empty() {
         let s = AppState::default();
         assert!(s.history.is_empty(), "history starts empty");
+    }
+
+    // ── Command history (feature D) ────────────────────────────────────────────
+
+    #[test]
+    fn record_command_skips_empty_and_consecutive_duplicates() {
+        let mut s = AppState::default();
+        s.record_command("north");
+        s.record_command("north"); // consecutive dup → skipped
+        s.record_command("   ");    // blank → skipped
+        s.record_command("south");
+        s.record_command("north"); // not consecutive → recorded
+        assert_eq!(s.command_history, vec!["north", "south", "north"]);
+    }
+
+    #[test]
+    fn record_command_caps_at_500_dropping_oldest() {
+        let mut s = AppState::default();
+        for i in 0..600 {
+            s.record_command(&format!("cmd{i}"));
+        }
+        assert_eq!(s.command_history.len(), COMMAND_HISTORY_CAP);
+        assert_eq!(s.command_history.first().unwrap(), "cmd100");
+        assert_eq!(s.command_history.last().unwrap(), "cmd599");
+    }
+
+    #[test]
+    fn record_command_resets_cursor_and_draft() {
+        let mut s = AppState::default();
+        s.command_history = vec!["a".into(), "b".into()];
+        s.history_cursor = Some(0);
+        s.history_draft = "draft".into();
+        s.record_command("c");
+        assert_eq!(s.history_cursor, None);
+        assert!(s.history_draft.is_empty());
+    }
+
+    #[test]
+    fn history_up_down_recall_with_draft_save_and_restore() {
+        let mut s = AppState::default();
+        s.command_history = vec!["one".into(), "two".into(), "three".into()];
+        s.input = "partial".into(); // in-progress draft
+
+        // First Up: save draft, recall newest ("three").
+        s.history_prev();
+        assert_eq!(s.input, "three");
+        // Up again: "two".
+        s.history_prev();
+        assert_eq!(s.input, "two");
+        // Up again: "one" (oldest).
+        s.history_prev();
+        assert_eq!(s.input, "one");
+        // Up at oldest: no-op (stays).
+        s.history_prev();
+        assert_eq!(s.input, "one");
+        // Down: "two".
+        s.history_next();
+        assert_eq!(s.input, "two");
+        // Down: "three".
+        s.history_next();
+        assert_eq!(s.input, "three");
+        // Down past newest: restore the saved draft.
+        s.history_next();
+        assert_eq!(s.input, "partial");
+        assert_eq!(s.history_cursor, None);
+        // Down again while not navigating: no-op.
+        s.history_next();
+        assert_eq!(s.input, "partial");
+    }
+
+    #[test]
+    fn history_prev_on_empty_history_is_noop() {
+        let mut s = AppState::default();
+        s.input = "x".into();
+        s.history_prev();
+        assert_eq!(s.input, "x");
+        assert_eq!(s.history_cursor, None);
     }
 
     #[test]

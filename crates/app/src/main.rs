@@ -979,6 +979,8 @@ fn main() {
     let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>)> = None;
     // Rewind/replay history carried from the archive when the game is auto-restored.
     let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
+    // Command history (Up/Down recall) carried from the archive, always loaded.
+    let mut startup_command_history: Vec<String> = Vec::new();
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
     let mut pending_resume_stash: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)> = None;
@@ -1004,6 +1006,8 @@ fn main() {
                 if cfg.aux_storage != app::config::AuxStorage::Global {
                     session.machine.aux_data = ac.aux.clone();
                 }
+                // Command history is per-game and loads regardless of auto_load.
+                startup_command_history = ac.command_history;
                 ac.mapper
             }
             Err(e) => {
@@ -1122,6 +1126,7 @@ fn main() {
     if !startup_history.is_empty() {
         state.history = startup_history;
     }
+    state.command_history = startup_command_history;
 
     // If a save was found but auto_load is off and prompt_load_on_launch is on,
     // open the launch dialog so the user can choose to resume or start fresh.
@@ -1488,7 +1493,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history);
                                 break;
                             }
                             QuitDialogAction::Quit => {
@@ -1525,7 +1530,7 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history);
+                                let _ = save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history);
                                 break;
                             } else if in_quit {
                                 break;
@@ -2164,6 +2169,10 @@ fn main() {
                     continue;
                 }
 
+                // Record into the shell-style command history (game + slash alike),
+                // deduping consecutive repeats and capping the list.
+                state.record_command(&cmd);
+
                 // ── Slash-command interception ────────────────────────────────
                 // If the input starts with the configured prefix, route it as an
                 // app command; do NOT call session.submit, increment turns, or
@@ -2303,7 +2312,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
+                match save_archive_meta(&arc_file, &mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -2337,6 +2346,7 @@ fn main() {
                                 state.transcript = ac.transcript;
                                 state.transcript_kinds = ac.transcript_kinds;
                                 state.history = ac.history;
+                                state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
                                 let loc = zvm::current_location(&session.machine);
                                 if let Some(snap) = loc {
@@ -2542,6 +2552,9 @@ fn main() {
                                     session.machine.aux_data = ac.aux.clone();
                                 }
                                 mapper = ac.mapper;
+                                if !ac.command_history.is_empty() {
+                                    state.command_history = ac.command_history;
+                                }
                             }
                             state.push_transcript(&format!("[Game restored from {}]", entry_name));
                             session.resume_restore(Some(&bytes))
@@ -2579,6 +2592,11 @@ fn main() {
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
                                     state.history = ac.history;
+                                    // Named-slot archives carry no command history; only
+                                    // adopt it when present so a slot load doesn't wipe it.
+                                    if !ac.command_history.is_empty() {
+                                        state.command_history = ac.command_history;
+                                    }
                                     // Restore turn counter from the loaded archive.
                                     state.turns = ac.meta.turns;
                                     // Re-observe current location.
@@ -2771,7 +2789,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.history) {
+        match save_archive_meta(&arc_file, &mapper, &session.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }
@@ -2859,7 +2877,7 @@ fn dispatch_slash_outcome(
                                 .unwrap_or(0),
                         ),
                     };
-                    save_archive_meta(arc_file, &*mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history)
+                    save_archive_meta(arc_file, &*mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history)
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -2904,6 +2922,9 @@ fn dispatch_slash_outcome(
                                     state.transcript = ac.transcript;
                                     state.transcript_kinds = ac.transcript_kinds;
                                     state.history = ac.history;
+                                    if !ac.command_history.is_empty() {
+                                        state.command_history = ac.command_history;
+                                    }
                                     let loc = zvm::current_location(&session.machine);
                                     if let Some(snap) = loc {
                                         let rid = snap.number as mapper::graph::RoomId;
@@ -3335,7 +3356,7 @@ fn post_turn_bookkeeping(
                     .unwrap_or(0),
             ),
         };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history) {
+        if let Err(e) = save_archive_meta(arc_file, mapper, &session.machine, meta, &state.transcript, &state.transcript_kinds, &state.history, &state.command_history) {
             state.push_transcript(&format!("[Auto-save failed: {}]", e));
         }
     }

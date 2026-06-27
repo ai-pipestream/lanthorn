@@ -163,6 +163,10 @@ pub enum Action {
     /// active under the same mid-word-with-suggestions condition; otherwise
     /// Shift-Tab keeps its `ToggleFocus` role).
     AutocompletePrev,
+    /// Recall the previous (older) command into the input buffer (game focus, Up).
+    HistoryPrev,
+    /// Recall the next (newer) command into the input buffer (game focus, Down).
+    HistoryNext,
     /// Open the hotkey dialog overlay.
     OpenHotkeyDialog,
     /// Close the hotkey dialog overlay.
@@ -1284,6 +1288,9 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
         KeyCode::Right if shift => Action::Pan(1, 0),
         KeyCode::Up if shift => Action::Pan(0, -1),
         KeyCode::Down if shift => Action::Pan(0, 1),
+        // Plain Up/Down recall command history (shell-style).
+        KeyCode::Up if key.modifiers == KeyModifiers::NONE => Action::HistoryPrev,
+        KeyCode::Down if key.modifiers == KeyModifiers::NONE => Action::HistoryNext,
         KeyCode::Home => Action::Recenter,
         // PageUp/PageDown page the transcript (toward older / newer). Zoom stays
         // on +/=/-/0, Ctrl+wheel, and /zoom-map.
@@ -1812,6 +1819,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 state.suggestion_idx = (idx + len - 1) % len;
             }
         }
+        Action::HistoryPrev => state.history_prev(),
+        Action::HistoryNext => state.history_next(),
         Action::ToggleFocus => state.toggle_focus(),
         Action::ToggleFocusBack => state.toggle_focus(),
         Action::CycleLayout => state.cycle_layout(),
@@ -4813,6 +4822,34 @@ mod tests {
             matches!(action, Action::ShowRoomDiagnostics(2)),
             "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
         );
+    }
+
+    // ── Command history Up/Down (feature D) ────────────────────────────────────
+
+    #[test]
+    fn plain_up_down_recall_history_in_game_focus() {
+        let s = AppState::default(); // Game focus
+        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::HistoryPrev));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::HistoryNext));
+    }
+
+    #[test]
+    fn shift_up_down_still_pan_in_game_focus() {
+        let s = AppState::default(); // Game focus
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
+    }
+
+    #[test]
+    fn history_actions_apply_through_apply_action() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.command_history = vec!["look".into(), "inventory".into()];
+        s.input = "dr".into();
+        apply_action(Action::HistoryPrev, &mut s, &mut m);
+        assert_eq!(s.input, "inventory");
+        apply_action(Action::HistoryNext, &mut s, &mut m);
+        assert_eq!(s.input, "dr"); // draft restored
     }
 
     // ── PageUp/PageDown transcript paging (feature C) ──────────────────────────

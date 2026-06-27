@@ -33,6 +33,7 @@ const ENTRY_MAP: &str = "map.json";
 const ENTRY_SAVE: &str = "game.sav";
 const ENTRY_META: &str = "meta.json";
 const ENTRY_TRANSCRIPT: &str = "transcript.json";
+const ENTRY_COMMAND_HISTORY: &str = "command_history.json";
 const ENTRY_SCREEN: &str = "screen.json";
 const ENTRY_AUX: &str = "aux.dat";
 const HISTORY_INDEX: &str = "history/index.json";
@@ -139,6 +140,8 @@ pub struct ArchiveContents {
     pub screen: Option<zvm::screen::ScreenState>,
     /// Auxiliary key/value data from the machine (empty for archives without `aux.dat`).
     pub aux: std::collections::BTreeMap<String, Vec<u8>>,
+    /// Shell-style command history (empty for archives without `command_history.json`).
+    pub command_history: Vec<String>,
 }
 
 /// Write a `.babelmap` archive containing the current map and VM save.
@@ -152,6 +155,7 @@ pub fn save_archive(
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
     history: &[crate::history::TurnRecord],
+    command_history: &[String],
 ) -> io::Result<()> {
     save_archive_meta(path, mapper, machine, Meta {
         format_version: CURRENT_FORMAT_VERSION,
@@ -159,7 +163,7 @@ pub fn save_archive(
         name: None,
         turns: 0,
         saved_at: String::new(),
-    }, transcript, transcript_kinds, history)
+    }, transcript, transcript_kinds, history, command_history)
 }
 
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
@@ -173,6 +177,7 @@ pub fn save_archive_meta(
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
     history: &[crate::history::TurnRecord],
+    command_history: &[String],
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -214,6 +219,12 @@ pub fn save_archive_meta(
         serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
     zip.write_all(transcript_json.as_bytes())?;
+
+    // command_history.json — the player's submitted command lines (JSON array).
+    let cmd_history_json = serde_json::to_string_pretty(command_history)
+        .expect("Vec<String> is always serializable");
+    zip.start_file(ENTRY_COMMAND_HISTORY, options)?;
+    zip.write_all(cmd_history_json.as_bytes())?;
 
     // screen.json — Z-machine screen state (for host-mediated restore redraw).
     let screen_json = serde_json::to_string(&ScreenDto::from_screen(&machine.screen))
@@ -323,6 +334,16 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => (Vec::new(), Vec::new()),
     };
 
+    // command_history.json — optional; older archives omit it → empty vec.
+    let command_history: Vec<String> = match zip.by_name(ENTRY_COMMAND_HISTORY) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            entry.read_to_string(&mut buf)?;
+            serde_json::from_str(&buf).unwrap_or_default()
+        }
+        Err(_) => Vec::new(),
+    };
+
     // history/ — optional; absent in archives that pre-date this feature.
     // Read the index first (releasing its borrow before the per-turn reads).
     let history_index: Option<Vec<HistoryIndexEntry>> = match zip.by_name(HISTORY_INDEX) {
@@ -397,7 +418,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history, screen, aux })
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, history, screen, aux, command_history })
 }
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
@@ -446,7 +467,7 @@ mod tests {
         let expected = machine.save_quetzal();
 
         let path = temp_archive_path("qzl-from-babelmap");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save_archive");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save_archive");
         let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
         let _ = std::fs::remove_file(&path);
 
@@ -483,7 +504,7 @@ mod tests {
         machine.screen.cursor_col = 3;
 
         let path = temp_archive_path("screen-roundtrip");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
 
@@ -523,6 +544,7 @@ mod tests {
             &transcript,
             &kinds,
             &[],
+            &[],
         )
         .expect("save_archive_meta");
         let ac = load_archive(&path).expect("load");
@@ -559,7 +581,7 @@ mod tests {
         ];
 
         let path = temp_archive_path("history-rt");
-        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &history)
+        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &history, &[])
             .expect("save_archive");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -586,11 +608,66 @@ mod tests {
         }
         let mapper = small_mapper();
         let path = temp_archive_path("history-v1");
-        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[])
+        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[], &[])
             .expect("save_archive without history");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
         assert!(ac.history.is_empty(), "archive without history/ → empty history");
+    }
+
+    #[test]
+    fn command_history_round_trips_in_archive() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+        let cmds = vec!["look".to_string(), "open mailbox".to_string(), "/help".to_string()];
+        let path = temp_archive_path("cmd-history-rt");
+        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &cmds)
+            .expect("save_archive");
+        let ac = load_archive(&path).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.command_history, cmds);
+    }
+
+    #[test]
+    fn archive_without_command_history_loads_empty() {
+        // Simulate a pre-feature archive by removing the command_history.json entry.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+        let path = temp_archive_path("cmd-history-missing");
+        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[],
+            &["north".to_string()])
+            .expect("save_archive");
+
+        // Rewrite the archive dropping the command_history.json entry.
+        let stripped = temp_archive_path("cmd-history-stripped");
+        {
+            let src = std::fs::File::open(&path).unwrap();
+            let mut zin = zip::ZipArchive::new(src).unwrap();
+            let out = std::fs::File::create(&stripped).unwrap();
+            let mut zout = zip::ZipWriter::new(out);
+            for i in 0..zin.len() {
+                let mut e = zin.by_index(i).unwrap();
+                if e.name() == ENTRY_COMMAND_HISTORY {
+                    continue;
+                }
+                let name = e.name().to_string();
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf).unwrap();
+                zout.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                zout.write_all(&buf).unwrap();
+            }
+            zout.finish().unwrap();
+        }
+        let ac = load_archive(&stripped).expect("load_archive");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&stripped);
+        assert!(ac.command_history.is_empty(), "missing entry → empty command history");
     }
 
     // -------------------------------------------------------------------------
@@ -616,7 +693,7 @@ mod tests {
         let expected_save = machine.save_quetzal();
 
         let path = temp_archive_path("roundtrip");
-        save_archive(&path, &mapper, &machine, &[], &[], &[]).expect("save_archive");
+        save_archive(&path, &mapper, &machine, &[], &[], &[], &[]).expect("save_archive");
 
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -831,7 +908,7 @@ mod tests {
         let mut machine = dummy_machine();
         machine.aux_data.insert("hints".to_string(), vec![1, 2, 3]);
         let path = temp_archive_path("aux");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert_eq!(ac.aux.get("hints").map(|v| v.as_slice()), Some(&[1, 2, 3][..]));
@@ -841,7 +918,7 @@ mod tests {
     fn archive_without_aux_loads_empty_map() {
         let machine = dummy_machine(); // empty aux_data
         let path = temp_archive_path("noaux");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[]).expect("save");
+        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert!(ac.aux.is_empty());
