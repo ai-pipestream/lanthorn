@@ -1186,6 +1186,7 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
                 _ => Action::StyleToggleAttr(AttrKind::Reversed),
             }
         }
+        // Border focus only occurs on bordered selectors; see StyleFocusCycle/StyleNav gating.
         KeyCode::Left if focus == StyleFocus::Border => Action::StyleBorderZoneNav(-1),
         KeyCode::Right if focus == StyleFocus::Border => Action::StyleBorderZoneNav(1),
         KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
@@ -2290,6 +2291,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(ed) = &mut state.style_editor {
                 let n = ed.selectors.len() as i32;
                 ed.active = ((ed.active as i32 + d).rem_euclid(n.max(1))) as usize;
+                if ed.focus == crate::state::StyleFocus::Border
+                    && !is_bordered_selector(ed.selectors[ed.active])
+                {
+                    ed.focus = crate::state::StyleFocus::Board;
+                }
             }
         }
 
@@ -2313,14 +2319,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::StyleFocusCycle(d) => {
             if let Some(ed) = &mut state.style_editor {
                 use crate::state::StyleFocus;
-                let order = [
-                    StyleFocus::Board,
-                    StyleFocus::Fg,
-                    StyleFocus::Bg,
-                    StyleFocus::Custom,
-                    StyleFocus::Attrs,
-                    StyleFocus::Border,
-                ];
+                let bordered = is_bordered_selector(ed.selectors[ed.active]);
+                let order: &[StyleFocus] = if bordered {
+                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs, StyleFocus::Border]
+                } else {
+                    &[StyleFocus::Board, StyleFocus::Fg, StyleFocus::Bg, StyleFocus::Custom, StyleFocus::Attrs]
+                };
                 let cur = order.iter().position(|f| *f == ed.focus).unwrap_or(0) as i32;
                 let n = order.len() as i32;
                 ed.focus = order[((cur + d).rem_euclid(n)) as usize];
@@ -6505,5 +6509,59 @@ mod tests {
             assert!(crate::input::is_bordered_selector(sel), "{sel} is bordered");
         }
         assert!(!crate::input::is_bordered_selector("transcript"));
+    }
+
+    #[test]
+    fn border_focus_only_on_bordered_selectors() {
+        use crate::state::StyleFocus;
+        let m = &mut mapper::mapper::Mapper::default();
+
+        // ── non-bordered selector: cycling from Attrs wraps to Board, never Border ──
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            let non_bordered_idx = ed.selectors.iter()
+                .position(|sel| !crate::input::is_bordered_selector(sel))
+                .expect("at least one non-bordered selector exists");
+            ed.active = non_bordered_idx;
+            ed.focus = StyleFocus::Attrs;
+        }
+        apply_action(Action::StyleFocusCycle(1), &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Board,
+            "non-bordered selector must skip Border focus");
+
+        // ── bordered selector: cycling from Attrs reaches Border ──
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            let bordered_idx = ed.selectors.iter()
+                .position(|sel| crate::input::is_bordered_selector(sel))
+                .expect("at least one bordered selector exists");
+            ed.active = bordered_idx;
+            ed.focus = StyleFocus::Attrs;
+        }
+        apply_action(Action::StyleFocusCycle(1), &mut s, m);
+        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
+            "bordered selector must reach Border focus");
+
+        // ── navigating away from bordered selector drops stale Border focus ──
+        let mut s = AppState::default();
+        open_style_editor(&mut s);
+        {
+            let ed = s.style_editor.as_mut().unwrap();
+            let bordered_idx = ed.selectors.iter()
+                .position(|sel| crate::input::is_bordered_selector(sel))
+                .expect("at least one bordered selector exists");
+            ed.active = bordered_idx;
+            ed.focus = StyleFocus::Border;
+        }
+        apply_action(Action::StyleNav(1), &mut s, m);
+        let ed = s.style_editor.as_ref().unwrap();
+        if !crate::input::is_bordered_selector(ed.selectors[ed.active]) {
+            assert_ne!(ed.focus, StyleFocus::Border,
+                "Border focus must drop on a non-bordered selector");
+        }
     }
 }
