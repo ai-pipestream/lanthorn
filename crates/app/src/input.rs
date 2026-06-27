@@ -230,6 +230,8 @@ pub enum Action {
     StyleCustomBackspace,
     /// Save the style editor: resolve working doc to live colors and close.
     StyleSave,
+    /// Save the style editor to the current game's per-game style file and close.
+    StyleSaveGame,
     /// Reset the active selector's Decl to the built-in default.
     StyleReset,
     /// Cycle the border type for the active selector by delta (+1/-1) over ["none","single","double","rounded","thick","picture-frame"].
@@ -2398,6 +2400,18 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::StyleSave => {
             if let Some(ed) = state.style_editor.take() {
+                let dir = state.config.user_dir.clone();
+                let _ = crate::style_mru::save_mru(&dir, &ed.mru);
+                let (cs, set, _w) = crate::style::resolve(&ed.doc, &dir);
+                state.colors = cs;
+                state.symbols = set;
+            }
+        }
+
+        Action::StyleSaveGame => {
+            if state.ifid.is_empty() {
+                state.set_status("no game loaded");
+            } else if let Some(ed) = state.style_editor.take() {
                 let dir = state.config.user_dir.clone();
                 let _ = crate::style_mru::save_mru(&dir, &ed.mru);
                 let (cs, set, _w) = crate::style::resolve(&ed.doc, &dir);
@@ -6714,5 +6728,22 @@ mod tests {
             assert_ne!(ed.focus, StyleFocus::Border,
                 "Border focus must drop on a non-bordered selector");
         }
+    }
+
+    #[test]
+    fn style_save_game_guards_no_game_and_closes_with_game() {
+        // No game loaded: editor stays open (cannot save a per-game style).
+        let mut s = AppState::default();
+        open_style_editor_hermetic(&mut s); // ifid is empty by default
+        assert!(s.ifid.is_empty());
+        apply_action(Action::StyleSaveGame, &mut s, &mut mapper::mapper::Mapper::default());
+        assert!(s.style_editor.is_some(), "no game: Save Game Style is a no-op, editor stays open");
+
+        // Game loaded: applies the look live and closes the editor.
+        let mut s2 = AppState::default();
+        open_style_editor_hermetic(&mut s2);
+        s2.ifid = "ZCODE-1-ABCDEF-0001".to_string();
+        apply_action(Action::StyleSaveGame, &mut s2, &mut mapper::mapper::Mapper::default());
+        assert!(s2.style_editor.is_none(), "with game: Save Game Style closes the editor");
     }
 }

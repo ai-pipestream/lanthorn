@@ -2095,6 +2095,7 @@ fn main() {
 
         // Note whether this action is a style-editor save (for post-apply disk write).
         let style_save = matches!(action, Action::StyleSave);
+        let style_save_game = matches!(action, Action::StyleSaveGame);
 
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
@@ -2718,6 +2719,17 @@ fn main() {
         if style_save {
             let user_dir = state.config.user_dir.clone();
             save_style_and_repoint(&mut state, &user_dir);
+        }
+
+        // After apply_action: if Save Game Style was used, write the live look
+        // self-contained to the current game's per-game style file.
+        if style_save_game {
+            let user_dir = state.config.user_dir.clone();
+            if !state.ifid.is_empty() {
+                let _ = app::styles::save_per_game_style(
+                    &user_dir, &state.ifid, &state.colors, &state.symbols,
+                );
+            }
         }
     }
 
