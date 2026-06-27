@@ -414,6 +414,11 @@ pub(crate) fn visible_wrapped_lines_kinded(
 /// This is necessary because `to_lowercase()` is not byte-length-preserving
 /// (e.g. Turkish dotted-I U+0130 expands from 2 bytes to 3 bytes), so naive
 /// offset reuse can produce non-char-boundary panics.
+///
+/// Retained as the reference renderer for the search-highlight path: production
+/// drawing now goes through `draw_str_runs` (which `highlight_mask` keeps
+/// consistent with this function), and the tests assert the two stay identical.
+#[cfg(test)]
 fn draw_str_highlighted(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -491,6 +496,85 @@ fn draw_str_highlighted(
             draw_str_clipped(buf, cursor_x, y, &text[orig_ss..], base_style, clip_area);
             break;
         }
+    }
+}
+
+/// Mark which char positions in `text` fall inside a case-insensitive match of
+/// `query_lower`. Mirrors `draw_str_highlighted`'s lowered-string matching so the
+/// two stay consistent. Returns one bool per char in `text`.
+fn highlight_mask(text: &str, query_lower: &str) -> Vec<bool> {
+    let nchars = text.chars().count();
+    let mut mask = vec![false; nchars];
+    if query_lower.is_empty() {
+        return mask;
+    }
+    // Build a lowered copy and record each source char's lowered byte-start.
+    let mut tl = String::with_capacity(text.len() + 4);
+    let mut char_lb: Vec<usize> = Vec::with_capacity(nchars + 1);
+    for ch in text.chars() {
+        char_lb.push(tl.len());
+        for lc in ch.to_lowercase() {
+            tl.push(lc);
+        }
+    }
+    char_lb.push(tl.len()); // sentinel
+
+    let qlen = query_lower.len();
+    let mut from = 0usize;
+    while from < tl.len() {
+        if let Some(rel) = tl[from..].find(query_lower) {
+            let ms = from + rel;
+            let me = ms + qlen;
+            // Mark every source char whose lowered span overlaps [ms, me).
+            for i in 0..nchars {
+                if char_lb[i] < me && ms < char_lb[i + 1] {
+                    mask[i] = true;
+                }
+            }
+            from = me;
+        } else {
+            break;
+        }
+    }
+    mask
+}
+
+/// Draw `text` at `(x, y)` applying per-char style: `base_style` plus the bits of
+/// the `StyleRun` covering that char. When `search` is `Some((query_lower,
+/// highlight_style))`, characters inside a query match use `highlight_style`
+/// instead (the search affordance wins over game styling). With empty `runs` and
+/// no search this is byte-identical to `draw_str_clipped`; with empty `runs` and
+/// a search it matches `draw_str_highlighted`.
+pub(crate) fn draw_str_runs(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    text: &str,
+    base_style: Style,
+    runs: &[StyleRun],
+    search: Option<(&str, Style)>,
+    area: ratatui::layout::Rect,
+) {
+    if y < area.y || y >= area.bottom() {
+        return;
+    }
+    let hi: Vec<bool> = match search {
+        Some((q, _)) if !q.is_empty() => highlight_mask(text, q),
+        _ => Vec::new(),
+    };
+    let mut col = x;
+    for (i, ch) in text.chars().enumerate() {
+        if col >= area.right() {
+            break;
+        }
+        let style = if hi.get(i).copied().unwrap_or(false) {
+            search.unwrap().1
+        } else {
+            let bits = runs.iter().find(|r| i >= r.start && i < r.end).map(|r| r.bits).unwrap_or(0);
+            crate::render::apply_text_style(base_style, bits)
+        };
+        crate::render::draw_char_clipped(buf, col, y, ch, style, area);
+        col += 1;
     }
 }
 
@@ -959,7 +1043,7 @@ fn render_middle(
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
 
-    for (i, (line, kind, style, _runs)) in lines.iter().enumerate() {
+    for (i, (line, kind, style, runs)) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
@@ -978,11 +1062,8 @@ fn render_middle(
         } else {
             body_area.x
         };
-        if has_search {
-            draw_str_highlighted(buf, text_x, row_y, line, *style, &query_lower, search_highlight_style, body_area);
-        } else {
-            draw_str_clipped(buf, text_x, row_y, line, *style, body_area);
-        }
+        let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
+        draw_str_runs(buf, text_x, row_y, line, *style, runs, search, body_area);
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
@@ -1148,6 +1229,43 @@ mod tests {
         assert_eq!(truncate_line("hello world", 5), "hello");
         assert_eq!(truncate_line("hi", 10), "hi");
         assert_eq!(truncate_line("abc", 3), "abc");
+    }
+
+    #[test]
+    fn draw_str_runs_applies_span_modifier() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}};
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02 }]; // bold chars 2..4
+        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area);
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD));
+        assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
+        assert!(buf[(3, 0)].modifier.contains(Modifier::BOLD));
+        assert!(!buf[(4, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn draw_str_runs_empty_matches_clipped() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let area = Rect::new(0, 0, 10, 1);
+        let mut a = Buffer::empty(area);
+        let mut b = Buffer::empty(area);
+        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area);
+        crate::render::draw_str_clipped(&mut b, 0, 0, "hello", Style::default(), area);
+        assert_eq!(a, b, "empty runs render identically to draw_str_clipped");
+    }
+
+    #[test]
+    fn draw_str_runs_empty_with_search_matches_highlighted() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
+        let area = Rect::new(0, 0, 20, 1);
+        let base = Style::default();
+        let hl = Style::new().fg(Color::Black).bg(Color::Yellow);
+        let mut a = Buffer::empty(area);
+        let mut b = Buffer::empty(area);
+        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area);
+        draw_str_highlighted(&mut b, 0, 0, "the cat sat", base, "cat", hl, area);
+        assert_eq!(a, b, "empty runs + search render identically to draw_str_highlighted");
     }
 
     #[test]
