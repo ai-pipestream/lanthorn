@@ -16,6 +16,6 @@ pub mod io;
 pub mod memory;
 
 pub use error::GError;
-pub use exec::Machine;
+pub use exec::{Machine, StepResult};
 pub use io::{BufferOutput, Output};
 pub use memory::{Memory, WriteFault};

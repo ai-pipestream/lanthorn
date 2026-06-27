@@ -9,17 +9,21 @@
 // value-stack region. A four-word "call stub" sits just below each non-start
 // frame so a return can restore the caller.
 
-// NOTE: Tasks 2–5 build the engine bottom-up; some methods are exercised only by
-// unit tests until instruction dispatch wires them in (Task 6). The blanket
-// allow is removed once `step()`/dispatch consumes them.
-#![allow(dead_code)]
-
 use crate::io::Output;
 use crate::memory::Memory;
 
 /// A recoverable runtime fault. Carries a human-readable diagnostic; the run
 /// loop records it and Quits rather than panicking.
 type R<T> = Result<T, String>;
+
+/// The outcome of a single [`Machine::step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepResult {
+    /// Execution should continue with the next instruction.
+    Continue,
+    /// Execution has ended (`quit`, an outer return, or a recorded fault).
+    Quit,
+}
 
 /// Where a produced value (a function's return value, or an opcode's store
 /// operand) should go. Mirrors the spec's call-stub DestType encoding.
@@ -266,6 +270,33 @@ impl Machine {
     /// Dispatch a decoded opcode to its handler.
     fn execute(&mut self, opcode: u32) -> R<()> {
         match opcode {
+            // Control / I/O system.
+            0x00 => Ok(()), // nop
+            0x120 => {
+                self.halted = true;
+                Ok(())
+            }
+            0x148 => {
+                let (_, s) = self.read_operands(0, 2)?;
+                let (mode, rock) = (self.iosys_mode, self.iosys_rock);
+                self.store(s[0], mode)?;
+                self.store(s[1], rock)
+            }
+            0x149 => {
+                let (l, _) = self.read_operands(2, 0)?;
+                self.iosys_mode = l[0];
+                self.iosys_rock = l[1];
+                if l[0] == 1 {
+                    self.diagnostics.push("filter iosys deferred to a later phase".to_string());
+                }
+                Ok(())
+            }
+            // Stream output.
+            0x70 => self.op_streamchar(),
+            0x71 => self.op_streamnum(),
+            0x72 => self.op_streamstr(),
+            0x73 => self.op_streamunichar(),
+            0x130 => self.op_glk(),
             // Arithmetic (2 load, 1 store) — 32-bit two's complement.
             0x10 => self.binop(|a, b| a.wrapping_add(b)),
             0x11 => self.binop(|a, b| a.wrapping_sub(b)),
@@ -838,6 +869,177 @@ impl Machine {
         self.sp = self.fp;
         self.build_frame_and_enter(func, &args)
     }
+
+    // ── stream output (GLULX_NOTES §7) ────────────────────────────────────────
+
+    /// Route stream output to the sink, honoring the current I/O system: only
+    /// the Glk system (mode 2) prints; the null system (and the deferred filter
+    /// system) discard.
+    fn emit(&mut self, s: &str) {
+        if self.iosys_mode == 2 {
+            self.out.print(s);
+        }
+    }
+
+    fn op_streamchar(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let s = ((l[0] & 0xFF) as u8 as char).to_string();
+        self.emit(&s);
+        Ok(())
+    }
+
+    fn op_streamunichar(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let s = char::from_u32(l[0]).unwrap_or('\u{FFFD}').to_string();
+        self.emit(&s);
+        Ok(())
+    }
+
+    fn op_streamnum(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let s = (l[0] as i32).to_string();
+        self.emit(&s);
+        Ok(())
+    }
+
+    fn op_streamstr(&mut self) -> R<()> {
+        let (l, _) = self.read_operands(1, 0)?;
+        let addr = l[0];
+        match self.m8(addr)? {
+            0xE0 => {
+                let s = self.read_cstring(addr + 1)?;
+                self.emit(&s);
+            }
+            0xE2 => {
+                let s = self.read_ustring(addr + 4)?;
+                self.emit(&s);
+            }
+            0xE1 => self
+                .diagnostics
+                .push("compressed string (E1) decoding deferred to phase 2b".to_string()),
+            other => return Err(format!("bad string type {other:#x} @{addr:#010x}")),
+        }
+        Ok(())
+    }
+
+    /// Read a zero-terminated Latin-1 string from main memory.
+    fn read_cstring(&self, mut addr: u32) -> R<String> {
+        let mut s = String::new();
+        loop {
+            let b = self.m8(addr)?;
+            if b == 0 {
+                break;
+            }
+            s.push(b as u8 as char);
+            addr += 1;
+        }
+        Ok(s)
+    }
+
+    /// Read a zero-terminated array of big-endian 32-bit Unicode code points.
+    fn read_ustring(&self, mut addr: u32) -> R<String> {
+        let mut s = String::new();
+        loop {
+            let cp = self.m32(addr)?;
+            if cp == 0 {
+                break;
+            }
+            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+            addr += 4;
+        }
+        Ok(s)
+    }
+
+    // ── minimal @glk dispatch (GLULX_NOTES §8) ────────────────────────────────
+
+    fn op_glk(&mut self) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let (selector, argc) = (l[0], l[1]);
+        let mut args = Vec::with_capacity(argc as usize);
+        for _ in 0..argc {
+            args.push(self.pop32()?); // first @glk arg is topmost
+        }
+        let result = self.glk_dispatch(selector, &args)?;
+        self.store(s[0], result)
+    }
+
+    /// Handle the put-char/buffer/string family; pop-and-ignore anything else and
+    /// return 0. Glk output prints regardless of the VM's I/O system.
+    fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
+        let a = |i: usize| args.get(i).copied().unwrap_or(0);
+        match selector {
+            0x0080 => self.put_latin1(a(0)), // glk_put_char(ch)
+            0x0081 => self.put_latin1(a(1)), // glk_put_char_stream(str, ch)
+            0x0082 => {
+                // glk_put_string(addr)
+                let s = self.read_cstring(a(0))?;
+                self.out.print(&s);
+            }
+            0x0084 => {
+                // glk_put_buffer(addr, len)
+                let (addr, len) = (a(0), a(1));
+                let mut s = String::new();
+                for i in 0..len {
+                    s.push(self.m8(addr + i)? as u8 as char);
+                }
+                self.out.print(&s);
+            }
+            0x0128 => self.put_uni(a(0)), // glk_put_char_uni(ch)
+            0x0129 => {
+                // glk_put_string_uni(addr)
+                let s = self.read_ustring(a(0))?;
+                self.out.print(&s);
+            }
+            0x012A => {
+                // glk_put_buffer_uni(addr, len)
+                let (addr, len) = (a(0), a(1));
+                let mut s = String::new();
+                for i in 0..len {
+                    let cp = self.m32(addr + i * 4)?;
+                    s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                }
+                self.out.print(&s);
+            }
+            other => self
+                .diagnostics
+                .push(format!("unhandled @glk selector {other:#06x} (returning 0)")),
+        }
+        Ok(0)
+    }
+
+    fn put_latin1(&mut self, v: u32) {
+        let s = ((v & 0xFF) as u8 as char).to_string();
+        self.out.print(&s);
+    }
+    fn put_uni(&mut self, v: u32) {
+        let s = char::from_u32(v).unwrap_or('\u{FFFD}').to_string();
+        self.out.print(&s);
+    }
+
+    // ── the run loop ──────────────────────────────────────────────────────────
+
+    /// Execute one instruction. Returns [`StepResult::Quit`] on `quit`, an outer
+    /// return, or any fault (which is recorded in `diagnostics`); otherwise
+    /// [`StepResult::Continue`]. Never panics.
+    pub fn step(&mut self) -> StepResult {
+        if self.halted {
+            return StepResult::Quit;
+        }
+        match self.step_once() {
+            Ok(()) if self.halted => StepResult::Quit,
+            Ok(()) => StepResult::Continue,
+            Err(msg) => {
+                self.diagnostics.push(msg);
+                self.halted = true;
+                StepResult::Quit
+            }
+        }
+    }
+
+    /// Run until the machine quits.
+    pub fn run(&mut self) {
+        while self.step() == StepResult::Continue {}
+    }
 }
 
 #[cfg(test)]
@@ -1285,6 +1487,129 @@ mod tests {
         m.step_once().unwrap(); // f2: return 0x77
         assert_eq!(m.mem.read32(0x100).unwrap(), 0x77);
         assert!(!m.halted); // returned into start, not halted
+    }
+
+    // ── Task 6: output, iosys, @glk, run loop ─────────────────────────────────
+
+    fn out_str(m: &Machine) -> String {
+        m.out.as_any().downcast_ref::<BufferOutput>().unwrap().buf.clone()
+    }
+
+    /// Build + run a start function with body `body`; return its output.
+    fn run_program(body: Vec<u8>) -> Machine {
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        m.run();
+        m
+    }
+
+    #[test]
+    fn streamnum_and_streamchar_under_glk_iosys() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]); // setiosys glk
+        body.extend(asm::ins(0x71, &[asm::Op::C8(42)])); // streamnum 42
+        body.extend(asm::ins(0x71, &[asm::Op::C8(-7)])); // streamnum -7
+        body.extend(asm::ins(0x70, &[asm::Op::C8(65)])); // streamchar 'A'
+        body.extend(asm::ins(0x120, &[])); // quit
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "42-7A");
+        assert!(m.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn null_iosys_discards_output() {
+        // Default iosys is null (0); streamchar produces nothing.
+        let mut body = asm::ins(0x70, &[asm::Op::C8(88)]); // streamchar 'X'
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "");
+    }
+
+    #[test]
+    fn glk_put_char_and_put_buffer() {
+        // glk_put_char('B').
+        let mut body = asm::ins(0x40, &[asm::Op::C8(66), asm::Op::Stack]); // push 'B'
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x80), asm::Op::C8(1), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "B");
+
+        // glk_put_buffer(addr=0x100, len=2) over "Hi" planted via copyb.
+        let mut body = asm::ins(0x42, &[asm::Op::C8(b'H' as i8), asm::Op::Mem16(0x0100)]);
+        body.extend(asm::ins(0x42, &[asm::Op::C8(b'i' as i8), asm::Op::Mem16(0x0101)]));
+        body.extend(asm::ins(0x40, &[asm::Op::C8(2), asm::Op::Stack])); // push len (below)
+        body.extend(asm::ins(0x40, &[asm::Op::C16(0x0100), asm::Op::Stack])); // push addr (top)
+        body.extend(asm::ins(0x130, &[asm::Op::C16(0x84), asm::Op::C8(2), asm::Op::Zero]));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(out_str(&m), "Hi");
+    }
+
+    #[test]
+    fn streamstr_prints_e0_cstring() {
+        let mut body = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        body.extend(asm::ins(0x72, &[asm::Op::C16(0x0100)])); // streamstr @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        for (i, b) in [0xE0u8, b'H', b'i', b'!', 0].iter().enumerate() {
+            m.mem.write8(0x100 + i as u32, *b as u32).unwrap();
+        }
+        m.run();
+        assert_eq!(out_str(&m), "Hi!");
+    }
+
+    #[test]
+    fn nop_and_quit() {
+        let mut body = asm::ins(0x00, &[]); // nop
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = machine(built);
+        assert_eq!(m.step(), StepResult::Continue); // nop
+        assert_eq!(m.step(), StepResult::Quit); // quit
+        assert_eq!(m.step(), StepResult::Quit); // stays quit
+    }
+
+    #[test]
+    fn unknown_opcode_records_diagnostic_and_quits() {
+        let m = run_program(asm::ins(0x1FF, &[])); // 0x1FF unimplemented
+        assert!(m.halted);
+        assert!(!m.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn memory_fault_records_diagnostic_and_quits() {
+        // Load contents of a wildly out-of-range address → fault, no panic.
+        let m = run_program(asm::ins(0x40, &[asm::Op::Mem32(0xFFFF_FFF0), asm::Op::Zero]));
+        assert!(m.halted);
+        assert!(m.diagnostics.iter().any(|d| d.contains("memory fault")));
+    }
+
+    #[test]
+    fn end_to_end_arith_call_output_branch_quit() {
+        // double(arg) = arg + arg (function at 0x24).
+        let mut dbody = asm::ins(0x10, &[asm::Op::Local8(0), asm::Op::Local8(0), asm::Op::Stack]);
+        dbody.extend(asm::ins(0x31, &[asm::Op::Stack])); // return
+        let double = asm::func(0xC1, &[(4, 1)], &dbody);
+
+        // start: setiosys glk; push 3+4; call double; streamnum result; a taken
+        // branch (jz 0, offset 1) returns from start (halts) before the poison.
+        let mut sbody = asm::ins(0x149, &[asm::Op::C8(2), asm::Op::C8(0)]);
+        sbody.extend(asm::ins(0x10, &[asm::Op::C8(3), asm::Op::C8(4), asm::Op::Stack])); // 7
+        sbody.extend(asm::ins(0x30, &[asm::Op::C32(0x24), asm::Op::C8(1), asm::Op::Stack])); // 14
+        sbody.extend(asm::ins(0x71, &[asm::Op::Stack])); // streamnum 14 → "14"
+        sbody.extend(asm::ins(0x22, &[asm::Op::C8(0), asm::Op::C8(1)])); // jz 0,1 → return 1
+        sbody.extend(asm::ins(0x70, &[asm::Op::C8(b'!' as i8)])); // poison, unreached
+        let start = asm::func(0xC1, &[], &sbody);
+
+        let built = asm::assemble(&[double, start], 1, 0x100);
+        assert_eq!(built.addrs[0], 0x24);
+        let mut m = machine(built);
+        m.run();
+        assert_eq!(out_str(&m), "14");
+        assert!(m.halted);
     }
 
     #[test]
