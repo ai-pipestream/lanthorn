@@ -5,7 +5,7 @@
 //! stripped. It does not know what the prefix was.
 
 use crate::input::Action;
-use crate::keymap::{Command, ALL_COMMANDS};
+use crate::keymap::{Command, Context, ALL_COMMANDS};
 
 // ── SlashOutcome ──────────────────────────────────────────────────────────────
 
@@ -89,7 +89,251 @@ impl Category {
     }
 }
 
-// ── Curated table ─────────────────────────────────────────────────────────────
+// ── CommandSpec registry ──────────────────────────────────────────────────────
+
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub category: Category,
+    pub context: Context,
+    pub usage: &'static str,
+    pub description: &'static str,
+    pub dispatch: fn(&[&str]) -> SlashOutcome,
+}
+
+fn err(s: impl Into<String>) -> SlashOutcome { SlashOutcome::Error(s.into()) }
+
+pub static COMMANDS: &[CommandSpec] = &[
+    // ── Game ──────────────────────────────────────────────────────────────
+    CommandSpec { name: "save-game", category: Category::Game, context: Context::Global,
+        usage: "save-game [name]", description: "save the game, optionally to a named slot",
+        dispatch: |a| SlashOutcome::Save(a.first().map(|s| s.to_string())) },
+    CommandSpec { name: "load-game", category: Category::Game, context: Context::Global,
+        usage: "load-game [name]", description: "load a save, optionally a named slot",
+        dispatch: |a| SlashOutcome::Load(a.first().map(|s| s.to_string())) },
+    CommandSpec { name: "reset-game", category: Category::Game, context: Context::Global,
+        usage: "reset-game [map]", description: "restart the game; 'reset-game map' also clears the map",
+        dispatch: |a| SlashOutcome::Reset { map: a.first().copied() == Some("map") } },
+    CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
+        usage: "quit", description: "exit babelmap",
+        dispatch: |_| SlashOutcome::Quit },
+    CommandSpec { name: "open-hints", category: Category::Game, context: Context::Global,
+        usage: "open-hints", description: "open the hints panel",
+        dispatch: |_| SlashOutcome::OpenHints },
+    CommandSpec { name: "open-history", category: Category::Game, context: Context::Global,
+        usage: "open-history", description: "open the rewind/replay history",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenHistory) },
+    CommandSpec { name: "open-verb-menu", category: Category::Game, context: Context::Global,
+        usage: "open-verb-menu", description: "open the verb/item palette",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenVerbMenu) },
+    CommandSpec { name: "open-saves", category: Category::Game, context: Context::Global,
+        usage: "open-saves", description: "open the saves manager",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenSaves) },
+
+    // ── Map ───────────────────────────────────────────────────────────────
+    CommandSpec { name: "pan-map", category: Category::Map, context: Context::Map,
+        usage: "pan-map <dx> <dy>", description: "pan the map by dx columns and dy rows",
+        dispatch: |a| {
+            let dx = a.first().and_then(|s| s.parse::<i32>().ok());
+            let dy = a.get(1).and_then(|s| s.parse::<i32>().ok());
+            match (dx, dy) {
+                (Some(x), Some(y)) => SlashOutcome::Action(crate::input::Action::Pan(x, y)),
+                _ => err("pan-map requires two integers (e.g. pan-map -3 0)"),
+            }
+        } },
+    CommandSpec { name: "zoom-map", category: Category::Map, context: Context::Map,
+        usage: "zoom-map in|out|reset|<n>", description: "zoom the map in/out, reset, or step by signed n",
+        dispatch: |a| {
+            use crate::input::Action;
+            match a.first().copied() {
+                Some("in") => SlashOutcome::Action(Action::ZoomIn),
+                Some("out") => SlashOutcome::Action(Action::ZoomOut),
+                Some("reset") => SlashOutcome::Action(Action::ZoomReset),
+                Some(s) => match s.parse::<i32>() {
+                    Ok(0) => SlashOutcome::Action(Action::ZoomReset),
+                    Ok(n) if n > 0 => SlashOutcome::Action(Action::ZoomIn),
+                    Ok(_) => SlashOutcome::Action(Action::ZoomOut),
+                    Err(_) => err(format!("zoom-map: expected in|out|reset|<integer>, got '{s}'")),
+                },
+                None => err("zoom-map requires an argument: in|out|reset|<n>"),
+            }
+        } },
+    CommandSpec { name: "center-map", category: Category::Map, context: Context::Map,
+        usage: "center-map", description: "re-center the map on the selected room",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::Recenter) },
+    CommandSpec { name: "tidy-map", category: Category::Map, context: Context::Map,
+        usage: "tidy-map", description: "re-run the layout tidy",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::Retidy) },
+    CommandSpec { name: "cycle-layer", category: Category::Map, context: Context::Map,
+        usage: "cycle-layer next|prev|<n>", description: "switch map layer; n is a signed delta",
+        dispatch: |a| {
+            use crate::input::Action;
+            match a.first().copied() {
+                Some("next") => SlashOutcome::Action(Action::CycleLayer(1)),
+                Some("prev") => SlashOutcome::Action(Action::CycleLayer(-1)),
+                Some(s) => match s.parse::<i32>() {
+                    Ok(n) => SlashOutcome::Action(Action::CycleLayer(n)),
+                    Err(_) => err(format!("cycle-layer: expected next|prev|<integer delta>, got '{s}'")),
+                },
+                None => err("cycle-layer requires an argument: next|prev|<n>"),
+            }
+        } },
+    CommandSpec { name: "select-room", category: Category::Map, context: Context::Map,
+        usage: "select-room next|prev", description: "move the room selection",
+        dispatch: |a| {
+            use crate::input::Action;
+            match a.first().copied() {
+                Some("next") => SlashOutcome::Action(Action::SelectNext),
+                Some("prev") => SlashOutcome::Action(Action::SelectPrev),
+                _ => err("select-room requires an argument: next|prev"),
+            }
+        } },
+    CommandSpec { name: "nudge-room", category: Category::Map, context: Context::Map,
+        usage: "nudge-room <dx> <dy>", description: "nudge the selected room by dx, dy cells",
+        dispatch: |a| {
+            let dx = a.first().and_then(|s| s.parse::<i32>().ok());
+            let dy = a.get(1).and_then(|s| s.parse::<i32>().ok());
+            match (dx, dy) {
+                (Some(x), Some(y)) => SlashOutcome::Action(crate::input::Action::NudgeSelected(x, y)),
+                _ => err("nudge-room requires two integers (e.g. nudge-room -1 0)"),
+            }
+        } },
+    CommandSpec { name: "rename-room", category: Category::Map, context: Context::Map,
+        usage: "rename-room", description: "rename the selected room",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::RenameRoom) },
+    CommandSpec { name: "rename-layer", category: Category::Map, context: Context::Map,
+        usage: "rename-layer", description: "rename the current layer",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::RenameLayer) },
+    CommandSpec { name: "edit-notes", category: Category::Map, context: Context::Map,
+        usage: "edit-notes", description: "edit the selected room's notes",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::EditNotes) },
+    CommandSpec { name: "delete-connection", category: Category::Map, context: Context::Map,
+        usage: "delete-connection", description: "delete the selected connection",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::DeleteSelectedConnection) },
+    CommandSpec { name: "relabel-edge", category: Category::Map, context: Context::Map,
+        usage: "relabel-edge", description: "relabel the selected edge",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::RelabelSelectedEdge) },
+    CommandSpec { name: "peel-layer", category: Category::Map, context: Context::Map,
+        usage: "peel-layer", description: "peel the selected layer into its own view",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::PeelLayer) },
+    CommandSpec { name: "merge-layer", category: Category::Map, context: Context::Map,
+        usage: "merge-layer", description: "merge the selected layer down",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::MergeLayer) },
+    CommandSpec { name: "toggle-inspector", category: Category::Map, context: Context::Map,
+        usage: "toggle-inspector", description: "toggle the room-inspector overlay",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInspector) },
+    CommandSpec { name: "toggle-room-numbers", category: Category::Map, context: Context::Global,
+        usage: "toggle-room-numbers", description: "toggle room-number labels",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomNumbers) },
+    CommandSpec { name: "toggle-loc-method", category: Category::Map, context: Context::Global,
+        usage: "toggle-loc-method", description: "toggle the room-detection-method indicator",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleLocMethod) },
+    CommandSpec { name: "toggle-alignment", category: Category::Map, context: Context::Global,
+        usage: "toggle-alignment", description: "toggle alignment guides",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleAlignment) },
+    CommandSpec { name: "toggle-portal-labels", category: Category::Map, context: Context::Global,
+        usage: "toggle-portal-labels", description: "toggle portal labels",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::TogglePortalLabels) },
+    CommandSpec { name: "open-gallery", category: Category::Map, context: Context::Map,
+        usage: "open-gallery", description: "open the symbol gallery",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenGallery) },
+
+    // ── View ──────────────────────────────────────────────────────────────
+    CommandSpec { name: "cycle-layout", category: Category::View, context: Context::Global,
+        usage: "cycle-layout [reverse]", description: "cycle the pane layout; 'reverse' cycles backward",
+        dispatch: |a| {
+            use crate::input::Action;
+            if a.first().copied() == Some("reverse") {
+                SlashOutcome::Action(Action::CycleLayoutReverse)
+            } else {
+                SlashOutcome::Action(Action::CycleLayout)
+            }
+        } },
+    CommandSpec { name: "toggle-focus", category: Category::View, context: Context::Global,
+        usage: "toggle-focus", description: "switch focus between panes",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleFocus) },
+    CommandSpec { name: "toggle-inventory", category: Category::View, context: Context::Global,
+        usage: "toggle-inventory", description: "toggle the inventory strip",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInventory) },
+    CommandSpec { name: "toggle-status-bar", category: Category::View, context: Context::Global,
+        usage: "toggle-status-bar", description: "toggle the status/score bar",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleStatusBar) },
+
+    // ── Transcript ────────────────────────────────────────────────────────
+    CommandSpec { name: "search-transcript", category: Category::Transcript, context: Context::Global,
+        usage: "search-transcript [query]", description: "search the transcript; no query repeats the last search",
+        dispatch: |a| if a.is_empty() { SlashOutcome::Search(None) } else { SlashOutcome::Search(Some(a.join(" "))) } },
+    CommandSpec { name: "filter-transcript", category: Category::Transcript, context: Context::Global,
+        usage: "filter-transcript story|meta|both", description: "filter the transcript by category",
+        dispatch: |a| match a.first().copied() {
+            Some("story") => SlashOutcome::Filter(TranscriptFilterArg::Story),
+            Some("meta")  => SlashOutcome::Filter(TranscriptFilterArg::Meta),
+            Some("both")  => SlashOutcome::Filter(TranscriptFilterArg::Both),
+            _ => err("filter-transcript: use story | meta | both"),
+        } },
+    CommandSpec { name: "export-transcript", category: Category::Transcript, context: Context::Global,
+        usage: "export-transcript [file]", description: "export the visible transcript; default path when omitted",
+        dispatch: |a| SlashOutcome::Export(a.first().map(|s| s.to_string())) },
+
+    // ── Style ─────────────────────────────────────────────────────────────
+    CommandSpec { name: "open-style-editor", category: Category::Style, context: Context::Global,
+        usage: "open-style-editor", description: "open the live style editor",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenStyleEditor) },
+    CommandSpec { name: "open-config", category: Category::Style, context: Context::Global,
+        usage: "open-config", description: "open the settings screen",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenConfig) },
+    CommandSpec { name: "reload-style", category: Category::Style, context: Context::Global,
+        usage: "reload-style", description: "reload style.toml from disk",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ReloadStyle) },
+    CommandSpec { name: "create-game-style", category: Category::Style, context: Context::Global,
+        usage: "create-game-style", description: "scaffold a per-game style file",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::GameStyle) },
+    CommandSpec { name: "toggle-watch", category: Category::Style, context: Context::Global,
+        usage: "toggle-watch", description: "toggle live style-file watching",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleWatch) },
+
+    // ── Export ────────────────────────────────────────────────────────────
+    CommandSpec { name: "export-svg", category: Category::Export, context: Context::Global,
+        usage: "export-svg", description: "export the map as SVG",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ExportSvg) },
+    CommandSpec { name: "export-dot", category: Category::Export, context: Context::Global,
+        usage: "export-dot", description: "export the map as Graphviz DOT",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ExportDot) },
+    CommandSpec { name: "export-dump", category: Category::Export, context: Context::Global,
+        usage: "export-dump", description: "dump the map structure",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ExportDump) },
+
+    // ── Animation ─────────────────────────────────────────────────────────
+    CommandSpec { name: "animate-tidy", category: Category::Animation, context: Context::Global,
+        usage: "animate-tidy", description: "animate a tidy pass",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::AnimateTidy) },
+    CommandSpec { name: "anim-step", category: Category::Animation, context: Context::Anim,
+        usage: "anim-step forward|back", description: "step the animation one frame",
+        dispatch: |a| {
+            use crate::input::Action;
+            match a.first().copied() {
+                Some("forward") => SlashOutcome::Action(Action::AnimStep(1)),
+                Some("back") => SlashOutcome::Action(Action::AnimStep(-1)),
+                _ => err("anim-step requires an argument: forward|back"),
+            }
+        } },
+    CommandSpec { name: "anim-play", category: Category::Animation, context: Context::Anim,
+        usage: "anim-play", description: "toggle animation play/pause",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::AnimTogglePlay) },
+    CommandSpec { name: "anim-exit", category: Category::Animation, context: Context::Anim,
+        usage: "anim-exit", description: "exit the animation view",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::AnimExit) },
+
+    // ── Help ──────────────────────────────────────────────────────────────
+    CommandSpec { name: "help", category: Category::Help, context: Context::Global,
+        usage: "help [command]", description: "list all commands by category; with a name, show one command's detail",
+        dispatch: |_| SlashOutcome::Help },
+];
+
+pub fn find_command(name: &str) -> Option<&'static CommandSpec> {
+    COMMANDS.iter().find(|c| c.name == name)
+}
+
+// ── Curated table (compat shim — parse/slash_names/help_text rewritten in later tasks) ──
 
 /// One entry in the curated table: a command name (or alias) and a builder
 /// that converts the remaining argument tokens into a `SlashOutcome`.
@@ -481,5 +725,31 @@ mod tests {
         assert_eq!(Category::ORDER[7], Category::Help);
         assert_eq!(Category::Game.title(), "Game");
         assert_eq!(Category::Animation.title(), "Animation");
+    }
+
+    #[test]
+    fn registry_is_complete_and_well_formed() {
+        use std::collections::HashSet;
+        // Names unique.
+        let mut seen = HashSet::new();
+        for c in COMMANDS {
+            assert!(seen.insert(c.name), "duplicate command name: {}", c.name);
+            assert!(!c.usage.is_empty(), "{} has empty usage", c.name);
+            assert!(!c.description.is_empty(), "{} has empty description", c.name);
+        }
+        // Verb-noun lint: every name contains '-' except the whitelist.
+        for c in COMMANDS {
+            if c.name == "quit" || c.name == "help" { continue; }
+            assert!(c.name.contains('-'), "non-verb-noun command name: {}", c.name);
+        }
+        // Spot-check representative commands exist with the right category.
+        let by = |n: &str| COMMANDS.iter().find(|c| c.name == n).expect(n);
+        assert_eq!(by("save-game").category, Category::Game);
+        assert_eq!(by("zoom-map").category, Category::Map);
+        assert_eq!(by("create-game-style").category, Category::Style);
+        assert_eq!(by("anim-step").context, Context::Anim);
+        // Total count matches the spec table (48 commands: Game 8, Map 20, View 4,
+        // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
+        assert_eq!(COMMANDS.len(), 48, "registry must match the spec's Full command table");
     }
 }
