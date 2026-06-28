@@ -997,6 +997,14 @@ fn draw_story_picker(
     row_rects
 }
 
+/// Format the one-line loading indicator shown while a (possibly large) story
+/// boots to its first prompt. `frame` is the spinner glyph for this tick. Large
+/// Glulx games (e.g. Counterfeit Monkey at ~11 MB) take several seconds to reach
+/// the first prompt; without this the normal terminal sits frozen and looks hung.
+fn loading_line(name: &str, bytes: usize, frame: char) -> String {
+    format!("babelmap: loading {name} ({:.1} MB) {frame}", bytes as f64 / 1_048_576.0)
+}
+
 fn main() {
     // ── 1. Parse args + load config ───────────────────────────────────────────
 
@@ -1024,6 +1032,38 @@ fn main() {
     };
     // Raw executable bytes (for the IFID / map-dir key), independent of engine.
     let story_bytes = loaded.bytes().to_vec();
+
+    // Booting a large story to its first prompt can take several seconds, and this
+    // happens before the alternate screen is entered — so the normal terminal would
+    // otherwise sit frozen. Spin a tiny indicator on a side thread; it only starts
+    // drawing after a short grace period, so quick loads never flicker.
+    let loading_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let loading_spinner = {
+        use std::io::Write as _;
+        use std::sync::atomic::Ordering;
+        let done = loading_done.clone();
+        let name = story_path.display().to_string();
+        let bytes = story_bytes.len();
+        std::thread::spawn(move || {
+            const FRAMES: [char; 4] = ['|', '/', '-', '\\'];
+            const TICK_MS: u64 = 60;
+            let (mut waited, mut i, mut shown) = (0u64, 0usize, false);
+            while !done.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(TICK_MS));
+                waited += TICK_MS;
+                if waited >= 180 {
+                    eprint!("\r{}", loading_line(&name, bytes, FRAMES[i % FRAMES.len()]));
+                    let _ = std::io::stderr().flush();
+                    i += 1;
+                    shown = true;
+                }
+            }
+            if shown {
+                eprint!("\r\x1b[2K"); // erase the spinner line before the UI starts
+                let _ = std::io::stderr().flush();
+            }
+        })
+    };
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
@@ -1069,6 +1109,10 @@ fn main() {
             }
         }
     };
+
+    // Engine is up — stop the loading spinner and let it erase its line.
+    loading_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = loading_spinner.join();
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
@@ -2296,7 +2340,12 @@ fn main() {
                         let mut out = std::io::stdout();
                         let _ = out.write_all(seq.as_bytes());
                         let _ = out.flush();
-                        state.set_status(format!("Copied {} chars to clipboard", text.chars().count()));
+                        // Report the copy as a meta line in the story output rather
+                        // than a status-bar message (which has no natural dismissal).
+                        state.push_transcript_kind(
+                            &format!("Copied {} chars to clipboard", text.chars().count()),
+                            app::state::TranscriptKind::Meta,
+                        );
                     }
                 }
                 continue;
@@ -4987,5 +5036,13 @@ mod tests {
         assert!(s.any_overlay_open(), "hotkey_dialog open => overlay open");
         assert!(!(s.char_mode && !s.any_overlay_open()),
             "char_mode gate must not fire when overlay is open");
+    }
+
+    #[test]
+    fn loading_line_reports_name_size_and_frame() {
+        let line = super::loading_line("CounterfeitMonkey-11.gblorb", 11_855_360, '/');
+        assert!(line.contains("CounterfeitMonkey-11.gblorb"), "names the story");
+        assert!(line.contains("11.3 MB"), "shows size in MB, got: {line}");
+        assert!(line.ends_with('/'), "ends with the spinner frame glyph");
     }
 }
