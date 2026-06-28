@@ -22,11 +22,14 @@
 //! (history is read only when a `history/` index is present), so v1 archives load
 //! with empty history.
 
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::Path;
 
 use mapper::mapper::Mapper;
 use mapper::persist::{from_json, to_json};
+
+use crate::engine::EngineSave;
 
 // ZIP entry names.
 const ENTRY_MAP: &str = "map.json";
@@ -180,19 +183,24 @@ pub struct ArchiveContents {
 
 /// Write a `.babelmap` archive containing the current map and VM save.
 ///
-/// The `machine` save bytes are produced via `Machine::save_quetzal`, the same
-/// method used by `persist_files::save_game`. No save logic is duplicated here.
+/// `save` is the engine-tagged game state (from `Engine::save_state`); its
+/// `bytes` become `game.sav` and its `engine` tag becomes `engine.txt`. `screen`
+/// is the Z-machine `ScreenState` written to `screen.json` — `Some` only for the
+/// Z-machine (Glulx keeps its display inside `save.bytes`). `aux` is the engine's
+/// auxiliary key/value table.
 pub fn save_archive(
     path: &Path,
     mapper: &Mapper,
-    machine: &zvm::cpu::exec::Machine,
+    save: &EngineSave,
+    screen: Option<&zvm::screen::ScreenState>,
+    aux: &BTreeMap<String, Vec<u8>>,
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
     transcript_runs: &[Vec<crate::state::StyleRun>],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
-    save_archive_meta(path, mapper, machine, Meta {
+    save_archive_meta(path, mapper, save, screen, aux, Meta {
         format_version: CURRENT_FORMAT_VERSION,
         ifid: None,
         name: None,
@@ -203,11 +211,14 @@ pub fn save_archive(
 
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
 ///
-/// Used by `persist_files::save_named` to attach save slot information.
+/// Used by `persist_files::save_named` to attach save slot information. See
+/// [`save_archive`] for the `save`/`screen`/`aux` parameters.
 pub fn save_archive_meta(
     path: &Path,
     mapper: &Mapper,
-    machine: &zvm::cpu::exec::Machine,
+    save: &EngineSave,
+    screen: Option<&zvm::screen::ScreenState>,
+    aux: &BTreeMap<String, Vec<u8>>,
     meta: Meta,
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
@@ -229,14 +240,13 @@ pub fn save_archive_meta(
     zip.start_file(ENTRY_MAP, options)?;
     zip.write_all(map_json.as_bytes())?;
 
-    // game.sav — same bytes save_game writes
-    let save_bytes = machine.save_quetzal();
+    // game.sav — the engine-tagged save bytes (Quetzal for the Z-machine).
     zip.start_file(ENTRY_SAVE, options)?;
-    zip.write_all(&save_bytes)?;
+    zip.write_all(&save.bytes)?;
 
     // engine.txt — the EngineSave tag (which engine produced this save).
     zip.start_file(ENTRY_ENGINE, options)?;
-    zip.write_all(DEFAULT_ENGINE.as_bytes())?;
+    zip.write_all(save.engine.as_bytes())?;
 
     // meta.json
     let meta_json =
@@ -271,15 +281,18 @@ pub fn save_archive_meta(
     zip.write_all(cmd_history_json.as_bytes())?;
 
     // screen.json — Z-machine screen state (for host-mediated restore redraw).
-    let screen_json = serde_json::to_string(&ScreenDto::from_screen(&machine.screen))
-        .expect("ScreenDto is always serializable");
-    zip.start_file(ENTRY_SCREEN, options)?;
-    zip.write_all(screen_json.as_bytes())?;
+    // Z-machine-only: Glulx passes `None` (its display lives inside save.bytes).
+    if let Some(scr) = screen {
+        let screen_json = serde_json::to_string(&ScreenDto::from_screen(scr))
+            .expect("ScreenDto is always serializable");
+        zip.start_file(ENTRY_SCREEN, options)?;
+        zip.write_all(screen_json.as_bytes())?;
+    }
 
-    // aux.dat — machine aux_data (only when non-empty).
-    if !machine.aux_data.is_empty() {
+    // aux.dat — engine aux data (only when non-empty).
+    if !aux.is_empty() {
         zip.start_file(ENTRY_AUX, options)?;
-        zip.write_all(&crate::aux_store::encode_aux(&machine.aux_data))?;
+        zip.write_all(&crate::aux_store::encode_aux(aux))?;
     }
 
     // history/ — per-turn rewind/replay records (only when non-empty).
@@ -486,6 +499,18 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history, engine })
 }
 
+impl ArchiveContents {
+    /// The persisted game state as an engine-tagged [`EngineSave`], rebuilt from
+    /// the archive's `game.sav` bytes + `engine.txt` tag (defaulting to
+    /// [`DEFAULT_ENGINE`] for legacy archives). The save-format version is not
+    /// stored in the archive — the engine ignores it on restore — so a
+    /// placeholder is used. Feed this to `Engine::restore_state`, which refuses a
+    /// foreign-engine save via [`restore_engine_allowed`]'s equivalent guard.
+    pub fn engine_save(&self) -> EngineSave {
+        EngineSave::new(self.engine.clone(), 1, self.save.clone())
+    }
+}
+
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
 ///
 /// If `path` is a `.babelmap` ZIP archive, returns its `game.sav` entry;
@@ -521,6 +546,29 @@ mod tests {
         m
     }
 
+    /// The Z-machine `EngineSave` for `machine` (Quetzal bytes, `"zmachine"` tag).
+    fn zvm_es(machine: &zvm::cpu::exec::Machine) -> EngineSave {
+        EngineSave::new(DEFAULT_ENGINE, 1, machine.save_quetzal())
+    }
+
+    /// Test helper: write an archive from a Z-machine `machine` (the old call
+    /// shape), building the `EngineSave` + screen + aux the production fn now
+    /// takes separately.
+    #[allow(clippy::too_many_arguments)]
+    fn save_archive_m(
+        path: &Path,
+        mapper: &Mapper,
+        machine: &zvm::cpu::exec::Machine,
+        transcript: &[String],
+        kinds: &[crate::state::TranscriptKind],
+        runs: &[Vec<crate::state::StyleRun>],
+        history: &[crate::history::TurnRecord],
+        cmds: &[String],
+    ) -> io::Result<()> {
+        save_archive(path, mapper, &zvm_es(machine), Some(&machine.screen), &machine.aux_data,
+            transcript, kinds, runs, history, cmds)
+    }
+
     #[test]
     fn read_quetzal_extracts_game_sav_from_babelmap() {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -532,7 +580,7 @@ mod tests {
         let expected = machine.save_quetzal();
 
         let path = temp_archive_path("qzl-from-babelmap");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save_archive");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save_archive");
         let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
         let _ = std::fs::remove_file(&path);
 
@@ -563,7 +611,7 @@ mod tests {
     fn archive_records_and_loads_engine_tag() {
         let machine = dummy_machine();
         let path = temp_archive_path("engine-tag");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert_eq!(ac.engine, DEFAULT_ENGINE, "archive records the zmachine engine tag");
@@ -590,7 +638,7 @@ mod tests {
         machine.screen.cursor_col = 3;
 
         let path = temp_archive_path("screen-roundtrip");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
 
@@ -622,10 +670,13 @@ mod tests {
         ];
 
         let path = temp_archive_path("transcript-filter");
+        let machine = dummy_machine();
         save_archive_meta(
             &path,
             &small_mapper(),
-            &dummy_machine(),
+            &zvm_es(&machine),
+            Some(&machine.screen),
+            &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new() },
             &transcript,
             &kinds,
@@ -668,7 +719,7 @@ mod tests {
         ];
 
         let path = temp_archive_path("history-rt");
-        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[], &history, &[])
+        save_archive_m(&path, &mapper, &dummy_machine(), &[], &[], &[], &history, &[])
             .expect("save_archive");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -695,7 +746,7 @@ mod tests {
         }
         let mapper = small_mapper();
         let path = temp_archive_path("history-v1");
-        save_archive(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
+        save_archive_m(&path, &mapper, &dummy_machine(), &[], &[], &[], &[], &[])
             .expect("save_archive without history");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -711,7 +762,7 @@ mod tests {
         }
         let cmds = vec!["look".to_string(), "open mailbox".to_string(), "/help".to_string()];
         let path = temp_archive_path("cmd-history-rt");
-        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &[], &cmds)
+        save_archive_m(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &[], &cmds)
             .expect("save_archive");
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -727,7 +778,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let path = temp_archive_path("cmd-history-missing");
-        save_archive(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &[],
+        save_archive_m(&path, &small_mapper(), &dummy_machine(), &[], &[], &[], &[],
             &["north".to_string()])
             .expect("save_archive");
 
@@ -780,7 +831,7 @@ mod tests {
         let expected_save = machine.save_quetzal();
 
         let path = temp_archive_path("roundtrip");
-        save_archive(&path, &mapper, &machine, &[], &[], &[], &[], &[]).expect("save_archive");
+        save_archive_m(&path, &mapper, &machine, &[], &[], &[], &[], &[]).expect("save_archive");
 
         let ac = load_archive(&path).expect("load_archive");
         let _ = std::fs::remove_file(&path);
@@ -1017,17 +1068,105 @@ mod tests {
         let mut machine = dummy_machine();
         machine.aux_data.insert("hints".to_string(), vec![1, 2, 3]);
         let path = temp_archive_path("aux");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert_eq!(ac.aux.get("hints").map(|v| v.as_slice()), Some(&[1, 2, 3][..]));
+    }
+
+    /// Read a single ZIP entry's bytes, or `None` when the entry is absent.
+    fn read_entry(path: &Path, name: &str) -> Option<Vec<u8>> {
+        let file = std::fs::File::open(path).ok()?;
+        let mut zip = zip::ZipArchive::new(file).ok()?;
+        let mut e = zip.by_name(name).ok()?;
+        let mut buf = Vec::new();
+        e.read_to_end(&mut buf).ok()?;
+        Some(buf)
+    }
+
+    #[test]
+    fn engine_save_round_trips_through_archive() {
+        // A zvm-tagged EngineSave writes game.sav == its bytes + engine.txt ==
+        // "zmachine"; a Some(screen) writes screen.json; load returns the tag,
+        // bytes, and screen.
+        let machine = dummy_machine();
+        let es = zvm_es(&machine);
+        let path = temp_archive_path("engine-save-rt");
+        save_archive(&path, &small_mapper(), &es, Some(&machine.screen), &machine.aux_data,
+            &[], &[], &[], &[], &[]).expect("save");
+
+        assert_eq!(read_entry(&path, ENTRY_SAVE).as_deref(), Some(es.bytes.as_slice()),
+            "game.sav holds the EngineSave bytes");
+        assert_eq!(read_entry(&path, ENTRY_ENGINE).as_deref(), Some(DEFAULT_ENGINE.as_bytes()),
+            "engine.txt holds the engine tag");
+        assert!(read_entry(&path, ENTRY_SCREEN).is_some(), "screen.json written for zvm");
+
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.engine, DEFAULT_ENGINE);
+        assert_eq!(ac.save, es.bytes, "loaded save bytes match");
+        assert!(ac.screen.is_some(), "screen restored");
+        assert_eq!(ac.engine_save(), es, "engine_save() reconstructs the EngineSave");
+    }
+
+    #[test]
+    fn glulx_tagged_save_round_trips_without_screen() {
+        // A "glulx"-tagged save (no screen) writes NO screen.json; load reports
+        // the glulx tag, the bytes, and screen == None.
+        let es = EngineSave::new("glulx", 1, vec![9, 8, 7, 6]);
+        let path = temp_archive_path("glulx-no-screen");
+        save_archive(&path, &small_mapper(), &es, None, &BTreeMap::new(),
+            &[], &[], &[], &[], &[]).expect("save");
+
+        assert!(read_entry(&path, ENTRY_SCREEN).is_none(), "no screen.json for glulx");
+        assert_eq!(read_entry(&path, ENTRY_ENGINE).as_deref(), Some(b"glulx".as_slice()));
+
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.engine, "glulx");
+        assert_eq!(ac.save, vec![9, 8, 7, 6]);
+        assert!(ac.screen.is_none(), "glulx archive carries no screen");
+    }
+
+    #[test]
+    fn old_archive_without_engine_txt_loads_as_zmachine() {
+        // An archive written by the OLD code: raw Quetzal game.sav, NO engine.txt,
+        // screen.json present. It must load as EngineSave { "zmachine", <bytes> }
+        // + the screen.
+        let machine = dummy_machine();
+        let quetzal = machine.save_quetzal();
+        let path = temp_archive_path("old-no-engine");
+        {
+            let file = std::fs::File::create(&path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            zip.start_file(ENTRY_META, options).unwrap();
+            zip.write_all(serde_json::to_string(&meta).unwrap().as_bytes()).unwrap();
+            zip.start_file(ENTRY_MAP, options).unwrap();
+            zip.write_all(mapper::persist::to_json(&small_mapper()).as_bytes()).unwrap();
+            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.write_all(&quetzal).unwrap();
+            // screen.json present, engine.txt absent (the old format).
+            zip.start_file(ENTRY_SCREEN, options).unwrap();
+            zip.write_all(serde_json::to_string(&ScreenDto::from_screen(&machine.screen)).unwrap().as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let ac = load_archive(&path).expect("old archive loads");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.engine, DEFAULT_ENGINE, "absent engine.txt defaults to zmachine");
+        assert_eq!(ac.save, quetzal, "raw Quetzal bytes load unchanged");
+        assert!(ac.screen.is_some(), "legacy screen.json still loads");
+        assert_eq!(ac.engine_save().engine, DEFAULT_ENGINE);
+        assert_eq!(ac.engine_save().bytes, quetzal);
     }
 
     #[test]
     fn archive_without_aux_loads_empty_map() {
         let machine = dummy_machine(); // empty aux_data
         let path = temp_archive_path("noaux");
-        save_archive(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert!(ac.aux.is_empty());

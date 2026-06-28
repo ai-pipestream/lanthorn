@@ -502,6 +502,48 @@ mod tests {
         assert!(sess.current_location().is_none(), "Glulx automapping is SP4");
     }
 
+    #[test]
+    fn glulx_state_round_trips_through_babelmap_archive() {
+        use std::collections::BTreeMap;
+        // A Glulx engine save survives a .babelmap archive round-trip: write its
+        // EngineSave (no screen.json), reload, and restore into a FRESH session
+        // through Engine::restore_state — state is preserved, no panic.
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24).expect("new");
+        let _ = sess.take_transcript(); // drain the banner
+        let es = sess.save_state();
+        assert_eq!(es.engine, GLULX_ENGINE);
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("babelmap-glulx-arch-{}.babelmap", std::process::id()));
+        let mapper = mapper::mapper::Mapper::default();
+        crate::archive::save_archive(&path, &mapper, &es, None, &BTreeMap::new(),
+            &[], &[], &[], &[], &[]).expect("save archive");
+
+        let ac = crate::archive::load_archive(&path).expect("load archive");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.engine, GLULX_ENGINE, "archive records the glulx tag");
+        assert!(ac.screen.is_none(), "Glulx archive carries no screen.json");
+        assert_eq!(ac.save, es.bytes, "archived bytes are the Glulx save");
+
+        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24).expect("new");
+        let _ = fresh.take_transcript();
+        fresh.restore_state(&ac.engine_save()).expect("Glulx restore from archive");
+        assert_eq!(fresh.pending_input(), InputKind::Line, "restored input state");
+        assert_eq!(fresh.save_state().bytes, es.bytes, "restored Glulx state matches");
+    }
+
+    #[test]
+    fn glulx_restore_refuses_zmachine_archive() {
+        // The foreign-engine guard fires gracefully (no panic) when a zmachine
+        // save is offered to a Glulx session.
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24).expect("new");
+        let foreign = EngineSave::new("zmachine", 1, vec![1, 2, 3]);
+        assert!(matches!(
+            sess.restore_state(&foreign),
+            Err(EngineError::EngineMismatch { .. })
+        ));
+    }
+
     /// End-to-end smoke: a hand-built .ulx plays through GlulxSession and renders
     /// through the generic story-pane renderer with the map pane bolted alongside.
     #[test]

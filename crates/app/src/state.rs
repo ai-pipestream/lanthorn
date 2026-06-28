@@ -923,8 +923,8 @@ pub struct AppState {
     /// When true, the "Resume saved game?" dialog is shown at startup.
     pub launch_dialog: bool,
     /// Stashed restore data shown while the launch dialog is open.
-    /// Tuple is (save bytes, transcript lines, transcript kinds).
-    pub pending_resume: Option<(Vec<u8>, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>,
+    /// Tuple is (engine-tagged save, transcript lines, transcript kinds, screen).
+    pub pending_resume: Option<(crate::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
     /// How the current room was detected (for the map indicator). Retained
