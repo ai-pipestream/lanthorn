@@ -2325,6 +2325,16 @@ impl Machine {
                 self.glk_store_ptr(a(1), 0)?;
                 0
             }
+            // The rest of the fileref group: filerefs and file streams are not yet
+            // implemented (deferred with @save/@restore). Games probe these at
+            // startup (create-by-name + does-file-exist + destroy) to look for save
+            // data; the safe degraded answer is "no filerefs, no files". Return NULL
+            // for create_* and get_rock, false for does_file_exist, and a no-op (0)
+            // for destroy/delete — silently, so the transcript is not spammed.
+            //   0x0060 create_temp     0x0061 create_by_name   0x0062 create_by_prompt
+            //   0x0063 destroy         0x0065 get_rock         0x0066 delete_file
+            //   0x0067 does_file_exist 0x0068 create_from_fileref
+            0x0060 | 0x0061 | 0x0062 | 0x0063 | 0x0065 | 0x0066 | 0x0067 | 0x0068 => 0,
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -4368,6 +4378,23 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 0, "no filerefs -> iterate returns NULL");
         assert_eq!(m.mem.read32(0x108).unwrap(), 0, "rock cleared on empty iteration");
         assert!(m.diagnostics.is_empty(), "fileref_iterate must be a handled selector");
+    }
+
+    #[test]
+    fn glk_fileref_group_degrades_silently() {
+        use asm::Op::{C8, Mem16};
+        // The startup probe games run: create a fileref by name, check existence,
+        // destroy it. With no fileref/file-stream support, all degrade to "nothing":
+        // NULL fref, false existence, no-op destroy -- and crucially no diagnostics
+        // (the spam reported on CounterfeitMonkey's start).
+        let mut body = glk_call(0x61, &[C8(0x02), C8(0x00), C8(0x00)], Mem16(0x0100)); // create_by_name
+        body.extend(glk_call(0x67, &[C8(0x00)], Mem16(0x0104))); // does_file_exist(NULL)
+        body.extend(glk_call(0x63, &[C8(0x00)], Mem16(0x0108))); // destroy(NULL)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "create_by_name -> NULL fileref");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0, "does_file_exist -> false");
+        assert!(m.diagnostics.is_empty(), "the fileref group must not emit diagnostics");
     }
 
     #[test]
