@@ -81,12 +81,18 @@ fn capture_mode(stdin_is_tty: bool) -> Option<String> {
     if !stdin_is_tty {
         return None;
     }
+    // `Command::output()` defaults the child's stdin to null, but `stty -g` reads
+    // the terminal mode from stdin -- with null stdin it fails ("stdin isn't a
+    // terminal") and yields empty stdout. Inherit our terminal so it captures the
+    // real mode; filter empty so `restore_mode` never runs `stty ""`.
     process::Command::new("stty")
         .arg("-g")
+        .stdin(process::Stdio::inherit())
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Restore the terminal to the captured (cooked + echo) mode.

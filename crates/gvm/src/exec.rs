@@ -2318,6 +2318,13 @@ impl Machine {
                 self.halted = true;
                 0
             }
+            0x0064 => {
+                // glk_fileref_iterate(fref, rockptr) -> next fileref id. No
+                // filerefs are tracked yet, so iteration is always empty: return
+                // NULL and clear the rock — the correct end-of-iteration result.
+                self.glk_store_ptr(a(1), 0)?;
+                0
+            }
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -4345,6 +4352,22 @@ mod tests {
 
     fn backend_of(m: &Machine) -> &TestBackend {
         m.backend.as_any().downcast_ref::<TestBackend>().unwrap()
+    }
+
+    #[test]
+    fn glk_fileref_iterate_is_empty_and_silent() {
+        use asm::Op::{C16, C8, Mem16};
+        // glk_fileref_iterate(fref=0, rockptr=0x0108). With no filerefs tracked,
+        // iteration is empty: NULL result, the rock cleared, and -- crucially --
+        // no "unhandled selector" diagnostic (it must not hit the fallthrough arm).
+        let mut body = glk_call(0x64, &[C8(0), C16(0x0108)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x0108, 0x9999).unwrap(); // sentinel: prove the rock is cleared
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "no filerefs -> iterate returns NULL");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "rock cleared on empty iteration");
+        assert!(m.diagnostics.is_empty(), "fileref_iterate must be a handled selector");
     }
 
     #[test]
