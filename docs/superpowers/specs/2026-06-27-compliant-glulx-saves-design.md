@@ -100,11 +100,10 @@ polish, like `screen.json`.
 
 ### Back-compat
 
-Existing Glulx `.babelmap` archives written this session carry the **legacy**
-`GReg`+`Glk ` snapshot bytes. `restore_state` detects the format (a `GReg` chunk
-present → legacy snapshot read path; absent → compliant Quetzal) so those saves
-still load. New saves are written compliant. (Glulx save support is new/unreleased
-this session, so this legacy read path is a courtesy, not a long-term contract.)
+**None.** babelmap is pre-release, so the legacy `GReg`+`Glk ` Glulx snapshots
+written earlier this session are simply dropped — `restore_state` reads only the
+compliant Quetzal format. (Z-machine archives are unaffected; they were always
+real Quetzal.)
 
 ## Decomposition (each sub-project: its own plan → build)
 
@@ -133,7 +132,7 @@ gvm only.
   read `CMem`/`UMem`; spec-exact `Stks` with the synthesized `glk_select`
   call-stub for app snapshots; reconcile the heap chunk). Drop `GReg` + the
   embedded `Glk ` chunk; expose the Glk-model serialization separately for the
-  side-car. Keep a legacy `GReg` **read** path for back-compat.
+  side-car. No legacy `GReg` read path (pre-release; old snapshots are dropped).
 - Verify byte-exact against the Glulx spec + Glulxe (manual cross-load) and the
   glulxercise save group.
 
@@ -155,8 +154,8 @@ gvm only.
 - **gvm (B):** a program `@save`s to a memory stream, a fresh machine `@restore`s
   it → memory+stack+resume match and execution continues after `@save` with −1;
   cross-format read of a hand-built `UMem` save; `@restart` resets; the
-  `glk_select` synthesized-stub app-snapshot round-trips; legacy `GReg` saves
-  still restore. Reconcile the heap chunk with a heap-active save.
+  `glk_select` synthesized-stub app-snapshot round-trips. Reconcile the heap
+  chunk with a heap-active save.
 - **gvm (A):** fileref create/exist/delete + file-stream open/write/seek/read/
   close drive the backend hooks (a test backend with an in-memory filesystem);
   `glk_stream_open_file` round-trips bytes.
@@ -169,7 +168,8 @@ gvm only.
 
 - gvm stays zero-dep (file I/O is the **host's** via `GlkBackend`, not gvm's).
 - Z-machine save/restore/restart/import/export stays **byte-for-byte unchanged**.
-- Existing `.babelmap` archives (Z-machine, and legacy-`GReg` Glulx) still load.
+- Z-machine `.babelmap` archives still load (always real Quetzal). Legacy Glulx
+  `GReg` snapshots are intentionally dropped (pre-release, no back-compat).
 - The compliant format is verified against the Glulx spec + a real interpreter,
   not just self-round-trip.
 - 0 warnings + full `cargo test --workspace` green per task; TDD; one commit per
