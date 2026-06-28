@@ -405,6 +405,7 @@ returns `GError::BadSave` on any corruption (never a panic).
 | `Stks` | the live stack bytes `[0, sp)`, big-endian, padding included         |
 | `MAll` | heap-start (4), block count (4), then `(addr, len)` per block        |
 | `GReg` | sp, fp, pc, iosys_mode, iosys_rock, cur_stringtbl, protect_addr, protect_len (8×u32) |
+| `Glk ` | the Glk window/stream model (window tree + streams + current state); see §20 |
 
 **`CMem` compression (spec §1.8 / Quetzal RLE):** the memory area saved is
 `[RAMSTART, memsize)`. Each byte is XORed against the **original loaded image**
@@ -679,3 +680,49 @@ and asserts the in-scope groups pass. Out of scope: filter iosys
 
 Filerefs/file streams (`@save`/`@restore` via Glk), echo streams, timers,
 hyperlinks, mouse, graphics, and sound remain out of scope.
+
+## 20. The `Glk ` save chunk (Glk model snapshot)
+
+The Glulx save core (§14) serializes RAM/stack/heap/registers but not the Glk
+display state. Without it, restoring a snapshot into a **fresh** `Machine`
+(a new session) would leave the VM holding window/stream ids that no longer
+exist. `save_state` therefore appends a `Glk ` chunk — `Model::serialize()` —
+and `restore_state` reinstalls the model from it via `Model::deserialize()`.
+
+**Body format** (all fields 32-bit big-endian, like the rest of the save):
+
+```
+version (=1) · root · cur_stream
+nwindows · per slot: present(0|1); if present:
+    id · wintype · rock · parent · stream · child1 · child2 · key · method · size
+    rect(left,top,width,height) · grid(width,height,cx,cy)
+    line_req: present(0|1)[ · buf · maxlen · initlen · unicode ]
+    char_req: present(0|1)[ · unicode ]
+nstreams · per slot: present(0|1); if present:
+    id · rock · style · read_count · write_count
+    kind: 0=Window( win ) | 1=Memory( addr · len · pos · unicode )
+```
+
+The window/stream slot vectors are emitted in full (`None` slots included) so
+ids — the `id - 1` index into each vector — survive the round-trip and the next
+`glk_window_open`/stream allocation keeps numbering where it left off.
+
+**What is and isn't stored.** The chunk carries window *structure* (the tree:
+types, rocks, pair splits, geometry), text-grid *dimensions + cursor*, the
+streams (memory stream addr/len/position/rock/window association, styles, I/O
+counts), and `root` + `cur_stream`. It does **not** store rendered cell glyphs
+or text-buffer scrollback: those live in the pluggable `GlkBackend`, not the
+`Model`, and the host re-renders them on restore (the app's transcript persists
+the buffer history; the grid is repainted from the game's next status redraw).
+The transient `glk_select` event queue is not stored either.
+
+**Routing after restore.** Because the stream table and `cur_stream` are
+restored, the output funnel (`glk_stream_put`) resolves the current stream to
+the correct window id immediately — a post-restore `glk_put_*` or text-grid op
+lands in the right window with no replay.
+
+**Back-compat.** A snapshot without a `Glk ` chunk (an older gvm save) restores
+with an empty `Model` and returns `Ok` — no panic. Malformed chunk bytes
+(truncation, a bad window/stream tag, trailing garbage) yield `GError::BadSave`;
+a corrupt slot count cannot trigger a large allocation (slots are pushed, not
+pre-reserved, so the reader runs out of bytes first).
