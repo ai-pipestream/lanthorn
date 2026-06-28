@@ -280,6 +280,20 @@ fn zvm_session_opt(engine: &dyn Engine) -> Option<&GameSession> {
     engine.as_any().downcast_ref::<GameSession>()
 }
 
+/// Whether the active engine is the Z-machine `GameSession` that the archive
+/// save/restore/restart paths require.
+///
+/// Those paths serialize Z-machine-specific state (Quetzal saves, the
+/// `ScreenState` snapshot) and reach the concrete session via
+/// [`zvm_session`]/[`zvm_session_mut`], which PANIC on any other engine. Every
+/// user-initiated save / restore / named-save / restart / Save&Quit path checks
+/// this first and bails gracefully when it returns `false` (a Glulx game),
+/// rather than panicking. Always `true` under the Z-machine, so its behavior is
+/// unchanged.
+fn engine_supports_save(engine: &dyn Engine) -> bool {
+    engine.as_any().downcast_ref::<GameSession>().is_some()
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -1562,22 +1576,24 @@ fn main() {
                         code => match quit_dialog_key_focused(code, state.dialog_focus) {
                             QuitDialogAction::Save => {
                                 state.quit_dialog = false;
-                                let meta = app::archive::Meta {
-                                    format_version: app::archive::CURRENT_FORMAT_VERSION,
-                                    ifid: Some(ifid.clone()),
-                                    name: None,
-                                    turns: state.turns,
-                                    saved_at: format_rfc3339(
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0),
-                                    ),
-                                };
-                                if let Some(zs) = zvm_session_opt(&*session) {
-                                    let _ = save_archive_meta(&arc_file, &mapper, &zs.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                if !engine_supports_save(&*session) {
+                                    state.set_status("Save & Quit is not supported for Glulx games yet");
+                                } else {
+                                    let meta = app::archive::Meta {
+                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
+                                        ifid: Some(ifid.clone()),
+                                        name: None,
+                                        turns: state.turns,
+                                        saved_at: format_rfc3339(
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0),
+                                        ),
+                                    };
+                                    let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                    break;
                                 }
-                                break;
                             }
                             QuitDialogAction::Quit => {
                                 break;
@@ -1601,22 +1617,24 @@ fn main() {
                             let in_dialog = qd.area.contains(pt);
                             if in_save {
                                 state.quit_dialog = false;
-                                let meta = app::archive::Meta {
-                                    format_version: app::archive::CURRENT_FORMAT_VERSION,
-                                    ifid: Some(ifid.clone()),
-                                    name: None,
-                                    turns: state.turns,
-                                    saved_at: format_rfc3339(
-                                        std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .map(|d| d.as_secs())
-                                            .unwrap_or(0),
-                                    ),
-                                };
-                                if let Some(zs) = zvm_session_opt(&*session) {
-                                    let _ = save_archive_meta(&arc_file, &mapper, &zs.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                if !engine_supports_save(&*session) {
+                                    state.set_status("Save & Quit is not supported for Glulx games yet");
+                                } else {
+                                    let meta = app::archive::Meta {
+                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
+                                        ifid: Some(ifid.clone()),
+                                        name: None,
+                                        turns: state.turns,
+                                        saved_at: format_rfc3339(
+                                            std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .map(|d| d.as_secs())
+                                                .unwrap_or(0),
+                                        ),
+                                    };
+                                    let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                    break;
                                 }
-                                break;
                             } else if in_quit {
                                 break;
                             } else if in_close || in_cancel {
@@ -2400,6 +2418,10 @@ fn main() {
 
             Action::SaveGame => {
                 // Dead post-unification: keys now route through SlashOutcome::Save. Retained as a no-cost match arm.
+                if !engine_supports_save(&*session) {
+                    state.set_status("Save is not supported for Glulx games yet");
+                    continue;
+                }
                 // Bundle map + game into a single .babelmap archive, with turn metadata.
                 let meta = app::archive::Meta {
                     format_version: app::archive::CURRENT_FORMAT_VERSION,
@@ -2432,6 +2454,10 @@ fn main() {
 
             Action::RestoreGame => {
                 // Dead post-unification: keys now route through SlashOutcome::Load. Retained as a no-cost match arm.
+                if !engine_supports_save(&*session) {
+                    state.set_status("Restore is not supported for Glulx games yet");
+                    continue;
+                }
                 // Restore map + game from the .babelmap archive.
                 match load_archive(&arc_file) {
                     Ok(ac) => {
@@ -2585,6 +2611,10 @@ fn main() {
                     }
                     Some(FbEntryAction::ImportFile(path)) => {
                         state.file_browser = None;
+                        if !engine_supports_save(&*session) {
+                            state.set_status("Restore is not supported for Glulx games yet");
+                            continue;
+                        }
                         match restore_game(&path, &mut zvm_session_mut(&mut *session).machine) {
                             Ok(()) => {
                                 // Re-observe current location (same as RestoreGame/SavesLoad).
@@ -2682,6 +2712,10 @@ fn main() {
                 }
 
                 if let Some((path, entry_name)) = load_info {
+                    if !engine_supports_save(&*session) {
+                        state.set_status("Restore is not supported for Glulx games yet");
+                        continue;
+                    }
                     match load_archive(&path) {
                         Ok(ac) => {
                             let restore_err = zvm_session_mut(&mut *session).machine.restore_file(&ac.save).map_err(|e| {
@@ -2750,6 +2784,10 @@ fn main() {
 
             // ── Replay/rewind: linear resume from the selected turn ────────────
             Action::ReplayResume => {
+                if !engine_supports_save(&*session) {
+                    state.set_status("Restore is not supported for Glulx games yet");
+                    continue;
+                }
                 if let Some(r) = state.replay.take() {
                     if r.idx < state.history.len() {
                         let plan = app::history::resume_plan(&state.history, r.idx);
@@ -2976,6 +3014,10 @@ fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Save(name_opt) => {
+            if !engine_supports_save(&*session) {
+                state.set_status("Save is not supported for Glulx games yet");
+                return false;
+            }
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
@@ -3007,6 +3049,10 @@ fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Load(name_opt) => {
+            if !engine_supports_save(&*session) {
+                state.set_status("Restore is not supported for Glulx games yet");
+                return false;
+            }
             // Named-slot load or default archive load.
             let archive_to_load = match name_opt {
                 None => Some(arc_file.to_path_buf()),
@@ -3085,6 +3131,8 @@ fn dispatch_slash_outcome(
             // its "also clear map" checkbox; a typed `/reset-game [map]` acts immediately.
             if from_key {
                 apply_action(Action::ResetGame, state, mapper);
+            } else if !engine_supports_save(session) {
+                state.set_status("Restart is not supported for Glulx games yet");
             } else {
                 reset_game(session, mapper, state, story_bytes, reset_map);
                 let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
@@ -3193,6 +3241,10 @@ fn reset_game(
     story_bytes: &[u8],
     clear_map: bool,
 ) {
+    if !engine_supports_save(session) {
+        state.set_status("Restart is not supported for Glulx games yet");
+        return;
+    }
     match GameSession::new(story_bytes.to_vec()) {
         Ok(new_session) => {
             // Replace the GameSession behind the engine box (restart).
@@ -3254,6 +3306,10 @@ fn handle_saves_prompt(
 ) {
     match kind {
         PromptKind::SaveAs => {
+            if !engine_supports_save(&*session) {
+                state.set_status("Save is not supported for Glulx games yet");
+                return;
+            }
             let ingame = state.ingame_io == Some(app::session::PendingIo::Save);
             if buf.is_empty() {
                 state.push_transcript("[Save name cannot be empty]".to_string().as_str());
@@ -3313,6 +3369,10 @@ fn handle_saves_prompt(
             }
         }
         PromptKind::ExportSaveName(export_dir) => {
+            if !engine_supports_save(&*session) {
+                state.set_status("Save is not supported for Glulx games yet");
+                return;
+            }
             let filename = buf.trim().to_string();
             if filename.is_empty() {
                 state.push_transcript("[Export filename cannot be empty]");
@@ -3965,6 +4025,10 @@ fn apply_launch_resume(
     state: &mut AppState,
     last_panes: &PaneRects,
 ) {
+    if !engine_supports_save(&*session) {
+        state.set_status("Resume is not supported for Glulx games yet");
+        return;
+    }
     match zvm_session_mut(&mut *session).machine.restore_file(save) {
         Ok(()) => {
             // mapper was already loaded from the archive at startup (ac.mapper);
@@ -4070,6 +4134,58 @@ mod tests {
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
+
+    // ── Graceful no-panic guards for non-Z-machine (Glulx) engines ──────────────
+
+    /// Minimal non-Z-machine `Engine` stand-in. The guard helper only inspects
+    /// `as_any`, so every gameplay/persistence method is left `unreachable!()`:
+    /// a guarded path that reaches one would be the very panic we are preventing.
+    struct NotZmachineEngine;
+
+    impl app::engine::Engine for NotZmachineEngine {
+        fn submit(&mut self, _command: &str) -> app::session::TurnResult { unreachable!() }
+        fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> { unreachable!() }
+        fn take_transcript(&mut self) -> String { unreachable!() }
+        fn pending_input(&self) -> app::session::InputKind { unreachable!() }
+        fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult { unreachable!() }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult { unreachable!() }
+        fn has_quit(&self) -> bool { false }
+        fn screen(&self) -> app::engine::ScreenModel { unreachable!() }
+        fn save_state(&self) -> app::engine::EngineSave { unreachable!() }
+        fn restore_state(&mut self, _save: &app::engine::EngineSave) -> Result<(), app::engine::EngineError> { unreachable!() }
+        fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> { unreachable!() }
+        fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) { unreachable!() }
+        fn aux_dirty(&self) -> bool { false }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<app::engine::LocationInfo> { None }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    }
+
+    #[test]
+    fn engine_supports_save_false_for_non_zmachine() {
+        let engine: Box<dyn app::engine::Engine> = Box::new(NotZmachineEngine);
+        assert!(
+            !super::engine_supports_save(&*engine),
+            "a non-Z-machine engine must report no save support so guards short-circuit"
+        );
+    }
+
+    #[test]
+    fn reset_game_bails_gracefully_on_non_zmachine() {
+        // The restart chokepoint: with a non-Z-machine engine it must set a
+        // graceful status and return WITHOUT reaching zvm_session_mut (which
+        // would panic). Empty story bytes are never used because the guard
+        // returns first.
+        let mut engine: Box<dyn app::engine::Engine> = Box::new(NotZmachineEngine);
+        let mut mapper = mapper::mapper::Mapper::default();
+        let mut state = app::state::AppState::default();
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &[], false);
+        assert_eq!(
+            state.status_msg.as_deref(),
+            Some("Restart is not supported for Glulx games yet"),
+        );
+    }
 
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
 
