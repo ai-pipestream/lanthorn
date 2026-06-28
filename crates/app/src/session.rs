@@ -88,7 +88,7 @@ impl Output for CaptureSink {
 /// trailing prompt). Chunks past the limit are dropped; the boundary chunk is
 /// truncated. A list shorter than `char_len` is returned unchanged (the missing
 /// tail is treated as plain by `push_transcript_runs`).
-fn clamp_runs(runs: Vec<(usize, u8)>, char_len: usize) -> Vec<(usize, u8)> {
+pub(crate) fn clamp_runs(runs: Vec<(usize, u8)>, char_len: usize) -> Vec<(usize, u8)> {
     let mut out = Vec::with_capacity(runs.len());
     let mut total = 0usize;
     for (c, b) in runs {

@@ -21,7 +21,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
-use crate::session::{InputKind, TurnResult};
+use crate::session::{clamp_runs, strip_read_prompt, InputKind, TurnResult};
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
 pub const GLULX_ENGINE: &str = "glulx";
@@ -132,7 +132,12 @@ impl GlulxSession {
     /// result. Shared by `submit`/`submit_key`/`resume_*`.
     fn finish_turn(&mut self) -> TurnResult {
         self.machine.flush();
-        let (transcript, transcript_runs) = self.appglk().take_transcript();
+        // Strip the game's trailing read prompt (e.g. a final "\n>") so the app's
+        // own bottom input bar is the only ">" shown -- mirroring the Z-machine
+        // path. clamp_runs keeps the style chunks aligned with the shortened text.
+        let (raw, raw_runs) = self.appglk().take_transcript();
+        let transcript = strip_read_prompt(&raw).to_owned();
+        let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         self.refresh_screen();
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
         TurnResult {
@@ -178,7 +183,7 @@ impl Engine for GlulxSession {
 
     fn take_transcript(&mut self) -> String {
         self.machine.flush();
-        self.appglk().take_transcript().0
+        strip_read_prompt(&self.appglk().take_transcript().0).to_owned()
     }
 
     fn pending_input(&self) -> InputKind {
@@ -474,6 +479,41 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
         body.extend(enc(0x120, &[])); // quit
         image_for(body, 1)
+    }
+
+    #[test]
+    fn trailing_read_prompt_is_stripped_from_banner_and_turns() {
+        use E::*;
+        // Print "Hi\n> ", request a line (banner), then after input print
+        // "done\n> " and request again (a turn). Both the banner and the turn
+        // transcript must drop the trailing prompt so the app's bottom input bar
+        // is the only ">" the player sees (matches the Z-machine path).
+        let mut body = open_buffer_prelude();
+        for c in b"Hi\n> " {
+            body.extend(streamchar(*c));
+        }
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (banner)
+        for c in b"done\n> " {
+            body.extend(streamchar(*c));
+        }
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (turn)
+        body.extend(enc(0x120, &[])); // quit
+        let image = image_for(body, 1);
+
+        let mut sess = GlulxSession::new(image, 80, 24).expect("new");
+        assert_eq!(sess.take_transcript(), "Hi", "banner drops the trailing prompt");
+        let r = sess.submit("x");
+        assert_eq!(r.transcript, "done", "turn output drops the trailing prompt");
     }
 
     #[test]
