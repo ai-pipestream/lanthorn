@@ -42,10 +42,10 @@ use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
 use app::render::history::draw_history;
-use app::render::transcript::render_transcript;
-use app::render::upper_window::draw_upper_window;
+use app::render::screen::render_story_pane;
 use app::render::draw_str_clipped;
 use app::engine::Engine;
+use app::glulx_session::GlulxSession;
 use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
 use app::hints;
@@ -271,6 +271,15 @@ fn zvm_session_mut(engine: &mut dyn Engine) -> &mut GameSession {
         .expect("babelmap drives a Z-machine GameSession")
 }
 
+/// Non-panicking downcast to the Z-machine session: `Some` for a Z-code game,
+/// `None` for Glulx. Used by the **automatic** archive-save paths (per-turn and
+/// on-exit), which serialize the Z-machine `ScreenState`/Quetzal save and so are
+/// Z-only; for Glulx they simply skip (Glulx archive persistence is a later
+/// phase) instead of panicking.
+fn zvm_session_opt(engine: &dyn Engine) -> Option<&GameSession> {
+    engine.as_any().downcast_ref::<GameSession>()
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -369,12 +378,10 @@ fn draw_frame(
             Layout::TranscriptFull => {
                 let story_fp = draw_framed(buf, main_area, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
-                let used = draw_upper_window(screen_model.grid().expect("screen tree carries a grid"), state.char_mode, &state.colors, c, buf);
-                let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                let (sb_, ms_) = render_transcript(&screen_model.status, engine.introspect(), state, tarea, buf);
-                story_scrollbar = sb_;
-                transcript_max_scroll = ms_;
-                transcript_viewport_rows = tarea.height;
+                let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
+                story_scrollbar = m.scrollbar;
+                transcript_max_scroll = m.max_scroll;
+                transcript_viewport_rows = m.viewport_rows;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -440,12 +447,10 @@ fn draw_frame(
 
                 let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
-                let used = draw_upper_window(screen_model.grid().expect("screen tree carries a grid"), state.char_mode, &state.colors, c, buf);
-                let tarea = Rect::new(c.x, c.y + used, c.width, c.height.saturating_sub(used));
-                let (sb_, ms_) = render_transcript(&screen_model.status, engine.introspect(), state, tarea, buf);
-                story_scrollbar = sb_;
-                transcript_max_scroll = ms_;
-                transcript_viewport_rows = tarea.height;
+                let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
+                story_scrollbar = m.scrollbar;
+                transcript_max_scroll = m.max_scroll;
+                transcript_viewport_rows = m.viewport_rows;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -962,38 +967,60 @@ fn main() {
         story_path
     };
 
-    let story_bytes = match hints::load_story_bytes(&story_path) {
-        Ok(b) => b,
+    let loaded = match hints::load_story(&story_path) {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("babelmap: cannot read '{}': {}", story_path.display(), e);
             std::process::exit(1);
         }
     };
+    // Raw executable bytes (for the IFID / map-dir key), independent of engine.
+    let story_bytes = loaded.bytes().to_vec();
 
-    let mut session = match GameSession::new(story_bytes.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            use zvm::error::ZError;
-            let msg = match e {
-                ZError::GraphicalV6 => "this is a version 6 (graphical) story; v6 graphical games are not supported".to_string(),
-                ZError::UnsupportedVersion(v) => format!("unsupported Z-machine version {v}"),
-                ZError::NotAStoryFile => "file is not a valid Z-machine story file".to_string(),
-                ZError::Truncated => "story file is truncated".to_string(),
-                _ => format!("{e:?}"),
+    // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
+    // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
+    // setup (screen dims, undo cap) runs in its arm before boxing.
+    let mut session: Box<dyn Engine> = match loaded {
+        app::hints::LoadedStory::ZCode(bytes) => {
+            let mut s = match GameSession::new(bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    use zvm::error::ZError;
+                    let msg = match e {
+                        ZError::GraphicalV6 => "this is a version 6 (graphical) story; v6 graphical games are not supported".to_string(),
+                        ZError::UnsupportedVersion(v) => format!("unsupported Z-machine version {v}"),
+                        ZError::NotAStoryFile => "file is not a valid Z-machine story file".to_string(),
+                        ZError::Truncated => "story file is truncated".to_string(),
+                        _ => format!("{e:?}"),
+                    };
+                    eprintln!("babelmap: {msg}");
+                    std::process::exit(1);
+                }
             };
-            eprintln!("babelmap: {msg}");
-            std::process::exit(1);
+            // Apply the configured virtual screen dimensions to the VM. init_caps
+            // (called inside GameSession::new) seeds defaults; override here.
+            zvm::screen::write_screen_dims(
+                &mut s.machine.mem,
+                cfg.virtual_screen_rows as u8,
+                cfg.virtual_screen_cols as u8,
+            );
+            s.machine.undo_cap = cfg.undo_levels;
+            Box::new(s)
+        }
+        app::hints::LoadedStory::Glulx(bytes) => {
+            match GlulxSession::new(
+                bytes,
+                cfg.virtual_screen_cols as u32,
+                cfg.virtual_screen_rows as u32,
+            ) {
+                Ok(s) => Box::new(s),
+                Err(e) => {
+                    eprintln!("babelmap: cannot load Glulx story: {e:?}");
+                    std::process::exit(1);
+                }
+            }
         }
     };
-
-    // Apply the configured virtual screen dimensions to the VM. init_caps (called
-    // inside GameSession::new) seeds defaults; we override with the user's config here.
-    zvm::screen::write_screen_dims(
-        &mut session.machine.mem,
-        cfg.virtual_screen_rows as u8,
-        cfg.virtual_screen_cols as u8,
-    );
-    session.machine.undo_cap = cfg.undo_levels;
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
@@ -1020,23 +1047,27 @@ fn main() {
                 // Restore the machine from the saved game state only when auto_load is enabled.
                 // When auto_load = false the accumulated map still loads, but the game starts fresh.
                 if cfg.auto_load {
-                    if let Err(msg) = app::archive::restore_engine_allowed(&ac.engine, app::session::ZMACHINE_ENGINE) {
-                        eprintln!("babelmap: warning: {msg}; starting fresh");
-                    } else if let Err(e) = session.machine.restore_file(&ac.save) {
-                        eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
-                    } else {
-                        // Restore the saved screen so a once-split game's upper
-                        // window (status line) shows after auto-load.
-                        if let Some(scr) = ac.screen.clone() { session.machine.screen = scr; }
-                        startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs));
-                        startup_history = ac.history;
+                    // Game-state auto-restore is Z-machine-only (Glulx save/restore
+                    // is a later phase); the mapper below still loads either way.
+                    if let Some(zs) = session.as_any_mut().downcast_mut::<GameSession>() {
+                        if let Err(msg) = app::archive::restore_engine_allowed(&ac.engine, app::session::ZMACHINE_ENGINE) {
+                            eprintln!("babelmap: warning: {msg}; starting fresh");
+                        } else if let Err(e) = zs.machine.restore_file(&ac.save) {
+                            eprintln!("babelmap: warning: could not restore game from archive: {:?}", e);
+                        } else {
+                            // Restore the saved screen so a once-split game's upper
+                            // window (status line) shows after auto-load.
+                            if let Some(scr) = ac.screen.clone() { zs.machine.screen = scr; }
+                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs));
+                            startup_history = ac.history;
+                        }
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
                     // Save present, auto_load off, prompt enabled: stash for launch dialog.
                     pending_resume_stash = Some((ac.save, ac.transcript, ac.transcript_kinds, ac.screen));
                 }
                 if cfg.aux_storage != app::config::AuxStorage::Global {
-                    session.machine.aux_data = ac.aux.clone();
+                    session.set_aux_data(ac.aux.clone());
                 }
                 // Command history is per-game and loads regardless of auto_load.
                 startup_command_history = ac.command_history;
@@ -1061,7 +1092,7 @@ fn main() {
     // global mode.  In archive mode the table was populated above from the
     // loaded archive (if any).
     if cfg.aux_storage == app::config::AuxStorage::Global {
-        session.machine.aux_data = app::aux_store::read_global_aux(&save_dir, &ifid);
+        session.set_aux_data(app::aux_store::read_global_aux(&save_dir, &ifid));
     }
 
     // Export paths (fixed per IFID).
@@ -1097,7 +1128,7 @@ fn main() {
     state.config = cfg;
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
-    state.dict_words = Engine::introspect(&session).map(|i| i.vocabulary()).unwrap_or_default();
+    state.dict_words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
 
     // Push the game's opening banner and capture the title from it.
     let banner = session.take_transcript();
@@ -1122,14 +1153,14 @@ fn main() {
     }
 
     // Observe the starting room so it appears on the map immediately.
-    let start_loc = zvm::current_location(&session.machine);
+    let start_loc = session.current_location();
     if let Some(snap) = start_loc {
         let snap_number = snap.number;
         let seed_result = TurnResult {
             transcript: String::new(),
             transcript_runs: Vec::new(),
             location: Some(snap),
-            quit: session.quit,
+            quit: session.has_quit(),
             info: None,
             beep: None,
             diagnostics: vec![],
@@ -1172,7 +1203,7 @@ fn main() {
 
     // If the game quit immediately (e.g. czech.z5 test suite), bail without
     // entering raw mode.
-    if session.quit {
+    if session.has_quit() {
         eprintln!("babelmap: story ended immediately (no interactive content).");
         std::process::exit(0);
     }
@@ -1231,11 +1262,10 @@ fn main() {
         }
     }
 
-    // From here on the app drives the game through the engine-neutral trait.
-    // (Construction above touches the concrete GameSession directly — applying
-    // the configured screen dims, undo cap, archive auto-restore, dictionary
-    // seed and starting room — which the plan allows as pre-boxing setup.)
-    let mut session: Box<dyn Engine> = Box::new(session);
+    // From here on the app drives the game through the engine-neutral trait
+    // (`session` was boxed at construction: a GameSession for Z-code, a
+    // GlulxSession for Glulx). The Z-machine-specific setup above runs behind a
+    // downcast so the Glulx path skips it.
 
     'event_loop: loop {
         // ── Style watch: drain events, debounce, then reload ──────────────────
@@ -1544,7 +1574,9 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                if let Some(zs) = zvm_session_opt(&*session) {
+                                    let _ = save_archive_meta(&arc_file, &mapper, &zs.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                }
                                 break;
                             }
                             QuitDialogAction::Quit => {
@@ -1581,7 +1613,9 @@ fn main() {
                                             .unwrap_or(0),
                                     ),
                                 };
-                                let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                if let Some(zs) = zvm_session_opt(&*session) {
+                                    let _ = save_archive_meta(&arc_file, &mapper, &zs.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                }
                                 break;
                             } else if in_quit {
                                 break;
@@ -2857,7 +2891,11 @@ fn main() {
     // nothing is saved automatically — the user controls saving via the quit prompt's
     // "Save & quit", the /save command, or named save slots. This keeps "Quit without
     // saving" honest and avoids silently overwriting an explicit save point on exit.
-    if state.config.auto_save {
+    // Exit auto-save is Z-machine only (the archive serializes the Z-machine
+    // screen/save); a Glulx game falls back to the legacy map-only save so the
+    // accumulated map is not lost without panicking through the Z-only path.
+    if state.config.auto_save && zvm_session_opt(&*session).is_some() {
+        let zs = zvm_session_opt(&*session).expect("guarded above");
         let exit_meta = app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: Some(ifid.clone()),
@@ -2870,7 +2908,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+        match save_archive_meta(&arc_file, &mapper, &zs.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }
@@ -3421,21 +3459,25 @@ fn post_turn_bookkeeping(
 
     // Per-turn auto-save (when enabled). Non-fatal: failure is shown in the
     // transcript status line so the player is aware but the loop continues.
+    // Z-machine only (the archive serializes the Z-machine screen/save); a Glulx
+    // game just skips it (Glulx archive persistence is a later phase).
     if state.config.auto_save {
-        let meta = app::archive::Meta {
-            format_version: app::archive::CURRENT_FORMAT_VERSION,
-            ifid: Some(ifid.to_string()),
-            name: None,
-            turns: state.turns,
-            saved_at: format_rfc3339(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            ),
-        };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
-            state.push_transcript(&format!("[Auto-save failed: {}]", e));
+        if let Some(zs) = zvm_session_opt(&*session) {
+            let meta = app::archive::Meta {
+                format_version: app::archive::CURRENT_FORMAT_VERSION,
+                ifid: Some(ifid.to_string()),
+                name: None,
+                turns: state.turns,
+                saved_at: format_rfc3339(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                ),
+            };
+            if let Err(e) = save_archive_meta(arc_file, mapper, &zs.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+                state.push_transcript(&format!("[Auto-save failed: {}]", e));
+            }
         }
     }
 }

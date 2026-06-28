@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 zvm = { path = "../zvm" }
+gvm = { path = "../gvm" }
 mapper = { path = "../mapper" }
 blorb = { path = "../blorb" }
 ratatui = "0.29"
