@@ -1004,6 +1004,190 @@ impl Model {
     pub fn pop_event(&mut self) -> Option<GlkEvent> {
         self.events.pop_front()
     }
+
+    // ── snapshot serialization (the Glulx-Quetzal "Glk " chunk; GLULX_NOTES §20) ──
+
+    /// Serialize the model's structural state (window tree, streams, root +
+    /// current stream) as the body of a `Glk ` save chunk. All fields are
+    /// 32-bit big-endian, matching the rest of the save format. Text-grid CELL
+    /// glyphs and text-buffer scrollback live in the backend (re-rendered by the
+    /// host on restore) and are intentionally not serialized; only the grid
+    /// dimensions + cursor are. The transient event queue is not serialized.
+    pub(crate) fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let w = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_be_bytes());
+        w(&mut out, GLK_SNAPSHOT_VERSION);
+        w(&mut out, self.root);
+        w(&mut out, self.cur_stream);
+        w(&mut out, self.windows.len() as u32);
+        for slot in &self.windows {
+            match slot {
+                None => w(&mut out, 0),
+                Some(win) => {
+                    w(&mut out, 1);
+                    w(&mut out, win.id);
+                    w(&mut out, win.wintype.to_arg());
+                    w(&mut out, win.rock);
+                    w(&mut out, win.parent);
+                    w(&mut out, win.stream);
+                    w(&mut out, win.child1);
+                    w(&mut out, win.child2);
+                    w(&mut out, win.key);
+                    w(&mut out, win.method);
+                    w(&mut out, win.size);
+                    w(&mut out, win.rect.left);
+                    w(&mut out, win.rect.top);
+                    w(&mut out, win.rect.width);
+                    w(&mut out, win.rect.height);
+                    w(&mut out, win.grid.width);
+                    w(&mut out, win.grid.height);
+                    w(&mut out, win.grid.cx);
+                    w(&mut out, win.grid.cy);
+                    match win.line_req {
+                        None => w(&mut out, 0),
+                        Some(lr) => {
+                            w(&mut out, 1);
+                            w(&mut out, lr.buf);
+                            w(&mut out, lr.maxlen);
+                            w(&mut out, lr.initlen);
+                            w(&mut out, lr.unicode as u32);
+                        }
+                    }
+                    match win.char_req {
+                        None => w(&mut out, 0),
+                        Some(cr) => {
+                            w(&mut out, 1);
+                            w(&mut out, cr.unicode as u32);
+                        }
+                    }
+                }
+            }
+        }
+        w(&mut out, self.streams.len() as u32);
+        for slot in &self.streams {
+            match slot {
+                None => w(&mut out, 0),
+                Some(s) => {
+                    w(&mut out, 1);
+                    w(&mut out, s.id);
+                    w(&mut out, s.rock);
+                    w(&mut out, s.style.to_num());
+                    w(&mut out, s.read_count);
+                    w(&mut out, s.write_count);
+                    match s.kind {
+                        StreamKind::Window(win) => {
+                            w(&mut out, 0);
+                            w(&mut out, win);
+                        }
+                        StreamKind::Memory { addr, len, pos, unicode } => {
+                            w(&mut out, 1);
+                            w(&mut out, addr);
+                            w(&mut out, len);
+                            w(&mut out, pos);
+                            w(&mut out, unicode as u32);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Rebuild a model from a `Glk ` chunk body (see [`Model::serialize`]). Never
+    /// panics: any truncation, bad enum value, or trailing garbage is reported as
+    /// an error string (mapped to `GError::BadSave` by the caller). Slot vectors
+    /// are grown by pushing, so a corrupt count cannot trigger a huge allocation.
+    pub(crate) fn deserialize(data: &[u8]) -> Result<Model, String> {
+        let mut r = SnapReader::new(data);
+        let version = r.u32()?;
+        if version != GLK_SNAPSHOT_VERSION {
+            return Err(format!("unsupported Glk snapshot version {version}"));
+        }
+        let root = r.u32()?;
+        let cur_stream = r.u32()?;
+
+        let nwin = r.u32()?;
+        let mut windows = Vec::new();
+        for _ in 0..nwin {
+            if r.u32()? == 0 {
+                windows.push(None);
+                continue;
+            }
+            let id = r.u32()?;
+            let wintype = WinType::from_arg(r.u32()?).ok_or("Glk snapshot: bad window type")?;
+            let rock = r.u32()?;
+            let parent = r.u32()?;
+            let stream = r.u32()?;
+            let child1 = r.u32()?;
+            let child2 = r.u32()?;
+            let key = r.u32()?;
+            let method = r.u32()?;
+            let size = r.u32()?;
+            let rect = Rect { left: r.u32()?, top: r.u32()?, width: r.u32()?, height: r.u32()? };
+            let grid = Grid { width: r.u32()?, height: r.u32()?, cx: r.u32()?, cy: r.u32()? };
+            let line_req = if r.u32()? != 0 {
+                Some(LineReq { buf: r.u32()?, maxlen: r.u32()?, initlen: r.u32()?, unicode: r.u32()? != 0 })
+            } else {
+                None
+            };
+            let char_req = if r.u32()? != 0 { Some(CharReq { unicode: r.u32()? != 0 }) } else { None };
+            windows.push(Some(Window {
+                id, wintype, rock, parent, stream, rect, grid, line_req, char_req, child1, child2, key, method, size,
+            }));
+        }
+
+        let nstream = r.u32()?;
+        let mut streams = Vec::new();
+        for _ in 0..nstream {
+            if r.u32()? == 0 {
+                streams.push(None);
+                continue;
+            }
+            let id = r.u32()?;
+            let rock = r.u32()?;
+            let style = GlkStyle::from_num(r.u32()?);
+            let read_count = r.u32()?;
+            let write_count = r.u32()?;
+            let kind = match r.u32()? {
+                0 => StreamKind::Window(r.u32()?),
+                1 => StreamKind::Memory { addr: r.u32()?, len: r.u32()?, pos: r.u32()?, unicode: r.u32()? != 0 },
+                other => return Err(format!("Glk snapshot: bad stream kind {other}")),
+            };
+            streams.push(Some(Stream { id, rock, kind, style, read_count, write_count }));
+        }
+
+        if !r.done() {
+            return Err("Glk snapshot: trailing bytes".to_string());
+        }
+        Ok(Model { windows, streams, root, cur_stream, events: std::collections::VecDeque::new() })
+    }
+}
+
+/// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
+const GLK_SNAPSHOT_VERSION: u32 = 1;
+
+/// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
+/// an error, never a panic.
+struct SnapReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SnapReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        SnapReader { data, pos: 0 }
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        if self.pos + 4 > self.data.len() {
+            return Err("Glk snapshot: truncated".to_string());
+        }
+        let b = &self.data[self.pos..self.pos + 4];
+        self.pos += 4;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    fn done(&self) -> bool {
+        self.pos == self.data.len()
+    }
 }
 
 /// Split `rect` into `(rect_for_old_window, rect_for_new_window)` per a

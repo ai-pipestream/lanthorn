@@ -1196,8 +1196,10 @@ impl Machine {
     // ── save / restore serialization core (GLULX_NOTES §14) ───────────────────
 
     /// Serialize the VM's mutable state as Glulx-Quetzal bytes (`FORM IFZS`:
-    /// `IFhd` identity, `CMem` compressed RAM, `Stks` stack, `MAll` heap, plus a
-    /// `GReg` register chunk). Round-trips exactly via [`Machine::restore_state`].
+    /// `IFhd` identity, `CMem` compressed RAM, `Stks` stack, `MAll` heap, a
+    /// `GReg` register chunk, and a `Glk ` window/stream-model chunk). Round-trips
+    /// exactly via [`Machine::restore_state`]; the `Glk ` chunk makes the snapshot
+    /// self-contained so a cross-session restore reinstalls the display state.
     pub fn save_state(&self) -> Vec<u8> {
         let mut body = Vec::new();
 
@@ -1241,6 +1243,10 @@ impl Machine {
             greg.extend_from_slice(&v.to_be_bytes());
         }
         push_chunk(&mut body, b"GReg", &greg);
+
+        // Glk: the window/stream model, so a snapshot is self-contained and a
+        // cross-session restore (a fresh Machine) reinstalls the display state.
+        push_chunk(&mut body, b"Glk ", &self.glk.serialize());
 
         let mut out = Vec::with_capacity(body.len() + 12);
         out.extend_from_slice(b"FORM");
@@ -1344,6 +1350,14 @@ impl Machine {
 
         // Recompute the current-frame cache from the restored stack.
         self.reload_frame_meta().map_err(GError::BadSave)?;
+
+        // Glk model: reinstall the window/stream tree from the "Glk " chunk so a
+        // restore into a fresh Machine has live windows. An older snapshot with
+        // no such chunk restores with an empty model (back-compat, no panic).
+        self.glk = match find(b"Glk ") {
+            Some(d) => Model::deserialize(d).map_err(GError::BadSave)?,
+            None => Model::new(),
+        };
         Ok(())
     }
 
@@ -3981,6 +3995,129 @@ mod tests {
         let mut good = m.save_state();
         good.truncate(good.len() - 10); // sever a chunk
         assert!(matches!(m.restore_state(&good), Err(GError::BadSave(_))));
+    }
+
+    // ── Glk-model snapshot ("Glk " chunk): cross-session + back-compat ─────────
+
+    /// Rebuild a `FORM IFZS` save omitting one chunk (simulates an older gvm
+    /// snapshot that predates a given chunk). Test helper.
+    fn strip_chunk(save: &[u8], target: &[u8; 4]) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut p = 12;
+        while p + 8 <= save.len() {
+            let len = u32::from_be_bytes([save[p + 4], save[p + 5], save[p + 6], save[p + 7]]) as usize;
+            let total = 8 + len + (len & 1);
+            if &save[p..p + 4] != target {
+                body.extend_from_slice(&save[p..(p + total).min(save.len())]);
+            }
+            p += total;
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(b"IFZS");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A snapshot carries the Glk window/stream model in a `Glk ` chunk, so
+    /// restoring into a FRESH machine reinstalls the window tree, streams, and
+    /// current state — and subsequent output routes to the right window.
+    #[test]
+    fn glk_model_survives_cross_session_restore() {
+        use crate::glk::{GlkStyle, StreamKind};
+        let start = asm::func(0xC1, &[], &asm::ins(0x120, &[])); // body: quit
+        let built = asm::assemble(&[start], 0, 0x100);
+        let image = built.image.clone();
+        let mut m = Machine::with_glk(Memory::new(built.image).unwrap(), Box::new(TestBackend::new()));
+
+        // A non-trivial model: a buffer root split into a grid (so the root is a
+        // pair window), a memory stream with a moved position, a styled+current
+        // grid stream, and a positioned grid cursor.
+        let buf = m.glk.window_open(0, 0, 0, 3, 0xB0).unwrap(); // root TextBuffer
+        let grid = m.glk.window_open(buf, 0x12, 3, 4, 0x61).unwrap(); // grid above, fixed 3
+        m.glk.relayout(80, 24);
+        let mem_stream = m.glk.stream_open_memory(0x180, 16, false, 0x5E);
+        m.glk.stream_set_position(mem_stream, 5, 0);
+        let grid_stream = m.glk.window_stream(grid).unwrap();
+        let buf_stream = m.glk.window_stream(buf).unwrap();
+        m.glk.set_stream_style(grid_stream, GlkStyle::Header);
+        m.glk.set_grid_cursor(grid, 2, 1);
+        m.glk.set_current_stream(grid_stream);
+        let root = m.glk.root();
+
+        let snap = m.save_state();
+
+        // A FRESH machine over the same image starts with an EMPTY model.
+        let mut m2 = Machine::with_glk(Memory::new(image).unwrap(), Box::new(TestBackend::new()));
+        assert_eq!(m2.glk.root(), 0, "fresh machine has no windows");
+        m2.restore_state(&snap).unwrap();
+
+        // Window tree: ids, types, rocks, and the pair split are all restored.
+        assert_eq!(m2.glk.root(), root);
+        assert_eq!(m2.glk.window_type(buf), Some(WinType::TextBuffer));
+        assert_eq!(m2.glk.window_rock(buf), Some(0xB0));
+        assert_eq!(m2.glk.window_type(grid), Some(WinType::TextGrid));
+        assert_eq!(m2.glk.window_rock(grid), Some(0x61));
+        assert_eq!(m2.glk.window_type(root), Some(WinType::Pair));
+        assert_eq!(m2.glk.window_parent(grid), Some(root));
+        assert_eq!(m2.glk.window_sibling(grid), Some(buf));
+        // Text-grid dimensions + cursor restored.
+        assert_eq!(m2.glk.grid_state(grid), Some((80, 3, 2, 1)));
+        // Streams: memory addr/len/pos/rock + current stream + style.
+        assert_eq!(m2.glk.stream_position(mem_stream), Some(5));
+        assert_eq!(m2.glk.stream_rock(mem_stream), Some(0x5E));
+        assert_eq!(m2.glk.current_stream(), grid_stream);
+        let (kind, style) = m2.glk.stream_kind_style(grid_stream).unwrap();
+        assert_eq!(style, GlkStyle::Header);
+        assert!(matches!(kind, StreamKind::Window(w) if w == grid));
+
+        // Routing after a cross-session restore: a put on the current (grid)
+        // stream lands in the grid window at its restored cursor (row 1, col 2+).
+        // (The host re-lays the restored tree out to its fresh backend first.)
+        let layout = m2.glk.relayout(80, 24);
+        m2.backend.window_layout(&layout);
+        m2.glk_stream_put(grid_stream, "Hi");
+        assert_eq!(backend_of(&m2).grid_line(grid, 1), "  Hi");
+        // And a put on the buffer window's stream routes to the buffer window.
+        m2.glk_stream_put(buf_stream, "Z");
+        assert_eq!(backend_of(&m2).text(buf), "Z");
+    }
+
+    /// A snapshot WITHOUT a `Glk ` chunk (an older gvm save) restores with an
+    /// empty model and returns Ok (no panic) — back-compat.
+    #[test]
+    fn restore_without_glk_chunk_leaves_empty_model() {
+        let mut m = machine_with_body(&[], vec![]); // prelude opened window 1
+        assert_ne!(m.glk.root(), 0);
+        let snap = m.save_state();
+        let stripped = strip_chunk(&snap, b"Glk ");
+        assert!(stripped.len() < snap.len(), "a Glk chunk was present and removed");
+        m.restore_state(&stripped).unwrap(); // no panic
+        assert_eq!(m.glk.root(), 0, "missing Glk chunk -> empty model");
+        assert_eq!(m.glk.current_stream(), 0);
+    }
+
+    /// Same-session restore reinstalls the saved model exactly: windows/streams
+    /// opened after the save are gone after restoring it.
+    #[test]
+    fn same_session_restore_reinstalls_saved_model() {
+        let mut m = machine_with_body(&[], vec![]); // prelude: buffer window 1 current
+        let buf = m.glk.root();
+        let buf_stream = m.glk.window_stream(buf).unwrap();
+        let snap = m.save_state();
+        // Diverge the model: split a grid, open a memory stream, change current.
+        let grid = m.glk.window_open(buf, 0x12, 2, 4, 0).unwrap();
+        let extra = m.glk.stream_open_memory(0x180, 8, false, 0);
+        m.glk.set_current_stream(extra);
+        assert_ne!(m.glk.current_stream(), buf_stream);
+        assert!(m.glk.window_type(grid).is_some());
+        m.restore_state(&snap).unwrap();
+        // Back to the saved single-window state.
+        assert_eq!(m.glk.root(), buf);
+        assert_eq!(m.glk.current_stream(), buf_stream);
+        assert_eq!(m.glk.window_type(grid), None, "post-save window removed by restore");
+        assert_eq!(m.glk.stream_rock(extra), None, "post-save stream removed by restore");
     }
 
     // ── Task 2 (2c): saveundo / restoreundo ───────────────────────────────────
