@@ -1591,7 +1591,7 @@ fn main() {
                                                 .unwrap_or(0),
                                         ),
                                     };
-                                    let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                    let _ = save_archive_meta(&arc_file, &mapper, &session.save_state(), Some(&zvm_session(&*session).machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
                                     break;
                                 }
                             }
@@ -1632,7 +1632,7 @@ fn main() {
                                                 .unwrap_or(0),
                                         ),
                                     };
-                                    let _ = save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+                                    let _ = save_archive_meta(&arc_file, &mapper, &session.save_state(), Some(&zvm_session(&*session).machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
                                     break;
                                 }
                             } else if in_quit {
@@ -2439,7 +2439,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+                match save_archive_meta(&arc_file, &mapper, &session.save_state(), Some(&zvm_session(&*session).machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
                     Ok(()) => {
                         state.push_transcript(&format!(
                             "[Game saved to {}]",
@@ -2946,7 +2946,7 @@ fn main() {
                     .unwrap_or(0),
             ),
         };
-        match save_archive_meta(&arc_file, &mapper, &zs.machine, exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+        match save_archive_meta(&arc_file, &mapper, &session.save_state(), Some(&zs.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             Ok(()) => {
                 eprintln!("babelmap: map saved to {}", arc_file.display());
             }
@@ -3021,7 +3021,7 @@ fn dispatch_slash_outcome(
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
-                    save_named(save_dir, ifid, name, &*mapper, &zvm_session(&*session).machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
+                    save_named(save_dir, ifid, name, &*mapper, &session.save_state(), Some(&zvm_session(&*session).machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -3038,7 +3038,7 @@ fn dispatch_slash_outcome(
                                 .unwrap_or(0),
                         ),
                     };
-                    save_archive_meta(arc_file, &*mapper, &zvm_session(&*session).machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history)
+                    save_archive_meta(arc_file, &*mapper, &session.save_state(), Some(&zvm_session(&*session).machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history)
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -3322,7 +3322,7 @@ fn handle_saves_prompt(
                 }
                 return;
             }
-            match save_named(dir, ifid, &buf, mapper, &zvm_session(&*session).machine, state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs) {
+            match save_named(dir, ifid, &buf, mapper, &session.save_state(), Some(&zvm_session(&*session).machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs) {
                 Ok(()) => {
                     state.push_transcript(&format!("[Saved as: {}]", buf));
                     // Refresh saves list.
@@ -3535,7 +3535,7 @@ fn post_turn_bookkeeping(
                         .unwrap_or(0),
                 ),
             };
-            if let Err(e) = save_archive_meta(arc_file, mapper, &zs.machine, meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+            if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), Some(&zs.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
                 state.push_transcript(&format!("[Auto-save failed: {}]", e));
             }
         }
