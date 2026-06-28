@@ -501,4 +501,59 @@ mod tests {
         assert!(sess.introspect().is_none(), "Glulx introspection is SP4");
         assert!(sess.current_location().is_none(), "Glulx automapping is SP4");
     }
+
+    /// End-to-end smoke: a hand-built .ulx plays through GlulxSession and renders
+    /// through the generic story-pane renderer with the map pane bolted alongside.
+    #[test]
+    fn glulx_plays_and_renders_end_to_end() {
+        use crate::render::screen::render_story_pane;
+        use crate::state::AppState;
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        // Program: open a buffer, print "Hello", request a line, echo it, quit.
+        let image = {
+            use E::*;
+            let mut body = open_buffer_prelude();
+            for c in b"Hello" {
+                body.extend(streamchar(*c));
+            }
+            for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+                body.extend(enc(0x40, &[v, Push]));
+            }
+            body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+            body.extend(enc(0x40, &[Imm(EVENT), Push]));
+            body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+            body.extend(enc(0x40, &[MemLoad(VAL1), Push])); // len
+            body.extend(enc(0x40, &[Imm(LINEBUF), Push])); // addr
+            body.extend(enc(0x130, &[Imm(0x84), Imm(2), Discard])); // glk_put_buffer
+            body.extend(enc(0x120, &[])); // quit
+            image_for(body, 1)
+        };
+
+        let mut sess = GlulxSession::new(image, 78, 20).expect("new");
+
+        // Mirror the app loop: drain the banner into the transcript, take a turn.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        let banner = sess.take_transcript();
+        assert_eq!(banner, "Hello");
+        state.push_transcript(&banner);
+
+        let r = sess.submit("there");
+        assert_eq!(r.transcript, "there");
+        state.push_transcript(&r.transcript);
+
+        // Render the Glulx screen into a story pane (no panic, content present).
+        let area = Rect::new(0, 0, 78, 20);
+        let mut buf = Buffer::empty(area);
+        let _ = render_story_pane(&sess.screen(), false, sess.introspect(), &state, area, &mut buf);
+
+        let dump: String = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .map(|(x, y)| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(dump.contains("Hello"), "banner rendered in the story pane");
+        assert!(dump.contains("there"), "echoed line rendered in the story pane");
+    }
 }
