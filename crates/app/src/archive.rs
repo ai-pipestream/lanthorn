@@ -33,7 +33,6 @@ use crate::engine::EngineSave;
 
 // ZIP entry names.
 const ENTRY_MAP: &str = "map.json";
-const ENTRY_SAVE: &str = "game.sav";
 const ENTRY_META: &str = "meta.json";
 const ENTRY_TRANSCRIPT: &str = "transcript.json";
 const ENTRY_COMMAND_HISTORY: &str = "command_history.json";
@@ -46,6 +45,13 @@ const ENTRY_ENGINE: &str = "engine.txt";
 /// only engine that exists today). Used as the default when an archive has no
 /// `engine.txt` entry, so legacy saves restore unchanged.
 pub const DEFAULT_ENGINE: &str = "zmachine";
+
+/// The inner save-entry extension for an engine tag, matching the raw
+/// interchange extensions: Z-machine Quetzal is `qzl`, Glulx is `glksave`. The
+/// archive's `game.<ext>` and per-turn `history/turn-NNNN.<ext>` entries use it.
+fn save_ext(engine: &str) -> &'static str {
+    if engine == "glulx" { "glksave" } else { "qzl" }
+}
 
 /// Whether an archive written by `archive_engine` may be restored while the app
 /// is running `current_engine`. The `.babelmap` archive records the engine that
@@ -184,7 +190,8 @@ pub struct ArchiveContents {
 /// Write a `.babelmap` archive containing the current map and VM save.
 ///
 /// `save` is the engine-tagged game state (from `Engine::save_state`); its
-/// `bytes` become `game.sav` and its `engine` tag becomes `engine.txt`. `screen`
+/// `bytes` become `game.qzl` (Z-machine) or `game.glksave` (Glulx), and the
+/// `engine` tag becomes `engine.txt`. `screen`
 /// is the Z-machine `ScreenState` written to `screen.json` — `Some` only for the
 /// Z-machine (Glulx keeps its display inside `save.bytes`). `aux` is the engine's
 /// auxiliary key/value table.
@@ -240,8 +247,9 @@ pub fn save_archive_meta(
     zip.start_file(ENTRY_MAP, options)?;
     zip.write_all(map_json.as_bytes())?;
 
-    // game.sav — the engine-tagged save bytes (Quetzal for the Z-machine).
-    zip.start_file(ENTRY_SAVE, options)?;
+    // game.<ext> — the engine-tagged save bytes (Quetzal): game.qzl for the
+    // Z-machine, game.glksave for Glulx, matching the raw interchange extension.
+    zip.start_file(format!("game.{}", save_ext(&save.engine)), options)?;
     zip.write_all(&save.bytes)?;
 
     // engine.txt — the EngineSave tag (which engine produced this save).
@@ -310,8 +318,9 @@ pub fn save_archive_meta(
         zip.start_file(HISTORY_INDEX, options)?;
         zip.write_all(index_json.as_bytes())?;
 
+        let ext = save_ext(&save.engine);
         for r in history {
-            zip.start_file(format!("history/turn-{:04}.sav", r.turn), options)?;
+            zip.start_file(format!("history/turn-{:04}.{}", r.turn, ext), options)?;
             zip.write_all(&r.save)?;
             if let Some(map) = &r.map_snapshot {
                 zip.start_file(format!("history/turn-{:04}.map.json", r.turn), options)?;
@@ -368,10 +377,23 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("corrupt {ENTRY_MAP}: {e}")))?
     };
 
-    // game.sav
+    // engine.txt — which engine produced this save; drives the save entry name
+    // (game.qzl / game.glksave). Absent → default engine.
+    let engine = match zip.by_name(ENTRY_ENGINE) {
+        Ok(mut entry) => {
+            let mut buf = String::new();
+            let _ = entry.read_to_string(&mut buf);
+            let t = buf.trim();
+            if t.is_empty() { DEFAULT_ENGINE.to_string() } else { t.to_string() }
+        }
+        Err(_) => DEFAULT_ENGINE.to_string(),
+    };
+
+    // game.<ext> — the engine-tagged save bytes.
     let save = {
-        let mut entry = zip.by_name(ENTRY_SAVE).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("missing {ENTRY_SAVE}: {e}"))
+        let name = format!("game.{}", save_ext(&engine));
+        let mut entry = zip.by_name(&name).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("missing {name}: {e}"))
         })?;
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf)?;
@@ -427,7 +449,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
             for e in index {
                 let save = {
                     let mut b = Vec::new();
-                    if let Ok(mut z) = zip.by_name(&format!("history/turn-{:04}.sav", e.turn)) {
+                    if let Ok(mut z) = zip.by_name(&format!("history/turn-{:04}.{}", e.turn, save_ext(&engine))) {
                         let _ = z.read_to_end(&mut b);
                     }
                     b
@@ -485,23 +507,12 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
-    // engine.txt — optional; absent in archives written before the tag → default.
-    let engine = match zip.by_name(ENTRY_ENGINE) {
-        Ok(mut entry) => {
-            let mut buf = String::new();
-            let _ = entry.read_to_string(&mut buf);
-            let t = buf.trim();
-            if t.is_empty() { DEFAULT_ENGINE.to_string() } else { t.to_string() }
-        }
-        Err(_) => DEFAULT_ENGINE.to_string(),
-    };
-
     Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history, engine })
 }
 
 impl ArchiveContents {
     /// The persisted game state as an engine-tagged [`EngineSave`], rebuilt from
-    /// the archive's `game.sav` bytes + `engine.txt` tag (defaulting to
+    /// the archive's `game.<ext>` bytes + `engine.txt` tag (defaulting to
     /// [`DEFAULT_ENGINE`] for legacy archives). The save-format version is not
     /// stored in the archive — the engine ignores it on restore — so a
     /// placeholder is used. Feed this to `Engine::restore_state`, which refuses a
@@ -513,15 +524,18 @@ impl ArchiveContents {
 
 /// Read raw Quetzal bytes from a save file for an in-game RESTORE.
 ///
-/// If `path` is a `.babelmap` ZIP archive, returns its `game.sav` entry;
+/// If `path` is a `.babelmap` ZIP archive, returns its `game.qzl`/`game.glksave`
+/// entry;
 /// otherwise returns the file's raw bytes (a plain `.qzl` Quetzal save).
 pub fn read_quetzal_from_file(path: &Path) -> io::Result<Vec<u8>> {
     let bytes = std::fs::read(path)?;
     if let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(&bytes)) {
-        if let Ok(mut entry) = zip.by_name(ENTRY_SAVE) {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)?;
-            return Ok(buf);
+        for name in ["game.qzl", "game.glksave"] {
+            if let Ok(mut entry) = zip.by_name(name) {
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf)?;
+                return Ok(buf);
+            }
         }
     }
     Ok(bytes)
@@ -584,7 +598,7 @@ mod tests {
         let got = read_quetzal_from_file(&path).expect("read_quetzal_from_file");
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(got, expected, "game.sav bytes extracted from the .babelmap");
+        assert_eq!(got, expected, "game.qzl bytes extracted from the .babelmap");
     }
 
     #[test]
@@ -910,7 +924,7 @@ mod tests {
             zip.write_all(map_json.as_bytes()).unwrap();
 
             // game.sav: empty bytes (won't be restored in this test)
-            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.start_file("game.qzl", options).unwrap();
             zip.write_all(&[]).unwrap();
 
             zip.finish().unwrap();
@@ -953,7 +967,7 @@ mod tests {
             zip.write_all(map_json.as_bytes()).unwrap();
 
             // game.sav
-            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.start_file("game.qzl", options).unwrap();
             zip.write_all(&[]).unwrap();
 
             // transcript.json with mixed Story/Meta entries
@@ -1022,7 +1036,7 @@ mod tests {
             zip.start_file(ENTRY_MAP, options).unwrap();
             zip.write_all(map_json.as_bytes()).unwrap();
 
-            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.start_file("game.qzl", options).unwrap();
             zip.write_all(&[]).unwrap();
 
             // No ENTRY_TRANSCRIPT written.
@@ -1095,8 +1109,8 @@ mod tests {
         save_archive(&path, &small_mapper(), &es, Some(&machine.screen), &machine.aux_data,
             &[], &[], &[], &[], &[]).expect("save");
 
-        assert_eq!(read_entry(&path, ENTRY_SAVE).as_deref(), Some(es.bytes.as_slice()),
-            "game.sav holds the EngineSave bytes");
+        assert_eq!(read_entry(&path, "game.qzl").as_deref(), Some(es.bytes.as_slice()),
+            "game.qzl holds the EngineSave bytes");
         assert_eq!(read_entry(&path, ENTRY_ENGINE).as_deref(), Some(DEFAULT_ENGINE.as_bytes()),
             "engine.txt holds the engine tag");
         assert!(read_entry(&path, ENTRY_SCREEN).is_some(), "screen.json written for zvm");
@@ -1129,10 +1143,34 @@ mod tests {
     }
 
     #[test]
-    fn old_archive_without_engine_txt_loads_as_zmachine() {
-        // An archive written by the OLD code: raw Quetzal game.sav, NO engine.txt,
-        // screen.json present. It must load as EngineSave { "zmachine", <bytes> }
-        // + the screen.
+    fn inner_save_entry_extension_matches_engine() {
+        // The inner save entry is named for the engine's format: game.qzl for the
+        // Z-machine, game.glksave for Glulx, and never the old game.sav.
+        let zm = EngineSave::new(DEFAULT_ENGINE, 1, vec![1, 2, 3]);
+        let zpath = temp_archive_path("entry-ext-zm");
+        save_archive(&zpath, &small_mapper(), &zm, None, &BTreeMap::new(),
+            &[], &[], &[], &[], &[]).expect("save zm");
+        assert!(read_entry(&zpath, "game.qzl").is_some(), "Z-machine save entry is game.qzl");
+        assert!(read_entry(&zpath, "game.sav").is_none(), "no legacy game.sav entry");
+        assert!(read_entry(&zpath, "game.glksave").is_none());
+        assert_eq!(load_archive(&zpath).unwrap().save, vec![1, 2, 3], "zm round-trips");
+        let _ = std::fs::remove_file(&zpath);
+
+        let gl = EngineSave::new("glulx", 1, vec![4, 5, 6]);
+        let gpath = temp_archive_path("entry-ext-gl");
+        save_archive(&gpath, &small_mapper(), &gl, None, &BTreeMap::new(),
+            &[], &[], &[], &[], &[]).expect("save gl");
+        assert!(read_entry(&gpath, "game.glksave").is_some(), "Glulx save entry is game.glksave");
+        assert!(read_entry(&gpath, "game.qzl").is_none());
+        assert!(read_entry(&gpath, "game.sav").is_none(), "no legacy game.sav entry");
+        assert_eq!(load_archive(&gpath).unwrap().save, vec![4, 5, 6], "glulx round-trips");
+        let _ = std::fs::remove_file(&gpath);
+    }
+
+    #[test]
+    fn archive_without_engine_txt_loads_as_zmachine() {
+        // An archive with NO engine.txt must default to the Z-machine: its
+        // game.qzl bytes load as EngineSave { "zmachine", <bytes> } + the screen.
         let machine = dummy_machine();
         let quetzal = machine.save_quetzal();
         let path = temp_archive_path("old-no-engine");
@@ -1145,7 +1183,7 @@ mod tests {
             zip.write_all(serde_json::to_string(&meta).unwrap().as_bytes()).unwrap();
             zip.start_file(ENTRY_MAP, options).unwrap();
             zip.write_all(mapper::persist::to_json(&small_mapper()).as_bytes()).unwrap();
-            zip.start_file(ENTRY_SAVE, options).unwrap();
+            zip.start_file("game.qzl", options).unwrap();
             zip.write_all(&quetzal).unwrap();
             // screen.json present, engine.txt absent (the old format).
             zip.start_file(ENTRY_SCREEN, options).unwrap();
