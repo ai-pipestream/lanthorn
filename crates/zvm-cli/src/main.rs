@@ -33,31 +33,59 @@ struct StdoutOutput {
     is_tty: bool,
     paging: bool,
     page_height: u16,
+    cols: u16,
+    current_col: u16,
     lines: u16,
     orig_mode: Option<String>,
 }
 
 impl StdoutOutput {
-    fn new(is_tty: bool, paging: bool, page_height: u16, orig_mode: Option<String>) -> Self {
-        StdoutOutput { is_tty, paging, page_height, lines: 0, orig_mode }
+    fn new(is_tty: bool, paging: bool, page_height: u16, cols: u16, orig_mode: Option<String>) -> Self {
+        StdoutOutput { is_tty, paging, page_height, cols, current_col: 0, lines: 0, orig_mode }
     }
 
-    /// Emit `s`, counting newlines; pause with `[MORE]` when a page fills.
+    fn check_paging(&mut self) {
+        if self.paging && crate::screen::should_page(self.lines, self.page_height) {
+            let _ = io::stdout().flush();
+            print!("\x1b[7m[MORE]\x1b[0m");
+            let _ = io::stdout().flush();
+            let _ = read_char_input(true, &self.orig_mode);
+            print!("\r\x1b[2K"); // erase the [MORE] prompt
+            self.lines = 0;
+        }
+    }
+
+    /// Emit `s` with token-based word wrapping
     fn write_counted(&mut self, s: &str) {
-        for (i, segment) in s.split('\n').enumerate() {
-            if i > 0 {
+        let words = s.split_inclusive(&[' ', '\n'][..]);
+        
+        for word in words {
+            let is_newline = word.ends_with('\n');
+            let clean_word = if is_newline { &word[..word.len()-1] } else { word };
+            let word_len = clean_word.chars().count() as u16;
+
+            // Wrap if the word pushes us past the column limit (and it's not the start of a line)
+            if self.current_col > 0 && self.current_col + word_len > self.cols {
                 print!("\n");
+                self.current_col = 0;
                 self.lines += 1;
-                if self.paging && crate::screen::should_page(self.lines, self.page_height) {
-                    let _ = io::stdout().flush();
-                    print!("\x1b[7m[MORE]\x1b[0m");
-                    let _ = io::stdout().flush();
-                    let _ = read_char_input(true, &self.orig_mode); // wait for a key
-                    print!("\r\x1b[2K"); // erase the [MORE] prompt
-                    self.lines = 0;
-                }
+                self.check_paging();
+                
+                // Trim leading spaces when wrapping to a new line
+                let trimmed = clean_word.trim_start();
+                print!("{}", trimmed);
+                self.current_col += trimmed.chars().count() as u16;
+            } else {
+                print!("{}", clean_word);
+                self.current_col += word_len;
             }
-            print!("{}", segment);
+
+            if is_newline {
+                print!("\n");
+                self.current_col = 0;
+                self.lines += 1;
+                self.check_paging();
+            }
         }
         let _ = io::stdout().flush();
     }
@@ -107,6 +135,7 @@ fn build_machine(
     stdout_is_tty: bool,
     paging: bool,
     page_height: u16,
+    term_cols: u16,
     orig_mode: Option<String>,
 ) -> Result<Machine, String> {
     use zvm::error::ZError;
@@ -121,6 +150,7 @@ fn build_machine(
         stdout_is_tty,
         paging,
         page_height,
+        term_cols,
         orig_mode,
     )));
     machine.init_caps();
@@ -152,14 +182,24 @@ fn parse_args(argv: &[String]) -> Args {
 
 // ── terminal size + raw single-key input ──────────────────────────────────────
 
-fn detect_term_rows() -> u16 {
+fn detect_term_size() -> (u16, u16) {
     let stty = process::Command::new("stty")
         .arg("size")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok());
     let env_lines = env::var("LINES").ok();
-    screen::term_rows(stty.as_deref(), env_lines.as_deref())
+    let rows = screen::term_rows(stty.as_deref(), env_lines.as_deref());
+
+    let cols = if let Some((_, c)) = stty.as_deref().and_then(screen::parse_stty_size) {
+        if c > 0 { c } else { screen::DEFAULT_COLS }
+    } else if let Some(c) = env::var("COLUMNS").ok().and_then(|s| s.trim().parse::<u16>().ok()) {
+        if c > 0 { c } else { screen::DEFAULT_COLS }
+    } else {
+        screen::DEFAULT_COLS
+    };
+    
+    (rows, cols)
 }
 
 /// Restore the terminal to the captured original (cooked+echo) mode.
@@ -307,7 +347,7 @@ fn main() {
 
     // Paging is only safe when BOTH ends are TTYs (else it would block the
     // headless harness); --no-more disables it.
-    let term_rows = detect_term_rows();
+    let (term_rows, term_cols) = detect_term_size();
     let paging = stdout_is_tty && stdin_is_tty && !args.no_more;
     let page_height = term_rows.saturating_sub(2).max(2);
 
@@ -316,6 +356,7 @@ fn main() {
         stdout_is_tty,
         paging,
         page_height,
+        term_cols,
         orig_mode.clone(),
     ) {
         Ok(m) => m,
@@ -367,6 +408,7 @@ fn main() {
                     stdout_is_tty,
                     paging,
                     page_height,
+                    term_cols,
                     orig_mode.clone(),
                 ) {
                     Ok(m) => m,
