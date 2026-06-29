@@ -295,10 +295,12 @@ fn main() {
     let orig_mode: Option<String> = if stdin_is_tty {
         process::Command::new("stty")
             .arg("-g")
+            .stdin(process::Stdio::inherit())
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()) // Filter empty so restore never runs stty ""
     } else {
         None
     };
