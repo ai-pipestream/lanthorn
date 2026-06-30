@@ -303,6 +303,12 @@ pub enum Action {
     SavesImport,
     /// Navigate the file browser by delta (-1 = up, +1 = down).
     FbNav(i32),
+    /// Page the file-browser list by one viewport (-1 = PageUp, +1 = PageDown).
+    FbPage(i32),
+    /// Jump to the first file-browser entry.
+    FbHome,
+    /// Jump to the last file-browser entry.
+    FbEnd,
     /// Activate the selected file-browser entry (cd into dir or import file).
     FbEnter,
     /// Choose the current directory as the export target (PickDir mode).
@@ -1176,6 +1182,10 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Up => Action::FbNav(-1),
         KeyCode::Down => Action::FbNav(1),
+        KeyCode::PageUp => Action::FbPage(-1),
+        KeyCode::PageDown => Action::FbPage(1),
+        KeyCode::Home => Action::FbHome,
+        KeyCode::End => Action::FbEnd,
         KeyCode::Enter => Action::FbEnter,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::FbChooseDir,
         KeyCode::Esc => Action::FbClose,
@@ -2211,11 +2221,45 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // SavesExport, SavesImport, FbEnter, FbChooseDir are caller-handled.
 
         Action::FbNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(fb) = &mut state.file_browser {
                 if !fb.entries.is_empty() {
-                    let len = fb.entries.len() as i32;
-                    fb.selected = ((fb.selected as i32 + delta).rem_euclid(len)) as usize;
+                    let len = fb.entries.len();
+                    fb.scroll.len(len);
+                    // Preserve the existing wrap-around behavior via select().
+                    let next = ((fb.scroll.selected as i32 + delta).rem_euclid(len as i32)) as usize;
+                    fb.scroll.select(next, vp, &anim);
                 }
+            }
+        }
+
+        Action::FbPage(dir) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(fb) = &mut state.file_browser {
+                let len = fb.entries.len();
+                fb.scroll.len(len);
+                fb.scroll.page(dir, vp, &anim);
+            }
+        }
+
+        Action::FbHome => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(fb) = &mut state.file_browser {
+                fb.scroll.len(fb.entries.len());
+                fb.scroll.home(vp, &anim);
+            }
+        }
+
+        Action::FbEnd => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(fb) = &mut state.file_browser {
+                let len = fb.entries.len();
+                fb.scroll.len(len);
+                fb.scroll.end(len, vp, &anim);
             }
         }
 
@@ -6094,7 +6138,7 @@ mod tests {
         // Move up from 0 should wrap to last entry.
         apply_action(Action::FbNav(-1), &mut s, &mut Mapper::default());
         if let Some(fb) = &s.file_browser {
-            assert_eq!(fb.selected, fb.entries.len() - 1, "nav -1 from 0 should wrap to last");
+            assert_eq!(fb.scroll.selected, fb.entries.len() - 1, "nav -1 from 0 should wrap to last");
         }
     }
 

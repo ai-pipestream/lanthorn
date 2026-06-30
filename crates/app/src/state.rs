@@ -497,8 +497,8 @@ pub struct FileBrowserState {
     pub cwd: std::path::PathBuf,
     /// Sorted entries: `..` (if not root), then dirs, then matching files.
     pub entries: Vec<FbEntry>,
-    /// Index of the currently-highlighted row.
-    pub selected: usize,
+    /// Selection + animated scroll offset for the entry list.
+    pub scroll: crate::list_scroll::ListScroll,
     /// Whether we are picking a file (import) or a directory (export).
     pub mode: FbMode,
     /// Default filename for the export prompt: `<ifid>.qzl`.
@@ -511,13 +511,13 @@ impl FileBrowserState {
     /// (PickFile only).  Entries that fail to read are silently omitted.
     pub fn build(cwd: std::path::PathBuf, mode: FbMode, export_default_name: String) -> Self {
         let entries = Self::read_entries(&cwd, mode);
-        FileBrowserState { cwd, entries, selected: 0, mode, export_default_name }
+        FileBrowserState { cwd, entries, scroll: Default::default(), mode, export_default_name }
     }
 
     /// (Re)build entries for the current `cwd` and `mode`.
     pub fn refresh(&mut self) {
         self.entries = Self::read_entries(&self.cwd, self.mode);
-        self.selected = 0;
+        self.scroll = Default::default();
     }
 
     /// Navigate into a subdirectory or parent.
@@ -2125,7 +2125,7 @@ mod tests {
         let subdir = dir.join("subdir");
         fb.cd(subdir.clone());
         assert_eq!(fb.cwd, subdir, "cwd should update after cd");
-        assert_eq!(fb.selected, 0, "selection should reset to 0 after cd");
+        assert_eq!(fb.scroll.selected, 0, "selection should reset to 0 after cd");
         // subdir is empty (no qzl files), but ".." should be present.
         let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&".."), "subdir should show '..'");

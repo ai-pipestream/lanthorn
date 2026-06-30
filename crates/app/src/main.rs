@@ -690,7 +690,7 @@ fn draw_frame(
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
         if state.file_browser.is_some() {
-            dialog_rects_out = draw_file_browser(state, full, buf);
+            dialog_rects_out = draw_file_browser(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
@@ -2666,7 +2666,7 @@ fn main() {
             Action::FbEnter => {
                 // Handle file-browser Enter: cd into dir or import file.
                 let fb_action = state.file_browser.as_ref().and_then(|fb| {
-                    fb.entries.get(fb.selected).map(|e| {
+                    fb.entries.get(fb.scroll.selected).map(|e| {
                         if e.is_dir {
                             let new_path = if e.name == ".." {
                                 fb.cwd.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| fb.cwd.clone())
