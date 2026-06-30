@@ -882,29 +882,41 @@ fn run_story_picker(
         }
     };
 
-    let mut selected: usize = 0;
+    let mut list = app::list_scroll::ListScroll::new();
+    list.len(stories.len());
+    let anim = &cfg.animation;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut viewport: usize = 0;
 
     let chosen: Option<std::path::PathBuf> = loop {
         let _ = terminal.draw(|f| {
             let area = f.area();
             let buf = f.buffer_mut();
-            row_rects = draw_story_picker(&stories, selected, dir, &cs, area, buf);
+            let (rects, vp) = draw_story_picker(&stories, &list, dir, &cs, area, buf);
+            row_rects = rects;
+            viewport = vp;
         });
+
+        // Tick while a scroll animation eases so the motion is visible; otherwise
+        // block until the next event.
+        if list.has_active_animation()
+            && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
+        {
+            list.finalize_if_done();
+            continue;
+        }
 
         match read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 match k.code {
-                    Up | Char('k') => selected = selected.saturating_sub(1),
-                    Down | Char('j') => {
-                        if selected + 1 < stories.len() {
-                            selected += 1;
-                        }
-                    }
-                    Home => selected = 0,
-                    End => selected = stories.len() - 1,
-                    Enter => break Some(stories[selected].path.clone()),
+                    Up | Char('k') => list.move_by(-1, viewport, anim),
+                    Down | Char('j') => list.move_by(1, viewport, anim),
+                    PageUp => list.page(-1, viewport, anim),
+                    PageDown => list.page(1, viewport, anim),
+                    Home => list.home(viewport, anim),
+                    End => list.end(stories.len(), viewport, anim),
+                    Enter => break Some(stories[list.selected].path.clone()),
                     Esc | Char('q') => break None,
                     _ => {}
                 }
@@ -917,11 +929,7 @@ fn run_story_picker(
                         break Some(stories[*idx].path.clone());
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
-                    if d < 0 {
-                        selected = selected.saturating_sub(1);
-                    } else if selected + 1 < stories.len() {
-                        selected += 1;
-                    }
+                    list.move_by(d, viewport, anim);
                 }
             }
             Ok(Event::Resize(_, _)) => {
@@ -930,6 +938,7 @@ fn run_story_picker(
             Ok(_) => {}
             Err(_) => break None,
         }
+        list.finalize_if_done();
     };
 
     restore_terminal();
@@ -940,13 +949,14 @@ fn run_story_picker(
 /// mouse selection.
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
-    selected: usize,
+    list: &app::list_scroll::ListScroll,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
-) -> Vec<(usize, Rect)> {
+) -> (Vec<(usize, Rect)>, usize) {
     use ratatui::style::{Color, Style};
+    let selected = list.selected;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
 
     // Background fill.
@@ -970,18 +980,24 @@ fn draw_story_picker(
     let list_top = area.y + 2;
     let list_bottom = area.bottom().saturating_sub(1);
     if list_bottom <= list_top {
-        return row_rects;
+        return (row_rects, 0);
     }
     let rows = (list_bottom - list_top) as usize;
-    let first = if selected >= rows { selected + 1 - rows } else { 0 };
+    let total = stories.len();
+
+    // Reserve a 1-col gutter for the scrollbar when the list overflows.
+    let scrollbar_visible =
+        app::render::scroll::needs_scrollbar(total, rows) && area.width >= 2;
+    let row_w = if scrollbar_visible { area.width.saturating_sub(1) } else { area.width };
+    let first = list.display_offset();
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
         let y = list_top + (i - first) as u16;
-        let row_rect = Rect::new(area.x, y, area.width, 1);
+        let row_rect = Rect::new(area.x, y, row_w, 1);
         row_rects.push((i, row_rect));
         let sel = i == selected;
         let style = if sel { cs.dialog_button_active } else { cs.dialog };
-        for x in area.left()..area.right() {
+        for x in area.left()..area.left() + row_w {
             if let Some(c) = buf.cell_mut((x, y)) {
                 c.set_symbol(" ").set_style(style);
             }
@@ -991,12 +1007,17 @@ fn draw_story_picker(
         draw_str_clipped(buf, area.x, y, &line, style, row_rect);
     }
 
+    if scrollbar_visible {
+        let sb_area = Rect::new(area.right().saturating_sub(1), list_top, 1, rows as u16);
+        app::render::scroll::draw_scrollbar(buf, sb_area, total, rows, list.target_offset(), cs.scrollbar);
+    }
+
     // Footer hint.
-    let footer = " ↑/↓ or j/k: move   Enter / click: open   q / Esc: quit";
+    let footer = " ↑/↓ or j/k: move   PgUp/PgDn   Enter / click: open   q / Esc: quit";
     let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
     draw_str_clipped(buf, area.x, list_bottom, footer, fstyle, area);
 
-    row_rects
+    (row_rects, rows)
 }
 
 /// Format the one-line loading indicator shown while a (possibly large) story
