@@ -112,12 +112,12 @@ pub enum VerbMenuPane {
 pub struct VerbMenuState {
     /// Which column is currently active.
     pub pane: VerbMenuPane,
-    /// Selected index within the Verbs pane.
-    pub verb_idx: usize,
-    /// Selected index within the Nouns pane.
-    pub noun_idx: usize,
-    /// Selected index within the Preps pane.
-    pub prep_idx: usize,
+    /// Selection + animated scroll for the Verbs pane.
+    pub verb_scroll: crate::list_scroll::ListScroll,
+    /// Selection + animated scroll for the Nouns pane.
+    pub noun_scroll: crate::list_scroll::ListScroll,
+    /// Selection + animated scroll for the Preps pane.
+    pub prep_scroll: crate::list_scroll::ListScroll,
     /// Noun list built from room words ∪ inventory at menu-open time.
     pub nouns: Vec<String>,
 }
@@ -126,9 +126,9 @@ impl VerbMenuState {
     /// Return the token that is currently selected (token to append on Pick).
     pub fn selected_token<'a>(&'a self, verbs: &'a [&'static str], preps: &'a [&'static str]) -> &'a str {
         match self.pane {
-            VerbMenuPane::Verbs => verbs.get(self.verb_idx).copied().unwrap_or(""),
-            VerbMenuPane::Nouns => self.nouns.get(self.noun_idx).map(|s| s.as_str()).unwrap_or(""),
-            VerbMenuPane::Preps => preps.get(self.prep_idx).copied().unwrap_or(""),
+            VerbMenuPane::Verbs => verbs.get(self.verb_scroll.selected).copied().unwrap_or(""),
+            VerbMenuPane::Nouns => self.nouns.get(self.noun_scroll.selected).map(|s| s.as_str()).unwrap_or(""),
+            VerbMenuPane::Preps => preps.get(self.prep_scroll.selected).copied().unwrap_or(""),
         }
     }
 }
@@ -1889,9 +1889,9 @@ mod tests {
         // verb_menu
         s.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns: vec![],
         });
         assert!(s.any_overlay_open(), "verb_menu open => any_overlay_open true");

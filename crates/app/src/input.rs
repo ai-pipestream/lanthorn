@@ -60,6 +60,14 @@ pub enum VerbMenuNavKind {
     NextPane,
     /// Switch to the previous pane (Shift+Tab / Left).
     PrevPane,
+    /// Page the current pane's selection up by one viewport (PageUp).
+    PageUp,
+    /// Page the current pane's selection down by one viewport (PageDown).
+    PageDown,
+    /// Jump to the first item in the current pane (Home).
+    Home,
+    /// Jump to the last item in the current pane (End).
+    End,
 }
 
 // ── Action enum ───────────────────────────────────────────────────────────────
@@ -1230,6 +1238,10 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Left => Action::VerbMenuNav(VerbMenuNavKind::PrevPane),
         KeyCode::Up => Action::VerbMenuNav(VerbMenuNavKind::Up),
         KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
+        KeyCode::PageUp => Action::VerbMenuNav(VerbMenuNavKind::PageUp),
+        KeyCode::PageDown => Action::VerbMenuNav(VerbMenuNavKind::PageDown),
+        KeyCode::Home => Action::VerbMenuNav(VerbMenuNavKind::Home),
+        KeyCode::End => Action::VerbMenuNav(VerbMenuNavKind::End),
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
         _ => Action::None,
@@ -2426,9 +2438,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let nouns = build_verb_menu_nouns(state, mapper);
             state.verb_menu = Some(crate::state::VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_idx: 0,
-                noun_idx: 0,
-                prep_idx: 0,
+                verb_scroll: Default::default(),
+                noun_scroll: Default::default(),
+                prep_scroll: Default::default(),
                 nouns,
             });
         }
@@ -2436,6 +2448,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::VerbMenuNav(kind) => {
             use crate::state::VerbMenuPane;
             use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(vm) = &mut state.verb_menu {
                 match kind {
                     VerbMenuNavKind::NextPane => {
@@ -2452,45 +2466,22 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                             VerbMenuPane::Preps => VerbMenuPane::Nouns,
                         };
                     }
-                    VerbMenuNavKind::Up => {
-                        match vm.pane {
-                            VerbMenuPane::Verbs => {
-                                let n = VERB_MENU_VERBS.len();
-                                if n > 0 {
-                                    vm.verb_idx = vm.verb_idx.saturating_sub(1);
-                                }
-                            }
-                            VerbMenuPane::Nouns => {
-                                vm.noun_idx = vm.noun_idx.saturating_sub(1);
-                            }
-                            VerbMenuPane::Preps => {
-                                let n = VERB_MENU_PREPS.len();
-                                if n > 0 {
-                                    vm.prep_idx = vm.prep_idx.saturating_sub(1);
-                                }
-                            }
-                        }
-                    }
-                    VerbMenuNavKind::Down => {
-                        match vm.pane {
-                            VerbMenuPane::Verbs => {
-                                let n = VERB_MENU_VERBS.len();
-                                if n > 0 {
-                                    vm.verb_idx = (vm.verb_idx + 1).min(n - 1);
-                                }
-                            }
-                            VerbMenuPane::Nouns => {
-                                let n = vm.nouns.len();
-                                if n > 0 {
-                                    vm.noun_idx = (vm.noun_idx + 1).min(n - 1);
-                                }
-                            }
-                            VerbMenuPane::Preps => {
-                                let n = VERB_MENU_PREPS.len();
-                                if n > 0 {
-                                    vm.prep_idx = (vm.prep_idx + 1).min(n - 1);
-                                }
-                            }
+                    // List movement within the active pane (clamped).
+                    _ => {
+                        let (scroll, len) = match vm.pane {
+                            VerbMenuPane::Verbs => (&mut vm.verb_scroll, VERB_MENU_VERBS.len()),
+                            VerbMenuPane::Nouns => (&mut vm.noun_scroll, vm.nouns.len()),
+                            VerbMenuPane::Preps => (&mut vm.prep_scroll, VERB_MENU_PREPS.len()),
+                        };
+                        scroll.len(len);
+                        match kind {
+                            VerbMenuNavKind::Up => scroll.move_by(-1, vp, &anim),
+                            VerbMenuNavKind::Down => scroll.move_by(1, vp, &anim),
+                            VerbMenuNavKind::PageUp => scroll.page(-1, vp, &anim),
+                            VerbMenuNavKind::PageDown => scroll.page(1, vp, &anim),
+                            VerbMenuNavKind::Home => scroll.home(vp, &anim),
+                            VerbMenuNavKind::End => scroll.end(len, vp, &anim),
+                            VerbMenuNavKind::NextPane | VerbMenuNavKind::PrevPane => {}
                         }
                     }
                 }
@@ -5152,9 +5143,9 @@ mod tests {
         let mut s = AppState::default();
         s.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns: Vec::new(),
         });
         assert!(matches!(
@@ -5882,9 +5873,9 @@ mod tests {
     fn open_verb_menu_with_nouns(state: &mut AppState, nouns: Vec<String>) {
         state.verb_menu = Some(crate::state::VerbMenuState {
             pane: crate::state::VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns,
         });
     }
@@ -5918,7 +5909,7 @@ mod tests {
         let with_idx = crate::render::verbmenu::VERB_MENU_PREPS.iter().position(|&p| p == "with").expect("with in preps");
 
         // 1. Pick "unlock" from Verbs pane.
-        s.verb_menu.as_mut().unwrap().verb_idx = unlock_idx;
+        s.verb_menu.as_mut().unwrap().verb_scroll.selected = unlock_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock ");
 
@@ -5929,13 +5920,13 @@ mod tests {
 
         // 3. Switch to Preps pane and pick "with".
         s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
-        s.verb_menu.as_mut().unwrap().prep_idx = with_idx;
+        s.verb_menu.as_mut().unwrap().prep_scroll.selected = with_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door with ");
 
         // 4. Switch back to Nouns and pick "key" (noun_idx=1).
         s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
-        s.verb_menu.as_mut().unwrap().noun_idx = 1;
+        s.verb_menu.as_mut().unwrap().noun_scroll.selected = 1;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door with key ");
     }
@@ -5983,22 +5974,22 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec!["door".to_string(), "mailbox".to_string()]);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 1);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 1);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         // Up at 0 stays at 0 (saturating).
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         // Switch to Nouns, move down.
         s.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Nouns;
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().noun_idx, 1);
+        assert_eq!(s.verb_menu.as_ref().unwrap().noun_scroll.selected, 1);
     }
 
     #[test]
@@ -6363,9 +6354,9 @@ mod tests {
         let mut state = AppState::default();
         state.verb_menu = Some(VerbMenuState {
             pane: crate::state::VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns: vec![],
         });
 
@@ -6490,7 +6481,7 @@ mod tests {
             let mut s = AppState::default();
             s.verb_menu = Some(VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![],
             });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::VerbMenuClose),
@@ -6573,7 +6564,7 @@ mod tests {
             let mut s = AppState::default();
             s.verb_menu = Some(VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![],
             });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::VerbMenuClose),

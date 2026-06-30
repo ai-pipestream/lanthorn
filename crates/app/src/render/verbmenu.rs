@@ -67,7 +67,12 @@ pub const VERB_MENU_PREPS: &[&str] = &[
 ///
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` when
 /// the verb menu is closed or the area is too small.
-pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+pub fn draw_verb_menu(
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+    vp_out: &mut usize,
+) -> Option<DialogRects> {
     let Some(vm) = &state.verb_menu else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
@@ -118,6 +123,7 @@ pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<
     let header_y = content.y;
     let list_y = content.y + 1;
     let list_h = content.height.saturating_sub(2); // 1 header + 1 input row
+    *vp_out = list_h as usize;
 
     let verb_header_area = Rect { x: verb_x, y: header_y, width: verb_w, height: 1 };
     let noun_header_area = Rect { x: noun_x, y: header_y, width: noun_w, height: 1 };
@@ -134,7 +140,7 @@ pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<
 
         draw_list(
             &VERB_MENU_VERBS.iter().map(|s| *s).collect::<Vec<_>>(),
-            vm.verb_idx,
+            &vm.verb_scroll,
             vm.pane == VerbMenuPane::Verbs,
             verb_list,
             buf,
@@ -144,7 +150,7 @@ pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<
         let noun_strs: Vec<&str> = vm.nouns.iter().map(|s| s.as_str()).collect();
         draw_list(
             &noun_strs,
-            vm.noun_idx,
+            &vm.noun_scroll,
             vm.pane == VerbMenuPane::Nouns,
             noun_list,
             buf,
@@ -153,7 +159,7 @@ pub fn draw_verb_menu(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<
 
         draw_list(
             &VERB_MENU_PREPS.iter().map(|s| *s).collect::<Vec<_>>(),
-            vm.prep_idx,
+            &vm.prep_scroll,
             vm.pane == VerbMenuPane::Preps,
             prep_list,
             buf,
@@ -194,32 +200,41 @@ fn draw_pane_header(title: &str, active: bool, area: Rect, buf: &mut Buffer, sta
     crate::render::draw_str_clipped(buf, area.x, area.y, &line, style, area);
 }
 
-/// Draw a scrolled list of items with the selected item highlighted.
-fn draw_list(items: &[&str], selected: usize, active: bool, area: Rect, buf: &mut Buffer, state: &AppState) {
+/// Draw a scrolled list of items (windowed via `scroll`) with the selected item
+/// highlighted, plus a scrollbar when the items overflow the area.
+fn draw_list(
+    items: &[&str],
+    scroll: &crate::list_scroll::ListScroll,
+    active: bool,
+    area: Rect,
+    buf: &mut Buffer,
+    state: &AppState,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
 
     let base = state.colors.dialog;
     let visible = area.height as usize;
+    let total = items.len();
+    let selected = scroll.selected;
 
-    // Compute scroll offset so selected is visible.
-    let scroll = if selected >= visible {
-        selected - visible + 1
-    } else {
-        0
-    };
+    // Reserve a 1-col gutter for the scrollbar when the list overflows.
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total, visible) && area.width >= 2;
+    let row_w = if scrollbar_visible { area.width.saturating_sub(1) } else { area.width };
+    let offset = scroll.display_offset();
 
     for row in 0..visible {
-        let idx = scroll + row;
+        let idx = offset + row;
         let y = area.y + row as u16;
         if y >= area.bottom() {
             break;
         }
 
-        if idx >= items.len() {
+        if idx >= total {
             // Empty rows: fill with dialog background.
-            for x in area.x..area.right() {
+            for x in area.x..area.x + row_w {
                 if let Some(cell) = buf.cell_mut((x, y)) {
                     cell.set_symbol(" ").set_style(base);
                 }
@@ -242,12 +257,25 @@ fn draw_list(items: &[&str], selected: usize, active: bool, area: Rect, buf: &mu
         let line = format!("{}{}", marker, item);
 
         // Fill the row with the style, then write text.
-        for x in area.x..area.right() {
+        let row_area = Rect::new(area.x, y, row_w, 1);
+        for x in row_area.x..row_area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_symbol(" ").set_style(style);
             }
         }
-        crate::render::draw_str_clipped(buf, area.x, y, &line, style, area);
+        crate::render::draw_str_clipped(buf, row_area.x, y, &line, style, row_area);
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(area.right().saturating_sub(1), area.y, 1, area.height);
+        crate::render::scroll::draw_scrollbar(
+            buf,
+            sb_area,
+            total,
+            visible,
+            scroll.target_offset(),
+            state.colors.scrollbar,
+        );
     }
 }
 
@@ -265,9 +293,9 @@ mod tests {
         let mut s = AppState::default();
         s.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns: vec!["mailbox".to_string(), "door".to_string()],
         });
         s
@@ -279,7 +307,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let state = make_state_with_verb_menu();
         terminal.draw(|f| {
-            draw_verb_menu(&state, f.area(), f.buffer_mut());
+            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -289,12 +317,35 @@ mod tests {
     }
 
     #[test]
+    fn verb_menu_scrollbar_and_paging_on_overflow() {
+        use crate::input::{apply_action, Action, VerbMenuNavKind};
+        use mapper::mapper::Mapper;
+        // The verbs pane (35 built-ins) overflows a short modal.
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = make_state_with_verb_menu();
+        let mut vp = 0usize;
+        terminal.draw(|f| {
+            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut vp);
+        }).unwrap();
+        assert!(vp > 0 && vp < VERB_MENU_VERBS.len(), "verbs should overflow (vp={vp})");
+        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        assert!(has_thumb, "a scrollbar thumb should be drawn when the verbs pane overflows");
+
+        // PageDown advances the active (Verbs) pane's selection by ~one viewport.
+        state.modal_list_viewport = vp;
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::PageDown), &mut state, &mut Mapper::default());
+        let sel = state.verb_menu.as_ref().unwrap().verb_scroll.selected;
+        assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
+    }
+
+    #[test]
     fn verb_menu_renders_room_noun() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = make_state_with_verb_menu();
         terminal.draw(|f| {
-            draw_verb_menu(&state, f.area(), f.buffer_mut());
+            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -323,7 +374,7 @@ mod tests {
                 }
             }
             // Now draw the modal — it should overwrite everything.
-            draw_verb_menu(&state, f.area(), f.buffer_mut());
+            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         // Check that cell (0, 0) no longer has Green background (modal replaced it).
         let cell = terminal.backend().buffer().cell((0, 0)).unwrap();
@@ -357,7 +408,7 @@ mod tests {
         // Set Single border so the title is visible (default is BorderStyle::None).
         state.colors.dialog_box_style = BorderStyle::Single;
 
-        let rects_out = draw_verb_menu(&state, area, &mut buf);
+        let rects_out = draw_verb_menu(&state, area, &mut buf, &mut 0);
 
         // Collect all cell symbols into one string for content search.
         let content: String = buf.content().iter()

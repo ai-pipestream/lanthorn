@@ -695,7 +695,7 @@ fn draw_frame(
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
         if state.verb_menu.is_some() {
-            dialog_rects_out = draw_verb_menu(state, full, buf);
+            dialog_rects_out = draw_verb_menu(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Config screen overlay — drawn after other modals ──────────────────
