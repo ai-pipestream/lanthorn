@@ -108,11 +108,20 @@ fn render_grid(cells: &[Vec<(char, GlkStyle)>], width: u32, tty: bool) -> String
 
 // ── Detect terminal size ──────────────────────────────────────────────────────
 
-/// Detect the terminal size via crossterm. Falls back to 80×24 on error (e.g.
-/// stdout is piped). Returns `(cols, rows)`.
+/// Convert a raw terminal size to a usable `(cols, rows)`, falling back to
+/// 80×24 when either dimension is zero. `crossterm::terminal::size()` can
+/// return `Ok((0, 0))` on some PTY implementations (e.g. macOS `script`);
+/// a zero `cols` would make `soft_wrap` treat the output as "no wrap", which
+/// silently disables word-wrap even on a real TTY.
+fn coerce_size(cols: u16, rows: u16) -> (u32, u32) {
+    if cols > 0 && rows > 0 { (cols as u32, rows as u32) } else { (80, 24) }
+}
+
+/// Detect the terminal size via crossterm. Falls back to 80×24 on error or
+/// when the reported size is zero. Returns `(cols, rows)`.
 fn detect_size() -> (u32, u32) {
     match crossterm::terminal::size() {
-        Ok((cols, rows)) => (cols as u32, rows as u32),
+        Ok((cols, rows)) => coerce_size(cols, rows),
         Err(_) => (80, 24),
     }
 }
@@ -379,6 +388,25 @@ mod tests {
         assert_eq!(out, text);
         // col tracks chars even without wrapping
         assert_eq!(col, 75 + text.chars().count() as u32);
+    }
+
+    // ── coerce_size regression (root-cause guard) ─────────────────────────────
+    //
+    // crossterm::terminal::size() returns Ok((0, 0)) on some PTY implementations
+    // (confirmed: macOS `script` creates a PTY where size() → Ok((0, 0))). A zero
+    // cols value reaches soft_wrap as the "no wrap" sentinel, silently disabling
+    // word-wrap even when is_tty=true. coerce_size() must catch the (0,0) case.
+    #[test]
+    fn coerce_size_falls_back_on_zero_cols() {
+        assert_eq!(coerce_size(0, 0), (80, 24), "zero cols/rows must fall back");
+        assert_eq!(coerce_size(0, 24), (80, 24), "zero cols alone must fall back");
+        assert_eq!(coerce_size(80, 0), (80, 24), "zero rows alone must fall back");
+    }
+
+    #[test]
+    fn coerce_size_passes_through_valid_size() {
+        assert_eq!(coerce_size(120, 40), (120, 40));
+        assert_eq!(coerce_size(1, 1), (1, 1));
     }
 
     #[test]
