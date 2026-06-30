@@ -227,7 +227,7 @@ pub fn init_header_caps(mem: &mut Memory) {
         //   bit 4: status line not available — clear (we support it)
         //   bit 5: screen-splitting available — set
         //   bit 6: variable-pitch font default — clear (use fixed)
-        f1 & !(1 << 4)   // clear "status line not available"
+        f1 & !((1 << 4) | (1 << 6))   // clear "status line not available" + variable-pitch default
           | (1 << 5)      // screen-splitting available
     } else {
         // v4+ Flags1 bits (ZMSD §11.1.3):
@@ -488,6 +488,17 @@ mod tests {
         write_screen_dims(&mut mem, 0, 0);
         assert_eq!(mem.read_byte(0x20), 1, "zero rows clamped to 1");
         assert_eq!(mem.read_byte(0x21), 1, "zero cols clamped to 1");
+    }
+
+    #[test]
+    fn header_caps_v3_clears_variable_pitch_default() {
+        // We render fixed-pitch; Flags1 v3 bit 6 (variable-pitch default) must be
+        // explicitly cleared rather than inheriting the story file's value.
+        let mut mem = Memory::new(sample_story(3)).unwrap();
+        let f1 = mem.read_byte(0x01) | (1 << 6); // pre-set variable-pitch default
+        mem.write_byte(0x01, f1);
+        init_header_caps(&mut mem);
+        assert_eq!(mem.read_byte(0x01) & (1 << 6), 0, "bit 6 (variable-pitch) should be clear");
     }
 
     #[test]
