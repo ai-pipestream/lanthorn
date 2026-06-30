@@ -244,6 +244,12 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn window_layout(&mut self, wins: &[(u32, WinType, Rect)]) {
+        if self.debug {
+            for (id, ty, r) in wins {
+                let kind = if *ty == WinType::TextGrid { "grid" } else if *ty == WinType::TextBuffer { "buffer" } else { "other" };
+                eprintln!("[term] layout: win={id} {kind} w={} h={} (left={} top={})", r.width, r.height, r.left, r.top);
+            }
+        }
         // Track the first TextGrid as the pinned status window.
         let grid = wins.iter().find(|(_, ty, _)| *ty == WinType::TextGrid);
         if let Some(&(id, _, rect)) = grid {
