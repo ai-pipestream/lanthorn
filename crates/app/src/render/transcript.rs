@@ -9,7 +9,6 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use ratatui::style::Color;
-use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::engine::{Introspect, StatusField, StatusModel};
 use crate::state::{AppState, Focus, StyleRun, TranscriptFilter, TranscriptKind};
@@ -1062,22 +1061,13 @@ fn render_middle(
             width: 1,
             height: transcript_bottom - transcript_top,
         };
-        // ratatui places the thumb at the track bottom only when position ==
-        // content_length - 1. Our top-line index `start` ranges 0..=max_scroll,
-        // so content_length must be max_scroll + 1 for the thumb to span the
-        // full track (viewport_content_length keeps the thumb proportional).
-        let content_len = total_rows.saturating_sub(transcript_rows) + 1;
-        let mut sb_state = ScrollbarState::new(content_len)
-            .viewport_content_length(transcript_rows)
-            .position(start);
-        StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(state.colors.scrollbar),
-            sb_area,
+        crate::render::scroll::draw_scrollbar(
             buf,
-            &mut sb_state,
+            sb_area,
+            total_rows,
+            transcript_rows,
+            start,
+            state.colors.scrollbar,
         );
     }
     let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
