@@ -323,24 +323,51 @@ pub struct SoundPulse {
 
 // ── Smooth transcript scroll ─────────────────────────────────────────────────
 
-/// An in-flight smooth-scroll animation for the transcript. `transcript_scroll`
-/// remains the logical target; this eases the *displayed* offset from `from` to
-/// `to` over the tween. Driven by the run loop, which sets `transcript_scroll = to`
-/// and clears this once the tween is `done()`.
+/// An in-flight smooth-scroll animation over a `usize` row offset. The logical
+/// target (e.g. `transcript_scroll`, a `ListScroll` offset) is updated
+/// immediately by the caller; this eases the *displayed* offset from `from` to
+/// `to` over the tween. Driven by the run loop, which snaps to `to` and clears
+/// this once the tween is `done()`. The single animated-offset type, reused by
+/// the transcript and by `ListScroll`.
 #[derive(Debug)]
 pub struct ScrollAnim {
     /// Displayed offset (rows) when the animation was armed.
-    pub from: f64,
+    pub from: usize,
     /// Target offset (rows) the animation eases toward.
-    pub to: f64,
+    pub to: usize,
     /// The timing curve.
     pub tween: crate::anim::Tween,
 }
 
 impl ScrollAnim {
+    /// Arm an animation easing the displayed offset from `from` to `to` per the
+    /// `[animation]` config. Returns `None` when animation is disabled or
+    /// `scroll_ms == 0` (the caller should jump instantly and clear any anim) —
+    /// the byte-for-byte instant path.
+    pub fn to(from: usize, to: usize, cfg: &crate::config::AnimationConfig) -> Option<Self> {
+        if !cfg.enabled || cfg.scroll_ms == 0 {
+            return None;
+        }
+        Some(Self {
+            from,
+            to,
+            tween: crate::anim::Tween::new(Duration::from_millis(cfg.scroll_ms), cfg.easing),
+        })
+    }
+
     /// The current displayed offset: `lerp(from, to, tween.progress())`.
     pub fn current(&self) -> f64 {
-        crate::anim::lerp(self.from, self.to, self.tween.progress())
+        crate::anim::lerp(self.from as f64, self.to as f64, self.tween.progress())
+    }
+
+    /// The settled target offset.
+    pub fn target(&self) -> usize {
+        self.to
+    }
+
+    /// True once the tween has reached its duration.
+    pub fn done(&self) -> bool {
+        self.tween.done()
     }
 }
 
@@ -1067,25 +1094,9 @@ impl AppState {
     /// current displayed offset toward `target`; otherwise jump instantly and
     /// clear any in-flight animation (exactly today's instant scroll).
     pub fn scroll_transcript_to(&mut self, target: u16) {
-        let from = self
-            .scroll_anim
-            .as_ref()
-            .map(|a| a.current())
-            .unwrap_or(self.transcript_scroll as f64);
+        let from = self.effective_transcript_scroll() as usize;
         self.transcript_scroll = target;
-        let anim = &self.config.animation;
-        if anim.enabled && anim.scroll_ms > 0 {
-            self.scroll_anim = Some(ScrollAnim {
-                from,
-                to: target as f64,
-                tween: crate::anim::Tween::new(
-                    std::time::Duration::from_millis(anim.scroll_ms),
-                    anim.easing,
-                ),
-            });
-        } else {
-            self.scroll_anim = None;
-        }
+        self.scroll_anim = ScrollAnim::to(from, target as usize, &self.config.animation);
     }
 
     /// The transcript offset to render this frame: the animated displayed offset
@@ -1729,8 +1740,8 @@ mod tests {
         s.sound_pulse = None;
 
         s.scroll_anim = Some(ScrollAnim {
-            from: 0.0,
-            to: 5.0,
+            from: 0,
+            to: 5,
             tween: crate::anim::Tween::new(
                 std::time::Duration::from_millis(100),
                 crate::anim::Easing::EaseOut,
@@ -1748,8 +1759,8 @@ mod tests {
         s.scroll_transcript_to(8);
         assert_eq!(s.transcript_scroll, 8, "logical target updated immediately");
         let a = s.scroll_anim.as_ref().expect("animation armed when enabled");
-        assert_eq!(a.from, 3.0, "from = previous displayed offset");
-        assert_eq!(a.to, 8.0, "to = new target");
+        assert_eq!(a.from, 3, "from = previous displayed offset");
+        assert_eq!(a.target(), 8, "to = new target");
     }
 
     #[test]
@@ -1780,8 +1791,8 @@ mod tests {
         // Immediately retarget: progress is ~0, so the new `from` is ~current (~0).
         s.scroll_transcript_to(4);
         let a = s.scroll_anim.as_ref().unwrap();
-        assert!(a.from >= 0.0 && a.from < 1.0, "retarget starts from current displayed offset, got {}", a.from);
-        assert_eq!(a.to, 4.0);
+        assert!(a.from < 1, "retarget starts from current displayed offset, got {}", a.from);
+        assert_eq!(a.target(), 4);
     }
 
     #[test]
@@ -1791,8 +1802,8 @@ mod tests {
         assert_eq!(s.effective_transcript_scroll(), 9, "no anim = logical target");
         // A done tween reports current() == to; the offset is line-rounded.
         s.scroll_anim = Some(ScrollAnim {
-            from: 0.0,
-            to: 4.0,
+            from: 0,
+            to: 4,
             tween: crate::anim::Tween::new(std::time::Duration::ZERO, crate::anim::Easing::Linear),
         });
         assert_eq!(s.effective_transcript_scroll(), 4, "done tween shows rounded target");
@@ -1801,8 +1812,8 @@ mod tests {
     #[test]
     fn scroll_anim_current_interpolates() {
         let a = ScrollAnim {
-            from: 2.0,
-            to: 10.0,
+            from: 2,
+            to: 10,
             tween: crate::anim::Tween::new(
                 std::time::Duration::from_millis(100),
                 crate::anim::Easing::Linear,
@@ -1811,6 +1822,25 @@ mod tests {
         // Right after construction progress is ~0, so current() is near `from`.
         let c = a.current();
         assert!(c >= 2.0 && c < 3.0, "current near from at start, got {c}");
+    }
+
+    #[test]
+    fn scroll_anim_instant_when_disabled() {
+        use crate::anim::Easing;
+        let cfg = crate::config::AnimationConfig { enabled: false, easing: Easing::EaseOut, scroll_ms: 120 };
+        assert!(ScrollAnim::to(0, 10, &cfg).is_none(), "disabled animation arms nothing");
+        let cfg0 = crate::config::AnimationConfig { enabled: true, easing: Easing::EaseOut, scroll_ms: 0 };
+        assert!(ScrollAnim::to(0, 10, &cfg0).is_none(), "scroll_ms = 0 arms nothing");
+    }
+
+    #[test]
+    fn scroll_anim_interpolates_then_settles() {
+        use crate::anim::Easing;
+        let cfg = crate::config::AnimationConfig { enabled: true, easing: Easing::Linear, scroll_ms: 40 };
+        let a = ScrollAnim::to(0, 10, &cfg).expect("armed");
+        assert_eq!(a.target(), 10);
+        let c = a.current();
+        assert!((0.0..=10.0).contains(&c), "current within range during ease: {c}");
     }
 
     #[test]

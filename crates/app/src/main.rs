@@ -1490,10 +1490,10 @@ fn main() {
             let done_to = state
                 .scroll_anim
                 .as_ref()
-                .filter(|a| a.tween.done())
-                .map(|a| a.to);
+                .filter(|a| a.done())
+                .map(|a| a.target());
             if let Some(to) = done_to {
-                state.transcript_scroll = to.round() as u16;
+                state.transcript_scroll = to as u16;
                 state.scroll_anim = None;
             }
             continue;
