@@ -265,9 +265,10 @@ pub fn init_header_caps(mem: &mut Memory) {
     // Interpreter version (0x1F): b'A' = 0x41.
     mem.write_byte(0x1F, b'A');
 
-    // Standard revision (0x32 = major, 0x33 = minor): 1.2 (latest published).
+    // Standard revision (0x32 = major, 0x33 = minor): 1.1 — the only published
+    // Z-Machine Standards Document revision (ZMSD 1.1); no "1.2" exists.
     mem.write_byte(0x32, 1);
-    mem.write_byte(0x33, 2);
+    mem.write_byte(0x33, 1);
 
     // Screen dimensions (ZMSD §11.1). Without these the header keeps the story
     // file's defaults (usually 0), and size-sensitive games (notably Bureaucracy)
@@ -487,6 +488,16 @@ mod tests {
         write_screen_dims(&mut mem, 0, 0);
         assert_eq!(mem.read_byte(0x20), 1, "zero rows clamped to 1");
         assert_eq!(mem.read_byte(0x21), 1, "zero cols clamped to 1");
+    }
+
+    #[test]
+    fn header_caps_writes_standard_revision_1_1() {
+        // ZMSD 1.1 is the only published standard revision; advertise major=1,
+        // minor=1 (bytes 0x32/0x33), not a non-existent "1.2".
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem);
+        assert_eq!(mem.read_byte(0x32), 1, "standard revision major = 1");
+        assert_eq!(mem.read_byte(0x33), 1, "standard revision minor = 1");
     }
 
     #[test]
