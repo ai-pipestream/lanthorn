@@ -123,7 +123,8 @@ impl Output for StdoutOutput {
     }
 
     fn print_styled(&mut self, s: &str, style: u8) {
-        let out = crate::screen::style_wrap(s, style, self.is_tty);
+        use zvm::io::TextAttrs;
+        let out = crate::screen::style_wrap(s, TextAttrs { style, ..Default::default() }, self.is_tty);
         self.write_counted(&out);
     }
 
@@ -594,8 +595,9 @@ mod stdout_tests {
     // manual smoke; this pins the wrapping helper the sink must use.
     #[test]
     fn print_styled_wraps_only_on_tty() {
-        assert_eq!(crate::screen::style_wrap("hi", 2, true), "\x1b[1mhi\x1b[0m");
-        assert_eq!(crate::screen::style_wrap("hi", 2, false), "hi");
+        use zvm::io::TextAttrs;
+        assert_eq!(crate::screen::style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, true), "\x1b[1mhi\x1b[0m");
+        assert_eq!(crate::screen::style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, false), "hi");
     }
 }
 

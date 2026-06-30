@@ -1,7 +1,8 @@
 //! Basic DOS-style screen model for zvm-cli: pure formatting/SGR/terminal
 //! helpers (this module) plus the stateful `ScreenView` (Task 3).
 
-use zvm::screen::{StatusLine, StatusRight, UpperWindow};
+use zvm::io::TextAttrs;
+use zvm::screen::{StatusLine, StatusRight, UpperWindow, ZColour, grey_rgb, rgb15_to_888};
 
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
@@ -22,12 +23,38 @@ pub fn sgr_set(style: u8) -> String {
     s
 }
 
-/// Wrap lower-window text in SGR when on a TTY and a style is set; else plain.
-pub fn style_wrap(s: &str, style: u8, is_tty: bool) -> String {
-    if !is_tty || style == 0 {
+/// Push SGR parameters for one colour channel. `fg` selects 3x vs 4x codes.
+fn push_colour_sgr(params: &mut Vec<String>, c: ZColour, fg: bool) {
+    let (base_std, base_true) = if fg { (30u16, 38u16) } else { (40u16, 48u16) };
+    match c {
+        ZColour::Default => {}
+        ZColour::Standard(n @ 2..=9) => params.push((base_std + (n as u16 - 2)).to_string()),
+        ZColour::Standard(n) => {
+            let (r, g, b) = grey_rgb(n);
+            params.push(format!("{};2;{};{};{}", base_true, r, g, b));
+        }
+        ZColour::True(v) => {
+            let (r, g, b) = rgb15_to_888(v);
+            params.push(format!("{};2;{};{};{}", base_true, r, g, b));
+        }
+    }
+}
+
+/// Wrap lower-window text in SGR when on a TTY and any style/colour is active; else plain.
+pub fn style_wrap(s: &str, attrs: TextAttrs, is_tty: bool) -> String {
+    if !is_tty {
         return s.to_string();
     }
-    format!("{}{}\x1b[0m", sgr_set(style), s)
+    let mut params: Vec<String> = Vec::new();
+    if attrs.style & 0x01 != 0 { params.push("7".into()); }
+    if attrs.style & 0x02 != 0 { params.push("1".into()); }
+    if attrs.style & 0x04 != 0 { params.push("3".into()); }
+    push_colour_sgr(&mut params, attrs.fg, true);
+    push_colour_sgr(&mut params, attrs.bg, false);
+    if params.is_empty() {
+        return s.to_string();
+    }
+    format!("\x1b[{}m{}\x1b[0m", params.join(";"), s)
 }
 
 /// Terminal BEL per bleep, TTY-gated.
@@ -329,6 +356,31 @@ mod view_tests {
 }
 
 #[cfg(test)]
+mod colour_tests {
+    use super::*;
+    use zvm::io::TextAttrs;
+    use zvm::screen::ZColour;
+
+    #[test]
+    fn style_wrap_emits_colour_sgr() {
+        // standard fg=red(3)->31, bg=blue(6)->44
+        let a = TextAttrs { style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) };
+        assert_eq!(style_wrap("x", a, true), "\x1b[31;44mx\x1b[0m");
+        // default channels emit nothing; no attrs → no wrap
+        let d = TextAttrs { style: 0, fg: ZColour::Default, bg: ZColour::Default };
+        assert_eq!(style_wrap("x", d, true), "x");
+        // true colour fg
+        let t = TextAttrs { style: 0, fg: ZColour::True(0x7FFF), bg: ZColour::Default };
+        assert_eq!(style_wrap("x", t, true), "\x1b[38;2;255;255;255mx\x1b[0m");
+        // grey 11 -> 808080
+        let g = TextAttrs { style: 0, fg: ZColour::Standard(11), bg: ZColour::Default };
+        assert_eq!(style_wrap("x", g, true), "\x1b[38;2;128;128;128mx\x1b[0m");
+        // non-tty stays plain
+        assert_eq!(style_wrap("x", a, false), "x");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use zvm::screen::{StatusLine, StatusRight, UpperWindow, ZColour};
@@ -345,9 +397,10 @@ mod tests {
 
     #[test]
     fn style_wrap_only_when_tty_and_styled() {
-        assert_eq!(style_wrap("hi", 0, true), "hi");
-        assert_eq!(style_wrap("hi", 2, false), "hi");
-        assert_eq!(style_wrap("hi", 2, true), "\x1b[1mhi\x1b[0m");
+        use zvm::io::TextAttrs;
+        assert_eq!(style_wrap("hi", TextAttrs { style: 0, ..Default::default() }, true), "hi");
+        assert_eq!(style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, false), "hi");
+        assert_eq!(style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, true), "\x1b[1mhi\x1b[0m");
     }
 
     #[test]
