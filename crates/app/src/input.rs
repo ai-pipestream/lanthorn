@@ -275,6 +275,12 @@ pub enum Action {
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
     ConfigNav(i32),
+    /// Page the config screen list by one viewport (-1 = PageUp, +1 = PageDown).
+    ConfigPage(i32),
+    /// Jump to the first config row.
+    ConfigHome,
+    /// Jump to the last config row.
+    ConfigEnd,
     /// Toggle the selected bool field in the working config.
     ConfigToggle,
     /// Cycle an enum/choice field in the working config by delta (-1 or +1).
@@ -1319,6 +1325,10 @@ fn config_screen_key_to_action(key: KeyEvent, focus: usize) -> Action {
     match key.code {
         KeyCode::Up => Action::ConfigNav(-1),
         KeyCode::Down => Action::ConfigNav(1),
+        KeyCode::PageUp => Action::ConfigPage(-1),
+        KeyCode::PageDown => Action::ConfigPage(1),
+        KeyCode::Home => Action::ConfigHome,
+        KeyCode::End => Action::ConfigEnd,
         KeyCode::Left => Action::ConfigCycle(-1),
         KeyCode::Right => Action::ConfigCycle(1),
         KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => Action::ConfigToggle,
@@ -2816,34 +2826,66 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let working = clone_config(&state.config);
             state.config_screen = Some(crate::state::ConfigScreenState {
                 working,
-                selected: 0,
+                scroll: Default::default(),
             });
         }
 
         Action::ConfigNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(cs) = &mut state.config_screen {
-                let n = CONFIG_ROW_COUNT as i32;
-                cs.selected = ((cs.selected as i32 + delta).rem_euclid(n)) as usize;
+                let n = CONFIG_ROW_COUNT;
+                cs.scroll.len(n);
+                // Preserve the existing wrap-around behavior via select().
+                let next = ((cs.scroll.selected as i32 + delta).rem_euclid(n as i32)) as usize;
+                cs.scroll.select(next, vp, &anim);
+            }
+        }
+
+        Action::ConfigPage(dir) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(cs) = &mut state.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.page(dir, vp, &anim);
+            }
+        }
+
+        Action::ConfigHome => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(cs) = &mut state.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.home(vp, &anim);
+            }
+        }
+
+        Action::ConfigEnd => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(cs) = &mut state.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.end(CONFIG_ROW_COUNT, vp, &anim);
             }
         }
 
         Action::ConfigToggle => {
             if state.config_screen.is_some() {
                 // Split the borrow: take the selected row, then call helper.
-                let selected = state.config_screen.as_ref().map(|cs| cs.selected).unwrap_or(0);
+                let selected = state.config_screen.as_ref().map(|cs| cs.scroll.selected).unwrap_or(0);
                 config_toggle_or_edit(selected, state);
             }
         }
 
         Action::ConfigCycle(delta) => {
             if let Some(cs) = &mut state.config_screen {
-                config_cycle(&mut cs.working, cs.selected, delta);
+                config_cycle(&mut cs.working, cs.scroll.selected, delta);
             }
         }
 
         Action::ConfigEdit => {
             if let Some(cs) = &state.config_screen {
-                let field = config_path_field(cs.selected);
+                let field = config_path_field(cs.scroll.selected);
                 if let Some(f) = field {
                     let current = match &f {
                         crate::state::ConfigPathField::UserDir => cs.working.user_dir.to_string_lossy().to_string(),
@@ -6084,7 +6126,7 @@ mod tests {
         // State with config_screen open (so dialog routing knows which modal).
         let mut state = AppState::default();
         let working = crate::input::clone_config(&state.config);
-        state.config_screen = Some(ConfigScreenState { working, selected: 0 });
+        state.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
 
         let map   = Rect::default();
         let story = Rect::default();
@@ -6113,7 +6155,7 @@ mod tests {
         // ESC in config screen should produce ConfigCancel (same as [X] and Cancel button).
         let mut s = AppState::default();
         let working = crate::input::clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::ConfigCancel), "ESC in config screen should produce ConfigCancel");
     }
@@ -6359,7 +6401,7 @@ mod tests {
         {
             let mut s = AppState::default();
             let working = clone_config(&s.config);
-            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::ConfigCancel),
                 "config screen ESC should produce ConfigCancel, got {:?}", esc_action);
@@ -6438,7 +6480,7 @@ mod tests {
         {
             let mut s = AppState::default();
             let working = clone_config(&s.config);
-            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::ConfigCancel),
                 "q must not cancel the config screen");
@@ -6577,7 +6619,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         s.dialog_focus = cycle_focus(0, 2, 1); // focus Cancel (index 1)
         let a = config_screen_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -6592,7 +6634,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         s.dialog_focus = 0; // focus Save (default)
         let a = config_screen_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -6607,7 +6649,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         // Space must toggle the selected row regardless of focus.
         for focus in [0, 1] {
             let a = config_screen_key_to_action(

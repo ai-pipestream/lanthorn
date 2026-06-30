@@ -35,7 +35,7 @@ fn ensure_visible(offset: usize, selected: usize, viewport: usize) -> usize {
 }
 
 /// A list's selection index plus an animated first-visible-row offset.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ListScroll {
     /// Highlighted item index.
     pub selected: usize,

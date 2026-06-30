@@ -329,7 +329,7 @@ pub struct SoundPulse {
 /// `to` over the tween. Driven by the run loop, which snaps to `to` and clears
 /// this once the tween is `done()`. The single animated-offset type, reused by
 /// the transcript and by `ListScroll`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ScrollAnim {
     /// Displayed offset (rows) when the animation was armed.
     pub from: usize,
@@ -666,8 +666,8 @@ pub struct ConfigScreenState {
     /// A working copy of the config, edited in the modal.
     /// On Save this is copied to `state.config`; on Cancel it is dropped.
     pub working: crate::config::Config,
-    /// Index of the currently-selected row.
-    pub selected: usize,
+    /// Selection + animated scroll offset for the settings list.
+    pub scroll: crate::list_scroll::ListScroll,
 }
 
 /// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
@@ -751,6 +751,11 @@ pub struct AppState {
     /// Which categories of transcript entries are currently visible.
     pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
+    /// List-row viewport (rows) of the currently-open selection-list modal,
+    /// captured from the last render so `apply_action` nav can keep the
+    /// selection visible and arm scroll animations (mirrors the transcript's
+    /// `transcript_viewport_rows`). 0 when no list modal is open.
+    pub modal_list_viewport: usize,
     pub input: String,
     // Reserved for future status-bar messages (not yet displayed).
     #[allow(dead_code)]
@@ -1010,6 +1015,7 @@ impl Default for AppState {
             transcript_runs: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
+            modal_list_viewport: 0,
             input: String::new(),
             status: String::new(),
             status_msg: None,
@@ -1870,7 +1876,7 @@ mod tests {
         // config_screen
         s.config_screen = Some(ConfigScreenState {
             working: crate::config::Config::default(),
-            selected: 0,
+            scroll: Default::default(),
         });
         assert!(s.any_overlay_open(), "config_screen open => any_overlay_open true");
         s.config_screen = None;

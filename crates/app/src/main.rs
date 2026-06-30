@@ -244,6 +244,10 @@ struct PaneRects {
     /// Visible transcript rows this frame (the transcript viewport height). Used
     /// to size a PageUp/PageDown step. 0 when no transcript is shown (MapFull).
     pub transcript_viewport_rows: u16,
+    /// List-row viewport of the open selection-list modal this frame, synced to
+    /// `AppState.modal_list_viewport` so nav actions can window/animate. 0 when
+    /// no list modal is open.
+    pub modal_list_viewport: usize,
 }
 
 /// Escape hatch: borrow the concrete Z-machine `GameSession` behind a
@@ -349,6 +353,7 @@ fn draw_frame(
     let mut style_editor_rects_out: Option<StyleEditorRects> = None;
     let mut glyph_picker_rects_out: Option<app::render::glyph_picker::GlyphPickerRects> = None;
     let mut selection_text_out: Option<String> = None;
+    let mut modal_list_viewport: usize = 0;
     let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
@@ -695,7 +700,7 @@ fn draw_frame(
 
         // ── Config screen overlay — drawn after other modals ──────────────────
         if state.config_screen.is_some() {
-            dialog_rects_out = draw_config_screen(state, full, buf);
+            dialog_rects_out = draw_config_screen(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Style editor overlay — full-screen, drawn after config screen ──────
@@ -803,7 +808,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1334,7 +1339,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1452,6 +1457,9 @@ fn main() {
                 // over-scroll past the top doesn't accumulate (and lag on the
                 // way back down).
                 state.transcript_scroll = state.transcript_scroll.min(panes.transcript_max_scroll);
+                // Carry this frame's modal list viewport so the next nav action
+                // can window/animate the open selection-list modal.
+                state.modal_list_viewport = panes.modal_list_viewport;
                 last_panes = panes;
             }
             Err(e) => {
