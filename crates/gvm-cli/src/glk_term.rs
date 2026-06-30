@@ -17,6 +17,10 @@ use gvm::glk::{GlkBackend, GlkStyle, Rect, WinType};
 /// always resets the column to 0. When `cols` is 0 the text is returned
 /// unchanged (no wrap — used when stdout is not a TTY, to keep piped output
 /// byte-identical).
+///
+/// This function is retained for its own unit tests; production wrapping is
+/// now handled by the stateful pending-word buffer in `put_text`.
+#[cfg(test)]
 pub fn soft_wrap(text: &str, cols: u32, current_col: u32) -> (String, u32) {
     if cols == 0 {
         // Compute new_col consistently even without wrapping.
@@ -137,6 +141,13 @@ pub struct TerminalBackend {
     /// Current column position in the buffer window (for soft word-wrap).
     /// Reset to 0 after each explicit or soft newline, and on flush.
     current_col: u32,
+    /// Pending word: chars accumulated since the last space or newline (TTY
+    /// only). Flushed — with a leading newline if the word doesn't fit on the
+    /// current line — when a space, newline, or explicit flush arrives.
+    pending_word: String,
+    /// Style of the chars in `pending_word`. On a mid-word style change the
+    /// accumulated portion is flushed with the old style before switching.
+    pending_word_style: GlkStyle,
     /// The tracked status grid window id (first TextGrid opened), if any.
     grid_win: Option<u32>,
     grid_rect: Rect,
@@ -165,6 +176,8 @@ impl TerminalBackend {
             cols,
             rows,
             current_col: 0,
+            pending_word: String::new(),
+            pending_word_style: GlkStyle::Normal,
             grid_win: None,
             grid_rect: Rect::default(),
             grid_cells: Vec::new(),
@@ -183,6 +196,8 @@ impl TerminalBackend {
             cols,
             rows,
             current_col: 0,
+            pending_word: String::new(),
+            pending_word_style: GlkStyle::Normal,
             grid_win: None,
             grid_rect: Rect::default(),
             grid_cells: Vec::new(),
@@ -204,9 +219,58 @@ impl TerminalBackend {
         }
     }
 
+    /// Emit the pending word (if any) to the output, inserting a newline before
+    /// it when the word would overflow the current line. Updates `current_col`.
+    fn flush_pending_word(&mut self) {
+        if self.pending_word.is_empty() {
+            return;
+        }
+        let style = self.pending_word_style;
+        let wlen = self.pending_word.chars().count() as u32;
+        if self.current_col > 0 && self.current_col + wlen > self.cols {
+            let _ = self.out.write_all(b"\n");
+            self.current_col = 0;
+        }
+        let text = style_wrap(&self.pending_word, style, self.is_tty);
+        let _ = self.out.write_all(text.as_bytes());
+        self.current_col += wlen;
+        self.pending_word.clear();
+    }
+
+    /// Called when `pending_word` has grown to `>= cols` characters and can
+    /// never fit on a single line. Hard-breaks the accumulated word at the
+    /// column limit (character wrap) so accumulation cannot grow unboundedly.
+    fn flush_overlong_pending(&mut self) {
+        let style = self.pending_word_style;
+        let word = std::mem::take(&mut self.pending_word);
+        // Move to a new line first if the word won't fit from the current column.
+        let wlen = word.chars().count() as u32;
+        if self.current_col > 0 && self.current_col + wlen > self.cols {
+            let _ = self.out.write_all(b"\n");
+            self.current_col = 0;
+        }
+        // Emit chars one at a time, inserting '\n' each time we reach the limit.
+        let mut result = String::with_capacity(word.len() + 4);
+        for ch in word.chars() {
+            if self.current_col >= self.cols {
+                result.push('\n');
+                self.current_col = 0;
+            }
+            result.push(ch);
+            self.current_col += 1;
+        }
+        let text = style_wrap(&result, style, self.is_tty);
+        let _ = self.out.write_all(text.as_bytes());
+    }
+
     /// Flush buffered output to the display **without** tearing down the scroll
     /// region (used before reading input, so the prompt is visible mid-run).
     pub fn flush_out(&mut self) {
+        // Emit any word still sitting in the pending buffer before blocking on
+        // input — without this, the last word before a prompt would be invisible.
+        if !self.pending_word.is_empty() {
+            self.flush_pending_word();
+        }
         let _ = self.out.flush();
     }
 
@@ -269,11 +333,9 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn put_text(&mut self, _win: u32, style: GlkStyle, s: &str) {
-        // Soft-wrap text at the terminal column width when on a TTY.  Grid
-        // windows use `grid_put` (never `put_text`), so wrapping here is safe
-        // for all TextBuffer output.  When piped (is_tty = false) wrap cols is
-        // 0 which leaves the text unchanged, preserving byte-identical piped
-        // output.
+        // When piped (not a TTY), pass through byte-identical — no buffering, no
+        // wrap. `cols == 0` is the non-TTY sentinel for the soft_wrap helper and
+        // is logged below but never used in the new char-by-char path.
         let wrap_cols = if self.is_tty { self.cols } else { 0 };
         if self.debug {
             eprintln!(
@@ -281,10 +343,47 @@ impl GlkBackend for TerminalBackend {
                 self.is_tty, self.cols, wrap_cols, self.current_col, s.chars().count()
             );
         }
-        let (wrapped, new_col) = soft_wrap(s, wrap_cols, self.current_col);
-        self.current_col = new_col;
-        let text = style_wrap(&wrapped, style, self.is_tty);
-        let _ = self.out.write_all(text.as_bytes());
+        if !self.is_tty {
+            let _ = self.out.write_all(s.as_bytes());
+            return;
+        }
+
+        // TTY: buffer chars into a pending word. Whole words are placed at a
+        // time, so breaks always happen at space boundaries even when the game
+        // sends one character per call (as Glulx games do via glk_put_char).
+        for ch in s.chars() {
+            match ch {
+                '\n' => {
+                    self.flush_pending_word();
+                    let _ = self.out.write_all(b"\n");
+                    self.current_col = 0;
+                }
+                ' ' => {
+                    self.flush_pending_word();
+                    // Drop a trailing space that would push past the right margin
+                    // (same normalisation as the previous soft_wrap helper).
+                    if self.current_col + 1 <= self.cols {
+                        let _ = self.out.write_all(b" ");
+                        self.current_col += 1;
+                    }
+                }
+                _ => {
+                    // On a mid-word style change (rare) flush the old portion
+                    // first so each styled run gets its own SGR wrap.
+                    if self.pending_word_style != style && !self.pending_word.is_empty() {
+                        self.flush_pending_word();
+                    }
+                    self.pending_word_style = style;
+                    self.pending_word.push(ch);
+                    // Overlong-word guard: if the accumulated word has reached the
+                    // column width it can never fit on one line — hard-break it
+                    // now so the buffer cannot grow without bound.
+                    if self.pending_word.chars().count() as u32 >= self.cols {
+                        self.flush_overlong_pending();
+                    }
+                }
+            }
+        }
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
@@ -315,6 +414,11 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn flush(&mut self) {
+        // Emit any word still pending in the char-stream buffer before tearing
+        // down the scroll region, so text that precedes glk_select is visible.
+        if !self.pending_word.is_empty() {
+            self.flush_pending_word();
+        }
         if self.region_set {
             let _ = self.out.write_all(leave_region().as_bytes());
             let _ = write!(self.out, "\x1b[{};1H", self.rows);
@@ -510,6 +614,8 @@ mod tests {
     fn tty_styles_buffer_output() {
         let (mut b, buf) = backend(true);
         b.put_text(1, GlkStyle::Emphasized, "ahem");
+        // "ahem" is buffered until flush_out() since it has no trailing space.
+        b.flush_out();
         assert_eq!(out_string(&buf), "\x1b[3mahem\x1b[0m");
     }
 
@@ -519,6 +625,9 @@ mod tests {
         let buf = Rc::new(RefCell::new(Vec::new()));
         let mut b = TerminalBackend::with_writer(Box::new(SharedWriter(buf.clone())), true, 20, 24);
         b.put_text(1, GlkStyle::Normal, "hello world foo bar baz");
+        // "baz" has no trailing space so it sits in the pending buffer until
+        // flush_out() is called (mimicking what happens before glk_select).
+        b.flush_out();
         let out = String::from_utf8(buf.borrow().clone()).unwrap();
         // Should contain at least one soft newline
         assert!(out.contains('\n'), "long line wrapped: {out:?}");
@@ -535,5 +644,113 @@ mod tests {
         b.put_text(1, GlkStyle::Normal, "hello world foo bar baz");
         let out = String::from_utf8(buf.borrow().clone()).unwrap();
         assert!(!out.contains('\n'), "piped output must not be wrapped: {out:?}");
+    }
+
+    // ── char-stream word-wrap tests (TDD for the Glulx glk_put_char fix) ──────
+
+    #[test]
+    fn char_stream_wraps_at_word_boundary_not_mid_word() {
+        // Glulx games emit one char per put_text call. With cols=10,
+        // character-based wrapping would split "world" (chars 7-11 straddle col
+        // 10). Word-based wrapping must keep the whole word intact on one line.
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut b =
+            TerminalBackend::with_writer(Box::new(SharedWriter(buf.clone())), true, 10, 24);
+        for ch in "hello world foo".chars() {
+            b.put_text(1, GlkStyle::Normal, &ch.to_string());
+        }
+        // "foo" has no trailing space — flush it explicitly, as happens before
+        // an input prompt.
+        b.flush_out();
+        let out = String::from_utf8(buf.borrow().clone()).unwrap();
+        // Every output line must fit within cols.
+        for line in out.lines() {
+            assert!(
+                line.chars().count() <= 10,
+                "line exceeds cols=10: {line:?} (full output: {out:?})"
+            );
+        }
+        // Every word must appear intact on some output line (no mid-word split).
+        for word in &["hello", "world", "foo"] {
+            assert!(
+                out.lines().any(|l| l.contains(word)),
+                "word {word:?} must appear intact on one line: {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_word_hard_breaks() {
+        // A single word longer than cols must hard-break rather than hang or
+        // produce lines that exceed the column width.
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut b =
+            TerminalBackend::with_writer(Box::new(SharedWriter(buf.clone())), true, 10, 24);
+        // "superlongword" is 13 chars which exceeds cols=10.
+        for ch in "superlongword".chars() {
+            b.put_text(1, GlkStyle::Normal, &ch.to_string());
+        }
+        b.flush_out();
+        let out = String::from_utf8(buf.borrow().clone()).unwrap();
+        for line in out.lines() {
+            assert!(
+                line.chars().count() <= 10,
+                "hard-break: line exceeds cols=10: {line:?} (full: {out:?})"
+            );
+        }
+        // All characters must appear in the output — none dropped.
+        let text: String = out.chars().filter(|&c| c != '\n').collect();
+        assert_eq!(text, "superlongword", "all chars preserved after hard-break: {out:?}");
+    }
+
+    #[test]
+    fn explicit_newlines_honored_in_char_stream() {
+        // Explicit '\\n' in the char stream must be honoured and reset the
+        // column counter, regardless of column position.
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut b =
+            TerminalBackend::with_writer(Box::new(SharedWriter(buf.clone())), true, 20, 24);
+        for ch in "foo\nbar".chars() {
+            b.put_text(1, GlkStyle::Normal, &ch.to_string());
+        }
+        b.flush_out(); // flush "bar" (no trailing space)
+        let out = String::from_utf8(buf.borrow().clone()).unwrap();
+        assert!(out.contains("foo\nbar"), "explicit newline preserved: {out:?}");
+    }
+
+    #[test]
+    fn flush_out_emits_pending_word() {
+        // A word buffered with no trailing space must be invisible until
+        // flush_out() is called (matching what happens before glk_select).
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut b =
+            TerminalBackend::with_writer(Box::new(SharedWriter(buf.clone())), true, 20, 24);
+        for ch in "foo".chars() {
+            b.put_text(1, GlkStyle::Normal, &ch.to_string());
+        }
+        // "foo" has no trailing space — must still be buffered.
+        assert!(
+            !out_string(&buf).contains("foo"),
+            "pending word must not be emitted before flush_out: {:?}",
+            out_string(&buf)
+        );
+        b.flush_out();
+        assert!(
+            out_string(&buf).contains("foo"),
+            "pending word must appear after flush_out: {:?}",
+            out_string(&buf)
+        );
+    }
+
+    #[test]
+    fn piped_char_by_char_unchanged() {
+        // Non-TTY output must be byte-identical even when chars arrive one at a
+        // time — no buffering, no newlines inserted.
+        let (mut b, buf) = backend(false);
+        for ch in "hello world foo bar baz".chars() {
+            b.put_text(1, GlkStyle::Normal, &ch.to_string());
+        }
+        assert_eq!(out_string(&buf), "hello world foo bar baz");
+        assert!(!out_string(&buf).contains('\n'), "piped char-by-char: no newlines inserted");
     }
 }
