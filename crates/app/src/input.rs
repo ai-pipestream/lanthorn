@@ -819,6 +819,19 @@ fn gallery_dialog_action(
     None
 }
 
+/// Map a vertical mouse-wheel event to a step: `ScrollUp` → `-1`, `ScrollDown`
+/// → `+1`, swapped when `invert`; `None` for non-wheel events. The single place
+/// wheel direction and the `mouse_wheel_invert` preference are resolved, so no
+/// surface re-implements the invert.
+pub fn wheel_delta(kind: MouseEventKind, invert: bool) -> Option<isize> {
+    let base = match kind {
+        MouseEventKind::ScrollUp => -1,
+        MouseEventKind::ScrollDown => 1,
+        _ => return None,
+    };
+    Some(if invert { -base } else { base })
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
 /// bounding rects of the map and story panes, the pre-computed room screen
 /// rects (needed for pixel-accurate room hit-testing on left/right clicks), and
@@ -861,15 +874,16 @@ pub fn mouse_to_action(
     // Each list modal reuses its existing Up/Down nav action (no new scroll
     // state). Corner overlays (room panel, tidy) are intentionally absent — the
     // wheel still pans the map under them, as before.
-    let wheel_up = match kind {
-        MouseEventKind::ScrollUp => Some(true),
-        MouseEventKind::ScrollDown => Some(false),
-        _ => None,
-    };
+    // `kind` already has the single mouse_wheel_invert applied (above), so map it
+    // to a direction with the shared helper and invert=false (never twice).
+    let wheel_up = wheel_delta(kind, false).map(|d| d < 0);
     if let Some(up) = wheel_up {
         // Priority mirrors the keyboard modal routing order above.
         if state.gallery.is_some() {
             return if up { Action::GalleryPrev } else { Action::GalleryNext };
+        }
+        if state.config_screen.is_some() {
+            return if up { Action::ConfigNav(-1) } else { Action::ConfigNav(1) };
         }
         if state.saves.is_some() {
             return if up { Action::SavesNav(-1) } else { Action::SavesNav(1) };
@@ -5155,6 +5169,16 @@ mod tests {
         // viewport of 0 or 1 → page floors at 1 line so paging still progresses.
         assert_eq!(page_scroll(0, 1, 1, 100), 1);
         assert_eq!(page_scroll(0, 1, 0, 100), 1);
+    }
+
+    #[test]
+    fn wheel_delta_maps_and_inverts_once() {
+        use crossterm::event::MouseEventKind::*;
+        assert_eq!(wheel_delta(ScrollUp, false), Some(-1));
+        assert_eq!(wheel_delta(ScrollDown, false), Some(1));
+        assert_eq!(wheel_delta(ScrollUp, true), Some(1));
+        assert_eq!(wheel_delta(ScrollDown, true), Some(-1));
+        assert_eq!(wheel_delta(Moved, false), None);
     }
 
     #[test]

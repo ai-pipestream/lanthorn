@@ -906,20 +906,17 @@ fn run_story_picker(
             }
             Ok(Event::Mouse(m)) => {
                 use crossterm::event::{MouseButton, MouseEventKind};
-                match m.kind {
-                    MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
-                    MouseEventKind::ScrollDown => {
-                        if selected + 1 < stories.len() {
-                            selected += 1;
-                        }
+                if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                    let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                    if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
+                        break Some(stories[*idx].path.clone());
                     }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
-                            break Some(stories[*idx].path.clone());
-                        }
+                } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
+                    if d < 0 {
+                        selected = selected.saturating_sub(1);
+                    } else if selected + 1 < stories.len() {
+                        selected += 1;
                     }
-                    _ => {}
                 }
             }
             Ok(Event::Resize(_, _)) => {
@@ -1836,17 +1833,15 @@ fn main() {
                             }
                             // Clicks inside the dialog but not on close: swallow.
                         }
-                    } else if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    } else if let Some(d) = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert) {
                         // Wheel drives the hint transcript's own scroll. The panel
-                        // is intercepted before mouse_to_action, so apply the
-                        // mouse_wheel_invert preference here (mirroring that helper).
-                        let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
-                        let up = raw_up ^ state.config.mouse_wheel_invert;
+                        // is intercepted before mouse_to_action, so resolve the
+                        // direction (and mouse_wheel_invert) via the shared helper.
                         let max = last_panes.hints_panel.as_ref().map_or(0, |hp| hp.max_scroll);
                         if let Some(hs) = &mut state.hints {
-                            // Wheel up → older content (increase scroll), matching
-                            // the story transcript's wheel direction.
-                            hs.scroll_by(if up { 1 } else { -1 }, max);
+                            // Wheel up (d < 0) → older content (increase scroll),
+                            // matching the story transcript's wheel direction.
+                            hs.scroll_by(if d < 0 { 1 } else { -1 }, max);
                         }
                     }
                 }
