@@ -1159,11 +1159,13 @@ impl Machine {
                 self.do_store(store, result as u16);
                 StepResult::Continue
             }
-            // EXT:0x04 set_font — one fixed font (id 1). font 1 or 0(query) -> previous (1);
-            // any other requested font is unavailable -> 0. No actual font change.
+            // EXT:0x04 set_font — font 0 (query), 1 (normal) and 4 (Courier/fixed-pitch)
+            // are all rendered identically on a fixed character grid, so each is
+            // accepted and reports the previous font (1). Other fonts (e.g. 2 =
+            // picture, v6) are unavailable -> 0. No actual font change.
             0x04 => {
                 let requested = ops.first().copied().unwrap_or(0);
-                let result = if requested == 0 || requested == 1 { 1 } else { 0 };
+                let result = if requested == 0 || requested == 1 || requested == 4 { 1 } else { 0 };
                 self.do_store(store, result);
                 StepResult::Continue
             }
@@ -4131,8 +4133,8 @@ pub(crate) mod tests {
         let mut m = Machine::new(mem);
         m.state.pc = 0x10;
         run_until_quit(&mut m);
-        assert_eq!(m.global(0), 1, "font 1 available -> 1");
-        assert_eq!(m.global(1), 0, "font 4 unavailable -> 0");
+        assert_eq!(m.global(0), 1, "font 1 available -> previous font (1)");
+        assert_eq!(m.global(1), 1, "font 4 (Courier/fixed-pitch) accepted -> previous font (1)");
     }
 
     #[test]
