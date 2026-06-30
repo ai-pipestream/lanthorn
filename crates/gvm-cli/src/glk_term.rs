@@ -146,6 +146,8 @@ pub struct TerminalBackend {
     region_set: bool,
     /// Whether the screen has been initialized (cleared) once.
     started: bool,
+    /// Emit terminal-detection diagnostics to stderr (env `BABELMAP_DEBUG_TERM`).
+    debug: bool,
 }
 
 impl TerminalBackend {
@@ -153,6 +155,10 @@ impl TerminalBackend {
     pub fn new() -> Self {
         let is_tty = io::stdout().is_terminal();
         let (cols, rows) = detect_size();
+        let debug = std::env::var_os("BABELMAP_DEBUG_TERM").is_some();
+        if debug {
+            eprintln!("[term] new: is_tty={is_tty} cols={cols} rows={rows}");
+        }
         TerminalBackend {
             out: Box::new(io::stdout()),
             is_tty,
@@ -164,6 +170,7 @@ impl TerminalBackend {
             grid_cells: Vec::new(),
             region_set: false,
             started: false,
+            debug,
         }
     }
 
@@ -181,6 +188,7 @@ impl TerminalBackend {
             grid_cells: Vec::new(),
             region_set: false,
             started: false,
+            debug: false,
         }
     }
 
@@ -261,6 +269,12 @@ impl GlkBackend for TerminalBackend {
         // 0 which leaves the text unchanged, preserving byte-identical piped
         // output.
         let wrap_cols = if self.is_tty { self.cols } else { 0 };
+        if self.debug {
+            eprintln!(
+                "[term] put_text: is_tty={} cols={} wrap_cols={} col={} len={}",
+                self.is_tty, self.cols, wrap_cols, self.current_col, s.chars().count()
+            );
+        }
         let (wrapped, new_col) = soft_wrap(s, wrap_cols, self.current_col);
         self.current_col = new_col;
         let text = style_wrap(&wrapped, style, self.is_tty);
@@ -268,6 +282,9 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
+        if self.debug {
+            eprintln!("[term] grid_put: win={win} x={x} y={y} len={}", s.chars().count());
+        }
         if self.grid_win.is_none() {
             self.grid_win = Some(win);
         }
