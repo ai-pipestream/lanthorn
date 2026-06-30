@@ -8,6 +8,16 @@
 
 use std::any::Any;
 
+use crate::screen::ZColour;
+
+/// Text attributes for one styled run (logical colour, pre-reverse-swap).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TextAttrs {
+    pub style: u8,
+    pub fg: ZColour,
+    pub bg: ZColour,
+}
+
 /// Trait for Z-machine text output sinks.
 pub trait Output: Any {
     fn print(&mut self, s: &str);
@@ -17,6 +27,12 @@ pub trait Output: Any {
     /// unaffected until they override this.
     fn print_styled(&mut self, s: &str, _style: u8) {
         self.print(s);
+    }
+    /// Print `s` carrying full text attributes (style bitmask + logical
+    /// colour). The default delegates to `print_styled`, so sinks that do not
+    /// render colour are unaffected.
+    fn print_attr(&mut self, s: &str, attrs: TextAttrs) {
+        self.print_styled(s, attrs.style);
     }
     /// Notify the sink that the Z-machine `buffer_mode` opcode changed the
     /// buffering flag. When `on` is `false` the interpreter must NOT soft-wrap
@@ -69,5 +85,15 @@ mod print_styled_tests {
         a.print("hello");
         b.print_styled("hello", 0x02); // style ignored by default impl
         assert_eq!(a.buf, b.buf, "default print_styled must equal print");
+    }
+
+    #[test]
+    fn default_print_attr_delegates_to_print_styled() {
+        use crate::screen::ZColour;
+        let mut a = BufferOutput::new();
+        let mut b = BufferOutput::new();
+        a.print_styled("hi", 0x02);
+        b.print_attr("hi", TextAttrs { style: 0x02, fg: ZColour::Standard(3), bg: ZColour::Default });
+        assert_eq!(a.buf, b.buf, "default print_attr falls back to print_styled");
     }
 }

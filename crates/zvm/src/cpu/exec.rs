@@ -1522,14 +1522,19 @@ impl Machine {
         }
         // Stream 3 is inactive; streams 1/2/4 apply.
         if self.streams.stream1 {
+            let attrs = crate::io::TextAttrs {
+                style: self.screen.text_style,
+                fg: self.screen.current_fg,
+                bg: self.screen.current_bg,
+            };
             if font3 {
                 let translated: String = s.chars().map(|ch| {
                     let code = ch as u32;
                     if (32..=126).contains(&code) { font3_translate(ch) } else { ch }
                 }).collect();
-                self.out.print_styled(&translated, self.screen.text_style);
+                self.out.print_attr(&translated, attrs);
             } else {
-                self.out.print_styled(s, self.screen.text_style);
+                self.out.print_attr(s, attrs);
             }
         }
     }
