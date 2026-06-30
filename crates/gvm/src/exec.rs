@@ -616,6 +616,25 @@ impl Machine {
             0x161 => self.op_callf(1),
             0x162 => self.op_callf(2),
             0x163 => self.op_callf(3),
+            0x0101 => {
+                // debugtrap L1 — log the value and continue.
+                let (l, _) = self.read_operands(1, 0)?;
+                self.diagnostics.push(format!("debugtrap: {:#x}", l[0]));
+                Ok(())
+            }
+            0x0122 => self.op_restart(),
+            0x0123 => {
+                // save L1 S1 — file layer not implemented; store failure (1).
+                let (_, s) = self.read_operands(1, 1)?;
+                self.diagnostics.push("@save: file layer not implemented; returning failure".to_string());
+                self.store(s[0], 1)
+            }
+            0x0124 => {
+                // restore L1 S1 — file layer not implemented; store failure (1).
+                let (_, s) = self.read_operands(1, 1)?;
+                self.diagnostics.push("@restore: file layer not implemented; returning failure".to_string());
+                self.store(s[0], 1)
+            }
             other => Err(format!("illegal/unimplemented opcode {other:#x}")),
         }
     }
@@ -1492,6 +1511,38 @@ impl Machine {
         }
     }
 
+    // ── restart ───────────────────────────────────────────────────────────────
+
+    /// `@restart`: reset all VM state to its initial condition and re-enter the
+    /// start function. The Glk backend is preserved (the display is not cleared by
+    /// the spec). No operands.
+    fn op_restart(&mut self) -> R<()> {
+        let start = self.mem.start_func();
+        let decode_table = self.mem.decode_table();
+        self.mem.reset_ram();
+        self.stack.fill(0);
+        self.sp = 0;
+        self.fp = 0;
+        self.pc = 0;
+        self.iosys_mode = 0;
+        self.iosys_rock = 0;
+        self.cur_stringtbl = decode_table;
+        self.heap_start = 0;
+        self.heap_blocks.clear();
+        self.glk = Model::new();
+        self.pending_input = None;
+        self.halted = false;
+        self.protect = (0, 0);
+        self.undo_stack.clear();
+        self.accel_funcs.clear();
+        self.accel_params.clear();
+        self.rng = Self::DEFAULT_SEED;
+        self.cur_frame_len = 0;
+        self.cur_localspos = 0;
+        self.cur_locals.clear();
+        self.build_frame_and_enter(start, &[])
+    }
+
     // ── acceleration storage + PRNG (GLULX_NOTES §17, §18) ────────────────────
 
     /// The accelerated-function number assigned to the VM function at `addr` via
@@ -2229,6 +2280,115 @@ impl Machine {
                 0
             }
             0x0048 => self.glk.current_stream(), // glk_stream_get_current
+            // ── stream reads ──────────────────────────────────────────────────
+            0x0090 => {
+                // glk_get_char_stream(str) — read one Latin-1 byte, or 0xFFFFFFFF = EOF
+                let sid = a(0);
+                match self.glk.memory_stream_read_info(sid) {
+                    Some((addr, len, pos, false)) if pos < len => {
+                        let v = self.m8(addr + pos)?;
+                        self.glk.memory_stream_read_advance(sid, 1);
+                        v
+                    }
+                    _ => 0xFFFF_FFFF, // EOF or not a byte memory stream
+                }
+            }
+            0x0091 => {
+                // glk_get_line_stream(str, buf, maxlen) — read up to maxlen-1 bytes
+                let (sid, buf, maxlen) = (a(0), a(1), a(2));
+                let mut count = 0u32;
+                if let Some((addr, len, pos, false)) = self.glk.memory_stream_read_info(sid) {
+                    let mut p = pos;
+                    while count + 1 < maxlen && p < len {
+                        let byte = self.m8(addr + p)? as u8;
+                        p += 1;
+                        self.store_mem_sized(buf + count, byte as u32, 1)?;
+                        count += 1;
+                        if byte == b'\n' {
+                            break;
+                        }
+                    }
+                    self.glk.memory_stream_read_advance(sid, count);
+                }
+                // always NUL-terminate if room
+                if maxlen > 0 {
+                    self.store_mem_sized(buf + count, 0, 1)?;
+                }
+                count
+            }
+            0x0092 => {
+                // glk_get_buffer_stream(str, buf, len) — read up to len bytes
+                let (sid, buf, maxlen) = (a(0), a(1), a(2));
+                let mut count = 0u32;
+                if let Some((addr, len, pos, false)) = self.glk.memory_stream_read_info(sid) {
+                    let available = (len - pos).min(maxlen);
+                    for i in 0..available {
+                        let byte = self.m8(addr + pos + i)?;
+                        self.store_mem_sized(buf + i, byte, 1)?;
+                    }
+                    count = available;
+                    self.glk.memory_stream_read_advance(sid, count);
+                }
+                count
+            }
+            0x012C => {
+                // glk_get_char_stream_uni(str) — read one codepoint, or 0xFFFFFFFF = EOF
+                let sid = a(0);
+                match self.glk.memory_stream_read_info(sid) {
+                    Some((addr, len, pos, unicode)) if pos < len => {
+                        let v = if unicode { self.m32(addr + pos * 4)? } else { self.m8(addr + pos)? };
+                        self.glk.memory_stream_read_advance(sid, 1);
+                        v
+                    }
+                    _ => 0xFFFF_FFFF,
+                }
+            }
+            0x012D => {
+                // glk_get_buffer_stream_uni(str, buf, len) — read up to len codepoints
+                let (sid, buf, maxlen) = (a(0), a(1), a(2));
+                let mut count = 0u32;
+                if let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) {
+                    let available = (len - pos).min(maxlen);
+                    for i in 0..available {
+                        let cp = if unicode {
+                            self.m32(addr + (pos + i) * 4)?
+                        } else {
+                            self.m8(addr + pos + i)?
+                        };
+                        self.store_mem_sized(buf + i * 4, cp, 4)?;
+                    }
+                    count = available;
+                    self.glk.memory_stream_read_advance(sid, count);
+                }
+                count
+            }
+            0x012E => {
+                // glk_get_line_stream_uni(str, buf, maxlen) — read up to maxlen-1 codepoints
+                let (sid, buf, maxlen) = (a(0), a(1), a(2));
+                let mut count = 0u32;
+                if let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) {
+                    let mut p = pos;
+                    while count + 1 < maxlen && p < len {
+                        let cp = if unicode {
+                            self.m32(addr + p * 4)?
+                        } else {
+                            self.m8(addr + p)?
+                        };
+                        p += 1;
+                        self.store_mem_sized(buf + count * 4, cp, 4)?;
+                        count += 1;
+                        if cp == b'\n' as u32 {
+                            break;
+                        }
+                    }
+                    self.glk.memory_stream_read_advance(sid, count);
+                }
+                // always NUL-terminate if room
+                if maxlen > 0 {
+                    self.store_mem_sized(buf + count * 4, 0, 4)?;
+                }
+                count
+            }
             // ── styles / gestalt / control ────────────────────────────────────
             0x0086 => {
                 // glk_set_style(style) — on the current stream
@@ -2247,6 +2407,8 @@ impl Machine {
             0x0121 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Upper)?, // _to_upper_case_uni
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
             0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
+            0x00B2 => 0,           // glk_style_distinguish — styles not distinguishable
+            0x00B3 => 0,           // glk_style_measure — measurement unsupported
             // ── input requests + select (3a-2) ────────────────────────────────
             0x00D0 => {
                 // glk_request_line_event(win, buf, maxlen, initlen)
@@ -4961,5 +5123,267 @@ mod tests {
         for addr in [0x0100u32, 0x0104, 0x0108, 0x010C] {
             assert_eq!(m.mem.read32(addr).unwrap(), 0, "evtype_None word @{addr:#x}");
         }
+    }
+
+    // ── @restart, @save/@restore stubs, debugtrap, glk_style_* ──────────────
+
+    #[test]
+    fn restart_resets_ram_and_reenters_start_func() {
+        // The start function is simply `quit`. We create the machine, mutate RAM,
+        // call op_restart directly, then verify RAM is reset and the machine can
+        // run to halt cleanly.
+        let body = asm::ins(0x120, &[]); // quit
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        // Mutate RAM after initial setup.
+        m.mem.write32(0x100, 0xDEAD_BEEF).unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF, "sanity: RAM written");
+        // op_restart resets RAM and re-enters start func.
+        m.op_restart().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "RAM reset by restart");
+        // Machine is now positioned at start_func again; run to completion.
+        m.run();
+        assert!(m.halted, "machine halted after restart");
+    }
+
+    #[test]
+    fn restart_opcode_via_assembly() {
+        use asm::Op::{C32, Mem16};
+        // Program: store sentinel to RAM, @restart (0x0122), then quit.
+        // After restart the machine re-enters this same function and runs to quit.
+        // We check that RAM[0x100] is zero at the end (reset, then the restart loop
+        // would store again — but we want only *one* restart, so after the second
+        // entry the @restart is reached again… which would loop forever).
+        //
+        // Instead: write to a scratch address *before* the restart, and check it's
+        // reset on the way through. To avoid the infinite-restart loop we use a
+        // two-function program: start_func writes a sentinel and calls `quit`, and
+        // a second function issues restart — but the start_func IS the restart entry.
+        //
+        // Simplest safe approach: test op_restart() directly (as above). This test
+        // just verifies @restart doesn't *halt* the machine with an illegal-opcode error.
+        let body = {
+            let mut b = asm::ins(0x40, &[C32(0xABCD), Mem16(0x0100)]); // copy sentinel
+            b.extend(asm::ins(0x122, &[])); // @restart (re-enters this body)
+            // The second time through, copy falls through to restart again →
+            // to avoid infinite loop in CI we keep it simple and just check
+            // that @restart itself doesn't fault. We'll test memory reset with
+            // the direct call above.
+            b
+        };
+        // Build and run for a limited number of steps to confirm no illegal-opcode error.
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        // Step a few times (enough to hit @restart at least once).
+        for _ in 0..6 {
+            m.step();
+        }
+        // Confirm no illegal-opcode diagnostic for 0x122.
+        assert!(
+            !m.diagnostics.iter().any(|d| d.contains("0x122")),
+            "restart must not produce an illegal-opcode error: {:?}",
+            m.diagnostics
+        );
+    }
+
+    #[test]
+    fn save_and_restore_stubs_return_failure_without_halting() {
+        use asm::Op::{Mem16, Zero};
+        // @save L1 S1: store 1 (failure) into S1, continue.
+        let mut body = asm::ins(0x123, &[Zero, Mem16(0x0100)]); // @save 0, -> mem[0x100]
+        // @restore L1 S1: store 1 (failure) into S1, continue.
+        body.extend(asm::ins(0x124, &[Zero, Mem16(0x0104)])); // @restore 0, -> mem[0x104]
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        m.run();
+        assert!(m.halted, "machine halted normally (not stuck)");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "@save returns 1 (failure)");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "@restore returns 1 (failure)");
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("@save")),
+            "save stub emits a diagnostic: {:?}",
+            m.diagnostics
+        );
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("@restore")),
+            "restore stub emits a diagnostic: {:?}",
+            m.diagnostics
+        );
+    }
+
+    #[test]
+    fn debugtrap_logs_value_and_continues() {
+        use asm::Op::{C8, Mem16};
+        // @debugtrap 0x42; copy a sentinel into RAM to prove execution continues.
+        let mut body = asm::ins(0x101, &[C8(0x42)]); // debugtrap 0x42
+        body.extend(asm::ins(0x40, &[C8(0x7F), Mem16(0x0100)])); // copy 0x7F -> RAM
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        m.run();
+        assert!(m.halted, "machine halted normally");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x7F, "execution continued past debugtrap");
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("debugtrap")),
+            "debugtrap emitted a diagnostic: {:?}",
+            m.diagnostics
+        );
+    }
+
+    #[test]
+    fn glk_style_distinguish_and_measure_return_zero_silently() {
+        use asm::Op::{C8, Mem16, Zero};
+        // glk_style_distinguish(win, style1, style2) → 0
+        let mut body = glk_call(0xB2, &[C8(1), C8(0), C8(1)], Mem16(0x0100));
+        // glk_style_measure(win, style, hint, result) → 0
+        body.extend(glk_call(0xB3, &[C8(1), C8(0), C8(0), Zero], Mem16(0x0104)));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "style_distinguish returns 0");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0, "style_measure returns 0");
+        assert!(
+            m.diagnostics.is_empty(),
+            "no diagnostic noise from style_distinguish/measure: {:?}",
+            m.diagnostics
+        );
+    }
+
+    // ── Glk stream reads (glk_get_*_stream) ──────────────────────────────────
+
+    #[test]
+    fn glk_get_char_stream_reads_bytes_and_returns_eof() {
+        use asm::Op::{C8, C16, Mem16, Zero};
+        // open_memory_stream over RAM bytes 0x180..0x183 ("AB\n"), then read 4 chars.
+        // First 3 should be 'A','B','\n'; 4th is EOF (0xFFFFFFFF).
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(3), C8(1), C8(0)], Zero); // open_memory -> sid=2
+        body.extend(glk_call(0x0090, &[C8(2)], Mem16(0x0100))); // get_char_stream(2) -> 'A'
+        body.extend(glk_call(0x0090, &[C8(2)], Mem16(0x0104))); // -> 'B'
+        body.extend(glk_call(0x0090, &[C8(2)], Mem16(0x0108))); // -> '\n'
+        body.extend(glk_call(0x0090, &[C8(2)], Mem16(0x010C))); // -> EOF
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write8(0x180, b'A' as u32).unwrap();
+            m.mem.write8(0x181, b'B' as u32).unwrap();
+            m.mem.write8(0x182, b'\n' as u32).unwrap();
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), b'A' as u32, "first char");
+        assert_eq!(m.mem.read32(0x104).unwrap(), b'B' as u32, "second char");
+        assert_eq!(m.mem.read32(0x108).unwrap(), b'\n' as u32, "third char");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0xFFFF_FFFF, "EOF");
+    }
+
+    #[test]
+    fn glk_get_buffer_stream_reads_up_to_len() {
+        use asm::Op::{C8, C16, Mem16, Zero};
+        // Stream over 4 bytes "RUST" at 0x180; read 3 into buf at 0x190, store count.
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(4), C8(1), C8(0)], Zero); // open
+        body.extend(glk_call(0x0092, &[C8(2), C16(0x0190), C8(3)], Mem16(0x0100))); // get_buffer_stream
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            for (i, &ch) in b"RUST".iter().enumerate() {
+                m.mem.write8(0x180 + i as u32, ch as u32).unwrap();
+            }
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 3, "count = 3 (maxlen)");
+        assert_eq!(m.mem.read8(0x190).unwrap(), b'R' as u32, "buf[0]");
+        assert_eq!(m.mem.read8(0x191).unwrap(), b'U' as u32, "buf[1]");
+        assert_eq!(m.mem.read8(0x192).unwrap(), b'S' as u32, "buf[2]");
+    }
+
+    #[test]
+    fn glk_get_line_stream_stops_at_newline_and_nul_terminates() {
+        use asm::Op::{C8, C16, Mem16, Zero};
+        // Stream over "Hi\nWorld" (8 bytes); read line into buf at 0x190 with maxlen 6.
+        let data = b"Hi\nWorld";
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(data.len() as i8), C8(1), C8(0)], Zero);
+        body.extend(glk_call(0x0091, &[C8(2), C16(0x0190), C8(6)], Mem16(0x0100)));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            for (i, &b) in data.iter().enumerate() {
+                m.mem.write8(0x180 + i as u32, b as u32).unwrap();
+            }
+        });
+        // Should have read "Hi\n" (3 chars) and NUL-terminated.
+        assert_eq!(m.mem.read32(0x100).unwrap(), 3, "3 chars read (including newline)");
+        assert_eq!(m.mem.read8(0x190).unwrap(), b'H' as u32);
+        assert_eq!(m.mem.read8(0x191).unwrap(), b'i' as u32);
+        assert_eq!(m.mem.read8(0x192).unwrap(), b'\n' as u32);
+        assert_eq!(m.mem.read8(0x193).unwrap(), 0, "NUL terminator");
+    }
+
+    #[test]
+    fn glk_get_char_stream_uni_reads_unicode_stream() {
+        use asm::Op::{C8, C16, Mem16, Zero};
+        // open_memory_uni over 2 codepoints at 0x180: U+0048 ('H'), U+1F600 (emoji).
+        let mut body = glk_call(0x0139, &[C16(0x0180), C8(2), C8(1), C8(0)], Zero); // open_memory_uni -> 2
+        body.extend(glk_call(0x012C, &[C8(2)], Mem16(0x0100))); // get_char_stream_uni
+        body.extend(glk_call(0x012C, &[C8(2)], Mem16(0x0104)));
+        body.extend(glk_call(0x012C, &[C8(2)], Mem16(0x0108))); // EOF
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, 0x0048).unwrap();     // 'H'
+            m.mem.write32(0x184, 0x1F600).unwrap();    // emoji
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0048, "first codepoint 'H'");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x1F600, "second codepoint emoji");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0xFFFF_FFFF, "EOF");
+    }
+
+    #[test]
+    fn glk_get_buffer_stream_uni_reads_codepoints() {
+        use asm::Op::{C8, C16, Mem16, Zero};
+        // 3-codepoint unicode stream at 0x180; read 2 into buf at 0x1C0.
+        let mut body = glk_call(0x0139, &[C16(0x0180), C8(3), C8(1), C8(0)], Zero);
+        body.extend(glk_call(0x012D, &[C8(2), C16(0x01C0), C8(2)], Mem16(0x0100)));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, b'A' as u32).unwrap();
+            m.mem.write32(0x184, b'B' as u32).unwrap();
+            m.mem.write32(0x188, b'C' as u32).unwrap();
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "count = 2");
+        assert_eq!(m.mem.read32(0x1C0).unwrap(), b'A' as u32, "cp[0]");
+        assert_eq!(m.mem.read32(0x1C4).unwrap(), b'B' as u32, "cp[1]");
+    }
+
+    // ── gestalt truthfulness ─────────────────────────────────────────────────
+
+    #[test]
+    fn glk_gestalt_all_known_selectors_are_accurate() {
+        use asm::Op::{C8, Mem16};
+        let mut body = glk_call(0x04, &[C8(0), C8(0)], Mem16(0x0100));  // Version
+        body.extend(glk_call(0x04, &[C8(1), C8(0)], Mem16(0x0104)));    // CharInput
+        body.extend(glk_call(0x04, &[C8(2), C8(0)], Mem16(0x0108)));    // LineInput
+        body.extend(glk_call(0x04, &[C8(3), C8(65)], Mem16(0x010C)));   // CharOutput 'A'
+        body.extend(glk_call(0x04, &[C8(4), C8(0)], Mem16(0x0110)));    // MouseInput
+        body.extend(glk_call(0x04, &[C8(5), C8(0)], Mem16(0x0114)));    // Timer
+        body.extend(glk_call(0x04, &[C8(6), C8(0)], Mem16(0x0118)));    // Graphics
+        body.extend(glk_call(0x04, &[C8(7), C8(0)], Mem16(0x011C)));    // DrawImage
+        body.extend(glk_call(0x04, &[C8(8), C8(0)], Mem16(0x0120)));    // Sound
+        body.extend(glk_call(0x04, &[C8(15), C8(0)], Mem16(0x0124)));   // Unicode
+        body.extend(glk_call(0x04, &[C8(22), C8(0)], Mem16(0x0128)));   // ResourceStream
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0705, "Version 0.7.5");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "CharInput supported");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 1, "LineInput supported");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "CharOutput = ExactPrint");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0, "MouseInput not supported");
+        assert_eq!(m.mem.read32(0x114).unwrap(), 0, "Timer not supported");
+        assert_eq!(m.mem.read32(0x118).unwrap(), 0, "Graphics not supported");
+        assert_eq!(m.mem.read32(0x11C).unwrap(), 0, "DrawImage not supported");
+        assert_eq!(m.mem.read32(0x120).unwrap(), 0, "Sound not supported");
+        assert_eq!(m.mem.read32(0x124).unwrap(), 1, "Unicode supported");
+        assert_eq!(m.mem.read32(0x128).unwrap(), 0, "ResourceStream not supported");
+        assert!(m.diagnostics.is_empty(), "no noise: {:?}", m.diagnostics);
     }
 }

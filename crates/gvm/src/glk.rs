@@ -910,6 +910,26 @@ impl Model {
             s.style = style;
         }
     }
+    /// Return `(addr, len, pos, unicode)` for a memory stream, or `None` if `id`
+    /// is not a memory stream. Used by the stream-read selectors in exec.rs.
+    pub fn memory_stream_read_info(&self, id: u32) -> Option<(u32, u32, u32, bool)> {
+        match self.stream(id)?.kind {
+            StreamKind::Memory { addr, len, pos, unicode } => Some((addr, len, pos, unicode)),
+            _ => None,
+        }
+    }
+
+    /// Advance a memory stream's read position by `n` elements and bump its
+    /// `read_count`. Used by the stream-read selectors after consuming bytes.
+    pub fn memory_stream_read_advance(&mut self, id: u32, n: u32) {
+        if let Some(s) = self.stream_mut(id) {
+            if let StreamKind::Memory { ref mut pos, .. } = s.kind {
+                *pos = pos.saturating_add(n);
+            }
+            s.read_count = s.read_count.saturating_add(n);
+        }
+    }
+
     /// Advance a memory stream's position by `n` elements (after the engine has
     /// written the bytes), bumping the write count.
     pub fn memory_stream_advance(&mut self, id: u32, n: u32) {
