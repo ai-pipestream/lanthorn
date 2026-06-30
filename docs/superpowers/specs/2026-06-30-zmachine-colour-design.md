@@ -50,13 +50,25 @@ user's themed palette, not raw RGB**:
 | 9        | white   | palette[7]                | 37 / 47           |
 
 So a game asking for "red" gets *the user's* red. Colour expresses through the
-theme. (Z-machine v6 grey extensions 10–12 are out of scope for v1; treat any
-value outside 1–9 on the standard path as "no change".)
+theme.
 
-The one path that cannot map to the palette is `set_true_colour`'s 15-bit RGB —
-an exact colour with no named slot. It renders as literal `Color::Rgb(r,g,b)`
-(app) / 24-bit truecolor SGR `38;2;r;g;b` / `48;2;r;g;b` (CLI). Rare (v6-era);
-acceptable that it bypasses the theme palette.
+**The v6 greys (10 light, 11 medium, 12 dark)** are in scope but render as
+**fixed RGB shades, not palette entries.** The scheme's 16-colour palette has no
+faithful home for three distinct greys: mapping light grey onto the white slot
+(palette[7]) collides with colour 9 (white), and the only true grey in an ANSI
+palette is bright-black (palette[8]) — there is no slot for a grey *between*
+black and white. So greys take the exact-colour path instead:
+
+| Z-colour | Name        | RGB       |
+|----------|-------------|-----------|
+| 10       | light grey  | `#B0B0B0` |
+| 11       | medium grey | `#808080` |
+| 12       | dark grey   | `#505050` |
+
+The other path that bypasses the palette is `set_true_colour`'s 15-bit RGB — an
+exact colour with no named slot. Like the greys it renders as literal
+`Color::Rgb(r,g,b)` (app) / 24-bit truecolor SGR `38;2;r;g;b` / `48;2;r;g;b`
+(CLI). Rare (v6-era); acceptable that it bypasses the theme palette.
 
 ## Semantics (ZMSD §8.3.1, §15)
 
@@ -66,9 +78,11 @@ Per-channel **replace with sentinels** — NOT cumulative:
 
 - `0` = **leave that channel unchanged**. Must not clobber the other channel.
 - `1` = **default** — the interpreter's default fg/bg (→ `ZColour::Default`).
-- `2..=9` = standard palette (table above) → `ZColour::Standard(n)`.
-- Any other value (incl. v6 `-1` "pixel under cursor", greys 10–12) → treat as
-  `0` (no change) in v1.
+- `2..=12` = standard palette + v6 greys → `ZColour::Standard(n)`. The host
+  resolver maps 2–9 onto the scheme palette and 10–12 onto fixed grey RGB
+  (tables above).
+- Any other value (incl. v6 `-1` "pixel under cursor") → treat as `0` (no
+  change) in v1.
 - A v6 optional 3rd "window" operand is ignored.
 
 ### `set_true_colour(foreground, background)` — EXT:0x05 (v5+/v6)
@@ -99,7 +113,8 @@ pub enum ZColour {
     /// Interpreter default (colour 1 / true-colour -1): host maps to
     /// terminal default / scheme fg or bg.
     Default,
-    /// Standard v5 palette index 2..=9 (black..white).
+    /// Standard palette index 2..=9 (black..white) + v6 greys 10..=12.
+    /// 2..=9 resolve to the scheme palette; 10..=12 to fixed grey RGB.
     Standard(u8),
     /// 15-bit RGB (0bbbbbgggggrrrrr) from set_true_colour.
     True(u16),
@@ -180,10 +195,11 @@ available and then have its colour dropped.
 `TextAttrs`, on a TTY only (piped output stays plain, as today):
 
 - style bits → existing SGR (1 bold, 3 italic, 7 reverse, …).
-- `fg`: `Default` → `39`; `Standard(n)` → `30 + (n-2)`; `True(v)` → `38;2;r;g;b`
-  (expand 5-bit channels to 8-bit).
-- `bg`: `Default` → `49`; `Standard(n)` → `40 + (n-2)`; `True(v)` →
-  `48;2;r;g;b`.
+- `fg`: `Default` → `39`; `Standard(2..=9)` → `30 + (n-2)`; `Standard(10..=12)`
+  → `38;2;r;g;b` from the grey RGB table; `True(v)` → `38;2;r;g;b` (expand 5-bit
+  channels to 8-bit).
+- `bg`: `Default` → `49`; `Standard(2..=9)` → `40 + (n-2)`; `Standard(10..=12)`
+  → `48;2;r;g;b`; `True(v)` → `48;2;r;g;b`.
 - Reverse: prefer emitting SGR `7` and letting the terminal swap, so fg/bg SGR
   stay in logical order. (Do **not** also pre-swap, or it double-swaps.)
 - Reset with `0` at run end, as today.
@@ -193,7 +209,8 @@ available and then have its colour dropped.
 A `ZColour` → ratatui `Color` resolver, given the active `ColorScheme`:
 
 - `Default` → `Color::Reset`.
-- `Standard(n)` → `scheme.palette[(n-2) as usize]`.
+- `Standard(2..=9)` → `scheme.palette[(n-2) as usize]`.
+- `Standard(10..=12)` → `Color::Rgb` from the grey RGB table.
 - `True(v)` → `Color::Rgb(r, g, b)`.
 
 Apply in two places, gated by `honor_game_colours`:
@@ -224,6 +241,7 @@ zvm unit tests:
 - `set_colour(0, x)` leaves fg unchanged, sets bg; `set_colour(x, 0)` symmetric.
 - `set_colour(1, 1)` → both `ZColour::Default`.
 - `set_colour(3, 6)` → `Standard(3)` / `Standard(6)`.
+- `set_colour(10, 12)` → `Standard(10)` / `Standard(12)` (v6 greys accepted).
 - `set_true_colour(-2, -2)` leaves both unchanged; `-1` → `Default`; a 15-bit
   value → `True(v)` with correct channel expansion.
 - Upper-window cell records current fg/bg.
@@ -237,16 +255,15 @@ CLI tests:
 
 App tests:
 
-- `ZColour` → `Color` resolver maps Standard onto `scheme.palette`, Default →
-  `Reset`, True → `Rgb`.
+- `ZColour` → `Color` resolver maps `Standard(2..=9)` onto `scheme.palette`,
+  `Standard(10..=12)` onto fixed grey `Rgb`, `Default` → `Reset`, `True` → `Rgb`.
 - Reverse swaps resolved fg/bg exactly once.
 - `honor_game_colours = false` → renderers ignore colour (theme unchanged).
 
 ## Out of scope (v1)
 
 - Glulx/Glk colour (style hints) — separate sub-project.
-- v6 grey palette extensions (10–12), `set_colour -1` (pixel under cursor),
-  transparent backgrounds.
+- `set_colour -1` (pixel under cursor), transparent backgrounds (v6 bg `-3`).
 - Per-game persistence of game-set colours (transient, like font).
 - gvm-cli colour (lands with the Glulx sub-project).
 ```
