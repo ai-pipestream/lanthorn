@@ -969,13 +969,17 @@ impl Machine {
             0x1B => {
                 let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse = ops.get(1).copied().unwrap_or(0) as u32;
-                // TODO custom dict addr: dictionary::load targets the standard
-                // dictionary; a non-zero `dictionary` operand is not yet honoured.
-                let _dict_addr = ops.get(2).copied().unwrap_or(0);
+                // Operand 2 is an optional custom dictionary address (ZMSD §15);
+                // 0 means use the standard story dictionary.
+                let dict_addr = ops.get(2).copied().unwrap_or(0);
                 let flag = ops.get(3).copied().unwrap_or(0) != 0;
                 let text = self.read_text_buffer(text_buf);
                 let text_data_start: u8 = if self.mem.version() <= 4 { 1 } else { 2 };
-                let dict = dictionary::load(&self.mem);
+                let dict = if dict_addr != 0 {
+                    dictionary::load_at(&self.mem, dict_addr as u32)
+                } else {
+                    dictionary::load(&self.mem)
+                };
                 let tokens = dict.tokenise(&self.mem, &text);
                 self.write_parse_buffer(parse, &tokens, text_data_start, flag);
                 StepResult::Continue
@@ -4342,6 +4346,40 @@ pub(crate) mod tests {
         let pb = parse_buf as u32;
         assert!(m.mem.read_byte(pb + 1) >= 1, "at least one token parsed");
         assert_eq!(m.mem.read_word(pb + 2), addr_north, "known word resolved to its dict entry");
+    }
+
+    #[test]
+    fn tokenise_honours_custom_dictionary_operand() {
+        // VAR:0x1B operand 2 is a custom dictionary address; the word must be
+        // resolved against it, not the standard story dictionary (ZMSD §15).
+        let mut m = build_test_machine(&[]);
+        // Custom dictionary at 0x02A0: 0 separators, entry_length 6, count -1
+        // (unsorted, one entry) — all in dynamic memory below global_vars (0x300).
+        let dict: u32 = 0x02A0;
+        m.mem.write_byte(dict, 0);          // 0 separators
+        m.mem.write_byte(dict + 1, 6);      // entry_length = 6 (v5 key length)
+        m.mem.write_word(dict + 2, 0xFFFF); // count = -1 -> abs 1, unsorted
+        let entry = dict + 4;
+        let key = crate::text::encode::encode_word("frotz", 5);
+        assert_eq!(key.len(), 6, "v5 dictionary key is 6 bytes");
+        for (i, b) in key.iter().enumerate() {
+            m.mem.write_byte(entry + i as u32, *b);
+        }
+        // v5 text buffer at 0x0250: [max][count][chars...] holding "frotz".
+        let text_buf: u32 = 0x0250;
+        m.mem.write_byte(text_buf, 10);
+        m.mem.write_byte(text_buf + 1, 5);
+        for (i, b) in b"frotz".iter().enumerate() {
+            m.mem.write_byte(text_buf + 2 + i as u32, *b);
+        }
+        // parse buffer at 0x0270: byte0 = max words.
+        let parse: u32 = 0x0270;
+        m.mem.write_byte(parse, 4);
+        // tokenise text parse custom-dict flag=0.
+        m.exec_var(0x1B, &[text_buf as u16, parse as u16, dict as u16, 0], None, None);
+        assert_eq!(m.mem.read_byte(parse + 1), 1, "one token parsed");
+        assert_eq!(m.mem.read_word(parse + 2), entry as u16,
+            "word resolved against the CUSTOM dictionary entry, not the standard dict");
     }
 
     // -----------------------------------------------------------------------

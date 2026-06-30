@@ -20,9 +20,16 @@ pub struct Dictionary {
     key_len: u8,          // 4 for v3, 6 for v4+
 }
 
-/// Parse the dictionary header and return a `Dictionary` ready for lookup.
+/// Parse the standard story dictionary (header 0x08) and return a `Dictionary`.
 pub fn load(mem: &Memory) -> Dictionary {
-    let dict_base = mem.dictionary() as u32;
+    load_at(mem, mem.dictionary() as u32)
+}
+
+/// Parse a dictionary whose header begins at `dict_base` and return a
+/// `Dictionary` ready for lookup. Used by `tokenise` (VAR:0x1B) to honour a
+/// caller-supplied custom dictionary address (ZMSD §15); custom dictionaries
+/// share the standard header layout.
+pub fn load_at(mem: &Memory, dict_base: u32) -> Dictionary {
     let mut cursor = dict_base;
 
     // Separator list.
