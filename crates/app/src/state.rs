@@ -1263,6 +1263,13 @@ impl AppState {
     /// separators (as recorded by `CaptureSink`). Adjacent equal-bits spans merge;
     /// zero-bits spans are omitted (so an unstyled line yields an empty run vec).
     pub fn push_transcript_runs(&mut self, text: &str, kind: TranscriptKind, chunks: &[(usize, u8)]) {
+        // A turn with no new lower-window output (e.g. a read_char keypress that
+        // only redrew the upper window) yields an empty string; appending it would
+        // add a spurious blank line (`"".split('\n')` yields one empty element),
+        // scrolling the transcript up one row per keypress. Skip it.
+        if text.is_empty() {
+            return;
+        }
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
 
@@ -1680,6 +1687,18 @@ mod tests {
         let mut s = AppState::default();
         s.push_transcript_runs("hello", TranscriptKind::Story, &[(5, 0)]);
         assert!(s.transcript_runs.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn push_runs_empty_text_adds_no_line() {
+        // Regression (BeyondZork v4+ upper-window menu): a read_char turn that only
+        // redraws the upper window emits NO new lower-window text. Pushing that
+        // empty transcript must append nothing — otherwise each keypress added a
+        // blank line and scrolled the (bottom-anchored) transcript up one row.
+        let mut s = AppState::default();
+        let before = s.transcript.len();
+        s.push_transcript_runs("", TranscriptKind::Story, &[]);
+        assert_eq!(s.transcript.len(), before, "empty transcript must add no line");
     }
 
     #[test]
