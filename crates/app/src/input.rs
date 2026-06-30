@@ -350,6 +350,8 @@ pub enum Action {
     OpenHistory,
     /// Step the replay selection by delta turns (-1 left, +1 right).
     ReplayStep(isize),
+    /// Page the replay selection by one viewport (-1 = PageUp, +1 = PageDown).
+    ReplayPage(i8),
     /// Toggle replay auto-play.
     ReplayTogglePlay,
     /// Close the replay modal (back to live, no change).
@@ -1168,6 +1170,10 @@ fn history_key_to_action(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Left => Action::ReplayStep(-1),
         KeyCode::Right => Action::ReplayStep(1),
+        KeyCode::PageUp => Action::ReplayPage(-1),
+        KeyCode::PageDown => Action::ReplayPage(1),
+        KeyCode::Home => Action::ReplayStep(i32::MIN as isize),
+        KeyCode::End => Action::ReplayStep(i32::MAX as isize),
         KeyCode::Char(' ') => Action::ReplayTogglePlay,
         KeyCode::Enter | KeyCode::Char('r') => Action::ReplayResume,
         KeyCode::Esc | KeyCode::Char('q') => Action::ReplayClose,
@@ -3046,6 +3052,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let len = state.history.len();
             if let Some(r) = &mut state.replay {
                 r.step(delta, len);
+            }
+        }
+
+        Action::ReplayPage(dir) => {
+            let len = state.history.len();
+            // Page by one list viewport (1-row overlap), clamped by step().
+            let page = (state.modal_list_viewport.max(2) - 1) as isize;
+            if let Some(r) = &mut state.replay {
+                r.step(dir as isize * page, len);
             }
         }
 

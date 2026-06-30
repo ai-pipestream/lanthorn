@@ -685,7 +685,7 @@ fn draw_frame(
 
         // ── Replay/rewind overlay ─────────────────────────────────────────────
         if state.replay.is_some() {
-            dialog_rects_out = draw_history(state, full, buf);
+            dialog_rects_out = draw_history(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
@@ -1460,6 +1460,17 @@ fn main() {
                 // Carry this frame's modal list viewport so the next nav action
                 // can window/animate the open selection-list modal.
                 state.modal_list_viewport = panes.modal_list_viewport;
+                // Replay's idx is the source of truth; keep its (animated) list
+                // scroll following it. Skip while a scroll is easing so the tween
+                // isn't restarted each frame; select() is a no-op once settled.
+                let anim = state.config.animation.clone();
+                let hist_len = state.history.len();
+                if let Some(r) = &mut state.replay {
+                    if !r.scroll.has_active_animation() {
+                        r.scroll.len(hist_len);
+                        r.scroll.select(r.idx, state.modal_list_viewport, &anim);
+                    }
+                }
                 last_panes = panes;
             }
             Err(e) => {

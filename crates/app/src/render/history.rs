@@ -13,7 +13,12 @@ use crate::state::AppState;
 /// command) with the selected turn highlighted, the selected turn's transcript,
 /// and a transport footer. Does nothing when `state.replay` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing).
-pub fn draw_history(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+pub fn draw_history(
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+    vp_out: &mut usize,
+) -> Option<DialogRects> {
     let replay = state.replay.as_ref()?;
     if state.history.is_empty() {
         return None;
@@ -59,15 +64,23 @@ pub fn draw_history(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
     let tr_top = footer_y.saturating_sub(tr_h);
 
     // ── Turn list ────────────────────────────────────────────────────────────
-    // Window the list around the selection so it stays visible.
+    // Window the list via the (idx-synced) ListScroll so the selection stays
+    // visible; reserve a 1-col gutter for the scrollbar when it overflows.
+    let total = state.history.len();
     let visible = tr_top.saturating_sub(content.y) as usize;
-    let first = replay.idx.saturating_sub(visible.saturating_sub(1));
-    for (row, i) in (first..state.history.len()).take(visible).enumerate() {
+    *vp_out = visible;
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total, visible) && content.width >= 2;
+    let row_w = if scrollbar_visible { content.width.saturating_sub(1) } else { content.width };
+    let row_area = Rect::new(content.x, content.y, row_w, visible as u16);
+
+    let first = replay.scroll.display_offset();
+    for (row, i) in (first..total).take(visible).enumerate() {
         let row_y = content.y + row as u16;
         if row_y >= tr_top { break; }
         let rec = &state.history[i];
         let style = if i == replay.idx { selected_style } else { normal };
-        for col in content.x..content.right() {
+        for col in row_area.x..row_area.right() {
             if let Some(cell) = buf.cell_mut((col, row_y)) {
                 cell.set_symbol(" ").set_style(style);
             }
@@ -76,7 +89,19 @@ pub fn draw_history(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         let cmd_trunc: String = rec.command.chars().take(40).collect();
         let map_tag = if rec.map_snapshot.is_some() { "*" } else { " " };
         let line = format!("{} T{:<5} {} {}", marker, rec.turn, map_tag, cmd_trunc);
-        crate::render::draw_str_clipped(buf, content.x, row_y, &line, style, content);
+        crate::render::draw_str_clipped(buf, row_area.x, row_y, &line, style, row_area);
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(content.right().saturating_sub(1), content.y, 1, visible as u16);
+        crate::render::scroll::draw_scrollbar(
+            buf,
+            sb_area,
+            total,
+            visible,
+            replay.scroll.target_offset(),
+            state.colors.scrollbar,
+        );
     }
 
     // ── Selected turn's transcript ───────────────────────────────────────────
@@ -126,7 +151,7 @@ mod tests {
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         term.draw(|f| {
             let area = f.area();
-            let out = draw_history(&state, area, f.buffer_mut());
+            let out = draw_history(&state, area, f.buffer_mut(), &mut 0);
             assert!(out.is_none(), "draw_history is a no-op when replay is None");
         }).unwrap();
 
@@ -136,7 +161,7 @@ mod tests {
         let mut rects: Option<DialogRects> = None;
         term2.draw(|f| {
             let area = f.area();
-            rects = draw_history(&state, area, f.buffer_mut());
+            rects = draw_history(&state, area, f.buffer_mut(), &mut 0);
         }).unwrap();
         assert!(rects.is_some(), "draw_history returns rects when open");
 
@@ -145,5 +170,31 @@ mod tests {
         let screen: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(screen.contains("go north"), "turn command should render");
         assert!(screen.contains("Forest"), "selected turn's transcript should render");
+    }
+
+    #[test]
+    fn draw_history_scrollbar_when_turns_overflow() {
+        let mut state = AppState::default();
+        let m = Mapper::default();
+        for t in 1..=40 {
+            crate::history::record_turn(&mut state.history, t, "go north", vec![t as u8], &m, false, "Forest");
+        }
+        state.config.animation.enabled = false; // settle the offset instantly
+        state.replay = Some(ReplayState::new(state.history.len() - 1));
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        // First render captures the list viewport.
+        let mut vp = 0usize;
+        term.draw(|f| { let a = f.area(); draw_history(&state, a, f.buffer_mut(), &mut vp); }).unwrap();
+        assert!(vp > 0 && vp < 40, "turns should overflow the list band (vp={vp})");
+        // Sync the idx-driven scroll (run loop does this) and re-render.
+        {
+            let anim = state.config.animation.clone();
+            let r = state.replay.as_mut().unwrap();
+            r.scroll.len(40);
+            r.scroll.select(r.idx, vp, &anim);
+        }
+        term.draw(|f| { let a = f.area(); draw_history(&state, a, f.buffer_mut(), &mut vp); }).unwrap();
+        let has_thumb = term.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        assert!(has_thumb, "a scrollbar thumb should be drawn when turns overflow");
     }
 }

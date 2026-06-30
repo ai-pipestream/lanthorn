@@ -267,16 +267,21 @@ impl TidyAnim {
 /// (like `TidyAnim`). `Esc`/`q` clears it back to the live game with no change.
 #[derive(Debug)]
 pub struct ReplayState {
-    /// Selected turn index into `AppState.history`.
+    /// Selected turn index into `AppState.history`. The source of truth that
+    /// drives map-snapshot reconstruction; `scroll` mirrors it for list display.
     pub idx: usize,
     pub playing: bool,
     last_advance: Instant,
+    /// Animated list scroll, synced to `idx` each frame for windowing + scrollbar.
+    pub scroll: crate::list_scroll::ListScroll,
 }
 
 impl ReplayState {
     /// Open seeded at the last turn (`last_idx`), paused.
     pub fn new(last_idx: usize) -> Self {
-        Self { idx: last_idx, playing: false, last_advance: Instant::now() }
+        let mut scroll = crate::list_scroll::ListScroll::new();
+        scroll.selected = last_idx;
+        Self { idx: last_idx, playing: false, last_advance: Instant::now(), scroll }
     }
 
     /// Step `delta` turns (clamped to `[0, len-1]`) and pause.
