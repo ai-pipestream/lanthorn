@@ -982,8 +982,8 @@ mod tests {
         let mut sess = GameSession::new(read_char_story_v5()).expect("new v5");
         // Paint the upper window directly and confirm screen() mirrors it exactly.
         sess.machine.screen.upper.resize(2, 5);
-        sess.machine.screen.upper.put(1, 1, 'H', 2); // bold
-        sess.machine.screen.upper.put(1, 2, 'I', 0);
+        sess.machine.screen.upper.put(1, 1, 'H', 2, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default); // bold
+        sess.machine.screen.upper.put(1, 2, 'I', 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
         sess.machine.screen.upper_window_rows = 2;
         sess.machine.screen.cursor_row = 1;
         sess.machine.screen.cursor_col = 3;

@@ -331,7 +331,7 @@ mod view_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zvm::screen::{StatusLine, StatusRight, UpperWindow};
+    use zvm::screen::{StatusLine, StatusRight, UpperWindow, ZColour};
 
     #[test]
     fn sgr_set_maps_bits() {
@@ -384,8 +384,8 @@ mod tests {
     fn upper_row_text_and_ansi() {
         let mut u = UpperWindow::default();
         u.resize(1, 5);
-        u.put(1, 1, 'H', 0);
-        u.put(1, 2, 'i', 2); // bold
+        u.put(1, 1, 'H', 0, ZColour::Default, ZColour::Default);
+        u.put(1, 2, 'i', 2, ZColour::Default, ZColour::Default); // bold
         let text = upper_row_text(&u, 1);
         assert_eq!(text, "Hi"); // trailing blanks trimmed
         let ansi = upper_row_ansi(&u, 1);

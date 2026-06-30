@@ -2572,8 +2572,8 @@ mod tests {
         use crate::render::paneframe::{BorderStyle, PaneSides};
         let mut m = minimal_machine_v4();
         m.screen.upper.resize(1, 3);
-        m.screen.upper.put(1, 1, 'A', 0);
-        m.screen.upper.put(1, 3, 'Z', 0);
+        m.screen.upper.put(1, 1, 'A', 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
+        m.screen.upper.put(1, 3, 'Z', 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
         m.screen.upper_window_rows = 1;
 
         let model = crate::session::screen_model_from_machine(&m);

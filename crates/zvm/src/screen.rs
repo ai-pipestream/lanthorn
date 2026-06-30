@@ -34,15 +34,52 @@ pub struct StatusLine {
 // Screen state (window model)
 // ---------------------------------------------------------------------------
 
+/// A Z-machine colour channel value (logical, pre-reverse-swap).
+///
+/// Transient display state — NOT serialised into Quetzal saves (like
+/// `current_font`). The host resolves `Default` to the terminal/scheme
+/// default, `Standard(2..=9)` to the scheme palette, `Standard(10..=12)` to
+/// fixed grey RGB, and `True` to an exact 15-bit RGB colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZColour {
+    Default,
+    Standard(u8),
+    True(u16),
+}
+impl Default for ZColour {
+    fn default() -> Self {
+        ZColour::Default
+    }
+}
+
+/// Expand a 15-bit RGB (0bbbbbgggggrrrrr) to 8-bit `(r, g, b)`. Shared by the
+/// CLI (SGR) and app (ratatui) renderers so the expansion is defined once.
+pub fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
+    let exp = |c: u16| -> u8 { ((c << 3) | (c >> 2)) as u8 };
+    (exp(v & 0x1F), exp((v >> 5) & 0x1F), exp((v >> 10) & 0x1F))
+}
+
+/// Fixed RGB for the v6 greys (Standard 10/11/12). Defined once here so both
+/// renderers agree. Any other value falls back to dark grey (12).
+pub fn grey_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        10 => (0xB0, 0xB0, 0xB0),
+        11 => (0x80, 0x80, 0x80),
+        _ => (0x50, 0x50, 0x50), // 12
+    }
+}
+
 /// One character cell in the upper window.
 #[derive(Debug, Clone, Copy)]
 pub struct Cell {
     pub ch: char,
     pub style: u8,
+    pub fg: ZColour,
+    pub bg: ZColour,
 }
 impl Default for Cell {
     fn default() -> Self {
-        Cell { ch: ' ', style: 0 }
+        Cell { ch: ' ', style: 0, fg: ZColour::Default, bg: ZColour::Default }
     }
 }
 
@@ -75,10 +112,10 @@ impl UpperWindow {
             .and_then(|i| self.cells.get(i).copied())
             .unwrap_or_default()
     }
-    pub fn put(&mut self, row: u16, col: u16, ch: char, style: u8) {
+    pub fn put(&mut self, row: u16, col: u16, ch: char, style: u8, fg: ZColour, bg: ZColour) {
         if let Some(i) = self.idx(row, col) {
             if let Some(c) = self.cells.get_mut(i) {
-                *c = Cell { ch, style };
+                *c = Cell { ch, style, fg, bg };
             }
         }
     }
@@ -114,6 +151,10 @@ pub struct ScreenState {
     /// Active font number (ZMSD §16): 1 = normal (default), 3 = character-graphics.
     /// This is transient display state — NOT serialised into Quetzal saves.
     pub current_font: u8,
+    /// Current logical foreground/background colour (ZMSD §8.3). Transient
+    /// display state — NOT serialised into Quetzal saves.
+    pub current_fg: ZColour,
+    pub current_bg: ZColour,
 }
 
 impl Default for ScreenState {
@@ -131,6 +172,8 @@ impl Default for ScreenState {
             erase_lower_requested: false,
             upper: UpperWindow::default(),
             current_font: 1,
+            current_fg: ZColour::Default,
+            current_bg: ZColour::Default,
         }
     }
 }
@@ -585,10 +628,10 @@ mod tests {
         assert_eq!(w.rows, 2);
         assert_eq!(w.cols, 4);
         assert_eq!(w.cell(1, 1).ch, ' ');
-        w.put(2, 3, 'X', 0b0001);
+        w.put(2, 3, 'X', 0b0001, ZColour::Default, ZColour::Default);
         assert_eq!(w.cell(2, 3).ch, 'X');
         assert_eq!(w.cell(2, 3).style, 0b0001);
-        w.put(9, 9, 'Z', 0); // out of range -> ignored, no panic
+        w.put(9, 9, 'Z', 0, ZColour::Default, ZColour::Default); // out of range -> ignored, no panic
         w.clear();
         assert_eq!(w.cell(2, 3).ch, ' ');
     }
@@ -620,6 +663,30 @@ mod tests {
         assert_eq!(mem.read_byte(table_addr + 4), b'l');
         assert_eq!(mem.read_byte(table_addr + 5), b'l');
         assert_eq!(mem.read_byte(table_addr + 6), b'o');
+    }
+
+    #[test]
+    fn zcolour_defaults_and_cell_carries_colour() {
+        assert_eq!(ZColour::default(), ZColour::Default);
+        let c = Cell::default();
+        assert_eq!(c.fg, ZColour::Default);
+        assert_eq!(c.bg, ZColour::Default);
+
+        let mut w = UpperWindow::default();
+        w.resize(1, 4);
+        w.put(1, 1, 'X', 0x01, ZColour::Standard(3), ZColour::Standard(6));
+        let cell = w.cell(1, 1);
+        assert_eq!(cell.ch, 'X');
+        assert_eq!(cell.style, 0x01);
+        assert_eq!(cell.fg, ZColour::Standard(3));
+        assert_eq!(cell.bg, ZColour::Standard(6));
+    }
+
+    #[test]
+    fn rgb15_expansion_and_greys() {
+        assert_eq!(rgb15_to_888(0x7FFF), (255, 255, 255));
+        assert_eq!(rgb15_to_888(0x001F), (255, 0, 0)); // red = low 5 bits
+        assert_eq!(grey_rgb(11), (0x80, 0x80, 0x80));
     }
 
     #[test]

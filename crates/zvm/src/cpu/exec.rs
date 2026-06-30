@@ -1072,7 +1072,7 @@ impl Machine {
                     let style = self.screen.text_style;
                     let mut c = start;
                     while c <= cols {
-                        self.screen.upper.put(row, c, ' ', style);
+                        self.screen.upper.put(row, c, ' ', style, self.screen.current_fg, self.screen.current_bg);
                         c += 1;
                     }
                 }
@@ -1491,7 +1491,7 @@ impl Machine {
                 }
                 let out_ch = if font3 { font3_translate(ch) } else { ch };
                 let (r, c) = (self.screen.cursor_row, self.screen.cursor_col);
-                self.screen.upper.put(r, c, out_ch, style);
+                self.screen.upper.put(r, c, out_ch, style, self.screen.current_fg, self.screen.current_bg);
                 if self.screen.cursor_col >= cols {
                     self.screen.cursor_row += 1;
                     self.screen.cursor_col = 1;

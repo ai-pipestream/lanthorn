@@ -313,7 +313,7 @@ mod tests {
         u.resize(rows.len() as u16, cols.max(1));
         for (r, line) in rows.iter().enumerate() {
             for (c, ch) in line.chars().enumerate() {
-                u.put((r + 1) as u16, (c + 1) as u16, ch, 0);
+                u.put((r + 1) as u16, (c + 1) as u16, ch, 0, crate::screen::ZColour::Default, crate::screen::ZColour::Default);
             }
         }
         u

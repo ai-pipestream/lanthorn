@@ -144,7 +144,7 @@ impl ScreenDto {
         s.upper.cells = self
             .cells
             .iter()
-            .map(|&(ch, style)| zvm::screen::Cell { ch, style })
+            .map(|&(ch, style)| zvm::screen::Cell { ch, style, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default })
             .collect();
         s
     }
@@ -647,7 +647,7 @@ mod tests {
         let mut machine = dummy_machine();
         machine.screen.upper_window_rows = 1;
         machine.screen.upper.resize(1, 6);
-        machine.screen.upper.put(1, 2, 'Z', 2);
+        machine.screen.upper.put(1, 2, 'Z', 2, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
         machine.screen.current_window = 1;
         machine.screen.cursor_col = 3;
 
