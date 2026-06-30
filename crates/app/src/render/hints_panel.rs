@@ -136,9 +136,17 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         .collect();
 
     let n = wrapped.len();
-    let scroll = session.scroll as usize;
     let rows = body_h as usize;
     let max_scroll = n.saturating_sub(rows).min(u16::MAX as usize) as u16;
+    // Use the eased (animated) offset for display; the logical target drives max.
+    let scroll = (session.effective_scroll() as usize).min(max_scroll as usize);
+
+    // Reserve a 1-col gutter for the scrollbar when the transcript overflows.
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(n, rows) && body_area.width >= 2;
+    let text_w = if scrollbar_visible { body_area.width.saturating_sub(1) } else { body_area.width };
+    let text_area = Rect::new(body_area.x, body_area.y, text_w, body_area.height);
+
     let end = n.saturating_sub(scroll);
     let start = end.saturating_sub(rows);
     let visible = &wrapped[start..end];
@@ -146,10 +154,16 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     let body_style = state.colors.dialog;
     for (i, line) in visible.iter().enumerate() {
         let row_y = body_top + i as u16;
-        if row_y >= body_area.bottom() {
+        if row_y >= text_area.bottom() {
             break;
         }
-        crate::render::draw_str_clipped(buf, body_area.x, row_y, line, body_style, body_area);
+        crate::render::draw_str_clipped(buf, text_area.x, row_y, line, body_style, text_area);
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(body_area.right().saturating_sub(1), body_area.y, 1, body_area.height);
+        // `start` is the index of the first visible row (0 = oldest/top).
+        crate::render::scroll::draw_scrollbar(buf, sb_area, n, rows, start, state.colors.scrollbar);
     }
 
     Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll })
@@ -180,6 +194,7 @@ mod tests {
             source: crate::state::HintSource::Zcode(session),
             transcript: vec!["pick a topic".to_string()],
             scroll: 0,
+            scroll_anim: None,
             input: "3".to_string(),
             label: "Hints: X".to_string(),
             builtin_hint: true,

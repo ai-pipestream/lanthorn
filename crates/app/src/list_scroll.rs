@@ -1,0 +1,191 @@
+//! `ListScroll`: a selection index plus an animated display offset — the single
+//! state machine every selection-list modal (and the story picker) uses instead
+//! of a bare `selected: usize` with a per-frame window recompute. Movement
+//! clamps the selection, keeps it visible in the viewport with the minimal
+//! offset change, and eases the displayed offset via the shared [`ScrollAnim`].
+//!
+//! [`ScrollAnim`]: crate::state::ScrollAnim
+
+use crate::config::AnimationConfig;
+use crate::state::ScrollAnim;
+
+/// One-page step with a 1-row overlap, floored at 1 so paging always advances.
+/// `dir > 0` steps forward (down), `dir < 0` backward (up). The single paging
+/// helper — `input::page_scroll` delegates here so the math lives in one place.
+pub(crate) fn page_step(current: usize, dir: i32, viewport: usize) -> usize {
+    let page = viewport.saturating_sub(1).max(1);
+    if dir > 0 {
+        current.saturating_add(page)
+    } else {
+        current.saturating_sub(page)
+    }
+}
+
+/// Minimal offset so `selected` is within `[offset, offset + viewport)`.
+fn ensure_visible(offset: usize, selected: usize, viewport: usize) -> usize {
+    if viewport == 0 {
+        offset
+    } else if selected < offset {
+        selected
+    } else if selected >= offset + viewport {
+        selected + 1 - viewport
+    } else {
+        offset
+    }
+}
+
+/// A list's selection index plus an animated first-visible-row offset.
+#[derive(Debug, Default, Clone)]
+pub struct ListScroll {
+    /// Highlighted item index.
+    pub selected: usize,
+    /// First visible row (the settled target the displayed offset eases toward).
+    offset: usize,
+    /// Item count, for clamping.
+    total: usize,
+    /// Eases the *displayed* offset toward `offset`; `None` when settled/instant.
+    anim: Option<ScrollAnim>,
+}
+
+impl ListScroll {
+    /// A fresh, empty list scroll (selection 0, offset 0).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record the current item count, clamping `selected`/`offset` into range.
+    pub fn len(&mut self, total: usize) {
+        self.total = total;
+        let max = total.saturating_sub(1);
+        if self.selected > max {
+            self.selected = max;
+        }
+        if self.offset > max {
+            self.offset = max;
+        }
+    }
+
+    /// Select `idx` (clamped), keeping it visible in `viewport`.
+    pub fn select(&mut self, idx: usize, viewport: usize, anim: &AnimationConfig) {
+        self.selected = idx.min(self.total.saturating_sub(1));
+        self.ensure_visible_and_arm(viewport, anim);
+    }
+
+    /// Move the selection by `delta` (clamped to `[0, total-1]`), keeping it visible.
+    pub fn move_by(&mut self, delta: isize, viewport: usize, anim: &AnimationConfig) {
+        let max = self.total.saturating_sub(1) as isize;
+        self.selected = (self.selected as isize + delta).clamp(0, max.max(0)) as usize;
+        self.ensure_visible_and_arm(viewport, anim);
+    }
+
+    /// Page the selection by ~one `viewport` (1-row overlap). `dir > 0` = PageDown.
+    pub fn page(&mut self, dir: i32, viewport: usize, anim: &AnimationConfig) {
+        let stepped = page_step(self.selected, dir, viewport);
+        self.selected = stepped.min(self.total.saturating_sub(1));
+        self.ensure_visible_and_arm(viewport, anim);
+    }
+
+    /// Jump to the first item.
+    pub fn home(&mut self, viewport: usize, anim: &AnimationConfig) {
+        self.selected = 0;
+        self.ensure_visible_and_arm(viewport, anim);
+    }
+
+    /// Jump to the last item (`total - 1`).
+    pub fn end(&mut self, total: usize, viewport: usize, anim: &AnimationConfig) {
+        self.total = total;
+        self.selected = total.saturating_sub(1);
+        self.ensure_visible_and_arm(viewport, anim);
+    }
+
+    /// The animated (rounded) first-visible row to render this frame.
+    pub fn display_offset(&self) -> usize {
+        self.anim
+            .as_ref()
+            .map_or(self.offset, |a| a.current().round() as usize)
+    }
+
+    /// The settled first-visible row (scrollbar position).
+    pub fn target_offset(&self) -> usize {
+        self.offset
+    }
+
+    /// True while the display offset is still easing toward the target.
+    pub fn has_active_animation(&self) -> bool {
+        self.anim.as_ref().is_some_and(|a| !a.done())
+    }
+
+    /// Drop a completed animation (the offset already holds the target). Called
+    /// from the run loop once the tween finishes.
+    pub fn finalize_if_done(&mut self) {
+        if self.anim.as_ref().is_some_and(|a| a.done()) {
+            self.anim = None;
+        }
+    }
+
+    /// Recompute the target offset to keep `selected` visible, then ease toward
+    /// it (instant when animation is disabled).
+    fn ensure_visible_and_arm(&mut self, viewport: usize, anim: &AnimationConfig) {
+        let new_offset = ensure_visible(self.offset, self.selected, viewport);
+        let from = self.display_offset();
+        self.offset = new_offset;
+        self.anim = if from == new_offset {
+            None
+        } else {
+            ScrollAnim::to(from, new_offset, anim)
+        };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::anim::Easing;
+    fn anim_off() -> AnimationConfig {
+        AnimationConfig { enabled: false, easing: Easing::EaseOut, scroll_ms: 0 }
+    }
+
+    #[test]
+    fn move_clamps_and_keeps_selection_visible() {
+        let mut l = ListScroll::new();
+        l.len(20);
+        l.move_by(5, 5, &anim_off()); // select 5, viewport 5
+        assert_eq!(l.selected, 5);
+        // offset advanced so 5 is visible in a 5-row viewport (rows 1..=5)
+        assert!(l.target_offset() <= 5 && 5 < l.target_offset() + 5);
+        l.move_by(-100, 5, &anim_off()); // clamp to 0
+        assert_eq!(l.selected, 0);
+        assert_eq!(l.target_offset(), 0);
+    }
+
+    #[test]
+    fn page_moves_by_a_viewport() {
+        let mut l = ListScroll::new();
+        l.len(100);
+        l.page(1, 10, &anim_off()); // PageDown
+        assert!(l.selected >= 9); // ~one page (with overlap)
+        let before = l.selected;
+        l.page(-1, 10, &anim_off()); // PageUp
+        assert!(l.selected < before);
+    }
+
+    #[test]
+    fn home_end_jump_to_bounds() {
+        let mut l = ListScroll::new();
+        l.len(50);
+        l.end(50, 10, &anim_off());
+        assert_eq!(l.selected, 49);
+        l.home(10, &anim_off());
+        assert_eq!(l.selected, 0);
+        assert_eq!(l.target_offset(), 0);
+    }
+
+    #[test]
+    fn instant_when_animation_disabled() {
+        let mut l = ListScroll::new();
+        l.len(100);
+        l.move_by(40, 10, &anim_off());
+        assert_eq!(l.display_offset(), l.target_offset(), "no easing when disabled");
+        assert!(!l.has_active_animation());
+    }
+}

@@ -8,7 +8,6 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget};
 
 use crate::input::{AttrKind, is_bordered_selector};
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
@@ -143,7 +142,8 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         .min(max_scroll);
 
     // When the list overflows, reserve the board's rightmost column as a scrollbar gutter.
-    let scrollbar_visible = total_lines > visible_rows && board_area.width >= 2;
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total_lines, visible_rows) && board_area.width >= 2;
     let draw_area = if scrollbar_visible {
         Rect::new(board_area.x, board_area.y, board_area.width.saturating_sub(1), board_area.height)
     } else {
@@ -201,19 +201,13 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     // ── Scrollbar (only when the selector list overflows the board height) ────
     if scrollbar_visible {
         let sb_area = Rect::new(board_area.right().saturating_sub(1), board_area.y, 1, board_area.height);
-        // content_len = max_scroll + 1 so position ranges 0..=max_scroll (matching transcript.rs).
-        let content_len = total_lines.saturating_sub(visible_rows) + 1;
-        let mut sb_state = ScrollbarState::new(content_len)
-            .viewport_content_length(visible_rows)
-            .position(scroll);
-        StatefulWidget::render(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(state.colors.scrollbar),
-            sb_area,
+        crate::render::scroll::draw_scrollbar(
             buf,
-            &mut sb_state,
+            sb_area,
+            total_lines,
+            visible_rows,
+            scroll,
+            state.colors.scrollbar,
         );
     }
 

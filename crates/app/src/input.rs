@@ -60,6 +60,14 @@ pub enum VerbMenuNavKind {
     NextPane,
     /// Switch to the previous pane (Shift+Tab / Left).
     PrevPane,
+    /// Page the current pane's selection up by one viewport (PageUp).
+    PageUp,
+    /// Page the current pane's selection down by one viewport (PageDown).
+    PageDown,
+    /// Jump to the first item in the current pane (Home).
+    Home,
+    /// Jump to the last item in the current pane (End).
+    End,
 }
 
 // ── Action enum ───────────────────────────────────────────────────────────────
@@ -171,6 +179,12 @@ pub enum Action {
     OpenSaves,
     /// Navigate the saves list by delta (-1 = up, +1 = down).
     SavesNav(i32),
+    /// Page the saves list by one viewport (-1 = PageUp, +1 = PageDown).
+    SavesPage(i32),
+    /// Jump to the first save entry.
+    SavesHome,
+    /// Jump to the last save entry.
+    SavesEnd,
     /// Load the selected save (caller-handled).
     SavesLoad,
     /// Begin a SaveAs prompt for a new named save (sets up the prompt sub-mode).
@@ -275,6 +289,12 @@ pub enum Action {
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
     ConfigNav(i32),
+    /// Page the config screen list by one viewport (-1 = PageUp, +1 = PageDown).
+    ConfigPage(i32),
+    /// Jump to the first config row.
+    ConfigHome,
+    /// Jump to the last config row.
+    ConfigEnd,
     /// Toggle the selected bool field in the working config.
     ConfigToggle,
     /// Cycle an enum/choice field in the working config by delta (-1 or +1).
@@ -291,6 +311,12 @@ pub enum Action {
     SavesImport,
     /// Navigate the file browser by delta (-1 = up, +1 = down).
     FbNav(i32),
+    /// Page the file-browser list by one viewport (-1 = PageUp, +1 = PageDown).
+    FbPage(i32),
+    /// Jump to the first file-browser entry.
+    FbHome,
+    /// Jump to the last file-browser entry.
+    FbEnd,
     /// Activate the selected file-browser entry (cd into dir or import file).
     FbEnter,
     /// Choose the current directory as the export target (PickDir mode).
@@ -332,6 +358,8 @@ pub enum Action {
     OpenHistory,
     /// Step the replay selection by delta turns (-1 left, +1 right).
     ReplayStep(isize),
+    /// Page the replay selection by one viewport (-1 = PageUp, +1 = PageDown).
+    ReplayPage(i8),
     /// Toggle replay auto-play.
     ReplayTogglePlay,
     /// Close the replay modal (back to live, no change).
@@ -819,6 +847,19 @@ fn gallery_dialog_action(
     None
 }
 
+/// Map a vertical mouse-wheel event to a step: `ScrollUp` → `-1`, `ScrollDown`
+/// → `+1`, swapped when `invert`; `None` for non-wheel events. The single place
+/// wheel direction and the `mouse_wheel_invert` preference are resolved, so no
+/// surface re-implements the invert.
+pub fn wheel_delta(kind: MouseEventKind, invert: bool) -> Option<isize> {
+    let base = match kind {
+        MouseEventKind::ScrollUp => -1,
+        MouseEventKind::ScrollDown => 1,
+        _ => return None,
+    };
+    Some(if invert { -base } else { base })
+}
+
 /// Map a crossterm `MouseEvent` to an `Action` given the current `AppState`, the
 /// bounding rects of the map and story panes, the pre-computed room screen
 /// rects (needed for pixel-accurate room hit-testing on left/right clicks), and
@@ -861,15 +902,16 @@ pub fn mouse_to_action(
     // Each list modal reuses its existing Up/Down nav action (no new scroll
     // state). Corner overlays (room panel, tidy) are intentionally absent — the
     // wheel still pans the map under them, as before.
-    let wheel_up = match kind {
-        MouseEventKind::ScrollUp => Some(true),
-        MouseEventKind::ScrollDown => Some(false),
-        _ => None,
-    };
+    // `kind` already has the single mouse_wheel_invert applied (above), so map it
+    // to a direction with the shared helper and invert=false (never twice).
+    let wheel_up = wheel_delta(kind, false).map(|d| d < 0);
     if let Some(up) = wheel_up {
         // Priority mirrors the keyboard modal routing order above.
         if state.gallery.is_some() {
             return if up { Action::GalleryPrev } else { Action::GalleryNext };
+        }
+        if state.config_screen.is_some() {
+            return if up { Action::ConfigNav(-1) } else { Action::ConfigNav(1) };
         }
         if state.saves.is_some() {
             return if up { Action::SavesNav(-1) } else { Action::SavesNav(1) };
@@ -1117,6 +1159,10 @@ fn saves_key_to_action(key: KeyEvent, _focus: usize) -> Action {
     match key.code {
         KeyCode::Up => Action::SavesNav(-1),
         KeyCode::Down => Action::SavesNav(1),
+        KeyCode::PageUp => Action::SavesPage(-1),
+        KeyCode::PageDown => Action::SavesPage(1),
+        KeyCode::Home => Action::SavesHome,
+        KeyCode::End => Action::SavesEnd,
         KeyCode::Enter => Action::SavesLoad,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::SavesSaveAs,
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => Action::SavesDelete,
@@ -1132,6 +1178,10 @@ fn history_key_to_action(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Left => Action::ReplayStep(-1),
         KeyCode::Right => Action::ReplayStep(1),
+        KeyCode::PageUp => Action::ReplayPage(-1),
+        KeyCode::PageDown => Action::ReplayPage(1),
+        KeyCode::Home => Action::ReplayStep(i32::MIN as isize),
+        KeyCode::End => Action::ReplayStep(i32::MAX as isize),
         KeyCode::Char(' ') => Action::ReplayTogglePlay,
         KeyCode::Enter | KeyCode::Char('r') => Action::ReplayResume,
         KeyCode::Esc | KeyCode::Char('q') => Action::ReplayClose,
@@ -1146,6 +1196,10 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Up => Action::FbNav(-1),
         KeyCode::Down => Action::FbNav(1),
+        KeyCode::PageUp => Action::FbPage(-1),
+        KeyCode::PageDown => Action::FbPage(1),
+        KeyCode::Home => Action::FbHome,
+        KeyCode::End => Action::FbEnd,
         KeyCode::Enter => Action::FbEnter,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::FbChooseDir,
         KeyCode::Esc => Action::FbClose,
@@ -1184,6 +1238,10 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Left => Action::VerbMenuNav(VerbMenuNavKind::PrevPane),
         KeyCode::Up => Action::VerbMenuNav(VerbMenuNavKind::Up),
         KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
+        KeyCode::PageUp => Action::VerbMenuNav(VerbMenuNavKind::PageUp),
+        KeyCode::PageDown => Action::VerbMenuNav(VerbMenuNavKind::PageDown),
+        KeyCode::Home => Action::VerbMenuNav(VerbMenuNavKind::Home),
+        KeyCode::End => Action::VerbMenuNav(VerbMenuNavKind::End),
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
         _ => Action::None,
@@ -1305,6 +1363,10 @@ fn config_screen_key_to_action(key: KeyEvent, focus: usize) -> Action {
     match key.code {
         KeyCode::Up => Action::ConfigNav(-1),
         KeyCode::Down => Action::ConfigNav(1),
+        KeyCode::PageUp => Action::ConfigPage(-1),
+        KeyCode::PageDown => Action::ConfigPage(1),
+        KeyCode::Home => Action::ConfigHome,
+        KeyCode::End => Action::ConfigEnd,
         KeyCode::Left => Action::ConfigCycle(-1),
         KeyCode::Right => Action::ConfigCycle(1),
         KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE => Action::ConfigToggle,
@@ -1364,13 +1426,8 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
 /// continuity), floored at 1 so paging always progresses, and the result is
 /// clamped to `[0, max_scroll]` — the same bounds the mouse-wheel scroll uses.
 pub fn page_scroll(current: u16, dir: i8, viewport_rows: u16, max_scroll: u16) -> u16 {
-    let page = viewport_rows.saturating_sub(1).max(1);
-    let next = if dir > 0 {
-        current.saturating_add(page)
-    } else {
-        current.saturating_sub(page)
-    };
-    next.min(max_scroll)
+    let next = crate::list_scroll::page_step(current as usize, dir as i32, viewport_rows as usize);
+    (next.min(u16::MAX as usize) as u16).min(max_scroll)
 }
 
 /// Cycle a button-focus index by `delta` (+1 Tab, -1 Shift-Tab), wrapping within
@@ -2103,11 +2160,45 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::SavesNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(s) = &mut state.saves {
                 if !s.entries.is_empty() {
-                    let len = s.entries.len() as i32;
-                    s.selected = ((s.selected as i32 + delta).rem_euclid(len)) as usize;
+                    let len = s.entries.len();
+                    s.scroll.len(len);
+                    // Preserve the existing wrap-around behavior via select().
+                    let next = ((s.scroll.selected as i32 + delta).rem_euclid(len as i32)) as usize;
+                    s.scroll.select(next, vp, &anim);
                 }
+            }
+        }
+
+        Action::SavesPage(dir) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(s) = &mut state.saves {
+                let len = s.entries.len();
+                s.scroll.len(len);
+                s.scroll.page(dir, vp, &anim);
+            }
+        }
+
+        Action::SavesHome => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(s) = &mut state.saves {
+                s.scroll.len(s.entries.len());
+                s.scroll.home(vp, &anim);
+            }
+        }
+
+        Action::SavesEnd => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(s) = &mut state.saves {
+                let len = s.entries.len();
+                s.scroll.len(len);
+                s.scroll.end(len, vp, &anim);
             }
         }
 
@@ -2126,7 +2217,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesDelete => {
             // Open the confirm-delete prompt for the selected entry.
             if let Some(s) = &state.saves {
-                if let Some(entry) = s.entries.get(s.selected) {
+                if let Some(entry) = s.entries.get(s.scroll.selected) {
                     let path = entry.path.clone();
                     state.hotkey_dialog = false;
                     state.prompt = Some(crate::state::Prompt {
@@ -2148,11 +2239,45 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // SavesExport, SavesImport, FbEnter, FbChooseDir are caller-handled.
 
         Action::FbNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(fb) = &mut state.file_browser {
                 if !fb.entries.is_empty() {
-                    let len = fb.entries.len() as i32;
-                    fb.selected = ((fb.selected as i32 + delta).rem_euclid(len)) as usize;
+                    let len = fb.entries.len();
+                    fb.scroll.len(len);
+                    // Preserve the existing wrap-around behavior via select().
+                    let next = ((fb.scroll.selected as i32 + delta).rem_euclid(len as i32)) as usize;
+                    fb.scroll.select(next, vp, &anim);
                 }
+            }
+        }
+
+        Action::FbPage(dir) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(fb) = &mut state.file_browser {
+                let len = fb.entries.len();
+                fb.scroll.len(len);
+                fb.scroll.page(dir, vp, &anim);
+            }
+        }
+
+        Action::FbHome => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(fb) = &mut state.file_browser {
+                fb.scroll.len(fb.entries.len());
+                fb.scroll.home(vp, &anim);
+            }
+        }
+
+        Action::FbEnd => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(fb) = &mut state.file_browser {
+                let len = fb.entries.len();
+                fb.scroll.len(len);
+                fb.scroll.end(len, vp, &anim);
             }
         }
 
@@ -2313,9 +2438,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let nouns = build_verb_menu_nouns(state, mapper);
             state.verb_menu = Some(crate::state::VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_idx: 0,
-                noun_idx: 0,
-                prep_idx: 0,
+                verb_scroll: Default::default(),
+                noun_scroll: Default::default(),
+                prep_scroll: Default::default(),
                 nouns,
             });
         }
@@ -2323,6 +2448,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::VerbMenuNav(kind) => {
             use crate::state::VerbMenuPane;
             use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(vm) = &mut state.verb_menu {
                 match kind {
                     VerbMenuNavKind::NextPane => {
@@ -2339,45 +2466,22 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                             VerbMenuPane::Preps => VerbMenuPane::Nouns,
                         };
                     }
-                    VerbMenuNavKind::Up => {
-                        match vm.pane {
-                            VerbMenuPane::Verbs => {
-                                let n = VERB_MENU_VERBS.len();
-                                if n > 0 {
-                                    vm.verb_idx = vm.verb_idx.saturating_sub(1);
-                                }
-                            }
-                            VerbMenuPane::Nouns => {
-                                vm.noun_idx = vm.noun_idx.saturating_sub(1);
-                            }
-                            VerbMenuPane::Preps => {
-                                let n = VERB_MENU_PREPS.len();
-                                if n > 0 {
-                                    vm.prep_idx = vm.prep_idx.saturating_sub(1);
-                                }
-                            }
-                        }
-                    }
-                    VerbMenuNavKind::Down => {
-                        match vm.pane {
-                            VerbMenuPane::Verbs => {
-                                let n = VERB_MENU_VERBS.len();
-                                if n > 0 {
-                                    vm.verb_idx = (vm.verb_idx + 1).min(n - 1);
-                                }
-                            }
-                            VerbMenuPane::Nouns => {
-                                let n = vm.nouns.len();
-                                if n > 0 {
-                                    vm.noun_idx = (vm.noun_idx + 1).min(n - 1);
-                                }
-                            }
-                            VerbMenuPane::Preps => {
-                                let n = VERB_MENU_PREPS.len();
-                                if n > 0 {
-                                    vm.prep_idx = (vm.prep_idx + 1).min(n - 1);
-                                }
-                            }
+                    // List movement within the active pane (clamped).
+                    _ => {
+                        let (scroll, len) = match vm.pane {
+                            VerbMenuPane::Verbs => (&mut vm.verb_scroll, VERB_MENU_VERBS.len()),
+                            VerbMenuPane::Nouns => (&mut vm.noun_scroll, vm.nouns.len()),
+                            VerbMenuPane::Preps => (&mut vm.prep_scroll, VERB_MENU_PREPS.len()),
+                        };
+                        scroll.len(len);
+                        match kind {
+                            VerbMenuNavKind::Up => scroll.move_by(-1, vp, &anim),
+                            VerbMenuNavKind::Down => scroll.move_by(1, vp, &anim),
+                            VerbMenuNavKind::PageUp => scroll.page(-1, vp, &anim),
+                            VerbMenuNavKind::PageDown => scroll.page(1, vp, &anim),
+                            VerbMenuNavKind::Home => scroll.home(vp, &anim),
+                            VerbMenuNavKind::End => scroll.end(len, vp, &anim),
+                            VerbMenuNavKind::NextPane | VerbMenuNavKind::PrevPane => {}
                         }
                     }
                 }
@@ -2807,34 +2911,66 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let working = clone_config(&state.config);
             state.config_screen = Some(crate::state::ConfigScreenState {
                 working,
-                selected: 0,
+                scroll: Default::default(),
             });
         }
 
         Action::ConfigNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(cs) = &mut state.config_screen {
-                let n = CONFIG_ROW_COUNT as i32;
-                cs.selected = ((cs.selected as i32 + delta).rem_euclid(n)) as usize;
+                let n = CONFIG_ROW_COUNT;
+                cs.scroll.len(n);
+                // Preserve the existing wrap-around behavior via select().
+                let next = ((cs.scroll.selected as i32 + delta).rem_euclid(n as i32)) as usize;
+                cs.scroll.select(next, vp, &anim);
+            }
+        }
+
+        Action::ConfigPage(dir) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(cs) = &mut state.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.page(dir, vp, &anim);
+            }
+        }
+
+        Action::ConfigHome => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(cs) = &mut state.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.home(vp, &anim);
+            }
+        }
+
+        Action::ConfigEnd => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(cs) = &mut state.config_screen {
+                cs.scroll.len(CONFIG_ROW_COUNT);
+                cs.scroll.end(CONFIG_ROW_COUNT, vp, &anim);
             }
         }
 
         Action::ConfigToggle => {
             if state.config_screen.is_some() {
                 // Split the borrow: take the selected row, then call helper.
-                let selected = state.config_screen.as_ref().map(|cs| cs.selected).unwrap_or(0);
+                let selected = state.config_screen.as_ref().map(|cs| cs.scroll.selected).unwrap_or(0);
                 config_toggle_or_edit(selected, state);
             }
         }
 
         Action::ConfigCycle(delta) => {
             if let Some(cs) = &mut state.config_screen {
-                config_cycle(&mut cs.working, cs.selected, delta);
+                config_cycle(&mut cs.working, cs.scroll.selected, delta);
             }
         }
 
         Action::ConfigEdit => {
             if let Some(cs) = &state.config_screen {
-                let field = config_path_field(cs.selected);
+                let field = config_path_field(cs.scroll.selected);
                 if let Some(f) = field {
                     let current = match &f {
                         crate::state::ConfigPathField::UserDir => cs.working.user_dir.to_string_lossy().to_string(),
@@ -2907,6 +3043,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let len = state.history.len();
             if let Some(r) = &mut state.replay {
                 r.step(delta, len);
+            }
+        }
+
+        Action::ReplayPage(dir) => {
+            let len = state.history.len();
+            // Page by one list viewport (1-row overlap), clamped by step().
+            let page = (state.modal_list_viewport.max(2) - 1) as isize;
+            if let Some(r) = &mut state.replay {
+                r.step(dir as isize * page, len);
             }
         }
 
@@ -4607,7 +4752,7 @@ mod tests {
                     is_default: false,
                 },
             ],
-            selected: 0,
+            scroll: Default::default(),
         });
         s
     }
@@ -4619,12 +4764,12 @@ mod tests {
         let a = key_to_action(&s, key(KeyCode::Down));
         assert!(matches!(a, Action::SavesNav(1)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 1);
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 1);
         // Up moves back to 0.
         let a = key_to_action(&s, key(KeyCode::Up));
         assert!(matches!(a, Action::SavesNav(-1)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 0);
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 0);
     }
 
     #[test]
@@ -4644,7 +4789,7 @@ mod tests {
     fn saves_submode_d_opens_confirm_delete_prompt() {
         let mut s = state_with_saves_open();
         // Select entry 1 (the named save).
-        s.saves.as_mut().unwrap().selected = 1;
+        s.saves.as_mut().unwrap().scroll.selected = 1;
         let a = key_to_action(&s, key(KeyCode::Char('d')));
         assert!(matches!(a, Action::SavesDelete));
         apply_action(a, &mut s, &mut Mapper::default());
@@ -4695,14 +4840,15 @@ mod tests {
                 SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), is_default: false },
                 SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), is_default: false },
             ],
-            selected: 1,
+            scroll: Default::default(),
         });
+        s.saves.as_mut().unwrap().scroll.selected = 1;
         // Down from last wraps to first.
         apply_action(Action::SavesNav(1), &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 0, "should wrap to 0 after last");
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 0, "should wrap to 0 after last");
         // Up from first wraps to last.
         apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 1, "should wrap to last");
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 1, "should wrap to last");
     }
 
     // ── Hotkey dialog dispatch tests ──────────────────────────────────────────
@@ -4946,7 +5092,7 @@ mod tests {
     fn wheel_drives_saves_selection() {
         use crate::state::SavesState;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
             Action::SavesNav(-1)
@@ -4997,9 +5143,9 @@ mod tests {
         let mut s = AppState::default();
         s.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns: Vec::new(),
         });
         assert!(matches!(
@@ -5034,7 +5180,7 @@ mod tests {
         use crate::render::dialog::DialogRects;
         use ratatui::layout::Rect;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         let dialog = Some(DialogRects {
             area: Rect::new(10, 5, 40, 15),
             content: Rect::new(11, 7, 38, 10),
@@ -5054,7 +5200,7 @@ mod tests {
         // to the DOWN action and ScrollDown to the UP action.
         use crate::state::SavesState;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         s.config.mouse_wheel_invert = true;
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
@@ -5160,6 +5306,16 @@ mod tests {
         // viewport of 0 or 1 → page floors at 1 line so paging still progresses.
         assert_eq!(page_scroll(0, 1, 1, 100), 1);
         assert_eq!(page_scroll(0, 1, 0, 100), 1);
+    }
+
+    #[test]
+    fn wheel_delta_maps_and_inverts_once() {
+        use crossterm::event::MouseEventKind::*;
+        assert_eq!(wheel_delta(ScrollUp, false), Some(-1));
+        assert_eq!(wheel_delta(ScrollDown, false), Some(1));
+        assert_eq!(wheel_delta(ScrollUp, true), Some(1));
+        assert_eq!(wheel_delta(ScrollDown, true), Some(-1));
+        assert_eq!(wheel_delta(Moved, false), None);
     }
 
     #[test]
@@ -5717,9 +5873,9 @@ mod tests {
     fn open_verb_menu_with_nouns(state: &mut AppState, nouns: Vec<String>) {
         state.verb_menu = Some(crate::state::VerbMenuState {
             pane: crate::state::VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns,
         });
     }
@@ -5753,7 +5909,7 @@ mod tests {
         let with_idx = crate::render::verbmenu::VERB_MENU_PREPS.iter().position(|&p| p == "with").expect("with in preps");
 
         // 1. Pick "unlock" from Verbs pane.
-        s.verb_menu.as_mut().unwrap().verb_idx = unlock_idx;
+        s.verb_menu.as_mut().unwrap().verb_scroll.selected = unlock_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock ");
 
@@ -5764,13 +5920,13 @@ mod tests {
 
         // 3. Switch to Preps pane and pick "with".
         s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
-        s.verb_menu.as_mut().unwrap().prep_idx = with_idx;
+        s.verb_menu.as_mut().unwrap().prep_scroll.selected = with_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door with ");
 
         // 4. Switch back to Nouns and pick "key" (noun_idx=1).
         s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
-        s.verb_menu.as_mut().unwrap().noun_idx = 1;
+        s.verb_menu.as_mut().unwrap().noun_scroll.selected = 1;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door with key ");
     }
@@ -5818,22 +5974,22 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec!["door".to_string(), "mailbox".to_string()]);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 1);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 1);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         // Up at 0 stays at 0 (saturating).
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_idx, 0);
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         // Switch to Nouns, move down.
         s.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Nouns;
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().noun_idx, 1);
+        assert_eq!(s.verb_menu.as_ref().unwrap().noun_scroll.selected, 1);
     }
 
     #[test]
@@ -5905,7 +6061,7 @@ mod tests {
     /// Build a state with saves open (for testing e/i dispatch).
     fn state_with_saves_for_fb_tests() -> AppState {
         let mut s = AppState::default();
-        s.saves = Some(crate::state::SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
         s
     }
 
@@ -5988,7 +6144,7 @@ mod tests {
         // Move up from 0 should wrap to last entry.
         apply_action(Action::FbNav(-1), &mut s, &mut Mapper::default());
         if let Some(fb) = &s.file_browser {
-            assert_eq!(fb.selected, fb.entries.len() - 1, "nav -1 from 0 should wrap to last");
+            assert_eq!(fb.scroll.selected, fb.entries.len() - 1, "nav -1 from 0 should wrap to last");
         }
     }
 
@@ -6065,7 +6221,7 @@ mod tests {
         // State with config_screen open (so dialog routing knows which modal).
         let mut state = AppState::default();
         let working = crate::input::clone_config(&state.config);
-        state.config_screen = Some(ConfigScreenState { working, selected: 0 });
+        state.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
 
         let map   = Rect::default();
         let story = Rect::default();
@@ -6094,7 +6250,7 @@ mod tests {
         // ESC in config screen should produce ConfigCancel (same as [X] and Cancel button).
         let mut s = AppState::default();
         let working = crate::input::clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::ConfigCancel), "ESC in config screen should produce ConfigCancel");
     }
@@ -6123,7 +6279,7 @@ mod tests {
                 saved_at: String::new(),
                 is_default: false,
             }],
-            selected: 0,
+            scroll: Default::default(),
         });
 
         let map   = Rect::default();
@@ -6198,9 +6354,9 @@ mod tests {
         let mut state = AppState::default();
         state.verb_menu = Some(VerbMenuState {
             pane: crate::state::VerbMenuPane::Verbs,
-            verb_idx: 0,
-            noun_idx: 0,
-            prep_idx: 0,
+            verb_scroll: Default::default(),
+            noun_scroll: Default::default(),
+            prep_scroll: Default::default(),
             nouns: vec![],
         });
 
@@ -6295,7 +6451,7 @@ mod tests {
             s.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
                 saved_at: String::new(), is_default: false,
-            }], selected: 0 });
+            }], scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::SavesClose),
                 "saves ESC should produce SavesClose, got {:?}", esc_action);
@@ -6325,7 +6481,7 @@ mod tests {
             let mut s = AppState::default();
             s.verb_menu = Some(VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![],
             });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::VerbMenuClose),
@@ -6340,7 +6496,7 @@ mod tests {
         {
             let mut s = AppState::default();
             let working = clone_config(&s.config);
-            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::ConfigCancel),
                 "config screen ESC should produce ConfigCancel, got {:?}", esc_action);
@@ -6386,7 +6542,7 @@ mod tests {
             s.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
                 saved_at: String::new(), is_default: false,
-            }], selected: 0 });
+            }], scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::SavesClose),
                 "q must not close the saves modal");
@@ -6408,7 +6564,7 @@ mod tests {
             let mut s = AppState::default();
             s.verb_menu = Some(VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_idx: 0, noun_idx: 0, prep_idx: 0, nouns: vec![],
+                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![],
             });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::VerbMenuClose),
@@ -6419,7 +6575,7 @@ mod tests {
         {
             let mut s = AppState::default();
             let working = clone_config(&s.config);
-            s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+            s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::ConfigCancel),
                 "q must not cancel the config screen");
@@ -6558,7 +6714,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         s.dialog_focus = cycle_focus(0, 2, 1); // focus Cancel (index 1)
         let a = config_screen_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -6573,7 +6729,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         s.dialog_focus = 0; // focus Save (default)
         let a = config_screen_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -6588,7 +6744,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         // Space must toggle the selected row regardless of focus.
         for focus in [0, 1] {
             let a = config_screen_key_to_action(
@@ -6606,7 +6762,7 @@ mod tests {
         // Enter still loads the selected save (existing behavior).
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
-        s.saves = Some(crate::state::SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
         s.dialog_focus = 0;
         // Tab with ring len 1 stays at 0.
         let after_tab = cycle_focus(s.dialog_focus, 1, 1);

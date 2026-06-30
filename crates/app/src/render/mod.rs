@@ -18,6 +18,7 @@ pub mod style_editor;
 pub mod room_info;
 pub mod saves;
 pub mod screen;
+pub mod scroll;
 pub mod tidy_panel;
 pub mod transcript;
 pub mod verbmenu;

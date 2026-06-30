@@ -14,7 +14,12 @@ use crate::state::AppState;
 ///
 /// Does nothing when `state.file_browser` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
-pub fn draw_file_browser(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+pub fn draw_file_browser(
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+    vp_out: &mut usize,
+) -> Option<DialogRects> {
     let Some(fb) = &state.file_browser else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
@@ -82,18 +87,32 @@ pub fn draw_file_browser(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
 
     // Reserve last row of entries_area for footer.
     let entries_max_y = entries_area.bottom().saturating_sub(1);
+    // The entry-row band sits above the footer row.
+    let band_h = entries_max_y.saturating_sub(entries_area.y);
+    let total = fb.entries.len();
+    let viewport = band_h as usize;
+    *vp_out = viewport;
 
-    for (i, entry) in fb.entries.iter().enumerate() {
-        let row_y = entries_area.y + i as u16;
-        if row_y >= entries_max_y {
+    // Reserve a 1-column gutter on the right for the scrollbar when overflowing.
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total, viewport) && content.width >= 2;
+    let row_w = if scrollbar_visible { content.width.saturating_sub(1) } else { content.width };
+    let row_area = Rect::new(content.x, entries_area.y, row_w, band_h);
+
+    let offset = fb.scroll.display_offset();
+    for row in 0..viewport {
+        let i = offset + row;
+        if i >= total {
             break;
         }
+        let entry = &fb.entries[i];
+        let row_y = entries_area.y + row as u16;
 
-        let is_sel = i == fb.selected;
+        let is_sel = i == fb.scroll.selected;
 
         // Fill row background.
         let row_bg = if is_sel { selected_style } else { normal };
-        for col in content.x..content.right() {
+        for col in row_area.x..row_area.right() {
             if let Some(cell) = buf.cell_mut((col, row_y)) {
                 cell.set_symbol(" ").set_style(row_bg);
             }
@@ -111,7 +130,19 @@ pub fn draw_file_browser(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         let marker = if is_sel { ">" } else { " " };
         let suffix = if entry.is_dir && entry.name != ".." { "/" } else { "" };
         let label = format!("{} {}{}", marker, entry.name, suffix);
-        crate::render::draw_str_clipped(buf, content.x, row_y, &label, text_style, content);
+        crate::render::draw_str_clipped(buf, row_area.x, row_y, &label, text_style, row_area);
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(entries_area.right().saturating_sub(1), entries_area.y, 1, band_h);
+        crate::render::scroll::draw_scrollbar(
+            buf,
+            sb_area,
+            total,
+            viewport,
+            fb.scroll.target_offset(),
+            state.colors.scrollbar,
+        );
     }
 
     // ── Footer hint ───────────────────────────────────────────────────────────
@@ -148,6 +179,37 @@ mod tests {
     }
 
     #[test]
+    fn draw_file_browser_scrollbar_and_paging_on_overflow() {
+        use crate::input::{apply_action, Action};
+        use crate::state::FbEntry;
+        use mapper::mapper::Mapper;
+        let entries: Vec<FbEntry> =
+            (0..50).map(|i| FbEntry { name: format!("file-{i}.qzl"), is_dir: false }).collect();
+        let mut state = AppState::default();
+        state.file_browser = Some(FileBrowserState {
+            cwd: PathBuf::from("/tmp"),
+            entries,
+            scroll: Default::default(),
+            mode: FbMode::PickFile,
+            export_default_name: String::new(),
+        });
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut vp = 0usize;
+        terminal.draw(|f| {
+            draw_file_browser(&state, f.area(), f.buffer_mut(), &mut vp);
+        }).unwrap();
+        assert!(vp > 0 && vp < 50, "entries should overflow the modal (vp={vp})");
+        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        assert!(has_thumb, "a scrollbar thumb should be drawn when entries overflow");
+
+        state.modal_list_viewport = vp;
+        apply_action(Action::FbPage(1), &mut state, &mut Mapper::default());
+        let sel = state.file_browser.as_ref().unwrap().scroll.selected;
+        assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
+    }
+
+    #[test]
     fn draw_file_browser_noop_when_closed() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -156,7 +218,7 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         terminal.draw(|f| {
-            draw_file_browser(&state, f.area(), f.buffer_mut());
+            draw_file_browser(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let after: Vec<_> = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().to_string())
@@ -175,7 +237,7 @@ mod tests {
         // Use Single border so title and content do not overlap.
         state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         terminal.draw(|f| {
-            draw_file_browser(&state, f.area(), f.buffer_mut());
+            draw_file_browser(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -191,7 +253,7 @@ mod tests {
         let mut state = state_with_browser(tmp, FbMode::PickDir);
         state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         terminal.draw(|f| {
-            draw_file_browser(&state, f.area(), f.buffer_mut());
+            draw_file_browser(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -209,7 +271,7 @@ mod tests {
         state.colors.dialog_box_style = BorderStyle::Single;
         let mut rects_out: Option<DialogRects> = None;
         terminal.draw(|f| {
-            rects_out = draw_file_browser(&state, f.area(), f.buffer_mut());
+            rects_out = draw_file_browser(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
 
         let content: String = terminal.backend().buffer().content().iter()

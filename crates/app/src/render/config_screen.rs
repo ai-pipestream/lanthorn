@@ -32,7 +32,12 @@ pub(crate) enum ConfigRowKind {
 /// Draw the config-screen modal centered over `area`.
 /// Does nothing when `state.config_screen` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
-pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+pub fn draw_config_screen(
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+    vp_out: &mut usize,
+) -> Option<DialogRects> {
     let Some(cs) = &state.config_screen else { return None };
 
     let modal_w = 64u16.min(area.width.saturating_sub(4));
@@ -87,17 +92,30 @@ pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         Rect::new(content.x, content.y, content.width, 0)
     };
 
-    for (i, (name, _kind)) in CONFIG_ROWS.iter().enumerate() {
-        let row_y = rows_area.y + i as u16;
-        if row_y >= rows_area.bottom() {
+    let total = CONFIG_ROWS.len();
+    let viewport = rows_area.height as usize;
+    *vp_out = viewport;
+
+    // Reserve a 1-column gutter on the right for the scrollbar when overflowing.
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total, viewport) && content.width >= 2;
+    let row_w = if scrollbar_visible { content.width.saturating_sub(1) } else { content.width };
+    let row_area = Rect::new(content.x, rows_area.y, row_w, rows_area.height);
+
+    let offset = cs.scroll.display_offset();
+    for row in 0..viewport {
+        let i = offset + row;
+        if i >= total {
             break;
         }
+        let (name, _kind) = CONFIG_ROWS[i];
+        let row_y = rows_area.y + row as u16;
 
-        let is_selected = i == cs.selected;
+        let is_selected = i == cs.scroll.selected;
         let row_style = if is_selected { selected_style } else { normal };
 
         // Fill row background.
-        for col in content.x..content.right() {
+        for col in row_area.x..row_area.right() {
             if let Some(cell) = buf.cell_mut((col, row_y)) {
                 cell.set_symbol(" ").set_style(row_style);
             }
@@ -109,7 +127,19 @@ pub fn draw_config_screen(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         let marker = if is_selected { ">" } else { " " };
         let name_trunc: String = name.chars().take(name_col_w).collect();
         let line = format!("{} {:<width$}  {}", marker, name_trunc, value, width = name_col_w);
-        crate::render::draw_str_clipped(buf, content.x, row_y, &line, row_style, rows_area);
+        crate::render::draw_str_clipped(buf, row_area.x, row_y, &line, row_style, row_area);
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(rows_area.right().saturating_sub(1), rows_area.y, 1, rows_area.height);
+        crate::render::scroll::draw_scrollbar(
+            buf,
+            sb_area,
+            total,
+            viewport,
+            cs.scroll.target_offset(),
+            state.colors.scrollbar,
+        );
     }
 
     Some(rects)
@@ -157,7 +187,7 @@ mod tests {
     fn state_with_config_screen() -> AppState {
         let mut s = AppState::default();
         let working = crate::input::clone_config(&s.config);
-        s.config_screen = Some(ConfigScreenState { working, selected: 0 });
+        s.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
         s
     }
 
@@ -167,13 +197,38 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let state = state_with_config_screen();
         terminal.draw(|f| {
-            draw_config_screen(&state, f.area(), f.buffer_mut());
+            draw_config_screen(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("auto_save"), "auto_save row should be visible");
         assert!(content.contains("background_tidy"), "background_tidy row should be visible");
+    }
+
+    #[test]
+    fn draw_config_screen_scrollbar_and_paging_on_overflow() {
+        use crate::input::{apply_action, Action};
+        use mapper::mapper::Mapper;
+        // A short terminal so the 10 settings rows can't all fit -> windowed list
+        // with a scrollbar, and PageDown advances the selection by ~a viewport.
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = state_with_config_screen();
+        let mut vp = 0usize;
+        terminal.draw(|f| {
+            draw_config_screen(&state, f.area(), f.buffer_mut(), &mut vp);
+        }).unwrap();
+        assert!(vp > 0 && vp < CONFIG_ROWS.len(), "rows should overflow a short modal (vp={vp})");
+        // A scrollbar thumb (full block) is drawn when the list overflows.
+        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        assert!(has_thumb, "a scrollbar thumb should be drawn when rows overflow");
+
+        // Sync the captured viewport (run loop does this) then PageDown.
+        state.modal_list_viewport = vp;
+        apply_action(Action::ConfigPage(1), &mut state, &mut Mapper::default());
+        let sel = state.config_screen.as_ref().unwrap().scroll.selected;
+        assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
     }
 
     #[test]
@@ -185,7 +240,7 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         terminal.draw(|f| {
-            draw_config_screen(&state, f.area(), f.buffer_mut());
+            draw_config_screen(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let after: Vec<_> = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().to_string())
@@ -205,7 +260,7 @@ mod tests {
         state.colors.dialog_box_style = BorderStyle::Single;
         let mut rects_out: Option<DialogRects> = None;
         terminal.draw(|f| {
-            rects_out = draw_config_screen(&state, f.area(), f.buffer_mut());
+            rects_out = draw_config_screen(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
 
         let content: String = terminal.backend().buffer().content().iter()

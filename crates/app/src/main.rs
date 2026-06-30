@@ -244,6 +244,10 @@ struct PaneRects {
     /// Visible transcript rows this frame (the transcript viewport height). Used
     /// to size a PageUp/PageDown step. 0 when no transcript is shown (MapFull).
     pub transcript_viewport_rows: u16,
+    /// List-row viewport of the open selection-list modal this frame, synced to
+    /// `AppState.modal_list_viewport` so nav actions can window/animate. 0 when
+    /// no list modal is open.
+    pub modal_list_viewport: usize,
 }
 
 /// Escape hatch: borrow the concrete Z-machine `GameSession` behind a
@@ -349,6 +353,7 @@ fn draw_frame(
     let mut style_editor_rects_out: Option<StyleEditorRects> = None;
     let mut glyph_picker_rects_out: Option<app::render::glyph_picker::GlyphPickerRects> = None;
     let mut selection_text_out: Option<String> = None;
+    let mut modal_list_viewport: usize = 0;
     let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
@@ -675,27 +680,27 @@ fn draw_frame(
 
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
-            dialog_rects_out = draw_saves(state, full, buf);
+            dialog_rects_out = draw_saves(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Replay/rewind overlay ─────────────────────────────────────────────
         if state.replay.is_some() {
-            dialog_rects_out = draw_history(state, full, buf);
+            dialog_rects_out = draw_history(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
         if state.file_browser.is_some() {
-            dialog_rects_out = draw_file_browser(state, full, buf);
+            dialog_rects_out = draw_file_browser(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
         if state.verb_menu.is_some() {
-            dialog_rects_out = draw_verb_menu(state, full, buf);
+            dialog_rects_out = draw_verb_menu(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Config screen overlay — drawn after other modals ──────────────────
         if state.config_screen.is_some() {
-            dialog_rects_out = draw_config_screen(state, full, buf);
+            dialog_rects_out = draw_config_screen(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Style editor overlay — full-screen, drawn after config screen ──────
@@ -803,7 +808,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -877,49 +882,54 @@ fn run_story_picker(
         }
     };
 
-    let mut selected: usize = 0;
+    let mut list = app::list_scroll::ListScroll::new();
+    list.len(stories.len());
+    let anim = &cfg.animation;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut viewport: usize = 0;
 
     let chosen: Option<std::path::PathBuf> = loop {
         let _ = terminal.draw(|f| {
             let area = f.area();
             let buf = f.buffer_mut();
-            row_rects = draw_story_picker(&stories, selected, dir, &cs, area, buf);
+            let (rects, vp) = draw_story_picker(&stories, &list, dir, &cs, area, buf);
+            row_rects = rects;
+            viewport = vp;
         });
+
+        // Tick while a scroll animation eases so the motion is visible; otherwise
+        // block until the next event.
+        if list.has_active_animation()
+            && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
+        {
+            list.finalize_if_done();
+            continue;
+        }
 
         match read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 match k.code {
-                    Up | Char('k') => selected = selected.saturating_sub(1),
-                    Down | Char('j') => {
-                        if selected + 1 < stories.len() {
-                            selected += 1;
-                        }
-                    }
-                    Home => selected = 0,
-                    End => selected = stories.len() - 1,
-                    Enter => break Some(stories[selected].path.clone()),
+                    Up | Char('k') => list.move_by(-1, viewport, anim),
+                    Down | Char('j') => list.move_by(1, viewport, anim),
+                    PageUp => list.page(-1, viewport, anim),
+                    PageDown => list.page(1, viewport, anim),
+                    Home => list.home(viewport, anim),
+                    End => list.end(stories.len(), viewport, anim),
+                    Enter => break Some(stories[list.selected].path.clone()),
                     Esc | Char('q') => break None,
                     _ => {}
                 }
             }
             Ok(Event::Mouse(m)) => {
                 use crossterm::event::{MouseButton, MouseEventKind};
-                match m.kind {
-                    MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
-                    MouseEventKind::ScrollDown => {
-                        if selected + 1 < stories.len() {
-                            selected += 1;
-                        }
+                if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                    let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                    if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
+                        break Some(stories[*idx].path.clone());
                     }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
-                            break Some(stories[*idx].path.clone());
-                        }
-                    }
-                    _ => {}
+                } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
+                    list.move_by(d, viewport, anim);
                 }
             }
             Ok(Event::Resize(_, _)) => {
@@ -928,6 +938,7 @@ fn run_story_picker(
             Ok(_) => {}
             Err(_) => break None,
         }
+        list.finalize_if_done();
     };
 
     restore_terminal();
@@ -938,13 +949,14 @@ fn run_story_picker(
 /// mouse selection.
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
-    selected: usize,
+    list: &app::list_scroll::ListScroll,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
-) -> Vec<(usize, Rect)> {
+) -> (Vec<(usize, Rect)>, usize) {
     use ratatui::style::{Color, Style};
+    let selected = list.selected;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
 
     // Background fill.
@@ -968,18 +980,24 @@ fn draw_story_picker(
     let list_top = area.y + 2;
     let list_bottom = area.bottom().saturating_sub(1);
     if list_bottom <= list_top {
-        return row_rects;
+        return (row_rects, 0);
     }
     let rows = (list_bottom - list_top) as usize;
-    let first = if selected >= rows { selected + 1 - rows } else { 0 };
+    let total = stories.len();
+
+    // Reserve a 1-col gutter for the scrollbar when the list overflows.
+    let scrollbar_visible =
+        app::render::scroll::needs_scrollbar(total, rows) && area.width >= 2;
+    let row_w = if scrollbar_visible { area.width.saturating_sub(1) } else { area.width };
+    let first = list.display_offset();
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
         let y = list_top + (i - first) as u16;
-        let row_rect = Rect::new(area.x, y, area.width, 1);
+        let row_rect = Rect::new(area.x, y, row_w, 1);
         row_rects.push((i, row_rect));
         let sel = i == selected;
         let style = if sel { cs.dialog_button_active } else { cs.dialog };
-        for x in area.left()..area.right() {
+        for x in area.left()..area.left() + row_w {
             if let Some(c) = buf.cell_mut((x, y)) {
                 c.set_symbol(" ").set_style(style);
             }
@@ -989,12 +1007,17 @@ fn draw_story_picker(
         draw_str_clipped(buf, area.x, y, &line, style, row_rect);
     }
 
+    if scrollbar_visible {
+        let sb_area = Rect::new(area.right().saturating_sub(1), list_top, 1, rows as u16);
+        app::render::scroll::draw_scrollbar(buf, sb_area, total, rows, list.target_offset(), cs.scrollbar);
+    }
+
     // Footer hint.
-    let footer = " ↑/↓ or j/k: move   Enter / click: open   q / Esc: quit";
+    let footer = " ↑/↓ or j/k: move   PgUp/PgDn   Enter / click: open   q / Esc: quit";
     let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
     draw_str_clipped(buf, area.x, list_bottom, footer, fstyle, area);
 
-    row_rects
+    (row_rects, rows)
 }
 
 /// Format the one-line loading indicator shown while a (possibly large) story
@@ -1337,7 +1360,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1455,6 +1478,20 @@ fn main() {
                 // over-scroll past the top doesn't accumulate (and lag on the
                 // way back down).
                 state.transcript_scroll = state.transcript_scroll.min(panes.transcript_max_scroll);
+                // Carry this frame's modal list viewport so the next nav action
+                // can window/animate the open selection-list modal.
+                state.modal_list_viewport = panes.modal_list_viewport;
+                // Replay's idx is the source of truth; keep its (animated) list
+                // scroll following it. Skip while a scroll is easing so the tween
+                // isn't restarted each frame; select() is a no-op once settled.
+                let anim = state.config.animation.clone();
+                let hist_len = state.history.len();
+                if let Some(r) = &mut state.replay {
+                    if !r.scroll.has_active_animation() {
+                        r.scroll.len(hist_len);
+                        r.scroll.select(r.idx, state.modal_list_viewport, &anim);
+                    }
+                }
                 last_panes = panes;
             }
             Err(e) => {
@@ -1490,12 +1527,23 @@ fn main() {
             let done_to = state
                 .scroll_anim
                 .as_ref()
-                .filter(|a| a.tween.done())
-                .map(|a| a.to);
+                .filter(|a| a.done())
+                .map(|a| a.target());
             if let Some(to) = done_to {
-                state.transcript_scroll = to.round() as u16;
+                state.transcript_scroll = to as u16;
                 state.scroll_anim = None;
             }
+            // Finalize each open scrollable surface's animation likewise.
+            if let Some(s) = &mut state.saves { s.scroll.finalize_if_done(); }
+            if let Some(fb) = &mut state.file_browser { fb.scroll.finalize_if_done(); }
+            if let Some(cs) = &mut state.config_screen { cs.scroll.finalize_if_done(); }
+            if let Some(vm) = &mut state.verb_menu {
+                vm.verb_scroll.finalize_if_done();
+                vm.noun_scroll.finalize_if_done();
+                vm.prep_scroll.finalize_if_done();
+            }
+            if let Some(r) = &mut state.replay { r.scroll.finalize_if_done(); }
+            if let Some(h) = &mut state.hints { h.finalize_scroll_if_done(); }
             continue;
         }
 
@@ -1808,6 +1856,7 @@ fn main() {
                                             hs.transcript.push(l.to_owned());
                                         }
                                         hs.scroll = 0;
+                                        hs.scroll_anim = None;
                                     }
                                 }
                                 KeyCode::Backspace => {
@@ -1836,17 +1885,16 @@ fn main() {
                             }
                             // Clicks inside the dialog but not on close: swallow.
                         }
-                    } else if matches!(m.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                    } else if let Some(d) = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert) {
                         // Wheel drives the hint transcript's own scroll. The panel
-                        // is intercepted before mouse_to_action, so apply the
-                        // mouse_wheel_invert preference here (mirroring that helper).
-                        let raw_up = matches!(m.kind, MouseEventKind::ScrollUp);
-                        let up = raw_up ^ state.config.mouse_wheel_invert;
+                        // is intercepted before mouse_to_action, so resolve the
+                        // direction (and mouse_wheel_invert) via the shared helper.
                         let max = last_panes.hints_panel.as_ref().map_or(0, |hp| hp.max_scroll);
+                        let anim = state.config.animation.clone();
                         if let Some(hs) = &mut state.hints {
-                            // Wheel up → older content (increase scroll), matching
-                            // the story transcript's wheel direction.
-                            hs.scroll_by(if up { 1 } else { -1 }, max);
+                            // Wheel up (d < 0) → older content (increase scroll),
+                            // matching the story transcript's wheel direction.
+                            hs.scroll_by(if d < 0 { 1 } else { -1 }, max, &anim);
                         }
                     }
                 }
@@ -2639,7 +2687,7 @@ fn main() {
             Action::OpenSaves => {
                 // Populate the saves list and open the modal.
                 let entries = list_saves(&save_dir, &ifid);
-                state.saves = Some(SavesState { entries, selected: 0 });
+                state.saves = Some(SavesState { entries, scroll: Default::default() });
                 state.dialog_focus = 0;
             }
 
@@ -2663,7 +2711,7 @@ fn main() {
             Action::FbEnter => {
                 // Handle file-browser Enter: cd into dir or import file.
                 let fb_action = state.file_browser.as_ref().and_then(|fb| {
-                    fb.entries.get(fb.selected).map(|e| {
+                    fb.entries.get(fb.scroll.selected).map(|e| {
                         if e.is_dir {
                             let new_path = if e.name == ".." {
                                 fb.cwd.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| fb.cwd.clone())
@@ -2745,7 +2793,7 @@ fn main() {
                 // Load the selected save (archive → mapper + machine restore).
                 // Clone path and name to release the borrow on state.saves before mutating state.
                 let load_info = state.saves.as_ref().and_then(|s| {
-                    s.entries.get(s.selected).map(|e| (e.path.clone(), e.name.clone()))
+                    s.entries.get(s.scroll.selected).map(|e| (e.path.clone(), e.name.clone()))
                 });
 
                 // In-game restore: feed Quetzal bytes back into the suspended VM
@@ -3422,9 +3470,8 @@ fn handle_saves_prompt(
                         state.push_transcript("[Save deleted]");
                         if let Some(s) = &mut state.saves {
                             s.entries = list_saves(dir, ifid);
-                            if s.selected >= s.entries.len() && !s.entries.is_empty() {
-                                s.selected = s.entries.len() - 1;
-                            }
+                            // Re-clamp the selection/offset to the new entry count.
+                            s.scroll.len(s.entries.len());
                         }
                     }
                     Err(e) => {
@@ -3484,7 +3531,7 @@ fn open_ingame_saves(
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
             let mut entries = list_saves(save_dir, ifid);
             entries.extend(list_qzl(save_dir));
-            state.saves = Some(SavesState { entries, selected: 0 });
+            state.saves = Some(SavesState { entries, scroll: Default::default() });
         }
     }
 }
@@ -3929,6 +3976,7 @@ fn open_hints(
                                 source: app::state::HintSource::Zcode(vm),
                                 transcript,
                                 scroll: 0,
+                                scroll_anim: None,
                                 input: String::new(),
                                 label,
                                 builtin_hint,
@@ -3959,6 +4007,7 @@ fn open_hints(
                                 source: app::state::HintSource::Zcode(vm),
                                 transcript,
                                 scroll: 0,
+                                scroll_anim: None,
                                 input: String::new(),
                                 label,
                                 builtin_hint,
