@@ -15,6 +15,7 @@ use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
 use crate::screen::{init_header_caps, ScreenState, StreamState};
+use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
 // ---------------------------------------------------------------------------
@@ -718,7 +719,7 @@ impl Machine {
             // 0x05 print_char — print a single ZSCII character
             0x05 => {
                 let zscii = ops.first().copied().unwrap_or(0);
-                let ch = zscii_to_char(zscii);
+                let ch = self.print_char_to_unicode(zscii);
                 let mut buf = [0u8; 4];
                 let s = ch.encode_utf8(&mut buf);
                 self.print_text(s);
@@ -1458,6 +1459,35 @@ impl Machine {
             } else {
                 self.out.print_styled(s, self.screen.text_style);
             }
+        }
+    }
+
+    /// Resolve a `print_char` ZSCII operand to the Unicode scalar to display.
+    ///
+    /// When we advertise interpreter number 6 (IBM PC, set in the header by
+    /// `init_header_caps`), Infocom's IBM-PC-aware v4+ games — Beyond Zork in
+    /// particular — emit their on-screen graphics (cursor arrows, box-drawing,
+    /// block elements) as raw CP437 byte codes through `print_char` instead of
+    /// switching to the portable Font 3. Translate those bytes through the CP437
+    /// table so they render on a Unicode terminal.
+    ///
+    /// Gating keeps this faithful and non-regressive:
+    ///   * Only when the header interpreter number is actually 6.
+    ///   * The Z-machine output control codes NUL (0), tab (9) and newline (13)
+    ///     keep their ZSCII meaning (they are NOT remapped to CP437 glyphs).
+    ///   * Values > 255 (10-bit ZSCII) fall back to the standard mapping.
+    ///   * 0x20–0x7E is ASCII either way, so ordinary text is unaffected.
+    ///
+    /// Z-string text (`print`, `print_paddr`, …) is decoded separately via
+    /// `zscii_to_char`/the header Unicode table and is deliberately left on the
+    /// standard ZSCII path, so accented prose in other games is never garbled.
+    fn print_char_to_unicode(&self, zscii: u16) -> char {
+        let interp_ibm_pc = self.mem.read_byte(0x1E) == 6;
+        let is_control = zscii == 0 || zscii == 9 || zscii == 13;
+        if interp_ibm_pc && !is_control && zscii <= 255 {
+            cp437_to_char(zscii as u8)
+        } else {
+            zscii_to_char(zscii)
         }
     }
 
@@ -4542,5 +4572,50 @@ pub(crate) mod tests {
         m.exec_ext(0x04, &[2], Some(0x10));
         assert_eq!(m.global(0), 0, "set_font(2) returns 0 (unavailable)");
         assert_eq!(m.screen.current_font, 3, "current_font unchanged after failed set");
+    }
+
+    // ── CP437 print_char translation under interpreter number 6 (IBM PC) ──────
+
+    /// VAR:0x05 print_char with the given ZSCII operand, into the lower window.
+    fn run_print_char(m: &mut Machine, zscii: u16) {
+        m.streams.stream1 = true;
+        m.exec_var(0x05, &[zscii], None, None);
+    }
+
+    #[test]
+    fn print_char_cp437_under_ibm_pc() {
+        // Beyond Zork's menu arrows (0x18 ↑ / 0x19 ↓) and the map's box-drawing
+        // (0xDA ┌, 0xC4 ─) come through print_char as raw CP437 bytes when the
+        // interpreter number is 6 (IBM PC).
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.mem.write_byte(0x1E, 6); // IBM PC
+        run_print_char(&mut m, 0x18);
+        run_print_char(&mut m, 0x19);
+        run_print_char(&mut m, 0xDA);
+        run_print_char(&mut m, 0xC4);
+        run_print_char(&mut m, 0x82); // é
+        assert_eq!(buf_output(&m), "\u{2191}\u{2193}\u{250C}\u{2500}\u{00E9}");
+    }
+
+    #[test]
+    fn print_char_ascii_and_newline_unaffected_under_ibm_pc() {
+        // ASCII passes through (CP437 0x20–0x7E == ASCII); newline stays a newline.
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.mem.write_byte(0x1E, 6);
+        for c in b"Hi" { run_print_char(&mut m, *c as u16); }
+        run_print_char(&mut m, 13); // newline, NOT CP437 ♪
+        run_print_char(&mut m, b'!' as u16);
+        assert_eq!(buf_output(&m), "Hi\n!");
+    }
+
+    #[test]
+    fn print_char_not_cp437_under_other_interpreter() {
+        // Under a non-IBM-PC interpreter number the bytes are NOT CP437-mapped:
+        // standard ZSCII applies, so the graphics codes fall back to '?'.
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.mem.write_byte(0x1E, 4); // Amiga (takes the Font 3 path, not CP437)
+        run_print_char(&mut m, 0x18);
+        run_print_char(&mut m, 0x82);
+        assert_eq!(buf_output(&m), "??", "non-IBM-PC: graphics codes stay standard ZSCII ('?')");
     }
 }
