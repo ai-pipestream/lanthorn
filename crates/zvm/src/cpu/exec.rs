@@ -1229,7 +1229,7 @@ impl Machine {
                 self.do_store(store, result);
                 StepResult::Continue
             }
-            // EXT:0x05 set_true_colour — we render with our own styling; accept and ignore.
+            // EXT:0x05 draw_picture (v6) — graphics unsupported; accept and ignore.
             0x05 => StepResult::Continue,
             // EXT:0x0B print_unicode — output an arbitrary Unicode codepoint.
             0x0B => {
@@ -1255,6 +1255,17 @@ impl Machine {
             // EXT:0x0A restore_undo — restore the newest in-memory undo snapshot.
             0x0A => {
                 self.do_restore_undo(store);
+                StepResult::Continue
+            }
+            // EXT:0x0D set_true_colour (v5+). Same channel model as set_colour
+            // but signed sentinels: -2 = keep, -1 = default, else 15-bit RGB.
+            0x0D => {
+                if let Some(c) = decode_true_colour(ops.first().copied().unwrap_or(0)) {
+                    self.screen.current_fg = c;
+                }
+                if let Some(c) = decode_true_colour(ops.get(1).copied().unwrap_or(0)) {
+                    self.screen.current_bg = c;
+                }
                 StepResult::Continue
             }
             // Other EXT opcodes: no-op
@@ -1894,6 +1905,17 @@ fn decode_set_colour(v: u16) -> Option<crate::screen::ZColour> {
         1 => Some(ZColour::Default),   // default
         2..=12 => Some(ZColour::Standard(v as u8)), // palette + v6 greys
         _ => None,                     // -1 (pixel) / unknown → keep
+    }
+}
+
+/// Decode a `set_true_colour` operand (signed). Returns `None` for "keep".
+fn decode_true_colour(v: u16) -> Option<crate::screen::ZColour> {
+    use crate::screen::ZColour;
+    match v as i16 {
+        -2 => None,                        // keep current channel
+        -1 => Some(ZColour::Default),      // default
+        n if n >= 0 => Some(ZColour::True((n as u16) & 0x7FFF)),
+        _ => None,                         // -3 transparent / other → keep
     }
 }
 
@@ -3631,6 +3653,23 @@ pub(crate) mod tests {
         }
     }
 
+    /// Emit an EXT instruction (0xBE prefix) with all operands as Large (16-bit) constants.
+    fn emit_ext_instr(buf: &mut Vec<u8>, opcode: u8, ops: &[u16]) {
+        buf.push(0xBE); // EXT prefix
+        buf.push(opcode);
+        // Type byte: each op = large-const (0b00), unused = omit (0b11).
+        let mut type_byte: u8 = 0xFF;
+        for (i, _) in ops.iter().enumerate().take(4) {
+            let shift = 6u8.saturating_sub(2 * i as u8);
+            type_byte &= !(0b11 << shift); // clear to 0b00 = large const
+        }
+        buf.push(type_byte);
+        for &op in ops.iter().take(4) {
+            buf.push((op >> 8) as u8);
+            buf.push((op & 0xFF) as u8);
+        }
+    }
+
     /// Emit VAR output_stream (0x13) with a large-const signed stream number.
     /// Z-machine signed stream numbers (e.g. -1, -3) require 16-bit large constants.
     fn emit_output_stream_large(buf: &mut Vec<u8>, stream_val: i16) {
@@ -4556,6 +4595,45 @@ pub(crate) mod tests {
         m.step(); m.step();
         assert_eq!(m.screen.current_fg, ZColour::Standard(3), "fg=0 kept prior fg");
         assert_eq!(m.screen.current_bg, ZColour::Standard(4), "bg updated to 4");
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 3 (series): set_true_colour (EXT:0x0D) sentinel handling
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_true_colour_honors_sentinels() {
+        fn run_true(fg: i16, bg: i16) -> (ZColour, ZColour) {
+            let mut buf = sample_story(5);
+            let instr = {
+                let mut v = vec![];
+                emit_ext_instr(&mut v, 0x0D, &[fg as u16, bg as u16]);
+                v
+            };
+            buf[0x10..0x10 + instr.len()].copy_from_slice(&instr);
+            buf[0x10 + instr.len()] = 0xBA; // quit
+            let mem = Memory::new(buf).unwrap();
+            let mut m = Machine::new(mem);
+            m.state.pc = 0x10;
+            m.step();
+            (m.screen.current_fg, m.screen.current_bg)
+        }
+
+        assert_eq!(run_true(0x7FFF, -1), (ZColour::True(0x7FFF), ZColour::Default));
+
+        // -2 keeps. Pre-set fg=3, then true_colour(-2,-1): fg stays Standard(3).
+        let mut buf = sample_story(5);
+        buf[0x10] = 0x1B; buf[0x11] = 3; buf[0x12] = 6;   // set_colour 3,6
+        let mut pos = 0x13;
+        let instr = { let mut v = vec![]; emit_ext_instr(&mut v, 0x0D, &[(-2i16) as u16, (-1i16) as u16]); v };
+        buf[pos..pos + instr.len()].copy_from_slice(&instr); pos += instr.len();
+        buf[pos] = 0xBA;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        m.step(); m.step();
+        assert_eq!(m.screen.current_fg, ZColour::Standard(3), "-2 kept fg");
+        assert_eq!(m.screen.current_bg, ZColour::Default, "-1 set bg default");
     }
 
     // -----------------------------------------------------------------------
