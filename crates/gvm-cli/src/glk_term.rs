@@ -410,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn tty_buffer_text_word_wraps_at_cols() {
+        // Regression (user report 2026-06-30): TextBuffer output must soft-wrap
+        // at the terminal width on a TTY. All glk_put_char/string for a buffer
+        // window funnel through put_text, so this covers both.
+        let (mut b, buf) = backend(true); // tty, 80 cols
+        let line = "word ".repeat(30); // 150 chars with spaces -> must wrap at 80
+        b.put_text(1, GlkStyle::Normal, &line);
+        let out = out_string(&buf);
+        assert!(out.contains('\n'), "buffer text must wrap at 80 cols on a TTY: {out:?}");
+        assert!(
+            out.lines().all(|l| l.chars().count() <= 80),
+            "no wrapped line exceeds the column width: {out:?}"
+        );
+    }
+
+    #[test]
+    fn tty_buffer_text_wraps_char_by_char() {
+        // glk_put_char emits one char per put_text call; current_col must persist
+        // across calls so a long char-by-char line still wraps.
+        let (mut b, buf) = backend(true);
+        for ch in "abcdefghij ".repeat(10).chars() {
+            // 110 chars
+            b.put_text(1, GlkStyle::Normal, &ch.to_string());
+        }
+        let out = out_string(&buf);
+        assert!(out.contains('\n'), "char-by-char buffer output must still wrap: {out:?}");
+    }
+
+    #[test]
     fn tty_pins_grid_and_sets_scroll_region() {
         let (mut b, buf) = backend(true);
         // Layout: a 1-row TextGrid (id 2) above an 80x23 TextBuffer (id 1).
