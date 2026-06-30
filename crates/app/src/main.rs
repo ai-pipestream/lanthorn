@@ -680,7 +680,7 @@ fn draw_frame(
 
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
-            dialog_rects_out = draw_saves(state, full, buf);
+            dialog_rects_out = draw_saves(state, full, buf, &mut modal_list_viewport);
         }
 
         // ── Replay/rewind overlay ─────────────────────────────────────────────
@@ -2642,7 +2642,7 @@ fn main() {
             Action::OpenSaves => {
                 // Populate the saves list and open the modal.
                 let entries = list_saves(&save_dir, &ifid);
-                state.saves = Some(SavesState { entries, selected: 0 });
+                state.saves = Some(SavesState { entries, scroll: Default::default() });
                 state.dialog_focus = 0;
             }
 
@@ -2748,7 +2748,7 @@ fn main() {
                 // Load the selected save (archive → mapper + machine restore).
                 // Clone path and name to release the borrow on state.saves before mutating state.
                 let load_info = state.saves.as_ref().and_then(|s| {
-                    s.entries.get(s.selected).map(|e| (e.path.clone(), e.name.clone()))
+                    s.entries.get(s.scroll.selected).map(|e| (e.path.clone(), e.name.clone()))
                 });
 
                 // In-game restore: feed Quetzal bytes back into the suspended VM
@@ -3425,9 +3425,8 @@ fn handle_saves_prompt(
                         state.push_transcript("[Save deleted]");
                         if let Some(s) = &mut state.saves {
                             s.entries = list_saves(dir, ifid);
-                            if s.selected >= s.entries.len() && !s.entries.is_empty() {
-                                s.selected = s.entries.len() - 1;
-                            }
+                            // Re-clamp the selection/offset to the new entry count.
+                            s.scroll.len(s.entries.len());
                         }
                     }
                     Err(e) => {
@@ -3487,7 +3486,7 @@ fn open_ingame_saves(
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
             let mut entries = list_saves(save_dir, ifid);
             entries.extend(list_qzl(save_dir));
-            state.saves = Some(SavesState { entries, selected: 0 });
+            state.saves = Some(SavesState { entries, scroll: Default::default() });
         }
     }
 }

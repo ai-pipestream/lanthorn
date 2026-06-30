@@ -16,7 +16,12 @@ use crate::state::AppState;
 ///
 /// Does nothing when `state.saves` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
-pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
+pub fn draw_saves(
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+    vp_out: &mut usize,
+) -> Option<DialogRects> {
     let Some(saves) = &state.saves else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
@@ -72,30 +77,55 @@ pub fn draw_saves(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Dial
         Rect::new(content.x, content.y, content.width, 0)
     };
 
-    for (i, entry) in saves.entries.iter().enumerate() {
-        let row_y = entries_area.y + i as u16;
-        if row_y >= entries_area.bottom() {
+    let total = saves.entries.len();
+    let viewport = entries_area.height as usize;
+    *vp_out = viewport;
+
+    // Reserve a 1-column gutter on the right for the scrollbar when overflowing.
+    let scrollbar_visible =
+        crate::render::scroll::needs_scrollbar(total, viewport) && content.width >= 2;
+    let row_w = if scrollbar_visible { content.width.saturating_sub(1) } else { content.width };
+    let row_area = Rect::new(content.x, entries_area.y, row_w, entries_area.height);
+
+    let offset = saves.scroll.display_offset();
+    for row in 0..viewport {
+        let i = offset + row;
+        if i >= total {
             break;
         }
+        let entry = &saves.entries[i];
+        let row_y = entries_area.y + row as u16;
 
-        let style = if i == saves.selected { selected_style } else { normal };
+        let style = if i == saves.scroll.selected { selected_style } else { normal };
 
         // Fill the whole row background with the row style.
-        for col in content.x..content.right() {
+        for col in row_area.x..row_area.right() {
             if let Some(cell) = buf.cell_mut((col, row_y)) {
                 cell.set_symbol(" ").set_style(style);
             }
         }
 
         // Marker + name (truncated to 28 chars).
-        let marker = if i == saves.selected { ">" } else { " " };
+        let marker = if i == saves.scroll.selected { ">" } else { " " };
         let name_trunc: String = entry.name.chars().take(26).collect();
         let short_time = format_time(&entry.saved_at);
         let line = format!(
             "{} {:<27}  {:>5}  {:<16}",
             marker, name_trunc, entry.turns, short_time
         );
-        crate::render::draw_str_clipped(buf, content.x, row_y, &line, style, content);
+        crate::render::draw_str_clipped(buf, row_area.x, row_y, &line, style, row_area);
+    }
+
+    if scrollbar_visible {
+        let sb_area = Rect::new(entries_area.right().saturating_sub(1), entries_area.y, 1, entries_area.height);
+        crate::render::scroll::draw_scrollbar(
+            buf,
+            sb_area,
+            total,
+            viewport,
+            saves.scroll.target_offset(),
+            state.colors.scrollbar,
+        );
     }
 
     // ── Footer hint (below entries) ───────────────────────────────────────────
@@ -152,8 +182,34 @@ mod tests {
 
     fn state_with_saves(entries: Vec<SaveInfo>, selected: usize) -> AppState {
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries, selected });
+        let mut scroll = crate::list_scroll::ListScroll::new();
+        scroll.selected = selected;
+        s.saves = Some(SavesState { entries, scroll });
         s
+    }
+
+    #[test]
+    fn draw_saves_scrollbar_and_paging_on_overflow() {
+        use crate::input::{apply_action, Action};
+        use mapper::mapper::Mapper;
+        // More entries than the modal can show -> windowed list + scrollbar.
+        let entries: Vec<SaveInfo> = (0..40).map(|i| dummy_save(&format!("slot-{i}"), i, false)).collect();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = state_with_saves(entries, 0);
+        let mut vp = 0usize;
+        terminal.draw(|f| {
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut vp);
+        }).unwrap();
+        assert!(vp > 0 && vp < 40, "entries should overflow the modal (vp={vp})");
+        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        assert!(has_thumb, "a scrollbar thumb should be drawn when entries overflow");
+
+        // PageDown advances the selection by ~one viewport (clamped/wrapped via nav).
+        state.modal_list_viewport = vp;
+        apply_action(Action::SavesPage(1), &mut state, &mut Mapper::default());
+        let sel = state.saves.as_ref().unwrap().scroll.selected;
+        assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
     }
 
     #[test]
@@ -168,7 +224,7 @@ mod tests {
             0,
         );
         terminal.draw(|f| {
-            draw_saves(&state, f.area(), f.buffer_mut());
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -186,7 +242,7 @@ mod tests {
             0,
         );
         terminal.draw(|f| {
-            draw_saves(&state, f.area(), f.buffer_mut());
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -203,7 +259,7 @@ mod tests {
             0,
         );
         terminal.draw(|f| {
-            draw_saves(&state, f.area(), f.buffer_mut());
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -224,7 +280,7 @@ mod tests {
             1,
         );
         terminal.draw(|f| {
-            draw_saves(&state, f.area(), f.buffer_mut());
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let content: String = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
@@ -242,7 +298,7 @@ mod tests {
             .map(|c| c.symbol().to_string())
             .collect();
         terminal.draw(|f| {
-            draw_saves(&state, f.area(), f.buffer_mut());
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
         let after: Vec<_> = terminal.backend().buffer().content().iter()
             .map(|c| c.symbol().to_string())
@@ -269,7 +325,7 @@ mod tests {
         state.colors.dialog_box_style = BorderStyle::Single;
         let mut rects_out: Option<DialogRects> = None;
         terminal.draw(|f| {
-            rects_out = draw_saves(&state, f.area(), f.buffer_mut());
+            rects_out = draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
         }).unwrap();
 
         let content: String = terminal.backend().buffer().content().iter()

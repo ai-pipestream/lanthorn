@@ -405,8 +405,8 @@ impl std::fmt::Debug for TidyJob {
 pub struct SavesState {
     /// All discovered save files for the current story (default first, then named).
     pub entries: Vec<crate::persist_files::SaveInfo>,
-    /// Index of the currently-highlighted row.
-    pub selected: usize,
+    /// Selection + animated scroll offset for the entry list.
+    pub scroll: crate::list_scroll::ListScroll,
 }
 
 // ── Gallery state ─────────────────────────────────────────────────────────────
@@ -1860,7 +1860,7 @@ mod tests {
         s.gallery = None;
 
         // saves
-        s.saves = Some(SavesState { entries: vec![], selected: 0 });
+        s.saves = Some(SavesState { entries: vec![], scroll: Default::default() });
         assert!(s.any_overlay_open(), "saves open => any_overlay_open true");
         s.saves = None;
 

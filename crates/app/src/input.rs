@@ -171,6 +171,12 @@ pub enum Action {
     OpenSaves,
     /// Navigate the saves list by delta (-1 = up, +1 = down).
     SavesNav(i32),
+    /// Page the saves list by one viewport (-1 = PageUp, +1 = PageDown).
+    SavesPage(i32),
+    /// Jump to the first save entry.
+    SavesHome,
+    /// Jump to the last save entry.
+    SavesEnd,
     /// Load the selected save (caller-handled).
     SavesLoad,
     /// Begin a SaveAs prompt for a new named save (sets up the prompt sub-mode).
@@ -1137,6 +1143,10 @@ fn saves_key_to_action(key: KeyEvent, _focus: usize) -> Action {
     match key.code {
         KeyCode::Up => Action::SavesNav(-1),
         KeyCode::Down => Action::SavesNav(1),
+        KeyCode::PageUp => Action::SavesPage(-1),
+        KeyCode::PageDown => Action::SavesPage(1),
+        KeyCode::Home => Action::SavesHome,
+        KeyCode::End => Action::SavesEnd,
         KeyCode::Enter => Action::SavesLoad,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::SavesSaveAs,
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => Action::SavesDelete,
@@ -2122,11 +2132,45 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::SavesNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(s) = &mut state.saves {
                 if !s.entries.is_empty() {
-                    let len = s.entries.len() as i32;
-                    s.selected = ((s.selected as i32 + delta).rem_euclid(len)) as usize;
+                    let len = s.entries.len();
+                    s.scroll.len(len);
+                    // Preserve the existing wrap-around behavior via select().
+                    let next = ((s.scroll.selected as i32 + delta).rem_euclid(len as i32)) as usize;
+                    s.scroll.select(next, vp, &anim);
                 }
+            }
+        }
+
+        Action::SavesPage(dir) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(s) = &mut state.saves {
+                let len = s.entries.len();
+                s.scroll.len(len);
+                s.scroll.page(dir, vp, &anim);
+            }
+        }
+
+        Action::SavesHome => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(s) = &mut state.saves {
+                s.scroll.len(s.entries.len());
+                s.scroll.home(vp, &anim);
+            }
+        }
+
+        Action::SavesEnd => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(s) = &mut state.saves {
+                let len = s.entries.len();
+                s.scroll.len(len);
+                s.scroll.end(len, vp, &anim);
             }
         }
 
@@ -2145,7 +2189,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesDelete => {
             // Open the confirm-delete prompt for the selected entry.
             if let Some(s) = &state.saves {
-                if let Some(entry) = s.entries.get(s.selected) {
+                if let Some(entry) = s.entries.get(s.scroll.selected) {
                     let path = entry.path.clone();
                     state.hotkey_dialog = false;
                     state.prompt = Some(crate::state::Prompt {
@@ -4658,7 +4702,7 @@ mod tests {
                     is_default: false,
                 },
             ],
-            selected: 0,
+            scroll: Default::default(),
         });
         s
     }
@@ -4670,12 +4714,12 @@ mod tests {
         let a = key_to_action(&s, key(KeyCode::Down));
         assert!(matches!(a, Action::SavesNav(1)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 1);
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 1);
         // Up moves back to 0.
         let a = key_to_action(&s, key(KeyCode::Up));
         assert!(matches!(a, Action::SavesNav(-1)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 0);
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 0);
     }
 
     #[test]
@@ -4695,7 +4739,7 @@ mod tests {
     fn saves_submode_d_opens_confirm_delete_prompt() {
         let mut s = state_with_saves_open();
         // Select entry 1 (the named save).
-        s.saves.as_mut().unwrap().selected = 1;
+        s.saves.as_mut().unwrap().scroll.selected = 1;
         let a = key_to_action(&s, key(KeyCode::Char('d')));
         assert!(matches!(a, Action::SavesDelete));
         apply_action(a, &mut s, &mut Mapper::default());
@@ -4746,14 +4790,15 @@ mod tests {
                 SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), is_default: false },
                 SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), is_default: false },
             ],
-            selected: 1,
+            scroll: Default::default(),
         });
+        s.saves.as_mut().unwrap().scroll.selected = 1;
         // Down from last wraps to first.
         apply_action(Action::SavesNav(1), &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 0, "should wrap to 0 after last");
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 0, "should wrap to 0 after last");
         // Up from first wraps to last.
         apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().selected, 1, "should wrap to last");
+        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 1, "should wrap to last");
     }
 
     // ── Hotkey dialog dispatch tests ──────────────────────────────────────────
@@ -4997,7 +5042,7 @@ mod tests {
     fn wheel_drives_saves_selection() {
         use crate::state::SavesState;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
             Action::SavesNav(-1)
@@ -5085,7 +5130,7 @@ mod tests {
         use crate::render::dialog::DialogRects;
         use ratatui::layout::Rect;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         let dialog = Some(DialogRects {
             area: Rect::new(10, 5, 40, 15),
             content: Rect::new(11, 7, 38, 10),
@@ -5105,7 +5150,7 @@ mod tests {
         // to the DOWN action and ScrollDown to the UP action.
         use crate::state::SavesState;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         s.config.mouse_wheel_invert = true;
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
@@ -5966,7 +6011,7 @@ mod tests {
     /// Build a state with saves open (for testing e/i dispatch).
     fn state_with_saves_for_fb_tests() -> AppState {
         let mut s = AppState::default();
-        s.saves = Some(crate::state::SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
         s
     }
 
@@ -6184,7 +6229,7 @@ mod tests {
                 saved_at: String::new(),
                 is_default: false,
             }],
-            selected: 0,
+            scroll: Default::default(),
         });
 
         let map   = Rect::default();
@@ -6356,7 +6401,7 @@ mod tests {
             s.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
                 saved_at: String::new(), is_default: false,
-            }], selected: 0 });
+            }], scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::SavesClose),
                 "saves ESC should produce SavesClose, got {:?}", esc_action);
@@ -6447,7 +6492,7 @@ mod tests {
             s.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
                 saved_at: String::new(), is_default: false,
-            }], selected: 0 });
+            }], scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::SavesClose),
                 "q must not close the saves modal");
@@ -6667,7 +6712,7 @@ mod tests {
         // Enter still loads the selected save (existing behavior).
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
-        s.saves = Some(crate::state::SavesState { entries: Vec::new(), selected: 0 });
+        s.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
         s.dialog_focus = 0;
         // Tab with ring len 1 stays at 0.
         let after_tab = cycle_focus(s.dialog_focus, 1, 1);
