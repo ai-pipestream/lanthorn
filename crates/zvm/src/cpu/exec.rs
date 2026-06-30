@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{init_header_caps, ScreenState, StreamState};
+use crate::screen::{advertise_colour, init_header_caps, ScreenState, StreamState};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -120,6 +120,9 @@ pub struct Machine {
     /// after persisting; correctness does not depend on the flag (every archive
     /// write embeds the latest table) — it is a "data changed" notification.
     pub aux_dirty: bool,
+    /// Whether to advertise Flags1 bit 0 (colour available) to the game. Default
+    /// false; set via `set_honor_game_colours`. v3 stories ignore this entirely.
+    pub honor_game_colours: bool,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -165,6 +168,7 @@ impl Machine {
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
+            honor_game_colours: false,
         }
     }
 
@@ -180,9 +184,16 @@ impl Machine {
     /// `step()`. Not needed for test harnesses built from `sample_story` (whose
     /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
-        init_header_caps(&mut self.mem);
+        init_header_caps(&mut self.mem, self.honor_game_colours);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
+    }
+
+    /// Enable/disable honoring game-driven colour. Advertises (or clears) the
+    /// Flags1 colour bit immediately so a not-yet-run game sees the capability.
+    pub fn set_honor_game_colours(&mut self, on: bool) {
+        self.honor_game_colours = on;
+        advertise_colour(&mut self.mem, on);
     }
 
     /// Borrow the default `BufferOutput` sink if that is what `out` holds, else `None`.

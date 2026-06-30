@@ -278,7 +278,7 @@ impl StreamState {
 ///
 /// Only modifies bytes inside dynamic memory (below static_mem_base); if the
 /// header region is read-only (static_mem_base ≤ 0x40) we skip silently.
-pub fn init_header_caps(mem: &mut Memory) {
+pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool) {
     let version = mem.version();
 
     // Guard: only write if the header sits in dynamic memory.
@@ -307,7 +307,7 @@ pub fn init_header_caps(mem: &mut Memory) {
         //   bit 4: fixed-space font available — set
         //   bit 5: sound effects available — clear
         //   bit 7: timed keyboard available — clear
-        f1 & !((1 << 0) | (1 << 1) | (1 << 5) | (1 << 7))  // clear unsupported
+        f1 & !((1 << 1) | (1 << 5) | (1 << 7))  // clear unsupported (colour handled separately)
           | (1 << 2) | (1 << 3) | (1 << 4)  // bold, italic, fixed-space font available
     };
     mem.write_byte(0x01, new_f1);
@@ -345,6 +345,20 @@ pub fn init_header_caps(mem: &mut Memory) {
     // Seed a generous default; the host refines it to the real pane size via
     // `write_screen_dims` once known (and on resize).
     write_screen_dims(mem, DEFAULT_SCREEN_ROWS, DEFAULT_SCREEN_COLS);
+
+    advertise_colour(mem, honor_game_colours);
+}
+
+/// Set or clear the Flags1 "colour available" bit (bit 0). No-op for v3, which
+/// has no colour capability bit. Re-applied on every header init and whenever
+/// the host toggles `honor_game_colours`.
+pub fn advertise_colour(mem: &mut Memory, on: bool) {
+    if mem.version() < 4 {
+        return;
+    }
+    let f1 = mem.read_byte(0x01);
+    let f1 = if on { f1 | 1 } else { f1 & !1 };
+    mem.write_byte(0x01, f1);
 }
 
 /// Default screen size seeded at header init, before the host reports the real
@@ -495,7 +509,7 @@ mod tests {
         // Set "status line not available" bit before init.
         let f1 = mem.read_byte(0x01) | (1 << 4);
         mem.write_byte(0x01, f1);
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         // Bit 4 should be cleared.
         assert_eq!(mem.read_byte(0x01) & (1 << 4), 0, "bit 4 (no status line) should be clear");
         // Screen-splitting available (bit 5) should be set.
@@ -505,7 +519,7 @@ mod tests {
     #[test]
     fn header_caps_v5_clears_unsupported_bits() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         let f1 = mem.read_byte(0x01);
         // Colour (bit 0) should be clear.
         assert_eq!(f1 & (1 << 0), 0, "colour bit should be clear");
@@ -523,7 +537,7 @@ mod tests {
         // Regression: without seeded screen dims the header keeps 0, and v4 games
         // such as Bureaucracy abort with "[Screen too small.]" on the first turn.
         let mut mem = Memory::new(sample_story(4)).unwrap();
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS, "screen height (lines) seeded");
         assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS, "screen width (chars) seeded");
         assert_ne!(mem.read_byte(0x20), 0, "height must not be zero");
@@ -533,7 +547,7 @@ mod tests {
     #[test]
     fn header_caps_v5_seeds_unit_words_and_font_size() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS);
         assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS);
         assert_eq!(mem.read_word(0x22), DEFAULT_SCREEN_COLS as u16, "width in units");
@@ -566,7 +580,7 @@ mod tests {
         let mut mem = Memory::new(sample_story(3)).unwrap();
         let f1 = mem.read_byte(0x01) | (1 << 6); // pre-set variable-pitch default
         mem.write_byte(0x01, f1);
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         assert_eq!(mem.read_byte(0x01) & (1 << 6), 0, "bit 6 (variable-pitch) should be clear");
     }
 
@@ -575,7 +589,7 @@ mod tests {
         // ZMSD 1.1 is the only published standard revision; advertise major=1,
         // minor=1 (bytes 0x32/0x33), not a non-existent "1.2".
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         assert_eq!(mem.read_byte(0x32), 1, "standard revision major = 1");
         assert_eq!(mem.read_byte(0x33), 1, "standard revision minor = 1");
     }
@@ -586,7 +600,7 @@ mod tests {
         // (save_undo/restore_undo, EXT:0x09/0x0A) is implemented, so the header
         // must advertise them or games skip the features at startup.
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         let f1 = mem.read_byte(0x01);
         assert_ne!(f1 & (1 << 2), 0, "Flags1 bit 2 (bold available) should be set");
         assert_ne!(f1 & (1 << 3), 0, "Flags1 bit 3 (italic available) should be set");
@@ -600,10 +614,21 @@ mod tests {
         // Pre-set pictures (bit 3) and sound (bit 7) in Flags2.
         let f2 = mem.read_word(0x10) | (1 << 3) | (1 << 7);
         mem.write_word(0x10, f2);
-        init_header_caps(&mut mem);
+        init_header_caps(&mut mem, false);
         let f2_after = mem.read_word(0x10);
         assert_eq!(f2_after & (1 << 3), 0, "pictures bit in Flags2 should be clear");
         assert_eq!(f2_after & (1 << 7), 0, "sound bit in Flags2 should be clear");
+    }
+
+    #[test]
+    fn colour_bit_tracks_honor_flag() {
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem, false);
+        assert_eq!(mem.read_byte(0x01) & 1, 0, "colour bit clear when honor=false");
+        init_header_caps(&mut mem, true);
+        assert_eq!(mem.read_byte(0x01) & 1, 1, "colour bit set when honor=true");
+        advertise_colour(&mut mem, false);
+        assert_eq!(mem.read_byte(0x01) & 1, 0, "advertise_colour clears it again");
     }
 
     // ── (d) ScreenState defaults ──────────────────────────────────────────────
