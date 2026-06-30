@@ -2174,7 +2174,6 @@ mod tests {
 
     #[test]
     fn format_inventory_line_live_vs_fallback_vs_hint() {
-        let machine = minimal_machine();
         // No player_obj, no fallback → "(press i)" hint.
         let line = format_inventory_line(true, None, &[], None);
         assert_eq!(line, Some("Inv: (press i)".to_string()));
