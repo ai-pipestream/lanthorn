@@ -1124,7 +1124,19 @@ impl AppState {
     /// loop should fast-poll (and redraw) to advance it without input. Covers the
     /// tidy border pulse, the sound-beep flash, and smooth transcript scroll.
     pub fn has_active_animation(&self) -> bool {
-        self.tidy_job.is_some() || self.sound_pulse.is_some() || self.scroll_anim.is_some()
+        self.tidy_job.is_some()
+            || self.sound_pulse.is_some()
+            || self.scroll_anim.is_some()
+            || self.saves.as_ref().is_some_and(|s| s.scroll.has_active_animation())
+            || self.file_browser.as_ref().is_some_and(|fb| fb.scroll.has_active_animation())
+            || self.config_screen.as_ref().is_some_and(|cs| cs.scroll.has_active_animation())
+            || self.verb_menu.as_ref().is_some_and(|vm| {
+                vm.verb_scroll.has_active_animation()
+                    || vm.noun_scroll.has_active_animation()
+                    || vm.prep_scroll.has_active_animation()
+            })
+            || self.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
+            || self.hints.as_ref().is_some_and(|h| h.has_active_animation())
     }
 
     /// Set the transcript scroll target to `target`. When animation is enabled
@@ -1787,6 +1799,23 @@ mod tests {
         });
         assert!(s.has_active_animation(), "scroll anim counts as active");
         s.scroll_anim = None;
+        assert!(!s.has_active_animation());
+
+        // An open selection-list modal's ListScroll animation also counts.
+        let cfg = crate::config::AnimationConfig {
+            enabled: true,
+            easing: crate::anim::Easing::Linear,
+            scroll_ms: 80,
+        };
+        let mut cs = ConfigScreenState {
+            working: crate::config::Config::default(),
+            scroll: Default::default(),
+        };
+        cs.scroll.len(100);
+        cs.scroll.move_by(40, 5, &cfg); // arms a scroll animation
+        s.config_screen = Some(cs);
+        assert!(s.has_active_animation(), "an open modal's list scroll anim counts as active");
+        s.config_screen = None;
         assert!(!s.has_active_animation());
     }
 

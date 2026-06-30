@@ -1533,6 +1533,17 @@ fn main() {
                 state.transcript_scroll = to as u16;
                 state.scroll_anim = None;
             }
+            // Finalize each open scrollable surface's animation likewise.
+            if let Some(s) = &mut state.saves { s.scroll.finalize_if_done(); }
+            if let Some(fb) = &mut state.file_browser { fb.scroll.finalize_if_done(); }
+            if let Some(cs) = &mut state.config_screen { cs.scroll.finalize_if_done(); }
+            if let Some(vm) = &mut state.verb_menu {
+                vm.verb_scroll.finalize_if_done();
+                vm.noun_scroll.finalize_if_done();
+                vm.prep_scroll.finalize_if_done();
+            }
+            if let Some(r) = &mut state.replay { r.scroll.finalize_if_done(); }
+            if let Some(h) = &mut state.hints { h.finalize_scroll_if_done(); }
             continue;
         }
 
