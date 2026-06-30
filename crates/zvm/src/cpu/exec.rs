@@ -418,6 +418,20 @@ impl Machine {
             // 2OP:0x1B set_colour — game-driven colour is not applied (babelmap styling
             // owns the look); accept and ignore.
             0x1B => StepResult::Continue,
+            // 2OP:0x1C throw value stack-frame (v5+) — non-local return. `catch`
+            // (0OP:0x09) records the call-stack depth; `throw` unwinds back to that
+            // depth and returns `value` from the catching routine (ZMSD §15).
+            0x1C => {
+                let value = a;
+                let target_depth = b as usize;
+                self.unwind_to_depth(target_depth);
+                // Return `value` from the catching routine itself (defensive: skip
+                // if the depth was invalid and nothing remains to return from).
+                if !self.state.frames.is_empty() {
+                    return_value(&mut self.state, &mut self.mem, value);
+                }
+                StepResult::Continue
+            }
             // Unknown / unimplemented 2OP — no-op seam for Tasks 10+ (object/text ops)
             _ => StepResult::Continue,
         }
@@ -851,16 +865,30 @@ impl Machine {
                 self.screen.current_window = win;
                 StepResult::Continue
             }
-            // 0x0D erase_window — clear window (state-tracking only; no render)
+            // 0x0D erase_window — clear window (state-tracking only; no render).
+            // ZMSD §8.7.3: -1 = erase all + unsplit, -2 = erase all without
+            // unsplitting, 0 = lower window, 1 = upper window. The lower window's
+            // scrolling contents live in the host, so we flag the request for it
+            // to drain (erase_lower_requested), mirroring show_status_requested.
             0x0D => {
-                // Erase window: -1 = all windows + unsplit, -2 = all without unsplit,
-                // 0 = lower, 1 = upper.
                 let win = ops.first().copied().unwrap_or(0) as i16;
-                if win == -1 {
-                    self.screen.upper_window_rows = 0;
-                    self.screen.upper.resize(0, self.screen.upper.cols);
-                } else if win == 1 {
-                    self.screen.upper.clear();
+                match win {
+                    -1 => {
+                        self.screen.upper_window_rows = 0;
+                        self.screen.upper.resize(0, self.screen.upper.cols);
+                        self.screen.erase_lower_requested = true;
+                    }
+                    -2 => {
+                        self.screen.upper.clear();
+                        self.screen.erase_lower_requested = true;
+                    }
+                    0 => {
+                        self.screen.erase_lower_requested = true;
+                    }
+                    1 => {
+                        self.screen.upper.clear();
+                    }
+                    _ => {}
                 }
                 StepResult::Continue
             }
@@ -946,13 +974,17 @@ impl Machine {
             0x1B => {
                 let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse = ops.get(1).copied().unwrap_or(0) as u32;
-                // TODO custom dict addr: dictionary::load targets the standard
-                // dictionary; a non-zero `dictionary` operand is not yet honoured.
-                let _dict_addr = ops.get(2).copied().unwrap_or(0);
+                // Operand 2 is an optional custom dictionary address (ZMSD §15);
+                // 0 means use the standard story dictionary.
+                let dict_addr = ops.get(2).copied().unwrap_or(0);
                 let flag = ops.get(3).copied().unwrap_or(0) != 0;
                 let text = self.read_text_buffer(text_buf);
                 let text_data_start: u8 = if self.mem.version() <= 4 { 1 } else { 2 };
-                let dict = dictionary::load(&self.mem);
+                let dict = if dict_addr != 0 {
+                    dictionary::load_at(&self.mem, dict_addr as u32)
+                } else {
+                    dictionary::load(&self.mem)
+                };
                 let tokens = dict.tokenise(&self.mem, &text);
                 self.write_parse_buffer(parse, &tokens, text_data_start, flag);
                 StepResult::Continue
@@ -1164,9 +1196,10 @@ impl Machine {
                 self.do_store(store, result as u16);
                 StepResult::Continue
             }
-            // EXT:0x04 set_font (ZMSD §16): operand 0 = query current font without changing;
-            // operand 1 = normal font; operand 3 = character-graphics font (Font 3).
-            // Returns the previously-active font number, or 0 if requested font unavailable.
+            // EXT:0x04 set_font (ZMSD §16): operand 0 = query current font without
+            // changing; 1 = normal, 3 = character-graphics (Font 3), 4 = Courier/
+            // fixed-pitch (rendered like font 1 on a fixed grid). Returns the
+            // previously-active font, or 0 if the requested font is unavailable.
             0x04 => {
                 let requested = ops.first().copied().unwrap_or(0);
                 let prev = self.screen.current_font as u16;
@@ -1174,6 +1207,7 @@ impl Machine {
                     0 => prev,       // query: return current, no change
                     1 => { self.screen.current_font = 1; prev }
                     3 => { self.screen.current_font = 3; prev }
+                    4 => { self.screen.current_font = 4; prev }
                     _ => 0,          // unsupported → 0
                 };
                 self.do_store(store, result);
@@ -1240,6 +1274,17 @@ impl Machine {
             Operand::Large(v) => *v,
             Operand::Small(v) => *v as u16,
             Operand::Var(n) => read_var(&mut self.state, &self.mem, *n),
+        }
+    }
+
+    /// Discard call frames until exactly `target_depth` remain, truncating the
+    /// shared eval stack to each popped frame's base. Used by `throw` to unwind
+    /// the stack back to the depth a matching `catch` recorded.
+    fn unwind_to_depth(&mut self, target_depth: usize) {
+        while self.state.frames.len() > target_depth {
+            if let Some(f) = self.state.frames.pop() {
+                self.state.eval_stack.truncate(f.eval_base);
+            }
         }
     }
 
@@ -4221,6 +4266,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn erase_window_minus_two_clears_grid_without_unsplitting() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 5); // screen width = 5 cols
+        m.exec_var(0x0A, &[2], None, None); // split 2 rows
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1; m.screen.cursor_col = 1;
+        m.print_text("ABCDE");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'A');
+        // erase_window(-2): erase all WITHOUT unsplitting (-2 = 0xFFFE as u16).
+        m.exec_var(0x0D, &[0xFFFE], None, None);
+        assert_eq!(m.screen.upper_window_rows, 2, "split preserved (no unsplit)");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, ' ', "upper grid cleared");
+        assert!(m.screen.erase_lower_requested, "lower-window erase requested");
+    }
+
+    #[test]
+    fn erase_window_zero_requests_lower_erase() {
+        let mut m = build_test_machine(&[]);
+        assert!(!m.screen.erase_lower_requested);
+        m.exec_var(0x0D, &[0], None, None); // erase lower window
+        assert!(m.screen.erase_lower_requested, "erase_window(0) requests a lower-window clear");
+    }
+
+    #[test]
     fn print_to_upper_window_lands_in_grid_not_stream() {
         let mut m = build_test_machine(&[]);
         m.mem.write_byte(0x21, 10); // screen width = 10 cols
@@ -4310,8 +4379,44 @@ pub(crate) mod tests {
         let mut m = Machine::new(mem);
         m.state.pc = 0x10;
         run_until_quit(&mut m);
-        assert_eq!(m.global(0), 1, "font 1 available -> 1");
-        assert_eq!(m.global(1), 0, "font 4 unavailable -> 0");
+        assert_eq!(m.global(0), 1, "font 1 available -> previous font (1)");
+        assert_eq!(m.global(1), 1, "font 4 (Courier/fixed-pitch) accepted -> previous font (1)");
+    }
+
+    #[test]
+    fn catch_then_throw_unwinds_and_returns_value() {
+        // catch (0OP:0x09 v5+) records the call-stack depth; throw (2OP:0x1C)
+        // unwinds back to that depth and returns the given value from the
+        // catching routine, as a non-local return (ZMSD §15).
+        let mut m = build_test_machine(&[]);
+
+        // Frame A: the routine that calls catch; its result lands in global 0.
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0x4242, locals: vec![], eval_base: 0,
+            store_var: Some(0x10), arg_count: 0,
+        });
+        // catch -> store depth in global 1.
+        m.exec_0op(0x09, Some(0x11), None, None);
+        let caught = m.global(1);
+        assert_eq!(caught, 1, "catch records the depth (1 frame on the stack)");
+
+        // A calls deeper into B then C.
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0x0010, locals: vec![], eval_base: 0,
+            store_var: Some(0x12), arg_count: 0,
+        });
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0x0020, locals: vec![], eval_base: 0,
+            store_var: Some(0x13), arg_count: 0,
+        });
+        assert_eq!(m.state.frames.len(), 3);
+
+        // throw 0x1234 back to the caught frame.
+        m.exec_2op(0x1C, &[0x1234, caught], None, None);
+
+        assert_eq!(m.state.frames.len(), 0, "unwound past the catching routine's frame");
+        assert_eq!(m.state.pc, 0x4242, "pc restored to the catching routine's return_pc");
+        assert_eq!(m.global(0), 0x1234, "thrown value returned to the catching routine's caller");
     }
 
     #[test]
@@ -4420,6 +4525,40 @@ pub(crate) mod tests {
         let pb = parse_buf as u32;
         assert!(m.mem.read_byte(pb + 1) >= 1, "at least one token parsed");
         assert_eq!(m.mem.read_word(pb + 2), addr_north, "known word resolved to its dict entry");
+    }
+
+    #[test]
+    fn tokenise_honours_custom_dictionary_operand() {
+        // VAR:0x1B operand 2 is a custom dictionary address; the word must be
+        // resolved against it, not the standard story dictionary (ZMSD §15).
+        let mut m = build_test_machine(&[]);
+        // Custom dictionary at 0x02A0: 0 separators, entry_length 6, count -1
+        // (unsorted, one entry) — all in dynamic memory below global_vars (0x300).
+        let dict: u32 = 0x02A0;
+        m.mem.write_byte(dict, 0);          // 0 separators
+        m.mem.write_byte(dict + 1, 6);      // entry_length = 6 (v5 key length)
+        m.mem.write_word(dict + 2, 0xFFFF); // count = -1 -> abs 1, unsorted
+        let entry = dict + 4;
+        let key = crate::text::encode::encode_word("frotz", 5);
+        assert_eq!(key.len(), 6, "v5 dictionary key is 6 bytes");
+        for (i, b) in key.iter().enumerate() {
+            m.mem.write_byte(entry + i as u32, *b);
+        }
+        // v5 text buffer at 0x0250: [max][count][chars...] holding "frotz".
+        let text_buf: u32 = 0x0250;
+        m.mem.write_byte(text_buf, 10);
+        m.mem.write_byte(text_buf + 1, 5);
+        for (i, b) in b"frotz".iter().enumerate() {
+            m.mem.write_byte(text_buf + 2 + i as u32, *b);
+        }
+        // parse buffer at 0x0270: byte0 = max words.
+        let parse: u32 = 0x0270;
+        m.mem.write_byte(parse, 4);
+        // tokenise text parse custom-dict flag=0.
+        m.exec_var(0x1B, &[text_buf as u16, parse as u16, dict as u16, 0], None, None);
+        assert_eq!(m.mem.read_byte(parse + 1), 1, "one token parsed");
+        assert_eq!(m.mem.read_word(parse + 2), entry as u16,
+            "word resolved against the CUSTOM dictionary entry, not the standard dict");
     }
 
     // -----------------------------------------------------------------------

@@ -62,9 +62,16 @@ pub fn restore_quetzal(machine: &mut Machine, data: &[u8]) -> Result<(), ZError>
     validate_ifhd(machine, ifhd_data)?;
     let saved_pc = decode_ifhd_pc(ifhd_data);
 
-    // CMem or UMem must be present; we only support CMem
-    let cmem_data = find_chunk(&chunks, b"CMem").ok_or(ZError::Truncated)?;
-    let restored_dyn = decode_cmem(cmem_data, &machine.original_dynamic)?;
+    // Dynamic memory: prefer the compressed CMem chunk (what we emit); also accept
+    // the uncompressed UMem chunk (Quetzal §3) so saves from other interpreters
+    // restore correctly. At least one must be present.
+    let restored_dyn = if let Some(cmem_data) = find_chunk(&chunks, b"CMem") {
+        decode_cmem(cmem_data, &machine.original_dynamic)?
+    } else if let Some(umem_data) = find_chunk(&chunks, b"UMem") {
+        decode_umem(umem_data, &machine.original_dynamic)?
+    } else {
+        return Err(ZError::Truncated);
+    };
 
     // Stks is mandatory
     let stks_data = find_chunk(&chunks, b"Stks").ok_or(ZError::Truncated)?;
@@ -206,6 +213,20 @@ fn decode_cmem(cmem: &[u8], orig: &[u8]) -> Result<Vec<u8>, ZError> {
         dyn_mem[j] ^= x;
     }
     Ok(dyn_mem)
+}
+
+// ---------------------------------------------------------------------------
+// UMem chunk — uncompressed dynamic memory (Quetzal §3)
+// ---------------------------------------------------------------------------
+// UMem holds the contents of dynamic memory verbatim (no XOR, no RLE). We never
+// emit it (CMem is more compact), but accept it on restore for cross-interpreter
+// compatibility. The chunk must cover the whole dynamic region.
+
+fn decode_umem(umem: &[u8], orig: &[u8]) -> Result<Vec<u8>, ZError> {
+    if umem.len() < orig.len() {
+        return Err(ZError::Truncated);
+    }
+    Ok(umem[..orig.len()].to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +637,41 @@ mod tests {
 
         // Eval stack: outer word then inner words
         assert_eq!(m.state.eval_stack, vec![0x1234, 0x5678, 0x9ABC]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: a hand-built save using the uncompressed UMem chunk restores.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn restore_accepts_umem_chunk() {
+        let mut m = make_machine();
+        m.state.pc = 0x0060;
+
+        // IFhd + Stks reuse the normal encoders (PC captured from state.pc).
+        let ifhd = encode_ifhd(&m);
+        let stks = encode_stks(&m.state);
+
+        // UMem = the full dynamic region verbatim, with one byte changed.
+        let mut umem = m.original_dynamic.clone();
+        umem[0x100] = 0x7E;
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"IFZS");
+        write_chunk(&mut body, b"IFhd", &ifhd);
+        write_chunk(&mut body, b"UMem", &umem);
+        write_chunk(&mut body, b"Stks", &stks);
+        let mut save = Vec::new();
+        save.extend_from_slice(b"FORM");
+        write_u32_be(&mut save, body.len() as u32);
+        save.extend_from_slice(&body);
+
+        // Move state away from the save point, then restore from the UMem save.
+        m.state.pc = 0x9999;
+        m.mem.write_byte(0x100, 0x00);
+
+        restore_quetzal(&mut m, &save).expect("UMem restore should succeed");
+        assert_eq!(m.state.pc, 0x0060, "PC restored from IFhd");
+        assert_eq!(m.mem.read_byte(0x100), 0x7E, "dynamic memory restored from UMem");
     }
 
     // -----------------------------------------------------------------------

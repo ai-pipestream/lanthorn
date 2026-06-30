@@ -105,6 +105,10 @@ pub struct ScreenState {
     pub buffer_mode: bool,
     /// Whether `show_status` (v3 0OP:0x0C) was requested since last read.
     pub show_status_requested: bool,
+    /// Whether the lower window should be cleared (set by `erase_window` 0/-1/-2;
+    /// ZMSD §8.7.3). The engine does not model the scrolling lower window's
+    /// contents, so it records the request here for the host to drain and act on.
+    pub erase_lower_requested: bool,
     /// Upper window character grid (v4+).
     pub upper: UpperWindow,
     /// Active font number (ZMSD §16): 1 = normal (default), 3 = character-graphics.
@@ -120,8 +124,11 @@ impl Default for ScreenState {
             text_style: 0,
             cursor_row: 0,
             cursor_col: 0,
-            buffer_mode: false,
+            // ZMSD §8.7.2.5: the lower window is buffered (word-wrapped) by
+            // default; a game turns buffering off explicitly via buffer_mode 0.
+            buffer_mode: true,
             show_status_requested: false,
+            erase_lower_requested: false,
             upper: UpperWindow::default(),
             current_font: 1,
         }
@@ -246,31 +253,37 @@ pub fn init_header_caps(mem: &mut Memory) {
         //   bit 4: status line not available — clear (we support it)
         //   bit 5: screen-splitting available — set
         //   bit 6: variable-pitch font default — clear (use fixed)
-        f1 & !(1 << 4)   // clear "status line not available"
+        f1 & !((1 << 4) | (1 << 6))   // clear "status line not available" + variable-pitch default
           | (1 << 5)      // screen-splitting available
     } else {
         // v4+ Flags1 bits (ZMSD §11.1.3):
         //   bit 0: colour available — clear (no colour)
         //   bit 1: picture display available — clear
-        //   bit 2: boldface available — clear (stub)
-        //   bit 3: italic available — clear (stub)
+        //   bit 2: boldface available — set (rendered via SGR / style spans)
+        //   bit 3: italic available — set (rendered via SGR / style spans)
         //   bit 4: fixed-space font available — set
         //   bit 5: sound effects available — clear
         //   bit 7: timed keyboard available — clear
-        f1 & !((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 7))  // clear unsupported
-          | (1 << 4)  // fixed-space font available
+        f1 & !((1 << 0) | (1 << 1) | (1 << 5) | (1 << 7))  // clear unsupported
+          | (1 << 2) | (1 << 3) | (1 << 4)  // bold, italic, fixed-space font available
     };
     mem.write_byte(0x01, new_f1);
 
     // Flags2 (word 0x10–0x11, interpreter clears bits it doesn't support).
     // ZMSD §11.1.4: bits 3–5, 7 are interpreter-writable (clear = not supported).
     //   bit 3: pictures — clear
-    //   bit 4: undo available — clear
+    //   bit 4: undo available — set for v5+ (save_undo/restore_undo implemented);
+    //          pre-v5 has no undo opcodes, so leave it clear.
     //   bit 5: mouse — clear
     //   bit 7: sound effects — clear
     let f2 = mem.read_word(0x10);
-    let f2_mask: u16 = !((1 << 3) | (1 << 4) | (1 << 5) | (1 << 7));
-    mem.write_word(0x10, f2 & f2_mask);
+    let mut new_f2 = f2 & !((1 << 3) | (1 << 5) | (1 << 7));
+    if version >= 5 {
+        new_f2 |= 1 << 4; // undo available
+    } else {
+        new_f2 &= !(1 << 4); // pre-v5: no undo
+    }
+    mem.write_word(0x10, new_f2);
 
     // Interpreter number (0x1E): 6 = IBM PC / generic.
     mem.write_byte(0x1E, 6);
@@ -278,9 +291,10 @@ pub fn init_header_caps(mem: &mut Memory) {
     // Interpreter version (0x1F): b'A' = 0x41.
     mem.write_byte(0x1F, b'A');
 
-    // Standard revision (0x32 = major, 0x33 = minor): 1.2 (latest published).
+    // Standard revision (0x32 = major, 0x33 = minor): 1.1 — the only published
+    // Z-Machine Standards Document revision (ZMSD 1.1); no "1.2" exists.
     mem.write_byte(0x32, 1);
-    mem.write_byte(0x33, 2);
+    mem.write_byte(0x33, 1);
 
     // Screen dimensions (ZMSD §11.1). Without these the header keeps the story
     // file's defaults (usually 0), and size-sensitive games (notably Bureaucracy)
@@ -503,6 +517,41 @@ mod tests {
     }
 
     #[test]
+    fn header_caps_v3_clears_variable_pitch_default() {
+        // We render fixed-pitch; Flags1 v3 bit 6 (variable-pitch default) must be
+        // explicitly cleared rather than inheriting the story file's value.
+        let mut mem = Memory::new(sample_story(3)).unwrap();
+        let f1 = mem.read_byte(0x01) | (1 << 6); // pre-set variable-pitch default
+        mem.write_byte(0x01, f1);
+        init_header_caps(&mut mem);
+        assert_eq!(mem.read_byte(0x01) & (1 << 6), 0, "bit 6 (variable-pitch) should be clear");
+    }
+
+    #[test]
+    fn header_caps_writes_standard_revision_1_1() {
+        // ZMSD 1.1 is the only published standard revision; advertise major=1,
+        // minor=1 (bytes 0x32/0x33), not a non-existent "1.2".
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem);
+        assert_eq!(mem.read_byte(0x32), 1, "standard revision major = 1");
+        assert_eq!(mem.read_byte(0x33), 1, "standard revision minor = 1");
+    }
+
+    #[test]
+    fn header_caps_v5_advertises_styles_and_undo() {
+        // Bold/italic are rendered (SGR / style spans) and multi-level undo
+        // (save_undo/restore_undo, EXT:0x09/0x0A) is implemented, so the header
+        // must advertise them or games skip the features at startup.
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem);
+        let f1 = mem.read_byte(0x01);
+        assert_ne!(f1 & (1 << 2), 0, "Flags1 bit 2 (bold available) should be set");
+        assert_ne!(f1 & (1 << 3), 0, "Flags1 bit 3 (italic available) should be set");
+        let f2 = mem.read_word(0x10);
+        assert_ne!(f2 & (1 << 4), 0, "Flags2 bit 4 (undo available) should be set");
+    }
+
+    #[test]
     fn header_caps_flags2_clears_pictures_sound() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
         // Pre-set pictures (bit 3) and sound (bit 7) in Flags2.
@@ -522,7 +571,8 @@ mod tests {
         assert_eq!(s.upper_window_rows, 0);
         assert_eq!(s.current_window, 0);
         assert_eq!(s.text_style, 0);
-        assert!(!s.buffer_mode);
+        // The lower window is buffered (word-wrapped) by default (ZMSD §8.7.2.5).
+        assert!(s.buffer_mode, "buffer_mode defaults to on (buffered)");
         assert_eq!(s.current_font, 1, "default font is 1 (normal)");
     }
 
