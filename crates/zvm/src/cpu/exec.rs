@@ -180,6 +180,8 @@ impl Machine {
     /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
         init_header_caps(&mut self.mem);
+        // Communicate the initial buffer_mode state (false = off) to the sink.
+        self.out.set_buffer_mode(self.screen.buffer_mode);
     }
 
     /// Borrow the default `BufferOutput` sink if that is what `out` holds, else `None`.
@@ -878,7 +880,9 @@ impl Machine {
             // 0x12 buffer_mode — toggle output buffering (v4+)
             0x12 => {
                 let mode = ops.first().copied().unwrap_or(0);
-                self.screen.buffer_mode = mode != 0;
+                let on = mode != 0;
+                self.screen.buffer_mode = on;
+                self.out.set_buffer_mode(on);
                 StepResult::Continue
             }
             // 0x13 output_stream — select/deselect output streams (ZMSD §7.1.2.5)

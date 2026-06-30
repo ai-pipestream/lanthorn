@@ -2676,6 +2676,20 @@ impl Machine {
     pub fn backend_mut(&mut self) -> &mut dyn GlkBackend {
         &mut *self.backend
     }
+
+    /// Notify the machine that the terminal was resized. Re-reads the display
+    /// size from the backend (the caller must update the backend first), lays
+    /// out all windows at the new size, and queues a Glk `evtype_Arrange`
+    /// event so the game can redraw its layout on the next `glk_select`.
+    pub fn notify_resize(&mut self) {
+        self.relayout_glk();
+        self.glk.push_event(GlkEvent {
+            etype: glk::evtype::ARRANGE,
+            win: 0,
+            val1: 0,
+            val2: 0,
+        });
+    }
 }
 
 #[cfg(test)]
