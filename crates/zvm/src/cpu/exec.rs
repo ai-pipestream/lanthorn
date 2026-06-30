@@ -4539,11 +4539,13 @@ pub(crate) mod tests {
         let mut buf = sample_story(5);
         // set_colour 2,3 (2OP:0x1B long form, both small)
         buf[0x10]=0x1B; buf[0x11]=2; buf[0x12]=3;
-        // set_true_colour 0,0 (EXT:0x05, [Small,Small])
-        buf[0x13]=0xBE; buf[0x14]=0x05; buf[0x15]=0x5F; buf[0x16]=0; buf[0x17]=0;
+        // draw_picture 0,0 (EXT:0x05, [Large,Large]) — graceful no-op
+        let ext05 = { let mut v = vec![]; emit_ext_instr(&mut v, 0x05, &[0, 0]); v }; // 7 bytes
+        buf[0x13..0x13 + ext05.len()].copy_from_slice(&ext05);
         // add 0,5 -> G0 (proves execution continued)
-        buf[0x18]=0x14; buf[0x19]=0x00; buf[0x1A]=0x05; buf[0x1B]=0x10;
-        buf[0x1C]=0xBA; // quit
+        let add_off = 0x13 + ext05.len(); // 0x1A
+        buf[add_off]=0x14; buf[add_off+1]=0x00; buf[add_off+2]=0x05; buf[add_off+3]=0x10;
+        buf[add_off+4]=0xBA; // quit
         let mem = Memory::new(buf).unwrap();
         let mut m = Machine::new(mem);
         m.state.pc = 0x10;
