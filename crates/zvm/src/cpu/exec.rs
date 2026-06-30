@@ -862,16 +862,30 @@ impl Machine {
                 self.screen.current_window = win;
                 StepResult::Continue
             }
-            // 0x0D erase_window — clear window (state-tracking only; no render)
+            // 0x0D erase_window — clear window (state-tracking only; no render).
+            // ZMSD §8.7.3: -1 = erase all + unsplit, -2 = erase all without
+            // unsplitting, 0 = lower window, 1 = upper window. The lower window's
+            // scrolling contents live in the host, so we flag the request for it
+            // to drain (erase_lower_requested), mirroring show_status_requested.
             0x0D => {
-                // Erase window: -1 = all windows + unsplit, -2 = all without unsplit,
-                // 0 = lower, 1 = upper.
                 let win = ops.first().copied().unwrap_or(0) as i16;
-                if win == -1 {
-                    self.screen.upper_window_rows = 0;
-                    self.screen.upper.resize(0, self.screen.upper.cols);
-                } else if win == 1 {
-                    self.screen.upper.clear();
+                match win {
+                    -1 => {
+                        self.screen.upper_window_rows = 0;
+                        self.screen.upper.resize(0, self.screen.upper.cols);
+                        self.screen.erase_lower_requested = true;
+                    }
+                    -2 => {
+                        self.screen.upper.clear();
+                        self.screen.erase_lower_requested = true;
+                    }
+                    0 => {
+                        self.screen.erase_lower_requested = true;
+                    }
+                    1 => {
+                        self.screen.upper.clear();
+                    }
+                    _ => {}
                 }
                 StepResult::Continue
             }
@@ -4066,6 +4080,30 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper.cell(1, 2).ch, 'B', "before cursor untouched");
         assert_eq!(m.screen.upper.cell(1, 3).ch, ' ', "from cursor cleared");
         assert_eq!(m.screen.upper.cell(1, 5).ch, ' ', "to end of line cleared");
+    }
+
+    #[test]
+    fn erase_window_minus_two_clears_grid_without_unsplitting() {
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 5); // screen width = 5 cols
+        m.exec_var(0x0A, &[2], None, None); // split 2 rows
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1; m.screen.cursor_col = 1;
+        m.print_text("ABCDE");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'A');
+        // erase_window(-2): erase all WITHOUT unsplitting (-2 = 0xFFFE as u16).
+        m.exec_var(0x0D, &[0xFFFE], None, None);
+        assert_eq!(m.screen.upper_window_rows, 2, "split preserved (no unsplit)");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, ' ', "upper grid cleared");
+        assert!(m.screen.erase_lower_requested, "lower-window erase requested");
+    }
+
+    #[test]
+    fn erase_window_zero_requests_lower_erase() {
+        let mut m = build_test_machine(&[]);
+        assert!(!m.screen.erase_lower_requested);
+        m.exec_var(0x0D, &[0], None, None); // erase lower window
+        assert!(m.screen.erase_lower_requested, "erase_window(0) requests a lower-window clear");
     }
 
     #[test]

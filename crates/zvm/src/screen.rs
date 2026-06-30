@@ -105,6 +105,10 @@ pub struct ScreenState {
     pub buffer_mode: bool,
     /// Whether `show_status` (v3 0OP:0x0C) was requested since last read.
     pub show_status_requested: bool,
+    /// Whether the lower window should be cleared (set by `erase_window` 0/-1/-2;
+    /// ZMSD §8.7.3). The engine does not model the scrolling lower window's
+    /// contents, so it records the request here for the host to drain and act on.
+    pub erase_lower_requested: bool,
     /// Upper window character grid (v4+).
     pub upper: UpperWindow,
 }
