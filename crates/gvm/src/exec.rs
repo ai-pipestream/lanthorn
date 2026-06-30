@@ -5150,7 +5150,7 @@ mod tests {
 
     #[test]
     fn restart_opcode_via_assembly() {
-        use asm::Op::{C32, Mem16, Zero};
+        use asm::Op::{C32, Mem16};
         // Program: store sentinel to RAM, @restart (0x0122), then quit.
         // After restart the machine re-enters this same function and runs to quit.
         // We check that RAM[0x100] is zero at the end (reset, then the restart loop
@@ -5192,7 +5192,7 @@ mod tests {
 
     #[test]
     fn save_and_restore_stubs_return_failure_without_halting() {
-        use asm::Op::{C8, Mem16, Zero};
+        use asm::Op::{Mem16, Zero};
         // @save L1 S1: store 1 (failure) into S1, continue.
         let mut body = asm::ins(0x123, &[Zero, Mem16(0x0100)]); // @save 0, -> mem[0x100]
         // @restore L1 S1: store 1 (failure) into S1, continue.
