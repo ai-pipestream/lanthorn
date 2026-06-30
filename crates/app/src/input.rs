@@ -1364,13 +1364,8 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
 /// continuity), floored at 1 so paging always progresses, and the result is
 /// clamped to `[0, max_scroll]` — the same bounds the mouse-wheel scroll uses.
 pub fn page_scroll(current: u16, dir: i8, viewport_rows: u16, max_scroll: u16) -> u16 {
-    let page = viewport_rows.saturating_sub(1).max(1);
-    let next = if dir > 0 {
-        current.saturating_add(page)
-    } else {
-        current.saturating_sub(page)
-    };
-    next.min(max_scroll)
+    let next = crate::list_scroll::page_step(current as usize, dir as i32, viewport_rows as usize);
+    (next.min(u16::MAX as usize) as u16).min(max_scroll)
 }
 
 /// Cycle a button-focus index by `delta` (+1 Tab, -1 Shift-Tab), wrapping within
