@@ -476,13 +476,22 @@ const ZMACHINE_SAVE_FORMAT: u32 = 1;
 impl GameSession {
     /// Map a neutral [`KeyInput`] to a ZSCII input byte (the logic relocated from
     /// the app's former `key_to_zscii`). Returns `None` for keys with no ZSCII
-    /// meaning (arrows, function keys, non-ASCII), so the caller leaves the turn
-    /// untouched — matching the old "skip unmapped key" behavior exactly.
+    /// meaning (non-ASCII printables, unhandled specials), so the caller leaves
+    /// the turn untouched — matching the old "skip unmapped key" behavior exactly.
+    ///
+    /// Arrow keys and function keys are mapped to ZSCII cursor/function codes
+    /// (ZMSD §3.8): Up=129, Down=130, Left=131, Right=132, F1–F4=133–136.
+    /// These match zvm-cli's `decode_escape_seq` in `crates/zvm-cli/src/screen.rs`.
     fn key_input_to_zscii(key: KeyInput) -> Option<u8> {
         match key {
             KeyInput::Enter => Some(13),
             KeyInput::Backspace => Some(8),
             KeyInput::Escape => Some(27),
+            KeyInput::Up    => Some(129),
+            KeyInput::Down  => Some(130),
+            KeyInput::Left  => Some(131),
+            KeyInput::Right => Some(132),
+            KeyInput::Func(n) => Some(132u8.saturating_add(n)),
             KeyInput::Char(c) if c.is_ascii() => Some(c as u8),
             _ => None,
         }
@@ -922,16 +931,17 @@ mod tests {
 
     #[test]
     fn key_input_to_zscii_matches_legacy_mapping() {
-        // The relocated mapping reproduces the app's former key_to_zscii exactly.
+        // Core text keys: unchanged from original mapping.
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Enter), Some(13));
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Backspace), Some(8));
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Escape), Some(27));
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('y')), Some(b'y'));
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('x')), Some(120));
-        // Non-ASCII and non-text keys carry no ZSCII byte (skip the turn).
+        // Non-ASCII printable chars carry no ZSCII byte (skip the turn).
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('\u{00E9}')), None);
-        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Up), None);
-        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Func(1)), None);
+        // Arrow keys now map to ZSCII cursor codes (ZMSD §3.8) so read_char works.
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Up),    Some(129));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Func(1)), Some(133));
     }
 
     #[test]
@@ -947,8 +957,8 @@ mod tests {
     #[test]
     fn engine_submit_key_is_noop_for_unmapped_key() {
         let mut sess = GameSession::new(read_char_story_v5()).expect("new");
-        // An arrow key has no ZSCII meaning: no turn runs, the VM stays waiting.
-        assert!(sess.submit_key(KeyInput::Up).is_none());
+        // Home has no ZSCII meaning: no turn runs, the VM stays waiting.
+        assert!(sess.submit_key(KeyInput::Home).is_none());
         assert_eq!(sess.pending_input(), InputKind::Char, "VM untouched by an unmapped key");
     }
 
@@ -1322,5 +1332,34 @@ mod tests {
     fn strip_prompt_no_trailing_prompt_unchanged() {
         let s = "You are in a maze of twisty passages, all alike.";
         assert_eq!(strip_read_prompt(s), s);
+    }
+
+    // ── key_input_to_zscii: arrow and function keys (Bug B) ──────────────────
+
+    #[test]
+    fn key_input_to_zscii_arrows_map_to_zscii_codes() {
+        use crate::engine::KeyInput;
+        // Arrow keys → ZSCII cursor codes (ZMSD §3.8), matching zvm-cli decode_escape_seq.
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Up),    Some(129));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Down),  Some(130));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Left),  Some(131));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Right), Some(132));
+        // Function keys F1-F4 → ZSCII 133-136.
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Func(1)), Some(133));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Func(4)), Some(136));
+    }
+
+    #[test]
+    fn key_input_to_zscii_existing_keys_unchanged() {
+        use crate::engine::KeyInput;
+        // Pre-existing mappings must not change.
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Enter),     Some(13));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Backspace), Some(8));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Escape),    Some(27));
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('A')), Some(65));
+        // Non-ascii char → None (existing behaviour).
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('\u{00E9}')), None);
+        // Tab → None (not a game key).
+        assert_eq!(GameSession::key_input_to_zscii(KeyInput::Tab), None);
     }
 }
