@@ -89,7 +89,7 @@ impl UpperWindow {
 /// For v3 the host derives the status line by calling `Machine::status_line()`.
 /// For v4+ the host reads `upper_window_rows`, `current_window`, `text_style`,
 /// and `cursor` to manage windows.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ScreenState {
     /// Number of rows in the upper (status) window; 0 means no upper window.
     pub upper_window_rows: u16,
@@ -107,6 +107,25 @@ pub struct ScreenState {
     pub show_status_requested: bool,
     /// Upper window character grid (v4+).
     pub upper: UpperWindow,
+    /// Active font number (ZMSD §16): 1 = normal (default), 3 = character-graphics.
+    /// This is transient display state — NOT serialised into Quetzal saves.
+    pub current_font: u8,
+}
+
+impl Default for ScreenState {
+    fn default() -> Self {
+        ScreenState {
+            upper_window_rows: 0,
+            current_window: 0,
+            text_style: 0,
+            cursor_row: 0,
+            cursor_col: 0,
+            buffer_mode: false,
+            show_status_requested: false,
+            upper: UpperWindow::default(),
+            current_font: 1,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -504,6 +523,7 @@ mod tests {
         assert_eq!(s.current_window, 0);
         assert_eq!(s.text_style, 0);
         assert!(!s.buffer_mode);
+        assert_eq!(s.current_font, 1, "default font is 1 (normal)");
     }
 
     // ── (f) UpperWindow: resize, put, cell, clear ───────────────────────────

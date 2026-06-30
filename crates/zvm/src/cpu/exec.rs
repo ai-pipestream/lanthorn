@@ -1159,11 +1159,18 @@ impl Machine {
                 self.do_store(store, result as u16);
                 StepResult::Continue
             }
-            // EXT:0x04 set_font — one fixed font (id 1). font 1 or 0(query) -> previous (1);
-            // any other requested font is unavailable -> 0. No actual font change.
+            // EXT:0x04 set_font (ZMSD §16): operand 0 = query current font without changing;
+            // operand 1 = normal font; operand 3 = character-graphics font (Font 3).
+            // Returns the previously-active font number, or 0 if requested font unavailable.
             0x04 => {
                 let requested = ops.first().copied().unwrap_or(0);
-                let result = if requested == 0 || requested == 1 { 1 } else { 0 };
+                let prev = self.screen.current_font as u16;
+                let result = match requested {
+                    0 => prev,       // query: return current, no change
+                    1 => { self.screen.current_font = 1; prev }
+                    3 => { self.screen.current_font = 3; prev }
+                    _ => 0,          // unsupported → 0
+                };
                 self.do_store(store, result);
                 StepResult::Continue
             }
@@ -1400,6 +1407,11 @@ impl Machine {
     /// If stream 3 is active, text goes to the memory table buffer (NOT the
     /// screen).  Otherwise it goes to `self.out` (subject to stream 1 being
     /// active).
+    ///
+    /// When the active font is Font 3 (character-graphics), character codes
+    /// 32–126 are translated through the Font-3 Unicode mapping table before
+    /// being stored in the upper window grid or forwarded to the output sink.
+    /// With any other font the output is byte-identical to the input.
     pub fn print_text(&mut self, s: &str) {
         // ZMSD 7.1.2.5: when stream 3 is selected it is the ONLY output stream —
         // any future stream-2/4 transcript sink MUST be added below this early
@@ -1408,6 +1420,7 @@ impl Machine {
             self.streams.write_stream3(s);
             return;
         }
+        let font3 = self.screen.current_font == 3;
         // Window 1 (upper): write chars into the grid, do not stream.
         if self.screen.current_window == 1 {
             let style = self.screen.text_style;
@@ -1418,8 +1431,9 @@ impl Machine {
                     self.screen.cursor_col = 1;
                     continue;
                 }
+                let out_ch = if font3 { font3_translate(ch) } else { ch };
                 let (r, c) = (self.screen.cursor_row, self.screen.cursor_col);
-                self.screen.upper.put(r, c, ch, style);
+                self.screen.upper.put(r, c, out_ch, style);
                 if self.screen.cursor_col >= cols {
                     self.screen.cursor_row += 1;
                     self.screen.cursor_col = 1;
@@ -1431,7 +1445,15 @@ impl Machine {
         }
         // Stream 3 is inactive; streams 1/2/4 apply.
         if self.streams.stream1 {
-            self.out.print_styled(s, self.screen.text_style);
+            if font3 {
+                let translated: String = s.chars().map(|ch| {
+                    let code = ch as u32;
+                    if (32..=126).contains(&code) { font3_translate(ch) } else { ch }
+                }).collect();
+                self.out.print_styled(&translated, self.screen.text_style);
+            } else {
+                self.out.print_styled(s, self.screen.text_style);
+            }
         }
     }
 
@@ -1627,6 +1649,129 @@ impl Machine {
         self.undo_stack.clear();
         self.pending_restore_store = None;
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Font-3 character-graphics mapping (ZMSD §16)
+// ---------------------------------------------------------------------------
+
+/// Translate a character code through Font 3's character-graphics table.
+///
+/// Source: Bocfel interpreter (garglk/garglk, terps/bocfel/unicode.cpp,
+/// function `build_zscii_to_character_graphics_table`), which faithfully
+/// implements the 8×8 bitmap descriptions in Z-Machine Standards Document §16.
+/// https://inform-fiction.org/zmachine/standards/z1point1/sect16.html
+///
+/// Key BeyondZork cursor-arrow mappings (ZMSD §16):
+///   code 92 ('\\') → U+2191 ↑  (cursor up)
+///   code 93 (']')  → U+2193 ↓  (cursor down)
+///
+/// Codes not assigned in the table (71–74) map to U+FFFD (replacement character),
+/// matching bocfel's treatment of unassigned entries.
+/// Codes outside 32..=126 are not handled here; the caller passes them through.
+fn font3_translate(ch: char) -> char {
+    let code = ch as u32;
+    match code {
+        32  => '\u{0020}', // (space)
+        33  => '\u{2190}', // ←
+        34  => '\u{2192}', // →
+        35  => '\u{2571}', // ╱
+        36  => '\u{2572}', // ╲
+        37  => '\u{0020}', // (space)
+        38  => '\u{2500}', // ─
+        39  => '\u{2500}', // ─
+        40  => '\u{2502}', // │
+        41  => '\u{2502}', // │
+        42  => '\u{2534}', // ┴
+        43  => '\u{252C}', // ┬
+        44  => '\u{251C}', // ├
+        45  => '\u{2524}', // ┤
+        46  => '\u{2514}', // └
+        47  => '\u{250C}', // ┌
+        48  => '\u{2510}', // ┐
+        49  => '\u{2518}', // ┘
+        // 50-53: room-connection pieces (bocfel default: no alt-graphics → corner chars)
+        50  => '\u{2514}', // └
+        51  => '\u{250C}', // ┌
+        52  => '\u{2510}', // ┐
+        53  => '\u{2518}', // ┘
+        54  => '\u{2588}', // █
+        55  => '\u{2580}', // ▀
+        56  => '\u{2584}', // ▄
+        57  => '\u{258C}', // ▌
+        58  => '\u{2590}', // ▐
+        // 59-62: room-connection pieces (bocfel default: filled block corners)
+        59  => '\u{2584}', // ▄
+        60  => '\u{2580}', // ▀
+        61  => '\u{258C}', // ▌
+        62  => '\u{2590}', // ▐
+        63  => '\u{259D}', // ▝
+        64  => '\u{2597}', // ▗
+        65  => '\u{2596}', // ▖
+        66  => '\u{2598}', // ▘
+        // 67-70: room-connection pieces (bocfel default: quarter-block corners)
+        67  => '\u{259D}', // ▝
+        68  => '\u{2597}', // ▗
+        69  => '\u{2596}', // ▖
+        70  => '\u{2598}', // ▘
+        // 71-74: not assigned in the bocfel/§16 table → replacement character
+        71 | 72 | 73 | 74 => '\u{FFFD}',
+        75  => '\u{2594}', // ▔
+        76  => '\u{2581}', // ▁
+        77  => '\u{258F}', // ▏
+        78  => '\u{2595}', // ▕
+        79  => '\u{0020}', // (space)
+        80  => '\u{258F}', // ▏
+        81  => '\u{258E}', // ▎
+        82  => '\u{258D}', // ▍
+        83  => '\u{258C}', // ▌
+        84  => '\u{258B}', // ▋
+        85  => '\u{258A}', // ▊
+        86  => '\u{2589}', // ▉
+        87  => '\u{2588}', // █
+        88  => '\u{2595}', // ▕
+        89  => '\u{258F}', // ▏
+        90  => '\u{2573}', // ╳
+        91  => '\u{253C}', // ┼
+        92  => '\u{2191}', // ↑  (cursor up arrow — used by BeyondZork menu)
+        93  => '\u{2193}', // ↓  (cursor down arrow — used by BeyondZork menu)
+        94  => '\u{2195}', // ↕
+        95  => '\u{2395}', // ⎕
+        96  => '\u{003F}', // ?
+        // 97-122: Elder Futhark runic letters (used by BeyondZork for atmosphere)
+        97  => '\u{16AA}', // ᚪ
+        98  => '\u{16D2}', // ᛒ
+        99  => '\u{16C7}', // ᛇ
+        100 => '\u{16DE}', // ᛞ
+        101 => '\u{16D6}', // ᛖ
+        102 => '\u{16A0}', // ᚠ
+        103 => '\u{16B7}', // ᚷ
+        104 => '\u{16BB}', // ᚻ
+        105 => '\u{16C1}', // ᛁ
+        106 => '\u{16C4}', // ᛄ
+        107 => '\u{16E6}', // ᛦ
+        108 => '\u{16DA}', // ᛚ
+        109 => '\u{16D7}', // ᛗ
+        110 => '\u{16BE}', // ᚾ
+        111 => '\u{16A9}', // ᚩ
+        112 => '\u{15BE}', // ᖾ
+        113 => '\u{16B3}', // ᚳ
+        114 => '\u{16B1}', // ᚱ
+        115 => '\u{16CB}', // ᛋ
+        116 => '\u{16CF}', // ᛏ
+        117 => '\u{16A2}', // ᚢ
+        118 => '\u{16E0}', // ᛠ
+        119 => '\u{16B9}', // ᚹ
+        120 => '\u{16C9}', // ᛉ
+        121 => '\u{16A5}', // ᚥ
+        122 => '\u{16DF}', // ᛟ
+        // 123-126: reversed variants (per ZMSD §16 note); mirror arrows/? from 92-96
+        123 => '\u{2191}', // ↑
+        124 => '\u{2193}', // ↓
+        125 => '\u{2195}', // ↕
+        126 => '\u{003F}', // ?
+        _   => ch,         // outside 32..=126: pass through (caller guards this range)
     }
 }
 
@@ -4330,5 +4475,68 @@ pub(crate) mod tests {
         let mut m = aux_machine();
         assert_eq!(m.exec_ext(0x00, &[], Some(0x10)), StepResult::SaveRequest);
         assert_eq!(m.exec_ext(0x01, &[], Some(0x10)), StepResult::RestoreRequest);
+    }
+
+    // ── Font 3 character-graphics translation (EXT:0x04 set_font + print_text) ──
+
+    /// Helper: drain the lower-window BufferOutput.
+    fn buf_output(m: &Machine) -> &str {
+        m.out.as_any().downcast_ref::<BufferOutput>().unwrap().buf.as_str()
+    }
+
+    #[test]
+    fn font3_translates_up_down_arrows_lower_window() {
+        // Codes 92 ('\') → ↑ (U+2191) and 93 (']') → ↓ (U+2193) in Font 3.
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        assert_eq!(m.screen.current_font, 1, "default font is 1");
+        m.screen.current_font = 3;
+        m.streams.stream1 = true;
+        m.print_text("\\]"); // ASCII 92, 93
+        assert_eq!(buf_output(&m), "\u{2191}\u{2193}", "font 3: '\\' → ↑ and ']' → ↓");
+    }
+
+    #[test]
+    fn font1_output_byte_identical_no_translation() {
+        // With font 1 (default), print_text must be byte-identical — no translation.
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        assert_eq!(m.screen.current_font, 1);
+        m.streams.stream1 = true;
+        m.print_text("\\]"); // ASCII 92, 93
+        assert_eq!(buf_output(&m), "\\]", "font 1: output must be byte-identical");
+    }
+
+    #[test]
+    fn font3_translates_upper_window_cells() {
+        // Same arrow codes through the upper-window grid path.
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.screen.upper.resize(2, 10);
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 1;
+        m.screen.current_font = 3;
+        m.print_text("\\]");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, '\u{2191}', "col 1 → ↑");
+        assert_eq!(m.screen.upper.cell(1, 2).ch, '\u{2193}', "col 2 → ↓");
+    }
+
+    #[test]
+    fn set_font_tracks_current_font_and_returns_previous() {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        // Default font is 1; set_font(3) should return 1 (previous) and switch to 3.
+        m.exec_ext(0x04, &[3], Some(0x10));
+        assert_eq!(m.global(0), 1, "set_font(3) returns previous font 1");
+        assert_eq!(m.screen.current_font, 3, "current_font updated to 3");
+        // Query with 0: returns current (3) without changing.
+        m.exec_ext(0x04, &[0], Some(0x10));
+        assert_eq!(m.global(0), 3, "set_font(0) returns current font 3");
+        assert_eq!(m.screen.current_font, 3, "current_font unchanged after query");
+        // Unsupported font: returns 0 (unavailable).
+        m.exec_ext(0x04, &[2], Some(0x10));
+        assert_eq!(m.global(0), 0, "set_font(2) returns 0 (unavailable)");
+        assert_eq!(m.screen.current_font, 3, "current_font unchanged after failed set");
     }
 }
