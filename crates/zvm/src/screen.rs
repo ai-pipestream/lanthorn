@@ -233,25 +233,31 @@ pub fn init_header_caps(mem: &mut Memory) {
         // v4+ Flags1 bits (ZMSD §11.1.3):
         //   bit 0: colour available — clear (no colour)
         //   bit 1: picture display available — clear
-        //   bit 2: boldface available — clear (stub)
-        //   bit 3: italic available — clear (stub)
+        //   bit 2: boldface available — set (rendered via SGR / style spans)
+        //   bit 3: italic available — set (rendered via SGR / style spans)
         //   bit 4: fixed-space font available — set
         //   bit 5: sound effects available — clear
         //   bit 7: timed keyboard available — clear
-        f1 & !((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 5) | (1 << 7))  // clear unsupported
-          | (1 << 4)  // fixed-space font available
+        f1 & !((1 << 0) | (1 << 1) | (1 << 5) | (1 << 7))  // clear unsupported
+          | (1 << 2) | (1 << 3) | (1 << 4)  // bold, italic, fixed-space font available
     };
     mem.write_byte(0x01, new_f1);
 
     // Flags2 (word 0x10–0x11, interpreter clears bits it doesn't support).
     // ZMSD §11.1.4: bits 3–5, 7 are interpreter-writable (clear = not supported).
     //   bit 3: pictures — clear
-    //   bit 4: undo available — clear
+    //   bit 4: undo available — set for v5+ (save_undo/restore_undo implemented);
+    //          pre-v5 has no undo opcodes, so leave it clear.
     //   bit 5: mouse — clear
     //   bit 7: sound effects — clear
     let f2 = mem.read_word(0x10);
-    let f2_mask: u16 = !((1 << 3) | (1 << 4) | (1 << 5) | (1 << 7));
-    mem.write_word(0x10, f2 & f2_mask);
+    let mut new_f2 = f2 & !((1 << 3) | (1 << 5) | (1 << 7));
+    if version >= 5 {
+        new_f2 |= 1 << 4; // undo available
+    } else {
+        new_f2 &= !(1 << 4); // pre-v5: no undo
+    }
+    mem.write_word(0x10, new_f2);
 
     // Interpreter number (0x1E): 6 = IBM PC / generic.
     mem.write_byte(0x1E, 6);
@@ -481,6 +487,20 @@ mod tests {
         write_screen_dims(&mut mem, 0, 0);
         assert_eq!(mem.read_byte(0x20), 1, "zero rows clamped to 1");
         assert_eq!(mem.read_byte(0x21), 1, "zero cols clamped to 1");
+    }
+
+    #[test]
+    fn header_caps_v5_advertises_styles_and_undo() {
+        // Bold/italic are rendered (SGR / style spans) and multi-level undo
+        // (save_undo/restore_undo, EXT:0x09/0x0A) is implemented, so the header
+        // must advertise them or games skip the features at startup.
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem);
+        let f1 = mem.read_byte(0x01);
+        assert_ne!(f1 & (1 << 2), 0, "Flags1 bit 2 (bold available) should be set");
+        assert_ne!(f1 & (1 << 3), 0, "Flags1 bit 3 (italic available) should be set");
+        let f2 = mem.read_word(0x10);
+        assert_ne!(f2 & (1 << 4), 0, "Flags2 bit 4 (undo available) should be set");
     }
 
     #[test]

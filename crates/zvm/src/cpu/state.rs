@@ -10,7 +10,7 @@ use crate::memory::Memory;
 pub struct Frame {
     /// PC to restore when this routine returns.
     pub return_pc: u32,
-    /// Local variables for this routine (0-indexed: local 1 is locals[0]).
+    /// Local variables for this routine (0-indexed: local 1 is `locals[0]`).
     pub locals: Vec<u16>,
     /// Base index into the shared eval_stack for this frame's region.
     pub eval_base: usize,
