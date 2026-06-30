@@ -616,6 +616,25 @@ impl Machine {
             0x161 => self.op_callf(1),
             0x162 => self.op_callf(2),
             0x163 => self.op_callf(3),
+            0x0101 => {
+                // debugtrap L1 — log the value and continue.
+                let (l, _) = self.read_operands(1, 0)?;
+                self.diagnostics.push(format!("debugtrap: {:#x}", l[0]));
+                Ok(())
+            }
+            0x0122 => self.op_restart(),
+            0x0123 => {
+                // save L1 S1 — file layer not implemented; store failure (1).
+                let (_, s) = self.read_operands(1, 1)?;
+                self.diagnostics.push("@save: file layer not implemented; returning failure".to_string());
+                self.store(s[0], 1)
+            }
+            0x0124 => {
+                // restore L1 S1 — file layer not implemented; store failure (1).
+                let (_, s) = self.read_operands(1, 1)?;
+                self.diagnostics.push("@restore: file layer not implemented; returning failure".to_string());
+                self.store(s[0], 1)
+            }
             other => Err(format!("illegal/unimplemented opcode {other:#x}")),
         }
     }
@@ -1490,6 +1509,38 @@ impl Machine {
             3 => self.push32(0xFFFF_FFFF),
             other => Err(format!("bad restoreundo stub DestType {other}")),
         }
+    }
+
+    // ── restart ───────────────────────────────────────────────────────────────
+
+    /// `@restart`: reset all VM state to its initial condition and re-enter the
+    /// start function. The Glk backend is preserved (the display is not cleared by
+    /// the spec). No operands.
+    fn op_restart(&mut self) -> R<()> {
+        let start = self.mem.start_func();
+        let decode_table = self.mem.decode_table();
+        self.mem.reset_ram();
+        self.stack.fill(0);
+        self.sp = 0;
+        self.fp = 0;
+        self.pc = 0;
+        self.iosys_mode = 0;
+        self.iosys_rock = 0;
+        self.cur_stringtbl = decode_table;
+        self.heap_start = 0;
+        self.heap_blocks.clear();
+        self.glk = Model::new();
+        self.pending_input = None;
+        self.halted = false;
+        self.protect = (0, 0);
+        self.undo_stack.clear();
+        self.accel_funcs.clear();
+        self.accel_params.clear();
+        self.rng = Self::DEFAULT_SEED;
+        self.cur_frame_len = 0;
+        self.cur_localspos = 0;
+        self.cur_locals.clear();
+        self.build_frame_and_enter(start, &[])
     }
 
     // ── acceleration storage + PRNG (GLULX_NOTES §17, §18) ────────────────────
