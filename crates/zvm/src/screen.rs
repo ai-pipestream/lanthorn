@@ -89,7 +89,7 @@ impl UpperWindow {
 /// For v3 the host derives the status line by calling `Machine::status_line()`.
 /// For v4+ the host reads `upper_window_rows`, `current_window`, `text_style`,
 /// and `cursor` to manage windows.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct ScreenState {
     /// Number of rows in the upper (status) window; 0 means no upper window.
     pub upper_window_rows: u16,
@@ -111,6 +111,24 @@ pub struct ScreenState {
     pub erase_lower_requested: bool,
     /// Upper window character grid (v4+).
     pub upper: UpperWindow,
+}
+
+impl Default for ScreenState {
+    fn default() -> Self {
+        ScreenState {
+            upper_window_rows: 0,
+            current_window: 0,
+            text_style: 0,
+            cursor_row: 0,
+            cursor_col: 0,
+            // ZMSD §8.7.2.5: the lower window is buffered (word-wrapped) by
+            // default; a game turns buffering off explicitly via buffer_mode 0.
+            buffer_mode: true,
+            show_status_requested: false,
+            erase_lower_requested: false,
+            upper: UpperWindow::default(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +567,8 @@ mod tests {
         assert_eq!(s.upper_window_rows, 0);
         assert_eq!(s.current_window, 0);
         assert_eq!(s.text_style, 0);
-        assert!(!s.buffer_mode);
+        // The lower window is buffered (word-wrapped) by default (ZMSD §8.7.2.5).
+        assert!(s.buffer_mode, "buffer_mode defaults to on (buffered)");
     }
 
     // ── (f) UpperWindow: resize, put, cell, clear ───────────────────────────
