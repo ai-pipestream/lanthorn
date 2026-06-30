@@ -900,10 +900,18 @@ impl Machine {
                 self.screen.cursor_col = col;
                 StepResult::Continue
             }
-            // 0x11 set_text_style — update text style bitmask (v4+)
+            // 0x11 set_text_style — update text style bitmask (v4+).
+            // ZMSD §8.7.1: styles are cumulative — Roman (0) clears all, any
+            // nonzero style is OR-ed into the current set. Games (e.g. BeyondZork
+            // menus) layer fixed-pitch onto a reverse-video region and rely on
+            // the reverse bit persisting; replacing would wipe it.
             0x11 => {
                 let style = ops.first().copied().unwrap_or(0) as u8;
-                self.screen.text_style = style;
+                if style == 0 {
+                    self.screen.text_style = 0;
+                } else {
+                    self.screen.text_style |= style;
+                }
                 StepResult::Continue
             }
             // 0x12 buffer_mode — toggle output buffering (v4+)
@@ -3659,6 +3667,48 @@ pub(crate) mod tests {
         assert_eq!(m.screen.text_style, 1, "set_text_style(1) → text_style=1");
         assert_eq!(m.screen.upper_window_rows, 3, "split_window(3) → upper_window_rows=3");
         assert_eq!(m.screen.current_window, 1, "set_window(1) → current_window=1");
+    }
+
+    // ── (a2) set_text_style is cumulative: nonzero OR-s in, 0 resets ──────────
+    // ZMSD §8.7.1: styles combine; only Roman (0) clears all. BeyondZork's
+    // character menus rely on this — the reverse-video box stays reversed while
+    // an additional style (fixed-pitch) is layered onto a line. Replace
+    // semantics would wipe the reverse bit and break selection highlighting.
+    #[test]
+    fn screen_set_text_style_is_cumulative() {
+        // v5 program:
+        //   set_text_style 1  (reverse)        → 1
+        //   set_text_style 8  (fixed, OR-ed)   → 9
+        //   set_text_style 0  (Roman, resets)  → 0
+        //   set_text_style 2  (bold)           → 2
+        //   quit
+        let mut buf = sample_story(5);
+        let mut pos: usize = 0x10;
+        for operand in [1u8, 8, 0, 2] {
+            let instr = {
+                let mut v = vec![];
+                emit_var_instr(&mut v, 0x11, &[operand]);
+                v
+            };
+            buf[pos..pos + instr.len()].copy_from_slice(&instr);
+            pos += instr.len();
+        }
+        buf[pos] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+
+        // Step through and check the bitmask after each set_text_style.
+        // After 1 → 1; after 8 → 9 (1|8); after 0 → 0; after 2 → 2.
+        m.step(); // set_text_style 1
+        assert_eq!(m.screen.text_style, 1, "after set_text_style(1): reverse");
+        m.step(); // set_text_style 8
+        assert_eq!(m.screen.text_style, 9, "after set_text_style(8): reverse|fixed (cumulative)");
+        m.step(); // set_text_style 0
+        assert_eq!(m.screen.text_style, 0, "after set_text_style(0): Roman resets all");
+        m.step(); // set_text_style 2
+        assert_eq!(m.screen.text_style, 2, "after set_text_style(2): bold");
     }
 
     // ── (b) show_status (v3 0OP:0x0C) sets the flag ─────────────────────────
