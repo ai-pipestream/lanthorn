@@ -415,9 +415,17 @@ impl Machine {
                 call_routine(&mut self.state, &mut self.mem, a, &[b], None);
                 StepResult::Continue
             }
-            // 2OP:0x1B set_colour — game-driven colour is not applied (babelmap styling
-            // owns the look); accept and ignore.
-            0x1B => StepResult::Continue,
+            // 2OP:0x1B set_colour (v5+). Per-channel replace with sentinels
+            // (ZMSD §8.3): 0 = keep, 1 = default, 2..=12 = palette + v6 greys.
+            0x1B => {
+                if let Some(c) = decode_set_colour(a) {
+                    self.screen.current_fg = c;
+                }
+                if let Some(c) = decode_set_colour(b) {
+                    self.screen.current_bg = c;
+                }
+                StepResult::Continue
+            }
             // 2OP:0x1C throw value stack-frame (v5+) — non-local return. `catch`
             // (0OP:0x09) records the call-stack depth; `throw` unwinds back to that
             // depth and returns `value` from the catching routine (ZMSD §15).
@@ -1874,6 +1882,22 @@ impl Memory {
 }
 
 // ---------------------------------------------------------------------------
+// Colour helpers
+// ---------------------------------------------------------------------------
+
+/// Decode a `set_colour` operand into a colour-channel update.
+/// Returns `None` for 0 ("leave unchanged"); `Some(ZColour)` otherwise.
+fn decode_set_colour(v: u16) -> Option<crate::screen::ZColour> {
+    use crate::screen::ZColour;
+    match v {
+        0 => None,                     // keep current channel
+        1 => Some(ZColour::Default),   // default
+        2..=12 => Some(ZColour::Standard(v as u8)), // palette + v6 greys
+        _ => None,                     // -1 (pixel) / unknown → keep
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1881,6 +1905,7 @@ impl Memory {
 pub(crate) mod tests {
     use super::*;
     use crate::header::tests_support::sample_story;
+    use crate::screen::ZColour;
 
     // ── In-game restore-success: the original @save "returns 2" on restore ─────
     //
@@ -4487,6 +4512,50 @@ pub(crate) mod tests {
         assert_eq!(m.global(0), 5, "execution continued past set_colour/set_true_colour");
         assert!(m.diagnostics.iter().all(|d| !d.contains("0x1B") && !d.contains("0x05")),
             "graceful arms must not emit unimplemented diagnostics");
+    }
+
+    #[test]
+    fn set_colour_honors_sentinels() {
+        // Helper: run "set_colour fg,bg" (2OP:0x1B long form, two smalls) at 0x10.
+        fn run_set_colour(fg: u8, bg: u8) -> (ZColour, ZColour) {
+            let mut buf = sample_story(5);
+            // 2OP long form, both operands Small: opcode byte 0x1B, fg, bg.
+            buf[0x10] = 0x1B;
+            buf[0x11] = fg;
+            buf[0x12] = bg;
+            buf[0x13] = 0xBA; // quit
+            let mem = Memory::new(buf).unwrap();
+            let mut m = Machine::new(mem);
+            m.state.pc = 0x10;
+            m.step(); // set_colour
+            (m.screen.current_fg, m.screen.current_bg)
+        }
+
+        // start both non-default, then 0 must KEEP each channel
+        let (fg, bg) = run_set_colour(3, 6);
+        assert_eq!(fg, ZColour::Standard(3));
+        assert_eq!(bg, ZColour::Standard(6));
+
+        // 1 = default
+        assert_eq!(run_set_colour(1, 1), (ZColour::Default, ZColour::Default));
+
+        // greys accepted
+        assert_eq!(run_set_colour(10, 12), (ZColour::Standard(10), ZColour::Standard(12)));
+    }
+
+    #[test]
+    fn set_colour_zero_keeps_channel() {
+        // set fg=3,bg=6 then set fg=0,bg=4: fg keeps 3, bg becomes 4.
+        let mut buf = sample_story(5);
+        buf[0x10] = 0x1B; buf[0x11] = 3; buf[0x12] = 6;      // set_colour 3,6
+        buf[0x13] = 0x1B; buf[0x14] = 0; buf[0x15] = 4;      // set_colour 0,4
+        buf[0x16] = 0xBA;                                     // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        m.step(); m.step();
+        assert_eq!(m.screen.current_fg, ZColour::Standard(3), "fg=0 kept prior fg");
+        assert_eq!(m.screen.current_bg, ZColour::Standard(4), "bg updated to 4");
     }
 
     // -----------------------------------------------------------------------
