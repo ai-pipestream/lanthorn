@@ -52,6 +52,7 @@
   - `Cell { ch: char, style: u8, fg: ZColour, bg: ZColour }`.
   - `ScreenState.current_fg: ZColour`, `ScreenState.current_bg: ZColour`.
   - `UpperWindow::put(&mut self, row, col, ch, style, fg, bg)`.
+  - `pub fn rgb15_to_888(v: u16) -> (u8, u8, u8)` and `pub fn grey_rgb(n: u8) -> (u8, u8, u8)` in `screen.rs` — shared colour math reused by zvm-cli (Task 7) and app (Task 9).
 
 - [ ] **Step 1: Write the failing test** — append to the `#[cfg(test)] mod tests` in `screen.rs`:
 
@@ -98,6 +99,34 @@ impl Default for ZColour {
     fn default() -> Self {
         ZColour::Default
     }
+}
+
+/// Expand a 15-bit RGB (0bbbbbgggggrrrrr) to 8-bit `(r, g, b)`. Shared by the
+/// CLI (SGR) and app (ratatui) renderers so the expansion is defined once.
+pub fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
+    let exp = |c: u16| -> u8 { ((c << 3) | (c >> 2)) as u8 };
+    (exp(v & 0x1F), exp((v >> 5) & 0x1F), exp((v >> 10) & 0x1F))
+}
+
+/// Fixed RGB for the v6 greys (Standard 10/11/12). Defined once here so both
+/// renderers agree. Any other value falls back to dark grey (12).
+pub fn grey_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        10 => (0xB0, 0xB0, 0xB0),
+        11 => (0x80, 0x80, 0x80),
+        _ => (0x50, 0x50, 0x50), // 12
+    }
+}
+```
+
+Add a quick test for the math (same test as Step 1, extend it):
+
+```rust
+#[test]
+fn rgb15_expansion_and_greys() {
+    assert_eq!(rgb15_to_888(0x7FFF), (255, 255, 255));
+    assert_eq!(rgb15_to_888(0x001F), (255, 0, 0)); // red = low 5 bits
+    assert_eq!(grey_rgb(11), (0x80, 0x80, 0x80));
 }
 ```
 
@@ -653,21 +682,7 @@ fn style_wrap_emits_colour_sgr() {
 
 ```rust
 use zvm::io::TextAttrs;
-use zvm::screen::ZColour;
-
-/// Expand a 15-bit RGB (0bbbbbgggggrrrrr) to 8-bit (r, g, b).
-fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
-    let exp = |c: u16| -> u8 { ((c << 3) | (c >> 2)) as u8 };
-    (exp(v & 0x1F), exp((v >> 5) & 0x1F), exp((v >> 10) & 0x1F))
-}
-
-fn grey_rgb(n: u8) -> (u8, u8, u8) {
-    match n {
-        10 => (0xB0, 0xB0, 0xB0),
-        11 => (0x80, 0x80, 0x80),
-        _ => (0x50, 0x50, 0x50), // 12
-    }
-}
+use zvm::screen::{ZColour, rgb15_to_888, grey_rgb};
 
 /// Push SGR parameters for one colour channel. `fg` selects 3x vs 4x codes.
 fn push_colour_sgr(params: &mut Vec<String>, c: ZColour, fg: bool) {
@@ -784,20 +799,13 @@ fn game_colours_default_on_unless_disabled() {
 - [ ] **Step 3: Implement** in `render/mod.rs`:
 
 ```rust
-use zvm::screen::ZColour;
-
-fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
-    let exp = |c: u16| -> u8 { ((c << 3) | (c >> 2)) as u8 };
-    (exp(v & 0x1F), exp((v >> 5) & 0x1F), exp((v >> 10) & 0x1F))
-}
+use zvm::screen::{ZColour, rgb15_to_888, grey_rgb};
 
 pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
     match c {
         ZColour::Default => Color::Reset,
         ZColour::Standard(n @ 2..=9) => scheme.palette[(n - 2) as usize],
-        ZColour::Standard(10) => Color::Rgb(0xB0, 0xB0, 0xB0),
-        ZColour::Standard(11) => Color::Rgb(0x80, 0x80, 0x80),
-        ZColour::Standard(_) => Color::Rgb(0x50, 0x50, 0x50), // 12 (and any stray)
+        ZColour::Standard(n) => { let (r, g, b) = grey_rgb(n); Color::Rgb(r, g, b) } // 10..=12
         ZColour::True(v) => { let (r, g, b) = rgb15_to_888(v); Color::Rgb(r, g, b) }
     }
 }
