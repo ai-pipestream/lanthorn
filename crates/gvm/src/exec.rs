@@ -2298,6 +2298,8 @@ impl Machine {
             0x0121 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Upper)?, // _to_upper_case_uni
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
             0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
+            0x00B2 => 0,           // glk_style_distinguish — styles not distinguishable
+            0x00B3 => 0,           // glk_style_measure — measurement unsupported
             // ── input requests + select (3a-2) ────────────────────────────────
             0x00D0 => {
                 // glk_request_line_event(win, buf, maxlen, initlen)
