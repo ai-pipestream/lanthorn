@@ -214,8 +214,10 @@ fn parse_args(argv: &[String]) -> Args {
 /// back to 24×80 if crossterm returns an error (e.g. stdout is piped).
 fn detect_term_size() -> (u16, u16) {
     match terminal::size() {
-        Ok((cols, rows)) => (rows, cols),
-        Err(_) => (screen::DEFAULT_ROWS, screen::DEFAULT_COLS),
+        // A zero dimension (some PTYs, e.g. macOS `script`, return Ok((0, 0)))
+        // would yield a 0 wrap width; fall back to the default like an error.
+        Ok((cols, rows)) if cols > 0 && rows > 0 => (rows, cols),
+        _ => (screen::DEFAULT_ROWS, screen::DEFAULT_COLS),
     }
 }
 
