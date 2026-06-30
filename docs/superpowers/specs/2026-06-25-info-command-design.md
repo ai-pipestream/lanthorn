@@ -35,6 +35,34 @@ active, what background tasks are doing, and the story/VM facts.
 - Game move count (from the status line)
 - VM diagnostics: which unimplemented opcodes have been hit this session
   (`warned_var_opcodes` / `diagnostics`)
+- **Feature usage (engine-feature recorder)** — added 2026-06-30. The accurate
+  way to know which engine features a story actually exercises: a lightweight,
+  always-on **usage recorder** in each VM (a set/counter updated in the opcode +
+  `@glk` dispatch, generalizing the existing once-per-opcode `diagnostics`
+  pattern), accumulated across the session and surfaced here. Record the
+  *interesting, operand-specific* events, not every opcode — e.g.:
+  - Z-machine: `set_font 3` (Font 3 graphics) and Font 4; `buffer_mode` off;
+    `set_text_style` styles used; `set_colour`; timed/interrupt input
+    (`read`/`read_char` with time+routine); terminating-chars table; sound
+    (`sound_effect` / Blorb); upper-window split / `set_window` usage; v3 status
+    line vs v4+ host-managed; CP437 / IBM-PC graphics path taken; Unicode
+    (`print_unicode` / translation table); save/restore/undo; `throw`/`catch`.
+  - Glulx: which `@glk` selectors fired; which `@gestalt` / `glk_gestalt`
+    capabilities the game queried; file/resource streams; acceleration; float ops;
+    `@restart`; timer/mouse/hyperlink/graphics/sound events requested.
+  Operand-specific because the recorder sees runtime values (font 3 vs 1) — which
+  static analysis cannot. Caveat: a recorder only reflects the **paths played**;
+  full coverage needs a walkthrough.
+  - *Static complement (for the story-list view, not `/info`):* a cheap up-front
+    header scan (version, Flags 1/2, Unicode table, terminating-chars table) is
+    reliable for a catalog column; a deeper opcode-reference scan via the decoder
+    (`zvm/cpu/decode.rs`) is only approximate (code/data intermixing, computed
+    calls, no operand values) — "references `set_font`", not "uses font 3".
+  - *Coverage-matrix follow-on (separate sub-project):* run stories under scripted
+    walkthroughs (ties into the deferred command-replay / `input_stream` idea) with
+    the recorder on → a *story × feature* matrix. Answers "which story files
+    exercise which features" for test-fixture selection + engine validation
+    (complements the 2026-06-30 feature-gap audits).
 
 **`app` — babelmap:**
 - **Styling:** resolved `style.toml` path (or built-in/`default`) · base scheme ·
