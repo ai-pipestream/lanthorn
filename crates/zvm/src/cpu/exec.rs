@@ -415,6 +415,20 @@ impl Machine {
             // 2OP:0x1B set_colour — game-driven colour is not applied (babelmap styling
             // owns the look); accept and ignore.
             0x1B => StepResult::Continue,
+            // 2OP:0x1C throw value stack-frame (v5+) — non-local return. `catch`
+            // (0OP:0x09) records the call-stack depth; `throw` unwinds back to that
+            // depth and returns `value` from the catching routine (ZMSD §15).
+            0x1C => {
+                let value = a;
+                let target_depth = b as usize;
+                self.unwind_to_depth(target_depth);
+                // Return `value` from the catching routine itself (defensive: skip
+                // if the depth was invalid and nothing remains to return from).
+                if !self.state.frames.is_empty() {
+                    return_value(&mut self.state, &mut self.mem, value);
+                }
+                StepResult::Continue
+            }
             // Unknown / unimplemented 2OP — no-op seam for Tasks 10+ (object/text ops)
             _ => StepResult::Continue,
         }
@@ -1230,6 +1244,17 @@ impl Machine {
             Operand::Large(v) => *v,
             Operand::Small(v) => *v as u16,
             Operand::Var(n) => read_var(&mut self.state, &self.mem, *n),
+        }
+    }
+
+    /// Discard call frames until exactly `target_depth` remain, truncating the
+    /// shared eval stack to each popped frame's base. Used by `throw` to unwind
+    /// the stack back to the depth a matching `catch` recorded.
+    fn unwind_to_depth(&mut self, target_depth: usize) {
+        while self.state.frames.len() > target_depth {
+            if let Some(f) = self.state.frames.pop() {
+                self.state.eval_stack.truncate(f.eval_base);
+            }
         }
     }
 
@@ -4135,6 +4160,42 @@ pub(crate) mod tests {
         run_until_quit(&mut m);
         assert_eq!(m.global(0), 1, "font 1 available -> previous font (1)");
         assert_eq!(m.global(1), 1, "font 4 (Courier/fixed-pitch) accepted -> previous font (1)");
+    }
+
+    #[test]
+    fn catch_then_throw_unwinds_and_returns_value() {
+        // catch (0OP:0x09 v5+) records the call-stack depth; throw (2OP:0x1C)
+        // unwinds back to that depth and returns the given value from the
+        // catching routine, as a non-local return (ZMSD §15).
+        let mut m = build_test_machine(&[]);
+
+        // Frame A: the routine that calls catch; its result lands in global 0.
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0x4242, locals: vec![], eval_base: 0,
+            store_var: Some(0x10), arg_count: 0,
+        });
+        // catch -> store depth in global 1.
+        m.exec_0op(0x09, Some(0x11), None, None);
+        let caught = m.global(1);
+        assert_eq!(caught, 1, "catch records the depth (1 frame on the stack)");
+
+        // A calls deeper into B then C.
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0x0010, locals: vec![], eval_base: 0,
+            store_var: Some(0x12), arg_count: 0,
+        });
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0x0020, locals: vec![], eval_base: 0,
+            store_var: Some(0x13), arg_count: 0,
+        });
+        assert_eq!(m.state.frames.len(), 3);
+
+        // throw 0x1234 back to the caught frame.
+        m.exec_2op(0x1C, &[0x1234, caught], None, None);
+
+        assert_eq!(m.state.frames.len(), 0, "unwound past the catching routine's frame");
+        assert_eq!(m.state.pc, 0x4242, "pc restored to the catching routine's return_pc");
+        assert_eq!(m.global(0), 0x1234, "thrown value returned to the catching routine's caller");
     }
 
     #[test]
