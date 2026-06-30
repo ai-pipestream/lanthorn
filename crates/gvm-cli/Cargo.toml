@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 gvm = { path = "../gvm" }
 blorb = { path = "../blorb" }
+crossterm = "0.28"

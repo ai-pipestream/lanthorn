@@ -39,54 +39,10 @@ pub fn bleep_bytes(count: usize, is_tty: bool) -> String {
     }
 }
 
-/// Raw single-key `read_char` only makes sense on a TTY stdin.
-pub fn wants_raw_char(stdin_is_tty: bool) -> bool {
-    stdin_is_tty
-}
-
 /// True once `lines` reaches the page limit (`page_height - 1`); a height < 2
 /// never pages (avoids a zero/looping page).
 pub fn should_page(lines: u16, page_height: u16) -> bool {
     page_height >= 2 && lines >= page_height - 1
-}
-
-/// Map the bytes AFTER an ESC into a Z-machine input code (ZMSD §3.8):
-/// cursor keys 129-132 (up/down/left/right), F1-F4 133-136. `None` if unknown.
-pub fn decode_escape_seq(seq: &[u8]) -> Option<u8> {
-    match seq {
-        b"[A" | b"OA" => Some(129),
-        b"[B" | b"OB" => Some(130),
-        b"[D" | b"OD" => Some(131),
-        b"[C" | b"OC" => Some(132),
-        b"OP" => Some(133),
-        b"OQ" => Some(134),
-        b"OR" => Some(135),
-        b"OS" => Some(136),
-        _ => None,
-    }
-}
-
-/// Parse `stty size` output ("rows cols").
-pub fn parse_stty_size(out: &str) -> Option<(u16, u16)> {
-    let mut it = out.split_whitespace();
-    let rows = it.next()?.parse().ok()?;
-    let cols = it.next()?.parse().ok()?;
-    Some((rows, cols))
-}
-
-/// Resolve the terminal row count: stty size, then env LINES, then default.
-pub fn term_rows(stty_out: Option<&str>, env_lines: Option<&str>) -> u16 {
-    if let Some((rows, _)) = stty_out.and_then(parse_stty_size) {
-        if rows > 0 {
-            return rows;
-        }
-    }
-    if let Some(n) = env_lines.and_then(|s| s.trim().parse::<u16>().ok()) {
-        if n > 0 {
-            return n;
-        }
-    }
-    DEFAULT_ROWS
 }
 
 fn right_field(right: &StatusRight) -> String {
@@ -283,6 +239,11 @@ impl ScreenView {
         }
     }
 
+    /// Update the row count used for scroll-region sizing (call on terminal resize).
+    pub fn set_term_rows(&mut self, rows: u16) {
+        self.term_rows = rows;
+    }
+
     /// Clear+home the screen at startup (interactive only), so existing
     /// scrollback is not overwritten by the pinned region.
     pub fn start(&self) -> String {
@@ -397,16 +358,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_and_resolve_term_rows() {
-        assert_eq!(parse_stty_size("24 80\n"), Some((24, 80)));
-        assert_eq!(parse_stty_size("garbage"), None);
-        assert_eq!(term_rows(Some("40 100"), None), 40); // stty wins
-        assert_eq!(term_rows(None, Some("50")), 50); // env fallback
-        assert_eq!(term_rows(None, None), DEFAULT_ROWS); // default
-        assert_eq!(term_rows(Some("bad"), Some("x")), DEFAULT_ROWS);
-    }
-
-    #[test]
     fn status_text_pads_and_right_aligns() {
         let st = StatusLine {
             location: "West of House".into(),
@@ -451,19 +402,6 @@ mod tests {
         assert!(should_page(23, 24)); // page_height - 1
         assert!(should_page(99, 24));
         assert!(!should_page(5, 1)); // degenerate height never pages
-    }
-
-    #[test]
-    fn decode_escape_seq_maps_arrows_and_fkeys() {
-        assert_eq!(decode_escape_seq(b"[A"), Some(129)); // up
-        assert_eq!(decode_escape_seq(b"[B"), Some(130)); // down
-        assert_eq!(decode_escape_seq(b"[D"), Some(131)); // left
-        assert_eq!(decode_escape_seq(b"[C"), Some(132)); // right
-        assert_eq!(decode_escape_seq(b"OA"), Some(129)); // up (SS3)
-        assert_eq!(decode_escape_seq(b"OP"), Some(133)); // F1
-        assert_eq!(decode_escape_seq(b"OS"), Some(136)); // F4
-        assert_eq!(decode_escape_seq(b"[Z"), None); // unknown
-        assert_eq!(decode_escape_seq(b""), None);
     }
 
     #[test]

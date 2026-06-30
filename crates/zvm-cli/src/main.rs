@@ -16,7 +16,9 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
-use std::process;
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::terminal;
 
 use zvm::cpu::exec::{Machine, StepResult};
 use zvm::io::Output;
@@ -24,6 +26,36 @@ use zvm::memory::Memory;
 
 mod screen;
 mod aux; // implemented in Task 5; declared now so the module tree is stable
+
+// ── Pure word-wrap helper ─────────────────────────────────────────────────────
+
+/// Soft-wrap `text` by word-token boundaries, tracking `current_col` as the
+/// starting column position. Returns `(wrapped_text, new_col)`. Explicit `\n`
+/// in `text` always resets the column to 0. When `cols` is `u16::MAX`,
+/// wrapping is disabled (used when `buffer_mode` is off).
+fn wrap_line(text: &str, cols: u16, current_col: u16) -> (String, u16) {
+    let mut out = String::with_capacity(text.len());
+    let mut col = current_col;
+    for word in text.split_inclusive(&[' ', '\n'][..]) {
+        let is_nl = word.ends_with('\n');
+        let clean = if is_nl { &word[..word.len() - 1] } else { word };
+        let wlen = clean.chars().count() as u16;
+        if col > 0 && col.saturating_add(wlen) > cols {
+            out.push('\n');
+            let trimmed = clean.trim_start();
+            out.push_str(trimmed);
+            col = trimmed.chars().count() as u16;
+        } else {
+            out.push_str(clean);
+            col = col.saturating_add(wlen);
+        }
+        if is_nl {
+            out.push('\n');
+            col = 0;
+        }
+    }
+    (out, col)
+}
 
 // ── StdoutOutput ──────────────────────────────────────────────────────────────
 
@@ -36,12 +68,23 @@ struct StdoutOutput {
     cols: u16,
     current_col: u16,
     lines: u16,
-    orig_mode: Option<String>,
+    /// Mirrors `machine.screen.buffer_mode`: when `false`, soft word-wrap at
+    /// the column limit is suppressed (per Z-spec, unwrapped output is flushed
+    /// immediately; explicit `\n` and `[MORE]` paging still apply).
+    buffer_mode: bool,
 }
 
 impl StdoutOutput {
-    fn new(is_tty: bool, paging: bool, page_height: u16, cols: u16, orig_mode: Option<String>) -> Self {
-        StdoutOutput { is_tty, paging, page_height, cols, current_col: 0, lines: 0, orig_mode }
+    fn new(is_tty: bool, paging: bool, page_height: u16, cols: u16) -> Self {
+        StdoutOutput {
+            is_tty,
+            paging,
+            page_height,
+            cols,
+            current_col: 0,
+            lines: 0,
+            buffer_mode: false,
+        }
     }
 
     fn check_paging(&mut self) {
@@ -49,44 +92,27 @@ impl StdoutOutput {
             let _ = io::stdout().flush();
             print!("\x1b[7m[MORE]\x1b[0m");
             let _ = io::stdout().flush();
-            let _ = read_char_input(true, &self.orig_mode);
+            wait_for_keypress(self.is_tty);
             print!("\r\x1b[2K"); // erase the [MORE] prompt
             self.lines = 0;
         }
     }
 
-    /// Emit `s` with token-based word wrapping
+    /// Emit `s` with optional token-based word wrapping (gated by `buffer_mode`).
+    /// Calls `check_paging` after each newline (soft or hard).
     fn write_counted(&mut self, s: &str) {
-        let words = s.split_inclusive(&[' ', '\n'][..]);
-        
-        for word in words {
-            let is_newline = word.ends_with('\n');
-            let clean_word = if is_newline { &word[..word.len()-1] } else { word };
-            let word_len = clean_word.chars().count() as u16;
-
-            // Wrap if the word pushes us past the column limit (and it's not the start of a line)
-            if self.current_col > 0 && self.current_col + word_len > self.cols {
-                print!("\n");
-                self.current_col = 0;
-                self.lines += 1;
-                self.check_paging();
-                
-                // Trim leading spaces when wrapping to a new line
-                let trimmed = clean_word.trim_start();
-                print!("{}", trimmed);
-                self.current_col += trimmed.chars().count() as u16;
-            } else {
-                print!("{}", clean_word);
-                self.current_col += word_len;
-            }
-
-            if is_newline {
-                print!("\n");
-                self.current_col = 0;
+        // When buffer_mode is off, pass u16::MAX as cols: saturating_add in
+        // wrap_line will never trigger the wrap condition.
+        let cols = if self.buffer_mode { self.cols } else { u16::MAX };
+        let (wrapped, new_col) = wrap_line(s, cols, self.current_col);
+        for ch in wrapped.chars() {
+            print!("{}", ch);
+            if ch == '\n' {
                 self.lines += 1;
                 self.check_paging();
             }
         }
+        self.current_col = new_col;
         let _ = io::stdout().flush();
     }
 }
@@ -99,6 +125,10 @@ impl Output for StdoutOutput {
     fn print_styled(&mut self, s: &str, style: u8) {
         let out = crate::screen::style_wrap(s, style, self.is_tty);
         self.write_counted(&out);
+    }
+
+    fn set_buffer_mode(&mut self, on: bool) {
+        self.buffer_mode = on;
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -136,7 +166,6 @@ fn build_machine(
     paging: bool,
     page_height: u16,
     term_cols: u16,
-    orig_mode: Option<String>,
 ) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
@@ -151,7 +180,6 @@ fn build_machine(
         paging,
         page_height,
         term_cols,
-        orig_mode,
     )));
     machine.init_caps();
     Ok(machine)
@@ -180,60 +208,74 @@ fn parse_args(argv: &[String]) -> Args {
     a
 }
 
-// ── terminal size + raw single-key input ──────────────────────────────────────
+// ── terminal size ─────────────────────────────────────────────────────────────
 
+/// Detect the terminal size. Returns `(rows, cols)` using crossterm; falls
+/// back to 24×80 if crossterm returns an error (e.g. stdout is piped).
 fn detect_term_size() -> (u16, u16) {
-    let stty = process::Command::new("stty")
-        .arg("size")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok());
-    let env_lines = env::var("LINES").ok();
-    let rows = screen::term_rows(stty.as_deref(), env_lines.as_deref());
-
-    let cols = if let Some((_, c)) = stty.as_deref().and_then(screen::parse_stty_size) {
-        if c > 0 { c } else { screen::DEFAULT_COLS }
-    } else if let Some(c) = env::var("COLUMNS").ok().and_then(|s| s.trim().parse::<u16>().ok()) {
-        if c > 0 { c } else { screen::DEFAULT_COLS }
-    } else {
-        screen::DEFAULT_COLS
-    };
-    
-    (rows, cols)
-}
-
-/// Restore the terminal to the captured original (cooked+echo) mode.
-fn restore_mode(orig: &Option<String>) {
-    if let Some(s) = orig {
-        let _ = process::Command::new("stty").arg(s).status();
+    match terminal::size() {
+        Ok((cols, rows)) => (rows, cols),
+        Err(_) => (screen::DEFAULT_ROWS, screen::DEFAULT_COLS),
     }
 }
 
-/// Read one keypress (TTY: raw, decoding escape sequences); always restores the
-/// original cooked mode afterward. Piped: a byte from a line, as before.
-fn read_char_input(stdin_is_tty: bool, orig: &Option<String>) -> u8 {
-    use std::io::Read;
-    if !screen::wants_raw_char(stdin_is_tty) {
-        return read_byte_stdin();
+// ── key input (crossterm) ─────────────────────────────────────────────────────
+
+/// Map a crossterm `KeyCode` to the Z-machine key code used by `supply_char`.
+/// Printable ASCII passes through; special keys map to ZMSD §3.8 codes.
+fn decode_keycode(code: KeyCode) -> u8 {
+    match code {
+        KeyCode::Char(c) if (c as u32) < 128 => c as u8,
+        KeyCode::Enter => b'\n',
+        KeyCode::Backspace | KeyCode::Delete => 8, // DEL/BS
+        KeyCode::Esc => 0x1B,
+        KeyCode::Up => 129,
+        KeyCode::Down => 130,
+        KeyCode::Left => 131,
+        KeyCode::Right => 132,
+        KeyCode::F(1) => 133,
+        KeyCode::F(2) => 134,
+        KeyCode::F(3) => 135,
+        KeyCode::F(4) => 136,
+        _ => b'\n', // unknown → newline
     }
-    let _ = process::Command::new("stty")
-        .args(["-icanon", "-echo", "min", "1", "time", "0"])
-        .status();
-    let mut first = [0u8; 1];
-    let n = io::stdin().read(&mut first).unwrap_or(0);
-    let key = if n == 0 {
-        b'\n'
-    } else if first[0] == 0x1B {
-        // Read the (brief, non-blocking) continuation and decode it.
-        let _ = process::Command::new("stty").args(["min", "0", "time", "1"]).status();
-        let mut rest = [0u8; 8];
-        let m = io::stdin().read(&mut rest).unwrap_or(0);
-        screen::decode_escape_seq(&rest[..m]).unwrap_or(0x1B)
-    } else {
-        first[0]
+}
+
+/// Wait for any key press (used by the `[MORE]` prompt). Resize events during
+/// the wait are discarded; the next NeedLine/NeedChar poll will pick them up.
+fn wait_for_keypress(is_tty: bool) {
+    if !is_tty {
+        read_byte_stdin();
+        return;
+    }
+    let _ = terminal::enable_raw_mode();
+    loop {
+        match event::read() {
+            Ok(Event::Key(_)) => break,
+            _ => {} // ignore resize and other events during [MORE] wait
+        }
+    }
+    let _ = terminal::disable_raw_mode();
+}
+
+/// Read one keypress in raw mode. Resize events that arrive before the key are
+/// captured and returned alongside the key so the caller can update its state.
+/// Piped stdin: reads the first byte of the next line.
+fn read_char_input(is_tty: bool) -> (u8, Option<(u16, u16)>) {
+    if !is_tty {
+        return (read_byte_stdin(), None);
+    }
+    let _ = terminal::enable_raw_mode();
+    let mut last_resize: Option<(u16, u16)> = None;
+    let key = loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent { code, .. })) => break decode_keycode(code),
+            Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
+            _ => {}
+        }
     };
-    restore_mode(orig); // always back to the known-good cooked+echo mode
-    key
+    let _ = terminal::disable_raw_mode();
+    (key, last_resize)
 }
 
 // ── aux ("global state") persistence ──────────────────────────────────────────
@@ -291,6 +333,50 @@ fn read_byte_stdin() -> u8 {
     line.bytes().next().unwrap_or(b'\n')
 }
 
+// ── terminal resize helper ────────────────────────────────────────────────────
+
+/// Apply a new terminal size `(new_rows, new_cols)` if it differs from the
+/// current `(last_rows, last_cols)`. Updates the output sink, paging height,
+/// and screen view. Only runs when `is_tty` is true.
+fn apply_resize(
+    new_rows: u16,
+    new_cols: u16,
+    last_rows: &mut u16,
+    last_cols: &mut u16,
+    page_height: &mut u16,
+    machine: &mut Machine,
+    view: &mut screen::ScreenView,
+) {
+    if new_rows == *last_rows && new_cols == *last_cols {
+        return;
+    }
+    *last_rows = new_rows;
+    *last_cols = new_cols;
+    *page_height = new_rows.saturating_sub(2).max(2);
+    view.set_term_rows(new_rows);
+    if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+        o.cols = new_cols;
+        o.page_height = *page_height;
+    }
+}
+
+/// Poll the current terminal size and apply it if it changed. Only runs when
+/// `is_tty` is true (otherwise no-op — avoids crossterm errors on piped I/O).
+fn maybe_resize(
+    is_tty: bool,
+    last_rows: &mut u16,
+    last_cols: &mut u16,
+    page_height: &mut u16,
+    machine: &mut Machine,
+    view: &mut screen::ScreenView,
+) {
+    if !is_tty {
+        return;
+    }
+    let (new_rows, new_cols) = detect_term_size();
+    apply_resize(new_rows, new_cols, last_rows, last_cols, page_height, machine, view);
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -298,7 +384,7 @@ fn main() {
     let args = parse_args(&argv);
     let Some(story_arg) = args.story.clone() else {
         eprintln!("Usage: {} [--no-status] [--no-aux] <story-file>", argv[0]);
-        process::exit(1);
+        std::process::exit(1);
     };
     let story_path = std::path::PathBuf::from(&story_arg);
 
@@ -306,7 +392,7 @@ fn main() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("Error: cannot read '{}': {}", story_path.display(), e);
-            process::exit(1);
+            std::process::exit(1);
         }
     };
 
@@ -316,7 +402,7 @@ fn main() {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{e}");
-            process::exit(1);
+            std::process::exit(1);
         }
     };
 
@@ -329,27 +415,13 @@ fn main() {
 
     let stdout_is_tty = io::stdout().is_terminal();
     let stdin_is_tty = io::stdin().is_terminal();
-
-    // Capture the original terminal mode ONCE; every raw read restores to this,
-    // and we restore it again on exit so echo is always returned.
-    let orig_mode: Option<String> = if stdin_is_tty {
-        process::Command::new("stty")
-            .arg("-g")
-            .stdin(process::Stdio::inherit())
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()) // Filter empty so restore never runs stty ""
-    } else {
-        None
-    };
+    let both_tty = stdout_is_tty && stdin_is_tty;
 
     // Paging is only safe when BOTH ends are TTYs (else it would block the
     // headless harness); --no-more disables it.
-    let (term_rows, term_cols) = detect_term_size();
-    let paging = stdout_is_tty && stdin_is_tty && !args.no_more;
-    let page_height = term_rows.saturating_sub(2).max(2);
+    let (mut term_rows, mut term_cols) = detect_term_size();
+    let paging = both_tty && !args.no_more;
+    let mut page_height = term_rows.saturating_sub(2).max(2);
 
     let mut machine = match build_machine(
         story_bytes,
@@ -357,12 +429,11 @@ fn main() {
         paging,
         page_height,
         term_cols,
-        orig_mode.clone(),
     ) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
-            process::exit(1);
+            std::process::exit(1);
         }
     };
     aux_preload(&mut machine, &aux_file, args.no_aux);
@@ -398,7 +469,8 @@ fn main() {
             StepResult::Quit => {
                 print!("{}", view.leave());
                 let _ = io::stdout().flush();
-                restore_mode(&orig_mode);
+                // Ensure raw mode is not left active on exit.
+                let _ = terminal::disable_raw_mode();
                 break;
             }
 
@@ -409,34 +481,45 @@ fn main() {
                     paging,
                     page_height,
                     term_cols,
-                    orig_mode.clone(),
                 ) {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("{e}");
-                        process::exit(1);
+                        std::process::exit(1);
                     }
                 };
                 aux_preload(&mut machine, &aux_file, args.no_aux);
             }
 
             StepResult::NeedLine { .. } => {
+                // Poll for terminal resize before line input (crossterm returns
+                // current size; on piped stdout this is a no-op via is_tty guard).
+                maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
                 let line = read_line_stdin();
                 machine.supply_line(line.trim_end());
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
+                    o.current_col = 0; // cursor is at line start after user input + Enter
                 }
             }
 
             StepResult::NeedChar => {
+                // Poll for terminal resize before char input.
+                maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
-                let ch = read_char_input(stdin_is_tty, &orig_mode);
+                let (ch, resize) = read_char_input(stdin_is_tty);
+                // Handle any resize that happened DURING the char read.
+                if let Some((new_cols, new_rows)) = resize {
+                    apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
+                                 &mut page_height, &mut machine, &mut view);
+                }
                 machine.supply_char(ch);
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
+                    o.current_col = 0;
                 }
             }
 
@@ -506,10 +589,100 @@ mod arg_tests {
 #[cfg(test)]
 mod stdout_tests {
     // The sink writes to the real stdout, so its behavior is exercised by the
-    // manual smoke in Task 6; this pins the wrapping helper the sink must use.
+    // manual smoke; this pins the wrapping helper the sink must use.
     #[test]
     fn print_styled_wraps_only_on_tty() {
         assert_eq!(crate::screen::style_wrap("hi", 2, true), "\x1b[1mhi\x1b[0m");
         assert_eq!(crate::screen::style_wrap("hi", 2, false), "hi");
+    }
+}
+
+#[cfg(test)]
+mod keycode_tests {
+    use super::*;
+    use crossterm::event::KeyCode;
+
+    #[test]
+    fn decode_keycode_printable_ascii() {
+        assert_eq!(decode_keycode(KeyCode::Char('a')), b'a');
+        assert_eq!(decode_keycode(KeyCode::Char('Z')), b'Z');
+        assert_eq!(decode_keycode(KeyCode::Char('5')), b'5');
+    }
+
+    #[test]
+    fn decode_keycode_special_keys() {
+        assert_eq!(decode_keycode(KeyCode::Enter), b'\n');
+        assert_eq!(decode_keycode(KeyCode::Backspace), 8);
+        assert_eq!(decode_keycode(KeyCode::Esc), 0x1B);
+        assert_eq!(decode_keycode(KeyCode::Up), 129);
+        assert_eq!(decode_keycode(KeyCode::Down), 130);
+        assert_eq!(decode_keycode(KeyCode::Left), 131);
+        assert_eq!(decode_keycode(KeyCode::Right), 132);
+        assert_eq!(decode_keycode(KeyCode::F(1)), 133);
+        assert_eq!(decode_keycode(KeyCode::F(4)), 136);
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::wrap_line;
+
+    #[test]
+    fn no_wrap_when_enough_space() {
+        let (out, col) = wrap_line("hello world", 80, 0);
+        assert_eq!(out, "hello world");
+        assert_eq!(col, 11);
+    }
+
+    #[test]
+    fn wraps_word_that_overflows_line() {
+        // "world" at col 76: 76+5=81 > 80 → soft newline then "world"
+        let (out, col) = wrap_line("world", 80, 76);
+        assert_eq!(out, "\nworld");
+        assert_eq!(col, 5);
+    }
+
+    #[test]
+    fn no_wrap_at_line_start_even_if_word_is_long() {
+        // A word longer than cols at col 0 is printed as-is (avoids infinite wrap).
+        let long = "x".repeat(100);
+        let (out, col) = wrap_line(&long, 80, 0);
+        assert_eq!(out, long);
+        assert_eq!(col, 100);
+    }
+
+    #[test]
+    fn buffer_mode_off_disables_wrap() {
+        // With cols = u16::MAX (buffer_mode off), no soft newline is ever inserted.
+        let text = "this is a very long sentence that would normally be wrapped at 80 columns";
+        let (out, _) = wrap_line(text, u16::MAX, 0);
+        assert_eq!(out, text);
+        assert!(!out.contains('\n'));
+    }
+
+    #[test]
+    fn explicit_newline_resets_column() {
+        let (out, col) = wrap_line("foo\nbar", 80, 70);
+        assert_eq!(out, "foo\nbar");
+        assert_eq!(col, 3);
+    }
+
+    #[test]
+    fn trims_space_token_that_triggers_wrap() {
+        // A space token at col 80 triggers a wrap; the space itself is trimmed.
+        // " " at col 80: 80+1=81>80 → wrap, trim(" ")="", col=0
+        // "world" at col 0: 0+5=5<=80 → emit, col=5
+        let (out, col) = wrap_line(" world", 80, 80);
+        assert_eq!(out, "\nworld");
+        assert_eq!(col, 5);
+    }
+
+    #[test]
+    fn multi_word_wrap_sequence() {
+        // At cols=10, starting at col 0: "hello world" wraps.
+        let (out, col) = wrap_line("hello world", 10, 0);
+        // "hello " is 6 chars (≤10), then "world" (5) pushes 6+5=11 > 10 → wrap
+        assert!(out.contains('\n'), "expected soft newline: {out:?}");
+        assert_eq!(col, 5); // "world" = 5 chars after the wrap
     }
 }

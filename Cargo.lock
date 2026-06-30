@@ -537,6 +537,7 @@ name = "gvm-cli"
 version = "0.1.0"
 dependencies = [
  "blorb",
+ "crossterm",
  "gvm",
 ]
 
@@ -1696,5 +1697,6 @@ name = "zvm-cli"
 version = "0.1.0"
 dependencies = [
  "blorb",
+ "crossterm",
  "zvm",
 ]

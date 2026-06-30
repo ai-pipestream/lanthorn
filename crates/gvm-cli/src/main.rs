@@ -5,19 +5,48 @@
 // Loads a raw `.ulx` Glulx image or extracts the `GLUL` executable from a Blorb,
 // drives it through a Glk step loop, routing Glk output to a terminal backend
 // and reading the player's input (cooked line / raw single key on a TTY), and
-// prints any diagnostics to stderr. The original terminal mode is always
-// restored on exit.
+// prints any diagnostics to stderr.
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Read};
+use std::io::{self, BufRead, IsTerminal};
 use std::process;
+
+use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::terminal;
 
 use gvm::glk::keycode;
 use gvm::{GlkBackend, Machine, Memory, StepResult};
 
 mod glk_term;
 use glk_term::TerminalBackend;
+
+// ── key decoding ──────────────────────────────────────────────────────────────
+
+/// Map a crossterm `KeyCode` to a Glk char-input keycode. Printable Latin-1
+/// characters pass through as their code point; special keys map to the
+/// `keycode::*` constants from the Glk spec.
+fn decode_glk_keycode(code: KeyCode) -> u32 {
+    match code {
+        KeyCode::Char(c) if (c as u32) < 0x110000 => c as u32,
+        KeyCode::Enter => keycode::RETURN,
+        KeyCode::Backspace | KeyCode::Delete => keycode::DELETE,
+        KeyCode::Tab => keycode::TAB,
+        KeyCode::Esc => keycode::ESCAPE,
+        KeyCode::Up => keycode::UP,
+        KeyCode::Down => keycode::DOWN,
+        KeyCode::Left => keycode::LEFT,
+        KeyCode::Right => keycode::RIGHT,
+        KeyCode::Home => keycode::HOME,
+        KeyCode::End => keycode::END,
+        KeyCode::PageUp => keycode::PAGE_UP,
+        KeyCode::PageDown => keycode::PAGE_DOWN,
+        KeyCode::F(n) if n >= 1 && n <= 12 => keycode::FUNC1 - (n as u32 - 1),
+        _ => keycode::UNKNOWN,
+    }
+}
+
+// ── Blorb extraction ──────────────────────────────────────────────────────────
 
 /// Get the runnable Glulx image: the `GLUL` executable inside a Blorb, or the
 /// raw bytes when they aren't a Blorb (a plain `.ulx`).
@@ -35,6 +64,8 @@ fn extract_executable(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 }
 
+// ── machine builder ───────────────────────────────────────────────────────────
+
 /// Build a machine from story bytes, sending Glk output to `backend`.
 fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine, String> {
     let image = extract_executable(bytes)?;
@@ -42,65 +73,7 @@ fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine
     Ok(Machine::with_glk(mem, backend))
 }
 
-/// Decode a raw key (one byte, or an escape sequence) into a Glk char-input code:
-/// printable bytes pass through as their Latin-1 value; Enter/Backspace/Tab/Esc
-/// and the arrow / Home / End / Page keys map to their `keycode_*`; an
-/// unrecognized escape sequence becomes `keycode_Unknown`. An empty slice (EOF)
-/// is treated as Enter.
-fn decode_key(bytes: &[u8]) -> u32 {
-    match bytes.first().copied() {
-        None => keycode::RETURN,
-        Some(0x1b) if bytes.len() == 1 => keycode::ESCAPE,
-        Some(0x1b) => {
-            // A CSI / SS3 sequence: ESC [ X  or  ESC O X.
-            match bytes.last().copied() {
-                Some(b'A') => keycode::UP,
-                Some(b'B') => keycode::DOWN,
-                Some(b'C') => keycode::RIGHT,
-                Some(b'D') => keycode::LEFT,
-                Some(b'H') => keycode::HOME,
-                Some(b'F') => keycode::END,
-                Some(b'~') => match bytes.get(2).copied() {
-                    Some(b'5') => keycode::PAGE_UP,
-                    Some(b'6') => keycode::PAGE_DOWN,
-                    _ => keycode::UNKNOWN,
-                },
-                _ => keycode::UNKNOWN,
-            }
-        }
-        Some(b'\n') | Some(b'\r') => keycode::RETURN,
-        Some(0x7f) | Some(0x08) => keycode::DELETE,
-        Some(b'\t') => keycode::TAB,
-        Some(b) => b as u32,
-    }
-}
-
-/// Capture the current terminal mode (`stty -g`) for later restore; `None` when
-/// stdin is not a TTY (nothing to restore).
-fn capture_mode(stdin_is_tty: bool) -> Option<String> {
-    if !stdin_is_tty {
-        return None;
-    }
-    // `Command::output()` defaults the child's stdin to null, but `stty -g` reads
-    // the terminal mode from stdin -- with null stdin it fails ("stdin isn't a
-    // terminal") and yields empty stdout. Inherit our terminal so it captures the
-    // real mode; filter empty so `restore_mode` never runs `stty ""`.
-    process::Command::new("stty")
-        .arg("-g")
-        .stdin(process::Stdio::inherit())
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Restore the terminal to the captured (cooked + echo) mode.
-fn restore_mode(orig: &Option<String>) {
-    if let Some(s) = orig {
-        let _ = process::Command::new("stty").arg(s).status();
-    }
-}
+// ── input helpers ─────────────────────────────────────────────────────────────
 
 /// Read a cooked line of input from stdin (the terminal echoes it).
 fn read_line_stdin() -> String {
@@ -109,35 +82,36 @@ fn read_line_stdin() -> String {
     line
 }
 
-/// Read one keypress. On a TTY: raw single key (escape sequences decoded), always
-/// restoring the cooked mode afterward. Piped: the first byte of the next line.
-fn read_char_input(stdin_is_tty: bool, orig: &Option<String>) -> u32 {
+/// Read one keypress. On a TTY: enter raw mode, read a crossterm `Event::Key`,
+/// then restore cooked mode. Resize events during the wait are silently
+/// discarded (they will be caught by the next `before_input` poll). Piped
+/// stdin: return the first byte of the next line.
+fn read_char_input(stdin_is_tty: bool) -> u32 {
     if !stdin_is_tty {
         let mut line = String::new();
         let _ = io::stdin().lock().read_line(&mut line);
-        return decode_key(line.as_bytes());
+        let byte = line.bytes().next().unwrap_or(b'\n');
+        return match byte {
+            b'\n' | b'\r' => keycode::RETURN,
+            0x7f | 0x08 => keycode::DELETE,
+            b'\t' => keycode::TAB,
+            0x1b => keycode::ESCAPE,
+            b => b as u32,
+        };
     }
-    let _ = process::Command::new("stty")
-        .args(["-icanon", "-echo", "min", "1", "time", "0"])
-        .status();
-    let mut first = [0u8; 1];
-    let n = io::stdin().read(&mut first).unwrap_or(0);
-    let key = if n == 0 {
-        keycode::RETURN
-    } else if first[0] == 0x1b {
-        // Grab the (brief, non-blocking) continuation and decode the sequence.
-        let _ = process::Command::new("stty").args(["min", "0", "time", "1"]).status();
-        let mut rest = [0u8; 8];
-        let m = io::stdin().read(&mut rest).unwrap_or(0);
-        let mut seq = vec![0x1b];
-        seq.extend_from_slice(&rest[..m]);
-        decode_key(&seq)
-    } else {
-        decode_key(&first[..1])
+    let _ = terminal::enable_raw_mode();
+    let key = loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent { code, .. })) => break decode_glk_keycode(code),
+            Ok(Event::Resize(..)) => {} // caught by next before_input size poll
+            _ => {}
+        }
     };
-    restore_mode(orig); // always return to the known-good cooked+echo mode
+    let _ = terminal::disable_raw_mode();
     key
 }
+
+// ── drive loop ────────────────────────────────────────────────────────────────
 
 /// Drive `machine` to completion through the Glk step loop, pulling input from
 /// the supplied readers. `before_input` runs just before each blocking read (the
@@ -168,6 +142,8 @@ fn drive(
     }
 }
 
+// ── main ──────────────────────────────────────────────────────────────────────
+
 fn main() {
     let argv: Vec<String> = env::args().collect();
     let Some(path) = argv.get(1) else {
@@ -192,13 +168,40 @@ fn main() {
     };
 
     let stdin_is_tty = io::stdin().is_terminal();
-    // Capture the original terminal mode once; each raw read restores to it and
-    // we restore again on exit, so echo is always returned to the user.
-    let orig_mode = capture_mode(stdin_is_tty);
+    let stdout_is_tty = io::stdout().is_terminal();
+    let both_tty = stdin_is_tty && stdout_is_tty;
+
+    // Track the last-known terminal size so we can detect resize events.
+    // Re-poll before each input using crossterm::terminal::size(); when
+    // changed, update the backend and queue a Glk evtype_Arrange event so
+    // the game can re-lay out its windows.
+    let mut last_size: Option<(u32, u32)> = if both_tty {
+        terminal::size().ok().map(|(c, r)| (c as u32, r as u32))
+    } else {
+        None
+    };
 
     drive(
         &mut machine,
         |m| {
+            // Re-poll terminal size before each input (interactive TTY only).
+            if both_tty {
+                if let Ok((cols, rows)) = terminal::size() {
+                    let new_size = (cols as u32, rows as u32);
+                    if last_size != Some(new_size) {
+                        last_size = Some(new_size);
+                        let changed = m
+                            .backend_mut()
+                            .as_any_mut()
+                            .downcast_mut::<TerminalBackend>()
+                            .map(|b| b.update_size(cols as u32, rows as u32))
+                            .unwrap_or(false);
+                        if changed {
+                            m.notify_resize();
+                        }
+                    }
+                }
+            }
             // Flush pending output (without tearing down the scroll region) so the
             // prompt is visible before we block for input.
             if let Some(t) = m.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>() {
@@ -206,11 +209,12 @@ fn main() {
             }
         },
         read_line_stdin,
-        || read_char_input(stdin_is_tty, &orig_mode),
+        move || read_char_input(stdin_is_tty),
     );
 
     machine.flush();
-    restore_mode(&orig_mode);
+    // Ensure raw mode is not left active on exit (harmless if already off).
+    let _ = terminal::disable_raw_mode();
 
     for d in &machine.diagnostics {
         eprintln!("gvm: {d}");
@@ -339,26 +343,28 @@ mod tests {
         assert_eq!(extract_executable(img.clone()).unwrap(), img);
     }
 
-    // ── Task 3: interactive input (decode_key + the drive loop) ───────────────
+    // ── key decoding tests ────────────────────────────────────────────────────
 
     #[test]
-    fn decode_key_maps_bytes_and_escape_sequences() {
-        assert_eq!(decode_key(b"a"), b'a' as u32);
-        assert_eq!(decode_key(b"7"), b'7' as u32);
-        assert_eq!(decode_key(b""), keycode::RETURN, "EOF → Enter");
-        assert_eq!(decode_key(b"\n"), keycode::RETURN);
-        assert_eq!(decode_key(b"\r"), keycode::RETURN);
-        assert_eq!(decode_key(&[0x7f]), keycode::DELETE);
-        assert_eq!(decode_key(&[0x08]), keycode::DELETE);
-        assert_eq!(decode_key(b"\t"), keycode::TAB);
-        assert_eq!(decode_key(&[0x1b]), keycode::ESCAPE, "lone ESC");
-        assert_eq!(decode_key(&[0x1b, b'[', b'A']), keycode::UP);
-        assert_eq!(decode_key(&[0x1b, b'[', b'B']), keycode::DOWN);
-        assert_eq!(decode_key(&[0x1b, b'[', b'C']), keycode::RIGHT);
-        assert_eq!(decode_key(&[0x1b, b'[', b'D']), keycode::LEFT);
-        assert_eq!(decode_key(&[0x1b, b'[', b'H']), keycode::HOME);
-        assert_eq!(decode_key(&[0x1b, b'[', b'5', b'~']), keycode::PAGE_UP);
-        assert_eq!(decode_key(&[0x1b, b'[', b'Z']), keycode::UNKNOWN, "unknown escape");
+    fn decode_glk_keycode_maps_crossterm_keys() {
+        assert_eq!(decode_glk_keycode(KeyCode::Char('a')), b'a' as u32);
+        assert_eq!(decode_glk_keycode(KeyCode::Char('7')), b'7' as u32);
+        assert_eq!(decode_glk_keycode(KeyCode::Enter), keycode::RETURN);
+        assert_eq!(decode_glk_keycode(KeyCode::Backspace), keycode::DELETE);
+        assert_eq!(decode_glk_keycode(KeyCode::Delete), keycode::DELETE);
+        assert_eq!(decode_glk_keycode(KeyCode::Tab), keycode::TAB);
+        assert_eq!(decode_glk_keycode(KeyCode::Esc), keycode::ESCAPE);
+        assert_eq!(decode_glk_keycode(KeyCode::Up), keycode::UP);
+        assert_eq!(decode_glk_keycode(KeyCode::Down), keycode::DOWN);
+        assert_eq!(decode_glk_keycode(KeyCode::Left), keycode::LEFT);
+        assert_eq!(decode_glk_keycode(KeyCode::Right), keycode::RIGHT);
+        assert_eq!(decode_glk_keycode(KeyCode::Home), keycode::HOME);
+        assert_eq!(decode_glk_keycode(KeyCode::End), keycode::END);
+        assert_eq!(decode_glk_keycode(KeyCode::PageUp), keycode::PAGE_UP);
+        assert_eq!(decode_glk_keycode(KeyCode::PageDown), keycode::PAGE_DOWN);
+        assert_eq!(decode_glk_keycode(KeyCode::F(1)), keycode::FUNC1);
+        assert_eq!(decode_glk_keycode(KeyCode::F(12)), keycode::FUNC12);
+        assert_eq!(decode_glk_keycode(KeyCode::F(13)), keycode::UNKNOWN, "F13 → unknown");
     }
 
     // A tiny Glulx instruction encoder for the input integration programs.
