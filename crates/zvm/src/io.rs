@@ -18,6 +18,12 @@ pub trait Output: Any {
     fn print_styled(&mut self, s: &str, _style: u8) {
         self.print(s);
     }
+    /// Notify the sink that the Z-machine `buffer_mode` opcode changed the
+    /// buffering flag. When `on` is `false` the interpreter must NOT soft-wrap
+    /// output at the terminal column limit (though explicit `\n` and paging
+    /// still apply). The default is a no-op so that `BufferOutput` and the
+    /// `app` crate's sink compile unchanged.
+    fn set_buffer_mode(&mut self, _on: bool) {}
     fn as_any(&self) -> &dyn Any;
     /// Mutable downcast support — required to drain sink state (e.g. `CaptureSink::take_text`).
     fn as_any_mut(&mut self) -> &mut dyn Any;
