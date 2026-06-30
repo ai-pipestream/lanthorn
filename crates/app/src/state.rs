@@ -30,8 +30,11 @@ pub struct HintSession {
     pub source: HintSource,
     /// The hint program's own output (its scrollback transcript).
     pub transcript: Vec<String>,
-    /// Scroll offset within the hint transcript.
+    /// Scroll offset within the hint transcript (logical target).
     pub scroll: u16,
+    /// Smooth-scroll animation easing the *displayed* offset toward `scroll`.
+    /// `None` when settled or animation is disabled (the instant path).
+    pub scroll_anim: Option<ScrollAnim>,
     /// The hint panel's own input line (typed by the player).
     pub input: String,
     /// Dialog title, e.g. "Invisiclues: Zork I".
@@ -41,13 +44,37 @@ pub struct HintSession {
 }
 
 impl HintSession {
-    /// Scroll the transcript by `delta` rows, clamped to `[0, max]`.
+    /// Scroll the transcript by `delta` rows, clamped to `[0, max]`, easing the
+    /// displayed offset per the `[animation]` config (instant when disabled).
     ///
     /// `delta > 0` scrolls toward older content (matching the story transcript's
     /// wheel-up direction); `max` is the last-rendered maximum scroll offset.
-    pub fn scroll_by(&mut self, delta: i32, max: u16) {
-        let next = (self.scroll as i32 + delta).clamp(0, max as i32);
-        self.scroll = next as u16;
+    pub fn scroll_by(&mut self, delta: i32, max: u16, anim: &crate::config::AnimationConfig) {
+        let from = self.effective_scroll() as usize;
+        let next = (self.scroll as i32 + delta).clamp(0, max as i32) as u16;
+        self.scroll = next;
+        self.scroll_anim = ScrollAnim::to(from, next as usize, anim);
+    }
+
+    /// The displayed scroll offset this frame: the eased value while animating,
+    /// else the logical target.
+    pub fn effective_scroll(&self) -> u16 {
+        self.scroll_anim
+            .as_ref()
+            .map(|a| a.current().round() as u16)
+            .unwrap_or(self.scroll)
+    }
+
+    /// Drop a completed scroll animation (called from the run loop).
+    pub fn finalize_scroll_if_done(&mut self) {
+        if self.scroll_anim.as_ref().is_some_and(|a| a.done()) {
+            self.scroll_anim = None;
+        }
+    }
+
+    /// True while the displayed scroll offset is still easing.
+    pub fn has_active_animation(&self) -> bool {
+        self.scroll_anim.as_ref().is_some_and(|a| !a.done())
     }
 }
 
@@ -2278,6 +2305,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
+            scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
             builtin_hint: false,
@@ -2300,21 +2328,24 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
+            scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
             builtin_hint: false,
         };
+        // Instant (animation disabled) so the logical offset settles immediately.
+        let anim = crate::config::AnimationConfig { enabled: false, easing: crate::anim::Easing::EaseOut, scroll_ms: 0 };
         // Scrolling down (negative) at the top is clamped to 0.
-        hs.scroll_by(-1, 5);
+        hs.scroll_by(-1, 5, &anim);
         assert_eq!(hs.scroll, 0, "scroll cannot go below 0");
         // Scrolling up (positive) advances within range.
-        hs.scroll_by(3, 5);
+        hs.scroll_by(3, 5, &anim);
         assert_eq!(hs.scroll, 3);
         // Scrolling past max is clamped to max.
-        hs.scroll_by(10, 5);
+        hs.scroll_by(10, 5, &anim);
         assert_eq!(hs.scroll, 5, "scroll clamps to max");
         // A max of 0 (nothing to scroll) pins scroll at 0.
-        hs.scroll_by(4, 0);
+        hs.scroll_by(4, 0, &anim);
         assert_eq!(hs.scroll, 0);
     }
 

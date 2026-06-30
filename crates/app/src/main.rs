@@ -1824,6 +1824,7 @@ fn main() {
                                             hs.transcript.push(l.to_owned());
                                         }
                                         hs.scroll = 0;
+                                        hs.scroll_anim = None;
                                     }
                                 }
                                 KeyCode::Backspace => {
@@ -1857,10 +1858,11 @@ fn main() {
                         // is intercepted before mouse_to_action, so resolve the
                         // direction (and mouse_wheel_invert) via the shared helper.
                         let max = last_panes.hints_panel.as_ref().map_or(0, |hp| hp.max_scroll);
+                        let anim = state.config.animation.clone();
                         if let Some(hs) = &mut state.hints {
                             // Wheel up (d < 0) → older content (increase scroll),
                             // matching the story transcript's wheel direction.
-                            hs.scroll_by(if d < 0 { 1 } else { -1 }, max);
+                            hs.scroll_by(if d < 0 { 1 } else { -1 }, max, &anim);
                         }
                     }
                 }
@@ -3942,6 +3944,7 @@ fn open_hints(
                                 source: app::state::HintSource::Zcode(vm),
                                 transcript,
                                 scroll: 0,
+                                scroll_anim: None,
                                 input: String::new(),
                                 label,
                                 builtin_hint,
@@ -3972,6 +3975,7 @@ fn open_hints(
                                 source: app::state::HintSource::Zcode(vm),
                                 transcript,
                                 scroll: 0,
+                                scroll_anim: None,
                                 input: String::new(),
                                 label,
                                 builtin_hint,
