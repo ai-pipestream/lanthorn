@@ -4639,6 +4639,37 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Task 4 (colour series): upper-window cells capture active colour
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn upper_window_cells_capture_active_colour() {
+        // split_window 1; set_window 1; set_colour 3,6; print "H".
+        let mut buf = sample_story(5);
+        let mut pos = 0x10usize;
+        let mut v = vec![];
+        emit_var_instr(&mut v, 0x0A, &[1]); // split_window 1
+        buf[pos..pos + v.len()].copy_from_slice(&v); pos += v.len();
+        v.clear();
+        emit_var_instr(&mut v, 0x0B, &[1]); // set_window 1
+        buf[pos..pos + v.len()].copy_from_slice(&v); pos += v.len();
+        // set_colour 3,6 (2OP long form)
+        buf[pos] = 0x1B; buf[pos+1] = 3; buf[pos+2] = 6; pos += 3;
+        v.clear();
+        emit_var_instr(&mut v, 0x05, &[72]); // print_char 'H'
+        buf[pos..pos + v.len()].copy_from_slice(&v); pos += v.len();
+        buf[pos] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        run_until_quit(&mut m);
+        let cell = m.screen.upper.cell(1, 1);
+        assert_eq!(cell.ch, 'H');
+        assert_eq!(cell.fg, ZColour::Standard(3));
+        assert_eq!(cell.bg, ZColour::Standard(6));
+    }
+
+    // -----------------------------------------------------------------------
     // Task 3: print_unicode + check_unicode (EXT:0x0B / 0x0C)
     // -----------------------------------------------------------------------
 
