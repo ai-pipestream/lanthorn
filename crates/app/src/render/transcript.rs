@@ -716,11 +716,10 @@ pub fn render_transcript(
     let input_style_kind  = state.colors.input_line_style;
 
     // The status bar always shows for v3 (its automatic status line is valid).
-    // For v4+ it's hidable (ToggleStatusBar / config show_status_bar) because
-    // the v3 globals are garbage there — but it still pops up for a transient
-    // status message so copy/slash feedback isn't lost.
+    // For v4+/Glulx (HostManaged) the synthesized bar is removed; the bar is
+    // only shown when a transient notification message is present so that
+    // save/load/export feedback still surfaces briefly.
     let status_visible = matches!(status, StatusModel::Classic { .. })
-        || state.show_status_bar
         || state.status_msg.is_some();
 
     // When boxed, status/input each take 3 rows; fall back to 1 if too small.
@@ -805,32 +804,11 @@ fn render_status_content(
         return;
     }
 
-    // Engines without an automatic status line (Z-machine v4+) have no
-    // location/score/turns globals to read, so the app shows babelmap-owned
-    // info instead: the DETECTED room (left); turn counter, detection method,
-    // and the filter indicator (right).
+    // For HostManaged (v4+/Glulx) the synthesized bar is removed entirely.
+    // The transient status_msg path above already handled any flash message;
+    // if we reach here with HostManaged there is nothing to render.
     let (location, right_field) = match status {
-        StatusModel::HostManaged => {
-            let loc = state.current_room_name.clone().unwrap_or_default();
-            let mut right = format!("turn {}", state.turns);
-            if let Some(m) = state.loc_method {
-                right.push_str("  ");
-                right.push_str(crate::render::map::loc_method_label(m));
-            }
-            match state.transcript_filter {
-                TranscriptFilter::Both => {}
-                TranscriptFilter::Story => right.push_str("  [filter: story]"),
-                TranscriptFilter::Meta => right.push_str("  [filter: meta]"),
-            }
-            let visible: Vec<(String, Style, crate::colors::Align)> = vec![
-                (loc, base, crate::colors::Align::Left),
-                (right, base, crate::colors::Align::Right),
-            ];
-            for (x, txt, style) in pack_status_clusters(&visible, w) {
-                draw_str_clipped(buf, region.x + x, status_y, &txt, style, region);
-            }
-            return;
-        }
+        StatusModel::HostManaged => return,
         StatusModel::Classic { location, right } => (location.clone(), *right),
     };
 
@@ -1492,31 +1470,51 @@ mod tests {
     }
 
     #[test]
-    fn v4_status_bar_shows_detected_location_not_globals() {
+    fn v4_status_bar_does_not_render_synthesized_content() {
+        // The synthesized babelmap status bar (room + turn counter) is removed for
+        // v4+/HostManaged during normal play. The bar must be fully hidden when
+        // there is no transient notification message.
         let machine = minimal_machine_v4();
         let mut state = AppState::default();
         state.current_room_name = Some("Outside".to_string());
         state.turns = 7;
+        state.transcript = vec!["FIRSTLINE".to_string()];
 
         let area = Rect::new(0, 0, 60, 5);
         let mut buf = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
+        // Room name and turn counter must NOT appear anywhere in the buffer.
+        let all_text: String = {
+            let mut s = String::new();
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    s.push(buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '));
+                }
+            }
+            s
+        };
+        assert!(!all_text.contains("Outside"),
+            "v4 must not render synthesized room name: {:?}", all_text);
+        assert!(!all_text.contains("turn 7"),
+            "v4 must not render synthesized turn counter: {:?}", all_text);
+        // Transcript starts at y=0 (status bar occupies 0 rows).
         let top: String = (0..area.width)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
-        assert!(top.contains("Outside"), "v4 status bar shows the detected room: {:?}", top);
-        assert!(top.contains("turn 7"), "v4 status bar shows the turn counter: {:?}", top);
+        assert!(top.contains("FIRSTLINE"),
+            "transcript must begin at y=0 when HostManaged bar is hidden: {:?}", top);
     }
 
     #[test]
-    fn v4_status_bar_hidden_collapses_row_but_v3_always_shows() {
+    fn v4_status_bar_collapsed_always_v3_always_shows() {
         let area = Rect::new(0, 0, 60, 5);
 
-        // v4 + hidden + no message → top row is the transcript, not the status bar.
+        // v4 + no message → top row is the transcript regardless of show_status_bar.
+        // The synthesized bar is now unconditionally removed for HostManaged.
         let mv4 = minimal_machine_v4();
         let mut s = AppState::default();
-        s.show_status_bar = false;
+        // show_status_bar=true is the default; the bar must still be hidden.
         s.current_room_name = Some("Outside".to_string());
         s.transcript = vec!["FIRSTLINE".to_string()];
         let mut buf = Buffer::empty(area);
@@ -1524,16 +1522,105 @@ mod tests {
         let top: String = (0..area.width)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
-        assert!(!top.contains("Outside"), "hidden v4 status bar must not render: {:?}", top);
+        assert!(!top.contains("Outside"), "v4 synthesized bar must never render: {:?}", top);
 
-        // v3 ignores show_status_bar = false (its status line is always shown).
+        // v3 always shows its Classic status line (unaffected by this change).
         let mv3 = minimal_machine();
         let mut s3 = AppState::default();
         s3.show_status_bar = false;
         let mut buf3 = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&mv3), None, &s3, area, &mut buf3);
         let top3_reversed = buf3.cell((0, 0)).map(|c| c.modifier.contains(Modifier::REVERSED)).unwrap_or(false);
-        assert!(top3_reversed, "v3 status bar always renders (reversed status row) regardless of toggle");
+        assert!(top3_reversed, "v3 Classic status bar always renders regardless of show_status_bar");
+    }
+
+    // ── New: status-bar removal contract for HostManaged (v4+/Glulx) ──────────
+
+    /// (a) HostManaged + no status_msg → bar hidden, no synthesized content.
+    #[test]
+    fn host_managed_no_msg_status_row_hidden() {
+        let mut state = AppState::default();
+        state.current_room_name = Some("West of House".to_string());
+        state.turns = 42;
+        state.transcript = vec!["You are standing in front of a house.".to_string()];
+        state.status_msg = None; // explicit
+
+        let area = Rect::new(0, 0, 60, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf);
+
+        // Synthesized content must not appear anywhere.
+        let all_text: String = {
+            let mut s = String::new();
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    s.push(buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '));
+                }
+            }
+            s
+        };
+        assert!(!all_text.contains("West of House"),
+            "HostManaged bar must not render room name when no status_msg: {:?}", all_text);
+        assert!(!all_text.contains("turn 42"),
+            "HostManaged bar must not render turn counter when no status_msg: {:?}", all_text);
+        // Transcript flows from y=0 (status bar takes no rows).
+        let top: String = (0..area.width)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(top.contains("standing"),
+            "transcript must start at y=0 (no status bar row): {:?}", top);
+    }
+
+    /// (b) HostManaged + status_msg set → transient flash still renders.
+    #[test]
+    fn host_managed_with_msg_flash_renders() {
+        let mut state = AppState::default();
+        state.current_room_name = Some("West of House".to_string());
+        state.turns = 42;
+        state.status_msg = Some("Saved.".to_string());
+
+        let area = Rect::new(0, 0, 60, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf);
+
+        // The flash message must appear on the top row.
+        let top: String = (0..area.width)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(top.contains("Saved."),
+            "HostManaged flash message must render in the status row: {:?}", top);
+        // Synthesized room/turn must NOT appear alongside the flash.
+        assert!(!top.contains("West of House"),
+            "flash must not co-render synthesized room name: {:?}", top);
+        assert!(!top.contains("turn 42"),
+            "flash must not co-render turn counter: {:?}", top);
+    }
+
+    /// (c) Classic status line is unaffected — still always renders.
+    #[test]
+    fn classic_status_always_renders_unchanged() {
+        // The Classic (v3) status line must be visible with its reversed background
+        // and its location/score content regardless of show_status_bar.
+        let machine = minimal_machine(); // v3 → Classic
+        let mut state = AppState::default();
+        state.show_status_bar = false; // toggling this must not hide the Classic bar
+        state.transcript = vec!["some story text".to_string()];
+
+        let area = Rect::new(0, 0, 40, 5);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+
+        // Top row (y=0) must have the reversed status bar background.
+        assert!(
+            buf.cell((0, 0)).unwrap().modifier.contains(Modifier::REVERSED),
+            "Classic status bar must always render (reversed modifier) regardless of toggle"
+        );
+        // Transcript is below y=0, not at y=0.
+        let top: String = (0..area.width as u16)
+            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(!top.contains("some story text"),
+            "transcript must not occupy y=0 when Classic bar is visible: {:?}", top);
     }
 
     #[test]
@@ -1975,21 +2062,23 @@ mod tests {
         let mem = zvm::memory::Memory::new(data).expect("parse czech.z5");
         let machine = Machine::new(mem);
 
+        // czech.z5 is a v5 story → HostManaged → synthesized bar is removed.
+        // Without a status_msg the bar occupies 0 rows; y=0 is transcript content,
+        // not a reversed-video status line.
         let state = AppState::default();
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
 
-        // Top row should have at least one non-space character (status line text or reversed bg).
-        // We verify the REVERSED modifier is present on the whole row.
+        // Top row must NOT have the reversed modifier (the synthesized bar is gone).
         let top_has_reversed = (0..80u16).all(|x| {
             buf.cell((x, 0))
                 .map(|c| c.modifier.contains(Modifier::REVERSED))
                 .unwrap_or(false)
         });
         assert!(
-            top_has_reversed,
-            "status line row should be fully reversed-video for czech.z5"
+            !top_has_reversed,
+            "v5 HostManaged story must not show reversed status bar when no status_msg"
         );
     }
 
