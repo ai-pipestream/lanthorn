@@ -99,6 +99,18 @@ pub enum GlkStyle {
 /// Number of standard style classes (`style_NUMSTYLES`).
 pub const NUMSTYLES: u32 = 11;
 
+/// Colour resolved from a window type's `stylehint_TextColor` (7),
+/// `stylehint_BackColor` (8), and `stylehint_ReverseColor` (9) for one style
+/// class. `fg`/`bg` are 24-bit RGB (`0xRRGGBB`); `None` means no hint is set, so
+/// the host uses its own default. `reverse` swaps foreground/background on
+/// display. Plain data — keeps `gvm` zero-dependency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StyleColour {
+    pub fg: Option<u32>,
+    pub bg: Option<u32>,
+    pub reverse: bool,
+}
+
 impl GlkStyle {
     /// Map a style number to a class (out-of-range falls back to Normal).
     pub fn from_num(v: u32) -> GlkStyle {
@@ -260,6 +272,18 @@ pub trait GlkBackend {
     fn put_text(&mut self, _win: u32, _style: GlkStyle, _s: &str) {}
     /// Write `s` to a text-grid window's cells starting at `(x, y)`.
     fn grid_put(&mut self, _win: u32, _x: u32, _y: u32, _style: GlkStyle, _s: &str) {}
+    /// Append `s` to a text-buffer window with the colour resolved from the
+    /// active style hints. Defaults to the colourless [`GlkBackend::put_text`],
+    /// so backends that don't render colour need no change (mirrors the
+    /// Z-machine `Output::print_attr` seam).
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, s: &str) {
+        self.put_text(win, style, s);
+    }
+    /// Write `s` to a text-grid window with resolved colour; defaults to the
+    /// colourless [`GlkBackend::grid_put`].
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, _colour: StyleColour, s: &str) {
+        self.grid_put(win, x, y, style, s);
+    }
     /// Clear a text-grid window.
     fn grid_clear(&mut self, _win: u32) {}
     /// Clear a text-buffer window.
@@ -479,6 +503,9 @@ pub struct Model {
     cur_stream: u32,
     /// Queued non-input events (arrange/redraw) awaiting the next `glk_select`.
     events: std::collections::VecDeque<GlkEvent>,
+    /// Colour style hints, indexed `[row][style]` where row 0 = text-buffer and
+    /// row 1 = text-grid (see [`Model::hint_row`]). Set via `glk_stylehint_set`.
+    style_hints: [[StyleColour; NUMSTYLES as usize]; 2],
 }
 
 impl Default for Model {
@@ -496,7 +523,63 @@ impl Model {
             root: 0,
             cur_stream: 0,
             events: std::collections::VecDeque::new(),
+            style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
         }
+    }
+
+    /// The `style_hints` rows a `wintype` argument touches: buffer (3) → [0],
+    /// grid (4) → [1], `wintype_AllTypes` (0) → both. Unsupported types → none.
+    fn hint_rows(wintype: u32) -> &'static [usize] {
+        match wintype {
+            0 => &[0, 1],
+            3 => &[0],
+            4 => &[1],
+            _ => &[],
+        }
+    }
+
+    /// Record a `glk_stylehint_set(wintype, styl, hint, val)`. Only the colour
+    /// hints are kept: TextColor (7), BackColor (8), ReverseColor (9); other
+    /// hints and out-of-range styles are ignored.
+    pub fn set_style_hint(&mut self, wintype: u32, styl: u32, hint: u32, val: u32) {
+        if styl >= NUMSTYLES {
+            return;
+        }
+        for &row in Self::hint_rows(wintype) {
+            let sc = &mut self.style_hints[row][styl as usize];
+            match hint {
+                7 => sc.fg = Some(val & 0x00FF_FFFF),
+                8 => sc.bg = Some(val & 0x00FF_FFFF),
+                9 => sc.reverse = val != 0,
+                _ => {}
+            }
+        }
+    }
+
+    /// Undo a `glk_stylehint_clear(wintype, styl, hint)` for a colour hint.
+    pub fn clear_style_hint(&mut self, wintype: u32, styl: u32, hint: u32) {
+        if styl >= NUMSTYLES {
+            return;
+        }
+        for &row in Self::hint_rows(wintype) {
+            let sc = &mut self.style_hints[row][styl as usize];
+            match hint {
+                7 => sc.fg = None,
+                8 => sc.bg = None,
+                9 => sc.reverse = false,
+                _ => {}
+            }
+        }
+    }
+
+    /// Resolve the colour hints active for `style` in a window of type `wintype`.
+    pub fn style_colour(&self, wintype: WinType, style: GlkStyle) -> StyleColour {
+        let row = match wintype {
+            WinType::TextBuffer => 0,
+            WinType::TextGrid => 1,
+            WinType::Pair => return StyleColour::default(),
+        };
+        self.style_hints[row][style as usize]
     }
 
     // ── slot accessors ────────────────────────────────────────────────────────
@@ -1179,7 +1262,14 @@ impl Model {
         if !r.done() {
             return Err("Glk snapshot: trailing bytes".to_string());
         }
-        Ok(Model { windows, streams, root, cur_stream, events: std::collections::VecDeque::new() })
+        Ok(Model {
+            windows,
+            streams,
+            root,
+            cur_stream,
+            events: std::collections::VecDeque::new(),
+            style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
+        })
     }
 }
 
@@ -1246,5 +1336,92 @@ fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
             Rect { top: rect.top, height: old_size, ..rect },
             Rect { top: rect.top + old_size, height: new_size, ..rect },
         ),
+    }
+}
+
+#[cfg(test)]
+mod style_hint_tests {
+    use super::*;
+
+    // stylehint_TextColor(7)/BackColor(8) are stored as 24-bit RGB per style,
+    // and style_colour reads them back for a text-buffer window.
+    #[test]
+    fn text_and_back_colour_hints_stored_per_style() {
+        let mut m = Model::new();
+        // wintype_TextBuffer = 3, style_Header = 3.
+        m.set_style_hint(3, 3, 7, 0x00FF_8040); // TextColor
+        m.set_style_hint(3, 3, 8, 0x0011_2233); // BackColor
+        let sc = m.style_colour(WinType::TextBuffer, GlkStyle::Header);
+        assert_eq!(sc.fg, Some(0x00FF_8040));
+        assert_eq!(sc.bg, Some(0x0011_2233));
+        assert!(!sc.reverse);
+        // A different style is untouched.
+        assert_eq!(m.style_colour(WinType::TextBuffer, GlkStyle::Normal), StyleColour::default());
+    }
+
+    // The high byte of a colour value is masked off (Glk colours are 24-bit).
+    #[test]
+    fn colour_value_masked_to_24_bits() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 7, 0xFF12_3456);
+        assert_eq!(m.style_colour(WinType::TextBuffer, GlkStyle::Normal).fg, Some(0x0012_3456));
+    }
+
+    // ReverseColor(9) sets/clears the reverse flag.
+    #[test]
+    fn reverse_colour_hint_toggles_flag() {
+        let mut m = Model::new();
+        m.set_style_hint(4, 5, 9, 1); // grid, style_Alert, reverse on
+        assert!(m.style_colour(WinType::TextGrid, GlkStyle::Alert).reverse);
+        m.set_style_hint(4, 5, 9, 0);
+        assert!(!m.style_colour(WinType::TextGrid, GlkStyle::Alert).reverse);
+    }
+
+    // wintype_AllTypes (0) applies a hint to both the buffer and grid rows.
+    #[test]
+    fn all_types_applies_to_buffer_and_grid() {
+        let mut m = Model::new();
+        m.set_style_hint(0, 0, 7, 0x00AABBCC);
+        assert_eq!(m.style_colour(WinType::TextBuffer, GlkStyle::Normal).fg, Some(0x00AABBCC));
+        assert_eq!(m.style_colour(WinType::TextGrid, GlkStyle::Normal).fg, Some(0x00AABBCC));
+    }
+
+    // Buffer and grid hints for the same style are independent.
+    #[test]
+    fn buffer_and_grid_rows_are_independent() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 1, 7, 0x00111111); // buffer
+        m.set_style_hint(4, 1, 7, 0x00222222); // grid
+        assert_eq!(m.style_colour(WinType::TextBuffer, GlkStyle::Emphasized).fg, Some(0x00111111));
+        assert_eq!(m.style_colour(WinType::TextGrid, GlkStyle::Emphasized).fg, Some(0x00222222));
+    }
+
+    // Out-of-range style numbers and unsupported wintypes are ignored (no panic).
+    #[test]
+    fn out_of_range_inputs_ignored() {
+        let mut m = Model::new();
+        m.set_style_hint(3, NUMSTYLES, 7, 0x00FFFFFF); // style too large
+        m.set_style_hint(99, 0, 7, 0x00FFFFFF);        // bad wintype
+        assert_eq!(m.style_colour(WinType::TextBuffer, GlkStyle::Normal), StyleColour::default());
+    }
+
+    // clear_style_hint removes a previously set colour hint.
+    #[test]
+    fn clear_resets_hint() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 7, 0x00FFFFFF);
+        m.set_style_hint(3, 0, 8, 0x00000000);
+        m.clear_style_hint(3, 0, 7);
+        let sc = m.style_colour(WinType::TextBuffer, GlkStyle::Normal);
+        assert_eq!(sc.fg, None, "text colour cleared");
+        assert_eq!(sc.bg, Some(0), "back colour retained");
+    }
+
+    // A pair window never carries colour.
+    #[test]
+    fn pair_window_has_no_colour() {
+        let mut m = Model::new();
+        m.set_style_hint(0, 0, 7, 0x00FFFFFF);
+        assert_eq!(m.style_colour(WinType::Pair, GlkStyle::Normal), StyleColour::default());
     }
 }

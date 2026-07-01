@@ -1867,7 +1867,10 @@ impl Machine {
         match kind {
             StreamKind::Window(win) => {
                 match self.glk.window_type(win) {
-                    Some(WinType::TextBuffer) => self.backend.put_text(win, style, s),
+                    Some(WinType::TextBuffer) => {
+                        let colour = self.glk.style_colour(WinType::TextBuffer, style);
+                        self.backend.put_text_attr(win, style, colour, s);
+                    }
                     Some(WinType::TextGrid) => self.grid_put_str(win, style, s),
                     _ => {} // pair window or stale: nothing to display
                 }
@@ -1898,6 +1901,7 @@ impl Machine {
     /// discarded). `\n` moves to the next row, column 0.
     fn grid_put_str(&mut self, win: u32, style: GlkStyle, s: &str) {
         let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
+        let colour = self.glk.style_colour(WinType::TextGrid, style);
         for ch in s.chars() {
             if ch == '\n' {
                 cx = 0;
@@ -1909,7 +1913,7 @@ impl Machine {
                 cy += 1;
             }
             if cy < h && cx < w {
-                self.backend.grid_put(win, cx, cy, style, &ch.to_string());
+                self.backend.grid_put_attr(win, cx, cy, style, colour, &ch.to_string());
             }
             cx += 1;
         }
@@ -2406,7 +2410,8 @@ impl Machine {
             0x0120 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Lower)?, // _to_lower_case_uni
             0x0121 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Upper)?, // _to_upper_case_uni
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
-            0x00B0 | 0x00B1 => 0, // glk_stylehint_set/clear — best-effort no-op
+            0x00B0 => { self.glk.set_style_hint(a(0), a(1), a(2), a(3)); 0 } // glk_stylehint_set
+            0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
             0x00B2 => 0,           // glk_style_distinguish — styles not distinguishable
             0x00B3 => 0,           // glk_style_measure — measurement unsupported
             // ── input requests + select (3a-2) ────────────────────────────────
