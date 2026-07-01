@@ -55,6 +55,7 @@ pub enum StepResult {
 /// host calls `supply_line` / `supply_char` with the input, which uses these
 /// fields to complete the operation (write buffers, store result) before the
 /// next `step()` call.
+#[derive(Clone, Copy)]
 struct PendingInput {
     /// Destination variable for the result (store var of the read/read_char
     /// instruction; `None` if the instruction has no store — v3 `read` has none).
@@ -63,6 +64,10 @@ struct PendingInput {
     text_buf: u32,
     /// Address of the parse buffer (for `supply_line`; 0 in v5+ means skip).
     parse_buf: u32,
+    /// Timed-input interval in tenths of a second (0 = untimed).
+    interrupt_time: u16,
+    /// Packed address of the interrupt routine (0 = none).
+    interrupt_routine: u16,
 }
 
 /// One in-memory undo snapshot: the Quetzal state blob plus the `save_undo`
@@ -839,17 +844,25 @@ impl Machine {
             }
             // 0x04 sread/aread/read — pause execution and wait for a line of input.
             // v3: no store var. v4+: has a store var (terminating character).
-            // Operands: text_buf, parse_buf (+ optional time/routine in v4+ — ignored).
+            // Operands: text_buf, parse_buf, + optional time/routine (v4+).
             0x04 => {
                 let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
-                self.pending_input = Some(PendingInput { store_var: store, text_buf, parse_buf });
+                let interrupt_time = ops.get(2).copied().unwrap_or(0);
+                let interrupt_routine = ops.get(3).copied().unwrap_or(0);
+                self.pending_input = Some(PendingInput {
+                    store_var: store, text_buf, parse_buf, interrupt_time, interrupt_routine,
+                });
                 StepResult::NeedLine { text_buf, parse_buf }
             }
             // 0x16 read_char — pause execution and wait for a single keypress (v4+).
-            // Has a store var for the ZSCII code.
+            // Has a store var for the ZSCII code. Operands: device, + optional time/routine.
             0x16 => {
-                self.pending_input = Some(PendingInput { store_var: store, text_buf: 0, parse_buf: 0 });
+                let interrupt_time = ops.get(1).copied().unwrap_or(0);
+                let interrupt_routine = ops.get(2).copied().unwrap_or(0);
+                self.pending_input = Some(PendingInput {
+                    store_var: store, text_buf: 0, parse_buf: 0, interrupt_time, interrupt_routine,
+                });
                 StepResult::NeedChar
             }
             // 0x18 not (VAR form, v5+) — bitwise complement
@@ -1476,6 +1489,19 @@ impl Machine {
                 return true;
             }
             p += 1;
+        }
+    }
+
+    /// While a *timed* `read`/`read_char` is pending, return `(time_tenths,
+    /// packed_routine)`. `None` for an untimed read or when no read is pending.
+    /// The clock lives in the host: it polls input for `time_tenths * 100` ms and
+    /// calls `run_timed_interrupt` on each timeout.
+    pub fn pending_timeout(&self) -> Option<(u16, u16)> {
+        let p = self.pending_input?;
+        if p.interrupt_time != 0 && p.interrupt_routine != 0 {
+            Some((p.interrupt_time, p.interrupt_routine))
+        } else {
+            None
         }
     }
 
@@ -3644,6 +3670,46 @@ pub(crate) mod tests {
 
         let r2 = m.step();
         assert_eq!(r2, StepResult::Quit, "machine resumes after supply_char");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: pending_timeout() exposes the read's time/routine operands
+    // -----------------------------------------------------------------------
+    #[test]
+    fn pending_timeout_exposes_time_and_routine() {
+        // v5 read with time=10 (1.0s) and routine at packed addr 0x0040.
+        // VAR read (0xE4) with four Large-const operands: text_buf, parse_buf,
+        // time, routine. Type byte: large,large,large,large -> 0b00_00_00_00 = 0x00.
+        let mut buf = sample_story(5);
+        buf[0x10] = 0xE4;
+        buf[0x11] = 0x00;
+        buf[0x12] = 0x02; buf[0x13] = 0x50; // text_buf 0x0250
+        buf[0x14] = 0x02; buf[0x15] = 0x60; // parse_buf 0x0260
+        buf[0x16] = 0x00; buf[0x17] = 0x0A; // time = 10
+        buf[0x18] = 0x00; buf[0x19] = 0x40; // routine = 0x40
+        buf[0x1A] = 0x10;                   // store var (v5 read stores terminator) -> G0
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        let r = m.step();
+        assert!(matches!(r, StepResult::NeedLine { .. }), "read suspends: {r:?}");
+        assert_eq!(m.pending_timeout(), Some((10, 0x40)), "time+routine exposed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: pending_timeout() is None for an untimed read
+    // -----------------------------------------------------------------------
+    #[test]
+    fn pending_timeout_none_when_untimed() {
+        // Existing untimed v5 read (no time/routine) -> None.
+        let mut buf = sample_story(5);
+        let n = emit_read(&mut buf, 0x10, 0x0250, 0x0260, 5, Some(0x10));
+        buf[0x10 + n] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        let _ = m.step();
+        assert_eq!(m.pending_timeout(), None, "untimed read exposes no timeout");
     }
 
     // -----------------------------------------------------------------------
