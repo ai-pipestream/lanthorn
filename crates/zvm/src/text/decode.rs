@@ -140,10 +140,7 @@ const UNICODE_TABLE: [char; 69] = [
 /// Everything else maps to '?'.
 pub(crate) fn zscii_to_char(zscii: u16) -> char {
     match zscii {
-        // ZSCII 13 is the standard newline; 10 (ASCII LF) has no printed form
-        // and the reference interpreter treats it as a line break too (Beyond
-        // Zork emits it between sentences in its description box).
-        10 | 13 => '\n',
+        13 => '\n',
         32..=126 => zscii as u8 as char,
         155..=223 => UNICODE_TABLE[(zscii - 155) as usize],
         _ => '?',
@@ -321,16 +318,6 @@ mod tests {
         // boundary: just outside the table
         assert_eq!(zscii_to_char(154), '?');
         assert_eq!(zscii_to_char(224), '?');
-    }
-
-    #[test]
-    fn zscii_line_feed_is_newline() {
-        // ZSCII 10 (ASCII LF) has no printed form; the reference interpreter
-        // (Frotz) treats it as a line break. Beyond Zork emits it between
-        // sentences in its description box, so mapping it to '?' printed a
-        // stray glyph after every sentence. It must render as a newline, like 13.
-        assert_eq!(zscii_to_char(10), '\n');
-        assert_eq!(zscii_to_char(13), '\n');
     }
 
     #[test]
