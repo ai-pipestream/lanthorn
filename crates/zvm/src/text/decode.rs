@@ -137,9 +137,16 @@ const UNICODE_TABLE: [char; 69] = [
 ///
 /// ZSCII 13 → '\n'. ASCII 32–126 are identity.
 /// ZSCII 155–223 → default Unicode translation table (ZMSD §3.8.5).
+/// ZSCII 10 → ' ': it has no printed form. The reference interpreter (Frotz)
+/// draws nothing for it but still advances the cursor one column
+/// (`os_char_width` returns 1), so it acts as an invisible spacer — Beyond Zork
+/// emits it between sentences in its boxed description. Rendering it as a space
+/// matches that (a blank column showing the current background) instead of the
+/// stray '?' the generic fallback would print.
 /// Everything else maps to '?'.
 pub(crate) fn zscii_to_char(zscii: u16) -> char {
     match zscii {
+        10 => ' ',
         13 => '\n',
         32..=126 => zscii as u8 as char,
         155..=223 => UNICODE_TABLE[(zscii - 155) as usize],
@@ -318,6 +325,16 @@ mod tests {
         // boundary: just outside the table
         assert_eq!(zscii_to_char(154), '?');
         assert_eq!(zscii_to_char(224), '?');
+    }
+
+    #[test]
+    fn zscii_line_feed_renders_as_space() {
+        // ZSCII 10 has no printed form; Frotz draws nothing but advances one
+        // column, so it is an invisible spacer, not a newline. Render it as a
+        // space (blank column over the current background), never the stray '?'
+        // the generic fallback would print. ZSCII 13 stays the real newline.
+        assert_eq!(zscii_to_char(10), ' ');
+        assert_eq!(zscii_to_char(13), '\n');
     }
 
     #[test]
