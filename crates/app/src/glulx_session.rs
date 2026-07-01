@@ -145,6 +145,7 @@ impl GlulxSession {
             transcript_runs,
             location: None,
             quit: self.quit,
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics,

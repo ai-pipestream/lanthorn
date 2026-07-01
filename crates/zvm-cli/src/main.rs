@@ -495,6 +495,19 @@ fn main() {
             let _ = io::stdout().flush();
             machine.screen.show_status_requested = false;
         }
+        // erase_window request (ZMSD §8.7.3): clear the lower window and reset
+        // the pinned region so a game's screen clear / help-menu takeover (e.g.
+        // Lost Pig's HELP, which issues erase_window -1) doesn't leave stale
+        // story text bleeding through beneath the upper window.
+        if machine.screen.erase_lower_requested {
+            print!("{}", view.erase());
+            let _ = io::stdout().flush();
+            if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+                o.lines = 0;
+                o.current_col = 0;
+            }
+            machine.screen.erase_lower_requested = false;
+        }
         // Persist aux tables as soon as the game commits one.
         aux_flush(&mut machine, &aux_file, args.no_aux);
 

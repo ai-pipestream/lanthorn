@@ -387,12 +387,39 @@ pub(crate) fn visible_wrapped_lines_kinded(
     rows: usize,
     scroll: u16,
     width: u16,
+    clear_anchor: Option<usize>,
 ) -> (Vec<(String, TranscriptKind, Style, Vec<StyleRun>)>, usize) {
     if rows == 0 || transcript.is_empty() {
         return (Vec::new(), 0);
     }
     let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, width);
     let n = display_rows.len();
+    // Screen-clear top-anchor: when the view is at the bottom (scroll == 0) and
+    // the post-clear content still fits the viewport, pin those lines to the TOP
+    // (returning fewer than `rows` rows → the caller leaves the rest blank),
+    // instead of bottom-sticking which would pull pre-clear history back into
+    // view. Older lines above the anchor stay in the buffer, reachable by
+    // scrolling up. Once post-clear content overflows the viewport this no
+    // longer triggers and normal bottom-stick resumes.
+    if scroll == 0 {
+        if let Some(a) = clear_anchor {
+            if a < transcript.len() {
+                // Clamp each parallel slice defensively: `runs` (and, in
+                // principle, the others) may be shorter than `transcript`.
+                let anchor_row = wrap_lines_kinded(
+                    &transcript[..a],
+                    &kinds[..a.min(kinds.len())],
+                    &styles[..a.min(styles.len())],
+                    &runs[..a.min(runs.len())],
+                    width,
+                )
+                .len();
+                if n.saturating_sub(anchor_row) <= rows {
+                    return (display_rows[anchor_row..n].to_vec(), n);
+                }
+            }
+        }
+    }
     // Clamp scroll so it never exceeds the top: past `n - rows` the window would
     // otherwise shrink from the bottom, blanking viewport rows.
     let max_scroll = n.saturating_sub(rows);
@@ -1035,6 +1062,11 @@ fn render_middle(
     // Effective scroll: the animated displayed offset (line-rounded) while a
     // smooth scroll is in flight, else the logical target. Clamped below.
     let effective_scroll = state.effective_transcript_scroll();
+    // Map the screen-clear boundary (a full-transcript index) to a position in
+    // the filtered line list, so top-anchoring works under any transcript filter.
+    let clear_anchor_filtered = state
+        .clear_anchor
+        .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
     let (lines, total_rows) = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
@@ -1043,6 +1075,7 @@ fn render_middle(
         transcript_rows,
         effective_scroll,
         body_area.width,
+        clear_anchor_filtered,
     );
     // Search highlight style: black text on yellow background.
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
@@ -1367,7 +1400,7 @@ mod tests {
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
         let styles = vec![Style::default(); 3];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, None);
         assert_eq!(vis.len(), 3);
         assert_eq!(total, 3, "total wrapped rows reported");
         assert_eq!(vis[2].0, "ghi");
@@ -1380,11 +1413,11 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 1, 5);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 1, 5, None);
         assert_eq!(vis[0].0, "hello");
         assert_eq!(total, 2, "both wrapped rows counted");
         // scroll=0: end=2, start=1 → ["world"]
-        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 0, 5);
+        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 0, 5, None);
         assert_eq!(vis2[0].0, "world");
     }
 
@@ -1395,7 +1428,7 @@ mod tests {
         let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 999, 10);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 999, 10, None);
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 3, "over-scroll still fills the viewport");
         assert_eq!(vis[0].0, "L0", "top line stays at the top");
@@ -1406,6 +1439,38 @@ mod tests {
     fn format_input_line_prefix() {
         assert_eq!(format_input_line("open mailbox"), "> open mailbox");
         assert_eq!(format_input_line(""), "> ");
+    }
+
+    #[test]
+    fn visible_wrapped_lines_kinded_top_anchors_after_clear() {
+        // 5 lines, viewport 3. A clear boundary at index 3 → post-clear content
+        // is lines 3,4 (2 lines); they pin to the TOP (2 rows returned, caller
+        // leaves the rest blank) rather than bottom-sticking the full viewport.
+        let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
+        let kinds = vec![TranscriptKind::Story; 5];
+        let styles = vec![Style::default(); 5];
+        let (vis, total) =
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, Some(3));
+        assert_eq!(total, 5);
+        assert_eq!(vis.len(), 2, "only post-clear lines returned (top-anchored)");
+        assert_eq!(vis[0].0, "L3");
+        assert_eq!(vis[1].0, "L4");
+        // No anchor → full viewport, bottom-stick (history stays in view).
+        let (vis2, _) =
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, None);
+        assert_eq!(vis2.len(), 3);
+        assert_eq!(vis2[0].0, "L2", "bottom-stick pulls in the pre-clear line");
+        // Scrolled up (scroll>0): anchor ignored so history is reachable.
+        let (vis3, _) =
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 1, 10, Some(3));
+        assert_eq!(vis3.len(), 3, "scrolled up ignores the clear anchor");
+        assert_eq!(vis3[2].0, "L3");
+        // Once post-clear content overflows the viewport, top-anchor stops
+        // triggering and normal bottom-stick resumes (anchor at 0, 5 lines > 3).
+        let (vis4, _) =
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, Some(0));
+        assert_eq!(vis4.len(), 3);
+        assert_eq!(vis4[2].0, "L4", "overflow → bottom-stick");
     }
 
     // ── Render tests: transcript + input rows (no Machine) ───────────────────

@@ -810,6 +810,11 @@ pub struct AppState {
     /// Which categories of transcript entries are currently visible.
     pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
+    /// Transcript length at the most recent game screen-clear (`erase_window`),
+    /// or `None`. When set and the view is at the bottom, the renderer pins the
+    /// post-clear lines to the top of the pane so a screen clear looks fresh
+    /// while older scrollback stays reachable above it. See `mark_screen_clear`.
+    pub clear_anchor: Option<usize>,
     /// List-row viewport (rows) of the currently-open selection-list modal,
     /// captured from the last render so `apply_action` nav can keep the
     /// selection visible and arm scroll animations (mirrors the transcript's
@@ -1074,6 +1079,7 @@ impl Default for AppState {
             transcript_runs: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
+            clear_anchor: None,
             modal_list_viewport: 0,
             input: String::new(),
             status: String::new(),
@@ -1317,6 +1323,18 @@ impl AppState {
     }
 
     /// Split `text` on `'\n'` and append each line to the transcript, tagged as `Story`.
+    /// Record a screen-clear boundary (game `erase_window`, ZMSD §8.7.3) at the
+    /// current end of the transcript, WITHOUT deleting scrollback. The renderer
+    /// pins post-clear output to the top of a fresh screen (blanks below) while
+    /// everything above the boundary stays reachable by scrolling up — a
+    /// scrollback-preserving "clear" rather than a destructive wipe. Also snaps
+    /// the view to the bottom so the cleared screen is what's shown.
+    pub fn mark_screen_clear(&mut self) {
+        self.clear_anchor = Some(self.transcript.len());
+        self.transcript_scroll = 0;
+        self.scroll_anim = None;
+    }
+
     pub fn push_transcript(&mut self, text: &str) {
         self.push_transcript_kind(text, TranscriptKind::Story);
     }

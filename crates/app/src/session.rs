@@ -122,6 +122,11 @@ pub struct TurnResult {
     pub transcript_runs: Vec<(usize, u8, ZColour, ZColour)>,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
+    /// The game issued `erase_window` (lower / all) this turn (ZMSD §8.7.3) — a
+    /// screen clear, e.g. a help-menu takeover. The host clears the transcript
+    /// before appending this turn's output so stale text does not bleed through
+    /// (matching a retained-mode interpreter like Lectrote).
+    pub erase_lower: bool,
     /// Optional informational note to surface to the player (e.g. when the
     /// game's own save/restore is auto-failed, hint them toward Ctrl+S/Ctrl+R).
     pub info: Option<String>,
@@ -259,8 +264,9 @@ impl GameSession {
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
         let beep = self.machine.pending_beeps.last().copied();
         self.machine.pending_beeps.clear();
+        let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
 
-        TurnResult { transcript, transcript_runs, location, quit, info, beep, diagnostics, location_method, pending_io }
+        TurnResult { transcript, transcript_runs, location, quit, erase_lower, info, beep, diagnostics, location_method, pending_io }
     }
 }
 
@@ -732,6 +738,7 @@ mod tests {
             transcript_runs: Vec::new(),
             location: Some(ObjectSnapshot { number: 1, parent: 0, name: "Hall".into() }),
             quit: false,
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics: vec![],
@@ -749,6 +756,7 @@ mod tests {
             transcript_runs: Vec::new(),
             location: Some(ObjectSnapshot { number: 2, parent: 0, name: "Attic".into() }),
             quit: false,
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics: vec![],
@@ -774,6 +782,7 @@ mod tests {
             transcript_runs: Vec::new(),
             location: None,
             quit: false,
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics: vec![],
@@ -798,6 +807,7 @@ mod tests {
             transcript_runs: Vec::new(),
             location: None,
             quit: false,
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics: vec![],
@@ -816,6 +826,7 @@ mod tests {
             transcript_runs: Vec::new(),
             location: Some(ObjectSnapshot { number, parent: 0, name: name.into() }),
             quit: false,
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics: vec![],

@@ -153,6 +153,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         area.height as usize,
         b.scroll,
         area.width,
+        None,
     );
     for (i, (line, _kind, style, runs)) in rows.iter().enumerate() {
         draw_str_runs(buf, area.x, area.y + i as u16, line, *style, runs, None, area, state.config.honor_game_colours.then_some(&state.colors));

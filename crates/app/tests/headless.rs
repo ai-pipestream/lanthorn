@@ -47,6 +47,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
         transcript_runs: Vec::new(),
         location: Some(ObjectSnapshot { number, parent: 0, name: name.to_owned() }),
         quit: false,
+        erase_lower: false,
         info: None,
         beep: None,
         diagnostics: vec![],

@@ -1281,6 +1281,7 @@ fn main() {
             transcript_runs: Vec::new(),
             location: Some(snap),
             quit: session.has_quit(),
+            erase_lower: false,
             info: None,
             beep: None,
             diagnostics: vec![],
@@ -1305,6 +1306,7 @@ fn main() {
     // If an archived transcript was loaded on startup, replace the fresh one.
     if let Some((lines, kinds, runs)) = startup_transcript {
         state.transcript = lines;
+        state.clear_anchor = None;
         state.transcript_kinds = kinds;
         state.transcript_runs = runs;
     }
@@ -2136,6 +2138,7 @@ fn main() {
                         if let Some(result) = app::engine::key_event_to_input(*k)
                             .and_then(|ki| session.submit_key(ki))
                         {
+                            if result.erase_lower { state.mark_screen_clear(); }
                             state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
                             apply_turn_events(&mut state, &result);
                             if let Some(note) = &result.info {
@@ -2453,6 +2456,7 @@ fn main() {
                 state.turns += 1;
 
                 let result = session.submit(&cmd);
+                if result.erase_lower { state.mark_screen_clear(); }
                 state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
                 state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
                 apply_turn_events(&mut state, &result);
@@ -2596,6 +2600,7 @@ fn main() {
                                 }
                                 mapper = ac.mapper;
                                 state.transcript = ac.transcript;
+                                state.clear_anchor = None;
                                 state.transcript_kinds = ac.transcript_kinds;
                                 state.transcript_runs = ac.transcript_runs;
                                 state.history = ac.history;
@@ -2609,6 +2614,7 @@ fn main() {
                                         transcript_runs: Vec::new(),
                                         location: Some(snap),
                                         quit: false,
+                                        erase_lower: false,
                                         info: None,
                                         beep: None,
                                         diagnostics: vec![],
@@ -2747,6 +2753,7 @@ fn main() {
                                         transcript_runs: Vec::new(),
                                         location: Some(snap),
                                         quit: false,
+                                        erase_lower: false,
                                         info: None,
                                         beep: None,
                                         diagnostics: vec![],
@@ -2846,6 +2853,7 @@ fn main() {
                                     }
                                     mapper = ac.mapper;
                                     state.transcript = ac.transcript;
+                                    state.clear_anchor = None;
                                     state.transcript_kinds = ac.transcript_kinds;
                                     state.transcript_runs = ac.transcript_runs;
                                     state.history = ac.history;
@@ -2865,6 +2873,7 @@ fn main() {
                                             transcript_runs: Vec::new(),
                                             location: Some(snap),
                                             quit: false,
+                                            erase_lower: false,
                                             info: None,
                                             beep: None,
                                             diagnostics: vec![],
@@ -2916,6 +2925,7 @@ fn main() {
                                 let (lines, kinds) =
                                     app::history::rebuild_transcript(&state.history, r.idx);
                                 state.transcript = lines;
+                                state.clear_anchor = None;
                                 state.transcript_kinds = kinds;
                                 // History replay carries no style runs; keep the
                                 // parallel vec length-synced (unstyled rows).
@@ -2930,6 +2940,7 @@ fn main() {
                                         transcript_runs: Vec::new(),
                                         location: Some(snap),
                                         quit: false,
+                                        erase_lower: false,
                                         info: None,
                                         beep: None,
                                         diagnostics: vec![],
@@ -3186,6 +3197,7 @@ fn dispatch_slash_outcome(
                                     }
                                     *mapper = ac.mapper;
                                     state.transcript = ac.transcript;
+                                    state.clear_anchor = None;
                                     state.transcript_kinds = ac.transcript_kinds;
                                     state.transcript_runs = ac.transcript_runs;
                                     state.history = ac.history;
@@ -3200,6 +3212,7 @@ fn dispatch_slash_outcome(
                                             transcript_runs: Vec::new(),
                                             location: Some(snap),
                                             quit: false,
+                                            erase_lower: false,
                                             info: None,
                                             beep: None,
                                             diagnostics: vec![],
@@ -3376,6 +3389,7 @@ fn reset_game(
             state.suggestion_idx = 0;
             state.suggestion_active = false;
             state.transcript.clear();
+            state.clear_anchor = None;
             state.transcript_kinds.clear();
             state.transcript_runs.clear();
             state.transcript_scroll = 0;
@@ -3391,6 +3405,7 @@ fn reset_game(
                     transcript_runs: Vec::new(),
                     location: Some(snap),
                     quit: false,
+                    erase_lower: false,
                     info: None,
                     beep: None,
                     diagnostics: vec![],
@@ -4149,6 +4164,7 @@ fn apply_launch_resume(
                 if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
             }
             state.transcript = lines;
+            state.clear_anchor = None;
             state.transcript_kinds = kinds;
             // The launch-resume stash carries no style runs; keep the parallel
             // vec length-synced (unstyled rows).
@@ -4162,6 +4178,7 @@ fn apply_launch_resume(
                     transcript_runs: Vec::new(),
                     location: Some(snap),
                     quit: false,
+                    erase_lower: false,
                     info: None,
                     beep: None,
                     diagnostics: vec![],

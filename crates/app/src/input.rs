@@ -5809,6 +5809,7 @@ mod tests {
                 transcript_runs: Vec::new(),
                 location: Some(snap),
                 quit: false,
+                erase_lower: false,
                 info: None,
                 beep: None,
                 diagnostics: vec![],
@@ -5837,6 +5838,7 @@ mod tests {
         state.suggestions.clear();
         state.suggestion_idx = 0;
         state.transcript.clear();
+        state.clear_anchor = None;
         state.transcript_kinds.clear();
         state.transcript_runs.clear();
         state.transcript_scroll = 0;
@@ -5849,6 +5851,7 @@ mod tests {
                 transcript_runs: Vec::new(),
                 location: Some(snap),
                 quit: false,
+                erase_lower: false,
                 info: None,
                 beep: None,
                 diagnostics: vec![],

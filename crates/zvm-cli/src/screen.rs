@@ -281,6 +281,19 @@ impl ScreenView {
         }
     }
 
+    /// Bytes to clear the lower window in response to an `erase_window`
+    /// request (ZMSD §8.7.3): leave any scroll region, clear the whole screen,
+    /// home the cursor, and reset the pinned-region state so the next `frame`
+    /// re-establishes the region. On a piped/non-TTY sink there is no screen to
+    /// clear (streaming scrollback), so it is a no-op.
+    pub fn erase(&mut self) -> String {
+        if !self.is_tty {
+            return String::new();
+        }
+        self.active_rows = 0;
+        format!("{}\x1b[2J\x1b[H", leave_region())
+    }
+
     /// Restore the terminal at quit.
     pub fn leave(&mut self) -> String {
         if self.is_tty && self.active_rows > 0 {
@@ -343,6 +356,27 @@ mod view_tests {
         assert_eq!(ScreenView::new(true, false, 24).start(), "\x1b[2J\x1b[H");
         assert_eq!(ScreenView::new(false, false, 24).start(), ""); // piped
         assert_eq!(ScreenView::new(true, true, 24).start(), ""); // --no-status
+    }
+
+    #[test]
+    fn erase_clears_screen_and_resets_region_on_tty() {
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(true, false, 24);
+        let _ = v.render(1, &p, &a); // activate a region (active_rows = 1)
+        let out = v.erase();
+        assert!(out.contains("\x1b[r"), "erase leaves the scroll region: {out:?}");
+        assert!(out.contains("\x1b[2J"), "erase clears the screen: {out:?}");
+        assert!(out.ends_with("\x1b[H"), "erase homes the cursor: {out:?}");
+        // After erase the region is considered inactive, so the next frame
+        // re-establishes it.
+        let re = v.render(1, &p, &a);
+        assert!(re.contains("\x1b[2;24r"), "next frame re-enters the region: {re:?}");
+    }
+
+    #[test]
+    fn erase_is_noop_when_piped() {
+        let mut v = ScreenView::new(false, false, 24);
+        assert_eq!(v.erase(), "", "piped erase emits nothing");
     }
 
     #[test]
