@@ -22,6 +22,8 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("aux_storage",          ConfigRowKind::Enum),
     ("honor_game_colours",   ConfigRowKind::Bool),
     ("honor_timed_input",    ConfigRowKind::Bool),
+    ("enable_sound",         ConfigRowKind::Bool),
+    ("volume",               ConfigRowKind::Num),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,6 +31,7 @@ pub(crate) enum ConfigRowKind {
     Path,
     Bool,
     Enum,
+    Num,
 }
 
 /// Draw the config-screen modal centered over `area`.
@@ -171,6 +174,8 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         },
         10 => bool_str(cfg.honor_game_colours),
         11 => bool_str(cfg.honor_timed_input),
+        12 => bool_str(cfg.enable_sound),
+        13 => cfg.volume.to_string(),
         _ => String::new(),
     }
 }

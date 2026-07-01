@@ -147,6 +147,10 @@ pub enum Action {
     ToggleStatusBar,
     /// Toggle honoring the Z-machine's timed-input (`read`/`read_char` timers).
     ToggleTimedInput,
+    /// Toggle audio playback (config.enable_sound).
+    ToggleSound,
+    /// Set the master audio volume 0..=100 (config.volume).
+    SetVolume(u8),
     /// Toggle the room-detection-method indicator in the map corner.
     ToggleLocMethod,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
@@ -2057,6 +2061,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.config.honor_timed_input = !state.config.honor_timed_input;
             state.set_status(if state.config.honor_timed_input { "timed input on" } else { "timed input off" });
         }
+        Action::ToggleSound => {
+            state.config.enable_sound = !state.config.enable_sound;
+            state.set_status(if state.config.enable_sound { "sound on" } else { "sound off" });
+        }
+        Action::SetVolume(v) => {
+            let v = v.min(100);
+            state.config.volume = v;
+            state.set_status(&format!("volume {v}"));
+        }
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
@@ -3499,6 +3512,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         9 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
         10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
         11 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
+        12 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
         _ => {}
     }
 }
@@ -3535,6 +3549,8 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         9 => config_cycle_aux_storage(&mut working.aux_storage, delta),
         10 => working.honor_game_colours = !working.honor_game_colours,
         11 => working.honor_timed_input = !working.honor_timed_input,
+        12 => working.enable_sound = !working.enable_sound,
+        13 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
         _ => {}
     }
 }

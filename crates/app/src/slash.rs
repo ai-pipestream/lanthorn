@@ -159,6 +159,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-timed-input", category: Category::Game, context: Context::Global,
         usage: "toggle-timed-input", description: "toggle honoring the game's timed-input timers",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleTimedInput) },
+    CommandSpec { name: "toggle-sound", category: Category::Game, context: Context::Global,
+        usage: "toggle-sound", description: "toggle audio playback (bleeps + sampled sounds)",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleSound) },
+    CommandSpec { name: "volume", category: Category::Game, context: Context::Global,
+        usage: "volume <0-100>", description: "set the master audio volume (0-100)",
+        dispatch: |a| match a.first().and_then(|s| s.parse::<u8>().ok()) {
+            Some(v) if v <= 100 => SlashOutcome::Action(crate::input::Action::SetVolume(v)),
+            _ => err("volume requires an integer 0-100 (e.g. volume 60)"),
+        } },
 
     // ── Map ───────────────────────────────────────────────────────────────
     CommandSpec { name: "pan-map", category: Category::Map, context: Context::Map,
@@ -597,7 +606,7 @@ mod tests {
         }
         // Verb-noun lint: every name contains '-' except the whitelist.
         for c in COMMANDS {
-            if c.name == "quit" || c.name == "help" { continue; }
+            if c.name == "quit" || c.name == "help" || c.name == "volume" { continue; }
             assert!(c.name.contains('-'), "non-verb-noun command name: {}", c.name);
         }
         // Spot-check representative commands exist with the right category.
@@ -605,9 +614,16 @@ mod tests {
         assert_eq!(by("save-game").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (49 commands: Game 9, Map 20, View 4,
+        // Total count matches the spec table (51 commands: Game 11, Map 20, View 4,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 49, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 51, "registry must match the spec's Full command table");
+    }
+
+    #[test]
+    fn sound_commands_present() {
+        let by = |n: &str| COMMANDS.iter().find(|c| c.name == n).expect(n);
+        assert_eq!(by("toggle-sound").category, Category::Game);
+        assert_eq!(by("volume").category, Category::Game);
     }
 
     #[test]

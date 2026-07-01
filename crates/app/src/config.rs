@@ -182,6 +182,8 @@ fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
 fn default_honor_game_colours() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
+fn default_enable_sound() -> bool { true }
+fn default_volume() -> u8 { 100 }
 
 /// Deserialize a single-char string field into a `char`.  Takes the first
 /// Unicode scalar value of the string; falls back to `/` on an empty string.
@@ -385,6 +387,13 @@ pub struct Config {
     /// character-graphics instead of colour.
     #[serde(default)]
     pub interpreter_number: Option<u8>,
+    /// When true (default), play audio for `sound_effect` (bleeps + Blorb samples).
+    #[serde(default = "default_enable_sound")]
+    pub enable_sound: bool,
+    /// Master audio volume 0..=100 (default 100). Combined with the game's per-sound
+    /// Z-scale volume.
+    #[serde(default = "default_volume")]
+    pub volume: u8,
 }
 
 impl Default for Config {
@@ -417,6 +426,8 @@ impl Default for Config {
             honor_game_colours: default_honor_game_colours(),
             honor_timed_input: default_honor_timed_input(),
             interpreter_number: None,
+            enable_sound: default_enable_sound(),
+            volume: default_volume(),
         }
     }
 }
@@ -480,6 +491,8 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.honor_game_colours = from_file.honor_game_colours;
             cfg.honor_timed_input = from_file.honor_timed_input;
             cfg.interpreter_number = from_file.interpreter_number;
+            cfg.enable_sound = from_file.enable_sound;
+            cfg.volume = from_file.volume;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
@@ -537,6 +550,8 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
     doc["honor_game_colours"] = toml_edit::value(cfg.honor_game_colours);
     doc["honor_timed_input"] = toml_edit::value(cfg.honor_timed_input);
+    doc["enable_sound"] = toml_edit::value(cfg.enable_sound);
+    doc["volume"] = toml_edit::value(cfg.volume as i64);
     if let Some(n) = cfg.interpreter_number {
         doc["interpreter_number"] = toml_edit::value(n as i64);
     }
@@ -838,6 +853,8 @@ use_defaults = false
             honor_game_colours: true,
             honor_timed_input: true,
             interpreter_number: None,
+            enable_sound: true,
+            volume: 100,
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,
@@ -991,6 +1008,24 @@ use_defaults = false
         // explicit false overrides the default
         let off: Config = toml::from_str("honor_timed_input = false\n").unwrap();
         assert!(!off.honor_timed_input);
+    }
+
+    #[test]
+    fn enable_sound_defaults_true() {
+        assert!(Config::default().enable_sound);
+        let back: Config = toml::from_str("").unwrap();
+        assert!(back.enable_sound, "absent key keeps default true");
+        let off: Config = toml::from_str("enable_sound = false\n").unwrap();
+        assert!(!off.enable_sound);
+    }
+
+    #[test]
+    fn volume_defaults_100_and_roundtrips() {
+        assert_eq!(Config::default().volume, 100);
+        let back: Config = toml::from_str("").unwrap();
+        assert_eq!(back.volume, 100, "absent key keeps default 100");
+        let set: Config = toml::from_str("volume = 40\n").unwrap();
+        assert_eq!(set.volume, 40);
     }
 
     #[test]
