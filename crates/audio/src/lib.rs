@@ -110,92 +110,26 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     Some((channels, sample_rate, pcm))
 }
 
-/// RAII guard that removes its temp file on drop — covers every exit path
-/// (normal return, early `?`/`None`, and panic-unwind).
+/// Render a ProTracker MOD to interleaved stereo i16 PCM via `xmrsplayer`.
+/// Returns None on a malformed module (xmrs `Module::load` returns `Err`) — no
+/// panic, no temp file, no stdout. Plays the song through once
+/// (`set_max_loop_count(1)`); looping/repeat is handled by the caller via
+/// `repeat_plan` (same path as AIFF). A safety cap bounds memory and guarantees
+/// termination even if a pathological song never signals its end.
 #[cfg(feature = "mod-music")]
-struct TempFileGuard(std::path::PathBuf);
-
-#[cfg(feature = "mod-music")]
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// `mod_player` 0.1's only public loader is `read_mod_file(path: &str) -> Song`,
-/// which reads from disk (there is no in-memory/slice loader). We stage `bytes`
-/// to a uniquely-named temp file, parse it, then remove the temp file (via
-/// `TempFileGuard`) — the returned `Song` owns all sample/pattern data, so
-/// nothing further touches it.
-///
-/// Known accepted issue: `mod_player` 0.1.4's `get_format` emits a stray
-/// `println!` on every parse (an upstream debug leftover) which can briefly
-/// garble the TUI until the next redraw. Not removable without vendoring the
-/// crate; tracked as a follow-up — do not attempt to fix/suppress it here.
-#[cfg(feature = "mod-music")]
-fn load_mod_song(bytes: &[u8]) -> Option<mod_player::Song> {
-    // ProTracker header (title + 31 sample records + songlen/restart + order
-    // table + 4-byte tag) is 1084 bytes minimum; `mod_player::get_format`
-    // slices `file_data[1080..1084]` unchecked, so shorter input panics.
-    if bytes.len() < 1084 {
+fn render_mod(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
+    use xmrs::prelude::*;
+    use xmrsplayer::prelude::*;
+    let module = Module::load(bytes).ok()?;
+    let mut player = XmrsPlayer::new(&module, SAMPLE_RATE, 0);
+    player.set_max_loop_count(1); // 0 = forever; 1 = play once (iterator ends at song end)
+    const MAX_SECONDS: usize = 600;
+    let cap = SAMPLE_RATE as usize * 2 * MAX_SECONDS; // interleaved stereo
+    let pcm: Vec<i16> = player.by_ref().take(cap).collect();
+    if pcm.is_empty() {
         return None;
     }
-
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("babelmap-mod-{}-{n}.mod", std::process::id()));
-    std::fs::write(&path, bytes).ok()?;
-    let _guard = TempFileGuard(path.clone());
-    let path_str = path.to_str()?;
-
-    // `mod_player` panics (unwrap/panic!) on various malformed inputs beyond
-    // the length check above. Catch that here so a corrupt MOD from an
-    // untrusted Blorb resource can't crash the interpreter. Silencing the
-    // panic hook for the duration is safe because this sound-loading path
-    // runs synchronously on a single thread — no concurrent panics can race
-    // on the global hook.
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mod_player::read_mod_file(path_str)));
-    std::panic::set_hook(prev_hook);
-
-    result.ok()
-}
-
-/// A `rodio::Source` that streams a ProTracker module via `mod_player`, yielding
-/// interleaved stereo f32 (left then right of each frame on alternate `next`).
-///
-/// `next` always returns `Some`, and `total_duration()`/`current_frame_len()`
-/// are both `None`, so the owning `Sink` never becomes empty. A MOD therefore
-/// never reports via `finished()` and never fires a finish-routine — intentional
-/// for looping tracker music; it stays tracked until an explicit `stop`/`stop_all`.
-#[cfg(feature = "mod-music")]
-struct ModSource {
-    song: mod_player::Song,
-    state: mod_player::PlayerState,
-    rate: u32,
-    pending_right: Option<f32>,
-}
-
-#[cfg(feature = "mod-music")]
-impl Iterator for ModSource {
-    type Item = f32;
-    fn next(&mut self) -> Option<f32> {
-        if let Some(r) = self.pending_right.take() {
-            return Some(r);
-        }
-        let (l, r) = mod_player::next_sample(&self.song, &mut self.state);
-        self.pending_right = Some(r);
-        Some(l)
-    }
-}
-
-#[cfg(feature = "mod-music")]
-impl rodio::Source for ModSource {
-    fn current_frame_len(&self) -> Option<usize> { None }
-    fn channels(&self) -> u16 { 2 }
-    fn sample_rate(&self) -> u32 { self.rate }
-    fn total_duration(&self) -> Option<std::time::Duration> { None }
+    Some((2, SAMPLE_RATE, pcm))
 }
 
 /// Map the Z-machine repeat count to (loop_forever, finite_play_count).
@@ -290,7 +224,16 @@ impl AudioBackend {
             }
             SoundFormat::Mod => {
                 #[cfg(feature = "mod-music")]
-                { return self.play_mod(bytes, z_volume); }
+                {
+                    let (channels, rate, pcm) = render_mod(bytes)?;
+                    if forever {
+                        sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()).repeat_infinite());
+                    } else {
+                        for _ in 0..count {
+                            sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()));
+                        }
+                    }
+                }
                 #[cfg(not(feature = "mod-music"))]
                 {
                     eprintln!("audio: unsupported sound format (MOD; mod-music feature off)");
@@ -298,24 +241,6 @@ impl AudioBackend {
                 }
             }
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.samples.insert(id, sink);
-        Some(id)
-    }
-
-    /// Decode and play a ProTracker MOD via `mod_player`, streaming through
-    /// `ModSource`. `repeats`/looping are not modelled for MOD (tracker songs
-    /// loop internally via pattern jumps); this plays the song once.
-    #[cfg(feature = "mod-music")]
-    fn play_mod(&mut self, bytes: &[u8], z_volume: u8) -> Option<SoundId> {
-        let (_, handle) = self.stream.as_ref()?;
-        let sink = rodio::Sink::try_new(handle).ok()?;
-        sink.set_volume(gain(self.master, z_volume));
-        let song = load_mod_song(bytes)?;
-        let state = mod_player::PlayerState::new(song.format.num_channels, SAMPLE_RATE);
-        let source = ModSource { song, state, rate: SAMPLE_RATE, pending_right: None };
-        sink.append(source);
         let id = self.next_id;
         self.next_id += 1;
         self.samples.insert(id, sink);
@@ -502,27 +427,17 @@ mod tests {
 
     #[cfg(feature = "mod-music")]
     #[test]
-    fn load_mod_song_rejects_malformed_without_panic() {
-        assert!(load_mod_song(&[0u8; 100]).is_none(), "short input is rejected, not panicked on");
-        assert!(load_mod_song(&[]).is_none(), "empty input is rejected, not panicked on");
+    fn render_mod_rejects_malformed_without_panic() {
+        assert!(render_mod(&[0u8; 100]).is_none(), "short input rejected, not panicked on");
+        assert!(render_mod(&[]).is_none(), "empty input rejected, not panicked on");
     }
 
     #[cfg(feature = "mod-music")]
     #[test]
-    fn mod_source_reports_stereo_and_pulls_frames() {
-        use rodio::Source;
-        let song = load_mod_song(&minimal_mod()).expect("write+parse temp mod file");
-        let state = mod_player::PlayerState::new(song.format.num_channels, SAMPLE_RATE);
-        let mut src = ModSource {
-            song,
-            state,
-            rate: SAMPLE_RATE,
-            pending_right: None,
-        };
-        assert_eq!(src.channels(), 2, "MOD is decoded as stereo");
-        assert_eq!(src.sample_rate(), SAMPLE_RATE);
-        for _ in 0..16 {
-            assert!(src.next().is_some(), "frames pull without panic");
-        }
+    fn render_mod_produces_stereo_buffer() {
+        let (channels, rate, pcm) = render_mod(&minimal_mod()).expect("valid minimal MOD renders");
+        assert_eq!(channels, 2, "MOD is rendered as stereo");
+        assert_eq!(rate, SAMPLE_RATE);
+        assert!(!pcm.is_empty(), "one pattern still yields frames");
     }
 }
