@@ -40,6 +40,19 @@ pub enum ExecKind {
     Glulx,
 }
 
+/// The kind of a Blorb `Snd ` sound resource, detected from its chunk type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoundKind {
+    /// AIFF sampled sound (`FORM` chunk).
+    Aiff,
+    /// Ogg Vorbis sampled sound (`OGGV` chunk).
+    Ogg,
+    /// Amiga ProTracker module (`MOD ` chunk).
+    Mod,
+    /// A sound resource whose chunk type we do not decode.
+    Other,
+}
+
 /// A parsed Blorb container: owns the file bytes and the resource index.
 #[derive(Debug)]
 pub struct Blorb {
@@ -146,6 +159,24 @@ impl Blorb {
             .iter()
             .find(|r| &r.usage == usage && r.number == number)?;
         Some((&e.chunk_type, self.chunk_data(e)))
+    }
+
+    /// Payload bytes + detected [`SoundKind`] for sound resource `number`
+    /// (`usage == b"Snd "`), or `None` when no such resource exists. The kind is
+    /// detected from the chunk type: `FORM` → AIFF, `OGGV` → Ogg, `MOD ` → Mod,
+    /// anything else → Other.
+    pub fn sound(&self, number: u32) -> Option<(&[u8], SoundKind)> {
+        let e = self
+            .index
+            .iter()
+            .find(|r| &r.usage == b"Snd " && r.number == number)?;
+        let kind = match &e.chunk_type {
+            b"FORM" => SoundKind::Aiff,
+            b"OGGV" => SoundKind::Ogg,
+            b"MOD " => SoundKind::Mod,
+            _ => SoundKind::Other,
+        };
+        Some((self.chunk_data(e), kind))
     }
 }
 
@@ -288,6 +319,32 @@ mod tests {
         let (kind, data) = blorb.executable().unwrap();
         assert_eq!(kind, ExecKind::ZCode);
         assert_eq!(data, b"abcd");
+    }
+
+    #[test]
+    fn sound_fetches_aiff_by_number() {
+        let b = build_blorb(&[
+            (b"Exec", 0, b"ZCOD", b"abcd"),
+            (b"Snd ", 7, b"FORM", b"aiffbytes"),
+        ]);
+        let blorb = Blorb::parse(b).unwrap();
+        let (data, kind) = blorb.sound(7).unwrap();
+        assert_eq!(data, b"aiffbytes");
+        assert_eq!(kind, SoundKind::Aiff);
+        assert!(blorb.sound(99).is_none(), "absent sound number returns None");
+    }
+
+    #[test]
+    fn sound_detects_ogg_mod_other() {
+        let b = build_blorb(&[
+            (b"Snd ", 1, b"OGGV", b"ogg"),
+            (b"Snd ", 2, b"MOD ", b"mod"),
+            (b"Snd ", 3, b"AIFF", b"weird"),
+        ]);
+        let blorb = Blorb::parse(b).unwrap();
+        assert_eq!(blorb.sound(1).unwrap().1, SoundKind::Ogg);
+        assert_eq!(blorb.sound(2).unwrap().1, SoundKind::Mod);
+        assert_eq!(blorb.sound(3).unwrap().1, SoundKind::Other);
     }
 
     #[test]
