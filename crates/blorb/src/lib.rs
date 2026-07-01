@@ -265,16 +265,27 @@ pub fn resolve_sound_blorb(
         let plen = common_prefix_len(&story_stem, &cand_stem);
         candidates.push((plen, b, path));
     }
-    // Best non-trivial prefix match wins.
-    if let Some(i) = candidates
+    // Best non-trivial prefix match wins — but only if it is UNAMBIGUOUS.
+    // Two candidates tied for the longest prefix (>=3) is a real collision:
+    // return None rather than picking one by read_dir order.
+    if let Some(max_plen) = candidates
         .iter()
-        .enumerate()
-        .filter(|(_, (plen, _, _))| *plen >= 3)
-        .max_by_key(|(_, (plen, _, _))| *plen)
-        .map(|(i, _)| i)
+        .map(|(plen, _, _)| *plen)
+        .filter(|plen| *plen >= 3)
+        .max()
     {
-        let (_, b, path) = candidates.swap_remove(i);
-        return Some((b, path));
+        let mut winners = candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, (plen, _, _))| *plen == max_plen)
+            .map(|(i, _)| i);
+        let first = winners.next();
+        if winners.next().is_none() {
+            let i = first.unwrap();
+            let (_, b, path) = candidates.swap_remove(i);
+            return Some((b, path));
+        }
+        return None; // tie → ambiguous
     }
     // Otherwise, the sole candidate if unambiguous.
     if candidates.len() == 1 {
@@ -551,6 +562,22 @@ mod tests {
             "must pick the prefix-matching blorb, not the unrelated one"
         );
         assert_eq!(path, prefixed);
+    }
+
+    #[test]
+    fn resolve_returns_none_on_prefix_tie() {
+        // Two candidates share the same >=3 leading run with the story stem;
+        // neither is the story itself nor an exact same-stem sibling. Ambiguous → None.
+        let dir = TempDir::new("prefix-tie");
+        let story = dir.join("lurkinghorror.z3");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        // Both share the "lurking" prefix run with "lurkinghorror":
+        std::fs::write(dir.join("lurking-sounds.blorb"), sound_blorb_tagged(b"a")).unwrap();
+        std::fs::write(dir.join("lurking-audio.blorb"), sound_blorb_tagged(b"b")).unwrap();
+        assert!(
+            resolve_sound_blorb(&story).is_none(),
+            "tie for longest prefix must be ambiguous"
+        );
     }
 
     #[test]
