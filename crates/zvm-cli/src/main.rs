@@ -85,13 +85,21 @@ fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: 
     let done = cs.backend.finished();
     let mut ran = false;
     for id in done {
+        // Always forget the number->id mapping for a finished sound, even one
+        // with no finish routine.
+        cs.ids.retain(|_, v| *v != id);
         if let Some(routine) = cs.routines.remove(&id) {
-            cs.ids.retain(|_, v| *v != id);
             if routine != 0 {
                 machine.run_routine(routine);
                 ran = true;
             }
         }
+    }
+    // A finish routine may itself start sounds (into machine.pending_sounds);
+    // play them now rather than deferring to the next main-loop step().
+    if !machine.pending_sounds.is_empty() {
+        let events: Vec<zvm::cpu::exec::SoundEvent> = machine.pending_sounds.drain(..).collect();
+        play_cli_sounds(cs, &events);
     }
     if ran && is_tty {
         print!("{}", view.frame(machine));
@@ -1146,5 +1154,29 @@ mod wrap_tests {
         // "hello " is 6 chars (≤10), then "world" (5) pushes 6+5=11 > 10 → wrap
         assert!(out.contains('\n'), "expected soft newline: {out:?}");
         assert_eq!(col, 5); // "world" = 5 chars after the wrap
+    }
+}
+
+#[cfg(test)]
+mod sound_idmap_tests {
+    use std::collections::HashMap;
+
+    // Mirrors the `cs.ids.retain(|_, v| *v != id)` line in `poll_sound_finish`:
+    // a finished sound's number->id mapping must be cleared even when it has no
+    // finish routine (Bug A — previously this only ran inside the
+    // `if let Some(routine) = cs.routines.remove(&id)` branch, so a routine-less
+    // sound left a stale entry). Exercises the exact retain predicate against a
+    // plain `HashMap<u16, SoundId>`, device-free.
+    #[test]
+    fn retain_clears_finished_id_without_routine() {
+        let id: audio::SoundId = 7;
+        let mut ids: HashMap<u16, audio::SoundId> = HashMap::new();
+        ids.insert(3, id); // sound #3 played with routine == 0 → no `routines` entry
+        ids.insert(4, 99); // unrelated sound, still playing
+
+        ids.retain(|_, v| *v != id);
+
+        assert!(!ids.contains_key(&3), "finished id must be cleared even without a routine");
+        assert_eq!(ids.get(&4), Some(&99), "unrelated entries must be untouched");
     }
 }
