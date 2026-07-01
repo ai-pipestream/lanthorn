@@ -275,6 +275,13 @@ impl StreamState {
 // Header capability bits (ZMSD §11.1)
 // ---------------------------------------------------------------------------
 
+/// Default interpreter number (header 0x1E) per Frotz's rule (ux_init.c): IBM PC
+/// (6) for v6 story files, DECSystem-20 (1) otherwise. v6 is rejected at load,
+/// so in practice every loaded game defaults to 1.
+pub fn default_interpreter_number(version: u8) -> u8 {
+    if version == 6 { 6 } else { 1 }
+}
+
 /// Set interpreter capability bits in the story header at machine startup.
 ///
 /// We advertise a basic text interpreter:
@@ -286,13 +293,13 @@ impl StreamState {
 ///   - Flags2: we clear bits we don't support (pictures=0, undo=0, mouse=0,
 ///     colour=0, sound=0, menubar=0) by masking.  Leave transcript (bit 0)
 ///     and fixed-pitch (bit 1) as-is (game controls those).
-///   - 0x1E: interpreter number — 6 (IBM PC), a common neutral value.
+///   - 0x1E: interpreter number — override, else Frotz's default (6 for v6, else 1).
 ///   - 0x1F: interpreter version — 'A' (ASCII 0x41), standard v1.1 era.
 ///   - 0x32/0x33: standard revision number (1.1 → 1, 1).
 ///
 /// Only modifies bytes inside dynamic memory (below static_mem_base); if the
 /// header region is read-only (static_mem_base ≤ 0x40) we skip silently.
-pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool) {
+pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, interpreter_number: Option<u8>) {
     let version = mem.version();
 
     // Guard: only write if the header sits in dynamic memory.
@@ -342,8 +349,10 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool) {
     }
     mem.write_word(0x10, new_f2);
 
-    // Interpreter number (0x1E): 6 = IBM PC / generic.
-    mem.write_byte(0x1E, 6);
+    // Interpreter number (0x1E): explicit override, else Frotz's default
+    // (6 for v6, else 1 = DEC-20). `version` was read at the top of this fn.
+    let interp = interpreter_number.unwrap_or_else(|| default_interpreter_number(version));
+    mem.write_byte(0x1E, interp);
 
     // Interpreter version (0x1F): b'A' = 0x41.
     mem.write_byte(0x1F, b'A');
@@ -523,7 +532,7 @@ mod tests {
         // Set "status line not available" bit before init.
         let f1 = mem.read_byte(0x01) | (1 << 4);
         mem.write_byte(0x01, f1);
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         // Bit 4 should be cleared.
         assert_eq!(mem.read_byte(0x01) & (1 << 4), 0, "bit 4 (no status line) should be clear");
         // Screen-splitting available (bit 5) should be set.
@@ -533,7 +542,7 @@ mod tests {
     #[test]
     fn header_caps_v5_clears_unsupported_bits() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         let f1 = mem.read_byte(0x01);
         // Colour (bit 0) should be clear.
         assert_eq!(f1 & (1 << 0), 0, "colour bit should be clear");
@@ -542,7 +551,7 @@ mod tests {
         // Fixed-space font (bit 4) should be set.
         assert_ne!(f1 & (1 << 4), 0, "fixed-space font bit should be set");
         // Interpreter number set.
-        assert_eq!(mem.read_byte(0x1E), 6, "interpreter number = 6");
+        assert_eq!(mem.read_byte(0x1E), 1, "interpreter number defaults to DEC-20 (1)");
         assert_eq!(mem.read_byte(0x1F), b'A', "interpreter version = 'A'");
     }
 
@@ -551,7 +560,7 @@ mod tests {
         // Regression: without seeded screen dims the header keeps 0, and v4 games
         // such as Bureaucracy abort with "[Screen too small.]" on the first turn.
         let mut mem = Memory::new(sample_story(4)).unwrap();
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS, "screen height (lines) seeded");
         assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS, "screen width (chars) seeded");
         assert_ne!(mem.read_byte(0x20), 0, "height must not be zero");
@@ -561,7 +570,7 @@ mod tests {
     #[test]
     fn header_caps_v5_seeds_unit_words_and_font_size() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS);
         assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS);
         assert_eq!(mem.read_word(0x22), DEFAULT_SCREEN_COLS as u16, "width in units");
@@ -594,7 +603,7 @@ mod tests {
         let mut mem = Memory::new(sample_story(3)).unwrap();
         let f1 = mem.read_byte(0x01) | (1 << 6); // pre-set variable-pitch default
         mem.write_byte(0x01, f1);
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         assert_eq!(mem.read_byte(0x01) & (1 << 6), 0, "bit 6 (variable-pitch) should be clear");
     }
 
@@ -603,7 +612,7 @@ mod tests {
         // ZMSD 1.1 is the only published standard revision; advertise major=1,
         // minor=1 (bytes 0x32/0x33), not a non-existent "1.2".
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         assert_eq!(mem.read_byte(0x32), 1, "standard revision major = 1");
         assert_eq!(mem.read_byte(0x33), 1, "standard revision minor = 1");
     }
@@ -614,7 +623,7 @@ mod tests {
         // (save_undo/restore_undo, EXT:0x09/0x0A) is implemented, so the header
         // must advertise them or games skip the features at startup.
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         let f1 = mem.read_byte(0x01);
         assert_ne!(f1 & (1 << 2), 0, "Flags1 bit 2 (bold available) should be set");
         assert_ne!(f1 & (1 << 3), 0, "Flags1 bit 3 (italic available) should be set");
@@ -628,7 +637,7 @@ mod tests {
         // Pre-set pictures (bit 3) and sound (bit 7) in Flags2.
         let f2 = mem.read_word(0x10) | (1 << 3) | (1 << 7);
         mem.write_word(0x10, f2);
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         let f2_after = mem.read_word(0x10);
         assert_eq!(f2_after & (1 << 3), 0, "pictures bit in Flags2 should be clear");
         assert_eq!(f2_after & (1 << 7), 0, "sound bit in Flags2 should be clear");
@@ -637,12 +646,35 @@ mod tests {
     #[test]
     fn colour_bit_tracks_honor_flag() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false);
+        init_header_caps(&mut mem, false, None);
         assert_eq!(mem.read_byte(0x01) & 1, 0, "colour bit clear when honor=false");
-        init_header_caps(&mut mem, true);
+        init_header_caps(&mut mem, true, None);
         assert_eq!(mem.read_byte(0x01) & 1, 1, "colour bit set when honor=true");
         advertise_colour(&mut mem, false);
         assert_eq!(mem.read_byte(0x01) & 1, 0, "advertise_colour clears it again");
+    }
+
+    #[test]
+    fn default_interpreter_number_follows_frotz_rule() {
+        // Frotz: DEC-20 (1) for non-v6, IBM PC (6) for v6.
+        assert_eq!(default_interpreter_number(3), 1);
+        assert_eq!(default_interpreter_number(5), 1);
+        assert_eq!(default_interpreter_number(8), 1);
+        assert_eq!(default_interpreter_number(6), 6);
+    }
+
+    #[test]
+    fn init_header_caps_default_interpreter_is_dec20_for_v5() {
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem, false, None);
+        assert_eq!(mem.read_byte(0x1E), 1, "v5 default interpreter = DEC-20 (1)");
+    }
+
+    #[test]
+    fn init_header_caps_interpreter_override_wins() {
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem, false, Some(6));
+        assert_eq!(mem.read_byte(0x1E), 6, "override forces IBM PC (6)");
     }
 
     // ── (d) ScreenState defaults ──────────────────────────────────────────────

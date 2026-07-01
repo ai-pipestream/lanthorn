@@ -123,6 +123,9 @@ pub struct Machine {
     /// Whether to advertise Flags1 bit 0 (colour available) to the game. Default
     /// false; set via `set_honor_game_colours`. v3 stories ignore this entirely.
     pub honor_game_colours: bool,
+    /// Interpreter number to advertise in header byte 0x1E. `None` = auto (Frotz's
+    /// rule: 6 for v6, else 1). `Some(n)` overrides. Applied at `init_caps`.
+    pub interpreter_number: Option<u8>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -169,6 +172,7 @@ impl Machine {
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
             honor_game_colours: false,
+            interpreter_number: None,
         }
     }
 
@@ -184,7 +188,7 @@ impl Machine {
     /// `step()`. Not needed for test harnesses built from `sample_story` (whose
     /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
-        init_header_caps(&mut self.mem, self.honor_game_colours);
+        init_header_caps(&mut self.mem, self.honor_game_colours, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
     }
@@ -194,6 +198,12 @@ impl Machine {
     pub fn set_honor_game_colours(&mut self, on: bool) {
         self.honor_game_colours = on;
         advertise_colour(&mut self.mem, on);
+    }
+
+    /// Set the interpreter number to advertise (header 0x1E). `None` restores the
+    /// auto default (Frotz's rule). Takes effect at the next `init_caps`.
+    pub fn set_interpreter_number(&mut self, n: Option<u8>) {
+        self.interpreter_number = n;
     }
 
     /// Borrow the default `BufferOutput` sink if that is what `out` holds, else `None`.
@@ -3969,8 +3979,20 @@ pub(crate) mod tests {
         assert_ne!(f1 & (1 << 4), 0, "Flags1 bit 4 (fixed-space font) should be set");
 
         // Interpreter number and version.
-        assert_eq!(m.mem.read_byte(0x1E), 6, "interpreter number = 6");
+        assert_eq!(m.mem.read_byte(0x1E), 1, "interpreter number defaults to DEC-20 (1)");
         assert_eq!(m.mem.read_byte(0x1F), b'A', "interpreter version = 'A'");
+    }
+
+    #[test]
+    fn set_interpreter_number_overrides_at_init_caps() {
+        let mut buf = sample_story(5);
+        buf[0x80] = 0xBA;                 // quit at 0x80
+        buf[0x06] = 0x00; buf[0x07] = 0x80; // initial_pc = 0x0080
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.set_interpreter_number(Some(4)); // Amiga
+        m.init_caps();
+        assert_eq!(m.mem.read_byte(0x1E), 4, "override advertised");
     }
 
     // -----------------------------------------------------------------------
