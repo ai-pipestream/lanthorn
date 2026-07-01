@@ -391,12 +391,17 @@ fn read_line_stdin() -> String {
 /// and the echo is drawn in the game's current style/colour (`echo`). Resize
 /// events during the read are captured and returned so the caller can update
 /// its layout. Falls back to cooked line input when stdin is not a TTY (piped).
-fn read_line_raw(is_tty: bool, echo: zvm::io::TextAttrs) -> (String, Option<(u16, u16)>) {
+fn read_line_raw(
+    is_tty: bool,
+    echo: zvm::io::TextAttrs,
+    machine: &Machine,
+) -> (String, u8, Option<(u16, u16)>) {
     if !is_tty {
-        return (read_line_stdin(), None);
+        return (read_line_stdin(), 13, None);
     }
     let _ = terminal::enable_raw_mode();
     let mut buf = String::new();
+    let mut terminator: u8 = 13; // Enter unless a function-key terminator ends the line
     let mut last_resize: Option<(u16, u16)> = None;
     let sgr = crate::screen::sgr_open(echo);
     if !sgr.is_empty() {
@@ -432,8 +437,18 @@ fn read_line_raw(is_tty: bool, echo: zvm::io::TextAttrs) -> (String, Option<(u16
                         let _ = io::stdout().flush();
                     }
                 }
-                // Arrows, function keys, etc. are consumed (no on-screen garbage).
-                _ => {}
+                // A function key listed in the game's terminating-characters
+                // table (header 0x2E) ends the line, reported to the game via the
+                // stored terminator — e.g. the cursor keys BeyondZork uses to
+                // scroll its boxed description (ZMSD §10.7). Any other special key
+                // is consumed (no on-screen garbage), as before.
+                _ => {
+                    let z = decode_keycode(code) as u16;
+                    if machine.is_terminator(z) {
+                        terminator = z as u8;
+                        break;
+                    }
+                }
             },
             Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
             _ => {}
@@ -443,9 +458,13 @@ fn read_line_raw(is_tty: bool, echo: zvm::io::TextAttrs) -> (String, Option<(u16
         print!("\x1b[0m");
     }
     let _ = terminal::disable_raw_mode();
-    print!("\r\n"); // raw mode does not translate Enter to CRLF
+    if terminator == 13 {
+        // Raw mode does not translate Enter to CRLF. Skip for a function-key
+        // terminator so the prompt doesn't drift as the game redraws in place.
+        print!("\r\n");
+    }
     let _ = io::stdout().flush();
-    (buf, last_resize)
+    (buf, terminator, last_resize)
 }
 
 fn read_byte_stdin() -> u8 {
@@ -661,12 +680,12 @@ fn main() {
                 } else {
                     zvm::io::TextAttrs::default()
                 };
-                let (line, resize) = read_line_raw(stdin_is_tty, echo);
+                let (line, terminator, resize) = read_line_raw(stdin_is_tty, echo, &machine);
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
                                  &mut page_height, &mut machine, &mut view);
                 }
-                machine.supply_line(line.trim_end(), 13);
+                machine.supply_line(line.trim_end(), terminator);
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
                     o.current_col = 0; // cursor is at line start after user input + Enter
