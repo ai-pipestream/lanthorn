@@ -39,6 +39,73 @@ fn synth_tone(freq_hz: f32, ms: u32) -> Vec<f32> {
     out
 }
 
+/// Decode a 10-byte 80-bit IEEE-754 extended float (AIFF sample rate) to u32 Hz.
+/// Layout: 1 sign bit, 15 exponent bits (bias 16383), 64 mantissa bits with an
+/// explicit integer bit. value = mantissa * 2^(exponent - 16383 - 63).
+fn extended80_to_u32(b: &[u8; 10]) -> u32 {
+    let exponent = (((b[0] & 0x7F) as u32) << 8) | b[1] as u32;
+    let mantissa = u64::from_be_bytes([b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9]]);
+    if exponent == 0 && mantissa == 0 {
+        return 0;
+    }
+    let e = exponent as i32 - 16383 - 63;
+    let mut val = mantissa as f64;
+    if e >= 0 {
+        val *= 2f64.powi(e);
+    } else {
+        val /= 2f64.powi(-e);
+    }
+    val as u32
+}
+
+/// Parse an IFF `FORM`/`AIFF` container into (channels, sample_rate, interleaved
+/// big-endian 16-bit PCM). Returns None on a malformed or non-16-bit AIFF.
+fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
+    if bytes.len() < 12 || &bytes[0..4] != b"FORM" || &bytes[8..12] != b"AIFF" {
+        return None;
+    }
+    let mut pos = 12;
+    let mut channels: u16 = 0;
+    let mut sample_rate: u32 = 0;
+    let mut sample_size: u16 = 0;
+    let mut pcm: Vec<i16> = Vec::new();
+    while pos + 8 <= bytes.len() {
+        let id = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
+        let len = u32::from_be_bytes([bytes[pos + 4], bytes[pos + 5], bytes[pos + 6], bytes[pos + 7]]) as usize;
+        let data_start = pos + 8;
+        if data_start + len > bytes.len() {
+            break;
+        }
+        match &id {
+            b"COMM" if len >= 18 => {
+                channels = u16::from_be_bytes([bytes[data_start], bytes[data_start + 1]]);
+                sample_size = u16::from_be_bytes([bytes[data_start + 6], bytes[data_start + 7]]);
+                let mut ext = [0u8; 10];
+                ext.copy_from_slice(&bytes[data_start + 8..data_start + 18]);
+                sample_rate = extended80_to_u32(&ext);
+            }
+            b"SSND" if len >= 8 => {
+                // Skip offset (u32) + blockSize (u32); the rest is big-endian PCM.
+                let pcm_start = data_start + 8;
+                let pcm_end = data_start + len;
+                if sample_size <= 16 {
+                    let mut i = pcm_start;
+                    while i + 1 < pcm_end {
+                        pcm.push(i16::from_be_bytes([bytes[i], bytes[i + 1]]));
+                        i += 2;
+                    }
+                }
+            }
+            _ => {}
+        }
+        pos = data_start + len + (len & 1);
+    }
+    if channels == 0 || sample_rate == 0 || pcm.is_empty() {
+        return None;
+    }
+    Some((channels, sample_rate, pcm))
+}
+
 // ── Real backend (playback feature on) ────────────────────────────────────────
 
 #[cfg(feature = "playback")]
@@ -77,10 +144,49 @@ impl AudioBackend {
         self.tones.push(sink);
     }
 
-    /// Decode + play a sampled sound. Real decoding lands in the next task;
-    /// for now this is a stub so both feature configs expose the same surface.
-    pub fn play_sample(&mut self, _bytes: &[u8], _format: SoundFormat, _z_volume: u8, _repeats: u8) -> Option<SoundId> {
-        None
+    /// Decode `bytes` per `format`, play on a fresh sink at gain(master, z_volume),
+    /// looping per `repeats` (0/255 = forever). Returns a SoundId to `stop`/track.
+    /// Returns None if there is no device, the format is unsupported, or decode fails.
+    pub fn play_sample(&mut self, bytes: &[u8], format: SoundFormat, z_volume: u8, repeats: u8) -> Option<SoundId> {
+        use rodio::Source;
+        let (_, handle) = self.stream.as_ref()?;
+        let sink = rodio::Sink::try_new(handle).ok()?;
+        sink.set_volume(gain(self.master, z_volume));
+        let forever = repeats == 0 || repeats == 255;
+        let count = repeats.max(1);
+        match format {
+            SoundFormat::Aiff => {
+                let (channels, rate, pcm) = decode_aiff(bytes)?;
+                if forever {
+                    sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()).repeat_infinite());
+                } else {
+                    for _ in 0..count {
+                        sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()));
+                    }
+                }
+            }
+            SoundFormat::Ogg => {
+                if forever {
+                    let dec = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec())).ok()?;
+                    sink.append(dec.repeat_infinite());
+                } else {
+                    for _ in 0..count {
+                        if let Ok(dec) = rodio::Decoder::new(std::io::Cursor::new(bytes.to_vec())) {
+                            sink.append(dec);
+                        }
+                    }
+                }
+            }
+            SoundFormat::Mod => {
+                // MOD playback is added in the mod-music task; until then, unsupported.
+                eprintln!("audio: MOD playback not yet supported");
+                return None;
+            }
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.samples.insert(id, sink);
+        Some(id)
     }
 
     pub fn stop(&mut self, id: SoundId) {
@@ -175,5 +281,61 @@ mod tests {
         b.stop(1);
         b.stop_all();
         let _ = b.finished();
+    }
+
+    /// Build a tiny 1-channel, 16-bit, 44100 Hz AIFF with two PCM frames.
+    fn tiny_aiff() -> Vec<u8> {
+        fn be_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(id);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 { v.push(0); }
+            v
+        }
+        // COMM: channels=1, numFrames=2, sampleSize=16, rate = 44100 as 80-bit ext.
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&1u16.to_be_bytes());       // channels
+        comm.extend_from_slice(&2u32.to_be_bytes());       // numSampleFrames
+        comm.extend_from_slice(&16u16.to_be_bytes());      // sampleSize
+        comm.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100
+        // SSND: offset=0, blockSize=0, then two BE i16 samples: 256, -256.
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // offset
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // blockSize
+        ssnd.extend_from_slice(&256i16.to_be_bytes());
+        ssnd.extend_from_slice(&(-256i16).to_be_bytes());
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"AIFF");
+        body.extend_from_slice(&be_chunk(b"COMM", &comm));
+        body.extend_from_slice(&be_chunk(b"SSND", &ssnd));
+
+        let mut form = Vec::new();
+        form.extend_from_slice(b"FORM");
+        form.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        form.extend_from_slice(&body);
+        form
+    }
+
+    #[test]
+    fn extended80_decodes_44100() {
+        assert_eq!(extended80_to_u32(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]), 44100);
+        assert_eq!(extended80_to_u32(&[0; 10]), 0);
+    }
+
+    #[test]
+    fn decode_aiff_parses_comm_and_ssnd() {
+        let (channels, rate, pcm) = decode_aiff(&tiny_aiff()).expect("valid AIFF");
+        assert_eq!(channels, 1);
+        assert_eq!(rate, 44100);
+        assert_eq!(pcm, vec![256i16, -256i16]);
+    }
+
+    #[cfg(not(feature = "playback"))]
+    #[test]
+    fn play_sample_returns_none_without_playback() {
+        let mut b = AudioBackend::new(100);
+        assert!(b.play_sample(&tiny_aiff(), SoundFormat::Aiff, 8, 1).is_none());
     }
 }
