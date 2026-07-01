@@ -5796,7 +5796,7 @@ mod tests {
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
 
         // Build the initial session and seed the start room.
-        let mut session = GameSession::new(story_bytes.clone(), true).expect("GameSession::new");
+        let mut session = GameSession::new(story_bytes.clone(), true, None).expect("GameSession::new");
         let mut mapper = Mapper::default();
         let mut state = crate::state::AppState::default();
 
@@ -5828,7 +5828,7 @@ mod tests {
         state.turns = 5;
 
         // Rebuild session from story_bytes (what handle_saves_prompt does on confirm).
-        let mut new_session = GameSession::new(story_bytes.clone(), true).expect("GameSession::new for reset");
+        let mut new_session = GameSession::new(story_bytes.clone(), true, None).expect("GameSession::new for reset");
         let new_start_loc = current_location(&new_session.machine);
         let new_room_number = new_start_loc.as_ref().map(|s| s.number);
 

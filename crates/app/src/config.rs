@@ -375,6 +375,11 @@ pub struct Config {
     /// window. Set false to use only the configured color scheme.
     #[serde(default = "default_honor_game_colours")]
     pub honor_game_colours: bool,
+    /// Interpreter number to advertise (header 0x1E). `None` = auto (Frotz's rule:
+    /// 1 for v1-5, 6 for v6). Set to override, e.g. 6 for BeyondZork's IBM PC
+    /// character-graphics instead of colour.
+    #[serde(default)]
+    pub interpreter_number: Option<u8>,
 }
 
 impl Default for Config {
@@ -405,6 +410,7 @@ impl Default for Config {
             virtual_screen_rows: default_virtual_screen_rows(),
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
+            interpreter_number: None,
         }
     }
 }
@@ -466,6 +472,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.show_loc_method = from_file.show_loc_method;
             cfg.show_status_bar = from_file.show_status_bar;
             cfg.honor_game_colours = from_file.honor_game_colours;
+            cfg.interpreter_number = from_file.interpreter_number;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
@@ -522,6 +529,9 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
     doc["honor_game_colours"] = toml_edit::value(cfg.honor_game_colours);
+    if let Some(n) = cfg.interpreter_number {
+        doc["interpreter_number"] = toml_edit::value(n as i64);
+    }
     doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
     doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
 
@@ -818,6 +828,7 @@ use_defaults = false
             show_loc_method: false,
             show_status_bar: true,
             honor_game_colours: true,
+            interpreter_number: None,
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,
@@ -959,6 +970,17 @@ use_defaults = false
         // explicit false overrides the default
         let off: Config = toml::from_str("honor_game_colours = false\n").unwrap();
         assert!(!off.honor_game_colours);
+    }
+
+    #[test]
+    fn interpreter_number_defaults_none_and_parses_override() {
+        // Default and absent key → None (auto).
+        assert_eq!(Config::default().interpreter_number, None);
+        let back: Config = toml::from_str("").unwrap();
+        assert_eq!(back.interpreter_number, None, "absent key keeps None");
+        // Explicit override parses.
+        let over: Config = toml::from_str("interpreter_number = 6\n").unwrap();
+        assert_eq!(over.interpreter_number, Some(6), "explicit override parses");
     }
 
     #[test]
