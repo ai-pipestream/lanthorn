@@ -106,19 +106,56 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     Some((channels, sample_rate, pcm))
 }
 
+/// RAII guard that removes its temp file on drop — covers every exit path
+/// (normal return, early `?`/`None`, and panic-unwind).
+#[cfg(feature = "mod-music")]
+struct TempFileGuard(std::path::PathBuf);
+
+#[cfg(feature = "mod-music")]
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// `mod_player` 0.1's only public loader is `read_mod_file(path: &str) -> Song`,
 /// which reads from disk (there is no in-memory/slice loader). We stage `bytes`
-/// to a uniquely-named temp file, parse it, then remove the temp file — the
-/// returned `Song` owns all sample/pattern data, so nothing further touches it.
+/// to a uniquely-named temp file, parse it, then remove the temp file (via
+/// `TempFileGuard`) — the returned `Song` owns all sample/pattern data, so
+/// nothing further touches it.
+///
+/// Known accepted issue: `mod_player` 0.1.4's `get_format` emits a stray
+/// `println!` on every parse (an upstream debug leftover) which can briefly
+/// garble the TUI until the next redraw. Not removable without vendoring the
+/// crate; tracked as a follow-up — do not attempt to fix/suppress it here.
 #[cfg(feature = "mod-music")]
 fn load_mod_song(bytes: &[u8]) -> Option<mod_player::Song> {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
-    let mut path = std::env::temp_dir();
-    path.push(format!("babelmap-mod-{}-{nanos}.mod", std::process::id()));
+    // ProTracker header (title + 31 sample records + songlen/restart + order
+    // table + 4-byte tag) is 1084 bytes minimum; `mod_player::get_format`
+    // slices `file_data[1080..1084]` unchecked, so shorter input panics.
+    if bytes.len() < 1084 {
+        return None;
+    }
+
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("babelmap-mod-{}-{n}.mod", std::process::id()));
     std::fs::write(&path, bytes).ok()?;
-    let song = mod_player::read_mod_file(path.to_str()?);
-    let _ = std::fs::remove_file(&path);
-    Some(song)
+    let _guard = TempFileGuard(path.clone());
+    let path_str = path.to_str()?;
+
+    // `mod_player` panics (unwrap/panic!) on various malformed inputs beyond
+    // the length check above. Catch that here so a corrupt MOD from an
+    // untrusted Blorb resource can't crash the interpreter. Silencing the
+    // panic hook for the duration is safe because this sound-loading path
+    // runs synchronously on a single thread — no concurrent panics can race
+    // on the global hook.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| mod_player::read_mod_file(path_str)));
+    std::panic::set_hook(prev_hook);
+
+    result.ok()
 }
 
 /// A `rodio::Source` that streams a ProTracker module via `mod_player`, yielding
@@ -424,6 +461,13 @@ mod tests {
         v.extend_from_slice(b"M.K.");       // 4-channel tag
         v.extend(std::iter::repeat(0u8).take(64 * 4 * 4)); // one zero pattern
         v
+    }
+
+    #[cfg(feature = "mod-music")]
+    #[test]
+    fn load_mod_song_rejects_malformed_without_panic() {
+        assert!(load_mod_song(&[0u8; 100]).is_none(), "short input is rejected, not panicked on");
+        assert!(load_mod_song(&[]).is_none(), "empty input is rejected, not panicked on");
     }
 
     #[cfg(feature = "mod-music")]
