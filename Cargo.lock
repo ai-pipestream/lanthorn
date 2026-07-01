@@ -147,8 +147,9 @@ checksum = "f02882884d3e1bc524fb12c79f107f6ad0e1cfd498c536ffb494301740995dfe"
 name = "audio"
 version = "0.1.0"
 dependencies = [
- "mod_player",
  "rodio",
+ "xmrs",
+ "xmrsplayer",
 ]
 
 [[package]]
@@ -1107,12 +1108,6 @@ dependencies = [
  "wasi",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "mod_player"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d767f12a79649ed4942a2f03bb2ffd2d7e89b9e562bb6931f55f2aa93a3c272a"
 
 [[package]]
 name = "ndk"
@@ -2288,6 +2283,24 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "xmrs"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "891622ae5fc3a868e33174cb381017a5fe41eb8f2604139c324d5b164177e840"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "xmrsplayer"
+version = "0.14.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58eb50a9bc5f0ae369b571b4536bc6a1532ebec0e4846f6082686e2915dacee7"
+dependencies = [
+ "xmrs",
+]
 
 [[package]]
 name = "xz2"
