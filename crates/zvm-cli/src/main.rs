@@ -583,7 +583,7 @@ fn main() {
         // Lost Pig's HELP, which issues erase_window -1) doesn't leave stale
         // story text bleeding through beneath the upper window.
         if machine.screen.erase_lower_requested {
-            print!("{}", view.erase());
+            print!("{}", view.erase(machine.screen.current_bg, machine.honor_game_colours));
             let _ = io::stdout().flush();
             if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                 o.lines = 0;

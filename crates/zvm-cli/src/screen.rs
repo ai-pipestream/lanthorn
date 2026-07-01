@@ -57,6 +57,22 @@ pub fn sgr_open(attrs: TextAttrs) -> String {
     }
 }
 
+/// SGR that sets only the background colour (`ESC[..m`, no reset), or `""` when
+/// the background is Default or colours are not honoured. Used to paint clears
+/// and line padding with the game's chosen background.
+pub fn bg_sgr(bg: ZColour, honor: bool) -> String {
+    if !honor {
+        return String::new();
+    }
+    let mut params: Vec<String> = Vec::new();
+    push_colour_sgr(&mut params, bg, false);
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!("\x1b[{}m", params.join(";"))
+    }
+}
+
 /// Wrap lower-window text in SGR when on a TTY and any style/colour is active; else plain.
 pub fn style_wrap(s: &str, attrs: TextAttrs, is_tty: bool) -> String {
     if !is_tty {
@@ -240,12 +256,13 @@ impl ScreenView {
         let top = Self::top_rows(machine);
         let plain = Self::rows_plain(machine, top);
         let ansi = Self::rows_ansi(machine, top);
-        self.render(top, &plain, &ansi)
+        let bg_paint = bg_sgr(machine.screen.current_bg, machine.honor_game_colours);
+        self.render(top, &plain, &ansi, &bg_paint)
     }
 
     /// Pure-core renderer: given the pinned-row count and the already-formatted
     /// plain/ANSI rows, advance the view's state and return the bytes to write.
-    fn render(&mut self, top: u16, rows_plain: &[String], rows_ansi: &[String]) -> String {
+    fn render(&mut self, top: u16, rows_plain: &[String], rows_ansi: &[String], bg_paint: &str) -> String {
         if self.no_status {
             return String::new();
         }
@@ -262,7 +279,8 @@ impl ScreenView {
             if top > 0 {
                 out.push_str("\x1b7"); // DECSC save cursor
                 for (i, row) in rows_ansi.iter().enumerate() {
-                    out.push_str(&format!("\x1b[{};1H\x1b[2K", i as u16 + 1)); // row, clear
+                    // position, paint bg, clear-to-EOL (fills with bg), then row
+                    out.push_str(&format!("\x1b[{};1H{}\x1b[2K", i as u16 + 1, bg_paint));
                     out.push_str(row);
                 }
                 out.push_str("\x1b8"); // DECRC restore cursor
@@ -312,12 +330,19 @@ impl ScreenView {
     /// home the cursor, and reset the pinned-region state so the next `frame`
     /// re-establishes the region. On a piped/non-TTY sink there is no screen to
     /// clear (streaming scrollback), so it is a no-op.
-    pub fn erase(&mut self) -> String {
+    pub fn erase(&mut self, bg: ZColour, honor: bool) -> String {
         if !self.is_tty {
             return String::new();
         }
         self.active_rows = 0;
-        format!("{}\x1b[2J\x1b[H", leave_region())
+        let paint = bg_sgr(bg, honor);
+        if paint.is_empty() {
+            format!("{}\x1b[2J\x1b[H", leave_region())
+        } else {
+            // Set bg, clear (fills with bg), home, then reset so subsequent
+            // prompt/text is not forced onto the painted background run.
+            format!("{}{}\x1b[2J\x1b[H\x1b[0m", leave_region(), paint)
+        }
     }
 
     /// Restore the terminal at quit.
@@ -351,19 +376,19 @@ mod view_tests {
     fn no_status_suppresses_everything() {
         let (p, a) = v3_rows();
         let mut piped = ScreenView::new(false, true, 24);
-        assert_eq!(piped.render(1, &p, &a), "");
+        assert_eq!(piped.render(1, &p, &a, ""), "");
         let mut tty = ScreenView::new(true, true, 24);
-        assert_eq!(tty.render(1, &p, &a), "");
+        assert_eq!(tty.render(1, &p, &a, ""), "");
     }
 
     #[test]
     fn piped_emits_inline_block_once_then_dedupes() {
         let (p, a) = v3_rows();
         let mut v = ScreenView::new(false, false, 24);
-        let first = v.render(1, &p, &a);
+        let first = v.render(1, &p, &a, "");
         assert!(first.contains("West of House"), "first frame emits block: {first:?}");
         assert!(!first.contains('\x1b'), "inline block carries no ANSI: {first:?}");
-        let second = v.render(1, &p, &a);
+        let second = v.render(1, &p, &a, "");
         assert_eq!(second, "", "unchanged region dedupes to empty");
     }
 
@@ -371,7 +396,7 @@ mod view_tests {
     fn tty_enters_region_then_resets_on_leave() {
         let (p, a) = v3_rows();
         let mut v = ScreenView::new(true, false, 24);
-        let f = v.render(1, &p, &a);
+        let f = v.render(1, &p, &a, "");
         assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
         assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
         assert!(v.leave().contains("\x1b[r"), "leave resets region");
@@ -388,29 +413,29 @@ mod view_tests {
     fn erase_clears_screen_and_resets_region_on_tty() {
         let (p, a) = v3_rows();
         let mut v = ScreenView::new(true, false, 24);
-        let _ = v.render(1, &p, &a); // activate a region (active_rows = 1)
-        let out = v.erase();
+        let _ = v.render(1, &p, &a, ""); // activate a region (active_rows = 1)
+        let out = v.erase(ZColour::Default, true);
         assert!(out.contains("\x1b[r"), "erase leaves the scroll region: {out:?}");
         assert!(out.contains("\x1b[2J"), "erase clears the screen: {out:?}");
         assert!(out.ends_with("\x1b[H"), "erase homes the cursor: {out:?}");
         // After erase the region is considered inactive, so the next frame
         // re-establishes it.
-        let re = v.render(1, &p, &a);
+        let re = v.render(1, &p, &a, "");
         assert!(re.contains("\x1b[2;24r"), "next frame re-enters the region: {re:?}");
     }
 
     #[test]
     fn erase_is_noop_when_piped() {
         let mut v = ScreenView::new(false, false, 24);
-        assert_eq!(v.erase(), "", "piped erase emits nothing");
+        assert_eq!(v.erase(ZColour::Default, true), "", "piped erase emits nothing");
     }
 
     #[test]
     fn tty_dropping_to_zero_rows_resets_region() {
         let (p, a) = v3_rows();
         let mut v = ScreenView::new(true, false, 24);
-        let _ = v.render(1, &p, &a); // activate region
-        let out = v.render(0, &[], &[]);
+        let _ = v.render(1, &p, &a, ""); // activate region
+        let out = v.render(0, &[], &[], "");
         assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
     }
 }
@@ -429,6 +454,25 @@ mod colour_tests {
         assert_eq!(sgr_open(c), "\x1b[31m", "fg only, no trailing reset");
         // style_wrap composes sgr_open + reset.
         assert_eq!(style_wrap("x", c, true), "\x1b[31mx\x1b[0m");
+    }
+
+    #[test]
+    fn bg_sgr_sets_background_only() {
+        use zvm::screen::ZColour;
+        assert_eq!(bg_sgr(ZColour::Standard(2), true), "\x1b[40m", "black bg");
+        assert_eq!(bg_sgr(ZColour::Default, true), "", "default = no SGR");
+        assert_eq!(bg_sgr(ZColour::Standard(2), false), "", "honor off = no SGR");
+    }
+
+    #[test]
+    fn erase_paints_current_bg() {
+        use zvm::screen::ZColour;
+        let mut v = ScreenView::new(true, false, 24);
+        let out = v.erase(ZColour::Standard(2), true);
+        assert!(out.contains("\x1b[40m"), "bg SGR before clear: {out:?}");
+        assert!(out.contains("\x1b[2J"), "screen clear present: {out:?}");
+        assert!(out.find("\x1b[40m").unwrap() < out.find("\x1b[2J").unwrap(),
+            "bg set before the clear: {out:?}");
     }
 
     #[test]
