@@ -25,7 +25,10 @@ pub mod verbmenu;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
+use zvm::screen::{ZColour, grey_rgb, rgb15_to_888};
+
+use crate::colors::ColorScheme;
 
 // ── Shared text-style mapping ─────────────────────────────────────────────────
 
@@ -43,6 +46,30 @@ pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
         s = s.add_modifier(Modifier::ITALIC);
     }
     s
+}
+
+/// Map a Z-machine colour to a ratatui `Color` via the user's theme palette.
+///
+/// - `ZColour::Default` → `Color::Reset` (let the terminal decide)
+/// - `ZColour::Standard(2..=9)` → `scheme.palette[n - 2]` (ANSI colours routed
+///   through the active theme so the user's Ghostty palette applies)
+/// - `ZColour::Standard(10..=12)` → fixed grey RGB via `grey_rgb(n)`
+/// - `ZColour::True(v)` → exact 15-bit RGB via `rgb15_to_888(v)`
+// Tasks 10-12 (transcript/upper-window render, config gating) will call this.
+#[allow(dead_code)]
+pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
+    match c {
+        ZColour::Default => Color::Reset,
+        ZColour::Standard(n @ 2..=9) => scheme.palette[(n - 2) as usize],
+        ZColour::Standard(n) => {
+            let (r, g, b) = grey_rgb(n);
+            Color::Rgb(r, g, b)
+        }
+        ZColour::True(v) => {
+            let (r, g, b) = rgb15_to_888(v);
+            Color::Rgb(r, g, b)
+        }
+    }
 }
 
 // ── Shared clipped drawing helpers ────────────────────────────────────────────
@@ -111,7 +138,18 @@ pub fn put_str(buf: &mut Buffer, x: i32, y: i32, s: &str, style: Style, area: Re
 #[cfg(test)]
 mod text_style_tests {
     use super::*;
-    use ratatui::style::{Modifier, Style};
+    use ratatui::style::{Color, Modifier, Style};
+
+    #[test]
+    fn resolve_zcolour_maps_palette_grey_true_default() {
+        use zvm::screen::ZColour;
+        let mut scheme = ColorScheme::default();
+        scheme.palette[1] = Color::Rgb(10, 20, 30); // "red" slot
+        assert_eq!(resolve_zcolour(ZColour::Standard(3), &scheme), Color::Rgb(10, 20, 30));
+        assert_eq!(resolve_zcolour(ZColour::Default, &scheme), Color::Reset);
+        assert_eq!(resolve_zcolour(ZColour::Standard(11), &scheme), Color::Rgb(0x80, 0x80, 0x80));
+        assert_eq!(resolve_zcolour(ZColour::True(0x7FFF), &scheme), Color::Rgb(255, 255, 255));
+    }
 
     #[test]
     fn apply_text_style_maps_all_bits() {

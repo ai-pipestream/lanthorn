@@ -323,6 +323,10 @@ pub struct ColorScheme {
     pub transcript_rules: Vec<CompiledRule>,
     /// The status-bar segment layout (default reproduces today's bar).
     pub statusbar_layout: StatusBarLayout,
+    /// The 16-colour ANSI palette carried from the terminal theme (indices 0-15).
+    /// Used by `resolve_zcolour` to map `ZColour::Standard(2..=9)` through the
+    /// user's colour scheme rather than the Z-machine's raw ANSI numbers.
+    pub palette: [Color; 16],
 }
 
 impl ColorScheme {
@@ -404,6 +408,7 @@ impl ColorScheme {
             warning_marker: Style::new().fg(Color::Yellow),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
+            palette: [Color::Reset; 16],
         }
     }
 
@@ -559,6 +564,7 @@ impl ColorScheme {
             warning_marker: Style::new().fg(scheme.palette[3]),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
+            palette: scheme.palette,
         }
     }
 
@@ -584,6 +590,12 @@ impl ColorScheme {
         self.transcript
     }
 
+}
+
+impl Default for ColorScheme {
+    fn default() -> Self {
+        Self::terminal_default()
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
