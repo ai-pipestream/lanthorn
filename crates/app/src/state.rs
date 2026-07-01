@@ -1066,6 +1066,13 @@ pub struct AppState {
     /// Set each frame by the run loop from `session.pending_input()`.
     /// Used by the renderer to hide the bottom input prompt.
     pub char_mode: bool,
+
+    // ── Timed input ───────────────────────────────────────────────────────────
+
+    /// When a timed read/read_char is active and honored (`config.honor_timed_input`),
+    /// the wall-clock instant the next interrupt tick is due. `None` when no timer
+    /// is armed (untimed read, honor disabled, or an overlay/dialog is open).
+    pub input_deadline: Option<std::time::Instant>,
 }
 
 impl Default for AppState {
@@ -1152,6 +1159,7 @@ impl Default for AppState {
             search_idx: 0,
             dialog_focus: 0,
             char_mode: false,
+            input_deadline: None,
         }
     }
 }

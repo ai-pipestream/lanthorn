@@ -1467,6 +1467,20 @@ fn main() {
         // Update char_mode flag so the renderer hides the prompt during read_char.
         state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
 
+        // Re-arm the timed-input deadline each iteration. Only while the game is
+        // actually awaiting input (no dialog/overlay/prompt covering the pane) and
+        // honoring timers; `pending_timeout()` is `None` for an untimed read, so
+        // this is a no-op for the vast majority of games (regression guard). Timed
+        // input is a Z-machine-only concept (ZMSD): `zvm_session_opt` is `None` for
+        // a Glulx engine, so the timer never arms there.
+        state.input_deadline = if state.config.honor_timed_input && !state.any_overlay_open() {
+            zvm_session_opt(&*session).and_then(|s| s.pending_timeout()).map(|(t, _)| {
+                std::time::Instant::now() + Duration::from_millis(t as u64 * 100)
+            })
+        } else {
+            None
+        };
+
         // Expire a finished sound pulse so the story border returns to normal.
         if let Some(p) = &state.sound_pulse {
             if p.started.elapsed().as_millis() as u64 >= SOUND_PULSE_MS {
@@ -1506,7 +1520,17 @@ fn main() {
 
         // Poll for a key event. Use a shorter timeout while a tidy job is in flight
         // so the pulsing border animates at ~30fps; otherwise use the normal 50ms.
-        let poll_ms = if state.has_active_animation() { TIDY_POLL_MS } else { 50 };
+        // When a timed-input deadline is armed, clamp further so the loop wakes in
+        // time to fire the interrupt — the normal cadence stays the ceiling, so
+        // this is a no-op when no timer is running (regression guard).
+        let base_poll_ms = if state.has_active_animation() { TIDY_POLL_MS } else { 50 };
+        let poll_ms = match state.input_deadline {
+            Some(dl) => {
+                let remaining = dl.saturating_duration_since(std::time::Instant::now()).as_millis() as u64;
+                remaining.min(base_poll_ms).max(1)
+            }
+            None => base_poll_ms,
+        };
         let event_ready = match poll(Duration::from_millis(poll_ms)) {
             Ok(r) => r,
             Err(e) => {
@@ -1517,6 +1541,25 @@ fn main() {
         };
 
         if !event_ready {
+            // Timed-input interrupt: the deadline elapsed with no key pressed. Run
+            // the game's interrupt routine and apply its output through the same
+            // path a char-mode keypress uses; the next loop iteration redraws
+            // unconditionally, so no explicit redraw flag is needed. If the read
+            // continues, Step 2 above re-arms the deadline next iteration from
+            // `pending_timeout()`; if the routine aborted the read, it returns
+            // `None` and the timer simply stops.
+            if let Some(dl) = state.input_deadline {
+                if std::time::Instant::now() >= dl {
+                    if let Some(zs) = zvm_session_opt_mut(&mut *session) {
+                        let result = zs.run_timed_interrupt();
+                        if apply_game_driven_result(
+                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            }
             // No key this tick — advance the tidy animation if one is playing. The next loop
             // iteration redraws, so an advanced frame appears without waiting for input.
             if let Some(anim) = &mut state.tidy_anim {
@@ -2139,35 +2182,9 @@ fn main() {
                         if let Some(result) = app::engine::key_event_to_input(*k)
                             .and_then(|ki| session.submit_key(ki))
                         {
-                            if result.erase_lower { state.mark_screen_clear(); }
-                            state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
-                            apply_turn_events(&mut state, &result);
-                            if let Some(note) = &result.info {
-                                state.push_transcript(note);
-                            }
-                            // apply_turn: char-mode keypresses don't carry direction info
-                            // (no text command to parse), but we still observe any location
-                            // change so the map stays in sync.
-                            apply_turn(&mut mapper, "", &result);
-                            // Game-initiated (v4+) save/restore: open the saves
-                            // dialog in in-game mode and defer the rest of the turn.
-                            if let Some(io) = result.pending_io {
-                                open_ingame_saves(io, &save_dir, &ifid, &mut state);
-                                continue;
-                            }
-                            state.graph_gen = state.graph_gen.wrapping_add(1);
-                            // Select and recenter on the current room if it changed.
-                            if let Some(snap) = &result.location {
-                                let rid = snap.number as mapper::graph::RoomId;
-                                state.select_room(Some(rid));
-                                if let Some(room) = mapper.graph.room(rid) {
-                                    if let Some(pos) = room.pos {
-                                        let (pw, ph) = map_pane_dims(last_panes.map);
-                                        state.recenter_on(pos, pw, ph);
-                                    }
-                                }
-                            }
-                            if result.quit {
+                            if apply_game_driven_result(
+                                &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                            ) {
                                 break;
                             }
                         }
@@ -4235,7 +4252,7 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
         .saturating_sub(pane_rows) as u16
 }
 
-// ── Char-input mode helpers ────────────────────────────────────────────────────
+// ── Game-driven input helpers (char-mode keypress, timed-input interrupt) ──────
 
 /// Route a turn's sound/diagnostic events: diagnostics become Warning transcript
 /// lines; the latest beep arms a one-shot story-border pulse; the current room
@@ -4254,6 +4271,51 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }
 }
 
+/// Apply a `TurnResult` produced by game-driven input that is not a full player
+/// command submission — a char-mode (`read_char`) keypress or a timed-input
+/// interrupt tick. Pushes transcript output (with style runs), routes
+/// beep/location/diagnostic events, applies the mapper turn, opens a
+/// game-initiated save/restore dialog if requested, and recenters on a location
+/// change. Deliberately skips `post_turn_bookkeeping` (history/inventory/
+/// auto-save): this is not a completed player turn. Returns `true` if the game
+/// quit (the caller should break the event loop).
+fn apply_game_driven_result(
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    result: &TurnResult,
+    save_dir: &std::path::Path,
+    ifid: &str,
+    map_area: Rect,
+) -> bool {
+    if result.erase_lower { state.mark_screen_clear(); }
+    state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+    apply_turn_events(state, result);
+    if let Some(note) = &result.info {
+        state.push_transcript(note);
+    }
+    // apply_turn: this input doesn't carry direction info (no text command to
+    // parse), but we still observe any location change so the map stays in sync.
+    apply_turn(mapper, "", result);
+    // Game-initiated (v4+) save/restore: open the saves dialog in in-game mode
+    // and defer the rest of the turn.
+    if let Some(io) = result.pending_io {
+        open_ingame_saves(io, save_dir, ifid, state);
+        return false;
+    }
+    state.graph_gen = state.graph_gen.wrapping_add(1);
+    // Select and recenter on the current room if it changed.
+    if let Some(snap) = &result.location {
+        let rid = snap.number as mapper::graph::RoomId;
+        state.select_room(Some(rid));
+        if let Some(room) = mapper.graph.room(rid) {
+            if let Some(pos) = room.pos {
+                let (pw, ph) = map_pane_dims(map_area);
+                state.recenter_on(pos, pw, ph);
+            }
+        }
+    }
+    result.quit
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
