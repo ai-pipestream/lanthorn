@@ -4,8 +4,8 @@
 
 ### Near Term
 
-1. [ ] Test our save files with online z-machine and glulx for compatibility
 1. [ ] On the story list page (when a directory is selected) support a side-panel that shows info about the highlighted story: e.g. story name, filename, size, and various meta data if available (file type, engine, story version, date, etc.) For blorb files list the file-structure
+1. [ ] Test our save files with online z-machine and glulx for compatibility
 1. [ ] Allow the app story/map split to be resizable via mouse and /slash commands
 1. [ ] add list of color schemes (from Ghostty?) and create a popup dialog that allows user to scroll through each one (with real-time preview), save/cancel button
 1. [ ] Refactor main app code to be more modular and more efficient to maintain
@@ -20,6 +20,7 @@
 1. [~] Dialog boxes should have common but configurable styling with clickable OK and Cancel buttons at the bottom (or SAVE and Cancel), with tab navigation. Used for reset confirmation, gallery, etc.  — done (wave19, merged): common configurable dialog chrome (style.toml dialog* selectors + dialog_box_style) with clickable tiered buttons (Save/Cancel/Done/[X]) across all 9 modals. STILL TODO: keyboard TAB navigation BETWEEN buttons (buttons are mouse-only today), and migrating the text-entry/confirm PROMPTS (reset confirmation, save-as, rename) to the dialog chrome (they're still the old prompt sub-mode).
 1. [~] Room diagnostics should include lots of debug info regarding layout, corrections made during cleanup, active constraints, dropped constraints, etc.  — done (6a8263f): per-room inspector overlay (i key) shows id/name/layer/pos + per-edge distorted (dropped-constraint) flags. STILL TODO: "corrections made during cleanup" history is not recorded in mapper yet (future extension)
 1. [ ] Story debug + disassembly — a developer/curiosity feature riding the SP3b `Engine` abstraction's `Debugger` capability seam. Per-engine tools (Z-machine ops != Glulx ops) surfaced through `engine.debugger() -> Option<&mut dyn Debugger>`, reusing each VM crate's existing instruction decoder. Scope: a DISASSEMBLY view (decode the routine/region at an address into mnemonics), a STEPPER (single-step, run-to, breakpoints on PC/opcode), and INSPECTORS (memory hex/dump, the object tree, the call stack, globals/locals, the dictionary). Generic debug UI in the app works against whichever engine is loaded; zvm-cli/gvm-cli can expose the same headless. BUILD ORDER: Z-machine first (immediately useful for the existing games — zvm already has the decoder + object model + dictionary), Glulx second. Gate on the SP3b Engine/Debugger seam existing. Its own spec when we get there. [tooling/dev; new debug module per VM + app debug UI; rides the Engine abstraction]
+1. [ ] Explore possibility of a hint downloader
 
 ### Long Term (Optional)
 
