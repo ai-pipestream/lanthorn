@@ -1586,9 +1586,10 @@ fn main() {
             // Poll for finished sampled sounds and fire their finish-routines.
             let done: Vec<u32> = state.audio.as_mut().map(|b| b.finished()).unwrap_or_default();
             for id in done {
+                // Always forget the number->id mapping for a finished sound, even
+                // one with no finish routine.
+                state.sound_ids.retain(|_, v| *v != id);
                 if let Some(routine) = state.sound_routines.remove(&id) {
-                    // Forget the number->id mapping for this finished sound too.
-                    state.sound_ids.retain(|_, v| *v != id);
                     if routine != 0 {
                         if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                             let result = zs.run_sound_finish(routine);
