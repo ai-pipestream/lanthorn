@@ -106,6 +106,8 @@ pub struct Machine {
     rng_state: u32,
     /// VAR opcodes that have hit the unimplemented fallthrough (warned once each).
     pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
+    /// EXT opcodes that have hit the unimplemented fallthrough (warned once each).
+    pub(crate) warned_ext_opcodes: std::collections::HashSet<u8>,
     /// Bleeps recorded by `sound_effect` since the host last drained them.
     pub pending_beeps: Vec<Beep>,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
@@ -167,6 +169,7 @@ impl Machine {
             pending_restore_store: None,
             rng_state: 0x12345678, // fixed nonzero seed
             warned_var_opcodes: std::collections::HashSet::new(),
+            warned_ext_opcodes: std::collections::HashSet::new(),
             pending_beeps: Vec::new(),
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
@@ -1260,11 +1263,14 @@ impl Machine {
                 self.print_text(ch.encode_utf8(&mut b));
                 StepResult::Continue
             }
-            // EXT:0x0C check_unicode — bit0: can print, bit1: can input. We render and
-            // read UTF-8, so any valid scalar value is both (3); invalid -> 0.
+            // EXT:0x0C check_unicode — bit0: can print, bit1: can input. We render
+            // UTF-8, so any valid scalar can print (bit0). We CANNOT input Unicode:
+            // the input path is byte-limited (`supply_char(ch: u8)`, no ZSCII
+            // mapping), so bit1 stays clear. Report 1 (print-only) for a valid
+            // scalar; invalid -> 0. (Bump to 3 once real Unicode input lands.)
             0x0C => {
                 let cp = ops.first().copied().unwrap_or(0) as u32;
-                let val = if char::from_u32(cp).is_some() { 3 } else { 0 };
+                let val = if char::from_u32(cp).is_some() { 1 } else { 0 };
                 self.do_store(store, val);
                 StepResult::Continue
             }
@@ -1289,8 +1295,16 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // Other EXT opcodes: no-op
-            _ => StepResult::Continue,
+            // Unknown / unimplemented EXT opcode: record once, then ignore
+            // (mirrors the VAR fallthrough for observability parity).
+            _ => {
+                if self.warned_ext_opcodes.insert(opcode) {
+                    self.diagnostics.push(format!(
+                        "unimplemented EXT opcode 0x{opcode:02X} (ignored)"
+                    ));
+                }
+                StepResult::Continue
+            }
         }
     }
 
@@ -4436,6 +4450,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn unimplemented_ext_opcode_is_warned_once() {
+        let mut m = build_test_machine(&[]);
+        // 0xFE has no arm in exec_ext -> hits the unimplemented fallthrough.
+        assert!(m.warned_ext_opcodes.is_empty());
+        assert!(m.diagnostics.is_empty());
+        m.exec_ext(0xFE, &[], None);
+        assert!(m.warned_ext_opcodes.contains(&0xFE), "fallthrough records the opcode");
+        assert_eq!(m.diagnostics.len(), 1, "records one diagnostic line");
+        assert!(
+            m.diagnostics[0].contains("EXT") && m.diagnostics[0].contains("0xFE"),
+            "diagnostic names EXT + opcode: {:?}", m.diagnostics[0]
+        );
+        m.exec_ext(0xFE, &[], None); // second call must not duplicate
+        assert_eq!(m.warned_ext_opcodes.len(), 1, "warned at most once per opcode");
+        assert_eq!(m.diagnostics.len(), 1, "warn-once: no duplicate diagnostic");
+    }
+
+    #[test]
     fn erase_line_is_recognized_noop_without_warning() {
         let mut m = build_test_machine(&[]);
         let r = m.exec_var(0x0E, &[1], None, None);
@@ -4807,7 +4839,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn check_unicode_reports_printable_and_receivable() {
+    fn check_unicode_reports_printable_only() {
         let mut buf = sample_story(5);
         // check_unicode 0x00E9 -> G0  (EXT:0x0C, [Large], store)
         buf[0x10]=0xBE; buf[0x11]=0x0C; buf[0x12]=0x3F; buf[0x13]=0x00; buf[0x14]=0xE9; buf[0x15]=0x10;
@@ -4816,7 +4848,8 @@ pub(crate) mod tests {
         let mut m = Machine::new(mem);
         m.state.pc = 0x10;
         run_until_quit(&mut m);
-        assert_eq!(m.global(0), 3, "valid scalar: printable|receivable = 3");
+        // Printable (bit0) but NOT receivable (bit1) — input is byte-limited.
+        assert_eq!(m.global(0), 1, "valid scalar: printable only = 1");
     }
 
     // -----------------------------------------------------------------------

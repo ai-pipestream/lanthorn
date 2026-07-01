@@ -386,6 +386,15 @@ pub fn advertise_colour(mem: &mut Memory, on: bool) {
     let f1 = mem.read_byte(0x01);
     let f1 = if on { f1 | 1 } else { f1 & !1 };
     mem.write_byte(0x01, f1);
+
+    // Flags2 bit 6 (word 0x10) is the game's "wants colours" request bit. When
+    // colour is off, clear it so a game doesn't proceed believing colour was
+    // granted; when on, leave the game's request untouched. Render gates colour
+    // regardless, so this is strict-correctness hygiene (ZMSD §11.1.4).
+    if !on {
+        let f2 = mem.read_word(0x10);
+        mem.write_word(0x10, f2 & !(1 << 6));
+    }
 }
 
 /// Default screen size seeded at header init, before the host reports the real
@@ -656,6 +665,22 @@ mod tests {
         assert_eq!(mem.read_byte(0x01) & 1, 1, "colour bit set when honor=true");
         advertise_colour(&mut mem, false);
         assert_eq!(mem.read_byte(0x01) & 1, 0, "advertise_colour clears it again");
+    }
+
+    #[test]
+    fn flags2_colour_request_bit_cleared_when_colour_off() {
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        // Game requests colours (Flags2 bit 6).
+        let f2 = mem.read_word(0x10) | (1 << 6);
+        mem.write_word(0x10, f2);
+        // Honour OFF: the request bit is cleared (colour not granted).
+        init_header_caps(&mut mem, false, None);
+        assert_eq!(mem.read_word(0x10) & (1 << 6), 0, "bit 6 cleared when colour off");
+        // Honour ON: the game's request bit is left untouched.
+        let f2 = mem.read_word(0x10) | (1 << 6);
+        mem.write_word(0x10, f2);
+        init_header_caps(&mut mem, true, None);
+        assert_eq!(mem.read_word(0x10) & (1 << 6), 1 << 6, "bit 6 preserved when colour on");
     }
 
     #[test]
