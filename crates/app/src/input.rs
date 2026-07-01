@@ -2055,7 +2055,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleStatusBar => state.show_status_bar = !state.show_status_bar,
         Action::ToggleTimedInput => {
             state.config.honor_timed_input = !state.config.honor_timed_input;
-            state.set_status(if state.config.honor_timed_input { "Timed input: on" } else { "Timed input: off" });
+            state.set_status(if state.config.honor_timed_input { "timed input on" } else { "timed input off" });
         }
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;

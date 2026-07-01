@@ -57,6 +57,13 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   need Blorb audio, still on the roadmap.) Unimplemented-opcode warnings surface
   in the transcript as meta lines (hidden by `/filter story`) rather than on
   stderr.
+- **Timed / interrupt input** — v4+ `read` and `read_char` `time`+`routine`
+  operands are honored: while waiting for input the game's interrupt routine is
+  called every N tenths of a second (real-time clocks, countdowns — e.g. Border
+  Zone), and can end the read. Controlled by `honor_timed_input` (default on) +
+  the `/toggle-timed-input` command and settings row; `zvm-cli` takes
+  `--no-timed-input`. The VM stays zero-dependency — the wall clock lives in the
+  hosts.
 - **Game-driven colour** — v5+ `set_colour` and v6 `set_true_colour` are honored.
   The standard palette (black/red/green/…) maps onto your colour scheme's palette,
   so a game's "red" is *your* red rather than a hard-coded shade; v6 greys and
