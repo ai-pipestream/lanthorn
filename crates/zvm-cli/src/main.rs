@@ -189,6 +189,7 @@ fn build_machine(
     page_height: u16,
     term_cols: u16,
     honor_game_colours: bool,
+    interpreter_number: Option<u8>,
 ) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
@@ -205,6 +206,7 @@ fn build_machine(
         term_cols,
         honor_game_colours,
     )));
+    machine.set_interpreter_number(interpreter_number);
     machine.init_caps();
     Ok(machine)
 }
@@ -220,15 +222,18 @@ struct Args {
 
 fn parse_args(argv: &[String]) -> Args {
     let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false };
-    for arg in &argv[1..] {
-        match arg.as_str() {
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
             "--no-status" | "--lower-only" => a.no_status = true,
             "--no-aux" => a.no_aux = true,
             "--no-more" | "--no-page" => a.no_more = true,
             "--no-game-colours" => {}
+            "-I" | "--interpreter" => i += 1, // also skip the following value token
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
             _ => {}
         }
+        i += 1;
     }
     a
 }
@@ -236,6 +241,19 @@ fn parse_args(argv: &[String]) -> Args {
 /// Returns `true` (honour game colours) unless `--no-game-colours` is present.
 fn parse_game_colours(args: &[String]) -> bool {
     !args.iter().any(|a| a == "--no-game-colours")
+}
+
+/// Read the interpreter-number override from `-I N` / `--interpreter N`.
+/// Returns None when absent or when N is not a valid u8 (lenient — falls back
+/// to the engine's Frotz default).
+fn parse_interpreter(args: &[String]) -> Option<u8> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "-I" || a == "--interpreter" {
+            return it.next().and_then(|v| v.parse::<u8>().ok());
+        }
+    }
+    None
 }
 
 // ── terminal size ─────────────────────────────────────────────────────────────
@@ -519,6 +537,7 @@ fn main() {
     let mut page_height = term_rows.saturating_sub(2).max(2);
 
     let honor = parse_game_colours(&argv);
+    let interpreter = parse_interpreter(&argv);
     let mut machine = match build_machine(
         story_bytes,
         stdout_is_tty,
@@ -526,6 +545,7 @@ fn main() {
         page_height,
         term_cols,
         honor,
+        interpreter,
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -593,6 +613,7 @@ fn main() {
                     page_height,
                     term_cols,
                     honor,
+                    interpreter,
                 ) {
                     Ok(m) => m,
                     Err(e) => {
@@ -718,6 +739,22 @@ mod arg_tests {
         assert!(parse_game_colours(&[]));
         assert!(parse_game_colours(&["story.z5".into()]));
         assert!(!parse_game_colours(&["--no-game-colours".into(), "story.z5".into()]));
+    }
+
+    #[test]
+    fn parse_interpreter_reads_flag() {
+        assert_eq!(parse_interpreter(&["-I".into(), "4".into(), "story.z5".into()]), Some(4));
+        assert_eq!(parse_interpreter(&["--interpreter".into(), "3".into(), "story.z5".into()]), Some(3));
+    }
+
+    #[test]
+    fn parse_interpreter_absent_is_none() {
+        assert_eq!(parse_interpreter(&["story.z5".into()]), None);
+    }
+
+    #[test]
+    fn parse_interpreter_bad_value_is_none() {
+        assert_eq!(parse_interpreter(&["-I".into(), "notanumber".into(), "story.z5".into()]), None);
     }
 }
 
