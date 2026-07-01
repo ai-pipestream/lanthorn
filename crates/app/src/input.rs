@@ -2066,6 +2066,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.set_status(if state.config.enable_sound { "sound on" } else { "sound off" });
             if !state.config.enable_sound {
                 if let Some(b) = state.audio.as_mut() { b.stop_all(); }
+            } else if state.audio.is_none() {
+                state.audio = Some(audio::AudioBackend::new(state.config.volume));
             }
         }
         Action::SetVolume(v) => {
@@ -3012,6 +3014,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 if let Some(b) = state.audio.as_mut() {
                     b.set_volume(state.config.volume);
                     if !state.config.enable_sound { b.stop_all(); }
+                } else if state.config.enable_sound {
+                    state.audio = Some(audio::AudioBackend::new(state.config.volume));
                 }
                 // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
@@ -4214,6 +4218,20 @@ mod tests {
         assert!(s.show_portal_labels, "TogglePortalLabels turns labels on");
         apply_action(Action::TogglePortalLabels, &mut s, &mut m);
         assert!(!s.show_portal_labels, "TogglePortalLabels toggles back off");
+    }
+
+    #[test]
+    fn toggle_sound_lazily_builds_backend_when_turned_on() {
+        // Regression: launching with enable_sound = false never constructs an
+        // AudioBackend (see main.rs), so flipping the config flag alone leaves
+        // state.audio == None forever. ToggleSound must build the backend too.
+        let mut s = AppState::default();
+        s.config.enable_sound = false;
+        s.audio = None;
+        let mut m = Mapper::default();
+        apply_action(Action::ToggleSound, &mut s, &mut m);
+        assert!(s.config.enable_sound, "ToggleSound should turn sound on");
+        assert!(s.audio.is_some(), "ToggleSound should lazily construct the AudioBackend");
     }
 
     #[test]

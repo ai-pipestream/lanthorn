@@ -25,7 +25,8 @@ use crate::text::decode::{decode_string, zscii_to_char};
 /// A Z-machine `sound_effect` event (ZMSD §9.4), recorded for the host to act on.
 /// `number` 1/2 are the built-in high/low bleeps; `number >= 3` selects a Blorb
 /// `Snd ` resource. `effect`: 1=prepare 2=start 3=stop 4=finish. `volume` is the
-/// Z-scale 1..=8 (255 = loudest). `repeats` is the repeat count (0/255 = forever).
+/// Z-scale 1..=8 (255 = loudest). `repeats` is the repeat count from the volume
+/// word's high byte; 255 = forever, 0/omitted = play once (applied by the host).
 /// `routine` (v5+) is the finish-routine the host calls when the sound ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SoundEvent {
@@ -1143,7 +1144,8 @@ impl Machine {
                 if number != 0 {
                     let effect = ops.get(1).copied().unwrap_or(0) as u8;
                     // Volume word: low byte = volume (1..8, 255=loudest), high byte
-                    // = repeat count (0/255 = forever). Default 8 when omitted.
+                    // = repeat count (255 = forever, 0/omitted = play once, applied
+                    // by the host). Default 8 when omitted.
                     let vw = ops.get(2).copied().unwrap_or(8);
                     let volume = (vw & 0xFF) as u8;
                     let repeats = (vw >> 8) as u8;

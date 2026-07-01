@@ -17,6 +17,7 @@ const SAMPLE_RATE: u32 = 44100;
 
 /// Master+Z-scale gain in 0.0..=1.0. Master is 0..=100; z_volume is the Z-machine
 /// 1..=8 scale, with 0/255 meaning "loudest" (full).
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn gain(master: u8, z_volume: u8) -> f32 {
     (master.min(100) as f32 / 100.0)
         * match z_volume {
@@ -27,6 +28,7 @@ fn gain(master: u8, z_volume: u8) -> f32 {
 
 /// A short decaying sine at `freq_hz` for `ms` at 44100 Hz (unit amplitude,
 /// linear decay envelope). Volume is applied by the caller via the sink.
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn synth_tone(freq_hz: f32, ms: u32) -> Vec<f32> {
     let n = ((ms as f32 / 1000.0) * SAMPLE_RATE as f32) as usize;
     let mut out = Vec::with_capacity(n);
@@ -42,6 +44,7 @@ fn synth_tone(freq_hz: f32, ms: u32) -> Vec<f32> {
 /// Decode a 10-byte 80-bit IEEE-754 extended float (AIFF sample rate) to u32 Hz.
 /// Layout: 1 sign bit, 15 exponent bits (bias 16383), 64 mantissa bits with an
 /// explicit integer bit. value = mantissa * 2^(exponent - 16383 - 63).
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn extended80_to_u32(b: &[u8; 10]) -> u32 {
     let exponent = (((b[0] & 0x7F) as u32) << 8) | b[1] as u32;
     let mantissa = u64::from_be_bytes([b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9]]);
@@ -60,6 +63,7 @@ fn extended80_to_u32(b: &[u8; 10]) -> u32 {
 
 /// Parse an IFF `FORM`/`AIFF` container into (channels, sample_rate, interleaved
 /// big-endian 16-bit PCM). Returns None on a malformed or non-16-bit AIFF.
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     if bytes.len() < 12 || &bytes[0..4] != b"FORM" || &bytes[8..12] != b"AIFF" {
         return None;
@@ -160,6 +164,11 @@ fn load_mod_song(bytes: &[u8]) -> Option<mod_player::Song> {
 
 /// A `rodio::Source` that streams a ProTracker module via `mod_player`, yielding
 /// interleaved stereo f32 (left then right of each frame on alternate `next`).
+///
+/// `next` always returns `Some`, and `total_duration()`/`current_frame_len()`
+/// are both `None`, so the owning `Sink` never becomes empty. A MOD therefore
+/// never reports via `finished()` and never fires a finish-routine — intentional
+/// for looping tracker music; it stays tracked until an explicit `stop`/`stop_all`.
 #[cfg(feature = "mod-music")]
 struct ModSource {
     song: mod_player::Song,
@@ -187,6 +196,18 @@ impl rodio::Source for ModSource {
     fn channels(&self) -> u16 { 2 }
     fn sample_rate(&self) -> u32 { self.rate }
     fn total_duration(&self) -> Option<std::time::Duration> { None }
+}
+
+/// Map the Z-machine repeat count to (loop_forever, finite_play_count).
+/// 255 = forever; 0 (or omitted, which the engine records as 0) = play once;
+/// 1..=254 = that many plays. (Matches de-facto interpreter behavior.)
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
+fn repeat_plan(repeats: u8) -> (bool, u8) {
+    match repeats {
+        255 => (true, 1),
+        0 => (false, 1),
+        n => (false, n),
+    }
 }
 
 // ── Real backend (playback feature on) ────────────────────────────────────────
@@ -235,15 +256,15 @@ impl AudioBackend {
     }
 
     /// Decode `bytes` per `format`, play on a fresh sink at gain(master, z_volume),
-    /// looping per `repeats` (0/255 = forever). Returns a SoundId to `stop`/track.
+    /// looping per `repeats` (see `repeat_plan`: 255 = forever, 0/omitted = once).
+    /// Returns a SoundId to `stop`/track.
     /// Returns None if there is no device, the format is unsupported, or decode fails.
     pub fn play_sample(&mut self, bytes: &[u8], format: SoundFormat, z_volume: u8, repeats: u8) -> Option<SoundId> {
         use rodio::Source;
         let (_, handle) = self.stream.as_ref()?;
         let sink = rodio::Sink::try_new(handle).ok()?;
         sink.set_volume(gain(self.master, z_volume));
-        let forever = repeats == 0 || repeats == 255;
-        let count = repeats.max(1);
+        let (forever, count) = repeat_plan(repeats);
         match format {
             SoundFormat::Aiff => {
                 let (channels, rate, pcm) = decode_aiff(bytes)?;
@@ -372,6 +393,14 @@ mod tests {
         assert_eq!(gain(100, 0), 1.0);        // 0 -> treated as full
         assert_eq!(gain(100, 255), 1.0);      // 255 -> loudest
         assert_eq!(gain(0, 8), 0.0);          // muted master
+    }
+
+    #[test]
+    fn repeat_plan_maps_counts() {
+        assert_eq!(repeat_plan(0), (false, 1));
+        assert_eq!(repeat_plan(255), (true, 1));
+        assert_eq!(repeat_plan(5), (false, 5));
+        assert_eq!(repeat_plan(1), (false, 1));
     }
 
     #[test]
