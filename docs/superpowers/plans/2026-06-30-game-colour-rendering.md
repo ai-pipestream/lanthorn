@@ -527,6 +527,132 @@ EOF
 
 ---
 
+## Task 5: zvm-cli — paint upper-window default cells with the screen background
+
+**Why:** Tasks 1+2 interact on centered upper-window text (BeyondZork's title). Task 2 fills each row with the game background via `ESC[40m ESC[2K`, but Task 1's `upper_row_ansi` emits a leading `ESC[0m` for the first Default/style-0 run, which resets that fill to terminal grey — so the leading centering spaces render grey while the text (concrete bg) renders black. Fix: resolve a cell's Default fg/bg to the screen's `current_fg`/`current_bg` so blank/leading cells carry the same background as the row fill.
+
+**Files:**
+- Modify: `crates/zvm-cli/src/screen.rs` (`upper_row_ansi` at 122-156; caller `rows_ansi`)
+- Test: `crates/zvm-cli/src/screen.rs` (test module)
+
+**Interfaces:**
+- Consumes: `machine.screen.current_fg: ZColour`, `machine.screen.current_bg: ZColour` (both public).
+- Produces: `upper_row_ansi(upper: &UpperWindow, row: u16, honor: bool, current_fg: ZColour, current_bg: ZColour) -> String` — Default cell fg/bg resolve to `current_fg`/`current_bg` when `honor`.
+
+- [ ] **Step 1: Write the failing test**
+
+```rust
+    #[test]
+    fn upper_row_ansi_paints_default_cells_with_current_bg() {
+        use zvm::screen::ZColour;
+        let mut u = UpperWindow::default();
+        u.resize(1, 6);
+        // cols 1-2 blank (Default bg); cols 3-4 'Hi' explicit white-on-black.
+        u.put(1, 3, 'H', 0, ZColour::Standard(9), ZColour::Standard(2));
+        u.put(1, 4, 'i', 0, ZColour::Standard(9), ZColour::Standard(2));
+        // Screen background is black: leading blank cells must be painted black
+        // (bg 40) BEFORE the text, not left to reset-to-terminal-default.
+        let out = upper_row_ansi(&u, 1, true, ZColour::Default, ZColour::Standard(2));
+        let first40 = out.find("40").expect("bg 40 present");
+        let hpos = out.find('H').expect("H present");
+        assert!(first40 < hpos, "leading blanks painted black before text: {out:?}");
+    }
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cargo test -p zvm-cli upper_row_ansi_paints_default 2>&1 | tail -20`
+Expected: FAIL — `upper_row_ansi` takes 3 args (arity), and leading blanks aren't painted.
+
+- [ ] **Step 3: Resolve Default cells to current_fg/current_bg**
+
+Change the signature and the per-cell effective-attr computation in `upper_row_ansi` (screen.rs:122). Keep the `last` computation on the RAW cells as-is (trailing blanks still trimmed; the row's `ESC[2K` fill covers the trailing region). Only the emitted run's colours change:
+
+```rust
+pub fn upper_row_ansi(
+    upper: &UpperWindow,
+    row: u16,
+    honor: bool,
+    current_fg: ZColour,
+    current_bg: ZColour,
+) -> String {
+    // ... unchanged `last` computation on raw cells ...
+    let mut out = String::new();
+    let mut cur: Option<(u8, ZColour, ZColour)> = None;
+    for c in 1..=last {
+        let cell = upper.cell(row, c);
+        let (style, fg, bg) = if honor {
+            // The upper window's "default" colour is the screen's current
+            // colour (what the row-fill paints); resolve Default cells to it so
+            // blank/leading cells match the painted background instead of
+            // resetting to terminal-default.
+            let fg = if matches!(cell.fg, ZColour::Default) { current_fg } else { cell.fg };
+            let bg = if matches!(cell.bg, ZColour::Default) { current_bg } else { cell.bg };
+            (cell.style, fg, bg)
+        } else {
+            (cell.style, ZColour::Default, ZColour::Default)
+        };
+        if cur != Some((style, fg, bg)) {
+            out.push_str("\x1b[0m");
+            out.push_str(&sgr_open(TextAttrs { style, fg, bg }));
+            cur = Some((style, fg, bg));
+        }
+        out.push(cell.ch);
+    }
+    if cur.is_some() {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
+```
+
+- [ ] **Step 4: Update the caller `rows_ansi`**
+
+In `rows_ansi` (screen.rs), pass the screen's current colours:
+
+```rust
+            (1..=top)
+                .map(|r| upper_row_ansi(
+                    &machine.screen.upper,
+                    r,
+                    machine.honor_game_colours,
+                    machine.screen.current_fg,
+                    machine.screen.current_bg,
+                ))
+                .collect()
+```
+
+- [ ] **Step 5: Fix the other `upper_row_ansi` call sites in tests**
+
+`upper_row_text_and_ansi` (~496) and `upper_row_ansi_emits_per_cell_fg_bg` (from Task 1) call the 3-arg form. Update both to pass `ZColour::Default, ZColour::Default` as the two new args (no substitution → their existing assertions still hold: the per-cell test uses explicit Standard(3)/Standard(2) cells, unaffected by Default current colours).
+
+- [ ] **Step 6: Run tests + warnings**
+
+Run: `cargo test -p zvm-cli 2>&1 | tail -20`
+Expected: PASS (new test + updated existing tests).
+Run: `cargo build --workspace --tests 2>&1 | grep -c warning`
+Expected: `0`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/zvm-cli/src/screen.rs
+git commit -F - <<'EOF'
+fix(zvm-cli): paint upper-window default cells with the screen background
+
+Centered upper-window text (BeyondZork's title) left its leading centering
+spaces grey: the row is filled with the game background, but upper_row_ansi
+reset the first Default/style-0 run to terminal-default, clobbering the
+fill. Resolve Default cell fg/bg to the screen current_fg/current_bg so
+blank and leading cells carry the same background as the painted row.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV
+EOF
+```
+
+---
+
 ## Manual verification (after all tasks)
 
 - `cargo run -p zvm-cli -- stories/beyondzork-r57-s871221.z5` → Character Setup menu selection is highlighted in colour; score box red; screen background black. `--no-game-colours` restores terminal colours.
