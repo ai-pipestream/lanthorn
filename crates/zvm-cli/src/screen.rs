@@ -217,11 +217,23 @@ pub struct ScreenView {
     term_rows: u16,
     active_rows: u16,           // current scroll-region top height (TTY)
     last_block: Option<String>, // last inline block emitted (non-TTY dedupe)
+    // Set by `erase`; consumed by the next `render`. When set, a subsequent
+    // upper-window growth shifts the freshly-streamed lower prompt down below the
+    // new upper region (see the shift logic in `render`). Only meaningful right
+    // after an `erase_window`, so continuous flow (no erase) is never shifted.
+    pending_erase_shift: bool,
 }
 
 impl ScreenView {
     pub fn new(is_tty: bool, no_status: bool, term_rows: u16) -> Self {
-        ScreenView { is_tty, no_status, term_rows, active_rows: 0, last_block: None }
+        ScreenView {
+            is_tty,
+            no_status,
+            term_rows,
+            active_rows: 0,
+            last_block: None,
+            pending_erase_shift: false,
+        }
     }
 
     /// Number of pinned top rows for the current machine state.
@@ -292,12 +304,50 @@ impl ScreenView {
         }
         if self.is_tty {
             let mut out = String::new();
+            // The shift below is a one-shot consumed on the first frame after an
+            // erase; read and clear it now.
+            let erase_shift = self.pending_erase_shift;
+            self.pending_erase_shift = false;
             if top != self.active_rows {
-                out.push_str(&if top == 0 {
-                    leave_region()
+                let delta = top as i32 - self.active_rows as i32;
+                if erase_shift && delta > 0 && top >= 2 {
+                    // A game cleared the screen, then redrew a multi-row upper
+                    // window (e.g. BeyondZork's stats + compass) and streamed its
+                    // short lower-window prompt right after the clear — before
+                    // this frame pins the upper region. That prompt (and the
+                    // input cursor) would otherwise sit inside the soon-to-be-
+                    // painted upper region, on top of the compass. Push the lower
+                    // window — its streamed text AND the cursor — down by the
+                    // delta so the cursor lands in the lower window and the prompt
+                    // stays visible (ZMSD §8.7.2.2).
+                    //
+                    // Sequence: DECSC to capture the real prompt cursor, reset to
+                    // full screen, scroll the display down (SD), DECRC to restore
+                    // the cursor, then a relative cursor-down (CUD) by the delta.
+                    // Wrapping SD in DECSC/DECRC normalises the terminal's SD
+                    // cursor side-effect, which is NOT portable (tmux homes the
+                    // cursor on SD; xterm leaves it put) — so the relative CUD then
+                    // lands on the shifted prompt with its real column intact.
+                    //
+                    // Gated on BOTH the just-erased flag and a multi-row upper
+                    // window (top >= 2). In continuous flow (no erase) the content
+                    // is already positioned correctly. And a v3 game also erases
+                    // at startup but then streams a full screen of narrative under
+                    // a 1-row status line (top == 1) — scrolling that would garble
+                    // it — so the 1-row status case is excluded.
+                    out.push_str("\x1b7"); // DECSC: save real prompt cursor
+                    out.push_str(&leave_region());
+                    out.push_str(&format!("\x1b[{delta}T")); // SD: content down
+                    out.push_str("\x1b8"); // DECRC: restore prompt cursor
+                    out.push_str(&format!("\x1b[{delta}B")); // CUD: follow content
+                    out.push_str(&enter_region(top, self.term_rows));
                 } else {
-                    enter_region(top, self.term_rows)
-                });
+                    out.push_str(&if top == 0 {
+                        leave_region()
+                    } else {
+                        enter_region(top, self.term_rows)
+                    });
+                }
                 self.active_rows = top;
             }
             if top > 0 {
@@ -359,6 +409,10 @@ impl ScreenView {
             return String::new();
         }
         self.active_rows = 0;
+        // Arm the one-shot lower-window shift: if the game now redraws a
+        // multi-row upper window, the next `render` pushes the freshly-streamed
+        // lower prompt down below it (see `render`).
+        self.pending_erase_shift = true;
         let paint = bg_sgr(bg, honor);
         if paint.is_empty() {
             format!("{}\x1b[2J\x1b[H", leave_region())
@@ -461,6 +515,53 @@ mod view_tests {
         let _ = v.render(1, &p, &a, ""); // activate region
         let out = v.render(0, &[], &[], "");
         assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
+    }
+
+    #[test]
+    fn erase_then_multirow_upper_shifts_lower_window() {
+        // BeyondZork case: erase, then a game redraws a 12-row upper window with
+        // a short lower prompt already streamed at the top. The next frame must
+        // scroll the lower window down and follow the cursor below the region.
+        let rows = vec![String::new(); 12];
+        let mut v = ScreenView::new(true, false, 24);
+        let _ = v.erase(ZColour::Default, true); // arms the one-shot shift
+        let out = v.render(12, &rows, &rows, "");
+        assert!(out.contains("\x1b[12T"), "scrolls the display down by 12 (SD): {out:?}");
+        assert!(out.contains("\x1b[12B"), "follows the cursor down by 12 (CUD): {out:?}");
+        assert!(out.contains("\x1b[13;24r"), "pins the region below the upper window: {out:?}");
+        // SD is wrapped in DECSC/DECRC so the terminal's SD cursor side-effect is
+        // normalised before the relative CUD.
+        assert!(
+            out.contains("\x1b7\x1b[r\x1b[12T\x1b8\x1b[12B"),
+            "SD is wrapped in DECSC/DECRC, then CUD: {out:?}"
+        );
+        // One-shot: a subsequent height change does NOT shift again.
+        let again = v.render(6, &rows[..6], &rows[..6], "");
+        assert!(!again.contains("\x1b[6T") && !again.contains("\x1b[6S"), "shift is one-shot: {again:?}");
+    }
+
+    #[test]
+    fn erase_then_single_row_status_does_not_shift() {
+        // A v3 game also erases at startup, but its 1-row status line (top == 1)
+        // must NOT trigger a shift — it streams a full screen of narrative that
+        // scrolling would garble.
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(true, false, 24);
+        let _ = v.erase(ZColour::Default, true);
+        let out = v.render(1, &p, &a, "");
+        assert!(!out.contains("\x1b[1T"), "1-row status line is not shifted: {out:?}");
+        assert!(out.contains("\x1b[2;24r"), "still pins the status region: {out:?}");
+    }
+
+    #[test]
+    fn multirow_upper_without_erase_does_not_shift() {
+        // Continuous flow (no preceding erase): the content is already positioned
+        // correctly, so a multi-row upper window must NOT scroll the lower window.
+        let rows = vec![String::new(); 12];
+        let mut v = ScreenView::new(true, false, 24);
+        let out = v.render(12, &rows, &rows, "");
+        assert!(!out.contains("\x1b[12T"), "no erase means no shift: {out:?}");
+        assert!(out.contains("\x1b[13;24r"), "still pins the region: {out:?}");
     }
 }
 
