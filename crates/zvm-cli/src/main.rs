@@ -38,22 +38,6 @@ struct CliSound {
     routines: HashMap<audio::SoundId, u16>,
 }
 
-/// Resolve the sound Blorb: a sibling `<story>.blb` / `<story>.blorb` next to the
-/// raw story file (a raw `.z3`/`.z5` carries no `Snd ` resources itself).
-fn resolve_sound_blorb(story_path: &Path) -> Option<blorb::Blorb> {
-    for ext in ["blb", "blorb"] {
-        let cand = story_path.with_extension(ext);
-        if cand.exists() {
-            if let Ok(bytes) = fs::read(&cand) {
-                if let Ok(b) = blorb::Blorb::parse(bytes) {
-                    return Some(b);
-                }
-            }
-        }
-    }
-    None
-}
-
 fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
     match k {
         blorb::SoundKind::Aiff => Some(audio::SoundFormat::Aiff),
@@ -775,9 +759,16 @@ fn main() {
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut sound: Option<CliSound> = if sound_enabled {
+        let blorb = match blorb::resolve_sound_blorb(&story_path) {
+            Some((b, path)) => {
+                eprintln!("zvm: loaded sound resources from {}", path.display());
+                Some(b)
+            }
+            None => None,
+        };
         Some(CliSound {
             backend: audio::AudioBackend::new(volume),
-            blorb: resolve_sound_blorb(&story_path),
+            blorb,
             ids: HashMap::new(),
             routines: HashMap::new(),
         })

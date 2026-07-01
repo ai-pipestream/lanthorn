@@ -1249,7 +1249,13 @@ fn main() {
 
     // Resolve the sound container + construct the audio backend (silent if the
     // feature is off, there is no device, or sound is disabled in config).
-    state.sound_blorb = resolve_sound_blorb(&story_path);
+    state.sound_blorb = match blorb::resolve_sound_blorb(&story_path) {
+        Some((b, path)) => {
+            eprintln!("babelmap: loaded sound resources from {}", path.display());
+            Some(b)
+        }
+        None => None,
+    };
     if state.config.enable_sound {
         state.audio = Some(audio::AudioBackend::new(state.config.volume));
     }
@@ -4288,30 +4294,6 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 }
 
 // ── Game-driven input helpers (char-mode keypress, timed-input interrupt) ──────
-
-/// Resolve the sound-resource Blorb at launch: the story file itself if it is a
-/// Blorb, else a sibling `<story>.blb` / `<story>.blorb`. `None` when no
-/// container is found or it fails to parse.
-fn resolve_sound_blorb(story_path: &std::path::Path) -> Option<blorb::Blorb> {
-    if let Ok(bytes) = std::fs::read(story_path) {
-        if blorb::Blorb::is_blorb(&bytes) {
-            if let Ok(b) = blorb::Blorb::parse(bytes) {
-                return Some(b);
-            }
-        }
-    }
-    for ext in ["blb", "blorb"] {
-        let cand = story_path.with_extension(ext);
-        if cand.exists() {
-            if let Ok(bytes) = std::fs::read(&cand) {
-                if let Ok(b) = blorb::Blorb::parse(bytes) {
-                    return Some(b);
-                }
-            }
-        }
-    }
-    None
-}
 
 /// Route a turn's sound/diagnostic events: diagnostics become Warning transcript
 /// lines; the latest beep arms a one-shot story-border pulse; the current room

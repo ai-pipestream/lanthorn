@@ -178,6 +178,110 @@ impl Blorb {
         };
         Some((self.chunk_data(e), kind))
     }
+
+    /// True if this Blorb carries any `Snd ` sound resource.
+    pub fn has_sounds(&self) -> bool {
+        self.resources().iter().any(|r| &r.usage == b"Snd ")
+    }
+}
+
+/// Read + parse `path` into a Blorb only if it is a Blorb that carries sounds.
+fn read_sound_blorb(path: &std::path::Path) -> Option<Blorb> {
+    let bytes = std::fs::read(path).ok()?;
+    if !Blorb::is_blorb(&bytes) {
+        return None;
+    }
+    let b = Blorb::parse(bytes).ok()?;
+    if b.has_sounds() {
+        Some(b)
+    } else {
+        None
+    }
+}
+
+/// Length of the shared leading run of bytes between two ascii-lowercased stems.
+fn common_prefix_len(a: &str, b: &str) -> usize {
+    a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
+}
+
+/// Resolve the Blorb holding a story's sound resources, plus the path it was
+/// read from, or `None`.
+///
+/// Order: (1) the story file itself if it is a Blorb; (2) a same-stem
+/// `<story>.blb`/`.blorb` sibling with sounds; (3) a directory-scan fallback
+/// over blorb-extension files that carry `Snd ` resources, picking the best
+/// stem-prefix match (>=3 chars) or the sole candidate — else `None`
+/// (ambiguous ⇒ no sound rather than the wrong game's sound).
+pub fn resolve_sound_blorb(
+    story_path: &std::path::Path,
+) -> Option<(Blorb, std::path::PathBuf)> {
+    // 1. Story file is itself a Blorb.
+    if let Ok(bytes) = std::fs::read(story_path) {
+        if Blorb::is_blorb(&bytes) {
+            if let Ok(b) = Blorb::parse(bytes) {
+                return Some((b, story_path.to_path_buf()));
+            }
+        }
+    }
+    // 2. Same-stem sibling.
+    for ext in ["blb", "blorb"] {
+        let cand = story_path.with_extension(ext);
+        if cand != story_path && cand.exists() {
+            if let Some(b) = read_sound_blorb(&cand) {
+                return Some((b, cand));
+            }
+        }
+    }
+    // 3. Directory-scan fallback (blorb-extension files with sounds only).
+    let dir = story_path.parent()?;
+    let story_stem = story_path
+        .file_stem()?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    let mut candidates: Vec<(usize, Blorb, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path == story_path {
+            continue;
+        }
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| {
+                let e = e.to_ascii_lowercase();
+                e == "blb" || e == "blorb" || e == "zblorb" || e == "gblorb"
+            })
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        let Some(b) = read_sound_blorb(&path) else {
+            continue;
+        };
+        let cand_stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let plen = common_prefix_len(&story_stem, &cand_stem);
+        candidates.push((plen, b, path));
+    }
+    // Best non-trivial prefix match wins.
+    if let Some(i) = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, (plen, _, _))| *plen >= 3)
+        .max_by_key(|(_, (plen, _, _))| *plen)
+        .map(|(i, _)| i)
+    {
+        let (_, b, path) = candidates.swap_remove(i);
+        return Some((b, path));
+    }
+    // Otherwise, the sole candidate if unambiguous.
+    if candidates.len() == 1 {
+        let (_, b, path) = candidates.pop().unwrap();
+        return Some((b, path));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -364,5 +468,117 @@ mod tests {
         file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
         file.extend_from_slice(&inner);
         assert_eq!(Blorb::parse(file).unwrap_err(), BlorbError::BadOffset);
+    }
+
+    // ── resolve_sound_blorb / has_sounds ────────────────────────────────────
+
+    /// RAII guard that removes a temp directory (and its contents) on drop.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "babelmap-blorb-test-{}-{}-{n}",
+                std::process::id(),
+                tag
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+
+        fn join(&self, name: &str) -> std::path::PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sound_blorb() -> Vec<u8> {
+        sound_blorb_tagged(b"aiffdata")
+    }
+
+    /// A sound Blorb whose `Snd ` payload is `tag`, so tests can tell which
+    /// file the resolver actually picked among several candidates.
+    fn sound_blorb_tagged(tag: &[u8]) -> Vec<u8> {
+        build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 1, b"FORM", tag)])
+    }
+
+    #[test]
+    fn resolve_prefers_story_that_is_itself_a_blorb() {
+        let dir = TempDir::new("self-blorb");
+        let game = dir.join("game.blb");
+        std::fs::write(&game, sound_blorb()).unwrap();
+
+        let (b, path) = resolve_sound_blorb(&game).expect("resolves the story's own Blorb");
+        assert!(b.has_sounds());
+        assert_eq!(path, game);
+    }
+
+    #[test]
+    fn resolve_finds_same_stem_sibling() {
+        let dir = TempDir::new("sibling");
+        let story = dir.join("game.z5");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        let sibling = dir.join("game.blb");
+        std::fs::write(&sibling, sound_blorb()).unwrap();
+
+        let (b, path) = resolve_sound_blorb(&story).expect("resolves the same-stem sibling");
+        assert!(b.has_sounds());
+        assert_eq!(path, sibling);
+    }
+
+    #[test]
+    fn resolve_scans_directory_for_prefixed_blorb() {
+        let dir = TempDir::new("prefix-scan");
+        let story = dir.join("lurkinghorror.z5");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        let prefixed = dir.join("lurkinghorror-sounds.blorb");
+        std::fs::write(&prefixed, sound_blorb_tagged(b"prefixed-data")).unwrap();
+        let unrelated = dir.join("arthur.blb");
+        std::fs::write(&unrelated, sound_blorb_tagged(b"arthur-data")).unwrap();
+
+        let (b, path) = resolve_sound_blorb(&story).expect("resolves the prefix-matching blorb");
+        assert!(b.has_sounds());
+        assert_eq!(
+            b.sound(1).unwrap().0,
+            b"prefixed-data",
+            "must pick the prefix-matching blorb, not the unrelated one"
+        );
+        assert_eq!(path, prefixed);
+    }
+
+    #[test]
+    fn resolve_ambiguous_scan_returns_none() {
+        let dir = TempDir::new("ambiguous");
+        let story = dir.join("story.z5");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        std::fs::write(dir.join("foo.blb"), sound_blorb()).unwrap();
+        std::fs::write(dir.join("bar.blorb"), sound_blorb()).unwrap();
+
+        assert!(resolve_sound_blorb(&story).is_none());
+    }
+
+    #[test]
+    fn resolve_soundless_story_no_blorb_returns_none() {
+        let dir = TempDir::new("no-blorb");
+        let story = dir.join("plain.z5");
+        std::fs::write(&story, b"not a blorb").unwrap();
+
+        assert!(resolve_sound_blorb(&story).is_none());
+    }
+
+    #[test]
+    fn has_sounds_true_only_with_snd() {
+        let with_sound = Blorb::parse(sound_blorb()).unwrap();
+        assert!(with_sound.has_sounds());
+
+        let without_sound = Blorb::parse(build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")])).unwrap();
+        assert!(!without_sound.has_sounds());
     }
 }
