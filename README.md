@@ -66,6 +66,14 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   your theme owning every colour. `zvm-cli` renders the same colours as ANSI SGR
   and accepts `--no-game-colours` to opt out. (Glulx/Glk colour via style hints is
   still on the roadmap.)
+- **Interpreter number** — the story header's interpreter number (byte `0x1E`)
+  defaults to **1 (DECSystem-20)** for v1–5 and **6 (IBM PC)** for v6, matching
+  Frotz. This is what makes colour appear: several Infocom games (notably Beyond
+  Zork) only emit colour on a non-IBM interpreter and fall back to reverse-video
+  under IBM PC. Override it with the app's `interpreter_number` config key or
+  `zvm-cli -I N` / `--interpreter N` (e.g. `-I 6` to select the IBM PC path,
+  which draws Beyond Zork's map box and cursor arrows as CP437 character
+  graphics instead of Font 3).
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
