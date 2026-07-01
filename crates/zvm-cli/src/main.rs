@@ -72,10 +72,14 @@ struct StdoutOutput {
     /// the column limit is suppressed (per Z-spec, unwrapped output is flushed
     /// immediately; explicit `\n` and `[MORE]` paging still apply).
     buffer_mode: bool,
+    /// When `false`, game-supplied fg/bg colour SGR is suppressed at render time
+    /// even if a non-conformant game sets colour after the header bit is cleared.
+    /// Style bits (reverse/bold/italic) are always preserved.
+    honor_game_colours: bool,
 }
 
 impl StdoutOutput {
-    fn new(is_tty: bool, paging: bool, page_height: u16, cols: u16) -> Self {
+    fn new(is_tty: bool, paging: bool, page_height: u16, cols: u16, honor_game_colours: bool) -> Self {
         StdoutOutput {
             is_tty,
             paging,
@@ -84,6 +88,7 @@ impl StdoutOutput {
             current_col: 0,
             lines: 0,
             buffer_mode: false,
+            honor_game_colours,
         }
     }
 
@@ -128,7 +133,19 @@ impl Output for StdoutOutput {
     }
 
     fn print_attr(&mut self, s: &str, attrs: zvm::io::TextAttrs) {
-        let out = crate::screen::style_wrap(s, attrs, self.is_tty);
+        // When honour is off, strip game fg/bg so a non-conformant game that sets
+        // colour after the header bit is cleared still renders without colour.
+        // Style bits (reverse/bold/italic) are preserved unconditionally.
+        let effective = if self.honor_game_colours {
+            attrs
+        } else {
+            zvm::io::TextAttrs {
+                fg: zvm::screen::ZColour::Default,
+                bg: zvm::screen::ZColour::Default,
+                ..attrs
+            }
+        };
+        let out = crate::screen::style_wrap(s, effective, self.is_tty);
         self.write_counted(&out);
     }
 
@@ -171,6 +188,7 @@ fn build_machine(
     paging: bool,
     page_height: u16,
     term_cols: u16,
+    honor_game_colours: bool,
 ) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
@@ -185,6 +203,7 @@ fn build_machine(
         paging,
         page_height,
         term_cols,
+        honor_game_colours,
     )));
     machine.init_caps();
     Ok(machine)
@@ -436,12 +455,14 @@ fn main() {
     let paging = both_tty && !args.no_more;
     let mut page_height = term_rows.saturating_sub(2).max(2);
 
+    let honor = parse_game_colours(&argv);
     let mut machine = match build_machine(
         story_bytes,
         stdout_is_tty,
         paging,
         page_height,
         term_cols,
+        honor,
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -449,7 +470,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    machine.set_honor_game_colours(parse_game_colours(&argv));
+    machine.set_honor_game_colours(honor);
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, term_rows);
@@ -495,6 +516,7 @@ fn main() {
                     paging,
                     page_height,
                     term_cols,
+                    honor,
                 ) {
                     Ok(m) => m,
                     Err(e) => {
@@ -502,7 +524,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
-                machine.set_honor_game_colours(parse_game_colours(&argv));
+                machine.set_honor_game_colours(honor);
                 aux_preload(&mut machine, &aux_file, args.no_aux);
             }
 
@@ -617,6 +639,33 @@ mod stdout_tests {
         use zvm::io::TextAttrs;
         assert_eq!(crate::screen::style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, true), "\x1b[1mhi\x1b[0m");
         assert_eq!(crate::screen::style_wrap("hi", TextAttrs { style: 2, ..Default::default() }, false), "hi");
+    }
+
+    /// CLI gate: when honor_game_colours is OFF, print_attr strips fg/bg before
+    /// passing to style_wrap so no colour SGR is emitted — but reverse/bold/italic
+    /// style bits are always preserved.
+    #[test]
+    fn honour_off_strips_colour_preserves_style_bits() {
+        use zvm::io::TextAttrs;
+        use zvm::screen::ZColour;
+        // Attrs with fg=red (Standard(3)→SGR 31), bg=blue (Standard(6)→SGR 44),
+        // and reverse+bold style bits.
+        let attrs = TextAttrs { style: 0x03, fg: ZColour::Standard(3), bg: ZColour::Standard(6) };
+
+        // With honour ON: colour SGR present.
+        let with_honour = crate::screen::style_wrap("hi", attrs, true);
+        assert!(with_honour.contains("31"), "fg red SGR present with honour: {with_honour:?}");
+        assert!(with_honour.contains("44"), "bg blue SGR present with honour: {with_honour:?}");
+
+        // With honour OFF: strip fg/bg, pass Default channels to style_wrap.
+        // This mirrors what StdoutOutput::print_attr does when honor_game_colours=false.
+        let stripped = TextAttrs { fg: ZColour::Default, bg: ZColour::Default, ..attrs };
+        let without_honour = crate::screen::style_wrap("hi", stripped, true);
+        assert!(!without_honour.contains("31"), "fg colour absent when honour=false: {without_honour:?}");
+        assert!(!without_honour.contains("44"), "bg colour absent when honour=false: {without_honour:?}");
+        // Reverse (7) and bold (1) must still be present.
+        assert!(without_honour.contains('7'), "reverse SGR preserved: {without_honour:?}");
+        assert!(without_honour.contains('1'), "bold SGR preserved: {without_honour:?}");
     }
 }
 
