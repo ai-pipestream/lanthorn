@@ -51,12 +51,18 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   themeable (`upper_window`, `upper_window_border`, `virtual_window_border`).
   During a `read_char` prompt keystrokes go to the game; the hotkey prefix
   (default `Ctrl+K`) stays reserved.
-- **Sound effects** — the `sound_effect` opcode's two built-in bleeps (high #1 /
-  low #2) flash the story-pane border in distinct, themeable colors
-  (`sound_beep_high` / `sound_beep_low`); a brief one-shot fade. (Sampled sounds
-  need Blorb audio, still on the roadmap.) Unimplemented-opcode warnings surface
-  in the transcript as meta lines (hidden by `/filter story`) rather than on
-  stderr.
+- **Sound effects** — the `sound_effect` opcode's two built-in bleeps (#1 high /
+  #2 low) play as real synthesized tones, and Blorb `Snd ` resources (#≥3) play
+  as sampled audio (AIFF, Ogg, or ProTracker MOD), in both the `app` TUI and
+  `zvm-cli`. Sound resources come from the story file itself if it's a Blorb,
+  else a sibling `.blb`/`.blorb` next to it. The story-pane border still flashes
+  in distinct, themeable colors (`sound_beep_high` / `sound_beep_low`) as a
+  complementary/accessibility cue on every bleep — and the only cue when sound
+  is disabled. Controlled by `enable_sound` (default on) + `volume` (0-100,
+  default 100); toggle with the `/toggle-sound` command or `F2` settings row,
+  adjust with `/volume <0-100>`. `zvm-cli` takes `--no-sound` and
+  `--volume <0-100>`. Unimplemented-opcode warnings surface in the transcript
+  as meta lines (hidden by `/filter story`) rather than on stderr.
 - **Timed / interrupt input** — v4+ `read` and `read_char` `time`+`routine`
   operands are honored: while waiting for input the game's interrupt routine is
   called every N tenths of a second (real-time clocks, countdowns — e.g. Border
@@ -264,7 +270,9 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
 
 ## Installation & usage
 
-Requires a Rust toolchain.
+Requires a Rust toolchain. On Linux, the `playback` audio feature (on by
+default) needs ALSA development headers to build: `libasound2-dev`
+(Debian/Ubuntu) or `alsa-lib-devel` (Fedora).
 
 ```bash
 # Build
@@ -302,8 +310,16 @@ line stream when piped. Interactively it does single-key input (arrow/function
 keys decoded for `read_char` menus) and `[MORE]` paging on long output; aux save
 tables persist per game by IFID. The flags `--no-status` (byte-identical
 lower-stream output), `--no-aux`, and `--no-more` keep the headless test harness
-deterministic.
+deterministic; `--no-sound` disables audio and `--volume <0-100>` sets the
+master volume.
 
 The crates are layered `zvm` → `mapper` → `app`; `zvm-cli` is a thin VM
 front-end. The mapper has no dependency on the VM, so layout logic can be tested
 in isolation.
+
+The `audio` crate carries two default-on features: `playback` (real output via
+`rodio`) and `mod-music` (ProTracker `.mod` playback via `mod_player`, requires
+`playback`). Build with `--no-default-features` to get a compile-time no-op
+backend for headless/CI environments; `--no-default-features --features
+playback` keeps AIFF/Ogg sample playback without MOD support. With `playback`
+on, a missing audio device at runtime degrades to silence rather than erroring.
