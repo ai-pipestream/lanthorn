@@ -408,7 +408,24 @@ impl ColorScheme {
             warning_marker: Style::new().fg(Color::Yellow),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
-            palette: [Color::Reset; 16],
+            palette: [
+                Color::Black,      // 0  Z Standard(2) black
+                Color::Red,        // 1  Standard(3) red
+                Color::Green,      // 2  Standard(4) green
+                Color::Yellow,     // 3  Standard(5) yellow
+                Color::Blue,       // 4  Standard(6) blue
+                Color::Magenta,    // 5  Standard(7) magenta
+                Color::Cyan,       // 6  Standard(8) cyan
+                Color::Gray,       // 7  Standard(9) white (ANSI 7)
+                Color::DarkGray,   // 8  bright black
+                Color::LightRed,   // 9
+                Color::LightGreen, // 10
+                Color::LightYellow,// 11
+                Color::LightBlue,  // 12
+                Color::LightMagenta,//13
+                Color::LightCyan,  // 14
+                Color::White,      // 15 bright white
+            ],
         }
     }
 
@@ -1092,6 +1109,16 @@ unknown-key = ignored
     fn loc_indicator_default_is_dim() {
         let cs = ColorScheme::terminal_default();
         assert_eq!(cs.loc_indicator.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn terminal_default_palette_maps_standard_colours_concretely() {
+        use zvm::screen::ZColour;
+        use ratatui::style::Color;
+        let s = ColorScheme::terminal_default();
+        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(2), &s), Color::Black, "black");
+        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(3), &s), Color::Red, "red");
+        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(9), &s), Color::Gray, "white(9)->ANSI white");
     }
 
 }
