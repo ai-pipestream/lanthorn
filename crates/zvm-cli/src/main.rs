@@ -283,10 +283,10 @@ fn decode_keycode(code: KeyCode) -> u8 {
         KeyCode::Down => 130,
         KeyCode::Left => 131,
         KeyCode::Right => 132,
-        KeyCode::F(1) => 133,
-        KeyCode::F(2) => 134,
-        KeyCode::F(3) => 135,
-        KeyCode::F(4) => 136,
+        // Function keys F1–F12 → ZSCII 133–144 (ZMSD §3.8). Keypad digits
+        // (ZSCII 145–154) are unreachable: terminals report them as ordinary
+        // Char events, indistinguishable from the number row.
+        KeyCode::F(n) if (1..=12).contains(&n) => 132 + n,
         _ => b'\n', // unknown → newline
     }
 }
@@ -820,6 +820,8 @@ mod keycode_tests {
         assert_eq!(decode_keycode(KeyCode::Right), 132);
         assert_eq!(decode_keycode(KeyCode::F(1)), 133);
         assert_eq!(decode_keycode(KeyCode::F(4)), 136);
+        assert_eq!(decode_keycode(KeyCode::F(5)), 137);
+        assert_eq!(decode_keycode(KeyCode::F(12)), 144);
     }
 }
 
