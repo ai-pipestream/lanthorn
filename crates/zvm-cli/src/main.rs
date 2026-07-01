@@ -187,6 +187,7 @@ fn build_machine(
     stdout_is_tty: bool,
     paging: bool,
     page_height: u16,
+    term_rows: u16,
     term_cols: u16,
     honor_game_colours: bool,
     interpreter_number: Option<u8>,
@@ -208,6 +209,15 @@ fn build_machine(
     )));
     machine.set_interpreter_number(interpreter_number);
     machine.init_caps();
+    // Report the real terminal size to the game. init_caps seeds a generous
+    // 80×24 default; without this override the game centres and wraps against
+    // 80 columns regardless of the actual pane width (e.g. a title page stays
+    // centred for 80 in a 50-column terminal). Kept in sync on resize.
+    zvm::screen::write_screen_dims(
+        &mut machine.mem,
+        term_rows.min(255) as u8,
+        term_cols.min(255) as u8,
+    );
     Ok(machine)
 }
 
@@ -471,6 +481,13 @@ fn apply_resize(
         o.cols = new_cols;
         o.page_height = *page_height;
     }
+    // Keep the game's view of the screen size current so it re-centres and
+    // re-wraps against the new pane width on its next redraw.
+    zvm::screen::write_screen_dims(
+        &mut machine.mem,
+        new_rows.min(255) as u8,
+        new_cols.min(255) as u8,
+    );
 }
 
 /// Poll the current terminal size and apply it if it changed. Only runs when
@@ -543,6 +560,7 @@ fn main() {
         stdout_is_tty,
         paging,
         page_height,
+        term_rows,
         term_cols,
         honor,
         interpreter,
@@ -611,6 +629,7 @@ fn main() {
                     stdout_is_tty,
                     paging,
                     page_height,
+                    term_rows,
                     term_cols,
                     honor,
                     interpreter,
