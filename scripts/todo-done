@@ -1,0 +1,67 @@
+#!/bin/sh
+# Move a single TODO.md item into COMPLETED.md with a random TODO-NNNN id.
+#
+# Random ids need no central counter, so parallel worktree lanes can each
+# allocate independently with no coordination. On the rare collision the
+# commit-msg hook rejects the commit — just re-run this to reroll.
+#
+# Usage: scripts/todo-done "<fixed text that uniquely matches the TODO.md line>"
+#
+# After running, `git add TODO.md COMPLETED.md <code>` and commit —
+# prepare-commit-msg auto-adds the `Completes: TODO-NNNN` trailer and commit-msg
+# validates it.
+
+set -e
+
+pattern="$1"
+if [ -z "$pattern" ]; then
+  echo "usage: scripts/todo-done \"<pattern matching one TODO.md line>\"" >&2
+  exit 1
+fi
+
+root=$(git rev-parse --show-toplevel)
+todo="$root/TODO.md"
+done="$root/COMPLETED.md"
+
+[ -f "$todo" ] || { echo "no TODO.md at $todo" >&2; exit 1; }
+[ -f "$done" ] || : > "$done"
+
+matches=$(grep -nF "$pattern" "$todo" || true)
+count=$(printf '%s' "$matches" | grep -c . || true)
+if [ "$count" -ne 1 ]; then
+  echo "Expected exactly 1 match in TODO.md, found $count:" >&2
+  [ -n "$matches" ] && printf '%s\n' "$matches" >&2
+  exit 1
+fi
+
+lineno=$(printf '%s' "$matches" | cut -d: -f1)
+line=$(sed -n "${lineno}p" "$todo")
+
+# Random 6-hex id (0-9a-f, ~16.7M space), avoiding any id already present in
+# this checkout. A cross-worktree clash (two frozen snapshots picking the same
+# id) is caught later by the commit-msg hook.
+next=""
+i=0
+while [ "$i" -lt 50 ]; do
+  cand="TODO-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  if ! grep -qF "$cand" "$todo" "$done" 2>/dev/null; then next="$cand"; break; fi
+  i=$(( i + 1 ))
+done
+[ -z "$next" ] && { echo "no free id after 50 tries (id space crowded?)" >&2; exit 1; }
+
+today=$(date +%Y-%m-%d)
+
+# Strip a leading "1. [ ] " / "[x] " / "[~] " marker before re-tagging.
+text=$(printf '%s' "$line" | sed -E 's/^1\. \[[ x~]\] //; s/^\[[ x~]\] //')
+entry="1. [x] [$next] $text — completed $today"
+
+# Remove from TODO.md, append to COMPLETED.md.
+tmp=$(mktemp)
+sed "${lineno}d" "$todo" > "$tmp" && mv "$tmp" "$todo"
+printf '%s\n' "$entry" >> "$done"
+
+echo "Moved TODO.md:$lineno -> COMPLETED.md as $next"
+echo
+echo "Next steps:"
+echo "    git add TODO.md COMPLETED.md <your code files>"
+echo "    git commit    # 'Completes: $next' trailer is auto-added & validated"

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Nudge (non-blocking): if this commit touches engine/app code but doesn't move
+# any item into COMPLETED.md, remind the author to do the bookkeeping.
+# A block would just train reflexive --no-verify, since most code commits
+# legitimately don't finish a whole TODO item.
+
+changed=$(git diff --cached --name-only)
+
+# Only care when real code is staged.
+echo "$changed" | grep -qE '^crates/' || exit 0
+
+# If COMPLETED.md is part of the commit, assume bookkeeping was done.
+echo "$changed" | grep -qx 'COMPLETED.md' && exit 0
+
+echo "⚠ pre-commit: staged changes touch crates/ but COMPLETED.md is untouched."
+echo "  If this commit COMPLETES a TODO item, run:"
+echo "      scripts/todo-done \"<text that matches the TODO.md line>\""
+echo "  then 'git add TODO.md COMPLETED.md' before committing."
+echo "  (warning only — the commit will proceed)"
+exit 0
