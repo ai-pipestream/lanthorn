@@ -1123,6 +1123,7 @@ fn main() {
                 bytes,
                 cfg.virtual_screen_cols as u32,
                 cfg.virtual_screen_rows as u32,
+                cfg.honor_game_colours,
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {
@@ -3369,6 +3370,7 @@ fn reset_game(
                 bytes,
                 state.config.virtual_screen_cols as u32,
                 state.config.virtual_screen_rows as u32,
+                state.config.honor_game_colours,
             )
             .map_err(|e| format!("{e:?}"))
             .map(|new_session| {
@@ -4322,7 +4324,7 @@ mod tests {
             .join("../gvm-cli/tests/fixtures/glulxercise.ulx");
         let Ok(bytes) = std::fs::read(&fixture) else { return };
         let mut engine: Box<dyn app::engine::Engine> =
-            Box::new(app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24).expect("glulx session"));
+            Box::new(app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true).expect("glulx session"));
         let mut mapper = mapper::mapper::Mapper::default();
         let mut state = app::state::AppState::default();
         state.turns = 5;

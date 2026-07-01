@@ -39,12 +39,16 @@ pub struct StatusLine {
 /// Transient display state — NOT serialised into Quetzal saves (like
 /// `current_font`). The host resolves `Default` to the terminal/scheme
 /// default, `Standard(2..=9)` to the scheme palette, `Standard(10..=12)` to
-/// fixed grey RGB, and `True` to an exact 15-bit RGB colour.
+/// fixed grey RGB, `True` to an exact 15-bit RGB colour (Z-machine
+/// `set_true_colour`), and `True24` to an exact 24-bit `0xRRGGBB` colour (used
+/// by the Glulx host, whose Glk stylehint colours are 24-bit — carried at full
+/// fidelity rather than downsampled to 15-bit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZColour {
     Default,
     Standard(u8),
     True(u16),
+    True24(u32),
 }
 impl Default for ZColour {
     fn default() -> Self {

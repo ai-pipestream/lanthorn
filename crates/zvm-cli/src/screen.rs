@@ -37,6 +37,10 @@ fn push_colour_sgr(params: &mut Vec<String>, c: ZColour, fg: bool) {
             let (r, g, b) = rgb15_to_888(v);
             params.push(format!("{};2;{};{};{}", base_true, r, g, b));
         }
+        ZColour::True24(v) => {
+            let (r, g, b) = (((v >> 16) & 0xFF), ((v >> 8) & 0xFF), (v & 0xFF));
+            params.push(format!("{};2;{};{};{}", base_true, r, g, b));
+        }
     }
 }
 

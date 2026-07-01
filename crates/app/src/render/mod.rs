@@ -67,6 +67,9 @@ pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
             let (r, g, b) = rgb15_to_888(v);
             Color::Rgb(r, g, b)
         }
+        ZColour::True24(v) => {
+            Color::Rgb(((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
+        }
     }
 }
 
@@ -147,6 +150,8 @@ mod text_style_tests {
         assert_eq!(resolve_zcolour(ZColour::Default, &scheme), Color::Reset);
         assert_eq!(resolve_zcolour(ZColour::Standard(11), &scheme), Color::Rgb(0x80, 0x80, 0x80));
         assert_eq!(resolve_zcolour(ZColour::True(0x7FFF), &scheme), Color::Rgb(255, 255, 255));
+        // True24 carries an exact 24-bit RGB (Glulx stylehint colour).
+        assert_eq!(resolve_zcolour(ZColour::True24(0x0011_2233), &scheme), Color::Rgb(0x11, 0x22, 0x33));
     }
 
     #[test]

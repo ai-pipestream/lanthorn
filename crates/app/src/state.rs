@@ -211,13 +211,16 @@ pub struct StyleRun {
 /// Encode a [`zvm::screen::ZColour`] as a packed `u32` for serde-safe storage in
 /// [`StyleRun`] (zvm is zero-dep and cannot derive serde).
 ///
-/// Scheme: `Default` → 0, `Standard(n)` → `(1 << 24) | n`, `True(v)` → `(2 << 24) | v`.
+/// Scheme (tag in the high byte): `Default` → 0, `Standard(n)` → `(1 << 24) | n`,
+/// `True(v)` → `(2 << 24) | v`, `True24(rgb)` → `(3 << 24) | rgb` (24-bit RGB
+/// occupies the low 24 bits exactly).
 pub fn pack_zcolour(c: zvm::screen::ZColour) -> u32 {
     use zvm::screen::ZColour;
     match c {
         ZColour::Default    => 0,
         ZColour::Standard(n) => (1 << 24) | n as u32,
         ZColour::True(v)    => (2 << 24) | v as u32,
+        ZColour::True24(v)  => (3 << 24) | (v & 0x00FF_FFFF),
     }
 }
 
@@ -227,6 +230,7 @@ pub fn unpack_zcolour(p: u32) -> zvm::screen::ZColour {
     match p >> 24 {
         1 => ZColour::Standard((p & 0xFF) as u8),
         2 => ZColour::True((p & 0xFFFF) as u16),
+        3 => ZColour::True24(p & 0x00FF_FFFF),
         _ => ZColour::Default,
     }
 }
@@ -1847,7 +1851,13 @@ mod tests {
     fn pack_roundtrip_and_run_carries_colour() {
         use zvm::screen::ZColour;
         // Round-trip all cases.
-        for c in [ZColour::Default, ZColour::Standard(3), ZColour::Standard(12), ZColour::True(0x1234)] {
+        for c in [
+            ZColour::Default,
+            ZColour::Standard(3),
+            ZColour::Standard(12),
+            ZColour::True(0x1234),
+            ZColour::True24(0x00AB_CDEF),
+        ] {
             assert_eq!(unpack_zcolour(pack_zcolour(c)), c,
                 "pack/unpack round-trip failed for {c:?}");
         }

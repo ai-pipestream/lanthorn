@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 
-use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, WinType};
+use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, StyleColour, WinType};
 
 use crate::engine::{
     BufferWindow, GridCell, GridWindow, ScreenModel, Split, StatusModel, WinNode,
@@ -42,6 +42,25 @@ pub fn glk_style_bits(style: GlkStyle) -> u8 {
     }
 }
 
+/// Resolve a Glk style class + its stylehint colour into the app's neutral
+/// `(style-bits, packed-fg, packed-bg)`. The reverse hint (bit `0x01`) and the
+/// fg/bg colour apply only when `honor` is set; 24-bit RGB is carried
+/// losslessly via [`ZColour::True24`](zvm::screen::ZColour::True24). Packed
+/// colours use [`crate::state::pack_zcolour`] (`0` = `ZColour::Default`).
+fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, honor: bool) -> (u8, u32, u32) {
+    let mut bits = glk_style_bits(style);
+    if !honor {
+        return (bits, 0, 0);
+    }
+    if colour.reverse {
+        bits |= 0x01;
+    }
+    let pack = |o: Option<u32>| {
+        o.map(|v| crate::state::pack_zcolour(zvm::screen::ZColour::True24(v))).unwrap_or(0)
+    };
+    (bits, pack(colour.fg), pack(colour.bg))
+}
+
 // ── Per-window record ──────────────────────────────────────────────────────────
 
 /// A text-grid window's cell buffer (cells keyed by 0-based `(row, col)`).
@@ -49,14 +68,15 @@ pub fn glk_style_bits(style: GlkStyle) -> u8 {
 struct GridBuf {
     width: u32,
     height: u32,
-    cells: BTreeMap<(u32, u32), (char, u8)>,
+    /// `(row, col) -> (char, style-bits, packed-fg, packed-bg)`.
+    cells: BTreeMap<(u32, u32), (char, u8, u32, u32)>,
 }
 
 /// A text-buffer window's styled output log.
 #[derive(Default)]
 struct BufBuf {
-    /// Every `put_text` run in order, as `(style-bits, text)`.
-    log: Vec<(u8, String)>,
+    /// Every `put_text` run in order, as `(style-bits, packed-fg, packed-bg, text)`.
+    log: Vec<(u8, u32, u32, String)>,
     /// Number of leading log entries already drained by `take_transcript`.
     drained: usize,
     /// Scrollback offset for an inline (non-primary) buffer window.
@@ -76,17 +96,20 @@ pub struct AppGlk {
     buffers: BTreeMap<u32, BufBuf>,
     /// The primary buffer window id (the first text-buffer opened), if any.
     primary: Option<u32>,
+    /// Whether to honour the game's stylehint colours (F2 / config gate).
+    honor: bool,
 }
 
 impl Default for AppGlk {
     fn default() -> Self {
-        AppGlk::new(80, 24)
+        AppGlk::new(80, 24, true)
     }
 }
 
 impl AppGlk {
-    /// A backend reporting a `cols × rows` display.
-    pub fn new(cols: u32, rows: u32) -> AppGlk {
+    /// A backend reporting a `cols × rows` display. `honor` gates rendering of
+    /// the game's stylehint colours (see [`AppGlk::set_honor_colours`]).
+    pub fn new(cols: u32, rows: u32, honor: bool) -> AppGlk {
         AppGlk {
             cols,
             rows,
@@ -94,7 +117,14 @@ impl AppGlk {
             grids: BTreeMap::new(),
             buffers: BTreeMap::new(),
             primary: None,
+            honor,
         }
+    }
+
+    /// Enable/disable honouring the game's stylehint colours. Applies to output
+    /// recorded after the change (already-recorded runs keep their colour).
+    pub fn set_honor_colours(&mut self, on: bool) {
+        self.honor = on;
     }
 
     /// Update the reported display size (the host story-pane size each frame).
@@ -110,8 +140,7 @@ impl AppGlk {
 
     /// Drain the primary window's text printed since the last drain, as
     /// `(text, (char_count, bits, fg, bg) chunks)` for `push_transcript_runs`.
-    /// Glulx colour is not yet threaded through AppGlk, so fg/bg default to
-    /// `ZColour::Default` for now.
+    /// fg/bg carry the resolved stylehint colour (24-bit via `ZColour::True24`).
     pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)>) {
         let Some(pid) = self.primary else {
             return (String::new(), Vec::new());
@@ -121,12 +150,12 @@ impl AppGlk {
         };
         let mut text = String::new();
         let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)> = Vec::new();
-        for (bits, s) in &buf.log[buf.drained..] {
+        for (bits, fg, bg, s) in &buf.log[buf.drained..] {
             let n = s.chars().count();
             if n == 0 {
                 continue;
             }
-            chunks.push((n, *bits, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
+            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg)));
             text.push_str(s);
         }
         buf.drained = buf.log.len();
@@ -161,9 +190,9 @@ impl AppGlk {
         let rows = g.map(|g| g.height).unwrap_or(rect.height).max(rect.height) as u16;
         let mut cells = vec![GridCell::default(); cols as usize * rows as usize];
         if let Some(g) = g {
-            for (&(r, c), &(ch, bits)) in &g.cells {
+            for (&(r, c), &(ch, bits, fg, bg)) in &g.cells {
                 if r < rows as u32 && c < cols as u32 {
-                    cells[r as usize * cols as usize + c as usize] = GridCell { ch, style: bits, fg: 0, bg: 0 };
+                    cells[r as usize * cols as usize + c as usize] = GridCell { ch, style: bits, fg, bg };
                 }
             }
         }
@@ -270,10 +299,10 @@ fn bounding_box(leaves: &[(GlkRect, WinNode)]) -> GlkRect {
 
 /// Split a buffer window's styled log into `(lines, per-line runs)`, merging
 /// adjacent same-style chars into one [`StyleRun`].
-fn log_to_lines(log: &[(u8, String)]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
+fn log_to_lines(log: &[(u8, u32, u32, String)]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
     let mut lines: Vec<String> = vec![String::new()];
     let mut runs: Vec<Vec<StyleRun>> = vec![Vec::new()];
-    for (bits, text) in log {
+    for (bits, fg, bg, text) in log {
         for ch in text.chars() {
             if ch == '\n' {
                 lines.push(String::new());
@@ -283,11 +312,16 @@ fn log_to_lines(log: &[(u8, String)]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
             let li = lines.len() - 1;
             let col = lines[li].chars().count();
             lines[li].push(ch);
-            if *bits != 0 {
+            // A run is emitted whenever any styling is active (bits or a colour).
+            if *bits != 0 || *fg != 0 || *bg != 0 {
                 let r = &mut runs[li];
                 match r.last_mut() {
-                    Some(last) if last.bits == *bits && last.end == col => last.end = col + 1,
-                    _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: 0, bg: 0 }),
+                    Some(last)
+                        if last.bits == *bits && last.fg == *fg && last.bg == *bg && last.end == col =>
+                    {
+                        last.end = col + 1
+                    }
+                    _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg }),
                 }
             }
         }
@@ -338,15 +372,24 @@ impl GlkBackend for AppGlk {
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
+        self.put_text_attr(win, style, StyleColour::default(), s);
+    }
+
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+        let (bits, fg, bg) = resolve_glk_colour(style, colour, self.honor);
         let buf = self.buffers.entry(win).or_default();
-        buf.log.push((glk_style_bits(style), s.to_string()));
+        buf.log.push((bits, fg, bg, s.to_string()));
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
-        let bits = glk_style_bits(style);
+        self.grid_put_attr(win, x, y, style, StyleColour::default(), s);
+    }
+
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+        let (bits, fg, bg) = resolve_glk_colour(style, colour, self.honor);
         let g = self.grids.entry(win).or_default();
         for (i, ch) in s.chars().enumerate() {
-            g.cells.insert((y, x + i as u32), (ch, bits));
+            g.cells.insert((y, x + i as u32), (ch, bits, fg, bg));
         }
     }
 
@@ -395,7 +438,7 @@ mod tests {
     #[test]
     fn grid_over_buffer_builds_pair_tree() {
         // A 1-row TextGrid (id 2) stacked above an 80x23 TextBuffer (id 1).
-        let mut glk = AppGlk::new(80, 24);
+        let mut glk = AppGlk::new(80, 24, true);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextGrid);
         glk.window_layout(&[
@@ -420,7 +463,7 @@ mod tests {
     #[test]
     fn three_window_split_nests() {
         // Grid (id 3, top row) over a left/right buffer split (ids 1, 2).
-        let mut glk = AppGlk::new(80, 24);
+        let mut glk = AppGlk::new(80, 24, true);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextBuffer);
         glk.window_open(3, WinType::TextGrid);
@@ -448,7 +491,7 @@ mod tests {
     #[test]
     fn put_text_styles_inline_buffer() {
         // Two buffers: id 1 is primary (drained), id 2 is inline.
-        let mut glk = AppGlk::new(80, 24);
+        let mut glk = AppGlk::new(80, 24, true);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextBuffer);
         glk.window_layout(&[
@@ -482,7 +525,7 @@ mod tests {
 
     #[test]
     fn primary_text_is_drainable() {
-        let mut glk = AppGlk::new(80, 24);
+        let mut glk = AppGlk::new(80, 24, true);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_layout(&[(1, WinType::TextBuffer, rect(0, 0, 80, 24))]);
         glk.put_text(1, GlkStyle::Normal, "You are here. ");
@@ -508,7 +551,7 @@ mod tests {
 
     #[test]
     fn grid_put_and_clear_update_cells() {
-        let mut glk = AppGlk::new(80, 24);
+        let mut glk = AppGlk::new(80, 24, true);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2))]);
         glk.grid_put(1, 2, 0, GlkStyle::Header, "Hi");
@@ -523,5 +566,59 @@ mod tests {
         glk.grid_clear(1);
         let g2 = glk.screen_model();
         assert_eq!(g2.grid().unwrap().cell(1, 3).ch, ' ');
+    }
+
+    #[test]
+    fn resolve_glk_colour_packs_24bit_and_gates_on_honor() {
+        use zvm::screen::ZColour;
+        let sc = StyleColour { fg: Some(0x00AA_BBCC), bg: Some(0x0011_2233), reverse: true };
+        // honor on: fg/bg become packed True24; the reverse hint sets bit 0x01.
+        let (bits, fg, bg) = resolve_glk_colour(GlkStyle::Normal, sc, true);
+        assert_eq!(bits, 0x01);
+        assert_eq!(fg, crate::state::pack_zcolour(ZColour::True24(0x00AA_BBCC)));
+        assert_eq!(bg, crate::state::pack_zcolour(ZColour::True24(0x0011_2233)));
+        // honor off: colour + reverse dropped, only the style-class bits remain.
+        assert_eq!(resolve_glk_colour(GlkStyle::Header, sc, false), (0x02, 0, 0));
+    }
+
+    #[test]
+    fn buffer_colour_flows_to_transcript() {
+        use zvm::screen::ZColour;
+        let mut glk = AppGlk::new(80, 24, true);
+        glk.window_open(1, WinType::TextBuffer);
+        let red = StyleColour { fg: Some(0x00FF_0000), bg: None, reverse: false };
+        glk.put_text_attr(1, GlkStyle::Normal, red, "hi");
+        let (text, chunks) = glk.take_transcript();
+        assert_eq!(text, "hi");
+        assert_eq!(chunks.len(), 1);
+        let (n, _bits, fg, bg) = chunks[0];
+        assert_eq!(n, 2);
+        assert_eq!(fg, ZColour::True24(0x00FF_0000), "24-bit fg carried losslessly");
+        assert_eq!(bg, ZColour::Default);
+    }
+
+    #[test]
+    fn grid_colour_flows_to_cells() {
+        use zvm::screen::ZColour;
+        let mut glk = AppGlk::new(80, 24, true);
+        glk.window_open(1, WinType::TextGrid);
+        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2))]);
+        let blue_on_white = StyleColour { fg: Some(0x0000_00FF), bg: Some(0x00FF_FFFF), reverse: false };
+        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, "X");
+        let cell = glk.screen_model().grid().unwrap().cell(1, 1);
+        assert_eq!(cell.ch, 'X');
+        assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
+        assert_eq!(cell.bg, crate::state::pack_zcolour(ZColour::True24(0x00FF_FFFF)));
+    }
+
+    #[test]
+    fn honor_off_backend_drops_colour() {
+        use zvm::screen::ZColour;
+        let mut glk = AppGlk::new(80, 24, false);
+        glk.window_open(1, WinType::TextBuffer);
+        let red = StyleColour { fg: Some(0x00FF_0000), bg: None, reverse: false };
+        glk.put_text_attr(1, GlkStyle::Normal, red, "hi");
+        let (_t, chunks) = glk.take_transcript();
+        assert_eq!(chunks[0].2, ZColour::Default, "colour dropped when honor is off");
     }
 }
