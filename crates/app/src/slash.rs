@@ -156,6 +156,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "open-saves", category: Category::Game, context: Context::Global,
         usage: "open-saves", description: "open the saves manager",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenSaves) },
+    CommandSpec { name: "toggle-timed-input", category: Category::Game, context: Context::Global,
+        usage: "toggle-timed-input", description: "toggle honoring the game's timed-input timers",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleTimedInput) },
 
     // ── Map ───────────────────────────────────────────────────────────────
     CommandSpec { name: "pan-map", category: Category::Map, context: Context::Map,
@@ -602,9 +605,9 @@ mod tests {
         assert_eq!(by("save-game").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (48 commands: Game 8, Map 20, View 4,
+        // Total count matches the spec table (49 commands: Game 9, Map 20, View 4,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 48, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 49, "registry must match the spec's Full command table");
     }
 
     #[test]

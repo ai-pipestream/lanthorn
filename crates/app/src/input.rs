@@ -145,6 +145,8 @@ pub enum Action {
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
     ToggleStatusBar,
+    /// Toggle honoring the Z-machine's timed-input (`read`/`read_char` timers).
+    ToggleTimedInput,
     /// Toggle the room-detection-method indicator in the map corner.
     ToggleLocMethod,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
@@ -2051,6 +2053,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
         Action::ToggleLocMethod => state.show_loc_method = !state.show_loc_method,
         Action::ToggleStatusBar => state.show_status_bar = !state.show_status_bar,
+        Action::ToggleTimedInput => {
+            state.config.honor_timed_input = !state.config.honor_timed_input;
+            state.set_status(if state.config.honor_timed_input { "Timed input: on" } else { "Timed input: off" });
+        }
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
@@ -3492,6 +3498,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         8 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
         9 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
         10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
+        11 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
         _ => {}
     }
 }
@@ -3527,6 +3534,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         8 => config_cycle_background_tidy(&mut working.background_tidy, delta),
         9 => config_cycle_aux_storage(&mut working.aux_storage, delta),
         10 => working.honor_game_colours = !working.honor_game_colours,
+        11 => working.honor_timed_input = !working.honor_timed_input,
         _ => {}
     }
 }

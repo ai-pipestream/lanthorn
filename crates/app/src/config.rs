@@ -181,6 +181,7 @@ fn default_undo_levels() -> usize { 16 }
 fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
 fn default_honor_game_colours() -> bool { true }
+fn default_honor_timed_input() -> bool { true }
 
 /// Deserialize a single-char string field into a `char`.  Takes the first
 /// Unicode scalar value of the string; falls back to `/` on an empty string.
@@ -375,6 +376,10 @@ pub struct Config {
     /// window. Set false to use only the configured color scheme.
     #[serde(default = "default_honor_game_colours")]
     pub honor_game_colours: bool,
+    /// When true (default), honor the Z-machine's timed-input (`read`/`read_char`
+    /// `time`+`routine` operands). Set false to treat all reads as untimed.
+    #[serde(default = "default_honor_timed_input")]
+    pub honor_timed_input: bool,
     /// Interpreter number to advertise (header 0x1E). `None` = auto (Frotz's rule:
     /// 1 for v1-5, 6 for v6). Set to override, e.g. 6 for BeyondZork's IBM PC
     /// character-graphics instead of colour.
@@ -410,6 +415,7 @@ impl Default for Config {
             virtual_screen_rows: default_virtual_screen_rows(),
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
+            honor_timed_input: default_honor_timed_input(),
             interpreter_number: None,
         }
     }
@@ -472,6 +478,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.show_loc_method = from_file.show_loc_method;
             cfg.show_status_bar = from_file.show_status_bar;
             cfg.honor_game_colours = from_file.honor_game_colours;
+            cfg.honor_timed_input = from_file.honor_timed_input;
             cfg.interpreter_number = from_file.interpreter_number;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
@@ -529,6 +536,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
     doc["honor_game_colours"] = toml_edit::value(cfg.honor_game_colours);
+    doc["honor_timed_input"] = toml_edit::value(cfg.honor_timed_input);
     if let Some(n) = cfg.interpreter_number {
         doc["interpreter_number"] = toml_edit::value(n as i64);
     }
@@ -828,6 +836,7 @@ use_defaults = false
             show_loc_method: false,
             show_status_bar: true,
             honor_game_colours: true,
+            honor_timed_input: true,
             interpreter_number: None,
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
@@ -970,6 +979,18 @@ use_defaults = false
         // explicit false overrides the default
         let off: Config = toml::from_str("honor_game_colours = false\n").unwrap();
         assert!(!off.honor_game_colours);
+    }
+
+    #[test]
+    fn honor_timed_input_defaults_true() {
+        let c = Config::default();
+        assert!(c.honor_timed_input);
+        // round-trips through TOML: absent key keeps the default true
+        let back: Config = toml::from_str("").unwrap();
+        assert!(back.honor_timed_input);
+        // explicit false overrides the default
+        let off: Config = toml::from_str("honor_timed_input = false\n").unwrap();
+        assert!(!off.honor_timed_input);
     }
 
     #[test]
