@@ -135,7 +135,13 @@ pub fn upper_row_text(upper: &UpperWindow, row: u16) -> String {
 
 /// One upper-window row with per-cell SGR runs (for the pinned TTY region).
 /// Carries style AND colour (fg/bg); colour is suppressed when `honor` is false.
-pub fn upper_row_ansi(upper: &UpperWindow, row: u16, honor: bool) -> String {
+pub fn upper_row_ansi(
+    upper: &UpperWindow,
+    row: u16,
+    honor: bool,
+    current_fg: ZColour,
+    current_bg: ZColour,
+) -> String {
     // Last column with any non-default attribute (blank cell = ' ' at style 0,
     // Default/Default); trailing defaults are dropped so the row closes reset,
     // matching the `ESC[2K` line-clear done before each row is written.
@@ -154,7 +160,13 @@ pub fn upper_row_ansi(upper: &UpperWindow, row: u16, honor: bool) -> String {
     for c in 1..=last {
         let cell = upper.cell(row, c);
         let (style, fg, bg) = if honor {
-            (cell.style, cell.fg, cell.bg)
+            // The upper window's "default" colour is the screen's current
+            // colour (what the row-fill paints); resolve Default cells to it so
+            // blank/leading cells match the painted background instead of
+            // resetting to terminal-default.
+            let fg = if matches!(cell.fg, ZColour::Default) { current_fg } else { cell.fg };
+            let bg = if matches!(cell.bg, ZColour::Default) { current_bg } else { cell.bg };
+            (cell.style, fg, bg)
         } else {
             (cell.style, ZColour::Default, ZColour::Default)
         };
@@ -243,7 +255,15 @@ impl ScreenView {
             vec![format!("\x1b[7m{}\x1b[0m", status_text(&machine.status_line(), DEFAULT_COLS))]
         } else {
             (1..=top)
-                .map(|r| upper_row_ansi(&machine.screen.upper, r, machine.honor_game_colours))
+                .map(|r| {
+                    upper_row_ansi(
+                        &machine.screen.upper,
+                        r,
+                        machine.honor_game_colours,
+                        machine.screen.current_fg,
+                        machine.screen.current_bg,
+                    )
+                })
                 .collect()
         }
     }
@@ -555,7 +575,7 @@ mod tests {
         u.put(1, 2, 'i', 2, ZColour::Default, ZColour::Default); // bold
         let text = upper_row_text(&u, 1);
         assert_eq!(text, "Hi"); // trailing blanks trimmed
-        let ansi = upper_row_ansi(&u, 1, true);
+        let ansi = upper_row_ansi(&u, 1, true, ZColour::Default, ZColour::Default);
         assert!(
             ansi.contains("\x1b[1m") && ansi.ends_with("\x1b[0m"),
             "ansi: {ansi:?}"
@@ -570,14 +590,30 @@ mod tests {
         // "Hi" in red-on-black, honor on.
         u.put(1, 1, 'H', 0, ZColour::Standard(3), ZColour::Standard(2));
         u.put(1, 2, 'i', 0, ZColour::Standard(3), ZColour::Standard(2));
-        let on = upper_row_ansi(&u, 1, true);
+        let on = upper_row_ansi(&u, 1, true, ZColour::Default, ZColour::Default);
         assert!(on.contains("31"), "red fg SGR present: {on:?}");
         assert!(on.contains("40"), "black bg SGR present: {on:?}");
         assert!(on.contains("Hi"), "text present: {on:?}");
         // honor off: no colour SGR, text still present.
-        let off = upper_row_ansi(&u, 1, false);
+        let off = upper_row_ansi(&u, 1, false, ZColour::Default, ZColour::Default);
         assert!(!off.contains("31") && !off.contains("40"), "no colour when honor off: {off:?}");
         assert!(off.contains("Hi"), "text present when honor off: {off:?}");
+    }
+
+    #[test]
+    fn upper_row_ansi_paints_default_cells_with_current_bg() {
+        use zvm::screen::ZColour;
+        let mut u = UpperWindow::default();
+        u.resize(1, 6);
+        // cols 1-2 blank (Default bg); cols 3-4 'Hi' explicit white-on-black.
+        u.put(1, 3, 'H', 0, ZColour::Standard(9), ZColour::Standard(2));
+        u.put(1, 4, 'i', 0, ZColour::Standard(9), ZColour::Standard(2));
+        // Screen background is black: leading blank cells must be painted black
+        // (bg 40) BEFORE the text, not left to reset-to-terminal-default.
+        let out = upper_row_ansi(&u, 1, true, ZColour::Default, ZColour::Standard(2));
+        let first40 = out.find("40").expect("bg 40 present");
+        let hpos = out.find('H').expect("H present");
+        assert!(first40 < hpos, "leading blanks painted black before text: {out:?}");
     }
 
     #[test]
