@@ -5823,6 +5823,7 @@ mod tests {
                 diagnostics: vec![],
                 location_method: None,
                 pending_io: None,
+                timed_out: false,
             };
             apply_turn(&mut mapper, "", &seed_result);
             state.select_room(Some(snap_number as mapper::graph::RoomId));
@@ -5865,6 +5866,7 @@ mod tests {
                 diagnostics: vec![],
                 location_method: None,
                 pending_io: None,
+                timed_out: false,
             };
             apply_turn(&mut mapper, "", &seed_result);
             state.select_room(Some(snap_number as mapper::graph::RoomId));

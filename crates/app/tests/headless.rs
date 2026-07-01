@@ -53,6 +53,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
         diagnostics: vec![],
         location_method: None,
         pending_io: None,
+        timed_out: false,
     }
 }
 

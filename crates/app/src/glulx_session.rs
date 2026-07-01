@@ -151,6 +151,7 @@ impl GlulxSession {
             diagnostics,
             location_method: None,
             pending_io: None,
+            timed_out: false,
         }
     }
 }
