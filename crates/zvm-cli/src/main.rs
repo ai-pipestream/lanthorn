@@ -584,7 +584,10 @@ fn main() {
     let argv: Vec<String> = env::args().collect();
     let args = parse_args(&argv);
     let Some(story_arg) = args.story.clone() else {
-        eprintln!("Usage: {} [--no-status] [--no-aux] <story-file>", argv[0]);
+        eprintln!(
+            "Usage: {} [--no-status] [--no-aux] [--no-more] [--no-timed-input] [--no-game-colours] <story-file>",
+            argv[0]
+        );
         std::process::exit(1);
     };
     let story_path = std::path::PathBuf::from(&story_arg);
