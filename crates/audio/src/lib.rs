@@ -77,6 +77,12 @@ impl AudioBackend {
         self.tones.push(sink);
     }
 
+    /// Decode + play a sampled sound. Real decoding lands in the next task;
+    /// for now this is a stub so both feature configs expose the same surface.
+    pub fn play_sample(&mut self, _bytes: &[u8], _format: SoundFormat, _z_volume: u8, _repeats: u8) -> Option<SoundId> {
+        None
+    }
+
     pub fn stop(&mut self, id: SoundId) {
         if let Some(sink) = self.samples.remove(&id) {
             sink.stop();
