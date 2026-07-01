@@ -22,12 +22,19 @@ use crate::text::decode::{decode_string, zscii_to_char};
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A built-in Z-machine bleep recorded by `sound_effect` (ZMSD §9.4):
-/// sound #1 is the high-pitched bleep, #2 the low-pitched bleep.
+/// A Z-machine `sound_effect` event (ZMSD §9.4), recorded for the host to act on.
+/// `number` 1/2 are the built-in high/low bleeps; `number >= 3` selects a Blorb
+/// `Snd ` resource. `effect`: 1=prepare 2=start 3=stop 4=finish. `volume` is the
+/// Z-scale 1..=8 (255 = loudest). `repeats` is the repeat count from the volume
+/// word's high byte; 255 = forever, 0/omitted = play once (applied by the host).
+/// `routine` (v5+) is the finish-routine the host calls when the sound ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Beep {
-    High,
-    Low,
+pub struct SoundEvent {
+    pub number: u16,
+    pub effect: u8,
+    pub volume: u8,
+    pub repeats: u8,
+    pub routine: u16,
 }
 
 /// Result of executing one instruction.
@@ -119,8 +126,8 @@ pub struct Machine {
     pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
     /// EXT opcodes that have hit the unimplemented fallthrough (warned once each).
     pub(crate) warned_ext_opcodes: std::collections::HashSet<u8>,
-    /// Bleeps recorded by `sound_effect` since the host last drained them.
-    pub pending_beeps: Vec<Beep>,
+    /// Sound events recorded by `sound_effect` since the host last drained them.
+    pub pending_sounds: Vec<SoundEvent>,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -181,7 +188,7 @@ impl Machine {
             rng_state: 0x12345678, // fixed nonzero seed
             warned_var_opcodes: std::collections::HashSet::new(),
             warned_ext_opcodes: std::collections::HashSet::new(),
-            pending_beeps: Vec::new(),
+            pending_sounds: Vec::new(),
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -1130,22 +1137,20 @@ impl Machine {
                 StepResult::Continue
             }
             // 0x15 sound_effect — number effect volume routine (ZMSD §9.4).
-            // We render bleeps visually (host shows a border pulse); sampled
-            // sounds (number >= 3) need a Blorb resource we do not yet load.
-            // effect/volume/routine are accepted but unused until audio lands.
+            // Record a SoundEvent for every call (including #1/#2 bleeps). The host
+            // drains `pending_sounds` and decides what to play / how to visualise.
             0x15 => {
                 let number = ops.first().copied().unwrap_or(0);
-                match number {
-                    1 => self.pending_beeps.push(Beep::High),
-                    2 => self.pending_beeps.push(Beep::Low),
-                    0 => {} // not a defined bleep
-                    n => {
-                        if self.warned_var_opcodes.insert(0x15) {
-                            self.diagnostics.push(format!(
-                                "sampled sound #{n} not supported (needs Blorb)"
-                            ));
-                        }
-                    }
+                if number != 0 {
+                    let effect = ops.get(1).copied().unwrap_or(0) as u8;
+                    // Volume word: low byte = volume (1..8, 255=loudest), high byte
+                    // = repeat count (255 = forever, 0/omitted = play once, applied
+                    // by the host). Default 8 when omitted.
+                    let vw = ops.get(2).copied().unwrap_or(8);
+                    let volume = (vw & 0xFF) as u8;
+                    let repeats = (vw >> 8) as u8;
+                    let routine = ops.get(3).copied().unwrap_or(0);
+                    self.pending_sounds.push(SoundEvent { number, effect, volume, repeats, routine });
                 }
                 StepResult::Continue
             }
@@ -1522,20 +1527,25 @@ impl Machine {
             Some(p) if p.interrupt_routine != 0 => p, // PendingInput: Copy
             _ => return TimedInterrupt { aborted: false },
         };
+        let ret = self.run_routine(saved.interrupt_routine);
+        TimedInterrupt { aborted: ret != 0 }
+    }
+
+    /// Call `packed_routine` to completion and return its value. Safe whether or
+    /// not a read is pending: it snapshots `pending_input` and restores it if the
+    /// routine attempts nested input/save/restart (unsupported — the routine is
+    /// then abandoned and 0 is returned). On the normal path `pending_input` is
+    /// left untouched. Used by timed-input interrupts and by the sound
+    /// finish-routine callback.
+    pub fn run_routine(&mut self, packed_routine: u16) -> u16 {
+        let saved = self.pending_input; // Option<PendingInput>: Copy
         let base_frames = self.state.frames.len();
         let base_stack = self.state.eval_stack.len();
         // Push the routine, storing its return value onto the eval stack (var 0).
-        call_routine(
-            &mut self.state,
-            &mut self.mem,
-            saved.interrupt_routine,
-            &[],
-            Some(0),
-        );
+        call_routine(&mut self.state, &mut self.mem, packed_routine, &[], Some(0));
         if self.state.frames.len() == base_frames {
             // packed 0 / bad addr: call_routine pushed 0 to the stack already.
-            let ret = self.state.eval_stack.pop().unwrap_or(0);
-            return TimedInterrupt { aborted: ret != 0 };
+            return self.state.eval_stack.pop().unwrap_or(0);
         }
         loop {
             match self.step() {
@@ -1545,20 +1555,20 @@ impl Machine {
                     }
                 }
                 // Nested input/save/restart/quit inside the routine: unsupported.
-                // Unwind and restore, including pending_input (a nested read
-                // opcode may have overwritten it).
+                // Unwind and restore, including pending_input (a nested read opcode
+                // may have overwritten it).
                 _ => {
                     self.state.frames.truncate(base_frames);
                     self.state.eval_stack.truncate(base_stack);
-                    self.pending_input = Some(saved);
-                    return TimedInterrupt { aborted: false };
+                    self.pending_input = saved;
+                    return 0;
                 }
             }
         }
         let ret = self.state.eval_stack.pop().unwrap_or(0);
         // Guard: a well-behaved routine leaves the stack where we started.
         self.state.eval_stack.truncate(base_stack);
-        TimedInterrupt { aborted: ret != 0 }
+        ret
     }
 
     /// Complete a pending timed read as *interrupted* (the interrupt routine
@@ -3872,6 +3882,27 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn run_routine_returns_true_value() {
+        // routine body: rtrue (0OP 0xB0) -> returns 1.
+        let (buf, rout) = timed_read_story(&[0xB0]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let packed = (rout / 4) as u16;
+        assert_eq!(m.run_routine(packed), 1, "rtrue routine returns 1");
+        assert!(m.pending_input.is_none(), "no read pending -> pending_input stays None");
+    }
+
+    #[test]
+    fn run_routine_returns_explicit_value() {
+        // routine body: ret 7 (1OP:0x0B short form small constant 7): 0x9B 0x07.
+        let (buf, rout) = timed_read_story(&[0x9B, 0x07]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let packed = (rout / 4) as u16;
+        assert_eq!(m.run_routine(packed), 7, "ret 7 returns 7");
+    }
+
     // -----------------------------------------------------------------------
     // Test: abort_timed_input(read_char) stores ZSCII 0 and clears pending
     // -----------------------------------------------------------------------
@@ -4669,32 +4700,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sound_effect_records_high_and_low_beeps() {
+    fn sound_effect_records_high_and_low_bleeps() {
         let mut m = build_test_machine(&[]);
-        // number 1 = high bleep
         m.exec_var(0x15, &[1], None, None);
-        assert_eq!(m.pending_beeps, vec![Beep::High]);
-        // number 2 = low bleep
         m.exec_var(0x15, &[2], None, None);
-        assert_eq!(m.pending_beeps, vec![Beep::High, Beep::Low]);
-        // no diagnostics for plain bleeps
+        assert_eq!(m.pending_sounds.len(), 2);
+        // No volume operand -> vw defaults to 8: volume 8, repeats 0.
+        assert_eq!(m.pending_sounds[0], SoundEvent { number: 1, effect: 0, volume: 8, repeats: 0, routine: 0 });
+        assert_eq!(m.pending_sounds[1], SoundEvent { number: 2, effect: 0, volume: 8, repeats: 0, routine: 0 });
         assert!(m.diagnostics.is_empty(), "bleeps must not record diagnostics");
     }
 
     #[test]
-    fn sound_effect_sampled_sound_records_diagnostic_no_beep() {
+    fn sound_effect_records_sampled_sound_event_no_diagnostic() {
         let mut m = build_test_machine(&[]);
-        m.exec_var(0x15, &[3], None, None); // sampled sound -> needs Blorb
-        assert!(m.pending_beeps.is_empty(), "sampled sound is not a bleep");
-        assert_eq!(m.diagnostics.len(), 1, "sampled sound records one diagnostic");
-        assert!(m.diagnostics[0].contains("sampled sound"));
+        // number 5, effect 2 (start), volume word 0xFF03 -> volume 3, repeats 255 (forever), routine 0x1234
+        m.exec_var(0x15, &[5, 2, 0xFF03, 0x1234], None, None);
+        assert_eq!(
+            m.pending_sounds,
+            vec![SoundEvent { number: 5, effect: 2, volume: 3, repeats: 255, routine: 0x1234 }]
+        );
+        assert!(m.diagnostics.is_empty(), "sampled sounds are recorded, not dropped as diagnostics");
     }
 
     #[test]
     fn sound_effect_zero_records_nothing() {
         let mut m = build_test_machine(&[]);
         m.exec_var(0x15, &[0], None, None);
-        assert!(m.pending_beeps.is_empty());
+        assert!(m.pending_sounds.is_empty());
         assert!(m.diagnostics.is_empty());
     }
 

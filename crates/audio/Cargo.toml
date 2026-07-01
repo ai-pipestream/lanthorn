@@ -1,0 +1,13 @@
+[package]
+name = "audio"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["playback", "mod-music"]
+playback = ["dep:rodio"]
+mod-music = ["dep:mod_player"]
+
+[dependencies]
+rodio = { version = "0.19", optional = true }
+mod_player = { version = "0.1", optional = true }

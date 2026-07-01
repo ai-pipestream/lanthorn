@@ -12,6 +12,7 @@
 //   RestoreRequest → prompt for filename, read Quetzal bytes, restore_quetzal
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -26,6 +27,77 @@ use zvm::memory::Memory;
 
 mod screen;
 mod aux; // implemented in Task 5; declared now so the module tree is stable
+
+// ── sound ──────────────────────────────────────────────────────────────────────
+
+/// The CLI's owned audio state: backend + resolved Blorb + live sound tracking.
+struct CliSound {
+    backend: audio::AudioBackend,
+    blorb: Option<blorb::Blorb>,
+    ids: HashMap<u16, audio::SoundId>,
+    routines: HashMap<audio::SoundId, u16>,
+}
+
+fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
+    match k {
+        blorb::SoundKind::Aiff => Some(audio::SoundFormat::Aiff),
+        blorb::SoundKind::Ogg => Some(audio::SoundFormat::Ogg),
+        blorb::SoundKind::Mod => Some(audio::SoundFormat::Mod),
+        blorb::SoundKind::Other => None,
+    }
+}
+
+/// Play a drained batch of `SoundEvent`s: bleeps (#1/#2) → tones; samples (#>=3)
+/// → Blorb resource playback tracked by number, remembering finish routines.
+fn play_cli_sounds(cs: &mut CliSound, events: &[zvm::cpu::exec::SoundEvent]) {
+    for ev in events {
+        match ev.number {
+            0 => {}
+            1 | 2 => {
+                if ev.effect == 0 || ev.effect == 2 {
+                    let freq = if ev.number == 1 { 800.0 } else { 400.0 };
+                    cs.backend.play_tone(freq, 150, ev.volume);
+                }
+            }
+            n => match ev.effect {
+                3 => { if let Some(id) = cs.ids.remove(&n) { cs.backend.stop(id); } }
+                1 => {}
+                _ => {
+                    if let Some(blorb) = &cs.blorb {
+                        if let Some((bytes, kind)) = blorb.sound(n as u32) {
+                            if let Some(fmt) = sound_kind_to_format(kind) {
+                                if let Some(id) = cs.backend.play_sample(bytes, fmt, ev.volume, ev.repeats) {
+                                    cs.ids.insert(n, id);
+                                    if ev.routine != 0 { cs.routines.insert(id, ev.routine); }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// Poll finished sampled sounds; run their finish-routines and reprint the frame.
+fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: &mut screen::ScreenView, is_tty: bool) {
+    let Some(cs) = sound else { return };
+    let done = cs.backend.finished();
+    let mut ran = false;
+    for id in done {
+        if let Some(routine) = cs.routines.remove(&id) {
+            cs.ids.retain(|_, v| *v != id);
+            if routine != 0 {
+                machine.run_routine(routine);
+                ran = true;
+            }
+        }
+    }
+    if ran && is_tty {
+        print!("{}", view.frame(machine));
+        let _ = io::stdout().flush();
+    }
+}
 
 // ── Pure word-wrap helper ─────────────────────────────────────────────────────
 
@@ -229,10 +301,11 @@ struct Args {
     no_aux: bool,
     no_more: bool,
     no_timed_input: bool,
+    no_sound: bool,
 }
 
 fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false, no_timed_input: false };
+    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false };
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -240,6 +313,8 @@ fn parse_args(argv: &[String]) -> Args {
             "--no-aux" => a.no_aux = true,
             "--no-more" | "--no-page" => a.no_more = true,
             "--no-timed-input" => a.no_timed_input = true,
+            "--no-sound" => a.no_sound = true,
+            "--volume" => i += 1, // also skip the following value token
             "--no-game-colours" => {}
             "-I" | "--interpreter" => i += 1, // also skip the following value token
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
@@ -263,6 +338,17 @@ fn parse_interpreter(args: &[String]) -> Option<u8> {
     while let Some(a) = it.next() {
         if a == "-I" || a == "--interpreter" {
             return it.next().and_then(|v| v.parse::<u8>().ok());
+        }
+    }
+    None
+}
+
+/// Read the master volume from `--volume N` (0..=100). None when absent/invalid.
+fn parse_volume(args: &[String]) -> Option<u8> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--volume" {
+            return it.next().and_then(|v| v.parse::<u8>().ok()).map(|v| v.min(100));
         }
     }
     None
@@ -335,6 +421,7 @@ fn read_char_input(
     machine: &mut Machine,
     view: &mut screen::ScreenView,
     timeout: Option<(u16, u16)>,
+    sound: &mut Option<CliSound>,
 ) -> (u8, Option<(u16, u16)>, bool) {
     if !is_tty {
         return (read_byte_stdin(), None, false);
@@ -342,10 +429,19 @@ fn read_char_input(
     let _ = terminal::enable_raw_mode();
     let mut last_resize: Option<(u16, u16)> = None;
     let result = loop {
+        if timeout.is_none() && sound.as_ref().map_or(false, |cs| !cs.routines.is_empty()) {
+            if !event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+                let _ = terminal::disable_raw_mode();
+                poll_sound_finish(sound.as_mut(), machine, view, is_tty);
+                let _ = terminal::enable_raw_mode();
+                continue;
+            }
+        }
         if let Some((t, _)) = timeout {
             if !event::poll(std::time::Duration::from_millis(t as u64 * 100)).unwrap_or(false) {
                 let _ = terminal::disable_raw_mode();
                 let out = machine.run_timed_interrupt();
+                poll_sound_finish(sound.as_mut(), machine, view, is_tty);
                 let _ = terminal::enable_raw_mode();
                 if out.aborted {
                     break (0u8, last_resize, true);
@@ -432,6 +528,7 @@ fn read_line_raw(
     machine: &mut Machine,
     view: &mut screen::ScreenView,
     timeout: Option<(u16, u16)>,
+    sound: &mut Option<CliSound>,
 ) -> (String, u8, Option<(u16, u16)>, bool) {
     if !is_tty {
         return (read_line_stdin(), 13, None, false);
@@ -447,10 +544,19 @@ fn read_line_raw(
         let _ = io::stdout().flush();
     }
     loop {
+        if timeout.is_none() && sound.as_ref().map_or(false, |cs| !cs.routines.is_empty()) {
+            if !event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+                let _ = terminal::disable_raw_mode();
+                poll_sound_finish(sound.as_mut(), machine, view, is_tty);
+                let _ = terminal::enable_raw_mode();
+                continue;
+            }
+        }
         if let Some((t, _)) = timeout {
             if !event::poll(std::time::Duration::from_millis(t as u64 * 100)).unwrap_or(false) {
                 let _ = terminal::disable_raw_mode();
                 let out = machine.run_timed_interrupt();
+                poll_sound_finish(sound.as_mut(), machine, view, is_tty);
                 let _ = terminal::enable_raw_mode();
                 if out.aborted {
                     aborted = true;
@@ -585,7 +691,7 @@ fn main() {
     let args = parse_args(&argv);
     let Some(story_arg) = args.story.clone() else {
         eprintln!(
-            "Usage: {} [--no-status] [--no-aux] [--no-more] [--no-timed-input] [--no-game-colours] <story-file>",
+            "Usage: {} [--no-status] [--no-aux] [--no-more] [--no-timed-input] [--no-game-colours] [--no-sound] [--volume <0-100>] <story-file>",
             argv[0]
         );
         std::process::exit(1);
@@ -628,6 +734,8 @@ fn main() {
     let mut page_height = term_rows.saturating_sub(2).max(2);
     // Timed reads (read/read_char time+routine) are honored unless disabled.
     let timed = !args.no_timed_input;
+    let sound_enabled = !args.no_sound;
+    let volume = parse_volume(&argv).unwrap_or(100);
 
     let honor = parse_game_colours(&argv);
     let interpreter = parse_interpreter(&argv);
@@ -650,6 +758,24 @@ fn main() {
     machine.set_honor_game_colours(honor);
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
+    let mut sound: Option<CliSound> = if sound_enabled {
+        let blorb = match blorb::resolve_sound_blorb(&story_path) {
+            Some((b, path)) => {
+                eprintln!("zvm: loaded sound resources from {}", path.display());
+                Some(b)
+            }
+            None => None,
+        };
+        Some(CliSound {
+            backend: audio::AudioBackend::new(volume),
+            blorb,
+            ids: HashMap::new(),
+            routines: HashMap::new(),
+        })
+    } else {
+        None
+    };
+
     let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, term_rows);
     print!("{}", view.start());
     let _ = io::stdout().flush();
@@ -659,12 +785,18 @@ fn main() {
         for d in machine.diagnostics.drain(..) {
             eprintln!("zvm: warning: {d}");
         }
-        // Bleeps: drain and ring (TTY only).
-        let beeps = machine.pending_beeps.len();
-        machine.pending_beeps.clear();
-        if beeps > 0 {
-            print!("{}", screen::bleep_bytes(beeps, stdout_is_tty));
-            let _ = io::stdout().flush();
+        // Bleeps + sampled sounds: drain the turn's sound events. Ring the bell for
+        // #1/#2 (TTY only), and play audio when enabled.
+        if !machine.pending_sounds.is_empty() {
+            let events: Vec<zvm::cpu::exec::SoundEvent> = machine.pending_sounds.drain(..).collect();
+            let beeps = events.iter().filter(|e| e.number == 1 || e.number == 2).count();
+            if beeps > 0 {
+                print!("{}", screen::bleep_bytes(beeps, stdout_is_tty));
+                let _ = io::stdout().flush();
+            }
+            if let Some(cs) = sound.as_mut() {
+                play_cli_sounds(cs, &events);
+            }
         }
         // v3 show_status redraw request.
         if machine.screen.show_status_requested {
@@ -739,7 +871,7 @@ fn main() {
                 };
                 let timeout = if timed { machine.pending_timeout() } else { None };
                 let (line, terminator, resize, aborted) =
-                    read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout);
+                    read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout, &mut sound);
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
                                  &mut page_height, &mut machine, &mut view);
@@ -761,7 +893,7 @@ fn main() {
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
                 let timeout = if timed { machine.pending_timeout() } else { None };
-                let (ch, resize, aborted) = read_char_input(stdin_is_tty, &mut machine, &mut view, timeout);
+                let (ch, resize, aborted) = read_char_input(stdin_is_tty, &mut machine, &mut view, timeout, &mut sound);
                 // Handle any resize that happened DURING the char read.
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
@@ -846,6 +978,20 @@ mod arg_tests {
         assert!(a.no_timed_input);
         let b = parse_args(&["zvm-cli".into(), "g".into()]);
         assert!(!b.no_timed_input);
+    }
+
+    #[test]
+    fn parses_no_sound_flag() {
+        let a = parse_args(&["zvm-cli".into(), "--no-sound".into(), "g".into()]);
+        assert!(a.no_sound);
+        let b = parse_args(&["zvm-cli".into(), "g".into()]);
+        assert!(!b.no_sound);
+    }
+
+    #[test]
+    fn parse_volume_reads_flag() {
+        assert_eq!(parse_volume(&["--volume".into(), "60".into(), "g".into()]), Some(60));
+        assert_eq!(parse_volume(&["g".into()]), None);
     }
 
     #[test]

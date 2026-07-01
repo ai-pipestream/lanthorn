@@ -406,12 +406,12 @@ fn draw_frame(
             match &state.sound_pulse {
                 Some(p) => {
                     let beep_color = match p.kind {
-                        zvm::cpu::exec::Beep::High => state
+                        app::state::BeepKind::High => state
                             .colors
                             .sound_beep_high
                             .fg
                             .unwrap_or(ratatui::style::Color::Rgb(255, 180, 40)),
-                        zvm::cpu::exec::Beep::Low => state
+                        app::state::BeepKind::Low => state
                             .colors
                             .sound_beep_low
                             .fg
@@ -1247,6 +1247,19 @@ fn main() {
     state.show_status_bar = cfg.show_status_bar;
     state.config = cfg;
 
+    // Resolve the sound container + construct the audio backend (silent if the
+    // feature is off, there is no device, or sound is disabled in config).
+    state.sound_blorb = match blorb::resolve_sound_blorb(&story_path) {
+        Some((b, path)) => {
+            eprintln!("babelmap: loaded sound resources from {}", path.display());
+            Some(b)
+        }
+        None => None,
+    };
+    if state.config.enable_sound {
+        state.audio = Some(audio::AudioBackend::new(state.config.volume));
+    }
+
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
 
@@ -1283,7 +1296,7 @@ fn main() {
             quit: session.has_quit(),
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -1528,7 +1541,8 @@ fn main() {
         // When a timed-input deadline is armed, clamp further so the loop wakes in
         // time to fire the interrupt — the normal cadence stays the ceiling, so
         // this is a no-op when no timer is running (regression guard).
-        let base_poll_ms = if state.has_active_animation() { TIDY_POLL_MS } else { 50 };
+        let sound_active = !state.sound_routines.is_empty();
+        let base_poll_ms = if state.has_active_animation() || sound_active { TIDY_POLL_MS } else { 50 };
         let poll_ms = match state.input_deadline {
             Some(dl) => {
                 let remaining = dl.saturating_duration_since(std::time::Instant::now()).as_millis() as u64;
@@ -1565,6 +1579,24 @@ fn main() {
                             &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
                         ) {
                             break;
+                        }
+                    }
+                }
+            }
+            // Poll for finished sampled sounds and fire their finish-routines.
+            let done: Vec<u32> = state.audio.as_mut().map(|b| b.finished()).unwrap_or_default();
+            for id in done {
+                if let Some(routine) = state.sound_routines.remove(&id) {
+                    // Forget the number->id mapping for this finished sound too.
+                    state.sound_ids.retain(|_, v| *v != id);
+                    if routine != 0 {
+                        if let Some(zs) = zvm_session_opt_mut(&mut *session) {
+                            let result = zs.run_sound_finish(routine);
+                            if apply_game_driven_result(
+                                &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                            ) {
+                                break 'event_loop;
+                            }
                         }
                     }
                 }
@@ -2643,7 +2675,7 @@ fn main() {
                                         quit: false,
                                         erase_lower: false,
                                         info: None,
-                                        beep: None,
+                                        sounds: Vec::new(),
                                         diagnostics: vec![],
                                         location_method: None,
                                         pending_io: None,
@@ -2783,7 +2815,7 @@ fn main() {
                                         quit: false,
                                         erase_lower: false,
                                         info: None,
-                                        beep: None,
+                                        sounds: Vec::new(),
                                         diagnostics: vec![],
                                         location_method: None,
                                         pending_io: None,
@@ -2904,7 +2936,7 @@ fn main() {
                                             quit: false,
                                             erase_lower: false,
                                             info: None,
-                                            beep: None,
+                                            sounds: Vec::new(),
                                             diagnostics: vec![],
                                             location_method: None,
                                             pending_io: None,
@@ -2972,7 +3004,7 @@ fn main() {
                                         quit: false,
                                         erase_lower: false,
                                         info: None,
-                                        beep: None,
+                                        sounds: Vec::new(),
                                         diagnostics: vec![],
                                         location_method: None,
                                         pending_io: None,
@@ -3245,7 +3277,7 @@ fn dispatch_slash_outcome(
                                             quit: false,
                                             erase_lower: false,
                                             info: None,
-                                            beep: None,
+                                            sounds: Vec::new(),
                                             diagnostics: vec![],
                                             location_method: None,
                                             pending_io: None,
@@ -3439,7 +3471,7 @@ fn reset_game(
                     quit: false,
                     erase_lower: false,
                     info: None,
-                    beep: None,
+                    sounds: Vec::new(),
                     diagnostics: vec![],
                     location_method: None,
                     pending_io: None,
@@ -4213,7 +4245,7 @@ fn apply_launch_resume(
                     quit: false,
                     erase_lower: false,
                     info: None,
-                    beep: None,
+                    sounds: Vec::new(),
                     diagnostics: vec![],
                     location_method: None,
                     pending_io: None,
@@ -4270,9 +4302,15 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     for line in &result.diagnostics {
         state.push_transcript_kind(line, app::state::TranscriptKind::Warning);
     }
-    if let Some(kind) = result.beep {
+    if let Some(kind) = result.sounds.iter().rev().find_map(|ev| match ev.number {
+        1 => Some(app::state::BeepKind::High),
+        2 => Some(app::state::BeepKind::Low),
+        _ => None,
+    }) {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
+    // Audio is additive on top of the border pulse; gated inside play_turn_sounds.
+    state.play_turn_sounds(&result.sounds);
     state.loc_method = result.location_method.or(state.loc_method);
     // Retain the previous name when this turn has no location signal.
     if let Some(loc) = &result.location {

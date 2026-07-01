@@ -81,7 +81,8 @@ New workspace crate depending on `rodio` and (behind the `mod-music` feature)
   Hz for high / ~400 Hz for low, ~150 ms) and plays it via a `rodio::Sink`.
 - **Sampled playback:** `play_sample` decodes the payload to PCM and plays it
   non-blocking on its own `Sink`. `repeats` maps the Z-machine repeat count
-  (0/255 = forever for looping sounds). `SoundId` lets `stop` target a playing
+  (255 = loop forever; 0/omitted = play once; 1..=254 = that many plays —
+  interpreter parity, per the host's `repeat_plan`). `SoundId` lets `stop` target a playing
   sound (needed for `effect` 3 = stop).
 - **AIFF decode (in-crate):** parse the IFF `FORM`/`AIFF` container — `COMM`
   chunk (channels, sample rate, bit depth; 80-bit IEEE extended sample-rate
@@ -131,7 +132,7 @@ pub struct SoundEvent {
     pub number: u16,   // 1/2 = bleep; >=3 = Blorb Snd resource
     pub effect: u8,    // 1=prepare 2=start 3=stop 4=finish
     pub volume: u8,    // 1..=8 (Z-scale) or 255 = loudest
-    pub repeats: u8,   // repeat count (0/255 = forever)
+    pub repeats: u8,   // repeat count (255 = forever; 0/omitted = play once)
     pub routine: u16,  // finish-routine; the host calls it on sound end (see §7.1)
 }
 pub pending_sounds: Vec<SoundEvent>,   // drained by the host

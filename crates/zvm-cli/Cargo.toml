@@ -6,4 +6,5 @@ edition = "2021"
 [dependencies]
 zvm = { path = "../zvm" }
 blorb = { path = "../blorb" }
+audio = { path = "../audio" }
 crossterm = "0.28"

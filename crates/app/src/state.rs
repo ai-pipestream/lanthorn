@@ -235,6 +235,16 @@ pub fn unpack_zcolour(p: u32) -> zvm::screen::ZColour {
     }
 }
 
+/// Map a Blorb sound kind to a backend format, or None for unsupported kinds.
+fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
+    match k {
+        blorb::SoundKind::Aiff => Some(audio::SoundFormat::Aiff),
+        blorb::SoundKind::Ogg => Some(audio::SoundFormat::Ogg),
+        blorb::SoundKind::Mod => Some(audio::SoundFormat::Mod),
+        blorb::SoundKind::Other => None,
+    }
+}
+
 // ── Transcript filter ─────────────────────────────────────────────────────────
 
 /// Which categories of transcript entries are currently visible.
@@ -377,10 +387,17 @@ impl ReplayState {
 
 // ── Sound pulse ──────────────────────────────────────────────────────────────
 
+/// A host-side bleep classification for the border-pulse visual cue.
+#[derive(Debug, Clone, Copy)]
+pub enum BeepKind {
+    High,
+    Low,
+}
+
 /// An in-flight one-shot story-border flash triggered by a `sound_effect` bleep.
 #[derive(Debug)]
 pub struct SoundPulse {
-    pub kind: zvm::cpu::exec::Beep,
+    pub kind: BeepKind,
     pub started: std::time::Instant,
 }
 
@@ -847,6 +864,15 @@ pub struct AppState {
     pub tidy_job: Option<TidyJob>,
     /// In-flight one-shot story-border flash, if any. Armed by a beep event; expires after SOUND_PULSE_MS.
     pub sound_pulse: Option<SoundPulse>,
+    /// Host audio backend, present when audio was enabled at launch. `None` when
+    /// disabled or when construction was skipped.
+    pub audio: Option<audio::AudioBackend>,
+    /// The Blorb holding this story's `Snd ` resources, resolved at launch.
+    pub sound_blorb: Option<blorb::Blorb>,
+    /// Playing sampled sounds keyed by Z-machine sound number (for `effect` 3 stop).
+    pub sound_ids: std::collections::HashMap<u16, audio::SoundId>,
+    /// Finish-routines to fire when a sampled sound ends, keyed by its SoundId.
+    pub sound_routines: std::collections::HashMap<audio::SoundId, u16>,
     /// In-flight smooth transcript-scroll animation, if any. `transcript_scroll`
     /// holds the target; this eases the displayed offset toward it.
     pub scroll_anim: Option<ScrollAnim>,
@@ -1101,6 +1127,10 @@ impl Default for AppState {
             tidy_anim: None,
             tidy_job: None,
             sound_pulse: None,
+            audio: None,
+            sound_blorb: None,
+            sound_ids: std::collections::HashMap::new(),
+            sound_routines: std::collections::HashMap::new(),
             scroll_anim: None,
             graph_gen: 0,
             viewed_layer: None,
@@ -1182,6 +1212,50 @@ impl AppState {
             })
             || self.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
             || self.hints.as_ref().is_some_and(|h| h.has_active_animation())
+    }
+
+    /// Play the turn's sound events through the backend (gated on config +
+    /// backend availability). Bleeps (#1/#2) → tones; samples (#>=3) → Blorb
+    /// resource playback, remembering the SoundId (and finish routine) per number.
+    /// `effect`: 2/default = start, 3 = stop, 1 = prepare (no-op).
+    pub fn play_turn_sounds(&mut self, sounds: &[zvm::cpu::exec::SoundEvent]) {
+        if !self.config.enable_sound {
+            return;
+        }
+        let Some(backend) = self.audio.as_mut() else { return };
+        for ev in sounds {
+            match ev.number {
+                0 => {}
+                1 | 2 => {
+                    if ev.effect == 0 || ev.effect == 2 {
+                        let freq = if ev.number == 1 { 800.0 } else { 400.0 };
+                        backend.play_tone(freq, 150, ev.volume);
+                    }
+                }
+                n => match ev.effect {
+                    3 => {
+                        if let Some(id) = self.sound_ids.remove(&n) {
+                            backend.stop(id);
+                        }
+                    }
+                    1 => {} // prepare: decode on start
+                    _ => {
+                        if let Some(blorb) = &self.sound_blorb {
+                            if let Some((bytes, kind)) = blorb.sound(n as u32) {
+                                if let Some(fmt) = sound_kind_to_format(kind) {
+                                    if let Some(id) = backend.play_sample(bytes, fmt, ev.volume, ev.repeats) {
+                                        self.sound_ids.insert(n, id);
+                                        if ev.routine != 0 {
+                                            self.sound_routines.insert(id, ev.routine);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
     }
 
     /// Set the transcript scroll target to `target`. When animation is enabled
@@ -1882,21 +1956,35 @@ mod tests {
     }
 
     #[test]
+    fn play_turn_sounds_never_panics_without_device() {
+        use zvm::cpu::exec::SoundEvent;
+        let mut s = AppState::default();       // audio = None, sound_blorb = None
+        s.config.enable_sound = true;
+        // A #1 bleep event: play_turn_sounds must not panic with no backend.
+        let ev = SoundEvent { number: 1, effect: 2, volume: 8, repeats: 0, routine: 0 };
+        s.play_turn_sounds(&[ev]);             // no device -> silent, no panic
+        // A #3 sampled start with no blorb loaded: no id remembered, no panic.
+        let ev3 = SoundEvent { number: 3, effect: 2, volume: 8, repeats: 1, routine: 0 };
+        s.play_turn_sounds(&[ev3]);
+        assert!(s.sound_ids.is_empty(), "no sound id remembered without a blorb");
+    }
+
+    #[test]
     fn sound_pulse_defaults_none_and_holds_kind() {
-        use zvm::cpu::exec::Beep;
+        use crate::state::BeepKind;
         let mut s = AppState::default();
         assert!(s.sound_pulse.is_none(), "no pulse by default");
-        s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
-        assert!(matches!(s.sound_pulse.as_ref().map(|p| p.kind), Some(Beep::High)));
+        s.sound_pulse = Some(SoundPulse { kind: BeepKind::High, started: std::time::Instant::now() });
+        assert!(matches!(s.sound_pulse.as_ref().map(|p| p.kind), Some(BeepKind::High)));
     }
 
     #[test]
     fn has_active_animation_reflects_sources() {
-        use zvm::cpu::exec::Beep;
+        use crate::state::BeepKind;
         let mut s = AppState::default();
         assert!(!s.has_active_animation(), "idle state has no active animation");
 
-        s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
+        s.sound_pulse = Some(SoundPulse { kind: BeepKind::High, started: std::time::Instant::now() });
         assert!(s.has_active_animation(), "sound pulse counts as active");
         s.sound_pulse = None;
 

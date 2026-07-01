@@ -147,6 +147,10 @@ pub enum Action {
     ToggleStatusBar,
     /// Toggle honoring the Z-machine's timed-input (`read`/`read_char` timers).
     ToggleTimedInput,
+    /// Toggle audio playback (config.enable_sound).
+    ToggleSound,
+    /// Set the master audio volume 0..=100 (config.volume).
+    SetVolume(u8),
     /// Toggle the room-detection-method indicator in the map corner.
     ToggleLocMethod,
     /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
@@ -2057,6 +2061,21 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.config.honor_timed_input = !state.config.honor_timed_input;
             state.set_status(if state.config.honor_timed_input { "timed input on" } else { "timed input off" });
         }
+        Action::ToggleSound => {
+            state.config.enable_sound = !state.config.enable_sound;
+            state.set_status(if state.config.enable_sound { "sound on" } else { "sound off" });
+            if !state.config.enable_sound {
+                if let Some(b) = state.audio.as_mut() { b.stop_all(); }
+            } else if state.audio.is_none() {
+                state.audio = Some(audio::AudioBackend::new(state.config.volume));
+            }
+        }
+        Action::SetVolume(v) => {
+            let v = v.min(100);
+            state.config.volume = v;
+            state.set_status(&format!("volume {v}"));
+            if let Some(b) = state.audio.as_mut() { b.set_volume(v); }
+        }
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
             // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
@@ -2992,6 +3011,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigSave => {
             if let Some(cs) = state.config_screen.take() {
                 state.config = clone_config(&cs.working);
+                if let Some(b) = state.audio.as_mut() {
+                    b.set_volume(state.config.volume);
+                    if !state.config.enable_sound { b.stop_all(); }
+                } else if state.config.enable_sound {
+                    state.audio = Some(audio::AudioBackend::new(state.config.volume));
+                }
                 // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
                     crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);
@@ -3499,6 +3524,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         9 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
         10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
         11 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
+        12 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
         _ => {}
     }
 }
@@ -3535,6 +3561,8 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         9 => config_cycle_aux_storage(&mut working.aux_storage, delta),
         10 => working.honor_game_colours = !working.honor_game_colours,
         11 => working.honor_timed_input = !working.honor_timed_input,
+        12 => working.enable_sound = !working.enable_sound,
+        13 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
         _ => {}
     }
 }
@@ -4190,6 +4218,20 @@ mod tests {
         assert!(s.show_portal_labels, "TogglePortalLabels turns labels on");
         apply_action(Action::TogglePortalLabels, &mut s, &mut m);
         assert!(!s.show_portal_labels, "TogglePortalLabels toggles back off");
+    }
+
+    #[test]
+    fn toggle_sound_lazily_builds_backend_when_turned_on() {
+        // Regression: launching with enable_sound = false never constructs an
+        // AudioBackend (see main.rs), so flipping the config flag alone leaves
+        // state.audio == None forever. ToggleSound must build the backend too.
+        let mut s = AppState::default();
+        s.config.enable_sound = false;
+        s.audio = None;
+        let mut m = Mapper::default();
+        apply_action(Action::ToggleSound, &mut s, &mut m);
+        assert!(s.config.enable_sound, "ToggleSound should turn sound on");
+        assert!(s.audio.is_some(), "ToggleSound should lazily construct the AudioBackend");
     }
 
     #[test]
@@ -5819,7 +5861,7 @@ mod tests {
                 quit: false,
                 erase_lower: false,
                 info: None,
-                beep: None,
+                sounds: Vec::new(),
                 diagnostics: vec![],
                 location_method: None,
                 pending_io: None,
@@ -5862,7 +5904,7 @@ mod tests {
                 quit: false,
                 erase_lower: false,
                 info: None,
-                beep: None,
+                sounds: Vec::new(),
                 diagnostics: vec![],
                 location_method: None,
                 pending_io: None,
