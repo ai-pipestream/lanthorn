@@ -158,20 +158,19 @@ pub fn draw_grid(
         }
     }
 
-    // Cursor: invert the cell under the (offset-adjusted) cursor so it stays
-    // visible over both normal and already-reversed cells. Uses the SAME
-    // single-swap mechanism as every other cell — flip the reverse bit (0x01)
-    // and re-run the cell through `cell_style` — rather than a separate REVERSED
-    // modifier that would be inconsistent with (and fight) the fg/bg swap.
+    // Cursor: resolve the cell's normal style then apply the terminal-level
+    // REVERSED modifier on top. Using the modifier (not the bit-flip trick)
+    // keeps the cursor visible even on default (Reset/Reset) cells, where
+    // swapping fg with bg is a no-op and the cursor would disappear.
     if show_cursor && crow >= row_offset && ccol >= col_offset {
         let cur_dy = crow - row_offset;
         let cur_dx = ccol - col_offset;
         if cur_dy < content.height && cur_dx < content.width {
             let grid_row = cur_dy + row_offset + 1; // 1-based
             let grid_col = cur_dx + col_offset + 1; // 1-based
-            let mut cur = upper.cell(grid_row, grid_col);
-            cur.style ^= 0x01; // flip reverse so the cursor cell inverts via the swap
-            let style = cell_style(grid_cell_to_zvm(cur), colors);
+            let cur = upper.cell(grid_row, grid_col);
+            let style = cell_style(grid_cell_to_zvm(cur), colors)
+                .add_modifier(ratatui::style::Modifier::REVERSED);
             if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
                 c.set_style(style);
             }
@@ -416,11 +415,41 @@ mod tests {
         assert_eq!(c.fg, Color::Rgb(200, 0, 0), "no cursor: fg is logical");
         assert_eq!(c.bg, Color::Rgb(0, 0, 200), "no cursor: bg is logical");
 
-        // With show_cursor=true the cursor cell inverts (fg/bg swapped once).
+        // With show_cursor=true the cursor cell carries REVERSED modifier on top
+        // of its logical colours (no swap in the stored fg/bg values).
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf);
         let c = buf.cell((4, 1)).unwrap();
-        assert_eq!(c.fg, Color::Rgb(0, 0, 200), "cursor cell fg is the swapped bg");
-        assert_eq!(c.bg, Color::Rgb(200, 0, 0), "cursor cell bg is the swapped fg");
+        assert!(c.modifier.contains(Modifier::REVERSED), "cursor cell must carry REVERSED modifier");
+        assert_eq!(c.fg, Color::Rgb(200, 0, 0), "cursor cell fg is logical (REVERSED handles invert)");
+        assert_eq!(c.bg, Color::Rgb(0, 0, 200), "cursor cell bg is logical (REVERSED handles invert)");
+    }
+
+    /// Regression guard: cursor on a DEFAULT cell (fg == bg == ZColour::Default,
+    /// resolved to Color::Reset) must still be visible. The old bit-flip path
+    /// swapped Reset with Reset (a no-op), making the cursor invisible. The fixed
+    /// path applies Modifier::REVERSED so the terminal inverts whatever the cell
+    /// happens to look like.
+    #[test]
+    fn cursor_on_default_cell_carries_reversed_modifier() {
+        let mut upper = GridWindow::default();
+        upper.resize(1, 3);
+        // Cell (1,2) keeps its default colours (ZColour::Default -> Color::Reset).
+        upper.put(1, 2, ' ', 0);
+
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+
+        // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; col 2 -> buf x=4.
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf);
+
+        let c = buf.cell((4, 0)).unwrap();
+        assert!(
+            c.modifier.contains(Modifier::REVERSED),
+            "cursor on a default (Reset/Reset) cell must carry REVERSED so it stays visible"
+        );
     }
 }
