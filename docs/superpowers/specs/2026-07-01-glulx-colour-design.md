@@ -40,10 +40,13 @@ some style; the interpreter resolves that (window-type, style) → colour.
   colour. Rather than downsample Glk's 24-bit RGB into 15 bits, add a `True24(u32)`
   variant carrying exact `0xRRGGBB`. Packed as tag `3<<24 | rgb` (the low 24 bits
   are free), resolved to `Color::Rgb`, and rendered as truecolor SGR.
-- **`honor_game_colours` gate, both hosts.** `gvm-cli`'s `TerminalBackend` and the
-  app's `AppGlk` each hold a `honor` flag (default on), threaded from
-  `cfg.honor_game_colours` / a `--no-game-colours` CLI flag. When off, colour and
-  the reverse hint are dropped; only style-class attributes remain.
+- **`honor_game_colours` gate, applied where each host renders.** `gvm-cli`'s
+  `TerminalBackend` *is* the renderer, so it gates in `sgr_open` (with a
+  `--no-game-colours` CLI flag). The **app** records colour unconditionally in
+  `AppGlk` and lets its shared renderer gate at draw time (`cell_style` /
+  `draw_str_runs` already suppress fg/bg when `honor_game_colours` is off) —
+  identical to the Z-machine path, so the F2 toggle recolours already-drawn
+  output live.
 - **Reverse hint:** `gvm-cli` emits SGR 7; the app ORs the reverse style bit
   (0x01). Consistent with how each host already renders reverse-video.
 
@@ -82,10 +85,13 @@ game prints in `style` → exec resolves Model.style_colour(wintype, style)
 - Z-machine colour path unchanged (`True24` is purely additive).
 - Cross-platform; full workspace suite green, no new warnings.
 
-## Known limitation
+## Notes
 
-The app resolves colour at **record** time (into the log/cells), not render
-time, so toggling `honor_game_colours` via F2 mid-game does not retroactively
-recolour already-printed text — it applies to subsequent output. (The Z-machine
-resolves at render time.) Acceptable for now; a render-time resolve is a
-follow-up if live toggling of past output is wanted.
+- The app records colour unconditionally and gates at render time, so F2
+  toggling of `honor_game_colours` recolours already-drawn Glulx output live —
+  the same behaviour as the Z-machine. (`gvm-cli` gates in its backend, which is
+  its renderer, and has no live toggle — only the `--no-game-colours` flag.)
+- Glk stylehints are held in a single global table and resolved at print time.
+  Per the Glk spec hints apply to windows opened *after* they're set; this
+  interpreter's global-resolve is a common, adequate simplification for the
+  target games.

@@ -43,15 +43,16 @@ pub fn glk_style_bits(style: GlkStyle) -> u8 {
 }
 
 /// Resolve a Glk style class + its stylehint colour into the app's neutral
-/// `(style-bits, packed-fg, packed-bg)`. The reverse hint (bit `0x01`) and the
-/// fg/bg colour apply only when `honor` is set; 24-bit RGB is carried
-/// losslessly via [`ZColour::True24`](zvm::screen::ZColour::True24). Packed
-/// colours use [`crate::state::pack_zcolour`] (`0` = `ZColour::Default`).
-fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, honor: bool) -> (u8, u32, u32) {
+/// `(style-bits, packed-fg, packed-bg)`. The reverse hint sets bit `0x01`;
+/// 24-bit RGB is carried losslessly via
+/// [`ZColour::True24`](zvm::screen::ZColour::True24). Packed colours use
+/// [`crate::state::pack_zcolour`] (`0` = `ZColour::Default`).
+///
+/// Colour is recorded unconditionally — the `honor_game_colours` gate is applied
+/// at *render* time by `cell_style`/`draw_str_runs`, exactly like the Z-machine,
+/// so toggling it (F2) recolours already-drawn output too.
+fn resolve_glk_colour(style: GlkStyle, colour: StyleColour) -> (u8, u32, u32) {
     let mut bits = glk_style_bits(style);
-    if !honor {
-        return (bits, 0, 0);
-    }
     if colour.reverse {
         bits |= 0x01;
     }
@@ -96,20 +97,18 @@ pub struct AppGlk {
     buffers: BTreeMap<u32, BufBuf>,
     /// The primary buffer window id (the first text-buffer opened), if any.
     primary: Option<u32>,
-    /// Whether to honour the game's stylehint colours (F2 / config gate).
-    honor: bool,
 }
 
 impl Default for AppGlk {
     fn default() -> Self {
-        AppGlk::new(80, 24, true)
+        AppGlk::new(80, 24)
     }
 }
 
 impl AppGlk {
-    /// A backend reporting a `cols × rows` display. `honor` gates rendering of
-    /// the game's stylehint colours (see [`AppGlk::set_honor_colours`]).
-    pub fn new(cols: u32, rows: u32, honor: bool) -> AppGlk {
+    /// A backend reporting a `cols × rows` display. Stylehint colour is always
+    /// recorded; the `honor_game_colours` gate is applied at render time.
+    pub fn new(cols: u32, rows: u32) -> AppGlk {
         AppGlk {
             cols,
             rows,
@@ -117,14 +116,7 @@ impl AppGlk {
             grids: BTreeMap::new(),
             buffers: BTreeMap::new(),
             primary: None,
-            honor,
         }
-    }
-
-    /// Enable/disable honouring the game's stylehint colours. Applies to output
-    /// recorded after the change (already-recorded runs keep their colour).
-    pub fn set_honor_colours(&mut self, on: bool) {
-        self.honor = on;
     }
 
     /// Update the reported display size (the host story-pane size each frame).
@@ -376,7 +368,7 @@ impl GlkBackend for AppGlk {
     }
 
     fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, s: &str) {
-        let (bits, fg, bg) = resolve_glk_colour(style, colour, self.honor);
+        let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let buf = self.buffers.entry(win).or_default();
         buf.log.push((bits, fg, bg, s.to_string()));
     }
@@ -386,7 +378,7 @@ impl GlkBackend for AppGlk {
     }
 
     fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, s: &str) {
-        let (bits, fg, bg) = resolve_glk_colour(style, colour, self.honor);
+        let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let g = self.grids.entry(win).or_default();
         for (i, ch) in s.chars().enumerate() {
             g.cells.insert((y, x + i as u32), (ch, bits, fg, bg));
@@ -438,7 +430,7 @@ mod tests {
     #[test]
     fn grid_over_buffer_builds_pair_tree() {
         // A 1-row TextGrid (id 2) stacked above an 80x23 TextBuffer (id 1).
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextGrid);
         glk.window_layout(&[
@@ -463,7 +455,7 @@ mod tests {
     #[test]
     fn three_window_split_nests() {
         // Grid (id 3, top row) over a left/right buffer split (ids 1, 2).
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextBuffer);
         glk.window_open(3, WinType::TextGrid);
@@ -491,7 +483,7 @@ mod tests {
     #[test]
     fn put_text_styles_inline_buffer() {
         // Two buffers: id 1 is primary (drained), id 2 is inline.
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextBuffer);
         glk.window_layout(&[
@@ -525,7 +517,7 @@ mod tests {
 
     #[test]
     fn primary_text_is_drainable() {
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_layout(&[(1, WinType::TextBuffer, rect(0, 0, 80, 24))]);
         glk.put_text(1, GlkStyle::Normal, "You are here. ");
@@ -551,7 +543,7 @@ mod tests {
 
     #[test]
     fn grid_put_and_clear_update_cells() {
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2))]);
         glk.grid_put(1, 2, 0, GlkStyle::Header, "Hi");
@@ -569,22 +561,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_glk_colour_packs_24bit_and_gates_on_honor() {
+    fn resolve_glk_colour_packs_24bit_and_reverse() {
         use zvm::screen::ZColour;
+        // fg/bg become packed True24; the reverse hint sets bit 0x01.
         let sc = StyleColour { fg: Some(0x00AA_BBCC), bg: Some(0x0011_2233), reverse: true };
-        // honor on: fg/bg become packed True24; the reverse hint sets bit 0x01.
-        let (bits, fg, bg) = resolve_glk_colour(GlkStyle::Normal, sc, true);
+        let (bits, fg, bg) = resolve_glk_colour(GlkStyle::Normal, sc);
         assert_eq!(bits, 0x01);
         assert_eq!(fg, crate::state::pack_zcolour(ZColour::True24(0x00AA_BBCC)));
         assert_eq!(bg, crate::state::pack_zcolour(ZColour::True24(0x0011_2233)));
-        // honor off: colour + reverse dropped, only the style-class bits remain.
-        assert_eq!(resolve_glk_colour(GlkStyle::Header, sc, false), (0x02, 0, 0));
+        // No hints set: only the style-class bits, no colour. (The honor gate is
+        // applied at render time, not here.)
+        assert_eq!(resolve_glk_colour(GlkStyle::Header, StyleColour::default()), (0x02, 0, 0));
     }
 
     #[test]
     fn buffer_colour_flows_to_transcript() {
         use zvm::screen::ZColour;
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         let red = StyleColour { fg: Some(0x00FF_0000), bg: None, reverse: false };
         glk.put_text_attr(1, GlkStyle::Normal, red, "hi");
@@ -600,7 +593,7 @@ mod tests {
     #[test]
     fn grid_colour_flows_to_cells() {
         use zvm::screen::ZColour;
-        let mut glk = AppGlk::new(80, 24, true);
+        let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2))]);
         let blue_on_white = StyleColour { fg: Some(0x0000_00FF), bg: Some(0x00FF_FFFF), reverse: false };
@@ -609,16 +602,5 @@ mod tests {
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
         assert_eq!(cell.bg, crate::state::pack_zcolour(ZColour::True24(0x00FF_FFFF)));
-    }
-
-    #[test]
-    fn honor_off_backend_drops_colour() {
-        use zvm::screen::ZColour;
-        let mut glk = AppGlk::new(80, 24, false);
-        glk.window_open(1, WinType::TextBuffer);
-        let red = StyleColour { fg: Some(0x00FF_0000), bg: None, reverse: false };
-        glk.put_text_attr(1, GlkStyle::Normal, red, "hi");
-        let (_t, chunks) = glk.take_transcript();
-        assert_eq!(chunks[0].2, ZColour::Default, "colour dropped when honor is off");
     }
 }
