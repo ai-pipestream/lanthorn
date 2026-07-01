@@ -235,6 +235,14 @@ impl GameSession {
         }
     }
 
+    /// Run a sampled sound's finish-routine (v5+) to completion and drain any
+    /// output it produced. The return value is ignored (ZMSD §9.4 — it does not
+    /// abort anything). Does not step a pending read forward.
+    pub fn run_sound_finish(&mut self, routine: u16) -> TurnResult {
+        self.machine.run_routine(routine);
+        self.collect_turn()
+    }
+
     /// Complete the pending read as timed-out: `read_char` delivers ZSCII 0;
     /// `read` writes the partial `typed` line with terminator 0. Steps to the
     /// next input request and returns a `TurnResult` with `timed_out == true`.
@@ -1106,6 +1114,18 @@ mod tests {
         let tr = s.abort_timed_input("");
         assert!(tr.timed_out, "abort_timed_input always marks timed_out");
         assert!(tr.quit, "story quits right after the aborted read_char");
+    }
+
+    #[test]
+    fn run_sound_finish_returns_turn_result() {
+        // Reuse the char-mode fixture: run_sound_finish drives run_routine then
+        // collects a TurnResult without stepping the read forward. Passing a 0
+        // (bad/no routine) still returns a well-formed TurnResult (no panic).
+        let story = read_char_story_v5();
+        let mut sess = GameSession::new(story, true, None).expect("GameSession::new failed");
+        let r = sess.run_sound_finish(0);
+        assert!(r.sounds.is_empty(), "no new sounds from a finish callback");
+        assert!(!r.quit, "a no-op finish routine does not quit");
     }
 
     #[test]

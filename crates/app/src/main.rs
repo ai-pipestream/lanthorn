@@ -1535,7 +1535,8 @@ fn main() {
         // When a timed-input deadline is armed, clamp further so the loop wakes in
         // time to fire the interrupt — the normal cadence stays the ceiling, so
         // this is a no-op when no timer is running (regression guard).
-        let base_poll_ms = if state.has_active_animation() { TIDY_POLL_MS } else { 50 };
+        let sound_active = !state.sound_routines.is_empty();
+        let base_poll_ms = if state.has_active_animation() || sound_active { TIDY_POLL_MS } else { 50 };
         let poll_ms = match state.input_deadline {
             Some(dl) => {
                 let remaining = dl.saturating_duration_since(std::time::Instant::now()).as_millis() as u64;
@@ -1572,6 +1573,24 @@ fn main() {
                             &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
                         ) {
                             break;
+                        }
+                    }
+                }
+            }
+            // Poll for finished sampled sounds and fire their finish-routines.
+            let done: Vec<u32> = state.audio.as_mut().map(|b| b.finished()).unwrap_or_default();
+            for id in done {
+                if let Some(routine) = state.sound_routines.remove(&id) {
+                    // Forget the number->id mapping for this finished sound too.
+                    state.sound_ids.retain(|_, v| *v != id);
+                    if routine != 0 {
+                        if let Some(zs) = zvm_session_opt_mut(&mut *session) {
+                            let result = zs.run_sound_finish(routine);
+                            if apply_game_driven_result(
+                                &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                            ) {
+                                break 'event_loop;
+                            }
                         }
                     }
                 }
