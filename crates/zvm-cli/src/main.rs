@@ -228,16 +228,18 @@ struct Args {
     no_status: bool,
     no_aux: bool,
     no_more: bool,
+    no_timed_input: bool,
 }
 
 fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false };
+    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false, no_timed_input: false };
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
             "--no-status" | "--lower-only" => a.no_status = true,
             "--no-aux" => a.no_aux = true,
             "--no-more" | "--no-page" => a.no_more = true,
+            "--no-timed-input" => a.no_timed_input = true,
             "--no-game-colours" => {}
             "-I" | "--interpreter" => i += 1, // also skip the following value token
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
@@ -321,21 +323,46 @@ fn wait_for_keypress(is_tty: bool) {
 /// Read one keypress in raw mode. Resize events that arrive before the key are
 /// captured and returned alongside the key so the caller can update its state.
 /// Piped stdin: reads the first byte of the next line.
-fn read_char_input(is_tty: bool) -> (u8, Option<(u16, u16)>) {
+///
+/// When `timeout` is `Some((time, _))` (a timed `read_char` and timed input is
+/// honored), each wait is bounded to `time * 100` ms; on expiry the pending
+/// interrupt routine runs via `machine.run_timed_interrupt()`. If it aborts the
+/// read, this returns with `aborted = true` (caller completes via
+/// `abort_timed_input`); otherwise the routine's output is redrawn via `view`
+/// and the wait resumes. `timeout = None` keeps today's exact blocking read.
+fn read_char_input(
+    is_tty: bool,
+    machine: &mut Machine,
+    view: &mut screen::ScreenView,
+    timeout: Option<(u16, u16)>,
+) -> (u8, Option<(u16, u16)>, bool) {
     if !is_tty {
-        return (read_byte_stdin(), None);
+        return (read_byte_stdin(), None, false);
     }
     let _ = terminal::enable_raw_mode();
     let mut last_resize: Option<(u16, u16)> = None;
-    let key = loop {
+    let result = loop {
+        if let Some((t, _)) = timeout {
+            if !event::poll(std::time::Duration::from_millis(t as u64 * 100)).unwrap_or(false) {
+                let _ = terminal::disable_raw_mode();
+                let out = machine.run_timed_interrupt();
+                let _ = terminal::enable_raw_mode();
+                if out.aborted {
+                    break (0u8, last_resize, true);
+                }
+                print!("{}", view.frame(machine));
+                let _ = io::stdout().flush();
+                continue;
+            }
+        }
         match event::read() {
-            Ok(Event::Key(KeyEvent { code, .. })) => break decode_keycode(code),
+            Ok(Event::Key(KeyEvent { code, .. })) => break (decode_keycode(code), last_resize, false),
             Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
             _ => {}
         }
     };
     let _ = terminal::disable_raw_mode();
-    (key, last_resize)
+    result
 }
 
 // ── aux ("global state") persistence ──────────────────────────────────────────
@@ -391,24 +418,49 @@ fn read_line_stdin() -> String {
 /// and the echo is drawn in the game's current style/colour (`echo`). Resize
 /// events during the read are captured and returned so the caller can update
 /// its layout. Falls back to cooked line input when stdin is not a TTY (piped).
+///
+/// When `timeout` is `Some((time, _))` (a timed `read` and timed input is
+/// honored), each wait is bounded to `time * 100` ms; on expiry the pending
+/// interrupt routine runs via `machine.run_timed_interrupt()`. If it aborts the
+/// read, this returns with `aborted = true` (caller completes via
+/// `abort_timed_input`, buffer preserved in `line`); otherwise the routine's
+/// output is redrawn via `view` and the line-edit resumes. `timeout = None`
+/// keeps today's exact blocking read.
 fn read_line_raw(
     is_tty: bool,
     echo: zvm::io::TextAttrs,
-    machine: &Machine,
-) -> (String, u8, Option<(u16, u16)>) {
+    machine: &mut Machine,
+    view: &mut screen::ScreenView,
+    timeout: Option<(u16, u16)>,
+) -> (String, u8, Option<(u16, u16)>, bool) {
     if !is_tty {
-        return (read_line_stdin(), 13, None);
+        return (read_line_stdin(), 13, None, false);
     }
     let _ = terminal::enable_raw_mode();
     let mut buf = String::new();
     let mut terminator: u8 = 13; // Enter unless a function-key terminator ends the line
     let mut last_resize: Option<(u16, u16)> = None;
+    let mut aborted = false;
     let sgr = crate::screen::sgr_open(echo);
     if !sgr.is_empty() {
         print!("{sgr}");
         let _ = io::stdout().flush();
     }
     loop {
+        if let Some((t, _)) = timeout {
+            if !event::poll(std::time::Duration::from_millis(t as u64 * 100)).unwrap_or(false) {
+                let _ = terminal::disable_raw_mode();
+                let out = machine.run_timed_interrupt();
+                let _ = terminal::enable_raw_mode();
+                if out.aborted {
+                    aborted = true;
+                    break;
+                }
+                print!("{}", view.frame(machine));
+                let _ = io::stdout().flush();
+                continue;
+            }
+        }
         match event::read() {
             Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
                 KeyCode::Enter => break,
@@ -464,7 +516,7 @@ fn read_line_raw(
         print!("\r\n");
     }
     let _ = io::stdout().flush();
-    (buf, terminator, last_resize)
+    (buf, terminator, last_resize, aborted)
 }
 
 fn read_byte_stdin() -> u8 {
@@ -571,6 +623,8 @@ fn main() {
     let (mut term_rows, mut term_cols) = detect_term_size();
     let paging = both_tty && !args.no_more;
     let mut page_height = term_rows.saturating_sub(2).max(2);
+    // Timed reads (read/read_char time+routine) are honored unless disabled.
+    let timed = !args.no_timed_input;
 
     let honor = parse_game_colours(&argv);
     let interpreter = parse_interpreter(&argv);
@@ -680,12 +734,18 @@ fn main() {
                 } else {
                     zvm::io::TextAttrs::default()
                 };
-                let (line, terminator, resize) = read_line_raw(stdin_is_tty, echo, &machine);
+                let timeout = if timed { machine.pending_timeout() } else { None };
+                let (line, terminator, resize, aborted) =
+                    read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout);
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
                                  &mut page_height, &mut machine, &mut view);
                 }
-                machine.supply_line(line.trim_end(), terminator);
+                if aborted {
+                    machine.abort_timed_input(line.trim_end());
+                } else {
+                    machine.supply_line(line.trim_end(), terminator);
+                }
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
                     o.current_col = 0; // cursor is at line start after user input + Enter
@@ -697,13 +757,18 @@ fn main() {
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
-                let (ch, resize) = read_char_input(stdin_is_tty);
+                let timeout = if timed { machine.pending_timeout() } else { None };
+                let (ch, resize, aborted) = read_char_input(stdin_is_tty, &mut machine, &mut view, timeout);
                 // Handle any resize that happened DURING the char read.
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
                                  &mut page_height, &mut machine, &mut view);
                 }
-                machine.supply_char(ch);
+                if aborted {
+                    machine.abort_timed_input("");
+                } else {
+                    machine.supply_char(ch);
+                }
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
                     o.current_col = 0;
@@ -770,6 +835,14 @@ mod arg_tests {
         assert!(a.no_more);
         let b = parse_args(&["zvm-cli".into(), "g".into()]);
         assert!(!b.no_more);
+    }
+
+    #[test]
+    fn parses_no_timed_input_flag() {
+        let a = parse_args(&["zvm-cli".into(), "--no-timed-input".into(), "g".into()]);
+        assert!(a.no_timed_input);
+        let b = parse_args(&["zvm-cli".into(), "g".into()]);
+        assert!(!b.no_timed_input);
     }
 
     #[test]
