@@ -40,11 +40,10 @@ fn push_colour_sgr(params: &mut Vec<String>, c: ZColour, fg: bool) {
     }
 }
 
-/// Wrap lower-window text in SGR when on a TTY and any style/colour is active; else plain.
-pub fn style_wrap(s: &str, attrs: TextAttrs, is_tty: bool) -> String {
-    if !is_tty {
-        return s.to_string();
-    }
+/// SGR set-sequence (`ESC[...m`, no trailing reset) for `attrs`, or `""` when
+/// no style/colour is active. Shared by `style_wrap` and the raw-mode input
+/// editor (to echo typed input in the game's current style/colour).
+pub fn sgr_open(attrs: TextAttrs) -> String {
     let mut params: Vec<String> = Vec::new();
     if attrs.style & 0x01 != 0 { params.push("7".into()); }
     if attrs.style & 0x02 != 0 { params.push("1".into()); }
@@ -52,9 +51,23 @@ pub fn style_wrap(s: &str, attrs: TextAttrs, is_tty: bool) -> String {
     push_colour_sgr(&mut params, attrs.fg, true);
     push_colour_sgr(&mut params, attrs.bg, false);
     if params.is_empty() {
+        String::new()
+    } else {
+        format!("\x1b[{}m", params.join(";"))
+    }
+}
+
+/// Wrap lower-window text in SGR when on a TTY and any style/colour is active; else plain.
+pub fn style_wrap(s: &str, attrs: TextAttrs, is_tty: bool) -> String {
+    if !is_tty {
         return s.to_string();
     }
-    format!("\x1b[{}m{}\x1b[0m", params.join(";"), s)
+    let open = sgr_open(attrs);
+    if open.is_empty() {
+        s.to_string()
+    } else {
+        format!("{}{}\x1b[0m", open, s)
+    }
 }
 
 /// Terminal BEL per bleep, TTY-gated.
@@ -133,15 +146,14 @@ pub fn upper_row_ansi(upper: &UpperWindow, row: u16) -> String {
     out
 }
 
-/// Set the scroll region below the pinned rows and park the cursor at the
-/// bottom of the lower region.
+/// Set the scroll region below the pinned rows, preserving the cursor position.
+///
+/// DECSTBM (`ESC[t;br`) homes the cursor as a side effect, which would
+/// disconnect input from where the game left its `>` prompt. Save the cursor
+/// (DECSC) before setting the region and restore it (DECRC) after, so input
+/// happens at the prompt rather than being force-parked at the bottom row.
 pub fn enter_region(top_rows: u16, term_rows: u16) -> String {
-    format!(
-        "\x1b[{};{}r\x1b[{};1H",
-        top_rows + 1,
-        term_rows,
-        term_rows
-    )
+    format!("\x1b7\x1b[{};{}r\x1b8", top_rows + 1, term_rows)
 }
 
 /// Reset the scroll region to the full screen.
@@ -399,6 +411,16 @@ mod colour_tests {
     use zvm::screen::ZColour;
 
     #[test]
+    fn sgr_open_builds_prefix_without_reset() {
+        assert_eq!(sgr_open(TextAttrs::default()), "", "no attrs → empty");
+        assert_eq!(sgr_open(TextAttrs { style: 2, ..Default::default() }), "\x1b[1m", "bold, no reset");
+        let c = TextAttrs { style: 0, fg: ZColour::Standard(3), bg: ZColour::Default };
+        assert_eq!(sgr_open(c), "\x1b[31m", "fg only, no trailing reset");
+        // style_wrap composes sgr_open + reset.
+        assert_eq!(style_wrap("x", c, true), "\x1b[31mx\x1b[0m");
+    }
+
+    #[test]
     fn style_wrap_emits_colour_sgr() {
         // standard fg=red(3)->31, bg=blue(6)->44
         let a = TextAttrs { style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) };
@@ -497,6 +519,9 @@ mod tests {
     #[test]
     fn region_strings() {
         assert_eq!(leave_region(), "\x1b[r");
-        assert!(enter_region(1, 24).starts_with("\x1b[2;24r"));
+        // Sets the scroll region (rows 2..24) wrapped in DECSC/DECRC so the
+        // cursor is preserved (not parked at the bottom).
+        assert_eq!(enter_region(1, 24), "\x1b7\x1b[2;24r\x1b8");
+        assert!(!enter_region(1, 24).contains("\x1b[24;1H"), "no bottom-row park");
     }
 }

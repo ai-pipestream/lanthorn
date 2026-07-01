@@ -17,7 +17,7 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 
 use zvm::cpu::exec::{Machine, StepResult};
@@ -357,6 +357,69 @@ fn read_line_stdin() -> String {
     line
 }
 
+/// Read a line of input in RAW mode, echoing as the user types. Unlike cooked
+/// `read_line_stdin`, arrow/function-key escape sequences are parsed by
+/// crossterm into key events (so they never leak onto the screen as garbage),
+/// and the echo is drawn in the game's current style/colour (`echo`). Resize
+/// events during the read are captured and returned so the caller can update
+/// its layout. Falls back to cooked line input when stdin is not a TTY (piped).
+fn read_line_raw(is_tty: bool, echo: zvm::io::TextAttrs) -> (String, Option<(u16, u16)>) {
+    if !is_tty {
+        return (read_line_stdin(), None);
+    }
+    let _ = terminal::enable_raw_mode();
+    let mut buf = String::new();
+    let mut last_resize: Option<(u16, u16)> = None;
+    let sgr = crate::screen::sgr_open(echo);
+    if !sgr.is_empty() {
+        print!("{sgr}");
+        let _ = io::stdout().flush();
+    }
+    loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
+                KeyCode::Enter => break,
+                // Ctrl-C / Ctrl-D: raw mode swallows signals, so exit cleanly
+                // ourselves (drop the colour, leave raw mode + the scroll region).
+                KeyCode::Char('c') | KeyCode::Char('d')
+                    if modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if !sgr.is_empty() { print!("\x1b[0m"); }
+                    print!("\r\n");
+                    let _ = io::stdout().flush();
+                    let _ = terminal::disable_raw_mode();
+                    print!("{}", crate::screen::leave_region());
+                    let _ = io::stdout().flush();
+                    std::process::exit(0);
+                }
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    print!("{c}");
+                    let _ = io::stdout().flush();
+                }
+                KeyCode::Backspace => {
+                    if buf.pop().is_some() {
+                        // Move left, erase, move left again.
+                        print!("\x08 \x08");
+                        let _ = io::stdout().flush();
+                    }
+                }
+                // Arrows, function keys, etc. are consumed (no on-screen garbage).
+                _ => {}
+            },
+            Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
+            _ => {}
+        }
+    }
+    if !sgr.is_empty() {
+        print!("\x1b[0m");
+    }
+    let _ = terminal::disable_raw_mode();
+    print!("\r\n"); // raw mode does not translate Enter to CRLF
+    let _ = io::stdout().flush();
+    (buf, last_resize)
+}
+
 fn read_byte_stdin() -> u8 {
     let stdin = io::stdin();
     let mut line = String::new();
@@ -547,7 +610,22 @@ fn main() {
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
-                let line = read_line_stdin();
+                // Echo input in the game's current style/colour (Default unless a
+                // game set colour and honoring is on — matching the output sink).
+                let echo = if honor {
+                    zvm::io::TextAttrs {
+                        style: machine.screen.text_style,
+                        fg: machine.screen.current_fg,
+                        bg: machine.screen.current_bg,
+                    }
+                } else {
+                    zvm::io::TextAttrs::default()
+                };
+                let (line, resize) = read_line_raw(stdin_is_tty, echo);
+                if let Some((new_cols, new_rows)) = resize {
+                    apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
+                                 &mut page_height, &mut machine, &mut view);
+                }
                 machine.supply_line(line.trim_end());
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
