@@ -118,29 +118,38 @@ pub fn upper_row_text(upper: &UpperWindow, row: u16) -> String {
 }
 
 /// One upper-window row with per-cell SGR runs (for the pinned TTY region).
-pub fn upper_row_ansi(upper: &UpperWindow, row: u16) -> String {
-    // Last column with non-blank content (a blank cell is ' ' at style 0);
-    // trailing blanks are dropped so the row closes with a reset, matching the
-    // line-clear (`ESC[2K`) done before each row is written in the TTY region.
+/// Carries style AND colour (fg/bg); colour is suppressed when `honor` is false.
+pub fn upper_row_ansi(upper: &UpperWindow, row: u16, honor: bool) -> String {
+    // Last column with any non-default attribute (blank cell = ' ' at style 0,
+    // Default/Default); trailing defaults are dropped so the row closes reset,
+    // matching the `ESC[2K` line-clear done before each row is written.
     let last = (1..=upper.cols)
         .rev()
         .find(|&c| {
             let cell = upper.cell(row, c);
-            cell.ch != ' ' || cell.style != 0
+            cell.ch != ' '
+                || cell.style != 0
+                || (honor && !matches!(cell.fg, ZColour::Default))
+                || (honor && !matches!(cell.bg, ZColour::Default))
         })
         .unwrap_or(0);
     let mut out = String::new();
-    let mut cur = 0u8;
+    let mut cur: Option<(u8, ZColour, ZColour)> = None;
     for c in 1..=last {
         let cell = upper.cell(row, c);
-        if cell.style != cur {
+        let (style, fg, bg) = if honor {
+            (cell.style, cell.fg, cell.bg)
+        } else {
+            (cell.style, ZColour::Default, ZColour::Default)
+        };
+        if cur != Some((style, fg, bg)) {
             out.push_str("\x1b[0m");
-            out.push_str(&sgr_set(cell.style));
-            cur = cell.style;
+            out.push_str(&sgr_open(TextAttrs { style, fg, bg }));
+            cur = Some((style, fg, bg));
         }
         out.push(cell.ch);
     }
-    if cur != 0 {
+    if cur.is_some() {
         out.push_str("\x1b[0m");
     }
     out
@@ -217,7 +226,9 @@ impl ScreenView {
         if machine.mem.version() < 4 {
             vec![format!("\x1b[7m{}\x1b[0m", status_text(&machine.status_line(), DEFAULT_COLS))]
         } else {
-            (1..=top).map(|r| upper_row_ansi(&machine.screen.upper, r)).collect()
+            (1..=top)
+                .map(|r| upper_row_ansi(&machine.screen.upper, r, machine.honor_game_colours))
+                .collect()
         }
     }
 
@@ -500,11 +511,29 @@ mod tests {
         u.put(1, 2, 'i', 2, ZColour::Default, ZColour::Default); // bold
         let text = upper_row_text(&u, 1);
         assert_eq!(text, "Hi"); // trailing blanks trimmed
-        let ansi = upper_row_ansi(&u, 1);
+        let ansi = upper_row_ansi(&u, 1, true);
         assert!(
             ansi.contains("\x1b[1m") && ansi.ends_with("\x1b[0m"),
             "ansi: {ansi:?}"
         );
+    }
+
+    #[test]
+    fn upper_row_ansi_emits_per_cell_fg_bg() {
+        use zvm::screen::ZColour;
+        let mut u = UpperWindow::default();
+        u.resize(1, 6);
+        // "Hi" in red-on-black, honor on.
+        u.put(1, 1, 'H', 0, ZColour::Standard(3), ZColour::Standard(2));
+        u.put(1, 2, 'i', 0, ZColour::Standard(3), ZColour::Standard(2));
+        let on = upper_row_ansi(&u, 1, true);
+        assert!(on.contains("31"), "red fg SGR present: {on:?}");
+        assert!(on.contains("40"), "black bg SGR present: {on:?}");
+        assert!(on.contains("Hi"), "text present: {on:?}");
+        // honor off: no colour SGR, text still present.
+        let off = upper_row_ansi(&u, 1, false);
+        assert!(!off.contains("31") && !off.contains("40"), "no colour when honor off: {off:?}");
+        assert!(off.contains("Hi"), "text present when honor off: {off:?}");
     }
 
     #[test]
