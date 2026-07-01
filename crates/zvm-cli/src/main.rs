@@ -124,7 +124,11 @@ impl Output for StdoutOutput {
 
     fn print_styled(&mut self, s: &str, style: u8) {
         use zvm::io::TextAttrs;
-        let out = crate::screen::style_wrap(s, TextAttrs { style, ..Default::default() }, self.is_tty);
+        self.print_attr(s, TextAttrs { style, ..Default::default() });
+    }
+
+    fn print_attr(&mut self, s: &str, attrs: zvm::io::TextAttrs) {
+        let out = crate::screen::style_wrap(s, attrs, self.is_tty);
         self.write_counted(&out);
     }
 
@@ -202,11 +206,17 @@ fn parse_args(argv: &[String]) -> Args {
             "--no-status" | "--lower-only" => a.no_status = true,
             "--no-aux" => a.no_aux = true,
             "--no-more" | "--no-page" => a.no_more = true,
+            "--no-game-colours" => {}
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
             _ => {}
         }
     }
     a
+}
+
+/// Returns `true` (honour game colours) unless `--no-game-colours` is present.
+fn parse_game_colours(args: &[String]) -> bool {
+    !args.iter().any(|a| a == "--no-game-colours")
 }
 
 // ── terminal size ─────────────────────────────────────────────────────────────
@@ -439,6 +449,7 @@ fn main() {
             std::process::exit(1);
         }
     };
+    machine.set_honor_game_colours(parse_game_colours(&argv));
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, term_rows);
@@ -491,6 +502,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 };
+                machine.set_honor_game_colours(parse_game_colours(&argv));
                 aux_preload(&mut machine, &aux_file, args.no_aux);
             }
 
@@ -586,6 +598,13 @@ mod arg_tests {
         assert!(a.no_more);
         let b = parse_args(&["zvm-cli".into(), "g".into()]);
         assert!(!b.no_more);
+    }
+
+    #[test]
+    fn game_colours_default_on_unless_disabled() {
+        assert!(parse_game_colours(&[]));
+        assert!(parse_game_colours(&["story.z5".into()]));
+        assert!(!parse_game_colours(&["--no-game-colours".into(), "story.z5".into()]));
     }
 }
 
