@@ -176,7 +176,10 @@ impl ScreenView {
         if machine.mem.version() < 4 {
             1 // v1-v3: a status line is always shown
         } else {
-            machine.screen.upper_window_rows
+            // The grid's own row count: equals `upper_window_rows` normally, but
+            // may be larger when a game drew in the upper window below the split
+            // (e.g. LostPig's HELP menu). Render every row the game wrote.
+            machine.screen.upper.rows
         }
     }
 

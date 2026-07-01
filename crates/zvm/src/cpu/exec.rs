@@ -1513,6 +1513,12 @@ impl Machine {
         if self.screen.current_window == 1 {
             let style = self.screen.text_style;
             let cols = self.screen.upper.cols.max(1);
+            // Games may draw in the upper window at rows below the split height
+            // (Inform's menu library does this — e.g. LostPig's HELP menu splits
+            // to 7 rows then prints 5 items at rows 6–10). Real interpreters keep
+            // such writes on screen, so grow the grid to cover the target row,
+            // bounded by the physical screen height (header byte 0x20).
+            let screen_h = (self.mem.read_byte(0x20) as u16).max(self.screen.upper_window_rows);
             for ch in s.chars() {
                 if ch == '\n' {
                     self.screen.cursor_row += 1;
@@ -1521,6 +1527,9 @@ impl Machine {
                 }
                 let out_ch = if font3 { font3_translate(ch) } else { ch };
                 let (r, c) = (self.screen.cursor_row, self.screen.cursor_col);
+                if r > self.screen.upper.rows && r <= screen_h {
+                    self.screen.upper.grow_rows(r);
+                }
                 self.screen.upper.put(r, c, out_ch, style, self.screen.current_fg, self.screen.current_bg);
                 if self.screen.cursor_col >= cols {
                     self.screen.cursor_row += 1;
@@ -4432,6 +4441,41 @@ pub(crate) mod tests {
         assert_eq!(m.screen.cursor_col, 3, "cursor advanced past the text");
         // Nothing went to the lower-window output sink:
         assert_eq!(m.buffer_output().expect("sink").buf, "");
+    }
+
+    #[test]
+    fn upper_window_write_beyond_split_grows_grid() {
+        // De-facto Z-machine behaviour (relied on by Inform's menu library, e.g.
+        // LostPig's HELP menu): a game may split_window(N) then draw in the upper
+        // window at rows *beyond* N via set_cursor. Real interpreters (Frotz) keep
+        // that content on screen; our grid must grow to hold writes past the split
+        // (bounded by the header screen height at 0x20) rather than dropping them.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 10); // screen height = 10 lines
+        m.mem.write_byte(0x21, 10); // screen width  = 10 cols
+        m.exec_var(0x0A, &[2], None, None); // split_window 2
+        m.exec_var(0x0B, &[1], None, None); // set_window 1 (upper)
+        m.screen.cursor_row = 4; // below the 2-row split
+        m.screen.cursor_col = 1;
+        m.print_text("X");
+        assert_eq!(m.screen.upper.cell(4, 1).ch, 'X', "write past split kept, not dropped");
+        assert!(m.screen.upper.rows >= 4, "grid grew to include row 4");
+    }
+
+    #[test]
+    fn upper_window_write_beyond_screen_height_is_clipped() {
+        // Growth is bounded by the header screen height: a write below the
+        // physical screen is dropped, matching a real interpreter's clip.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 5); // screen height = 5 lines
+        m.mem.write_byte(0x21, 10);
+        m.exec_var(0x0A, &[2], None, None); // split_window 2
+        m.exec_var(0x0B, &[1], None, None); // set_window 1 (upper)
+        m.screen.cursor_row = 9; // beyond the 5-line screen
+        m.screen.cursor_col = 1;
+        m.print_text("Z");
+        assert!(m.screen.upper.rows <= 5, "grid does not grow past screen height");
+        assert_eq!(m.screen.upper.cell(9, 1).ch, ' ', "off-screen write dropped");
     }
 
     #[test]

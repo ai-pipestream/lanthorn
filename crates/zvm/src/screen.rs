@@ -101,6 +101,20 @@ impl UpperWindow {
             *c = Cell::default();
         }
     }
+    /// Grow the grid to at least `new_rows` rows, preserving existing content.
+    /// No-op when the grid is already tall enough. Used when a game draws in the
+    /// upper window at rows beyond the current split height (Frotz keeps such
+    /// writes on screen instead of clipping them to the split).
+    pub fn grow_rows(&mut self, new_rows: u16) {
+        if new_rows <= self.rows {
+            return;
+        }
+        // Cells are row-major; appending blank cells adds new rows at the bottom
+        // without disturbing existing rows.
+        self.cells
+            .resize(new_rows as usize * self.cols as usize, Cell::default());
+        self.rows = new_rows;
+    }
     fn idx(&self, row: u16, col: u16) -> Option<usize> {
         if row == 0 || col == 0 || row > self.rows || col > self.cols {
             return None;

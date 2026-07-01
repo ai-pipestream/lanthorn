@@ -538,14 +538,18 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
                 bg: crate::state::pack_zcolour(c.bg),
             })
             .collect(),
-        active_rows: screen.upper_window_rows,
+        // `upper.rows` equals `upper_window_rows` normally, but grows when a game
+        // draws in the upper window below the split (e.g. LostPig's HELP menu
+        // splits to 7 rows then prints 5 items at rows 6–10). Render/reserve the
+        // full grown height so nothing is clipped.
+        active_rows: screen.upper.rows,
         cursor: (screen.cursor_row, screen.cursor_col),
         cursor_active: screen.current_window == 1,
     };
     ScreenModel {
         root: WinNode::Pair {
             vertical: true,
-            split: Split { fixed: screen.upper_window_rows },
+            split: Split { fixed: screen.upper.rows },
             first: Box::new(WinNode::Grid(grid)),
             second: Box::new(WinNode::Buffer(BufferWindow::default())),
         },
