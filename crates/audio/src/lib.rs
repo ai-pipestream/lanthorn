@@ -106,6 +106,52 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     Some((channels, sample_rate, pcm))
 }
 
+/// `mod_player` 0.1's only public loader is `read_mod_file(path: &str) -> Song`,
+/// which reads from disk (there is no in-memory/slice loader). We stage `bytes`
+/// to a uniquely-named temp file, parse it, then remove the temp file — the
+/// returned `Song` owns all sample/pattern data, so nothing further touches it.
+#[cfg(feature = "mod-music")]
+fn load_mod_song(bytes: &[u8]) -> Option<mod_player::Song> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!("babelmap-mod-{}-{nanos}.mod", std::process::id()));
+    std::fs::write(&path, bytes).ok()?;
+    let song = mod_player::read_mod_file(path.to_str()?);
+    let _ = std::fs::remove_file(&path);
+    Some(song)
+}
+
+/// A `rodio::Source` that streams a ProTracker module via `mod_player`, yielding
+/// interleaved stereo f32 (left then right of each frame on alternate `next`).
+#[cfg(feature = "mod-music")]
+struct ModSource {
+    song: mod_player::Song,
+    state: mod_player::PlayerState,
+    rate: u32,
+    pending_right: Option<f32>,
+}
+
+#[cfg(feature = "mod-music")]
+impl Iterator for ModSource {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        if let Some(r) = self.pending_right.take() {
+            return Some(r);
+        }
+        let (l, r) = mod_player::next_sample(&self.song, &mut self.state);
+        self.pending_right = Some(r);
+        Some(l)
+    }
+}
+
+#[cfg(feature = "mod-music")]
+impl rodio::Source for ModSource {
+    fn current_frame_len(&self) -> Option<usize> { None }
+    fn channels(&self) -> u16 { 2 }
+    fn sample_rate(&self) -> u32 { self.rate }
+    fn total_duration(&self) -> Option<std::time::Duration> { None }
+}
+
 // ── Real backend (playback feature on) ────────────────────────────────────────
 
 #[cfg(feature = "playback")]
@@ -178,11 +224,33 @@ impl AudioBackend {
                 }
             }
             SoundFormat::Mod => {
-                // MOD playback is added in the mod-music task; until then, unsupported.
-                eprintln!("audio: MOD playback not yet supported");
-                return None;
+                #[cfg(feature = "mod-music")]
+                { return self.play_mod(bytes, z_volume); }
+                #[cfg(not(feature = "mod-music"))]
+                {
+                    eprintln!("audio: unsupported sound format (MOD; mod-music feature off)");
+                    return None;
+                }
             }
         }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.samples.insert(id, sink);
+        Some(id)
+    }
+
+    /// Decode and play a ProTracker MOD via `mod_player`, streaming through
+    /// `ModSource`. `repeats`/looping are not modelled for MOD (tracker songs
+    /// loop internally via pattern jumps); this plays the song once.
+    #[cfg(feature = "mod-music")]
+    fn play_mod(&mut self, bytes: &[u8], z_volume: u8) -> Option<SoundId> {
+        let (_, handle) = self.stream.as_ref()?;
+        let sink = rodio::Sink::try_new(handle).ok()?;
+        sink.set_volume(gain(self.master, z_volume));
+        let song = load_mod_song(bytes)?;
+        let state = mod_player::PlayerState::new(song.format.num_channels, SAMPLE_RATE);
+        let source = ModSource { song, state, rate: SAMPLE_RATE, pending_right: None };
+        sink.append(source);
         let id = self.next_id;
         self.next_id += 1;
         self.samples.insert(id, sink);
@@ -337,5 +405,43 @@ mod tests {
     fn play_sample_returns_none_without_playback() {
         let mut b = AudioBackend::new(100);
         assert!(b.play_sample(&tiny_aiff(), SoundFormat::Aiff, 8, 1).is_none());
+    }
+
+    /// Smallest structurally-valid 4-channel ("M.K.") ProTracker MOD: 1084-byte
+    /// header (20-byte title, 31 * 30-byte sample records, songlen, restart,
+    /// 128-byte order table, "M.K."), then one 1024-byte (64-row * 4-ch * 4-byte)
+    /// zero pattern, and no sample data (all sample lengths are 0). It is silent,
+    /// so the test asserts structure (channels == 2) + no-panic frame pulls, per
+    /// the plan's documented fallback (a byte-exact non-silent tiny MOD is not
+    /// practical to hand-build here).
+    #[cfg(feature = "mod-music")]
+    fn minimal_mod() -> Vec<u8> {
+        let mut v = vec![0u8; 20];          // title
+        v.extend(std::iter::repeat(0u8).take(31 * 30)); // 31 sample records
+        v.push(1);                          // song length = 1 pattern in the order
+        v.push(127);                        // restart position
+        v.extend(std::iter::repeat(0u8).take(128)); // order table (pattern 0)
+        v.extend_from_slice(b"M.K.");       // 4-channel tag
+        v.extend(std::iter::repeat(0u8).take(64 * 4 * 4)); // one zero pattern
+        v
+    }
+
+    #[cfg(feature = "mod-music")]
+    #[test]
+    fn mod_source_reports_stereo_and_pulls_frames() {
+        use rodio::Source;
+        let song = load_mod_song(&minimal_mod()).expect("write+parse temp mod file");
+        let state = mod_player::PlayerState::new(song.format.num_channels, SAMPLE_RATE);
+        let mut src = ModSource {
+            song,
+            state,
+            rate: SAMPLE_RATE,
+            pending_right: None,
+        };
+        assert_eq!(src.channels(), 2, "MOD is decoded as stereo");
+        assert_eq!(src.sample_rate(), SAMPLE_RATE);
+        for _ in 0..16 {
+            assert!(src.next().is_some(), "frames pull without panic");
+        }
     }
 }
