@@ -1561,6 +1561,25 @@ impl Machine {
         TimedInterrupt { aborted: ret != 0 }
     }
 
+    /// Complete a pending timed read as *interrupted* (the interrupt routine
+    /// returned true / the host timed out): `read_char` stores ZSCII 0;
+    /// `read` writes the partial `typed` line and stores terminator 0 (v5+).
+    /// Delegates to `supply_char`/`supply_line`, which clear `pending_input`.
+    /// No-op if no read is pending.
+    pub fn abort_timed_input(&mut self, typed: &str) {
+        match self.pending_input {
+            Some(p) if p.text_buf == 0 => {
+                // read_char: deliver ZSCII 0.
+                self.supply_char(0);
+            }
+            Some(_) => {
+                // read (line): partial buffer, terminator 0.
+                self.supply_line(typed, 0);
+            }
+            None => {}
+        }
+    }
+
     /// Store `val` into variable `var` if `var` is Some.
     pub fn do_store(&mut self, var: Option<u8>, val: u16) {
         if let Some(v) = var {
@@ -3851,6 +3870,52 @@ pub(crate) mod tests {
             m.pending_timeout().is_some(),
             "read still pending after a non-aborting interrupt"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: abort_timed_input(read_char) stores ZSCII 0 and clears pending
+    // -----------------------------------------------------------------------
+    #[test]
+    fn abort_timed_input_read_char_stores_zero() {
+        // v5 read_char at 0x10 -> NeedChar; abort stores 0 in the store var (G0).
+        let mut buf = sample_story(5);
+        buf[0x0010] = 0xF6; // VAR read_char
+        buf[0x0011] = 0x7F; // type: small(01), omit, omit, omit
+        buf[0x0012] = 1;    // operand: device=1 (keyboard)
+        buf[0x0013] = 0x10; // store -> G0
+        buf[0x0014] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+        assert_eq!(m.step(), StepResult::NeedChar);
+        m.abort_timed_input("");
+        assert_eq!(m.global(0), 0, "aborted read_char stores 0");
+        assert!(m.pending_timeout().is_none(), "pending cleared after abort");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: abort_timed_input(read) writes the partial line + count and
+    // stores terminator 0 (v5+)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn abort_timed_input_read_writes_partial_and_terminator_zero() {
+        // v5 read at 0x10 with time/routine (timed_read_story); abort writes
+        // the partial buffer and stores terminator 0. Routine body is
+        // irrelevant here (never run).
+        let (mut buf, _rout) = timed_read_story(&[0xB0]);
+        // text_buf is 0x0250 (see timed_read_story); byte 0 = max chars.
+        buf[0x0250] = 20;
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        m.abort_timed_input("no");
+        // v5 text buffer: byte0=max, byte1=count, text from byte2.
+        assert_eq!(m.mem.read_byte(0x0251), 2, "count = len('no')");
+        assert_eq!(m.mem.read_byte(0x0252), b'n');
+        assert_eq!(m.mem.read_byte(0x0253), b'o');
+        assert_eq!(m.global(0), 0, "terminator stored is 0");
+        assert!(m.pending_timeout().is_none(), "pending cleared after abort");
     }
 
     // -----------------------------------------------------------------------
