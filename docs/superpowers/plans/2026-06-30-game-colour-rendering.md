@@ -653,6 +653,141 @@ EOF
 
 ---
 
+## Task 6: app — colour the live input line with the game colour
+
+**Why:** In BeyondZork the game sets an input colour (e.g. cyan). zvm-cli echoes the live input line in the game's `current_fg`/`current_bg`. The app's live input line (`render_input_content`) uses only the theme fields `input_text`/`input_prompt`, so what you type is uncoloured until submitted. Fix: thread the game's current fg/bg to the input-line render and patch the prompt+text with it (honor-gated). This mirrors Task 4's `current_bg` threading but adds `current_fg`.
+
+**Files:**
+- Modify: `crates/app/src/engine.rs` (`ScreenModel` — add `fg: u32` next to `bg` at ~221)
+- Modify: `crates/app/src/session.rs` (`screen_model_from_machine` ~563; other `ScreenModel {}` literals in `glulx_session.rs`, `glk_backend.rs`, and test modules — set `fg`)
+- Modify: `crates/app/src/render/screen.rs` (`render_story_pane` ~54, `render_node` ~81 — compute + thread `game_input: Option<Style>`)
+- Modify: `crates/app/src/render/transcript.rs` (`render_transcript` ~748 signature + the two `render_input_content` calls ~805/807; `render_input_content` ~904 patches styles)
+- Test: `crates/app/src/render/transcript.rs` (test module)
+
+**Interfaces:**
+- Consumes: `machine.screen.current_fg: ZColour`; `crate::state::{pack_zcolour, unpack_zcolour}`; `crate::render::resolve_zcolour`.
+- Produces: `ScreenModel.fg: u32`; `render_transcript(.., game_input: Option<Style>)`; `render_input_content(.., game_input: Option<Style>)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to the `render/transcript.rs` test module. Mirror the nearest existing test's `AppState` construction; set `state.input = "look".into()` and honor on. Assert the typed text cell carries the game fg (cyan = `Color::Cyan` after the Task 3 palette) when a game input style is passed:
+
+```rust
+    #[test]
+    fn input_line_uses_game_colour() {
+        use ratatui::style::Color;
+        // ... build AppState `state` (honor_game_colours=true), state.input="x" ...
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let game = Some(ratatui::style::Style::new().fg(Color::Cyan));
+        render_input_content(&state, &mut buf, area, ratatui::style::Style::new(), game);
+        // The "> " prompt occupies cols 0-1; the typed 'x' is at col 2.
+        assert_eq!(buf.cell((2, 0)).unwrap().style().fg, Some(Color::Cyan),
+            "typed input uses the game colour");
+    }
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cargo test -p app input_line_uses_game_colour 2>&1 | tail -20`
+Expected: FAIL — `render_input_content` takes 4 args; typed text uses theme colour, not cyan.
+
+- [ ] **Step 3: Add `fg` to `ScreenModel`**
+
+In engine.rs, next to `bg` (~221):
+
+```rust
+    /// The game's current foreground colour, packed (see `crate::state::pack_zcolour`).
+    /// `pack_zcolour(ZColour::Default)` when unset; used to colour the live input line.
+    pub fg: u32,
+```
+
+- [ ] **Step 4: Populate `fg` at every `ScreenModel` literal**
+
+In `screen_model_from_machine` (session.rs ~563), beside `bg`:
+
+```rust
+        bg: crate::state::pack_zcolour(screen.current_bg),
+        fg: crate::state::pack_zcolour(screen.current_fg),
+```
+
+Add `fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),` (or `fg: 0`) to the other `ScreenModel {}` literals: `glulx_session.rs` `blank_screen`, `glk_backend.rs` `screen_model`, and every test-module literal (grep `ScreenModel {` across crates/app). `0 == pack_zcolour(Default)`.
+
+- [ ] **Step 5: Compute + thread the game input style in render/screen.rs**
+
+Add a helper near `render_story_pane` (screen.rs):
+
+```rust
+/// The game's live input colour (fg/bg) for the input line, or None when
+/// colours are off or the game left both channels Default (theme-neutral).
+fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::style::Style> {
+    if !state.config.honor_game_colours {
+        return None;
+    }
+    let fg = crate::state::unpack_zcolour(model.fg);
+    let bg = crate::state::unpack_zcolour(model.bg);
+    if matches!(fg, zvm::screen::ZColour::Default) && matches!(bg, zvm::screen::ZColour::Default) {
+        return None;
+    }
+    let mut s = ratatui::style::Style::new();
+    if !matches!(fg, zvm::screen::ZColour::Default) {
+        s = s.fg(crate::render::resolve_zcolour(fg, &state.colors));
+    }
+    if !matches!(bg, zvm::screen::ZColour::Default) {
+        s = s.bg(crate::render::resolve_zcolour(bg, &state.colors));
+    }
+    Some(s)
+}
+```
+
+In `render_story_pane`, compute `let gi = game_input_style(model, state);` once (after the existing background fill). Pass `gi` to `render_transcript` at the `is_simple` call site AND to `render_node`. Extend `render_node`'s signature with `game_input: Option<Style>` and thread it through its recursive `Pair` calls and into the `WinNode::Buffer` primary `render_transcript` call.
+
+- [ ] **Step 6: Thread through `render_transcript` into `render_input_content`**
+
+Add `game_input: Option<Style>` as the last parameter of `render_transcript` (transcript.rs:748) and pass it to both `render_input_content` calls (transcript.rs:805/807). Update the two `render_transcript(...)` call sites in render/screen.rs (already done in Step 5) to pass `gi`. If any OTHER `render_transcript` caller exists (grep), pass `None`.
+
+- [ ] **Step 7: Patch the input styles in `render_input_content`**
+
+Change the signature (transcript.rs:904) to accept `game_input: Option<Style>` and patch both prompt and text so the game colour wins over the theme fields:
+
+```rust
+    let base_prompt = normal_style.patch(state.colors.input_prompt);
+    let base_text = normal_style.patch(state.colors.input_text);
+    let (prompt_style, text_style) = match game_input {
+        Some(gs) => (base_prompt.patch(gs), base_text.patch(gs)),
+        None => (base_prompt, base_text),
+    };
+```
+
+(the rest of the function — prefix/text draw, cursor — is unchanged.)
+
+- [ ] **Step 8: Run the tests + warnings**
+
+Run: `cargo test -p app 2>&1 | tail -20`
+Expected: PASS (the new test + all existing).
+Run: `cargo build --workspace --tests 2>&1 | grep -c warning`
+Expected: `0`
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add crates/app/src/engine.rs crates/app/src/session.rs crates/app/src/render/screen.rs crates/app/src/render/transcript.rs crates/app/src/glulx_session.rs crates/app/src/glk_backend.rs
+git commit -F - <<'EOF'
+fix(app): colour the live input line with the game colour
+
+The live input line (what the user types at the prompt) used only the
+theme input_text/input_prompt styles, so it stayed uncoloured until
+submit, unlike zvm-cli which echoes input in the game's current colour.
+Thread the game current_fg/current_bg (new ScreenModel.fg beside bg) to
+render_input_content and patch the prompt+text with it, honor-gated.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Uvf2RNUS7SBZHXPWqcRAkV
+EOF
+```
+
+---
+
 ## Manual verification (after all tasks)
 
 - `cargo run -p zvm-cli -- stories/beyondzork-r57-s871221.z5` → Character Setup menu selection is highlighted in colour; score box red; screen background black. `--no-game-colours` restores terminal colours.
