@@ -155,7 +155,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         area.width,
     );
     for (i, (line, _kind, style, runs)) in rows.iter().enumerate() {
-        draw_str_runs(buf, area.x, area.y + i as u16, line, *style, runs, None, area);
+        draw_str_runs(buf, area.x, area.y + i as u16, line, *style, runs, None, area, Some(&state.colors));
     }
 }
 
@@ -292,7 +292,7 @@ mod tests {
     #[test]
     fn inline_buffer_renders_styled_runs() {
         let mut b = inline_buffer("abCD");
-        b.runs = vec![vec![StyleRun { start: 2, end: 4, bits: 0x02 }]];
+        b.runs = vec![vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0 }]];
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
         let area = Rect::new(0, 0, 10, 3);

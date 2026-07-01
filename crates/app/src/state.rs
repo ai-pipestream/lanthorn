@@ -196,12 +196,39 @@ pub enum TranscriptKind {
     Warning,
 }
 
-/// A run of characters in a transcript line carrying Z-machine text-style bits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// A run of characters in a transcript line carrying Z-machine text-style bits and colour.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StyleRun {
     pub start: usize, // char offset within the line, inclusive
     pub end: usize,   // char offset, exclusive
     pub bits: u8,     // 1=reverse, 2=bold, 4=italic, 8=fixed
+    #[serde(default)]
+    pub fg: u32, // packed ZColour (see pack_zcolour / unpack_zcolour); 0 = Default
+    #[serde(default)]
+    pub bg: u32, // packed ZColour; 0 = Default
+}
+
+/// Encode a [`zvm::screen::ZColour`] as a packed `u32` for serde-safe storage in
+/// [`StyleRun`] (zvm is zero-dep and cannot derive serde).
+///
+/// Scheme: `Default` → 0, `Standard(n)` → `(1 << 24) | n`, `True(v)` → `(2 << 24) | v`.
+pub fn pack_zcolour(c: zvm::screen::ZColour) -> u32 {
+    use zvm::screen::ZColour;
+    match c {
+        ZColour::Default    => 0,
+        ZColour::Standard(n) => (1 << 24) | n as u32,
+        ZColour::True(v)    => (2 << 24) | v as u32,
+    }
+}
+
+/// Decode a packed `u32` back to a [`zvm::screen::ZColour`].  Unknown tags → `Default`.
+pub fn unpack_zcolour(p: u32) -> zvm::screen::ZColour {
+    use zvm::screen::ZColour;
+    match p >> 24 {
+        1 => ZColour::Standard((p & 0xFF) as u8),
+        2 => ZColour::True((p & 0xFFFF) as u16),
+        _ => ZColour::Default,
+    }
 }
 
 // ── Transcript filter ─────────────────────────────────────────────────────────
@@ -1319,11 +1346,17 @@ impl AppState {
     }
 
     /// Split `text` on `'\n'` and append each line tagged with `kind`, deriving a
-    /// per-line `Vec<StyleRun>` from `chunks` — a `(char_count, bits)` list whose
-    /// total char-count covers every char of `text` INCLUDING the `'\n'`
-    /// separators (as recorded by `CaptureSink`). Adjacent equal-bits spans merge;
-    /// zero-bits spans are omitted (so an unstyled line yields an empty run vec).
-    pub fn push_transcript_runs(&mut self, text: &str, kind: TranscriptKind, chunks: &[(usize, u8)]) {
+    /// per-line `Vec<StyleRun>` from `chunks` — a `(char_count, bits, fg, bg)` list
+    /// whose total char-count covers every char of `text` INCLUDING the `'\n'`
+    /// separators (as recorded by `CaptureSink`). Adjacent equal-attribute spans
+    /// merge; zero-bits/default-colour spans are omitted (so an unstyled line
+    /// yields an empty run vec).
+    pub fn push_transcript_runs(
+        &mut self,
+        text: &str,
+        kind: TranscriptKind,
+        chunks: &[(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)],
+    ) {
         // A turn with no new lower-window output (e.g. a read_char keypress that
         // only redrew the upper window) yields an empty string; appending it would
         // add a spurious blank line (`"".split('\n')` yields one empty element),
@@ -1338,18 +1371,27 @@ impl AppState {
         let mut chunk_iter = chunks.iter().copied();
         let mut rem: usize = 0;
         let mut bits: u8 = 0;
+        let mut fg = zvm::screen::ZColour::Default;
+        let mut bg = zvm::screen::ZColour::Default;
         // Advance to the next non-exhausted chunk when the current one is spent.
-        // When chunks run out, treat the remainder as plain (bits 0).
-        let mut refill = |rem: &mut usize, bits: &mut u8| {
+        // When chunks run out, treat the remainder as plain (bits 0, default colours).
+        let mut refill = |rem: &mut usize,
+                          bits: &mut u8,
+                          fg: &mut zvm::screen::ZColour,
+                          bg: &mut zvm::screen::ZColour| {
             while *rem == 0 {
                 match chunk_iter.next() {
-                    Some((c, b)) => {
+                    Some((c, b, f, bk)) => {
                         *rem = c;
                         *bits = b;
+                        *fg = f;
+                        *bg = bk;
                     }
                     None => {
                         *rem = usize::MAX;
                         *bits = 0;
+                        *fg = zvm::screen::ZColour::Default;
+                        *bg = zvm::screen::ZColour::Default;
                         break;
                     }
                 }
@@ -1361,7 +1403,7 @@ impl AppState {
             // Consume the '\n' separator's chunk char (one per separator, i.e.
             // before every line except the first).
             if !first {
-                refill(&mut rem, &mut bits);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg);
                 rem = rem.saturating_sub(1);
             }
             first = false;
@@ -1369,11 +1411,16 @@ impl AppState {
             let mut runs: Vec<StyleRun> = Vec::new();
             let mut col = 0usize;
             for _ch in line.chars() {
-                refill(&mut rem, &mut bits);
-                if bits != 0 {
+                refill(&mut rem, &mut bits, &mut fg, &mut bg);
+                let pfg = pack_zcolour(fg);
+                let pbg = pack_zcolour(bg);
+                let has_style = bits != 0 || pfg != 0 || pbg != 0;
+                if has_style {
                     match runs.last_mut() {
-                        Some(r) if r.end == col && r.bits == bits => r.end = col + 1,
-                        _ => runs.push(StyleRun { start: col, end: col + 1, bits }),
+                        Some(r) if r.end == col && r.bits == bits && r.fg == pfg && r.bg == pbg => {
+                            r.end = col + 1;
+                        }
+                        _ => runs.push(StyleRun { start: col, end: col + 1, bits, fg: pfg, bg: pbg }),
                     }
                 }
                 col += 1;
@@ -1724,29 +1771,37 @@ mod tests {
 
     #[test]
     fn push_runs_extracts_per_line_spans() {
+        use zvm::screen::ZColour;
         let mut s = AppState::default();
-        s.push_transcript_runs("ab cd", TranscriptKind::Story, &[(2, 0x02), (3, 0)]);
+        s.push_transcript_runs("ab cd", TranscriptKind::Story,
+            &[(2, 0x02, ZColour::Default, ZColour::Default), (3, 0, ZColour::Default, ZColour::Default)]);
         assert_eq!(s.transcript.last().unwrap(), "ab cd");
-        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02 }]);
+        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0 }]);
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
         assert_eq!(s.transcript.len(), s.transcript_kinds.len());
     }
 
     #[test]
     fn push_runs_splits_across_newlines() {
+        use zvm::screen::ZColour;
         let mut s = AppState::default();
-        s.push_transcript_runs("A\nB", TranscriptKind::Story, &[(1, 0x02), (1, 0), (1, 0x02)]);
+        s.push_transcript_runs("A\nB", TranscriptKind::Story,
+            &[(1, 0x02, ZColour::Default, ZColour::Default),
+              (1, 0, ZColour::Default, ZColour::Default),
+              (1, 0x02, ZColour::Default, ZColour::Default)]);
         let n = s.transcript.len();
         assert_eq!(s.transcript[n - 2], "A");
         assert_eq!(s.transcript[n - 1], "B");
-        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02 }]);
-        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02 }]);
+        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0 }]);
+        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0 }]);
     }
 
     #[test]
     fn push_runs_all_plain_is_empty() {
+        use zvm::screen::ZColour;
         let mut s = AppState::default();
-        s.push_transcript_runs("hello", TranscriptKind::Story, &[(5, 0)]);
+        s.push_transcript_runs("hello", TranscriptKind::Story,
+            &[(5, 0, ZColour::Default, ZColour::Default)]);
         assert!(s.transcript_runs.last().unwrap().is_empty());
     }
 
@@ -1768,6 +1823,26 @@ mod tests {
         s.push_transcript_kind("x", TranscriptKind::Meta);
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
         assert!(s.transcript_runs.last().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pack_roundtrip_and_run_carries_colour() {
+        use zvm::screen::ZColour;
+        // Round-trip all cases.
+        for c in [ZColour::Default, ZColour::Standard(3), ZColour::Standard(12), ZColour::True(0x1234)] {
+            assert_eq!(unpack_zcolour(pack_zcolour(c)), c,
+                "pack/unpack round-trip failed for {c:?}");
+        }
+        // Thread colour through push_transcript_runs → StyleRun.
+        let mut s = AppState::default();
+        s.push_transcript_runs("ab", TranscriptKind::Story,
+            &[(2, 0x02, ZColour::Standard(3), ZColour::Default)]);
+        let run = s.transcript_runs.last().unwrap().first()
+            .expect("coloured chunk must produce a StyleRun");
+        assert_eq!(unpack_zcolour(run.fg), ZColour::Standard(3),
+            "fg colour must survive the push → StyleRun round-trip");
+        assert_eq!(unpack_zcolour(run.bg), ZColour::Default,
+            "bg colour must survive the push → StyleRun round-trip");
     }
 
     #[test]

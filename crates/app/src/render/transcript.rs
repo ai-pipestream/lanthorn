@@ -286,7 +286,7 @@ fn rebase_runs(line_runs: Option<&Vec<StyleRun>>, start: usize, end: usize) -> V
         let s = r.start.max(start);
         let e = r.end.min(end);
         if s < e {
-            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits });
+            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits, fg: r.fg, bg: r.bg });
         }
     }
     out
@@ -538,11 +538,15 @@ fn highlight_mask(text: &str, query_lower: &str) -> Vec<bool> {
 }
 
 /// Draw `text` at `(x, y)` applying per-char style: `base_style` plus the bits of
-/// the `StyleRun` covering that char. When `search` is `Some((query_lower,
-/// highlight_style))`, characters inside a query match use `highlight_style`
-/// instead (the search affordance wins over game styling). With empty `runs` and
-/// no search this is byte-identical to `draw_str_clipped`; with empty `runs` and
-/// a search it matches `draw_str_highlighted`.
+/// the `StyleRun` covering that char, and its resolved fg/bg colours. When
+/// `search` is `Some((query_lower, highlight_style))`, characters inside a query
+/// match use `highlight_style` instead (the search affordance wins over game
+/// styling). With empty `runs` and no search this is byte-identical to
+/// `draw_str_clipped`; with empty `runs` and a search it matches
+/// `draw_str_highlighted`.
+///
+/// `colours` is used to resolve `ZColour::Standard` palette entries; pass
+/// `None` to skip colour application (style bits still apply).
 pub(crate) fn draw_str_runs(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -552,6 +556,7 @@ pub(crate) fn draw_str_runs(
     runs: &[StyleRun],
     search: Option<(&str, Style)>,
     area: ratatui::layout::Rect,
+    colours: Option<&crate::colors::ColorScheme>,
 ) {
     if y < area.y || y >= area.bottom() {
         return;
@@ -568,8 +573,25 @@ pub(crate) fn draw_str_runs(
         let style = if hi.get(i).copied().unwrap_or(false) {
             search.unwrap().1
         } else {
-            let bits = runs.iter().find(|r| i >= r.start && i < r.end).map(|r| r.bits).unwrap_or(0);
-            crate::render::apply_text_style(base_style, bits)
+            let run = runs.iter().find(|r| i >= r.start && i < r.end);
+            let bits = run.map(|r| r.bits).unwrap_or(0);
+            let mut s = crate::render::apply_text_style(base_style, bits);
+            // Apply game colour unconditionally (gating added in Task 12).
+            // fg/bg are logical (pre-reverse); apply_text_style already set
+            // REVERSED when bit 1 is on, so the terminal performs exactly one swap.
+            if let (Some(run), Some(scheme)) = (run, colours) {
+                use crate::state::unpack_zcolour;
+                use zvm::screen::ZColour;
+                let fg = unpack_zcolour(run.fg);
+                let bg = unpack_zcolour(run.bg);
+                if !matches!(fg, ZColour::Default) {
+                    s = s.fg(crate::render::resolve_zcolour(fg, scheme));
+                }
+                if !matches!(bg, ZColour::Default) {
+                    s = s.bg(crate::render::resolve_zcolour(bg, scheme));
+                }
+            }
+            s
         };
         crate::render::draw_char_clipped(buf, col, y, ch, style, area);
         col += 1;
@@ -1046,7 +1068,7 @@ fn render_middle(
             body_area.x
         };
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
-        draw_str_runs(buf, text_x, row_y, line, *style, runs, search, body_area);
+        draw_str_runs(buf, text_x, row_y, line, *style, runs, search, body_area, Some(&state.colors));
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
@@ -1211,8 +1233,8 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}};
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
-        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02 }]; // bold chars 2..4
-        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area);
+        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0 }]; // bold chars 2..4
+        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area, None);
         assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(3, 0)].modifier.contains(Modifier::BOLD));
@@ -1225,7 +1247,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut a = Buffer::empty(area);
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area);
+        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area, None);
         crate::render::draw_str_clipped(&mut b, 0, 0, "hello", Style::default(), area);
         assert_eq!(a, b, "empty runs render identically to draw_str_clipped");
     }
@@ -1238,7 +1260,7 @@ mod tests {
         let hl = Style::new().fg(Color::Black).bg(Color::Yellow);
         let mut a = Buffer::empty(area);
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area);
+        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area, None);
         draw_str_highlighted(&mut b, 0, 0, "the cat sat", base, "cat", hl, area);
         assert_eq!(a, b, "empty runs + search render identically to draw_str_highlighted");
     }
@@ -1259,11 +1281,11 @@ mod tests {
         let lines = vec!["AAAAA BBBBB".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02 }]]; // bold "BBBBB"
+        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0 }]]; // bold "BBBBB"
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, 5);
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
         assert!(out[0].3.is_empty());
-        assert_eq!(out[1].3, vec![StyleRun { start: 0, end: 5, bits: 0x02 }]);
+        assert_eq!(out[1].3, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0 }]);
     }
 
     #[test]

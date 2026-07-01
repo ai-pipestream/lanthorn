@@ -434,7 +434,7 @@ mod tests {
         assert_eq!(r.transcript, "Yhi");
         assert!(r.quit);
         assert!(
-            r.transcript_runs.iter().any(|&(_, bits)| bits == 0x02),
+            r.transcript_runs.iter().any(|&(_, bits, _, _)| bits == 0x02),
             "the Header-styled 'Y' contributes a bold run: {:?}",
             r.transcript_runs
         );

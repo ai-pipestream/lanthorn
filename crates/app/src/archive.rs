@@ -997,7 +997,7 @@ mod tests {
         let td = TranscriptData {
             lines: vec!["a".into(), "b".into()],
             kinds: vec![TranscriptKind::Story, TranscriptKind::Input],
-            runs: vec![vec![StyleRun { start: 0, end: 1, bits: 0x02 }], vec![]],
+            runs: vec![vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0 }], vec![]],
         };
         let json = serde_json::to_string(&td).unwrap();
         let back: TranscriptData = serde_json::from_str(&json).unwrap();

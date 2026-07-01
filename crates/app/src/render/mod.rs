@@ -55,8 +55,6 @@ pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
 ///   through the active theme so the user's Ghostty palette applies)
 /// - `ZColour::Standard(10..=12)` → fixed grey RGB via `grey_rgb(n)`
 /// - `ZColour::True(v)` → exact 15-bit RGB via `rgb15_to_888(v)`
-// Tasks 10-12 (transcript/upper-window render, config gating) will call this.
-#[allow(dead_code)]
 pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
     match c {
         ZColour::Default => Color::Reset,

@@ -15,8 +15,9 @@ use mapper::direction::parse_direction;
 use mapper::mapper::Mapper;
 use zvm::cpu::exec::{Beep, Machine, StepResult};
 use zvm::error::ZError;
-use zvm::io::Output;
+use zvm::io::{Output, TextAttrs};
 use zvm::location::{detect_location, Location, LocationMethod};
+use zvm::screen::ZColour;
 use zvm::ObjectSnapshot;
 use zvm::memory::Memory;
 
@@ -42,12 +43,13 @@ pub enum PendingIo {
 
 /// An output sink that accumulates printed text and lets the caller drain it.
 ///
-/// `runs` records one `(char_count, text_style_bits)` chunk per `print`/
-/// `print_styled` call, in lockstep with the appended text, so callers can
-/// reconstruct which spans carried Z-machine emphasis.
+/// `runs` records one `(char_count, text_style_bits, fg, bg)` chunk per
+/// `print`/`print_styled`/`print_attr` call, in lockstep with the appended
+/// text, so callers can reconstruct which spans carried Z-machine emphasis and
+/// colour.
 pub struct CaptureSink {
     pub text: String,
-    pub runs: Vec<(usize, u8)>,
+    pub runs: Vec<(usize, u8, ZColour, ZColour)>,
 }
 
 impl CaptureSink {
@@ -56,7 +58,7 @@ impl CaptureSink {
     }
 
     /// Drain accumulated text and style runs together, leaving both empty.
-    pub fn take_styled(&mut self) -> (String, Vec<(usize, u8)>) {
+    pub fn take_styled(&mut self) -> (String, Vec<(usize, u8, ZColour, ZColour)>) {
         (std::mem::take(&mut self.text), std::mem::take(&mut self.runs))
     }
 
@@ -68,11 +70,15 @@ impl CaptureSink {
 
 impl Output for CaptureSink {
     fn print(&mut self, s: &str) {
-        self.runs.push((s.chars().count(), 0));
+        self.runs.push((s.chars().count(), 0, ZColour::Default, ZColour::Default));
         self.text.push_str(s);
     }
     fn print_styled(&mut self, s: &str, style: u8) {
-        self.runs.push((s.chars().count(), style));
+        self.runs.push((s.chars().count(), style, ZColour::Default, ZColour::Default));
+        self.text.push_str(s);
+    }
+    fn print_attr(&mut self, s: &str, attrs: TextAttrs) {
+        self.runs.push((s.chars().count(), attrs.style, attrs.fg, attrs.bg));
         self.text.push_str(s);
     }
     fn as_any(&self) -> &dyn Any {
@@ -83,20 +89,23 @@ impl Output for CaptureSink {
     }
 }
 
-/// Trim a `(char_count, bits)` chunk list so its total char-count equals
+/// Trim a `(char_count, bits, fg, bg)` chunk list so its total char-count equals
 /// `char_len` (used after `strip_read_prompt` shortens the captured text by a
 /// trailing prompt). Chunks past the limit are dropped; the boundary chunk is
 /// truncated. A list shorter than `char_len` is returned unchanged (the missing
 /// tail is treated as plain by `push_transcript_runs`).
-pub(crate) fn clamp_runs(runs: Vec<(usize, u8)>, char_len: usize) -> Vec<(usize, u8)> {
+pub(crate) fn clamp_runs(
+    runs: Vec<(usize, u8, ZColour, ZColour)>,
+    char_len: usize,
+) -> Vec<(usize, u8, ZColour, ZColour)> {
     let mut out = Vec::with_capacity(runs.len());
     let mut total = 0usize;
-    for (c, b) in runs {
+    for (c, b, fg, bg) in runs {
         if total >= char_len {
             break;
         }
         let take = c.min(char_len - total);
-        out.push((take, b));
+        out.push((take, b, fg, bg));
         total += take;
     }
     out
@@ -107,10 +116,10 @@ pub(crate) fn clamp_runs(runs: Vec<(usize, u8)>, char_len: usize) -> Vec<(usize,
 /// Result of one player turn.
 pub struct TurnResult {
     pub transcript: String,
-    /// Z-machine text-style chunks for `transcript`: a `(char_count, bits)` list
+    /// Z-machine text-style chunks for `transcript`: a `(char_count, bits, fg, bg)` list
     /// covering every char of `transcript`, fed to `push_transcript_runs`. All
-    /// chunks carry bits 0 when the turn emitted no styling.
-    pub transcript_runs: Vec<(usize, u8)>,
+    /// chunks carry bits 0 and default colours when the turn emitted no styling.
+    pub transcript_runs: Vec<(usize, u8, ZColour, ZColour)>,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
     /// Optional informational note to surface to the player (e.g. when the
@@ -679,19 +688,30 @@ mod tests {
     #[test]
     fn capture_sink_records_style_runs() {
         use zvm::io::Output;
+        use zvm::screen::ZColour;
         let mut s = CaptureSink::new();
         s.print("ab");
         s.print_styled("CD", 0x02);
         let (text, runs) = s.take_styled();
         assert_eq!(text, "abCD");
-        assert_eq!(runs, vec![(2, 0), (2, 0x02)]);
+        assert_eq!(runs, vec![
+            (2, 0, ZColour::Default, ZColour::Default),
+            (2, 0x02, ZColour::Default, ZColour::Default),
+        ]);
     }
 
     #[test]
     fn clamp_runs_trims_to_char_len() {
+        use zvm::screen::ZColour;
         // strip_read_prompt removed 3 trailing chars ("\n> " etc.) → clamp.
-        let runs = vec![(2, 0u8), (5, 0x02u8)];
-        assert_eq!(clamp_runs(runs, 4), vec![(2, 0), (2, 0x02)]);
+        let runs = vec![
+            (2, 0u8, ZColour::Default, ZColour::Default),
+            (5, 0x02u8, ZColour::Default, ZColour::Default),
+        ];
+        assert_eq!(clamp_runs(runs, 4), vec![
+            (2, 0, ZColour::Default, ZColour::Default),
+            (2, 0x02, ZColour::Default, ZColour::Default),
+        ]);
     }
 
     // ── Pure bridge test ──────────────────────────────────────────────────────

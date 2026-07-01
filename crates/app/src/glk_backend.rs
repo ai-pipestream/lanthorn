@@ -109,8 +109,10 @@ impl AppGlk {
     }
 
     /// Drain the primary window's text printed since the last drain, as
-    /// `(text, (char_count, bits) chunks)` for `push_transcript_runs`.
-    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8)>) {
+    /// `(text, (char_count, bits, fg, bg) chunks)` for `push_transcript_runs`.
+    /// Glulx colour is not yet threaded through AppGlk, so fg/bg default to
+    /// `ZColour::Default` for now.
+    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)>) {
         let Some(pid) = self.primary else {
             return (String::new(), Vec::new());
         };
@@ -118,13 +120,13 @@ impl AppGlk {
             return (String::new(), Vec::new());
         };
         let mut text = String::new();
-        let mut chunks: Vec<(usize, u8)> = Vec::new();
+        let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)> = Vec::new();
         for (bits, s) in &buf.log[buf.drained..] {
             let n = s.chars().count();
             if n == 0 {
                 continue;
             }
-            chunks.push((n, *bits));
+            chunks.push((n, *bits, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
             text.push_str(s);
         }
         buf.drained = buf.log.len();
@@ -280,7 +282,7 @@ fn log_to_lines(log: &[(u8, String)]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
                 let r = &mut runs[li];
                 match r.last_mut() {
                     Some(last) if last.bits == *bits && last.end == col => last.end = col + 1,
-                    _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits }),
+                    _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: 0, bg: 0 }),
                 }
             }
         }
@@ -469,7 +471,7 @@ mod tests {
         let inline = bufs.iter().find(|b| !b.primary).expect("an inline buffer exists");
         assert_eq!(inline.lines, vec!["abCD".to_string(), "x".to_string()]);
         // "CD" (cols 2..4) is bold (Header → 0x02), merged into one run.
-        assert_eq!(inline.runs[0], vec![StyleRun { start: 2, end: 4, bits: 0x02 }]);
+        assert_eq!(inline.runs[0], vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0 }]);
         assert!(inline.runs[1].is_empty());
     }
 
@@ -482,7 +484,10 @@ mod tests {
         glk.put_text(1, GlkStyle::Emphasized, "Look!");
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "You are here. Look!");
-        assert_eq!(chunks, vec![(14, 0u8), (5, 0x02u8)]);
+        assert_eq!(chunks, vec![
+            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default),
+            (5, 0x02u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default),
+        ]);
         // A second drain returns only new text.
         glk.put_text(1, GlkStyle::Normal, " More.");
         let (text2, _) = glk.take_transcript();
