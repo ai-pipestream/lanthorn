@@ -149,8 +149,8 @@ fn repeat_plan(repeats: u8) -> (bool, u8) {
 #[cfg(feature = "playback")]
 pub struct AudioBackend {
     stream: Option<(rodio::OutputStream, rodio::OutputStreamHandle)>,
-    samples: std::collections::HashMap<SoundId, rodio::Sink>,
-    tones: Vec<rodio::Sink>,
+    samples: std::collections::HashMap<SoundId, (rodio::Sink, u8)>,
+    tones: Vec<(rodio::Sink, u8)>,
     next_id: SoundId,
     master: u8,
 }
@@ -186,7 +186,7 @@ impl AudioBackend {
         let Ok(sink) = rodio::Sink::try_new(handle) else { return };
         sink.set_volume(gain(self.master, z_volume));
         sink.append(rodio::buffer::SamplesBuffer::new(1, SAMPLE_RATE, synth_tone(freq_hz, ms)));
-        self.tones.push(sink);
+        self.tones.push((sink, z_volume));
     }
 
     /// Decode `bytes` per `format`, play on a fresh sink at gain(master, z_volume),
@@ -243,43 +243,42 @@ impl AudioBackend {
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.samples.insert(id, sink);
+        self.samples.insert(id, (sink, z_volume));
         Some(id)
     }
 
     pub fn stop(&mut self, id: SoundId) {
-        if let Some(sink) = self.samples.remove(&id) {
+        if let Some((sink, _)) = self.samples.remove(&id) {
             sink.stop();
         }
     }
 
     pub fn stop_all(&mut self) {
-        for (_, s) in self.samples.drain() {
-            s.stop();
+        for (_, (sink, _)) in self.samples.drain() {
+            sink.stop();
         }
-        for s in self.tones.drain(..) {
-            s.stop();
+        for (sink, _) in self.tones.drain(..) {
+            sink.stop();
         }
     }
 
     pub fn set_volume(&mut self, volume: u8) {
         self.master = volume.min(100);
-        let v = self.master as f32 / 100.0;
-        for s in self.samples.values() {
-            s.set_volume(v);
+        for (s, z_volume) in self.samples.values() {
+            s.set_volume(gain(self.master, *z_volume));
         }
-        for s in &self.tones {
-            s.set_volume(v);
+        for (s, z_volume) in &self.tones {
+            s.set_volume(gain(self.master, *z_volume));
         }
     }
 
     /// Drain completed sample ids (whose sink is empty) and prune finished tones.
     pub fn finished(&mut self) -> Vec<SoundId> {
-        self.tones.retain(|s| !s.empty());
+        self.tones.retain(|(s, _)| !s.empty());
         let done: Vec<SoundId> = self
             .samples
             .iter()
-            .filter(|(_, s)| s.empty())
+            .filter(|(_, (s, _))| s.empty())
             .map(|(id, _)| *id)
             .collect();
         for id in &done {
@@ -337,6 +336,20 @@ mod tests {
         let peak_early = s[..1000].iter().fold(0.0_f32, |a, v| a.max(v.abs()));
         let peak_late = s[3410..].iter().fold(0.0_f32, |a, v| a.max(v.abs()));
         assert!(peak_early > peak_late, "amplitude decays over time");
+    }
+
+    #[cfg(feature = "playback")]
+    #[test]
+    fn set_volume_preserves_per_sound_z_scale() {
+        // A sound played at a reduced z_volume must keep its z-scale relationship
+        // to master after a runtime volume change — set_volume must apply
+        // gain(master, z_volume), not bare master/100.
+        // Backend may have no device in CI; assert on the pure gain relationship
+        // that set_volume now uses, so the test is deterministic without a sink:
+        let quiet = gain(50, 4); // half master, mid z-scale
+        let loud = gain(50, 8); // half master, full z-scale
+        assert!(quiet < loud, "z_volume must still scale after a master change");
+        assert_eq!(gain(50, 8), 0.5, "full z-scale at half master == master/100");
     }
 
     #[test]
