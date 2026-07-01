@@ -146,8 +146,11 @@ fn drive(
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    let Some(path) = argv.get(1) else {
-        eprintln!("Usage: {} <story.ulx | story.gblorb>", argv[0]);
+    // Honour the game's stylehint colours by default; --no-game-colours opts out
+    // (mirrors zvm-cli). The story path is the first non-flag argument.
+    let honor = !argv.iter().any(|a| a == "--no-game-colours");
+    let Some(path) = argv.iter().skip(1).find(|a| !a.starts_with("--")) else {
+        eprintln!("Usage: {} [--no-game-colours] <story.ulx | story.gblorb>", argv[0]);
         process::exit(1);
     };
 
@@ -159,7 +162,9 @@ fn main() {
         }
     };
 
-    let mut machine = match build_machine(bytes, Box::new(TerminalBackend::new())) {
+    let mut backend = TerminalBackend::new();
+    backend.set_honor_colours(honor);
+    let mut machine = match build_machine(bytes, Box::new(backend)) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("{e}");
