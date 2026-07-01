@@ -1525,20 +1525,25 @@ impl Machine {
             Some(p) if p.interrupt_routine != 0 => p, // PendingInput: Copy
             _ => return TimedInterrupt { aborted: false },
         };
+        let ret = self.run_routine(saved.interrupt_routine);
+        TimedInterrupt { aborted: ret != 0 }
+    }
+
+    /// Call `packed_routine` to completion and return its value. Safe whether or
+    /// not a read is pending: it snapshots `pending_input` and restores it if the
+    /// routine attempts nested input/save/restart (unsupported — the routine is
+    /// then abandoned and 0 is returned). On the normal path `pending_input` is
+    /// left untouched. Used by timed-input interrupts and by the sound
+    /// finish-routine callback.
+    pub fn run_routine(&mut self, packed_routine: u16) -> u16 {
+        let saved = self.pending_input; // Option<PendingInput>: Copy
         let base_frames = self.state.frames.len();
         let base_stack = self.state.eval_stack.len();
         // Push the routine, storing its return value onto the eval stack (var 0).
-        call_routine(
-            &mut self.state,
-            &mut self.mem,
-            saved.interrupt_routine,
-            &[],
-            Some(0),
-        );
+        call_routine(&mut self.state, &mut self.mem, packed_routine, &[], Some(0));
         if self.state.frames.len() == base_frames {
             // packed 0 / bad addr: call_routine pushed 0 to the stack already.
-            let ret = self.state.eval_stack.pop().unwrap_or(0);
-            return TimedInterrupt { aborted: ret != 0 };
+            return self.state.eval_stack.pop().unwrap_or(0);
         }
         loop {
             match self.step() {
@@ -1548,20 +1553,20 @@ impl Machine {
                     }
                 }
                 // Nested input/save/restart/quit inside the routine: unsupported.
-                // Unwind and restore, including pending_input (a nested read
-                // opcode may have overwritten it).
+                // Unwind and restore, including pending_input (a nested read opcode
+                // may have overwritten it).
                 _ => {
                     self.state.frames.truncate(base_frames);
                     self.state.eval_stack.truncate(base_stack);
-                    self.pending_input = Some(saved);
-                    return TimedInterrupt { aborted: false };
+                    self.pending_input = saved;
+                    return 0;
                 }
             }
         }
         let ret = self.state.eval_stack.pop().unwrap_or(0);
         // Guard: a well-behaved routine leaves the stack where we started.
         self.state.eval_stack.truncate(base_stack);
-        TimedInterrupt { aborted: ret != 0 }
+        ret
     }
 
     /// Complete a pending timed read as *interrupted* (the interrupt routine
@@ -3873,6 +3878,27 @@ pub(crate) mod tests {
             m.pending_timeout().is_some(),
             "read still pending after a non-aborting interrupt"
         );
+    }
+
+    #[test]
+    fn run_routine_returns_true_value() {
+        // routine body: rtrue (0OP 0xB0) -> returns 1.
+        let (buf, rout) = timed_read_story(&[0xB0]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let packed = (rout / 4) as u16;
+        assert_eq!(m.run_routine(packed), 1, "rtrue routine returns 1");
+        assert!(m.pending_input.is_none(), "no read pending -> pending_input stays None");
+    }
+
+    #[test]
+    fn run_routine_returns_explicit_value() {
+        // routine body: ret 7 (1OP:0x0B short form small constant 7): 0x9B 0x07.
+        let (buf, rout) = timed_read_story(&[0x9B, 0x07]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        let packed = (rout / 4) as u16;
+        assert_eq!(m.run_routine(packed), 7, "ret 7 returns 7");
     }
 
     // -----------------------------------------------------------------------
