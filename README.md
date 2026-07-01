@@ -64,8 +64,10 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   transcript and the upper-window grid. Controlled by `honor_game_colours`
   (default **on**) — toggle it in the F2 settings screen, or turn it off to keep
   your theme owning every colour. `zvm-cli` renders the same colours as ANSI SGR
-  and accepts `--no-game-colours` to opt out. (Glulx/Glk colour via style hints is
-  still on the roadmap.)
+  and accepts `--no-game-colours` to opt out. **Glulx/Glk** games get the same
+  treatment: `stylehint_TextColor`/`BackColor`/`ReverseColor` are honored and
+  rendered at full 24-bit RGB fidelity in both hosts, under the same
+  `honor_game_colours` gate (`gvm-cli` also takes `--no-game-colours`).
 - **Interpreter number** — the story header's interpreter number (byte `0x1E`)
   defaults to **1 (DECSystem-20)** for v1–5 and **6 (IBM PC)** for v6, matching
   Frotz. This is what makes colour appear: several Infocom games (notably Beyond
