@@ -151,6 +151,7 @@ impl AppGlk {
             root,
             status: StatusModel::HostManaged,
             bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
         }
     }
 

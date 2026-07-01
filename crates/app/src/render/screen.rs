@@ -49,6 +49,27 @@ fn is_simple(model: &ScreenModel) -> bool {
     others == 0 && grids <= 1 && buffers <= 1 && grids + buffers >= 1
 }
 
+/// The game's live input colour (fg/bg) for the input line, or None when
+/// colours are off or the game left both channels Default (theme-neutral).
+fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::style::Style> {
+    if !state.config.honor_game_colours {
+        return None;
+    }
+    let fg = crate::state::unpack_zcolour(model.fg);
+    let bg = crate::state::unpack_zcolour(model.bg);
+    if matches!(fg, zvm::screen::ZColour::Default) && matches!(bg, zvm::screen::ZColour::Default) {
+        return None;
+    }
+    let mut s = ratatui::style::Style::new();
+    if !matches!(fg, zvm::screen::ZColour::Default) {
+        s = s.fg(crate::render::resolve_zcolour(fg, &state.colors));
+    }
+    if !matches!(bg, zvm::screen::ZColour::Default) {
+        s = s.bg(crate::render::resolve_zcolour(bg, &state.colors));
+    }
+    Some(s)
+}
+
 /// Render the engine's screen into the story-pane `area`, returning scrollbar /
 /// scroll metrics for the (primary) transcript.
 pub fn render_story_pane(
@@ -76,6 +97,8 @@ pub fn render_story_pane(
         }
     }
 
+    let gi = game_input_style(model, state);
+
     if is_simple(model) {
         // Byte-identical Z-machine path: the upper grid (if any) over the
         // transcript.
@@ -84,12 +107,12 @@ pub fn render_story_pane(
             None => 0,
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
-        let (scrollbar, max_scroll) = render_transcript(&model.status, introspect, state, tarea, buf);
+        let (scrollbar, max_scroll) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
         return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height };
     }
 
     // Generic multi-window path.
-    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf);
+    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi);
     metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height })
 }
 
@@ -103,6 +126,7 @@ fn render_node(
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
+    game_input: Option<ratatui::style::Style>,
 ) -> Option<StoryPaneMetrics> {
     if area.width == 0 || area.height == 0 {
         return None;
@@ -110,8 +134,8 @@ fn render_node(
     match node {
         WinNode::Pair { vertical, split, first, second } => {
             let (a1, a2) = split_area(area, *vertical, split.fixed);
-            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf);
-            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf);
+            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input);
+            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input);
             m1.or(m2)
         }
         WinNode::Grid(g) => {
@@ -122,7 +146,7 @@ fn render_node(
         WinNode::Buffer(b) => {
             if b.primary {
                 let (scrollbar, max_scroll) =
-                    render_transcript(status, introspect, state, area, buf);
+                    render_transcript(status, introspect, state, area, buf, game_input);
                 Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height })
             } else {
                 render_inline_buffer(b, state, area, buf);
@@ -234,6 +258,7 @@ mod tests {
             },
             status: StatusModel::HostManaged,
             bg: 0,
+            fg: 0,
         };
         assert!(is_simple(&zm));
         // Lone buffer: simple.
@@ -241,6 +266,7 @@ mod tests {
             root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
             status: StatusModel::HostManaged,
             bg: 0,
+            fg: 0,
         };
         assert!(is_simple(&lone));
         // Two buffers: not simple.
@@ -253,6 +279,7 @@ mod tests {
             },
             status: StatusModel::HostManaged,
             bg: 0,
+            fg: 0,
         };
         assert!(!is_simple(&two));
     }
@@ -289,6 +316,7 @@ mod tests {
             },
             status: StatusModel::HostManaged,
             bg: 0,
+            fg: 0,
         };
         assert!(!is_simple(&model));
 
@@ -336,6 +364,7 @@ mod tests {
             root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
             status: StatusModel::HostManaged,
             bg: 0,
+            fg: 0,
         };
         model.bg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(2)); // black
         let area = Rect::new(0, 0, 10, 5);
@@ -387,7 +416,7 @@ mod tests {
         let mut buf_b = Buffer::empty(area);
         let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b, state.config.honor_game_colours);
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
-        let (sb, ms) = render_transcript(&model.status, None, &state, tarea, &mut buf_b);
+        let (sb, ms) = render_transcript(&model.status, None, &state, tarea, &mut buf_b, None);
 
         assert_eq!(buf_a, buf_b, "the simple path must be byte-identical to the legacy path");
         assert_eq!((ma.scrollbar, ma.max_scroll, ma.viewport_rows), (sb, ms, tarea.height));

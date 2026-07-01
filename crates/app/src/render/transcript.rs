@@ -751,6 +751,7 @@ pub fn render_transcript(
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
+    game_input: Option<Style>,
 ) -> (bool, u16) {
     if area.height == 0 || area.width == 0 {
         return (false, 0);
@@ -802,9 +803,9 @@ pub fn render_transcript(
 
     if input_boxed {
         let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
-        render_input_content(state, buf, frame.content, normal_style);
+        render_input_content(state, buf, frame.content, normal_style, game_input);
     } else {
-        render_input_content(state, buf, input_region, normal_style);
+        render_input_content(state, buf, input_region, normal_style, game_input);
     }
 
     // ── Middle area: transcript + inventory + suggestion ─────────────────────
@@ -906,6 +907,7 @@ fn render_input_content(
     buf: &mut Buffer,
     region: Rect,
     normal_style: Style,
+    game_input: Option<Style>,
 ) {
     if region.height == 0 || region.width == 0 {
         return;
@@ -919,8 +921,13 @@ fn render_input_content(
 
     // The "> " prompt and the typed text are separately styleable (patched over
     // the normal style, so an unset selector renders identically to before).
-    let prompt_style = normal_style.patch(state.colors.input_prompt);
-    let text_style = normal_style.patch(state.colors.input_text);
+    // The game's current colour, when honoured, wins over the theme fields.
+    let base_prompt = normal_style.patch(state.colors.input_prompt);
+    let base_text = normal_style.patch(state.colors.input_text);
+    let (prompt_style, text_style) = match game_input {
+        Some(gs) => (base_prompt.patch(gs), base_text.patch(gs)),
+        None => (base_prompt, base_text),
+    };
     let prefix = format_input_line(""); // "> "
     let prefix_trunc = truncate_line(&prefix, w);
     draw_str_clipped(buf, region.x, input_y, prefix_trunc, prompt_style, region);
@@ -1215,7 +1222,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         let row: String = (0..40u16)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -1559,7 +1566,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 60, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Room name and turn counter must NOT appear anywhere in the buffer.
         let all_text: String = {
@@ -1595,7 +1602,7 @@ mod tests {
         s.current_room_name = Some("Outside".to_string());
         s.transcript = vec!["FIRSTLINE".to_string()];
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&mv4), None, &s, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&mv4), None, &s, area, &mut buf, None);
         let top: String = (0..area.width)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
@@ -1606,7 +1613,7 @@ mod tests {
         let mut s3 = AppState::default();
         s3.show_status_bar = false;
         let mut buf3 = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&mv3), None, &s3, area, &mut buf3);
+        render_transcript(&crate::session::status_model_from_machine(&mv3), None, &s3, area, &mut buf3, None);
         let top3_reversed = buf3.cell((0, 0)).map(|c| c.modifier.contains(Modifier::REVERSED)).unwrap_or(false);
         assert!(top3_reversed, "v3 Classic status bar always renders regardless of show_status_bar");
     }
@@ -1624,7 +1631,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 60, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf);
+        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf, None);
 
         // Synthesized content must not appear anywhere.
         let all_text: String = {
@@ -1658,7 +1665,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 60, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf);
+        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf, None);
 
         // The flash message must appear on the top row.
         let top: String = (0..area.width)
@@ -1685,7 +1692,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Top row (y=0) must have the reversed status bar background.
         assert!(
@@ -1712,7 +1719,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Find the row index (1..8) for each tagged line by its first glyph / content.
         let row_text = |y: u16| -> String {
@@ -1751,7 +1758,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 20, 12); // narrow → the 40-char line wraps
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         let mut checked = 0;
         for y in 1u16..10 {
@@ -1781,7 +1788,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         let y = (1u16..9).find(|&y| {
             let row: String = (0..40u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect();
@@ -1803,7 +1810,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Bottom row (y=9) should contain "> open mailbox".
         let bottom_row: String = (0..40u16)
@@ -1826,6 +1833,21 @@ mod tests {
     }
 
     #[test]
+    fn input_line_uses_game_colour() {
+        use ratatui::style::Color;
+        let mut state = AppState::default();
+        state.config.honor_game_colours = true;
+        state.input = "x".to_string();
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let game = Some(ratatui::style::Style::new().fg(Color::Cyan));
+        render_input_content(&state, &mut buf, area, ratatui::style::Style::new(), game);
+        // The "> " prompt occupies cols 0-1; the typed 'x' is at col 2.
+        assert_eq!(buf.cell((2, 0)).unwrap().style().fg, Some(Color::Cyan),
+            "typed input uses the game colour");
+    }
+
+    #[test]
     fn render_transcript_cursor_shown_when_focused() {
         let machine = minimal_machine();
         let mut state = AppState::default();
@@ -1834,7 +1856,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Cursor at position 4 ("> hi" = 4 chars → cursor at x=4).
         let cursor_cell = buf.cell((4, 4)).expect("cursor cell should exist");
@@ -1854,7 +1876,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Position x=4 should not have '_'.
         let cell = buf.cell((4, 4)).expect("cell should exist");
@@ -1873,7 +1895,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Position x=4 (after "> hi") should NOT have '_' because an overlay is open.
         let cell = buf.cell((4, 4)).expect("cell should exist");
@@ -1895,7 +1917,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Top row (y=0) should all have REVERSED modifier (status line background).
         let top_cell = buf.cell((0, 0)).expect("top-left cell should exist");
@@ -1916,7 +1938,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Find the '>' prompt cell and the typed 'z' cell; check their fg.
         let mut prompt_fg = None;
@@ -1946,7 +1968,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // The scrollbar gutter is the rightmost column; its thumb glyph is '█'.
         let mut thumb_fg = None;
@@ -1971,7 +1993,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         let gutter: String = (0..area.height)
             .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -1990,7 +2012,7 @@ mod tests {
         // 7-row area: 1 status + 5 transcript + 1 input
         let area = Rect::new(0, 0, 40, 7);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Middle rows y=1..5: should NOT show L9 (newest) but should show L4 or earlier.
         let found_l9 = (1u16..6u16).any(|y| {
@@ -2093,7 +2115,7 @@ mod tests {
         // 10-row area: row 0=status, rows 1..7=transcript, row 8=suggestion, row 9=input
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Row 9 (bottom) must contain the input.
         let input_row: String = (0..40u16)
@@ -2116,7 +2138,7 @@ mod tests {
         state.push_transcript_styled("connector sample", TranscriptKind::Meta, Style::new().fg(Color::Cyan));
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
         // Find a cell of the line and assert its fg is Cyan (the override), not transcript_meta.
         let found = (0..area.height).any(|y| (0..area.width).any(|x| {
             let c = &buf[(x, y)];
@@ -2145,7 +2167,7 @@ mod tests {
         let state = AppState::default();
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Top row must NOT have the reversed modifier (the synthesized bar is gone).
         let top_has_reversed = (0..80u16).all(|x| {
@@ -2171,7 +2193,7 @@ mod tests {
         // 10-row area: row0=status, rows1..7=transcript, row8=inventory, row9=input.
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Row 9 (bottom) must contain the input prompt.
         let input_row: String = (0..40u16)
@@ -2196,7 +2218,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // No row should contain "Inv:".
         let found_inv = (0..10u16).any(|y| {
@@ -2223,7 +2245,7 @@ mod tests {
         // Without inventory.
         let mut buf_no = Buffer::empty(area);
         state.show_inventory = false;
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf_no);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf_no, None);
         let transcript_rows_no = (1u16..6u16).filter(|&y| {
             let row: String = (0..40u16)
                 .map(|x| buf_no.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -2234,7 +2256,7 @@ mod tests {
         // With inventory.
         let mut buf_yes = Buffer::empty(area);
         state.show_inventory = true;
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf_yes);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf_yes, None);
         let transcript_rows_yes = (1u16..6u16).filter(|&y| {
             let row: String = (0..40u16)
                 .map(|x| buf_yes.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
@@ -2276,7 +2298,7 @@ mod tests {
         // 10-row area; status row is y=0.
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Row 0 (status line) must contain the word "saved".
         let status_row: String = (0..40u16)
@@ -2309,7 +2331,7 @@ mod tests {
 
             let area = Rect::new(0, 0, 40, 10);
             let mut buf = Buffer::empty(area);
-            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
             // Row 0 (status) must have REVERSED modifier (plain bar style).
             let top_cell = buf.cell((0, 0)).expect("top-left must exist");
@@ -2340,7 +2362,7 @@ mod tests {
             // Use a large enough area so boxing is not suppressed (needs >= 5 rows).
             let area = Rect::new(0, 0, 40, 12);
             let mut buf = Buffer::empty(area);
-            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
             // Row 0 must be the top border: top-left corner must be "┌".
             assert_eq!(
@@ -2381,7 +2403,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
         // Bottom row (y=9) must contain "> go north" (plain, no box).
         let bottom_row: String = (0..40u16)
@@ -2461,7 +2483,7 @@ mod tests {
         };
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
         // The left side bar must actually be drawn in column 0 of the boxed status
         // region (rows 0..3) — this is the headline left/right-only use case and
         // must NOT be inert. (Regression guard: with the old base-only boxing gate

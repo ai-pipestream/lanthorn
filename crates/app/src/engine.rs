@@ -219,6 +219,9 @@ pub struct ScreenModel {
     /// The game's current background colour, packed (see `crate::state::pack_zcolour`).
     /// `pack_zcolour(ZColour::Default)` when unset; used to paint the story pane.
     pub bg: u32,
+    /// The game's current foreground colour, packed (see `crate::state::pack_zcolour`).
+    /// `pack_zcolour(ZColour::Default)` when unset; used to colour the live input line.
+    pub fg: u32,
 }
 
 impl ScreenModel {
@@ -426,6 +429,7 @@ mod tests {
             },
             status: StatusModel::HostManaged,
             bg: 0,
+            fg: 0,
         };
         let g = model.grid().expect("tree has a grid");
         assert_eq!(g.cell(1, 1).ch, 'H');
