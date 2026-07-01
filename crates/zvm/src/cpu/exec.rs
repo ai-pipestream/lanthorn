@@ -78,6 +78,12 @@ pub struct UndoSnapshot {
     pub store: Option<u8>,
 }
 
+/// Outcome of running a timed-input interrupt routine.
+pub struct TimedInterrupt {
+    /// The routine returned nonzero: the host should abort the pending read.
+    pub aborted: bool,
+}
+
 /// The Z-machine interpreter — ties memory and CPU state together.
 /// Fields are `pub` so Tasks 11+ can attach I/O channels.
 pub struct Machine {
@@ -1503,6 +1509,56 @@ impl Machine {
         } else {
             None
         }
+    }
+
+    /// Run the pending read's interrupt routine to completion and report whether
+    /// input should abort. Called by the host once per elapsed timer interval.
+    /// The routine's output flows to the normal sink; `pending_input` is left
+    /// intact so an un-aborted read resumes. If the routine attempts nested
+    /// input/save/restart (unsupported per ZMSD), the interrupt is abandoned and
+    /// reported as non-aborting, with engine state restored.
+    pub fn run_timed_interrupt(&mut self) -> TimedInterrupt {
+        let saved = match self.pending_input {
+            Some(p) if p.interrupt_routine != 0 => p, // PendingInput: Copy
+            _ => return TimedInterrupt { aborted: false },
+        };
+        let base_frames = self.state.frames.len();
+        let base_stack = self.state.eval_stack.len();
+        // Push the routine, storing its return value onto the eval stack (var 0).
+        call_routine(
+            &mut self.state,
+            &mut self.mem,
+            saved.interrupt_routine,
+            &[],
+            Some(0),
+        );
+        if self.state.frames.len() == base_frames {
+            // packed 0 / bad addr: call_routine pushed 0 to the stack already.
+            let ret = self.state.eval_stack.pop().unwrap_or(0);
+            return TimedInterrupt { aborted: ret != 0 };
+        }
+        loop {
+            match self.step() {
+                StepResult::Continue => {
+                    if self.state.frames.len() <= base_frames {
+                        break;
+                    }
+                }
+                // Nested input/save/restart/quit inside the routine: unsupported.
+                // Unwind and restore, including pending_input (a nested read
+                // opcode may have overwritten it).
+                _ => {
+                    self.state.frames.truncate(base_frames);
+                    self.state.eval_stack.truncate(base_stack);
+                    self.pending_input = Some(saved);
+                    return TimedInterrupt { aborted: false };
+                }
+            }
+        }
+        let ret = self.state.eval_stack.pop().unwrap_or(0);
+        // Guard: a well-behaved routine leaves the stack where we started.
+        self.state.eval_stack.truncate(base_stack);
+        TimedInterrupt { aborted: ret != 0 }
     }
 
     /// Store `val` into variable `var` if `var` is Some.
@@ -3710,6 +3766,91 @@ pub(crate) mod tests {
         m.state.pc = 0x10;
         let _ = m.step();
         assert_eq!(m.pending_timeout(), None, "untimed read exposes no timeout");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: v5 story whose `read` at 0x10 is timed (time=5, routine=ROUT).
+    // ROUT is placed at 0x0280 — clear of the dictionary (0x0200), the text/
+    // parse buffers (0x0250/0x0260), and the global-vars table (0x0300) that
+    // sample_story wires up, so writing the routine's bytes there can't
+    // corrupt engine state the test later reads (e.g. global 0).
+    // -----------------------------------------------------------------------
+    fn timed_read_story(routine_body: &[u8]) -> (Vec<u8>, u32) {
+        let mut buf = sample_story(5);
+        let rout: u32 = 0x0280;
+        // v5 packed routine addr = byte addr / 4, routine_offset 0 (confirmed by
+        // call_and_return_value above: byte 0x80 -> packed 0x20, 4*0x20=0x80).
+        let packed = (rout / 4) as u16;
+        buf[0x10] = 0xE4; // VAR read
+        buf[0x11] = 0x00; // type byte: large,large,large,large
+        buf[0x12] = 0x02;
+        buf[0x13] = 0x50; // text_buf 0x0250
+        buf[0x14] = 0x02;
+        buf[0x15] = 0x60; // parse_buf 0x0260
+        buf[0x16] = 0x00;
+        buf[0x17] = 0x05; // time = 5 (tenths)
+        buf[0x18] = (packed >> 8) as u8;
+        buf[0x19] = (packed & 0xFF) as u8; // routine (packed)
+        buf[0x1A] = 0x10; // store var (v5 read stores terminator) -> G0
+        // routine header: 0 locals (v5: no initial-value words), then body.
+        buf[rout as usize] = 0x00;
+        for (i, b) in routine_body.iter().enumerate() {
+            buf[rout as usize + 1 + i] = *b;
+        }
+        (buf, rout)
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: run_timed_interrupt runs the routine; a true return aborts the read
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_timed_interrupt_abort_when_routine_true() {
+        // routine body: rtrue (0OP 0xB0).
+        let (buf, _) = timed_read_story(&[0xB0]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        let depth_before = m.state.frames.len();
+        let out = m.run_timed_interrupt();
+        assert!(out.aborted, "routine returned true -> abort");
+        assert_eq!(m.state.frames.len(), depth_before, "frame stack restored");
+        assert!(
+            m.pending_timeout().is_some(),
+            "pending_input untouched on abort — the host decides whether to abort the read"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: a false return continues the read; side effects and eval-stack
+    // depth are preserved.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_timed_interrupt_continue_and_side_effect() {
+        // routine body: inc G0 (1OP:0x05, short form, small-constant operand
+        // 0x10 = variable number for global 0), then rfalse (0OP 0xB1).
+        // 0x95 = 0b10_01_0101: short form, small constant, opcode 5 (inc).
+        let (buf, _) = timed_read_story(&[0x95, 0x10, 0xB1]);
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        let depth_before = m.state.frames.len();
+        let stack_before = m.state.eval_stack.len();
+        let g_before = m.global(0);
+        let out = m.run_timed_interrupt();
+        assert!(!out.aborted, "routine returned false -> continue");
+        assert_eq!(
+            m.global(0),
+            g_before.wrapping_add(1),
+            "routine side effect applied"
+        );
+        assert_eq!(m.state.frames.len(), depth_before, "frame stack restored");
+        assert_eq!(m.state.eval_stack.len(), stack_before, "eval stack restored");
+        assert!(
+            m.pending_timeout().is_some(),
+            "read still pending after a non-aborting interrupt"
+        );
     }
 
     // -----------------------------------------------------------------------
