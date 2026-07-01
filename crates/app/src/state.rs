@@ -2404,7 +2404,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
-        let session = crate::session::GameSession::new(story_bytes).expect("GameSession::new");
+        let session = crate::session::GameSession::new(story_bytes, true).expect("GameSession::new");
         s.hints = Some(HintSession {
             source: HintSource::Zcode(session),
             transcript: vec![],
@@ -2427,7 +2427,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
-        let session = crate::session::GameSession::new(story_bytes).expect("GameSession::new");
+        let session = crate::session::GameSession::new(story_bytes, true).expect("GameSession::new");
         let mut hs = HintSession {
             source: HintSource::Zcode(session),
             transcript: vec![],

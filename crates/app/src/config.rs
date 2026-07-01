@@ -180,6 +180,7 @@ fn default_undo_levels() -> usize { 16 }
 
 fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
+fn default_honor_game_colours() -> bool { true }
 
 /// Deserialize a single-char string field into a `char`.  Takes the first
 /// Unicode scalar value of the string; falls back to `/` on an empty string.
@@ -370,6 +371,10 @@ pub struct Config {
     /// Animation engine settings: enable switch, easing curve, scroll duration.
     #[serde(default)]
     pub animation: AnimationConfig,
+    /// When true (default), honor game-set colours in the transcript and upper
+    /// window. Set false to use only the configured color scheme.
+    #[serde(default = "default_honor_game_colours")]
+    pub honor_game_colours: bool,
 }
 
 impl Default for Config {
@@ -399,6 +404,7 @@ impl Default for Config {
             virtual_screen_cols: default_virtual_screen_cols(),
             virtual_screen_rows: default_virtual_screen_rows(),
             animation: AnimationConfig::default(),
+            honor_game_colours: default_honor_game_colours(),
         }
     }
 }
@@ -459,6 +465,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.show_room_numbers = from_file.show_room_numbers;
             cfg.show_loc_method = from_file.show_loc_method;
             cfg.show_status_bar = from_file.show_status_bar;
+            cfg.honor_game_colours = from_file.honor_game_colours;
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
@@ -514,6 +521,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
+    doc["honor_game_colours"] = toml_edit::value(cfg.honor_game_colours);
     doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
     doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
 
@@ -809,6 +817,7 @@ use_defaults = false
             show_room_numbers: false,
             show_loc_method: false,
             show_status_bar: true,
+            honor_game_colours: true,
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,
@@ -938,6 +947,18 @@ use_defaults = false
         assert_eq!(doc["animation"]["easing"].as_str(), Some("ease-in-out"));
         assert_eq!(doc["animation"]["scroll_ms"].as_integer(), Some(250));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn honor_game_colours_defaults_true() {
+        let c = Config::default();
+        assert!(c.honor_game_colours);
+        // round-trips through TOML: absent key keeps the default true
+        let back: Config = toml::from_str("").unwrap();
+        assert!(back.honor_game_colours);
+        // explicit false overrides the default
+        let off: Config = toml::from_str("honor_game_colours = false\n").unwrap();
+        assert!(!off.honor_game_colours);
     }
 
     #[test]

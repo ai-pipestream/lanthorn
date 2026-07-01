@@ -20,6 +20,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("show_room_numbers",    ConfigRowKind::Bool),
     ("background_tidy",      ConfigRowKind::Enum),
     ("aux_storage",          ConfigRowKind::Enum),
+    ("honor_game_colours",   ConfigRowKind::Bool),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,6 +168,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             crate::config::AuxStorage::Archive => "archive".to_string(),
             crate::config::AuxStorage::Global => "global".to_string(),
         },
+        10 => bool_str(cfg.honor_game_colours),
         _ => String::new(),
     }
 }

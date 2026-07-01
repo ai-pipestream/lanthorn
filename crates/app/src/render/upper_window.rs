@@ -18,9 +18,9 @@ use crate::render::paneframe::{draw_framed, BorderStyle};
 /// consistent reverse mechanism. The remaining style bits (bold/italic) are
 /// applied with the reverse bit masked out so `apply_text_style` does not also
 /// add `REVERSED` (which would double-swap and cancel).
-fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme) -> Style {
-    let mut fg = crate::render::resolve_zcolour(cell.fg, scheme);
-    let mut bg = crate::render::resolve_zcolour(cell.bg, scheme);
+fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme, honor_game_colours: bool) -> Style {
+    let mut fg = if honor_game_colours { crate::render::resolve_zcolour(cell.fg, scheme) } else { ratatui::style::Color::Reset };
+    let mut bg = if honor_game_colours { crate::render::resolve_zcolour(cell.bg, scheme) } else { ratatui::style::Color::Reset };
     if cell.style & 0x01 != 0 {
         std::mem::swap(&mut fg, &mut bg); // reverse video swaps colour
     }
@@ -60,6 +60,7 @@ pub fn draw_grid(
     colors: &ColorScheme,
     area: Rect,
     buf: &mut Buffer,
+    honor_game_colours: bool,
 ) -> u16 {
     if upper_rows == 0 || area.height == 0 || area.width == 0 {
         return 0;
@@ -151,7 +152,7 @@ pub fn draw_grid(
             let bx = content.x + dx;
             let by = content.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
-                let style = cell_style(grid_cell_to_zvm(cell), colors);
+                let style = cell_style(grid_cell_to_zvm(cell), colors, honor_game_colours);
                 let mut ch_buf = [0u8; 4];
                 buf_cell.set_symbol(cell.ch.encode_utf8(&mut ch_buf)).set_style(style);
             }
@@ -169,7 +170,7 @@ pub fn draw_grid(
             let grid_row = cur_dy + row_offset + 1; // 1-based
             let grid_col = cur_dx + col_offset + 1; // 1-based
             let cur = upper.cell(grid_row, grid_col);
-            let style = cell_style(grid_cell_to_zvm(cur), colors)
+            let style = cell_style(grid_cell_to_zvm(cur), colors, honor_game_colours)
                 .add_modifier(ratatui::style::Modifier::REVERSED);
             if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
                 c.set_style(style);
@@ -195,6 +196,7 @@ pub fn draw_upper_window(
     colors: &ColorScheme,
     area: Rect,
     buf: &mut Buffer,
+    honor_game_colours: bool,
 ) -> u16 {
     let show_cursor = char_mode && grid.cursor_active;
     draw_grid(
@@ -205,6 +207,7 @@ pub fn draw_upper_window(
         colors,
         area,
         buf,
+        honor_game_colours,
     )
 }
 
@@ -226,6 +229,7 @@ mod tests {
         let s = cell_style(
             Cell { ch: 'x', style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
             &scheme,
+            true,
         );
         assert_eq!(s.fg, Some(Color::Rgb(200, 0, 0)));
         assert_eq!(s.bg, Some(Color::Rgb(0, 0, 200)));
@@ -233,6 +237,7 @@ mod tests {
         let r = cell_style(
             Cell { ch: 'x', style: 0x01, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
             &scheme,
+            true,
         );
         assert_eq!(r.fg, Some(Color::Rgb(0, 0, 200)));
         assert_eq!(r.bg, Some(Color::Rgb(200, 0, 0)));
@@ -264,7 +269,7 @@ mod tests {
         colors_no_border.virtual_window_border = BorderStyle::None;
         colors_no_border.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
 
-        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors_no_border, area, &mut buf);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors_no_border, area, &mut buf, true);
 
         // Should consume exactly 2 rows (grid height, no border).
         assert_eq!(consumed, 2, "consumed rows should equal upper_window_rows");
@@ -291,7 +296,7 @@ mod tests {
         // Pane is 30 wide; the 10-col upper window should center: x_off=(30-10)/2=10.
         let area = Rect::new(0, 0, 30, 5);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true);
         assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "A", "left edge of the game screen at x=10");
         assert_eq!(buf.cell((19, 0)).unwrap().symbol(), "Z", "right edge at x=19 (10..19)");
         // Nothing drawn outside the centered 10-col region.
@@ -305,7 +310,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         // upper_rows = 0 means inactive.
-        let consumed = draw_grid(&upper, 0, (1, 1), false, &colors, area, &mut buf);
+        let consumed = draw_grid(&upper, 0, (1, 1), false, &colors, area, &mut buf, true);
         assert_eq!(consumed, 0);
     }
 
@@ -317,7 +322,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
 
-        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf, true);
 
         // 2 grid rows + 2 border rows = 4 total.
         assert_eq!(consumed, 4);
@@ -342,7 +347,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
 
-        let consumed = draw_grid(&upper, 5, (5, 1), false, &colors, area, &mut buf);
+        let consumed = draw_grid(&upper, 5, (5, 1), false, &colors, area, &mut buf, true);
         assert_eq!(consumed, 3);
 
         // Row offset = cursor_row-1 - (height-1) = 4 - 2 = 2.
@@ -371,7 +376,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true);
 
         // cols=3 centered in 10 (no border): x_off=(10-3)/2=3.
         let x_cell = buf.cell((3, 0)).unwrap();
@@ -410,7 +415,7 @@ mod tests {
         // content (1,2) → buffer (4,1).
         // With show_cursor=false the cursor cell shows its logical fg/bg order.
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf);
+        draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf, true);
         let c = buf.cell((4, 1)).unwrap();
         assert_eq!(c.fg, Color::Rgb(200, 0, 0), "no cursor: fg is logical");
         assert_eq!(c.bg, Color::Rgb(0, 0, 200), "no cursor: bg is logical");
@@ -418,7 +423,7 @@ mod tests {
         // With show_cursor=true the cursor cell carries REVERSED modifier on top
         // of its logical colours (no swap in the stored fg/bg values).
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf);
+        draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf, true);
         let c = buf.cell((4, 1)).unwrap();
         assert!(c.modifier.contains(Modifier::REVERSED), "cursor cell must carry REVERSED modifier");
         assert_eq!(c.fg, Color::Rgb(200, 0, 0), "cursor cell fg is logical (REVERSED handles invert)");
@@ -444,7 +449,7 @@ mod tests {
         // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; col 2 -> buf x=4.
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf);
+        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf, true);
 
         let c = buf.cell((4, 0)).unwrap();
         assert!(

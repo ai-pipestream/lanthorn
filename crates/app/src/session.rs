@@ -154,10 +154,11 @@ impl GameSession {
     /// steps until the first `NeedLine`/`NeedChar`/`Quit` — this drives the
     /// game's opening text into the sink.  The sink is NOT drained here; the
     /// caller can call `take_transcript` to retrieve the banner/intro text.
-    pub fn new(story: Vec<u8>) -> Result<GameSession, ZError> {
+    pub fn new(story: Vec<u8>, honor_game_colours: bool) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
+        machine.set_honor_game_colours(honor_game_colours);
         machine.init_caps();
 
         let mut quit = false;
@@ -915,7 +916,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story = std::fs::read(&fixture_path).expect("read czech.z5");
-        let session = GameSession::new(story).expect("GameSession::new with czech.z5");
+        let session = GameSession::new(story, true).expect("GameSession::new with czech.z5");
         assert_eq!(session.pending_input(), InputKind::Line,
             "a story that quits without requesting input should leave pending == Line");
     }
@@ -923,7 +924,7 @@ mod tests {
     #[test]
     fn pending_input_is_char_after_new_on_read_char_story() {
         let story = read_char_story_v5();
-        let session = GameSession::new(story).expect("GameSession::new failed");
+        let session = GameSession::new(story, true).expect("GameSession::new failed");
         assert_eq!(session.pending_input(), InputKind::Char,
             "GameSession::new on a read_char story should leave pending == Char");
     }
@@ -931,7 +932,7 @@ mod tests {
     #[test]
     fn submit_char_returns_turn_result_and_advances() {
         let story = read_char_story_v5();
-        let mut session = GameSession::new(story).expect("GameSession::new failed");
+        let mut session = GameSession::new(story, true).expect("GameSession::new failed");
         assert_eq!(session.pending_input(), InputKind::Char);
 
         // After read_char the next instruction is quit, so submit_char drives
@@ -971,7 +972,7 @@ mod tests {
 
     #[test]
     fn engine_submit_key_drives_turn_for_mapped_key() {
-        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        let mut sess = GameSession::new(read_char_story_v5(), true).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
         // 'x' → read_char → quit.
         let r = sess.submit_key(KeyInput::Char('x'));
@@ -981,7 +982,7 @@ mod tests {
 
     #[test]
     fn engine_submit_key_is_noop_for_unmapped_key() {
-        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        let mut sess = GameSession::new(read_char_story_v5(), true).expect("new");
         // Home has no ZSCII meaning: no turn runs, the VM stays waiting.
         assert!(sess.submit_key(KeyInput::Home).is_none());
         assert_eq!(sess.pending_input(), InputKind::Char, "VM untouched by an unmapped key");
@@ -989,7 +990,7 @@ mod tests {
 
     #[test]
     fn engine_screen_v3_is_classic_status() {
-        let sess = GameSession::new(read_char_story_v3()).expect("new v3");
+        let sess = GameSession::new(read_char_story_v3(), true).expect("new v3");
         let model = sess.screen();
         match model.status {
             StatusModel::Classic { right, .. } => {
@@ -1004,7 +1005,7 @@ mod tests {
 
     #[test]
     fn engine_screen_v5_is_host_managed_and_mirrors_upper_grid() {
-        let mut sess = GameSession::new(read_char_story_v5()).expect("new v5");
+        let mut sess = GameSession::new(read_char_story_v5(), true).expect("new v5");
         // Paint the upper window directly and confirm screen() mirrors it exactly.
         sess.machine.screen.upper.resize(2, 5);
         sess.machine.screen.upper.put(1, 1, 'H', 2, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default); // bold
@@ -1028,7 +1029,7 @@ mod tests {
 
     #[test]
     fn engine_save_state_round_trips_and_is_tagged() {
-        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        let mut sess = GameSession::new(read_char_story_v5(), true).expect("new");
         let save = sess.save_state();
         assert_eq!(save.engine, ZMACHINE_ENGINE);
         assert!(!save.bytes.is_empty(), "Quetzal save is non-empty");
@@ -1050,7 +1051,7 @@ mod tests {
 
     #[test]
     fn engine_introspect_wraps_existing_logic() {
-        let sess = GameSession::new(read_char_story_v5()).expect("new");
+        let sess = GameSession::new(read_char_story_v5(), true).expect("new");
         let intro = sess.introspect().expect("zvm exposes introspection");
         // vocabulary == today's dictionary load.
         let vocab = intro.vocabulary();
@@ -1062,7 +1063,7 @@ mod tests {
 
     #[test]
     fn engine_aux_data_accessors_round_trip() {
-        let mut sess = GameSession::new(read_char_story_v5()).expect("new");
+        let mut sess = GameSession::new(read_char_story_v5(), true).expect("new");
         assert!(sess.aux_data().is_empty());
         let mut table = std::collections::BTreeMap::new();
         table.insert("k".to_string(), vec![1u8, 2, 3]);
@@ -1099,7 +1100,7 @@ mod tests {
 
     #[test]
     fn ingame_save_yields_pending_io_and_resume_continues() {
-        let mut sess = GameSession::new(read_char_then_save_v4()).expect("new");
+        let mut sess = GameSession::new(read_char_then_save_v4(), true).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
 
         // The keypress drives read_char -> @save, which suspends with pending_io.
@@ -1116,7 +1117,7 @@ mod tests {
 
     #[test]
     fn ingame_restore_yields_pending_io_and_cancel_fails_cleanly() {
-        let mut sess = GameSession::new(read_char_then_restore_v4()).expect("new");
+        let mut sess = GameSession::new(read_char_then_restore_v4(), true).expect("new");
 
         let r = sess.submit_char(b'x');
         assert_eq!(r.pending_io, Some(PendingIo::Restore));
@@ -1137,7 +1138,7 @@ mod tests {
         buf[0x44] = 0xB5; // 0OP:0x05 save (branch form in v3)
         buf[0x45] = 0xC0; // branch: on-true, offset that lands on quit (see note)
         buf[0x46] = 0xBA; // quit
-        let mut sess = GameSession::new(buf).expect("new");
+        let mut sess = GameSession::new(buf, true).expect("new");
         let r = sess.submit_char(b'x');
         assert_eq!(r.pending_io, None, "v3 never bubbles pending_io");
         assert!(r.info.is_some(), "v3 keeps the 'isn't wired' info line");
@@ -1148,7 +1149,7 @@ mod tests {
         // Build the same way the sibling submit test does; the field just needs to exist
         // and default to a value. For a v3 fixture with global 0 set, method is GlobalVar0.
         let story = read_char_story_v5();
-        let mut sess = GameSession::new(story).expect("GameSession::new failed");
+        let mut sess = GameSession::new(story, true).expect("GameSession::new failed");
         // The story starts with a read_char; submit_char drives it to quit.
         let r = sess.submit_char(b'x');
         // The field exists and is an Option<LocationMethod>; on a v5 story with no
@@ -1159,7 +1160,7 @@ mod tests {
     #[test]
     fn turn_result_has_empty_sound_fields_by_default() {
         let story = read_char_story_v5();
-        let mut sess = GameSession::new(story).expect("GameSession::new failed");
+        let mut sess = GameSession::new(story, true).expect("GameSession::new failed");
         // The story starts with a read_char; submit_char drives it to quit.
         let r = sess.submit_char(b'x');
         assert!(r.beep.is_none(), "no beep when the game emits no sound");
@@ -1182,7 +1183,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story = std::fs::read(&fixture).expect("read bureaucr.z4");
-        let mut sess = GameSession::new(story).expect("new bureaucr.z4");
+        let mut sess = GameSession::new(story, true).expect("new bureaucr.z4");
 
         // Probe: type SAVE-ish commands until the VM suspends on @save.
         let mut blob: Option<Vec<u8>> = None;
@@ -1236,7 +1237,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story = std::fs::read(&fixture_path).expect("read czech.z5");
-        let mut session = GameSession::new(story).expect("GameSession::new with czech.z5");
+        let mut session = GameSession::new(story, true).expect("GameSession::new with czech.z5");
         // czech is an automated test suite that runs to completion (quit=true is normal).
         let transcript = session.take_transcript();
         assert!(!transcript.is_empty(), "czech should produce output before quitting");

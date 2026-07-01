@@ -1068,7 +1068,7 @@ fn render_middle(
             body_area.x
         };
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
-        draw_str_runs(buf, text_x, row_y, line, *style, runs, search, body_area, Some(&state.colors));
+        draw_str_runs(buf, text_x, row_y, line, *style, runs, search, body_area, state.config.honor_game_colours.then_some(&state.colors));
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
@@ -2607,7 +2607,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 9, 3);
         let mut buf = Buffer::empty(area);
-        let used = crate::render::upper_window::draw_upper_window(grid, false, &colors, area, &mut buf);
+        let used = crate::render::upper_window::draw_upper_window(grid, false, &colors, area, &mut buf, true);
         assert_eq!(used, 1, "one active upper row consumed");
         // cols=3 centered in 9 → x_off = 3.
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "A");

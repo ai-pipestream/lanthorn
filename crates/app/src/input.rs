@@ -3491,6 +3491,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         7 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
         8 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
         9 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
+        10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
         _ => {}
     }
 }
@@ -3525,6 +3526,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         7 => working.show_room_numbers = !working.show_room_numbers,
         8 => config_cycle_background_tidy(&mut working.background_tidy, delta),
         9 => config_cycle_aux_storage(&mut working.aux_storage, delta),
+        10 => working.honor_game_colours = !working.honor_game_colours,
         _ => {}
     }
 }
@@ -5794,7 +5796,7 @@ mod tests {
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
 
         // Build the initial session and seed the start room.
-        let mut session = GameSession::new(story_bytes.clone()).expect("GameSession::new");
+        let mut session = GameSession::new(story_bytes.clone(), true).expect("GameSession::new");
         let mut mapper = Mapper::default();
         let mut state = crate::state::AppState::default();
 
@@ -5825,7 +5827,7 @@ mod tests {
         state.turns = 5;
 
         // Rebuild session from story_bytes (what handle_saves_prompt does on confirm).
-        let mut new_session = GameSession::new(story_bytes.clone()).expect("GameSession::new for reset");
+        let mut new_session = GameSession::new(story_bytes.clone(), true).expect("GameSession::new for reset");
         let new_start_loc = current_location(&new_session.machine);
         let new_room_number = new_start_loc.as_ref().map(|s| s.number);
 

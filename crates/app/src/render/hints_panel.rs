@@ -189,7 +189,7 @@ mod tests {
             return None;
         }
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
-        let session = crate::session::GameSession::new(story_bytes).expect("GameSession::new");
+        let session = crate::session::GameSession::new(story_bytes, true).expect("GameSession::new");
         Some(crate::state::HintSession {
             source: crate::state::HintSource::Zcode(session),
             transcript: vec!["pick a topic".to_string()],

@@ -63,7 +63,7 @@ pub fn render_story_pane(
         // Byte-identical Z-machine path: the upper grid (if any) over the
         // transcript.
         let used = match model.grid() {
-            Some(grid) => draw_upper_window(grid, char_mode, &state.colors, area, buf),
+            Some(grid) => draw_upper_window(grid, char_mode, &state.colors, area, buf, state.config.honor_game_colours),
             None => 0,
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
@@ -99,7 +99,7 @@ fn render_node(
         }
         WinNode::Grid(g) => {
             let show_cursor = char_mode && g.cursor_active;
-            draw_grid(g, g.active_rows, g.cursor, show_cursor, &state.colors, area, buf);
+            draw_grid(g, g.active_rows, g.cursor, show_cursor, &state.colors, area, buf, state.config.honor_game_colours);
             None
         }
         WinNode::Buffer(b) => {
@@ -155,7 +155,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         area.width,
     );
     for (i, (line, _kind, style, runs)) in rows.iter().enumerate() {
-        draw_str_runs(buf, area.x, area.y + i as u16, line, *style, runs, None, area, Some(&state.colors));
+        draw_str_runs(buf, area.x, area.y + i as u16, line, *style, runs, None, area, state.config.honor_game_colours.then_some(&state.colors));
     }
 }
 
@@ -342,7 +342,7 @@ mod tests {
 
         // Path B: the exact code render_story_pane replaced.
         let mut buf_b = Buffer::empty(area);
-        let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b);
+        let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b, state.config.honor_game_colours);
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
         let (sb, ms) = render_transcript(&model.status, None, &state, tarea, &mut buf_b);
 
