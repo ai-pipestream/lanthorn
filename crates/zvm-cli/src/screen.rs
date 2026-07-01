@@ -611,9 +611,17 @@ mod tests {
         // Screen background is black: leading blank cells must be painted black
         // (bg 40) BEFORE the text, not left to reset-to-terminal-default.
         let out = upper_row_ansi(&u, 1, true, ZColour::Default, ZColour::Standard(2));
-        let first40 = out.find("40").expect("bg 40 present");
-        let hpos = out.find('H').expect("H present");
-        assert!(first40 < hpos, "leading blanks painted black before text: {out:?}");
+        // The text run at col 3 emits its own bg 40, so a plain "40 before H"
+        // check would pass even unfixed. Discriminate: the segment BEFORE the
+        // first (leading) space must already carry bg 40, i.e. the leading
+        // blank cells are painted with the screen background rather than a bare
+        // reset. Unfixed, the leading run is a lone `ESC[0m` with no 40.
+        let first_space = out.find(' ').expect("row has leading spaces");
+        assert!(
+            out[..first_space].contains("40"),
+            "leading blank cells carry the screen bg before the spaces: {out:?}"
+        );
+        assert!(out.contains('H'), "text preserved: {out:?}");
     }
 
     #[test]
