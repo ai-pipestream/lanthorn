@@ -59,6 +59,23 @@ pub fn render_story_pane(
     area: Rect,
     buf: &mut Buffer,
 ) -> StoryPaneMetrics {
+    // Paint the story-pane background with the game's current background
+    // (theme-safe: only the story pane, never the map/chrome; only a concrete,
+    // honoured background — Default keeps the theme).
+    if state.config.honor_game_colours {
+        let bg = crate::state::unpack_zcolour(model.bg);
+        if !matches!(bg, zvm::screen::ZColour::Default) {
+            let bg_color = crate::render::resolve_zcolour(bg, &state.colors);
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    if let Some(cell) = buf.cell_mut((x, y)) {
+                        cell.set_symbol(" ").set_style(ratatui::style::Style::new().bg(bg_color));
+                    }
+                }
+            }
+        }
+    }
+
     if is_simple(model) {
         // Byte-identical Z-machine path: the upper grid (if any) over the
         // transcript.
@@ -216,12 +233,14 @@ mod tests {
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
             status: StatusModel::HostManaged,
+            bg: 0,
         };
         assert!(is_simple(&zm));
         // Lone buffer: simple.
         let lone = ScreenModel {
             root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
             status: StatusModel::HostManaged,
+            bg: 0,
         };
         assert!(is_simple(&lone));
         // Two buffers: not simple.
@@ -233,6 +252,7 @@ mod tests {
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
             status: StatusModel::HostManaged,
+            bg: 0,
         };
         assert!(!is_simple(&two));
     }
@@ -268,6 +288,7 @@ mod tests {
                 }),
             },
             status: StatusModel::HostManaged,
+            bg: 0,
         };
         assert!(!is_simple(&model));
 
@@ -303,6 +324,27 @@ mod tests {
         // 'C' (col 2) carries the bold modifier.
         assert!(buf.cell((2, 0)).unwrap().modifier.contains(ratatui::style::Modifier::BOLD));
         assert!(!buf.cell((0, 0)).unwrap().modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn story_pane_fills_game_background() {
+        use ratatui::style::Color;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        // honor_game_colours defaults to true.
+        let mut model = ScreenModel {
+            root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+            status: StatusModel::HostManaged,
+            bg: 0,
+        };
+        model.bg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(2)); // black
+        let area = Rect::new(0, 0, 10, 5);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+        // A blank interior cell (the empty transcript body, not the bottom input
+        // row) carries the game background (black).
+        assert_eq!(buf.cell((0, 2)).unwrap().style().bg, Some(Color::Black),
+            "story pane blank cell painted with game background");
     }
 
     /// The Z-machine 2-node tree must render byte-identical through

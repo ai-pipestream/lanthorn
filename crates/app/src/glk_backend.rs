@@ -147,7 +147,11 @@ impl AppGlk {
             leaves.push((rect, node));
         }
         let root = assemble(&leaves);
-        ScreenModel { root, status: StatusModel::HostManaged }
+        ScreenModel {
+            root,
+            status: StatusModel::HostManaged,
+            bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+        }
     }
 
     fn grid_node(&self, id: u32, rect: GlkRect) -> GridWindow {

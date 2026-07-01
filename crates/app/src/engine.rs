@@ -216,6 +216,9 @@ pub struct ScreenModel {
     pub root: WinNode,
     /// The status line the app draws above the transcript.
     pub status: StatusModel,
+    /// The game's current background colour, packed (see `crate::state::pack_zcolour`).
+    /// `pack_zcolour(ZColour::Default)` when unset; used to paint the story pane.
+    pub bg: u32,
 }
 
 impl ScreenModel {
@@ -422,6 +425,7 @@ mod tests {
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
             status: StatusModel::HostManaged,
+            bg: 0,
         };
         let g = model.grid().expect("tree has a grid");
         assert_eq!(g.cell(1, 1).ch, 'H');

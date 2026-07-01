@@ -560,6 +560,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
             second: Box::new(WinNode::Buffer(BufferWindow::default())),
         },
         status: status_model_from_machine(machine),
+        bg: crate::state::pack_zcolour(screen.current_bg),
     }
 }
 

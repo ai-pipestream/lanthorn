@@ -157,7 +157,11 @@ impl GlulxSession {
 
 /// The empty initial screen snapshot.
 fn blank_screen() -> ScreenModel {
-    ScreenModel { root: WinNode::Blank, status: StatusModel::HostManaged }
+    ScreenModel {
+        root: WinNode::Blank,
+        status: StatusModel::HostManaged,
+        bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+    }
 }
 
 impl Engine for GlulxSession {
