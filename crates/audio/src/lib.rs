@@ -410,9 +410,8 @@ mod tests {
     /// header (20-byte title, 31 * 30-byte sample records, songlen, restart,
     /// 128-byte order table, "M.K."), then one 1024-byte (64-row * 4-ch * 4-byte)
     /// zero pattern, and no sample data (all sample lengths are 0). It is silent,
-    /// so the test asserts structure (channels == 2) + no-panic frame pulls, per
-    /// the plan's documented fallback (a byte-exact non-silent tiny MOD is not
-    /// practical to hand-build here).
+    /// so `render_mod` asserts structure (channels == 2, correct rate) and a
+    /// non-empty rendered buffer rather than any particular audio content.
     #[cfg(feature = "mod-music")]
     fn minimal_mod() -> Vec<u8> {
         let mut v = vec![0u8; 20];          // title
