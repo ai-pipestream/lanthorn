@@ -57,6 +57,15 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   need Blorb audio, still on the roadmap.) Unimplemented-opcode warnings surface
   in the transcript as meta lines (hidden by `/filter story`) rather than on
   stderr.
+- **Game-driven colour** — v5+ `set_colour` and v6 `set_true_colour` are honored.
+  The standard palette (black/red/green/…) maps onto your colour scheme's palette,
+  so a game's "red" is *your* red rather than a hard-coded shade; v6 greys and
+  true-colour render as exact RGB. Colour and reverse-video apply in both the
+  transcript and the upper-window grid. Controlled by `honor_game_colours`
+  (default **on**) — toggle it in the F2 settings screen, or turn it off to keep
+  your theme owning every colour. `zvm-cli` renders the same colours as ANSI SGR
+  and accepts `--no-game-colours` to opt out. (Glulx/Glk colour via style hints is
+  still on the roadmap.)
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
