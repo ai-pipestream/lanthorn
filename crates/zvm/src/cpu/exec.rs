@@ -22,12 +22,18 @@ use crate::text::decode::{decode_string, zscii_to_char};
 // Public types
 // ---------------------------------------------------------------------------
 
-/// A built-in Z-machine bleep recorded by `sound_effect` (ZMSD §9.4):
-/// sound #1 is the high-pitched bleep, #2 the low-pitched bleep.
+/// A Z-machine `sound_effect` event (ZMSD §9.4), recorded for the host to act on.
+/// `number` 1/2 are the built-in high/low bleeps; `number >= 3` selects a Blorb
+/// `Snd ` resource. `effect`: 1=prepare 2=start 3=stop 4=finish. `volume` is the
+/// Z-scale 1..=8 (255 = loudest). `repeats` is the repeat count (0/255 = forever).
+/// `routine` (v5+) is the finish-routine the host calls when the sound ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Beep {
-    High,
-    Low,
+pub struct SoundEvent {
+    pub number: u16,
+    pub effect: u8,
+    pub volume: u8,
+    pub repeats: u8,
+    pub routine: u16,
 }
 
 /// Result of executing one instruction.
@@ -119,8 +125,8 @@ pub struct Machine {
     pub(crate) warned_var_opcodes: std::collections::HashSet<u8>,
     /// EXT opcodes that have hit the unimplemented fallthrough (warned once each).
     pub(crate) warned_ext_opcodes: std::collections::HashSet<u8>,
-    /// Bleeps recorded by `sound_effect` since the host last drained them.
-    pub pending_beeps: Vec<Beep>,
+    /// Sound events recorded by `sound_effect` since the host last drained them.
+    pub pending_sounds: Vec<SoundEvent>,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -181,7 +187,7 @@ impl Machine {
             rng_state: 0x12345678, // fixed nonzero seed
             warned_var_opcodes: std::collections::HashSet::new(),
             warned_ext_opcodes: std::collections::HashSet::new(),
-            pending_beeps: Vec::new(),
+            pending_sounds: Vec::new(),
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -1130,22 +1136,19 @@ impl Machine {
                 StepResult::Continue
             }
             // 0x15 sound_effect — number effect volume routine (ZMSD §9.4).
-            // We render bleeps visually (host shows a border pulse); sampled
-            // sounds (number >= 3) need a Blorb resource we do not yet load.
-            // effect/volume/routine are accepted but unused until audio lands.
+            // Record a SoundEvent for every call (including #1/#2 bleeps). The host
+            // drains `pending_sounds` and decides what to play / how to visualise.
             0x15 => {
                 let number = ops.first().copied().unwrap_or(0);
-                match number {
-                    1 => self.pending_beeps.push(Beep::High),
-                    2 => self.pending_beeps.push(Beep::Low),
-                    0 => {} // not a defined bleep
-                    n => {
-                        if self.warned_var_opcodes.insert(0x15) {
-                            self.diagnostics.push(format!(
-                                "sampled sound #{n} not supported (needs Blorb)"
-                            ));
-                        }
-                    }
+                if number != 0 {
+                    let effect = ops.get(1).copied().unwrap_or(0) as u8;
+                    // Volume word: low byte = volume (1..8, 255=loudest), high byte
+                    // = repeat count (0/255 = forever). Default 8 when omitted.
+                    let vw = ops.get(2).copied().unwrap_or(8);
+                    let volume = (vw & 0xFF) as u8;
+                    let repeats = (vw >> 8) as u8;
+                    let routine = ops.get(3).copied().unwrap_or(0);
+                    self.pending_sounds.push(SoundEvent { number, effect, volume, repeats, routine });
                 }
                 StepResult::Continue
             }
@@ -4669,32 +4672,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn sound_effect_records_high_and_low_beeps() {
+    fn sound_effect_records_high_and_low_bleeps() {
         let mut m = build_test_machine(&[]);
-        // number 1 = high bleep
         m.exec_var(0x15, &[1], None, None);
-        assert_eq!(m.pending_beeps, vec![Beep::High]);
-        // number 2 = low bleep
         m.exec_var(0x15, &[2], None, None);
-        assert_eq!(m.pending_beeps, vec![Beep::High, Beep::Low]);
-        // no diagnostics for plain bleeps
+        assert_eq!(m.pending_sounds.len(), 2);
+        // No volume operand -> vw defaults to 8: volume 8, repeats 0.
+        assert_eq!(m.pending_sounds[0], SoundEvent { number: 1, effect: 0, volume: 8, repeats: 0, routine: 0 });
+        assert_eq!(m.pending_sounds[1], SoundEvent { number: 2, effect: 0, volume: 8, repeats: 0, routine: 0 });
         assert!(m.diagnostics.is_empty(), "bleeps must not record diagnostics");
     }
 
     #[test]
-    fn sound_effect_sampled_sound_records_diagnostic_no_beep() {
+    fn sound_effect_records_sampled_sound_event_no_diagnostic() {
         let mut m = build_test_machine(&[]);
-        m.exec_var(0x15, &[3], None, None); // sampled sound -> needs Blorb
-        assert!(m.pending_beeps.is_empty(), "sampled sound is not a bleep");
-        assert_eq!(m.diagnostics.len(), 1, "sampled sound records one diagnostic");
-        assert!(m.diagnostics[0].contains("sampled sound"));
+        // number 5, effect 2 (start), volume word 0xFF03 -> volume 3, repeats 255 (forever), routine 0x1234
+        m.exec_var(0x15, &[5, 2, 0xFF03, 0x1234], None, None);
+        assert_eq!(
+            m.pending_sounds,
+            vec![SoundEvent { number: 5, effect: 2, volume: 3, repeats: 255, routine: 0x1234 }]
+        );
+        assert!(m.diagnostics.is_empty(), "sampled sounds are recorded, not dropped as diagnostics");
     }
 
     #[test]
     fn sound_effect_zero_records_nothing() {
         let mut m = build_test_machine(&[]);
         m.exec_var(0x15, &[0], None, None);
-        assert!(m.pending_beeps.is_empty());
+        assert!(m.pending_sounds.is_empty());
         assert!(m.diagnostics.is_empty());
     }
 

@@ -49,7 +49,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
         quit: false,
         erase_lower: false,
         info: None,
-        beep: None,
+        sounds: Vec::new(),
         diagnostics: vec![],
         location_method: None,
         pending_io: None,

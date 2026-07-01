@@ -659,9 +659,13 @@ fn main() {
         for d in machine.diagnostics.drain(..) {
             eprintln!("zvm: warning: {d}");
         }
-        // Bleeps: drain and ring (TTY only).
-        let beeps = machine.pending_beeps.len();
-        machine.pending_beeps.clear();
+        // Bleeps: drain sound events and ring for #1/#2 (TTY only). Sampled audio
+        // playback is wired in a later task; here we only preserve the terminal bell.
+        let beeps = machine
+            .pending_sounds
+            .drain(..)
+            .filter(|e| e.number == 1 || e.number == 2)
+            .count();
         if beeps > 0 {
             print!("{}", screen::bleep_bytes(beeps, stdout_is_tty));
             let _ = io::stdout().flush();

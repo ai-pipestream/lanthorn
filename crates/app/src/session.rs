@@ -13,7 +13,7 @@ use std::any::Any;
 
 use mapper::direction::parse_direction;
 use mapper::mapper::Mapper;
-use zvm::cpu::exec::{Beep, Machine, StepResult};
+use zvm::cpu::exec::{Machine, SoundEvent, StepResult};
 use zvm::error::ZError;
 use zvm::io::{Output, TextAttrs};
 use zvm::location::{detect_location, Location, LocationMethod};
@@ -130,8 +130,8 @@ pub struct TurnResult {
     /// Optional informational note to surface to the player (e.g. when the
     /// game's own save/restore is auto-failed, hint them toward Ctrl+S/Ctrl+R).
     pub info: Option<String>,
-    /// The latest bleep emitted this turn (last wins), if any.
-    pub beep: Option<Beep>,
+    /// Sound events emitted this turn (drained from the VM), in order.
+    pub sounds: Vec<SoundEvent>,
     /// Host-facing diagnostic lines emitted this turn (drained from the VM).
     pub diagnostics: Vec<String>,
     /// How the current room was detected this turn (drives the map indicator).
@@ -299,7 +299,7 @@ impl GameSession {
         self.drain_turn(self.quit, None, false, false)
     }
 
-    /// Drain the VM's per-turn buffers (transcript, location, diagnostics, beep,
+    /// Drain the VM's per-turn buffers (transcript, location, diagnostics, sounds,
     /// erase_lower) into a `TurnResult`, given the already-resolved
     /// `quit`/`pending_io`/`v3_failed`/`timed_out` state. Shared by
     /// `finish_turn` (after stepping to the next input) and `collect_turn`
@@ -332,8 +332,7 @@ impl GameSession {
         };
 
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
-        let beep = self.machine.pending_beeps.last().copied();
-        self.machine.pending_beeps.clear();
+        let sounds = std::mem::take(&mut self.machine.pending_sounds);
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
 
         TurnResult {
@@ -343,7 +342,7 @@ impl GameSession {
             quit,
             erase_lower,
             info,
-            beep,
+            sounds,
             diagnostics,
             location_method,
             pending_io,
@@ -828,7 +827,7 @@ mod tests {
             quit: false,
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -847,7 +846,7 @@ mod tests {
             quit: false,
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -874,7 +873,7 @@ mod tests {
             quit: false,
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -900,7 +899,7 @@ mod tests {
             quit: false,
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -920,7 +919,7 @@ mod tests {
             quit: false,
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -1358,10 +1357,10 @@ mod tests {
         let mut sess = GameSession::new(story, true, None).expect("GameSession::new failed");
         // The story starts with a read_char; submit_char drives it to quit.
         let r = sess.submit_char(b'x');
-        assert!(r.beep.is_none(), "no beep when the game emits no sound");
+        assert!(r.sounds.is_empty(), "no sounds when the game emits no sound");
         assert!(r.diagnostics.is_empty(), "no diagnostics on a clean turn");
         // VM queues are drained after the turn.
-        assert!(sess.machine.pending_beeps.is_empty());
+        assert!(sess.machine.pending_sounds.is_empty());
         assert!(sess.machine.diagnostics.is_empty());
     }
 

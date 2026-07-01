@@ -377,10 +377,17 @@ impl ReplayState {
 
 // ── Sound pulse ──────────────────────────────────────────────────────────────
 
+/// A host-side bleep classification for the border-pulse visual cue.
+#[derive(Debug, Clone, Copy)]
+pub enum BeepKind {
+    High,
+    Low,
+}
+
 /// An in-flight one-shot story-border flash triggered by a `sound_effect` bleep.
 #[derive(Debug)]
 pub struct SoundPulse {
-    pub kind: zvm::cpu::exec::Beep,
+    pub kind: BeepKind,
     pub started: std::time::Instant,
 }
 
@@ -1883,20 +1890,20 @@ mod tests {
 
     #[test]
     fn sound_pulse_defaults_none_and_holds_kind() {
-        use zvm::cpu::exec::Beep;
+        use crate::state::BeepKind;
         let mut s = AppState::default();
         assert!(s.sound_pulse.is_none(), "no pulse by default");
-        s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
-        assert!(matches!(s.sound_pulse.as_ref().map(|p| p.kind), Some(Beep::High)));
+        s.sound_pulse = Some(SoundPulse { kind: BeepKind::High, started: std::time::Instant::now() });
+        assert!(matches!(s.sound_pulse.as_ref().map(|p| p.kind), Some(BeepKind::High)));
     }
 
     #[test]
     fn has_active_animation_reflects_sources() {
-        use zvm::cpu::exec::Beep;
+        use crate::state::BeepKind;
         let mut s = AppState::default();
         assert!(!s.has_active_animation(), "idle state has no active animation");
 
-        s.sound_pulse = Some(SoundPulse { kind: Beep::High, started: std::time::Instant::now() });
+        s.sound_pulse = Some(SoundPulse { kind: BeepKind::High, started: std::time::Instant::now() });
         assert!(s.has_active_animation(), "sound pulse counts as active");
         s.sound_pulse = None;
 

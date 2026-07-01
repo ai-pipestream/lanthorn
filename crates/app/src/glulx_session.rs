@@ -147,7 +147,7 @@ impl GlulxSession {
             quit: self.quit,
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics,
             location_method: None,
             pending_io: None,

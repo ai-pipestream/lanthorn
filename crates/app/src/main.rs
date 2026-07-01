@@ -406,12 +406,12 @@ fn draw_frame(
             match &state.sound_pulse {
                 Some(p) => {
                     let beep_color = match p.kind {
-                        zvm::cpu::exec::Beep::High => state
+                        app::state::BeepKind::High => state
                             .colors
                             .sound_beep_high
                             .fg
                             .unwrap_or(ratatui::style::Color::Rgb(255, 180, 40)),
-                        zvm::cpu::exec::Beep::Low => state
+                        app::state::BeepKind::Low => state
                             .colors
                             .sound_beep_low
                             .fg
@@ -1283,7 +1283,7 @@ fn main() {
             quit: session.has_quit(),
             erase_lower: false,
             info: None,
-            beep: None,
+            sounds: Vec::new(),
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
@@ -2643,7 +2643,7 @@ fn main() {
                                         quit: false,
                                         erase_lower: false,
                                         info: None,
-                                        beep: None,
+                                        sounds: Vec::new(),
                                         diagnostics: vec![],
                                         location_method: None,
                                         pending_io: None,
@@ -2783,7 +2783,7 @@ fn main() {
                                         quit: false,
                                         erase_lower: false,
                                         info: None,
-                                        beep: None,
+                                        sounds: Vec::new(),
                                         diagnostics: vec![],
                                         location_method: None,
                                         pending_io: None,
@@ -2904,7 +2904,7 @@ fn main() {
                                             quit: false,
                                             erase_lower: false,
                                             info: None,
-                                            beep: None,
+                                            sounds: Vec::new(),
                                             diagnostics: vec![],
                                             location_method: None,
                                             pending_io: None,
@@ -2972,7 +2972,7 @@ fn main() {
                                         quit: false,
                                         erase_lower: false,
                                         info: None,
-                                        beep: None,
+                                        sounds: Vec::new(),
                                         diagnostics: vec![],
                                         location_method: None,
                                         pending_io: None,
@@ -3245,7 +3245,7 @@ fn dispatch_slash_outcome(
                                             quit: false,
                                             erase_lower: false,
                                             info: None,
-                                            beep: None,
+                                            sounds: Vec::new(),
                                             diagnostics: vec![],
                                             location_method: None,
                                             pending_io: None,
@@ -3439,7 +3439,7 @@ fn reset_game(
                     quit: false,
                     erase_lower: false,
                     info: None,
-                    beep: None,
+                    sounds: Vec::new(),
                     diagnostics: vec![],
                     location_method: None,
                     pending_io: None,
@@ -4213,7 +4213,7 @@ fn apply_launch_resume(
                     quit: false,
                     erase_lower: false,
                     info: None,
-                    beep: None,
+                    sounds: Vec::new(),
                     diagnostics: vec![],
                     location_method: None,
                     pending_io: None,
@@ -4270,7 +4270,11 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     for line in &result.diagnostics {
         state.push_transcript_kind(line, app::state::TranscriptKind::Warning);
     }
-    if let Some(kind) = result.beep {
+    if let Some(kind) = result.sounds.iter().rev().find_map(|ev| match ev.number {
+        1 => Some(app::state::BeepKind::High),
+        2 => Some(app::state::BeepKind::Low),
+        _ => None,
+    }) {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
     state.loc_method = result.location_method.or(state.loc_method);
