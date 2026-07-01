@@ -2402,6 +2402,7 @@ version = "0.1.0"
 name = "zvm-cli"
 version = "0.1.0"
 dependencies = [
+ "audio",
  "blorb",
  "crossterm",
  "zvm",
