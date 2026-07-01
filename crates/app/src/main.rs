@@ -1247,6 +1247,13 @@ fn main() {
     state.show_status_bar = cfg.show_status_bar;
     state.config = cfg;
 
+    // Resolve the sound container + construct the audio backend (silent if the
+    // feature is off, there is no device, or sound is disabled in config).
+    state.sound_blorb = resolve_sound_blorb(&story_path);
+    if state.config.enable_sound {
+        state.audio = Some(audio::AudioBackend::new(state.config.volume));
+    }
+
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
 
@@ -4263,6 +4270,30 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 
 // ── Game-driven input helpers (char-mode keypress, timed-input interrupt) ──────
 
+/// Resolve the sound-resource Blorb at launch: the story file itself if it is a
+/// Blorb, else a sibling `<story>.blb` / `<story>.blorb`. `None` when no
+/// container is found or it fails to parse.
+fn resolve_sound_blorb(story_path: &std::path::Path) -> Option<blorb::Blorb> {
+    if let Ok(bytes) = std::fs::read(story_path) {
+        if blorb::Blorb::is_blorb(&bytes) {
+            if let Ok(b) = blorb::Blorb::parse(bytes) {
+                return Some(b);
+            }
+        }
+    }
+    for ext in ["blb", "blorb"] {
+        let cand = story_path.with_extension(ext);
+        if cand.exists() {
+            if let Ok(bytes) = std::fs::read(&cand) {
+                if let Ok(b) = blorb::Blorb::parse(bytes) {
+                    return Some(b);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Route a turn's sound/diagnostic events: diagnostics become Warning transcript
 /// lines; the latest beep arms a one-shot story-border pulse; the current room
 /// name is tracked for the built-in location story rule.
@@ -4277,6 +4308,8 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }) {
         state.sound_pulse = Some(SoundPulse { kind, started: std::time::Instant::now() });
     }
+    // Audio is additive on top of the border pulse; gated inside play_turn_sounds.
+    state.play_turn_sounds(&result.sounds);
     state.loc_method = result.location_method.or(state.loc_method);
     // Retain the previous name when this turn has no location signal.
     if let Some(loc) = &result.location {

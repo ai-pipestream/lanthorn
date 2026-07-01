@@ -2064,11 +2064,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleSound => {
             state.config.enable_sound = !state.config.enable_sound;
             state.set_status(if state.config.enable_sound { "sound on" } else { "sound off" });
+            if !state.config.enable_sound {
+                if let Some(b) = state.audio.as_mut() { b.stop_all(); }
+            }
         }
         Action::SetVolume(v) => {
             let v = v.min(100);
             state.config.volume = v;
             state.set_status(&format!("volume {v}"));
+            if let Some(b) = state.audio.as_mut() { b.set_volume(v); }
         }
         Action::ToggleInspector => {
             // Toggle: if a Diagnostics panel is already open for the selected room, close it;
@@ -3005,6 +3009,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigSave => {
             if let Some(cs) = state.config_screen.take() {
                 state.config = clone_config(&cs.working);
+                if let Some(b) = state.audio.as_mut() {
+                    b.set_volume(state.config.volume);
+                    if !state.config.enable_sound { b.stop_all(); }
+                }
                 // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
                     crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);

@@ -16,6 +16,7 @@ zvm = { path = "../zvm" }
 gvm = { path = "../gvm" }
 mapper = { path = "../mapper" }
 blorb = { path = "../blorb" }
+audio = { path = "../audio" }
 ratatui = "0.29"
 crossterm = "0.28"
 zip = "2"
