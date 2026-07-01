@@ -1571,8 +1571,9 @@ impl Machine {
 
     /// Resolve a `print_char` ZSCII operand to the Unicode scalar to display.
     ///
-    /// When we advertise interpreter number 6 (IBM PC, set in the header by
-    /// `init_header_caps`), Infocom's IBM-PC-aware v4+ games — Beyond Zork in
+    /// When interpreter number 6 (IBM PC) is set in the header by
+    /// `init_header_caps` (via the `-I 6` / config override; the default is
+    /// now 1/DEC-20), Infocom's IBM-PC-aware v4+ games — Beyond Zork in
     /// particular — emit their on-screen graphics (cursor arrows, box-drawing,
     /// block elements) as raw CP437 byte codes through `print_char` instead of
     /// switching to the portable Font 3. Translate those bytes through the CP437

@@ -1,7 +1,8 @@
 //! IBM PC code page 437 (CP437) → Unicode translation.
 //!
-//! We advertise interpreter number 6 (IBM PC) in the story header (byte 0x1E,
-//! set by `screen::init_header_caps`). Infocom's later v4+ games — notably
+//! When interpreter number 6 (IBM PC) is set in the story header (byte 0x1E,
+//! by `screen::init_header_caps` — via the `-I 6` / config override, since the
+//! default is now 1/DEC-20), Infocom's later v4+ games — notably
 //! Beyond Zork — branch on that number and, for the IBM PC, draw their on-screen
 //! graphics (menu cursor arrows, the live dungeon map's box-drawing, block
 //! elements) by emitting raw CP437 byte codes through `print_char` rather than
