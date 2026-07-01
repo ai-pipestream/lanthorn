@@ -82,11 +82,15 @@ pub fn key_event_to_input(key: crossterm::event::KeyEvent) -> Option<KeyInput> {
 pub struct GridCell {
     pub ch: char,
     pub style: u8,
+    /// Packed foreground colour (see `crate::state::pack_zcolour`); 0 = Default.
+    pub fg: u32,
+    /// Packed background colour; 0 = Default.
+    pub bg: u32,
 }
 
 impl Default for GridCell {
     fn default() -> Self {
-        GridCell { ch: ' ', style: 0 }
+        GridCell { ch: ' ', style: 0, fg: 0, bg: 0 }
     }
 }
 
@@ -135,7 +139,7 @@ impl GridWindow {
         }
         let idx = ((row - 1) as usize) * self.cols as usize + (col - 1) as usize;
         if let Some(c) = self.cells.get_mut(idx) {
-            *c = GridCell { ch, style };
+            *c = GridCell { ch, style, fg: 0, bg: 0 };
         }
     }
 }

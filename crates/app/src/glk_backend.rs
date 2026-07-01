@@ -158,7 +158,7 @@ impl AppGlk {
         if let Some(g) = g {
             for (&(r, c), &(ch, bits)) in &g.cells {
                 if r < rows as u32 && c < cols as u32 {
-                    cells[r as usize * cols as usize + c as usize] = GridCell { ch, style: bits };
+                    cells[r as usize * cols as usize + c as usize] = GridCell { ch, style: bits, fg: 0, bg: 0 };
                 }
             }
         }

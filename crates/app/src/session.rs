@@ -524,7 +524,12 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         cells: src
             .cells
             .iter()
-            .map(|c| GridCell { ch: c.ch, style: c.style })
+            .map(|c| GridCell {
+                ch: c.ch,
+                style: c.style,
+                fg: crate::state::pack_zcolour(c.fg),
+                bg: crate::state::pack_zcolour(c.bg),
+            })
             .collect(),
         active_rows: screen.upper_window_rows,
         cursor: (screen.cursor_row, screen.cursor_col),

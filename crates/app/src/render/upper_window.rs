@@ -4,12 +4,40 @@
 /// the engine's `ScreenModel` and delegates to the testable `draw_grid` helper.
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
+use ratatui::style::Style;
 
 use crate::colors::ColorScheme;
-use crate::engine::GridWindow;
-use crate::render::apply_text_style;
+use crate::engine::{GridCell, GridWindow};
 use crate::render::paneframe::{draw_framed, BorderStyle};
+
+/// Resolve a grid cell's game colour into a ratatui [`Style`], honoring
+/// reverse-video by swapping fg/bg exactly once.
+///
+/// Reverse video (style bit `0x01`) is realised as a single fg/bg swap here —
+/// NOT via the ratatui `REVERSED` modifier — so the upper window has one
+/// consistent reverse mechanism. The remaining style bits (bold/italic) are
+/// applied with the reverse bit masked out so `apply_text_style` does not also
+/// add `REVERSED` (which would double-swap and cancel).
+fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme) -> Style {
+    let mut fg = crate::render::resolve_zcolour(cell.fg, scheme);
+    let mut bg = crate::render::resolve_zcolour(cell.bg, scheme);
+    if cell.style & 0x01 != 0 {
+        std::mem::swap(&mut fg, &mut bg); // reverse video swaps colour
+    }
+    let base = Style::default().fg(fg).bg(bg);
+    crate::render::apply_text_style(base, cell.style & !0x01)
+}
+
+/// Convert a neutral [`GridCell`] (packed colour) into a `zvm::screen::Cell`
+/// (typed `ZColour`) for [`cell_style`].
+fn grid_cell_to_zvm(cell: GridCell) -> zvm::screen::Cell {
+    zvm::screen::Cell {
+        ch: cell.ch,
+        style: cell.style,
+        fg: crate::state::unpack_zcolour(cell.fg),
+        bg: crate::state::unpack_zcolour(cell.bg),
+    }
+}
 
 // ── Core grid renderer ────────────────────────────────────────────────────────
 
@@ -123,25 +151,29 @@ pub fn draw_grid(
             let bx = content.x + dx;
             let by = content.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
-                let style = apply_text_style(content_style, cell.style);
+                let style = cell_style(grid_cell_to_zvm(cell), colors);
                 let mut ch_buf = [0u8; 4];
                 buf_cell.set_symbol(cell.ch.encode_utf8(&mut ch_buf)).set_style(style);
             }
         }
     }
 
-    // Cursor: toggle reverse-video on the cell under the (offset-adjusted)
-    // cursor so it stays visible over both normal and already-reversed cells.
+    // Cursor: invert the cell under the (offset-adjusted) cursor so it stays
+    // visible over both normal and already-reversed cells. Uses the SAME
+    // single-swap mechanism as every other cell — flip the reverse bit (0x01)
+    // and re-run the cell through `cell_style` — rather than a separate REVERSED
+    // modifier that would be inconsistent with (and fight) the fg/bg swap.
     if show_cursor && crow >= row_offset && ccol >= col_offset {
         let cur_dy = crow - row_offset;
         let cur_dx = ccol - col_offset;
         if cur_dy < content.height && cur_dx < content.width {
+            let grid_row = cur_dy + row_offset + 1; // 1-based
+            let grid_col = cur_dx + col_offset + 1; // 1-based
+            let mut cur = upper.cell(grid_row, grid_col);
+            cur.style ^= 0x01; // flip reverse so the cursor cell inverts via the swap
+            let style = cell_style(grid_cell_to_zvm(cur), colors);
             if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
-                if c.modifier.contains(Modifier::REVERSED) {
-                    c.modifier.remove(Modifier::REVERSED);
-                } else {
-                    c.modifier.insert(Modifier::REVERSED);
-                }
+                c.set_style(style);
             }
         }
     }
@@ -182,7 +214,30 @@ pub fn draw_upper_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::{Color, Modifier};
     use ratatui::{buffer::Buffer, layout::Rect};
+
+    #[test]
+    fn upper_cell_colour_resolves_and_reverse_swaps() {
+        use zvm::screen::{Cell, ZColour};
+        let mut scheme = ColorScheme::default();
+        scheme.palette[1] = Color::Rgb(200, 0, 0); // red   (Standard(3) -> palette[1])
+        scheme.palette[4] = Color::Rgb(0, 0, 200); // blue  (Standard(6) -> palette[4])
+        // no reverse: fg=red, bg=blue
+        let s = cell_style(
+            Cell { ch: 'x', style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
+            &scheme,
+        );
+        assert_eq!(s.fg, Some(Color::Rgb(200, 0, 0)));
+        assert_eq!(s.bg, Some(Color::Rgb(0, 0, 200)));
+        // reverse (style 0x01): fg/bg swapped exactly once
+        let r = cell_style(
+            Cell { ch: 'x', style: 0x01, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
+            &scheme,
+        );
+        assert_eq!(r.fg, Some(Color::Rgb(0, 0, 200)));
+        assert_eq!(r.bg, Some(Color::Rgb(200, 0, 0)));
+    }
 
     fn make_colors() -> ColorScheme {
         ColorScheme::terminal_default()
@@ -299,15 +354,21 @@ mod tests {
 
     #[test]
     fn bold_and_reverse_style_applied() {
+        use zvm::screen::ZColour;
         let mut upper = GridWindow::default();
         upper.resize(1, 3);
         // ZMSD §8.7.2 operand values: 1 = reverse-video, 2 = bold
         upper.put(1, 1, 'X', 0x02); // bold
         upper.put(1, 2, 'Y', 0x01); // reverse-video
+        // Give Y distinct logical fg/bg so the reverse-swap is observable.
+        upper.cells[1].fg = crate::state::pack_zcolour(ZColour::Standard(3)); // -> palette[1]
+        upper.cells[1].bg = crate::state::pack_zcolour(ZColour::Standard(6)); // -> palette[4]
 
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;
         colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+        colors.palette[1] = Color::Rgb(200, 0, 0);
+        colors.palette[4] = Color::Rgb(0, 0, 200);
 
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
@@ -317,35 +378,49 @@ mod tests {
         let x_cell = buf.cell((3, 0)).unwrap();
         assert!(x_cell.modifier.contains(Modifier::BOLD), "X should be bold");
 
+        // Reverse video is now a single fg/bg swap — NOT the REVERSED modifier.
         let y_cell = buf.cell((4, 0)).unwrap();
-        assert!(y_cell.modifier.contains(Modifier::REVERSED), "Y should be reversed");
+        assert!(
+            !y_cell.modifier.contains(Modifier::REVERSED),
+            "reverse uses the fg/bg swap, not the REVERSED modifier"
+        );
+        assert_eq!(y_cell.fg, Color::Rgb(0, 0, 200), "Y fg is the swapped bg");
+        assert_eq!(y_cell.bg, Color::Rgb(200, 0, 0), "Y bg is the swapped fg");
     }
 
     #[test]
-    fn cursor_cell_is_marked_when_show_cursor() {
+    fn cursor_cell_inverts_via_reverse_swap_when_show_cursor() {
+        use zvm::screen::ZColour;
         let mut upper = GridWindow::default();
         upper.resize(2, 5);
+        // Give the cell under the cursor distinct logical fg/bg so the invert
+        // (a single fg/bg swap) is observable.
+        upper.put(2, 3, 'C', 0);
+        let idx = (2 - 1) * 5 + (3 - 1);
+        upper.cells[idx].fg = crate::state::pack_zcolour(ZColour::Standard(3)); // -> palette[1]
+        upper.cells[idx].bg = crate::state::pack_zcolour(ZColour::Standard(6)); // -> palette[4]
+
         let mut colors = make_colors();
         colors.virtual_window_border = BorderStyle::None;
         colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+        colors.palette[1] = Color::Rgb(200, 0, 0);
+        colors.palette[4] = Color::Rgb(0, 0, 200);
         let area = Rect::new(0, 0, 10, 3);
 
         // cols=5 centered in 10 (no border): x_off=2; cursor (row 2, col 3) →
         // content (1,2) → buffer (4,1).
-        // With show_cursor=false the cursor cell is a plain (non-reversed) space.
+        // With show_cursor=false the cursor cell shows its logical fg/bg order.
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf);
-        assert!(
-            !buf.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED),
-            "no cursor mark when show_cursor=false"
-        );
+        let c = buf.cell((4, 1)).unwrap();
+        assert_eq!(c.fg, Color::Rgb(200, 0, 0), "no cursor: fg is logical");
+        assert_eq!(c.bg, Color::Rgb(0, 0, 200), "no cursor: bg is logical");
 
-        // With show_cursor=true the cell under (row 2, col 3) is reversed.
+        // With show_cursor=true the cursor cell inverts (fg/bg swapped once).
         let mut buf = Buffer::empty(area);
         draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf);
-        assert!(
-            buf.cell((4, 1)).unwrap().modifier.contains(Modifier::REVERSED),
-            "cursor cell should be reverse-video when show_cursor=true"
-        );
+        let c = buf.cell((4, 1)).unwrap();
+        assert_eq!(c.fg, Color::Rgb(0, 0, 200), "cursor cell fg is the swapped bg");
+        assert_eq!(c.bg, Color::Rgb(200, 0, 0), "cursor cell bg is the swapped fg");
     }
 }
