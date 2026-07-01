@@ -1473,13 +1473,18 @@ fn main() {
         // this is a no-op for the vast majority of games (regression guard). Timed
         // input is a Z-machine-only concept (ZMSD): `zvm_session_opt` is `None` for
         // a Glulx engine, so the timer never arms there.
-        state.input_deadline = if state.config.honor_timed_input && !state.any_overlay_open() {
-            zvm_session_opt(&*session).and_then(|s| s.pending_timeout()).map(|(t, _)| {
-                std::time::Instant::now() + Duration::from_millis(t as u64 * 100)
-            })
-        } else {
-            None
-        };
+        let timer_interval = zvm_session_opt(&*session)
+            .and_then(|s| s.pending_timeout())
+            .map(|(t, _)| Duration::from_millis(t as u64 * 100));
+        let should_arm = state.config.honor_timed_input
+            && !state.any_overlay_open()
+            && timer_interval.is_some();
+        state.input_deadline = next_input_deadline(
+            state.input_deadline,
+            should_arm,
+            timer_interval.unwrap_or(Duration::ZERO),
+            std::time::Instant::now(),
+        );
 
         // Expire a finished sound pulse so the story border returns to normal.
         if let Some(p) = &state.sound_pulse {
@@ -1552,6 +1557,10 @@ fn main() {
                 if std::time::Instant::now() >= dl {
                     if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                         let result = zs.run_timed_interrupt();
+                        // Fired: disarm so the next armed iteration re-arms fresh at
+                        // now + interval (otherwise the elapsed deadline would refire
+                        // immediately every iteration).
+                        state.input_deadline = None;
                         if apply_game_driven_result(
                             &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
                         ) {
@@ -4317,6 +4326,27 @@ fn apply_game_driven_result(
     result.quit
 }
 
+/// Decide the timed-input deadline for this loop iteration. `should_arm` is true
+/// while the game is awaiting timed input (honoring timers, no overlay covering
+/// the pane, and a timed read pending). Arm ONCE at `now + interval` and KEEP the
+/// existing deadline while still armed — re-arming every iteration would push the
+/// deadline perpetually ahead of `now`, so `now >= deadline` could never become
+/// true and the interrupt would never fire. Disarm (`None`) when not applicable;
+/// the run loop also clears the deadline to `None` right after firing, so the next
+/// armed iteration re-arms fresh at `now + interval`.
+fn next_input_deadline(
+    current: Option<std::time::Instant>,
+    should_arm: bool,
+    interval: Duration,
+    now: std::time::Instant,
+) -> Option<std::time::Instant> {
+    if should_arm {
+        Some(current.unwrap_or(now + interval))
+    } else {
+        None
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -4329,6 +4359,33 @@ mod tests {
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
+
+    // ── Timed-input deadline arming (F1 regression) ─────────────────────────────
+
+    #[test]
+    fn timed_input_deadline_arms_once_and_does_not_recede() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let iv = Duration::from_millis(3000);
+
+        // First armed iteration, no existing deadline: arm at t0 + interval.
+        let d1 = super::next_input_deadline(None, true, iv, t0);
+        assert_eq!(d1, Some(t0 + iv));
+
+        // Later armed iterations MUST keep the original deadline, not push it
+        // forward. This is the whole bug: re-arming to `now + interval` every
+        // ~50ms iteration meant `now >= deadline` was never reached.
+        let d2 = super::next_input_deadline(d1, true, iv, t0 + Duration::from_millis(50));
+        assert_eq!(d2, d1, "armed deadline must not recede on later iterations");
+        let d3 = super::next_input_deadline(d2, true, iv, t0 + Duration::from_millis(2999));
+        assert_eq!(d3, d1, "still the original deadline right up until it elapses");
+
+        // Not armed (overlay opened, timers off, or read ended): disarm.
+        assert_eq!(super::next_input_deadline(d3, false, iv, t0 + Duration::from_millis(2999)), None);
+        // Re-arm after a fire (deadline cleared to None): fresh at the new `now`.
+        let t_fire = t0 + Duration::from_millis(3000);
+        assert_eq!(super::next_input_deadline(None, true, iv, t_fire), Some(t_fire + iv));
+    }
 
     // ── Graceful no-panic guards for non-Z-machine (Glulx) engines ──────────────
 
