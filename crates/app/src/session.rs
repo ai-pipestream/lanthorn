@@ -140,6 +140,10 @@ pub struct TurnResult {
     /// performs the file I/O and calls `resume_save`/`resume_restore`. `None` for
     /// an ordinary turn (and for v3, which still auto-fails — see `info`).
     pub pending_io: Option<PendingIo>,
+    /// Set when this turn came from `abort_timed_input` (the pending read was
+    /// completed as timed-out, either directly or because `run_timed_interrupt`'s
+    /// routine aborted the read). `false` for every other turn.
+    pub timed_out: bool,
 }
 
 /// A running Z-machine game session.
@@ -200,16 +204,43 @@ impl GameSession {
     /// and return the turn result.
     pub fn submit(&mut self, command: &str) -> TurnResult {
         self.machine.supply_line(command, 13);
-        let (stop, v3) = run_until_input(&mut self.machine);
-        self.finish_turn(stop, v3)
+        self.advance_after_input(false)
     }
 
     /// Supply a single keypress, step until the next input request or Quit,
     /// and return the turn result.
     pub fn submit_char(&mut self, ch: u8) -> TurnResult {
         self.machine.supply_char(ch);
-        let (stop, v3) = run_until_input(&mut self.machine);
-        self.finish_turn(stop, v3)
+        self.advance_after_input(false)
+    }
+
+    /// While a timed read/read_char is pending, `(time_tenths, packed_routine)`
+    /// — the interval to poll for and the interrupt routine to run on timeout.
+    /// `None` for an untimed read or when no read is pending.
+    pub fn pending_timeout(&self) -> Option<(u16, u16)> {
+        self.machine.pending_timeout()
+    }
+
+    /// Run the pending read's interrupt routine once. If the routine aborts the
+    /// read, completes it via `abort_timed_input` (steps to the next input,
+    /// `timed_out == true`); otherwise the read is still pending, and the
+    /// returned `TurnResult` carries only the routine's drained output
+    /// (`pending`/`quit` unchanged, `timed_out == false`).
+    pub fn run_timed_interrupt(&mut self) -> TurnResult {
+        let out = self.machine.run_timed_interrupt();
+        if out.aborted {
+            self.abort_timed_input("")
+        } else {
+            self.collect_turn()
+        }
+    }
+
+    /// Complete the pending read as timed-out: `read_char` delivers ZSCII 0;
+    /// `read` writes the partial `typed` line with terminator 0. Steps to the
+    /// next input request and returns a `TurnResult` with `timed_out == true`.
+    pub fn abort_timed_input(&mut self, typed: &str) -> TurnResult {
+        self.machine.abort_timed_input(typed);
+        self.advance_after_input(true)
     }
 
     /// Resume after the host performed an in-game SAVE (`wrote_ok` = file written).
@@ -246,7 +277,40 @@ impl GameSession {
         };
         self.quit = quit;
         self.pending = pending;
+        self.drain_turn(quit, pending_io, v3_failed, false)
+    }
 
+    /// Step the VM to the next input request (or Quit) and build the
+    /// `TurnResult` — the shared tail of `submit`/`submit_char`/
+    /// `abort_timed_input` once input has been supplied to the VM. `timed_out`
+    /// is `true` only for the `abort_timed_input` caller.
+    fn advance_after_input(&mut self, timed_out: bool) -> TurnResult {
+        let (stop, v3) = run_until_input(&mut self.machine);
+        let mut result = self.finish_turn(stop, v3);
+        result.timed_out = timed_out;
+        result
+    }
+
+    /// Drain the VM's per-turn output into a `TurnResult` without stepping —
+    /// used after a timed-interrupt routine ran but did not abort the read: the
+    /// read is still pending, so `quit`/`pending` are left as-is and
+    /// `timed_out` stays `false`.
+    fn collect_turn(&mut self) -> TurnResult {
+        self.drain_turn(self.quit, None, false, false)
+    }
+
+    /// Drain the VM's per-turn buffers (transcript, location, diagnostics, beep,
+    /// erase_lower) into a `TurnResult`, given the already-resolved
+    /// `quit`/`pending_io`/`v3_failed`/`timed_out` state. Shared by
+    /// `finish_turn` (after stepping to the next input) and `collect_turn`
+    /// (mid-read, after a timed-interrupt routine that did not abort).
+    fn drain_turn(
+        &mut self,
+        quit: bool,
+        pending_io: Option<PendingIo>,
+        v3_failed: bool,
+        timed_out: bool,
+    ) -> TurnResult {
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         let transcript = strip_read_prompt(&raw).to_owned();
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
@@ -272,7 +336,19 @@ impl GameSession {
         self.machine.pending_beeps.clear();
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
 
-        TurnResult { transcript, transcript_runs, location, quit, erase_lower, info, beep, diagnostics, location_method, pending_io }
+        TurnResult {
+            transcript,
+            transcript_runs,
+            location,
+            quit,
+            erase_lower,
+            info,
+            beep,
+            diagnostics,
+            location_method,
+            pending_io,
+            timed_out,
+        }
     }
 }
 
@@ -756,6 +832,7 @@ mod tests {
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
+            timed_out: false,
         };
         apply_turn(&mut m, "look", &first);
         assert_eq!(m.graph.current(), Some(1));
@@ -774,6 +851,7 @@ mod tests {
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
+            timed_out: false,
         };
         apply_turn(&mut m, "north", &second);
         assert!(m.graph.room(2).is_some());
@@ -800,6 +878,7 @@ mod tests {
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
+            timed_out: false,
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
@@ -825,6 +904,7 @@ mod tests {
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
+            timed_out: false,
         };
         assert!(r.info.is_none());
     }
@@ -844,6 +924,7 @@ mod tests {
             diagnostics: vec![],
             location_method: None,
             pending_io: None,
+            timed_out: false,
         }
     }
 
@@ -929,6 +1010,36 @@ mod tests {
         buf
     }
 
+    /// Timed variant of `read_char_story_v5`: `read_char(device=1, time=5,
+    /// routine=packed(0x0050))` -> G0, then `quit`. `routine_body` is placed at
+    /// 0x0050 (0 locals) so the caller can make it `rtrue` (abort) or do a
+    /// side-effect + `rfalse` (continue). Packed routine address = 0x0050/4 =
+    /// 0x0014 (v5 packed multiplier is 4).
+    fn timed_read_char_story_v5(routine_body: &[u8]) -> Vec<u8> {
+        let mut buf = read_char_story_v5();
+        // Program at 0x0040:
+        //   read_char (VAR opcode 0xF6)
+        //     type byte 0x53: small(01)=device, small(01)=time, large(00)=routine, omit(11)
+        //     operands: device=1, time=5, routine=packed(0x0050)=0x0014
+        //     store: 0x10 (G0)
+        //   quit (0xBA)
+        buf[0x0040] = 0xF6; // VAR read_char
+        buf[0x0041] = 0x53; // types: small, small, large, omit
+        buf[0x0042] = 1;    // device = 1 (keyboard)
+        buf[0x0043] = 5;    // time = 5 (tenths of a second)
+        buf[0x0044] = 0x00;
+        buf[0x0045] = 0x14; // routine packed addr = 0x0050 / 4
+        buf[0x0046] = 0x10; // store → G0
+        buf[0x0047] = 0xBA; // quit
+
+        // Routine at 0x0050: header byte = 0 locals, then routine_body.
+        buf[0x0050] = 0x00;
+        for (i, b) in routine_body.iter().enumerate() {
+            buf[0x0051 + i] = *b;
+        }
+        buf
+    }
+
     #[test]
     fn pending_input_is_line_after_new_on_quitting_story() {
         // czech.z5 quits without ever requesting input; the quit path in
@@ -950,6 +1061,52 @@ mod tests {
         let session = GameSession::new(story, true, None).expect("GameSession::new failed");
         assert_eq!(session.pending_input(), InputKind::Char,
             "GameSession::new on a read_char story should leave pending == Char");
+    }
+
+    #[test]
+    fn session_surfaces_timeout_and_aborts_via_run_timed_interrupt() {
+        // Interrupt routine: rtrue (0xB0) -> aborts the pending read_char.
+        let bytes = timed_read_char_story_v5(&[0xB0]);
+        let mut s = GameSession::new(bytes, true, None).expect("GameSession::new");
+        assert_eq!(s.pending_input(), InputKind::Char);
+        assert_eq!(s.pending_timeout(), Some((5, 0x0014)), "time+packed routine surfaced");
+
+        let tr = s.run_timed_interrupt();
+        assert!(tr.timed_out, "routine returned true -> the read was aborted");
+        // abort_timed_input completes the read_char (stores 0) and the story
+        // immediately hits quit.
+        assert!(tr.quit, "story quits right after the aborted read_char");
+        assert_eq!(s.pending_timeout(), None, "no read pending once the story has quit");
+    }
+
+    #[test]
+    fn session_run_timed_interrupt_continues_when_routine_returns_false() {
+        // Interrupt routine: inc G1 (0x95, 0x11), then rfalse (0xB1) -> the read
+        // stays pending; the host is expected to keep waiting.
+        let bytes = timed_read_char_story_v5(&[0x95, 0x11, 0xB1]);
+        let mut s = GameSession::new(bytes, true, None).expect("GameSession::new");
+        assert_eq!(s.pending_timeout(), Some((5, 0x0014)));
+        let g_before = s.machine.global(1);
+
+        let tr = s.run_timed_interrupt();
+        assert!(!tr.timed_out, "routine returned false -> read still pending");
+        assert!(!tr.quit, "read_char has not been completed yet");
+        assert_eq!(s.pending_input(), InputKind::Char, "read_char is still the pending input");
+        assert_eq!(s.pending_timeout(), Some((5, 0x0014)), "timer stays armed for the next tick");
+        assert_eq!(s.machine.global(1), g_before.wrapping_add(1), "routine side effect applied");
+    }
+
+    #[test]
+    fn abort_timed_input_marks_timed_out_and_advances() {
+        // Directly abort a timed read_char (bypassing run_timed_interrupt) and
+        // confirm the TurnResult is flagged and the VM advances past the read.
+        let bytes = timed_read_char_story_v5(&[0xB0]);
+        let mut s = GameSession::new(bytes, true, None).expect("GameSession::new");
+        assert_eq!(s.pending_input(), InputKind::Char);
+
+        let tr = s.abort_timed_input("");
+        assert!(tr.timed_out, "abort_timed_input always marks timed_out");
+        assert!(tr.quit, "story quits right after the aborted read_char");
     }
 
     #[test]
