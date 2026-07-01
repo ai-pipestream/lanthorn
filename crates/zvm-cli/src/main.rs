@@ -626,7 +626,7 @@ fn main() {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
                                  &mut page_height, &mut machine, &mut view);
                 }
-                machine.supply_line(line.trim_end());
+                machine.supply_line(line.trim_end(), 13);
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
                     o.lines = 0;
                     o.current_col = 0; // cursor is at line start after user input + Enter

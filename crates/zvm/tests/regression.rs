@@ -23,7 +23,7 @@ fn run_to_quit(story: Vec<u8>) -> String {
             StepResult::Continue => {}
             StepResult::Restart => break, // shouldn't happen in CZECH
             StepResult::NeedLine { .. } => {
-                machine.supply_line("");
+                machine.supply_line("", 13);
             }
             StepResult::NeedChar => {
                 machine.supply_char(b'\n');

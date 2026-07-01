@@ -1616,9 +1616,12 @@ impl Machine {
     ///   The text-buf position is 1-based from the start of the text buffer, i.e.
     ///   `text_data_start + token.text_pos` where text_data_start = 1 (v1–4) or 2 (v5+).
     ///
-    /// For v5+: stores the terminating character (13 = Enter) into the store variable.
+    /// For v5+: stores `terminator` (the ZSCII code of the key that ended the
+    /// line — 13 for Enter, or a function-key code the host matched against the
+    /// terminating-characters table) into the store variable. v1–4 have no store
+    /// variable for `read`, so `terminator` is ignored there.
     /// Skips tokenisation when parse_buf == 0 (v5+ only).
-    pub fn supply_line(&mut self, input: &str) {
+    pub fn supply_line(&mut self, input: &str, terminator: u8) {
         let pending = match self.pending_input.take() {
             Some(p) => p,
             None => return, // no pending read — ignore
@@ -1661,17 +1664,11 @@ impl Machine {
             self.write_parse_buffer(parse_buf, &tokens, text_data_start, false);
         }
 
-        // v5+: store the terminating character. The host's `supply_line` only ever
-        // delivers Enter-terminated lines today, so the terminator is 13 (which
-        // `is_terminator` always accepts). A future host that supplies a function-key
-        // terminator (per the header 0x2E table) should thread that ZSCII code here
-        // and store it instead of 13.
-        // TODO function-key terminator threading: pass the actual terminating char
-        // into supply_line and store `term` when is_terminator(term) holds.
+        // v5+: store the terminating character the host supplied. `is_terminator`
+        // is the host's oracle for which keys may end line input (ZMSD §10.7); by
+        // the time we get here the host has already applied it.
         if version >= 5 {
-            let term: u16 = 13;
-            debug_assert!(self.is_terminator(term));
-            self.do_store(pending.store_var, term);
+            self.do_store(pending.store_var, terminator as u16);
         }
     }
 
@@ -3398,7 +3395,7 @@ pub(crate) mod tests {
         );
 
         // Step 2: supply_line("north") and check text buffer (v3 layout).
-        m.supply_line("north");
+        m.supply_line("north", 13);
 
         // v3: byte 0 = max (untouched), text at byte 1, null-terminated.
         let tb = text_buf as u32;
@@ -3452,7 +3449,7 @@ pub(crate) mod tests {
             "expected NeedLine, got {:?}", result
         );
 
-        m.supply_line("north");
+        m.supply_line("north", 13);
 
         // v5: byte 0 = max (untouched), byte 1 = char count, text at byte 2.
         let tb = text_buf as u32;
@@ -3497,7 +3494,7 @@ pub(crate) mod tests {
         let result = m.step();
         assert!(matches!(result, StepResult::NeedLine { .. }));
 
-        m.supply_line("open mailbox");
+        m.supply_line("open mailbox", 13);
 
         // v3 layout: text at offset 1.
         // "open mailbox" → 12 chars; null at byte 1+12=13.
@@ -3548,11 +3545,49 @@ pub(crate) mod tests {
         m.state.pc = 0x0010;
 
         m.step(); // returns NeedLine
-        m.supply_line("hello");
+        m.supply_line("hello", 13);
 
         // G1 should have been set to 13 (Enter).
         let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
         assert_eq!(g1, 13, "v5 read terminator stored in G1 = 13");
+    }
+
+    #[test]
+    fn supply_line_v5_stores_function_key_terminator() {
+        // v5 read terminated by a cursor key (ZSCII 129) stores 129, not 13.
+        let (mut buf, ..) = build_input_story(5);
+        let text_buf: u16 = 0x0250; buf[text_buf as usize] = 20;
+        let parse_buf: u16 = 0x0260; buf[parse_buf as usize] = 8;
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 5, Some(0x11));
+        buf[0x0010 + n] = 0xBA;
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0010;
+        m.step();
+        m.supply_line("look", 129);
+
+        let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
+        assert_eq!(g1, 129, "v5 read stores the function-key terminator in G1");
+    }
+
+    #[test]
+    fn supply_char_stores_delete_and_escape() {
+        // ZSCII 8 (delete/backspace) and 27 (ESC) reach the read_char store var.
+        for z in [8u8, 27u8] {
+            let mut buf = sample_story(5);
+            buf[0x0010] = 0xF6; // VAR read_char
+            buf[0x0011] = 0x7F; // small const, omit, omit, omit
+            buf[0x0012] = 1;    // device = keyboard
+            buf[0x0013] = 0x10; // store → G0
+            buf[0x0014] = 0xBA; // quit
+            let mem = Memory::new(buf).unwrap();
+            let mut m = Machine::new(mem);
+            m.state.pc = 0x0010;
+            assert_eq!(m.step(), StepResult::NeedChar);
+            m.supply_char(z);
+            assert_eq!(m.global(0), z as u16, "supply_char({z}) stored in G0");
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3605,7 +3640,7 @@ pub(crate) mod tests {
         let mut m = Machine::new(mem);
         m.state.pc = 0x0010;
         m.step();
-        m.supply_line("NORTH");
+        m.supply_line("NORTH", 13);
 
         let tb = text_buf as u32;
         assert_eq!(m.mem.read_byte(tb + 1), b'n', "upper N lower-cased to 'n'");

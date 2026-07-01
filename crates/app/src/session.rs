@@ -193,7 +193,7 @@ impl GameSession {
     /// Supply a player command, step until the next input request or Quit,
     /// and return the turn result.
     pub fn submit(&mut self, command: &str) -> TurnResult {
-        self.machine.supply_line(command);
+        self.machine.supply_line(command, 13);
         let (stop, v3) = run_until_input(&mut self.machine);
         self.finish_turn(stop, v3)
     }
