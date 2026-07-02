@@ -15,7 +15,7 @@ use crate::memory::Memory;
 
 /// A recoverable runtime fault. Carries a human-readable diagnostic; the run
 /// loop records it and Quits rather than panicking.
-type R<T> = Result<T, String>;
+pub(crate) type R<T> = Result<T, String>;
 
 /// The outcome of a single [`Machine::step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,13 +263,13 @@ impl Machine {
 
     // ── main-memory read helpers (fault on out-of-range) ──────────────────────
 
-    fn m8(&self, a: u32) -> R<u32> {
+    pub(crate) fn m8(&self, a: u32) -> R<u32> {
         self.mem.read8(a).ok_or_else(|| format!("memory fault: read8 @{a:#010x}"))
     }
-    fn m16(&self, a: u32) -> R<u32> {
+    pub(crate) fn m16(&self, a: u32) -> R<u32> {
         self.mem.read16(a).ok_or_else(|| format!("memory fault: read16 @{a:#010x}"))
     }
-    fn m32(&self, a: u32) -> R<u32> {
+    pub(crate) fn m32(&self, a: u32) -> R<u32> {
         self.mem.read32(a).ok_or_else(|| format!("memory fault: read32 @{a:#010x}"))
     }
 
@@ -1213,7 +1213,7 @@ impl Machine {
             7 => 1,                                    // MAlloc
             8 => self.heap_start,                      // MAllocHeap (0 if inactive)
             9 => 1,                                    // Acceleration: interception implemented
-            10 => u32::from((1..=13).contains(&arg)),  // AccelFunc: implemented function numbers
+            10 => u32::from(crate::accel::accel_impl_supported(arg)), // AccelFunc: implemented function numbers
             11 => 0,                                   // Float
             _ => 0,
         }
