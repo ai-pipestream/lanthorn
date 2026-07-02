@@ -3894,6 +3894,36 @@ pub(crate) mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Test: run_timed_interrupt's no-frame branch (call_routine bails out
+    // before pushing a frame) still pops a value and reports non-aborting,
+    // leaving frames/eval-stack exactly where they started.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn run_timed_interrupt_no_frame_branch_leaves_stack_intact() {
+        // Patch the interrupt routine field to a packed address that unpacks
+        // past mem.len() (0x400): call_routine's out-of-bounds guard fires,
+        // storing 0 into var 0 (the eval stack) WITHOUT pushing a frame —
+        // the same no-frame path taken for packed_addr==0 or local_count>15.
+        let (mut buf, _rout) = timed_read_story(&[0xB0]); // body unused; routine never runs
+        buf[0x18] = 0xFF;
+        buf[0x19] = 0xFF; // packed 0xFFFF -> unpacks to 4*0xFFFF, far past mem.len()
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        let depth_before = m.state.frames.len();
+        let stack_before = m.state.eval_stack.len();
+        let out = m.run_timed_interrupt();
+        assert!(!out.aborted, "call_routine's no-frame guard stores 0 -> not aborted");
+        assert_eq!(m.state.frames.len(), depth_before, "no frame pushed or leaked");
+        assert_eq!(m.state.eval_stack.len(), stack_before, "eval stack depth unchanged");
+        assert!(
+            m.pending_timeout().is_some(),
+            "read still pending after a non-aborting interrupt"
+        );
+    }
+
     #[test]
     fn run_routine_returns_true_value() {
         // routine body: rtrue (0OP 0xB0) -> returns 1.
