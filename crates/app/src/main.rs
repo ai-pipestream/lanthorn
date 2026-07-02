@@ -858,9 +858,9 @@ fn can_open_panel(width: u16) -> bool {
     width >= LIST_MIN_W + PANEL_MIN_W
 }
 
-/// Split `area` into (list, panel) given an eased open fraction in [0,1].
+/// Split `area` into (list, panel) given an eased open fraction in `[0,1]`.
 /// Panel target width is a third of the area, clamped to
-/// [PANEL_MIN_W, area.width - LIST_MIN_W]; the eased width is that × fraction.
+/// `[PANEL_MIN_W, area.width - LIST_MIN_W]`; the eased width is that × fraction.
 fn split_picker_area(area: Rect, fraction: f64) -> (Rect, Rect) {
     if fraction <= 0.0 || !can_open_panel(area.width) {
         return (area, Rect::new(area.right(), area.y, 0, area.height));
