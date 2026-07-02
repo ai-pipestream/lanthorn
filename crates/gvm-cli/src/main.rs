@@ -151,8 +151,13 @@ fn main() {
     // Honour the game's stylehint colours by default; --no-game-colours opts out
     // (mirrors zvm-cli). The story path is the first non-flag argument.
     let honor = !argv.iter().any(|a| a == "--no-game-colours");
+    // Acceleration (Glulx accelfunc interception) is on by default; --no-accel opts out.
+    let accel = !argv.iter().any(|a| a == "--no-accel");
     let Some(path) = argv.iter().skip(1).find(|a| !a.starts_with("--")) else {
-        eprintln!("Usage: {} [--no-game-colours] <story.ulx | story.gblorb>", argv[0]);
+        eprintln!(
+            "Usage: {} [--no-game-colours] [--no-accel] <story.ulx | story.gblorb>",
+            argv[0]
+        );
         process::exit(1);
     };
 
@@ -173,6 +178,7 @@ fn main() {
             process::exit(1);
         }
     };
+    machine.set_acceleration(accel);
 
     let stdin_is_tty = io::stdin().is_terminal();
     let stdout_is_tty = io::stdout().is_terminal();
