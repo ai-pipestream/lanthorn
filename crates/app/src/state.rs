@@ -236,7 +236,7 @@ pub fn unpack_zcolour(p: u32) -> zvm::screen::ZColour {
 }
 
 /// Map a Blorb sound kind to a backend format, or None for unsupported kinds.
-pub(crate) fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
+pub fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
     match k {
         blorb::SoundKind::Aiff => Some(audio::SoundFormat::Aiff),
         blorb::SoundKind::Ogg => Some(audio::SoundFormat::Ogg),

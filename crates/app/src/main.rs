@@ -3200,8 +3200,34 @@ fn dispatch_slash_outcome(
                 }
             }
         }
-        // TODO(Task 7): wire to the audio backend + sound blorb.
-        SlashOutcome::PlaySound(_) => {}
+        SlashOutcome::PlaySound(None) => {
+            for line in app::state::format_sound_resource_list(state.sound_blorb.as_ref()) {
+                state.push_transcript_kind(&line, TranscriptKind::Meta);
+            }
+        }
+        SlashOutcome::PlaySound(Some(n)) => {
+            let mut report = app::state::PlaySoundReport {
+                number: n,
+                enable_sound: state.config.enable_sound,
+                backend_present: state.audio.is_some(),
+                blorb_present: state.sound_blorb.is_some(),
+                ..Default::default()
+            };
+            if let Some(blorb) = &state.sound_blorb {
+                if let Some((bytes, kind)) = blorb.sound(n) {
+                    report.resource = Some((kind, bytes.len()));
+                    if let Some(fmt) = app::state::sound_kind_to_format(kind) {
+                        report.format = Some(fmt);
+                        if let Some(backend) = state.audio.as_mut() {
+                            report.sound_id = backend.play_sample(bytes, fmt, 8, 1);
+                        }
+                    }
+                }
+            }
+            for line in app::state::format_play_sound_report(&report) {
+                state.push_transcript_kind(&line, TranscriptKind::Meta);
+            }
+        }
         SlashOutcome::Save(name_opt) => {
             // Named save or default archive save.
             let result = match name_opt {
