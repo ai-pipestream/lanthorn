@@ -171,15 +171,21 @@ hand-computed expected values — including the spec's edge cases (absent proper
 invalid address → `Z__Region` 0, class vs. object vs. routine vs. string, individual
 vs. common properties).
 
-### 2. Differential equivalence (`exec.rs` test harness)
+### 2. Differential equivalence (`exec.rs` test harness) — **best effort**
 
 A helper runs the **real veneer frame** for a given `func_addr`/args — assemble a
 minimal Glulx image whose function at `func_addr` is a faithful transcription of the
 veneer routine, `build_frame_and_enter` + run to return — and asserts its result
-equals `accel::accelerated(...)` for the same inputs. This is the anti-divergence
-guarantee: native output must match interpreted output bit-for-bit.
+equals `accel::accelerated(...)` for the same inputs.
 
-### 3. Full-story equivalence
+This is the most involved scaffolding (hand-assembling a faithful veneer routine), so
+it is **best effort**: implement it for the functions where a minimal transcription is
+tractable (e.g. `Z__Region`, a simple property lookup), and where it proves too costly
+to transcribe faithfully, rely on layer 3 (full-story on/off equivalence) as the
+anti-divergence guarantee instead. Do **not** block the feature on achieving
+differential coverage of all 13 functions.
+
+### 3. Full-story equivalence — **primary anti-divergence guarantee**
 
 `CounterfeitMonkey-11.gblorb` (and one more Glulx title) run twice — acceleration on
 vs. off — must produce:
