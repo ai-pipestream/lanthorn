@@ -138,6 +138,33 @@ fn glulx_version(exec: &[u8]) -> Option<String> {
     Some(format!("{major}.{minor}.{subminor}"))
 }
 
+/// Lazily-resolved, per-highlight data that touches other files/dirs.
+pub struct StoryAux {
+    /// Sibling/dir-scan blorb resources when the story is NOT itself a blorb.
+    /// Carries the source path so the panel can name the file.
+    pub assoc_blorb: Option<(PathBuf, Vec<ChunkInfo>)>,
+    pub saves: Vec<crate::persist_files::SaveInfo>,
+    pub hints_available: bool,
+}
+
+/// Resolve the lazy aux for one story. `save_dir` is `user_dir/saves`;
+/// `hint_index` is the shared index loaded once at picker start.
+pub fn resolve_aux(
+    entry: &StoryEntry,
+    save_dir: &Path,
+    hint_index: &hints::HintIndex,
+) -> StoryAux {
+    // Only record an ASSOCIATED blorb (a different file); the self-blorb case is
+    // already carried in StoryMeta.self_blorb.
+    let assoc_blorb = match blorb::resolve_sound_blorb(&entry.path) {
+        Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
+        _ => None,
+    };
+    let saves = crate::persist_files::list_saves(save_dir, &entry.meta.ifid);
+    let hints_available = hint_index.get(&entry.meta.ifid).is_some();
+    StoryAux { assoc_blorb, saves, hints_available }
+}
+
 /// Convert a parsed blorb's resource index into displayable `ChunkInfo`.
 pub fn chunks_of(b: &blorb::Blorb) -> Vec<ChunkInfo> {
     b.resources()
@@ -504,6 +531,52 @@ mod tests {
         assert_eq!((a.blorb, a.save, a.hint), (true, true, false));
         assert_eq!((b.blorb, b.save, b.hint), (true, true, false));
         assert_eq!((c.blorb, c.save, c.hint), (false, false, false));
+    }
+
+    // Minimal blorb with one Snd resource so resolve_sound_blorb accepts a sibling.
+    fn blorb_with_sound() -> Vec<u8> {
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 { v.push(0); }
+            v
+        }
+        let ridx_data_len = 4 + 12;
+        let snd_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes());
+        ridx.extend_from_slice(b"Snd ");
+        ridx.extend_from_slice(&0u32.to_be_bytes());
+        ridx.extend_from_slice(&(snd_off as u32).to_be_bytes());
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(b"OGGV", b"snd"));
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    #[test]
+    fn resolve_aux_finds_sibling_blorb_and_saves() {
+        let dir = temp_dir("aux");
+        std::fs::write(dir.join("g.z5"), minimal_v3_story()).unwrap();
+        std::fs::write(dir.join("g.blb"), blorb_with_sound()).unwrap();
+        let entry = entry_with("IFID-G", dir.join("g.z5"), None);
+
+        let hi = hints::load_hint_index(&dir);
+        let aux = resolve_aux(&entry, &dir, &hi); // save_dir=dir (no saves present)
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (src, chunks) = aux.assoc_blorb.expect("sibling blorb resolved");
+        assert!(src.ends_with("g.blb"));
+        assert!(chunks.iter().any(|c| c.usage == "Snd "));
+        assert!(aux.saves.is_empty());
+        assert!(!aux.hints_available);
     }
 }
 
