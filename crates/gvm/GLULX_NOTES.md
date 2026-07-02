@@ -369,7 +369,8 @@ selectors return 0. `verify S1` (0x121) — a **real image checksum check** (spe
 §1.4: sum the initial memory as big-endian 32-bit words with the 0x20 field
 zeroed, compare to the stored checksum); stores 0 if it matches, else 1.
 Selector numbers and meanings are from the spec; the **returned capability values
-reflect what this VM actually implements** (accel/float remain deferred → 0).
+reflect what this VM actually implements** (float remains deferred → 0; see §17
+for acceleration, which is implemented).
 
 | Sel | Name         | Num | Returns                                              |
 |-----|--------------|-----|------------------------------------------------------|
@@ -382,8 +383,8 @@ reflect what this VM actually implements** (accel/float remain deferred → 0).
 | 6   | MemCopy      | 6   | 1 (mzero/mcopy)                                      |
 | 7   | MAlloc       | 7   | 1 (malloc/mfree)                                     |
 | 8   | MAllocHeap   | 8   | heap-start address (0 if the heap is inactive)      |
-| 9   | Acceleration | 9   | 0 (accelfunc/accelparam stored but not intercepted) |
-| 10  | AccelFunc    | 10  | 0 (no accelerated function is intercepted)          |
+| 9   | Acceleration | 9   | 1 (interception implemented for 13 well-known functions) |
+| 10  | AccelFunc    | 10  | 1 for function numbers 1–13, else 0 (0 is also the accelfunc cancel sentinel) |
 | 11  | Float        | 11  | 0 (floating point deferred)                         |
 
 **Deviation note:** for selector 4 (IOSystem) the spec states the null (0) and
@@ -478,14 +479,21 @@ among the operations protect guards; `restart` is not implemented in 2c.)
 | accelparam | 0x181 | 2 | 0 | store value L2 in the accel parameter table at index L1 |
 
 Acceleration is a pure **speed optimization**; Inform 7 games run correctly
-without it. 2c **stores** the assignments (`accel_funcs`: address → number) and
-parameters (`accel_params`: index → value) so the opcodes succeed and state
-round-trips, but does **not** intercept the accelerated functions — the real
-veneer functions run normally. Accordingly the `Acceleration` (9) and `AccelFunc`
-(10) gestalt selectors report **0** (truthful: nothing is intercepted), so a
-spec-conformant game won't call these opcodes anyway. The stored assignments are
-readable via `Machine::accel_func_for` / `accel_param`. Interception of the
-well-known functions (1–13) is deferred.
+without it. `accelfunc`/`accelparam` **store** the assignments (`accel_funcs`:
+address → number) and parameters (`accel_params`: index → value), and the 13
+well-known functions (numbers 1–13: `Z__Region`, `CP__Tab`, `RA__Pr`, `RL__Pr`,
+`OC__Cl`, `RV__Pr`, `OP__Pr`, in both V1 and V2 parameter-offset variants) are
+now **intercepted and executed natively**, bypassing normal frame construction
+and opcode dispatch entirely. Interception happens at the two call choke
+points — `call_function` and `op_tailcall` — so it applies uniformly whether a
+game calls an accelerated function directly or tail-calls into one. This is
+behaviorally transparent (the transcript is byte-identical with acceleration on
+or off) and is **on by default**, with a `--no-accel` flag (`gvm-cli` and the
+app) as an escape hatch for diagnosing any mismatch. On CounterfeitMonkey-11,
+acceleration cuts the dispatched-opcode count from init to the first prompt by
+roughly 7.9× (23.78M → 3.00M). Accordingly the `Acceleration` (9) and
+`AccelFunc` (10) gestalt selectors report support. The stored assignments
+remain readable via `Machine::accel_func_for` / `accel_param`.
 
 ## 18. PRNG (Phase 2c, spec §2.7)
 

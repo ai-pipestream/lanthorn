@@ -32,7 +32,7 @@ spatial graph without knowing anything about the Z-machine.
 
 **Supported story versions:** Z-machine v3, v4, v5, v7, and v8. (v6 is graphical
 and unsupported; v1/v2 are not supported.) Story files load raw, from a `.zip`,
-or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
+or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is also supported.
 
 ---
 
@@ -97,6 +97,10 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   keycode is reported back in the line event's second value (`val2`; `0` for a
   normal Enter). `glk_gestalt(gestalt_LineTerminators/LineTerminatorKey)` answers
   truthfully so games can probe support.
+- **Accelerated-function interception** — large Glulx games (e.g. CounterfeitMonkey)
+  reach the first prompt substantially faster: well-known Inform veneer functions
+  set up via `accelfunc` are recognized and executed natively instead of through
+  full VM dispatch. On by default; disable with `--no-accel` (`gvm-cli` and the app).
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
