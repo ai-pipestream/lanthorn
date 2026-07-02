@@ -376,7 +376,7 @@ impl ColorScheme {
             story_info_title: Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
             story_info_label: Style::new().fg(Color::DarkGray),
             story_info_value: Style::new().fg(Color::White),
-            story_badge: Style::new().fg(Color::Black).bg(Color::Cyan),
+            story_badge: Style::new().fg(Color::Green),
             // The shown layer reads brighter than the others: inactive tabs are
             // dimmed, the active one is the bold accent colour. Both themeable.
             map_layer_tab: Style::new().fg(Color::DarkGray),
@@ -556,7 +556,7 @@ impl ColorScheme {
             story_info_title: Style::new().fg(fg).add_modifier(Modifier::BOLD),
             story_info_label: Style::new().fg(fg).add_modifier(Modifier::DIM),
             story_info_value: Style::new().fg(fg),
-            story_badge: Style::new().fg(Color::Black).bg(scheme.palette[6]),
+            story_badge: Style::new().fg(scheme.palette[2]),
             map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
             status_header: Style::new(),

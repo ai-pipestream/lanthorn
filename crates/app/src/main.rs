@@ -1176,8 +1176,8 @@ fn draw_story_picker(
         if b.hint { cluster.push(glyphs.hint); }
         let cluster_str = cluster.join(" ");
         let cluster_w = cluster_str.chars().count() as u16;
-        if cluster_w + 1 < row_w {
-            let bx = area.left() + row_w - cluster_w;
+        if cluster_w + 2 < row_w {
+            let bx = area.left() + row_w - cluster_w - 1;
             draw_str_clipped(buf, bx, y, &cluster_str, cs.story_badge, row_rect);
         }
     }
@@ -1281,7 +1281,13 @@ fn draw_info_panel(
         lines.push((h, cs.story_info_label));
         for c in chunks {
             lines.push((
-                format!(" {:<4} #{} {:<4} {}", c.usage, c.number, c.chunk_type, human_size(c.len as u64)),
+                format!(
+                    " #{}  {} — {} ({})",
+                    c.number,
+                    resource_usage_label(&c.usage),
+                    resource_type_label(&c.chunk_type),
+                    human_size(c.len as u64)
+                ),
                 cs.story_info_value,
             ));
         }
@@ -1316,6 +1322,32 @@ fn draw_info_panel(
     if overflow {
         let sb_area = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, 0, cs.scrollbar);
+    }
+}
+
+/// Translate a raw Blorb resource usage FourCC into a human-readable label.
+fn resource_usage_label(usage: &str) -> String {
+    match usage.trim() {
+        "Exec" => "Code".into(),
+        "Pict" => "Image".into(),
+        "Snd" => "Sound".into(),
+        "Data" => "Data".into(),
+        other => other.to_string(), // unknown: show raw (trimmed), nothing hidden
+    }
+}
+
+/// Translate a raw Blorb chunk-type FourCC into a human-readable label.
+fn resource_type_label(chunk_type: &str) -> String {
+    match chunk_type.trim() {
+        "ZCOD" => "Z-code".into(),
+        "GLUL" => "Glulx".into(),
+        "FORM" => "AIFF".into(),
+        "OGGV" => "Ogg Vorbis".into(),
+        "MOD" => "MOD".into(),
+        "PNG" => "PNG".into(),
+        "JPEG" => "JPEG".into(),
+        "GIF" => "GIF".into(),
+        other => other.to_string(), // unknown: raw FourCC
     }
 }
 
@@ -5723,6 +5755,7 @@ mod tests {
             features: app::picker::Features { sound: true, graphics: true, colour: Some(false), hints: true },
             self_blorb: Some(vec![
                 app::picker::ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 92 * 1024 },
+                app::picker::ChunkInfo { usage: "Snd ".into(), number: 32, chunk_type: "FORM".into(), len: 12 * 1024 },
             ]),
         };
         let area = Rect::new(0, 0, 34, 20);
@@ -5739,8 +5772,9 @@ mod tests {
         assert!(text.contains("sound"));
         assert!(text.contains("graphics"));
         assert!(text.contains("hints"));
-        assert!(text.contains("Exec"));
-        assert!(text.contains("ZCOD"));
+        assert!(text.contains("Code"));
+        assert!(text.contains("Sound"));
+        assert!(text.contains("AIFF"));
     }
 
     // ── Story-picker info panel: toggle/slide/split ─────────────────────────────
