@@ -101,6 +101,38 @@ pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<St
     None
 }
 
+/// Centered-title fallback for row 1 when the common form yields nothing.
+///
+/// Some v4+ games (e.g. BeyondZork) CENTER the room name in row 1 with leading
+/// padding and put stats on row 2, so the left-justified first segment (text
+/// before the first 2+-space run) is empty and `status_line_room_name` returns
+/// `None`. This retries on the TRIMMED line, taking its first 2+-space segment.
+///
+/// It fires ONLY where the left-justified first segment is empty, so it never
+/// changes left-justified behavior. A centered line can be a banner/title
+/// rather than a room, so `detect_location` accepts this result only when it
+/// validates against the object tree (PlayerParent or StatusName) — never as an
+/// unvalidated `NameOnly`.
+fn centered_status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<String> {
+    let scan = active_rows.min(2).min(upper.rows);
+    if scan < 1 {
+        return None;
+    }
+    let line: String = (1..=upper.cols).map(|c| upper.cell(1, c).ch).collect();
+    // Only a centered title: the left-justified first segment must be empty
+    // (the line begins with 2+ spaces). Otherwise the common form handled it.
+    if !line.split("  ").next().unwrap_or("").trim().is_empty() {
+        return None;
+    }
+    let first = line.trim().split("  ").next().unwrap_or("").trim();
+    let candidate = clean_room_text(first);
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate)
+    }
+}
+
 /// True if `short` names the room shown as `candidate`: equality, or `short` is
 /// a leading prefix of `candidate` ending on a word boundary (next char
 /// non-alphanumeric, or end of string). Both normalized; `short` non-empty.
@@ -228,21 +260,39 @@ pub fn detect_location(machine: &Machine) -> Option<Location> {
     if machine.mem.version() <= 3 {
         return current_location(machine).map(Location::GlobalVar0);
     }
-    let name = status_line_room_name(&machine.screen.upper, machine.screen.upper_window_rows)?;
-    // Prefer the avatar whose ancestor chain validates against the status-line
-    // room name. Trying every plausible player object (and using the first whose
-    // parent chain reaches the shown room) distinguishes same-named rooms that a
-    // name-only match would collapse — e.g. Zork's several "Forest" rooms — and
-    // rejects decorative "you"/"self" objects whose parent never tracks the player.
-    for player in player_candidates(machine) {
-        if let Some(room) = nearest_matching_ancestor(machine, player, &name) {
-            return Some(Location::PlayerParent(room));
+    if let Some(name) = status_line_room_name(&machine.screen.upper, machine.screen.upper_window_rows) {
+        // Prefer the avatar whose ancestor chain validates against the status-line
+        // room name. Trying every plausible player object (and using the first whose
+        // parent chain reaches the shown room) distinguishes same-named rooms that a
+        // name-only match would collapse — e.g. Zork's several "Forest" rooms — and
+        // rejects decorative "you"/"self" objects whose parent never tracks the player.
+        for player in player_candidates(machine) {
+            if let Some(room) = nearest_matching_ancestor(machine, player, &name) {
+                return Some(Location::PlayerParent(room));
+            }
+        }
+        if let Some(obj) = resolve_room_object(machine, &name) {
+            return Some(Location::StatusName(obj));
+        }
+        return Some(Location::NameOnly(name));
+    }
+    // Centered-title fallback (BeyondZork et al.): a centered row-1 name that the
+    // left-justified common form can't parse. A centered line is often a banner
+    // or story title, not a room (e.g. Photopia's "Photopia by Adam Cadre", whose
+    // top-level title object would satisfy a bare name match). So accept it ONLY
+    // under the STRONGEST validation — the avatar's own ancestor chain reaches a
+    // room of that name (PlayerParent). A mere name match (StatusName) or an
+    // unvalidated NameOnly is NOT trusted here; anything else returns None.
+    if let Some(name) =
+        centered_status_line_room_name(&machine.screen.upper, machine.screen.upper_window_rows)
+    {
+        for player in player_candidates(machine) {
+            if let Some(room) = nearest_matching_ancestor(machine, player, &name) {
+                return Some(Location::PlayerParent(room));
+            }
         }
     }
-    if let Some(obj) = resolve_room_object(machine, &name) {
-        return Some(Location::StatusName(obj));
-    }
-    Some(Location::NameOnly(name))
+    None
 }
 
 /// Returns the object representing the player's current location, or `None` if
@@ -366,6 +416,31 @@ mod tests {
     fn status_room_name_empty_grid_is_none() {
         let u = upper_with(&["                                "]);
         assert_eq!(status_line_room_name(&u, 1), None);
+    }
+
+    #[test]
+    fn status_room_name_centered_defeats_common_form() {
+        // A centered title has empty left-justified first segment → None from
+        // the common form; the centered fallback recovers the name.
+        let u = upper_with(&["                           Hilltop                                     "]);
+        assert_eq!(status_line_room_name(&u, 1), None);
+        assert_eq!(centered_status_line_room_name(&u, 1).as_deref(), Some("Hilltop"));
+    }
+
+    #[test]
+    fn centered_fallback_ignores_left_justified() {
+        // Left-justified lines must NOT trigger the centered fallback — the
+        // common form already handles them, so it returns None here.
+        let u = upper_with(&[" Bedroom                                         Score: 0     Moves: 1"]);
+        assert_eq!(centered_status_line_room_name(&u, 1), None);
+    }
+
+    #[test]
+    fn centered_fallback_multiword_and_empty() {
+        let multi = upper_with(&["                     Palace Gate                                        "]);
+        assert_eq!(centered_status_line_room_name(&multi, 1).as_deref(), Some("Palace Gate"));
+        let empty = upper_with(&["                                                                        "]);
+        assert_eq!(centered_status_line_room_name(&empty, 1), None);
     }
 
     #[test]

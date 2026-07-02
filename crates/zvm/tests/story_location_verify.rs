@@ -13,11 +13,10 @@
 //     LEFT-JUSTIFIED (the common Infocom form: "Room Name    Score: n  Moves: n")
 //     or uses a "Location:" label. Several such games now resolve.
 //   - BeyondZork's status line is NOT left-justified: it CENTERS the room
-//     name in row 1 and puts stats in row 2 ("EN:16  ST:08 ..."), which
-//     `status_line_room_name`'s common-form heuristic (text before the first
-//     run of 2+ spaces) reduces to an empty string, so `detect_location`
-//     still returns `None` for BeyondZork. TODO MAP#3's BeyondZork case
-//     remains OPEN — see the dedicated test below.
+//     name in row 1 and puts stats in row 2 ("EN:16  ST:08 ..."). A
+//     centered-title fallback (accepted only when it validates against the
+//     object tree) now resolves BeyondZork to "Hilltop" — closing the second
+//     half of TODO MAP#3. See the dedicated test below.
 
 use std::path::PathBuf;
 use zvm::cpu::exec::{Machine, StepResult};
@@ -140,23 +139,17 @@ fn v4plus_left_justified_status_lines_now_resolve() {
     }
 }
 
-// ── BeyondZork: TODO MAP#3 residual gap — still open ────────────────────────
+// ── BeyondZork: TODO MAP#3 residual gap — now closed ────────────────────────
 
 #[test]
-fn beyondzork_centered_status_line_still_undetected() {
-    // Documents the still-open half of TODO MAP#3. Drives past the VT220
-    // prompt / title crawl / character-creation menus (accepting the default
-    // character via '\n' at each char-read) into the first real room, then
-    // asserts the room banner IS present in the upper window but
-    // `detect_location` still can't parse it — because BeyondZork centers
-    // the room name in row 1 (padded with leading spaces) instead of
-    // left-justifying it, which defeats `status_line_room_name`'s
-    // common-form heuristic (text before the first run of 2+ spaces reduces
-    // to an empty string for a centered title).
-    //
-    // If this test starts failing because detect_location now returns
-    // Some(_), status_line_room_name has gained centered-title support:
-    // update this test and close out the remainder of TODO MAP#3.
+fn beyondzork_centered_status_line_now_resolves() {
+    // Closes the second half of TODO MAP#3. Drives past the VT220 prompt /
+    // title crawl / character-creation menus (accepting the default character
+    // via '\n' at each char-read) into the first real room, then asserts
+    // `detect_location` now resolves the room. BeyondZork centers the room
+    // name in row 1 (padded with leading spaces, stats on row 2); the
+    // centered-title fallback in `status_line_room_name`/`detect_location`
+    // now parses "Hilltop" and validates it against the object tree.
     let Some(story) = load_story("beyondzork-r57-s871221.z5") else {
         return; // fixture absent — skip.
     };
@@ -182,10 +175,16 @@ fn beyondzork_centered_status_line_still_undetected() {
         "expected to have reached the Hilltop starting room by now, upper row1={row1:?}"
     );
 
-    let loc = detect_location(&machine);
+    let loc = detect_location(&machine).unwrap_or_else(|| {
+        panic!("BeyondZork centered status line should now resolve a location, got None")
+    });
+    let name = loc
+        .object()
+        .map(|o| o.name.clone())
+        .unwrap_or_else(|| panic!("expected a validated room object, got {loc:?}"));
     assert!(
-        loc.is_none(),
-        "BeyondZork now resolves a location ({loc:?}) — the centered-status-line gap \
-         appears fixed; update this test (assert Some) and close the residual half of TODO MAP#3"
+        name.starts_with("Hilltop"),
+        "expected the resolved room to be Hilltop, got {name:?} (method {:?})",
+        loc.method()
     );
 }

@@ -105,7 +105,10 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   classic v3 status variable (Hitchhiker, Bureaucracy, A Mind Forever Voyaging),
   the room is read from the status line and resolved to a game object — preferring
   the player object's room when the game re-parents the player (Inform), falling
-  back to a name-only room otherwise. A hideable indicator in the map's
+  back to a name-only room otherwise. Games that **center** the room name in their
+  custom status display (Beyond Zork, Trinity) are handled too: the centered title
+  is parsed and accepted only when it validates against the player's room, so those
+  now automap as well. A hideable indicator in the map's
   bottom-right corner shows how the current room was found (`toggle-loc-method`,
   persisted via `show_loc_method`; styled by `loc_indicator`): `via player
   object`, `via name match`, `via name (unlinked)`, or `via status variable`.
