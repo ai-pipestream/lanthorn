@@ -7,22 +7,6 @@ use zvm::screen::{StatusLine, StatusRight, UpperWindow, ZColour, grey_rgb, rgb15
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 
-/// SGR set-codes for a Z-machine text-style bitmask (no leading/trailing reset).
-/// 1=reverse, 2=bold, 4=italic; 8 (fixed-pitch) has no terminal equivalent here.
-pub fn sgr_set(style: u8) -> String {
-    let mut s = String::new();
-    if style & 0x01 != 0 {
-        s.push_str("\x1b[7m");
-    }
-    if style & 0x02 != 0 {
-        s.push_str("\x1b[1m");
-    }
-    if style & 0x04 != 0 {
-        s.push_str("\x1b[3m");
-    }
-    s
-}
-
 /// Push SGR parameters for one colour channel. `fg` selects 3x vs 4x codes.
 fn push_colour_sgr(params: &mut Vec<String>, c: ZColour, fg: bool) {
     let (base_std, base_true) = if fg { (30u16, 38u16) } else { (40u16, 48u16) };
@@ -623,16 +607,6 @@ mod colour_tests {
 mod tests {
     use super::*;
     use zvm::screen::{StatusLine, StatusRight, UpperWindow, ZColour};
-
-    #[test]
-    fn sgr_set_maps_bits() {
-        assert_eq!(sgr_set(0), "");
-        assert_eq!(sgr_set(1), "\x1b[7m"); // reverse
-        assert_eq!(sgr_set(2), "\x1b[1m"); // bold
-        assert_eq!(sgr_set(4), "\x1b[3m"); // italic
-        assert_eq!(sgr_set(8), ""); // fixed-pitch ignored
-        assert_eq!(sgr_set(1 | 2), "\x1b[7m\x1b[1m");
-    }
 
     #[test]
     fn style_wrap_only_when_tty_and_styled() {
