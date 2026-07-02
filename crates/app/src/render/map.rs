@@ -611,6 +611,7 @@ pub(crate) fn loc_method_label(m: zvm::location::LocationMethod) -> &'static str
         PlayerParent => "via player object",
         StatusName => "via name match",
         NameOnly => "via name (unlinked)",
+        RoomHeading => "via room heading",
     }
 }
 
@@ -2238,6 +2239,7 @@ mod tests {
         assert_eq!(loc_method_label(PlayerParent), "via player object");
         assert_eq!(loc_method_label(StatusName), "via name match");
         assert_eq!(loc_method_label(NameOnly), "via name (unlinked)");
+        assert_eq!(loc_method_label(RoomHeading), "via room heading");
     }
 
     #[test]

@@ -237,6 +237,10 @@ pub enum LocationMethod {
     PlayerParent,
     StatusName,
     NameOnly,
+    /// Glulx: the room was read from the Inform 7 `Subheader` room heading in
+    /// the story buffer (name-based; no backing object). Trusted directly — not
+    /// subject to the `NameOnly`-empty-graph gate.
+    RoomHeading,
 }
 
 /// The mapper-facing location signal for one turn.
