@@ -138,7 +138,7 @@ impl Machine {
         }
         if self.obj_in_class(obj)? && cla == 0 {
             let ips = self.accel_param_or0(1);
-            if id < ips || id >= ips + 8 {
+            if id < ips || id >= ips.wrapping_add(8) {
                 return Ok(0);
             }
         }
@@ -248,7 +248,7 @@ impl Machine {
         let addr = self.accel_ra_pr(args, variant)?;
         if addr == 0 {
             if id > 0 && id < self.accel_param_or0(1) {
-                return self.m32(self.accel_param_or0(8).wrapping_add(4 * id));
+                return self.m32(self.accel_param_or0(8).wrapping_add(4u32.wrapping_mul(id)));
             }
             self.accel_error("[** Programming error: tried to read (something) **]");
             return Ok(0);
@@ -263,22 +263,22 @@ impl Machine {
         let zr = self.accel_z_region(&[obj])?;
         if zr == 3 {
             let ips = self.accel_param_or0(1);
-            if id == ips + 6 {
+            if id == ips.wrapping_add(6) {
                 return Ok(1); // print
             }
-            if id == ips + 7 {
+            if id == ips.wrapping_add(7) {
                 return Ok(1); // print_to_array
             }
             return Ok(0);
         }
         if zr == 2 {
-            return Ok(if id == self.accel_param_or0(1) + 5 { 1 } else { 0 }); // call
+            return Ok(if id == self.accel_param_or0(1).wrapping_add(5) { 1 } else { 0 }); // call
         }
         if zr != 1 {
             return Ok(0);
         }
         let ips = self.accel_param_or0(1);
-        if id >= ips && id < ips + 8 && self.obj_in_class(obj)? {
+        if id >= ips && id < ips.wrapping_add(8) && self.obj_in_class(obj)? {
             return Ok(1);
         }
         Ok(if self.accel_ra_pr(args, variant)? != 0 { 1 } else { 0 })
@@ -474,7 +474,9 @@ mod tests {
     fn cp_tab_v1_v2_agree_at_nab7_and_diverge_otherwise() {
         // With num_attr_bytes = 7 the V1 (obj+16) and V2 (obj+4*(3+7/4)=obj+16) offsets match.
         let m = accel_world();
-        assert_eq!(m.accel_dispatch(2, &[OBJ, P]).unwrap(), m.accel_dispatch(8, &[OBJ, P]).unwrap());
+        let v1 = m.accel_dispatch(2, &[OBJ, P]).unwrap();
+        assert_ne!(v1, 0, "agreement check is vacuous if the shared value is 0");
+        assert_eq!(v1, m.accel_dispatch(8, &[OBJ, P]).unwrap());
         // With num_attr_bytes != 7, only V2 lands on the real table. The second world's
         // object places its prop-table pointer at obj+4*(3+nab/4); assert V2 finds
         // the property and V1 (obj+16) does not.
