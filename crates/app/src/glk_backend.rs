@@ -475,6 +475,15 @@ impl GlkBackend for AppGlk {
             b.log.clear();
             b.drained = 0;
         }
+        // A cleared primary window puts the cursor back at line start, so a
+        // heading printed at the top of the fresh window is a valid line-start
+        // heading. Reset the detector; discard any partial heading run whose
+        // text was just wiped.
+        if Some(win) == self.primary {
+            self.at_line_start = true;
+            self.in_heading = false;
+            self.heading_acc.clear();
+        }
     }
 
     fn flush(&mut self) {}
@@ -762,5 +771,18 @@ mod heading_tests {
         put(&mut b, GlkStyle::Subheader, "land"); // inline link, mid-line
         put(&mut b, GlkStyle::Normal, " soon?\n\n");
         assert_eq!(b.take_room_heading().as_deref(), Some("Orbiting Boony"));
+    }
+
+    #[test]
+    fn window_clear_resets_line_start_for_next_heading() {
+        // A game that clears the screen mid-line and then prints the room title
+        // with no leading newline: the clear returns the cursor to line start, so
+        // the heading must still be recognized.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Normal, "loading"); // leaves at_line_start = false
+        b.window_clear(1);
+        put(&mut b, GlkStyle::Subheader, "Grand Hall"); // top of cleared window
+        put(&mut b, GlkStyle::Normal, "\nA vast chamber.\n");
+        assert_eq!(b.take_room_heading().as_deref(), Some("Grand Hall"));
     }
 }
