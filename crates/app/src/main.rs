@@ -1093,7 +1093,7 @@ fn main() {
     // setup (screen dims, undo cap) runs in its arm before boxing.
     let mut session: Box<dyn Engine> = match loaded {
         app::hints::LoadedStory::ZCode(bytes) => {
-            let mut s = match GameSession::new(bytes, cfg.honor_game_colours, cfg.interpreter_number) {
+            let mut s = match GameSession::new(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -3424,7 +3424,7 @@ fn reset_game(
         Ok(app::hints::LoadedStory::ZCode(bytes)) => {
             // Match the prior in-place restart exactly (no screen-dim write) so a
             // Z-machine restart stays byte-for-byte identical.
-            GameSession::new(bytes, state.config.honor_game_colours, state.config.interpreter_number).map_err(|e| format!("{e:?}")).map(|mut new_session| {
+            GameSession::new(bytes, state.config.honor_game_colours, state.config.enable_sound, state.config.interpreter_number).map_err(|e| format!("{e:?}")).map(|mut new_session| {
                 new_session.machine.undo_cap = state.config.undo_levels;
                 *zvm_session_mut(session) = new_session;
             })
@@ -4042,7 +4042,7 @@ fn open_hints(
         hints::HintResolution::File(p) => {
             match hints::load_story_bytes(&p) {
                 Ok(bytes) => {
-                    match app::session::GameSession::new(bytes, state.config.honor_game_colours, state.config.interpreter_number) {
+                    match app::session::GameSession::new(bytes, state.config.honor_game_colours, false, state.config.interpreter_number) {
                         Ok(mut vm) => {
                             vm.machine.undo_cap = state.config.undo_levels;
                             let opening = vm.take_transcript();
@@ -4077,7 +4077,7 @@ fn open_hints(
             let pred = |name: &str| name == entry;
             match hints::read_zip_entry(&zip_path, pred) {
                 Ok(Some(bytes)) => {
-                    match app::session::GameSession::new(bytes, state.config.honor_game_colours, state.config.interpreter_number) {
+                    match app::session::GameSession::new(bytes, state.config.honor_game_colours, false, state.config.interpreter_number) {
                         Ok(mut vm) => {
                             vm.machine.undo_cap = state.config.undo_levels;
                             let opening = vm.take_transcript();
@@ -4470,7 +4470,7 @@ mod tests {
             .join("../zvm/tests/fixtures/czech.z5");
         let Ok(bytes) = std::fs::read(&fixture) else { return };
         let mut engine: Box<dyn app::engine::Engine> =
-            Box::new(app::session::GameSession::new(bytes.clone(), true, None).expect("zcode session"));
+            Box::new(app::session::GameSession::new(bytes.clone(), true, false, None).expect("zcode session"));
         let mut mapper = mapper::mapper::Mapper::default();
         let mut state = app::state::AppState::default();
         state.turns = 5;
