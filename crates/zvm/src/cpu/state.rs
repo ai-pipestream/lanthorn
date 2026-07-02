@@ -26,6 +26,9 @@ pub struct State {
     pub pc: u32,
     pub frames: Vec<Frame>,
     pub eval_stack: Vec<u16>,
+    /// Latched stack-underflow fault from the current instruction. Drained by
+    /// the CPU after each step. `None` in normal operation.
+    pub fault: Option<String>,
 }
 
 impl State {
@@ -34,6 +37,7 @@ impl State {
             pc,
             frames: Vec::new(),
             eval_stack: Vec::new(),
+            fault: None,
         }
     }
 }
@@ -56,7 +60,10 @@ pub fn read_var(state: &mut State, mem: &Memory, var: u8) -> u16 {
         }
         0x01..=0x0F => {
             let idx = (var - 1) as usize;
-            let frame = state.frames.last().expect("no current frame");
+            let Some(frame) = state.frames.last() else {
+                state.fault = Some("stack underflow".to_string());
+                return 0;
+            };
             // Guard: if the routine has fewer locals than requested, return 0
             // (Z-machine spec says locals not provided by caller are 0).
             frame.locals.get(idx).copied().unwrap_or(0)
@@ -94,7 +101,10 @@ pub fn write_var(state: &mut State, mem: &mut Memory, var: u8, val: u16) {
         }
         0x01..=0x0F => {
             let idx = (var - 1) as usize;
-            let frame = state.frames.last_mut().expect("no current frame");
+            let Some(frame) = state.frames.last_mut() else {
+                state.fault = Some("stack underflow".to_string());
+                return;
+            };
             // Guard: if the routine has fewer locals than requested, extend locals
             // (Z-machine spec allows this for compatibility).
             if idx >= frame.locals.len() {
@@ -193,7 +203,10 @@ pub fn call_routine(
 /// stack to the frame's base, store `val` into the frame's `store_var`, and
 /// restore PC to the frame's `return_pc`.
 pub fn return_value(state: &mut State, mem: &mut Memory, val: u16) {
-    let frame = state.frames.pop().expect("return with no active frame");
+    let Some(frame) = state.frames.pop() else {
+        state.fault = Some("stack underflow".to_string());
+        return;
+    };
 
     // Discard any eval stack entries belonging to this frame
     state.eval_stack.truncate(frame.eval_base);
@@ -366,5 +379,23 @@ mod tests {
         assert_eq!(read_var(&mut st, &m, 0x10), 0x0001);
         assert_eq!(read_var(&mut st, &m, 0x11), 0x0002);
         assert_eq!(read_var(&mut st, &m, 0x8F), 0x00EF);
+    }
+
+    #[test]
+    fn return_with_no_frame_latches_underflow_not_panic() {
+        let mut m = Memory::new(sample_story(3)).unwrap();
+        let mut st = State::new(0x0400);
+        // No frames pushed → previously `.expect("return with no active frame")`.
+        return_value(&mut st, &mut m, 5);
+        assert_eq!(st.fault.as_deref(), Some("stack underflow"));
+    }
+
+    #[test]
+    fn read_local_with_no_frame_latches_underflow() {
+        let mut m = Memory::new(sample_story(3)).unwrap();
+        let mut st = State::new(0x0400);
+        let v = read_var(&mut st, &m, 0x01); // local 1, no frame
+        assert_eq!(v, 0);
+        assert_eq!(st.fault.as_deref(), Some("stack underflow"));
     }
 }

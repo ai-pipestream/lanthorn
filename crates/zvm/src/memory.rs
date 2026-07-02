@@ -15,6 +15,10 @@ pub struct Memory {
     /// (ZMSD §3.8.5.4). Maps ZSCII codes 155, 156, … to Unicode chars.
     /// `None` if the story has no custom table; the default table is used instead.
     unicode_table: Option<Vec<char>>,
+    /// Latched out-of-bounds access from the current instruction: (is_write,
+    /// size_bytes, addr). Interior-mutable so read paths (&self) can record it.
+    /// Drained by `take_mem_fault`; the CPU checks it after each instruction.
+    mem_fault: std::cell::Cell<Option<(bool, u8, u32)>>,
 }
 
 /// Parse the custom Unicode translation table from raw story bytes if present
@@ -75,7 +79,12 @@ impl Memory {
             return Err(ZError::Truncated);
         }
         let unicode_table = parse_unicode_table(&bytes);
-        Ok(Memory { bytes, header, unicode_table })
+        Ok(Memory {
+            bytes,
+            header,
+            unicode_table,
+            mem_fault: std::cell::Cell::new(None),
+        })
     }
 
     /// Length of the story file in bytes.
@@ -87,37 +96,69 @@ impl Memory {
 
     /// Read a single byte at `addr`.
     pub fn read_byte(&self, addr: u32) -> u8 {
-        self.bytes[addr as usize]
+        match self.bytes.get(addr as usize) {
+            Some(&b) => b,
+            None => {
+                self.latch_fault(false, 1, addr);
+                0
+            }
+        }
     }
 
     /// Write a single byte at `addr`. Only dynamic memory (addr < static_mem_base) is writable.
     pub fn write_byte(&mut self, addr: u32, v: u8) {
-        debug_assert!(
-            addr < self.header.static_mem_base as u32,
-            "write to read-only memory at {:#06x} (static_mem_base = {:#06x})",
-            addr,
-            self.header.static_mem_base
-        );
-        self.bytes[addr as usize] = v;
+        match self.bytes.get_mut(addr as usize) {
+            Some(slot) => {
+                debug_assert!(
+                    addr < self.header.static_mem_base as u32,
+                    "write to read-only memory at {:#06x} (static_mem_base = {:#06x})",
+                    addr,
+                    self.header.static_mem_base
+                );
+                *slot = v;
+            }
+            None => self.latch_fault(true, 1, addr),
+        }
     }
 
     /// Read a big-endian 16-bit word at `addr`.
     pub fn read_word(&self, addr: u32) -> u16 {
         let i = addr as usize;
-        ((self.bytes[i] as u16) << 8) | self.bytes[i + 1] as u16
+        match (self.bytes.get(i), self.bytes.get(i + 1)) {
+            (Some(&hi), Some(&lo)) => ((hi as u16) << 8) | lo as u16,
+            _ => {
+                self.latch_fault(false, 2, addr);
+                0
+            }
+        }
     }
 
     /// Write a big-endian 16-bit word at `addr`. Only dynamic memory is writable.
     pub fn write_word(&mut self, addr: u32, v: u16) {
-        debug_assert!(
-            addr < self.header.static_mem_base as u32,
-            "write to read-only memory at {:#06x} (static_mem_base = {:#06x})",
-            addr,
-            self.header.static_mem_base
-        );
         let i = addr as usize;
-        self.bytes[i] = (v >> 8) as u8;
-        self.bytes[i + 1] = (v & 0xFF) as u8;
+        if i + 1 < self.bytes.len() {
+            debug_assert!(
+                addr < self.header.static_mem_base as u32,
+                "write to read-only memory at {:#06x} (static_mem_base = {:#06x})",
+                addr,
+                self.header.static_mem_base
+            );
+            self.bytes[i] = (v >> 8) as u8;
+            self.bytes[i + 1] = (v & 0xFF) as u8;
+        } else {
+            self.latch_fault(true, 2, addr);
+        }
+    }
+
+    fn latch_fault(&self, is_write: bool, size: u8, addr: u32) {
+        if self.mem_fault.get().is_none() {
+            self.mem_fault.set(Some((is_write, size, addr)));
+        }
+    }
+
+    /// Take and clear a latched OOB access recorded since the last drain.
+    pub fn take_mem_fault(&self) -> Option<(bool, u8, u32)> {
+        self.mem_fault.take()
     }
 
     /// Unpack a packed routine address (ZMSD §1.2.3).
@@ -224,5 +265,34 @@ mod tests {
         buf.truncate(64);
         let err = Memory::new(buf).unwrap_err();
         assert!(matches!(err, ZError::Truncated));
+    }
+
+    #[test]
+    fn oob_read_latches_fault_instead_of_panicking() {
+        let m = Memory::new(sample_story(3)).unwrap();
+        let end = m.len() as u32;
+        // Previously panicked (unchecked slice index); must now return 0 + latch.
+        let v = m.read_word(end + 100);
+        assert_eq!(v, 0, "OOB read returns benign 0");
+        assert_eq!(m.take_mem_fault(), Some((false, 2, end + 100)));
+        // Latch is drained by take.
+        assert_eq!(m.take_mem_fault(), None);
+    }
+
+    #[test]
+    fn oob_write_latches_fault() {
+        let mut m = Memory::new(sample_story(3)).unwrap();
+        let end = m.len() as u32;
+        m.write_byte(end + 5, 0xAB);
+        assert_eq!(m.take_mem_fault(), Some((true, 1, end + 5)));
+    }
+
+    #[test]
+    fn first_fault_wins() {
+        let m = Memory::new(sample_story(3)).unwrap();
+        let end = m.len() as u32;
+        let _ = m.read_byte(end + 1);
+        let _ = m.read_byte(end + 2);
+        assert_eq!(m.take_mem_fault(), Some((false, 1, end + 1)), "keep first fault addr");
     }
 }
