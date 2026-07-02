@@ -65,10 +65,20 @@ fn extended80_to_u32(b: &[u8; 10]) -> u32 {
 /// big-endian 16-bit PCM). Returns None on a malformed or non-16-bit AIFF.
 #[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
-    if bytes.len() < 12 || &bytes[0..4] != b"FORM" || &bytes[8..12] != b"AIFF" {
+    // Blorb's `Blorb::sound` returns the FORM chunk's PAYLOAD (the 8-byte
+    // `FORM`+len header already stripped), so the bytes it hands us usually
+    // start directly with the form type `AIFF`/`AIFC`. Accept both that shape
+    // and a full `FORM`...`AIFF`/`AIFC` container (e.g. a standalone .aiff file).
+    let mut pos = if bytes.len() >= 12
+        && &bytes[0..4] == b"FORM"
+        && (&bytes[8..12] == b"AIFF" || &bytes[8..12] == b"AIFC")
+    {
+        12
+    } else if bytes.len() >= 4 && (&bytes[0..4] == b"AIFF" || &bytes[0..4] == b"AIFC") {
+        4
+    } else {
         return None;
-    }
-    let mut pos = 12;
+    };
     let mut channels: u16 = 0;
     let mut sample_rate: u32 = 0;
     let mut sample_size: u16 = 0;
@@ -92,11 +102,18 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
                 // Skip offset (u32) + blockSize (u32); the rest is big-endian PCM.
                 let pcm_start = data_start + 8;
                 let pcm_end = data_start + len;
-                if sample_size <= 16 {
-                    let mut i = pcm_start;
+                let mut i = pcm_start;
+                if sample_size <= 8 {
+                    while i < pcm_end {
+                        let s = bytes[i] as i8;
+                        pcm.push((s as i16) << 8);
+                        i += 1;
+                    }
+                } else {
+                    let bps = ((sample_size as usize + 7) / 8).max(2);
                     while i + 1 < pcm_end {
                         pcm.push(i16::from_be_bytes([bytes[i], bytes[i + 1]]));
-                        i += 2;
+                        i += bps;
                     }
                 }
             }
@@ -410,6 +427,47 @@ mod tests {
         assert_eq!(channels, 1);
         assert_eq!(rate, 44100);
         assert_eq!(pcm, vec![256i16, -256i16]);
+    }
+
+    /// Build a blorb-shaped AIFF payload: the FORM chunk's PAYLOAD as `Blorb::sound`
+    /// actually hands to `decode_aiff` — starts with the form type `AIFF` (no
+    /// leading `FORM`+len header), COMM is 8-bit mono, SSND holds signed 8-bit
+    /// samples. Reuses the same 80-bit extended sample-rate bytes as `tiny_aiff()`.
+    fn blorb_aiff_payload_8bit() -> Vec<u8> {
+        fn be_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(id);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 { v.push(0); }
+            v
+        }
+        // COMM: channels=1, numFrames=3, sampleSize=8, rate = 44100 as 80-bit ext
+        // (same extended-float bytes tiny_aiff() uses).
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&1u16.to_be_bytes());       // channels
+        comm.extend_from_slice(&3u32.to_be_bytes());       // numSampleFrames
+        comm.extend_from_slice(&8u16.to_be_bytes());       // sampleSize
+        comm.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100
+        // SSND: offset=0, blockSize=0, then three signed 8-bit samples.
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // offset
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // blockSize
+        ssnd.extend_from_slice(&[0x7f, 0x80, 0x00]);       // i8: +127, -128, 0
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"AIFF");
+        payload.extend_from_slice(&be_chunk(b"COMM", &comm));
+        payload.extend_from_slice(&be_chunk(b"SSND", &ssnd));
+        payload
+    }
+
+    #[test]
+    fn decode_aiff_accepts_blorb_payload_8bit() {
+        let (channels, rate, pcm) = decode_aiff(&blorb_aiff_payload_8bit()).expect("valid blorb AIFF payload");
+        assert_eq!(channels, 1);
+        assert_eq!(rate, 44100);
+        assert_eq!(pcm, vec![32512i16, -32768i16, 0i16]);
     }
 
     #[cfg(not(feature = "playback"))]
