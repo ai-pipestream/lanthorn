@@ -45,12 +45,20 @@ signal both reliable and self-gating against pre-game screens.
 
 ## 2. The signal & algorithm
 
-**Room name = the last complete `Subheader` line in a turn's primary-buffer
-output.**
+**Room name = the last `Subheader` line that BEGINS AT LINE START in a turn's
+primary-buffer output.**
 
 - **Style:** only `GlkStyle::Subheader` counts. `Header` is the big game-title
   banner; `Emphasized` is inline bold (FooFoo's "Knock.", Zozzled's "wish ME").
   Neither is a room.
+- **Line-start only (inline-link guard):** the heading is a `Subheader` run that
+  begins at the start of a line — Inform prints the room title on its own line.
+  Some games also emit `Subheader` *mid-line* for inline command hyperlinks
+  (Superluminal Vagrant Twin renders "credits"/"land" this way, before and after
+  the real "Orbiting Boony" heading). A plain "last Subheader run" rule captures
+  the trailing inline link ("land") instead of the room; requiring the run to
+  begin at line start rejects inline links and selects the true heading. The
+  detector tracks line-start position across the whole primary-window stream.
 - **"Last line" skips the banner:** on turn one some games print the game title
   *and* the room, both as `Subheader` (Coloratura: `Coloratura` then
   `Inside the Cellarium`). Taking the **last** `Subheader` line before the

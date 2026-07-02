@@ -103,6 +103,14 @@ pub struct AppGlk {
     /// The last completed `Subheader` line seen since the previous drain — the
     /// current room heading (`None` if this turn printed none).
     last_heading: Option<String>,
+    /// Whether the primary window's output stream is at the start of a line.
+    /// A room heading is a `Subheader` run that BEGINS here; `Subheader` runs
+    /// beginning mid-line are inline hyperlinks (e.g. Superluminal's command
+    /// hints), not rooms.
+    at_line_start: bool,
+    /// Whether `heading_acc` is an active heading run (a `Subheader` run that
+    /// began at line start and has not yet been terminated).
+    in_heading: bool,
 }
 
 impl Default for AppGlk {
@@ -124,6 +132,8 @@ impl AppGlk {
             primary: None,
             heading_acc: String::new(),
             last_heading: None,
+            at_line_start: true,
+            in_heading: false,
         }
     }
 
@@ -163,20 +173,40 @@ impl AppGlk {
     }
 
     /// Feed one primary-window output run into the room-heading detector.
-    /// Accumulates consecutive `Subheader` text; a newline or any non-`Subheader`
-    /// run finalizes the current heading line. Keeps the LAST finalized line, so
-    /// the banner title (printed before the room heading) is overwritten by it.
+    ///
+    /// The Inform 7 room heading is a `Subheader` run printed on its OWN line, so
+    /// a heading is a `Subheader` run that begins at line start (tracked by
+    /// `at_line_start`). A `Subheader` run that begins mid-line is an inline
+    /// hyperlink — e.g. Superluminal Vagrant Twin renders its "credits"/"land"
+    /// command hints as mid-line `Subheader` — and is ignored. A heading run ends
+    /// at the next newline or when the style leaves `Subheader`; the LAST heading
+    /// in a turn wins, so a banner title printed earlier on its own line is
+    /// overwritten by the real room heading.
     fn capture_heading(&mut self, style: GlkStyle, s: &str) {
-        if style == GlkStyle::Subheader {
-            for ch in s.chars() {
-                if ch == '\n' {
+        let is_sub = style == GlkStyle::Subheader;
+        for ch in s.chars() {
+            if ch == '\n' {
+                if self.in_heading {
                     self.finalize_heading();
-                } else {
+                    self.in_heading = false;
+                }
+                self.at_line_start = true;
+                continue;
+            }
+            if is_sub {
+                if self.at_line_start && !self.in_heading {
+                    self.in_heading = true; // a heading begins only at line start
+                }
+                if self.in_heading {
                     self.heading_acc.push(ch);
                 }
+                // A `Subheader` run that began mid-line is an inline link → ignore.
+            } else if self.in_heading {
+                // Non-`Subheader` text on the heading's line ends the heading run.
+                self.finalize_heading();
+                self.in_heading = false;
             }
-        } else {
-            self.finalize_heading();
+            self.at_line_start = false;
         }
     }
 
@@ -193,7 +223,10 @@ impl AppGlk {
     /// Return and clear the last `Subheader` room heading captured since the
     /// previous call. Drained once per turn, alongside `take_transcript`.
     pub fn take_room_heading(&mut self) -> Option<String> {
-        self.finalize_heading(); // flush a heading with no trailing separator yet
+        if self.in_heading {
+            self.finalize_heading(); // flush a heading with no trailing separator yet
+            self.in_heading = false;
+        }
         self.last_heading.take()
     }
 
@@ -713,5 +746,21 @@ mod heading_tests {
         }
         put(&mut b, GlkStyle::Normal, "\nThe battle.\n");
         assert_eq!(b.take_room_heading().as_deref(), Some("War Chest"));
+    }
+
+    #[test]
+    fn mid_line_subheader_is_an_inline_link_not_a_room() {
+        // Superluminal Vagrant Twin renders command hints ("credits", "land") as
+        // Subheader mid-line, before and after the real room heading. Only the
+        // line-start heading counts; a trailing inline link must NOT overwrite it.
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Normal, "(Type ");
+        put(&mut b, GlkStyle::Subheader, "credits"); // inline link, mid-line
+        put(&mut b, GlkStyle::Normal, " to learn who made this.)\n\n");
+        put(&mut b, GlkStyle::Subheader, "Orbiting Boony"); // room heading, line start
+        put(&mut b, GlkStyle::Normal, "\nA grey world. You going to ");
+        put(&mut b, GlkStyle::Subheader, "land"); // inline link, mid-line
+        put(&mut b, GlkStyle::Normal, " soon?\n\n");
+        assert_eq!(b.take_room_heading().as_deref(), Some("Orbiting Boony"));
     }
 }

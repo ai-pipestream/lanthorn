@@ -45,17 +45,14 @@ fn drive_to_room(s: &mut GlulxSession, max_keys: u32) -> Option<app::engine::Loc
 #[test]
 #[ignore]
 fn starting_rooms_resolve() {
-    // Superluminal_Vagrant_Twin is deliberately NOT included here: verified
-    // locally, its boot turn also prints inline command-hint words ("credits",
-    // "land") in `GlkStyle::Subheader` (the same style as the real room
-    // heading "Orbiting Boony"). Our "last Subheader line of the turn wins"
-    // heuristic (crates/app/src/glk_backend.rs::capture_heading) picks up
-    // "land" instead, since it prints after the room heading in that game's
-    // boot text. This is a genuine detection false-positive for this
-    // specific game, not a test issue or an input-timing issue - out of
-    // scope for a test-only task (Task 5 makes no production changes).
+    // Superluminal_Vagrant_Twin renders inline command-hint words ("credits",
+    // "land") in `GlkStyle::Subheader` — the same style as the real room heading
+    // "Orbiting Boony" — but mid-line, whereas the heading is on its own line.
+    // The line-start discriminator in `capture_heading` ignores the inline links,
+    // so it resolves correctly.
     let cases = [
         ("FooFoo.gblorb.blorb", "Studio Apartment"),
+        ("Superluminal_Vagrant_Twin.gblorb.blorb", "Orbiting Boony"),
         ("Sub_Rosa.gblorb.blorb", "Leathery Cliff"),
         ("Dr Ludwig and the Devil.gblorb", "Laboratory"),
         ("TAKE.gblorb", "War Chest"),
