@@ -97,6 +97,12 @@ pub struct AppGlk {
     buffers: BTreeMap<u32, BufBuf>,
     /// The primary buffer window id (the first text-buffer opened), if any.
     primary: Option<u32>,
+    /// Accumulator for the current run of `Subheader` text in the primary
+    /// window (the Inform 7 room heading, captured char-by-char).
+    heading_acc: String,
+    /// The last completed `Subheader` line seen since the previous drain — the
+    /// current room heading (`None` if this turn printed none).
+    last_heading: Option<String>,
 }
 
 impl Default for AppGlk {
@@ -116,6 +122,8 @@ impl AppGlk {
             grids: BTreeMap::new(),
             buffers: BTreeMap::new(),
             primary: None,
+            heading_acc: String::new(),
+            last_heading: None,
         }
     }
 
@@ -152,6 +160,41 @@ impl AppGlk {
         }
         buf.drained = buf.log.len();
         (text, chunks)
+    }
+
+    /// Feed one primary-window output run into the room-heading detector.
+    /// Accumulates consecutive `Subheader` text; a newline or any non-`Subheader`
+    /// run finalizes the current heading line. Keeps the LAST finalized line, so
+    /// the banner title (printed before the room heading) is overwritten by it.
+    fn capture_heading(&mut self, style: GlkStyle, s: &str) {
+        if style == GlkStyle::Subheader {
+            for ch in s.chars() {
+                if ch == '\n' {
+                    self.finalize_heading();
+                } else {
+                    self.heading_acc.push(ch);
+                }
+            }
+        } else {
+            self.finalize_heading();
+        }
+    }
+
+    /// Promote the accumulated `Subheader` text (if any, trimmed non-empty) to
+    /// the last-heading slot and clear the accumulator.
+    fn finalize_heading(&mut self) {
+        let line = self.heading_acc.trim().to_string();
+        self.heading_acc.clear();
+        if !line.is_empty() {
+            self.last_heading = Some(line);
+        }
+    }
+
+    /// Return and clear the last `Subheader` room heading captured since the
+    /// previous call. Drained once per turn, alongside `take_transcript`.
+    pub fn take_room_heading(&mut self) -> Option<String> {
+        self.finalize_heading(); // flush a heading with no trailing separator yet
+        self.last_heading.take()
     }
 
     /// Project the recorded Glk state onto the neutral [`ScreenModel`].
@@ -368,6 +411,9 @@ impl GlkBackend for AppGlk {
     }
 
     fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+        if Some(win) == self.primary {
+            self.capture_heading(style, s);
+        }
         let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let buf = self.buffers.entry(win).or_default();
         buf.log.push((bits, fg, bg, s.to_string()));
@@ -602,5 +648,70 @@ mod tests {
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
         assert_eq!(cell.bg, crate::state::pack_zcolour(ZColour::True24(0x00FF_FFFF)));
+    }
+}
+
+#[cfg(test)]
+mod heading_tests {
+    use super::*;
+    use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, WinType};
+
+    fn primary_backend() -> AppGlk {
+        let mut b = AppGlk::new(80, 24);
+        b.window_open(1, WinType::TextBuffer);
+        b.window_layout(&[(1, WinType::TextBuffer, GlkRect { left: 0, top: 0, width: 80, height: 24 })]);
+        b
+    }
+
+    // Feed a run via the colourless trait entry (delegates to put_text_attr).
+    fn put(b: &mut AppGlk, style: GlkStyle, s: &str) {
+        b.put_text(1, style, s);
+    }
+
+    #[test]
+    fn subheader_line_is_the_heading() {
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Studio Apartment\n");
+        put(&mut b, GlkStyle::Normal, "You climb out of bed.\n");
+        assert_eq!(b.take_room_heading().as_deref(), Some("Studio Apartment"));
+        // Drained: a second call with no new heading is None.
+        assert_eq!(b.take_room_heading(), None);
+    }
+
+    #[test]
+    fn last_subheader_wins_over_banner_title() {
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Subheader, "Coloratura");
+        put(&mut b, GlkStyle::Normal, " by lynnea glasser\n");
+        put(&mut b, GlkStyle::Subheader, "Inside the Cellarium");
+        put(&mut b, GlkStyle::Normal, "A white structure.\n");
+        assert_eq!(b.take_room_heading().as_deref(), Some("Inside the Cellarium"));
+    }
+
+    #[test]
+    fn emphasized_and_header_are_not_headings() {
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Header, "Superluminal Vagrant Twin\n");
+        put(&mut b, GlkStyle::Emphasized, "Knock.");
+        put(&mut b, GlkStyle::Normal, "Prose.\n");
+        assert_eq!(b.take_room_heading(), None);
+    }
+
+    #[test]
+    fn menu_only_normal_text_has_no_heading() {
+        let mut b = primary_backend();
+        put(&mut b, GlkStyle::Normal, "1) Yes\n2) No\n");
+        assert_eq!(b.take_room_heading(), None);
+    }
+
+    #[test]
+    fn heading_char_by_char_runs_accumulate() {
+        // Games often emit one glk_put_char per character.
+        let mut b = primary_backend();
+        for ch in "War Chest".chars() {
+            put(&mut b, GlkStyle::Subheader, &ch.to_string());
+        }
+        put(&mut b, GlkStyle::Normal, "\nThe battle.\n");
+        assert_eq!(b.take_room_heading().as_deref(), Some("War Chest"));
     }
 }
