@@ -290,20 +290,22 @@ pub fn default_interpreter_number(version: u8) -> u8 {
 ///
 /// We advertise a basic text interpreter:
 ///   - Flags1: clear graphics (bit 1 v3 is status-line kind — leave alone),
-///     clear colour (bit 0 in v5+), clear pictures, clear sound.
+///     clear colour (bit 0 in v5+), clear pictures. Sound (bit 5 in v4+) is
+///     capability-driven — see `advertise_sound`.
 ///     Set fixed-pitch available (bit 4 in v3 Flags2? — actually interpreter
 ///     sets this in response to Flags2; for simplicity we just clear "no
 ///     status line" bit).
 ///   - Flags2: we clear bits we don't support (pictures=0, undo=0, mouse=0,
-///     colour=0, sound=0, menubar=0) by masking.  Leave transcript (bit 0)
-///     and fixed-pitch (bit 1) as-is (game controls those).
+///     colour=0, menubar=0) by masking. Sound (bit 7) is capability-driven —
+///     see `advertise_sound`. Leave transcript (bit 0) and fixed-pitch (bit 1)
+///     as-is (game controls those).
 ///   - 0x1E: interpreter number — override, else Frotz's default (6 for v6, else 1).
 ///   - 0x1F: interpreter version — 'A' (ASCII 0x41), standard v1.1 era.
 ///   - 0x32/0x33: standard revision number (1.1 → 1, 1).
 ///
 /// Only modifies bytes inside dynamic memory (below static_mem_base); if the
 /// header region is read-only (static_mem_base ≤ 0x40) we skip silently.
-pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, interpreter_number: Option<u8>) {
+pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>) {
     let version = mem.version();
 
     // Guard: only write if the header sits in dynamic memory.
@@ -330,9 +332,9 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, interpreter_
         //   bit 2: boldface available — set (rendered via SGR / style spans)
         //   bit 3: italic available — set (rendered via SGR / style spans)
         //   bit 4: fixed-space font available — set
-        //   bit 5: sound effects available — clear
+        //   bit 5: sound effects available — handled separately (advertise_sound)
         //   bit 7: timed keyboard available — clear
-        f1 & !((1 << 1) | (1 << 5) | (1 << 7))  // clear unsupported (colour handled separately)
+        f1 & !((1 << 1) | (1 << 7))  // clear unsupported (colour, sound handled separately)
           | (1 << 2) | (1 << 3) | (1 << 4)  // bold, italic, fixed-space font available
     };
     mem.write_byte(0x01, new_f1);
@@ -343,9 +345,9 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, interpreter_
     //   bit 4: undo available — set for v5+ (save_undo/restore_undo implemented);
     //          pre-v5 has no undo opcodes, so leave it clear.
     //   bit 5: mouse — clear
-    //   bit 7: sound effects — clear
+    //   bit 7: sound effects — handled separately (advertise_sound)
     let f2 = mem.read_word(0x10);
-    let mut new_f2 = f2 & !((1 << 3) | (1 << 5) | (1 << 7));
+    let mut new_f2 = f2 & !((1 << 3) | (1 << 5));
     if version >= 5 {
         new_f2 |= 1 << 4; // undo available
     } else {
@@ -374,6 +376,7 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, interpreter_
     write_screen_dims(mem, DEFAULT_SCREEN_ROWS, DEFAULT_SCREEN_COLS);
 
     advertise_colour(mem, honor_game_colours);
+    advertise_sound(mem, sound_available);
 }
 
 /// Set or clear the Flags1 "colour available" bit (bit 0). No-op for v3, which
@@ -395,6 +398,21 @@ pub fn advertise_colour(mem: &mut Memory, on: bool) {
         let f2 = mem.read_word(0x10);
         mem.write_word(0x10, f2 & !(1 << 6));
     }
+}
+
+/// Set or clear the sound-effects capability bits: Flags1 bit 5 (v4+ ONLY —
+/// in v3 that bit means "screen-splitting available", a different capability,
+/// and is left untouched) and Flags2 bit 7 (all versions). Re-applied on
+/// every header init and whenever the host toggles `sound_available`.
+pub fn advertise_sound(mem: &mut Memory, on: bool) {
+    if mem.version() >= 4 {
+        let f1 = mem.read_byte(0x01);
+        let f1 = if on { f1 | (1 << 5) } else { f1 & !(1 << 5) };
+        mem.write_byte(0x01, f1);
+    }
+    let f2 = mem.read_word(0x10);
+    let f2 = if on { f2 | (1 << 7) } else { f2 & !(1 << 7) };
+    mem.write_word(0x10, f2);
 }
 
 /// Default screen size seeded at header init, before the host reports the real
@@ -545,7 +563,7 @@ mod tests {
         // Set "status line not available" bit before init.
         let f1 = mem.read_byte(0x01) | (1 << 4);
         mem.write_byte(0x01, f1);
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         // Bit 4 should be cleared.
         assert_eq!(mem.read_byte(0x01) & (1 << 4), 0, "bit 4 (no status line) should be clear");
         // Screen-splitting available (bit 5) should be set.
@@ -555,7 +573,7 @@ mod tests {
     #[test]
     fn header_caps_v5_clears_unsupported_bits() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         let f1 = mem.read_byte(0x01);
         // Colour (bit 0) should be clear.
         assert_eq!(f1 & (1 << 0), 0, "colour bit should be clear");
@@ -573,7 +591,7 @@ mod tests {
         // Regression: without seeded screen dims the header keeps 0, and v4 games
         // such as Bureaucracy abort with "[Screen too small.]" on the first turn.
         let mut mem = Memory::new(sample_story(4)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS, "screen height (lines) seeded");
         assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS, "screen width (chars) seeded");
         assert_ne!(mem.read_byte(0x20), 0, "height must not be zero");
@@ -583,7 +601,7 @@ mod tests {
     #[test]
     fn header_caps_v5_seeds_unit_words_and_font_size() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_byte(0x20), DEFAULT_SCREEN_ROWS);
         assert_eq!(mem.read_byte(0x21), DEFAULT_SCREEN_COLS);
         assert_eq!(mem.read_word(0x22), DEFAULT_SCREEN_COLS as u16, "width in units");
@@ -616,7 +634,7 @@ mod tests {
         let mut mem = Memory::new(sample_story(3)).unwrap();
         let f1 = mem.read_byte(0x01) | (1 << 6); // pre-set variable-pitch default
         mem.write_byte(0x01, f1);
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_byte(0x01) & (1 << 6), 0, "bit 6 (variable-pitch) should be clear");
     }
 
@@ -625,7 +643,7 @@ mod tests {
         // ZMSD 1.1 is the only published standard revision; advertise major=1,
         // minor=1 (bytes 0x32/0x33), not a non-existent "1.2".
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_byte(0x32), 1, "standard revision major = 1");
         assert_eq!(mem.read_byte(0x33), 1, "standard revision minor = 1");
     }
@@ -636,7 +654,7 @@ mod tests {
         // (save_undo/restore_undo, EXT:0x09/0x0A) is implemented, so the header
         // must advertise them or games skip the features at startup.
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         let f1 = mem.read_byte(0x01);
         assert_ne!(f1 & (1 << 2), 0, "Flags1 bit 2 (bold available) should be set");
         assert_ne!(f1 & (1 << 3), 0, "Flags1 bit 3 (italic available) should be set");
@@ -645,23 +663,53 @@ mod tests {
     }
 
     #[test]
-    fn header_caps_flags2_clears_pictures_sound() {
+    fn header_caps_flags2_clears_pictures() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        // Pre-set pictures (bit 3) and sound (bit 7) in Flags2.
-        let f2 = mem.read_word(0x10) | (1 << 3) | (1 << 7);
+        // Pre-set pictures (bit 3) in Flags2.
+        let f2 = mem.read_word(0x10) | (1 << 3);
         mem.write_word(0x10, f2);
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         let f2_after = mem.read_word(0x10);
         assert_eq!(f2_after & (1 << 3), 0, "pictures bit in Flags2 should be clear");
-        assert_eq!(f2_after & (1 << 7), 0, "sound bit in Flags2 should be clear");
+    }
+
+    #[test]
+    fn sound_bit_tracks_sound_available_flag_v5() {
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        init_header_caps(&mut mem, false, false, None);
+        assert_eq!(mem.read_byte(0x01) & (1 << 5), 0, "Flags1 sound bit clear when sound_available=false");
+        assert_eq!(mem.read_word(0x10) & (1 << 7), 0, "Flags2 sound bit clear when sound_available=false");
+
+        init_header_caps(&mut mem, false, true, None);
+        assert_ne!(mem.read_byte(0x01) & (1 << 5), 0, "Flags1 sound bit set when sound_available=true");
+        assert_ne!(mem.read_word(0x10) & (1 << 7), 0, "Flags2 sound bit set when sound_available=true");
+
+        advertise_sound(&mut mem, false);
+        assert_eq!(mem.read_byte(0x01) & (1 << 5), 0, "advertise_sound(false) clears Flags1 bit again");
+        assert_eq!(mem.read_word(0x10) & (1 << 7), 0, "advertise_sound(false) clears Flags2 bit again");
+    }
+
+    #[test]
+    fn sound_bit_v3_flags1_untouched_but_flags2_tracks() {
+        let mut mem = Memory::new(sample_story(3)).unwrap();
+        init_header_caps(&mut mem, false, true, None);
+        // v3 Flags1 bit 5 means "screen-splitting available", NOT sound — must
+        // stay set regardless of sound_available (it's set unconditionally by
+        // init_header_caps for v3, see header_caps_v3_clears_no_status_line).
+        assert_ne!(mem.read_byte(0x01) & (1 << 5), 0, "v3 Flags1 bit5 (screen-split) stays set");
+        assert_ne!(mem.read_word(0x10) & (1 << 7), 0, "v3 Flags2 sound bit set when sound_available=true");
+
+        init_header_caps(&mut mem, false, false, None);
+        assert_ne!(mem.read_byte(0x01) & (1 << 5), 0, "v3 Flags1 bit5 (screen-split) still set");
+        assert_eq!(mem.read_word(0x10) & (1 << 7), 0, "v3 Flags2 sound bit clear when sound_available=false");
     }
 
     #[test]
     fn colour_bit_tracks_honor_flag() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_byte(0x01) & 1, 0, "colour bit clear when honor=false");
-        init_header_caps(&mut mem, true, None);
+        init_header_caps(&mut mem, true, false, None);
         assert_eq!(mem.read_byte(0x01) & 1, 1, "colour bit set when honor=true");
         advertise_colour(&mut mem, false);
         assert_eq!(mem.read_byte(0x01) & 1, 0, "advertise_colour clears it again");
@@ -674,12 +722,12 @@ mod tests {
         let f2 = mem.read_word(0x10) | (1 << 6);
         mem.write_word(0x10, f2);
         // Honour OFF: the request bit is cleared (colour not granted).
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_word(0x10) & (1 << 6), 0, "bit 6 cleared when colour off");
         // Honour ON: the game's request bit is left untouched.
         let f2 = mem.read_word(0x10) | (1 << 6);
         mem.write_word(0x10, f2);
-        init_header_caps(&mut mem, true, None);
+        init_header_caps(&mut mem, true, false, None);
         assert_eq!(mem.read_word(0x10) & (1 << 6), 1 << 6, "bit 6 preserved when colour on");
     }
 
@@ -695,14 +743,14 @@ mod tests {
     #[test]
     fn init_header_caps_default_interpreter_is_dec20_for_v5() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, None);
+        init_header_caps(&mut mem, false, false, None);
         assert_eq!(mem.read_byte(0x1E), 1, "v5 default interpreter = DEC-20 (1)");
     }
 
     #[test]
     fn init_header_caps_interpreter_override_wins() {
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        init_header_caps(&mut mem, false, Some(6));
+        init_header_caps(&mut mem, false, false, Some(6));
         assert_eq!(mem.read_byte(0x1E), 6, "override forces IBM PC (6)");
     }
 

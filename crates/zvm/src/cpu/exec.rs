@@ -209,7 +209,10 @@ impl Machine {
     /// `step()`. Not needed for test harnesses built from `sample_story` (whose
     /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
-        init_header_caps(&mut self.mem, self.honor_game_colours, self.interpreter_number);
+        // sound_available: false here — Machine doesn't yet track a
+        // sound-capability field (added in a follow-up task alongside
+        // honor_game_colours' Machine-level mirror).
+        init_header_caps(&mut self.mem, self.honor_game_colours, false, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
     }
