@@ -3200,6 +3200,8 @@ fn dispatch_slash_outcome(
                 }
             }
         }
+        // TODO(Task 7): wire to the audio backend + sound blorb.
+        SlashOutcome::PlaySound(_) => {}
         SlashOutcome::Save(name_opt) => {
             // Named save or default archive save.
             let result = match name_opt {
