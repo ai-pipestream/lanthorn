@@ -952,6 +952,30 @@ mod tests {
         assert_eq!(m.graph.rooms().count(), 2);
     }
 
+    #[test]
+    fn apply_turn_observes_roomheading_on_empty_map() {
+        // Glulx rooms use RoomHeading (never NameOnly) precisely so the
+        // NameOnly-empty-graph gate does NOT suppress the first Glulx room —
+        // a Glulx game never produces an object-backed room to un-gate it.
+        let mut m = Mapper::default();
+        let result = TurnResult {
+            transcript: String::new(),
+            transcript_runs: Vec::new(),
+            location: Some(ObjectSnapshot { number: 333, parent: 0, name: "Orbiting Boony".into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            diagnostics: vec![],
+            location_method: Some(LocationMethod::RoomHeading),
+            pending_io: None,
+            timed_out: false,
+        };
+        apply_turn(&mut m, "", &result);
+        assert_eq!(m.graph.current(), Some(333));
+        assert_eq!(m.graph.rooms().count(), 1);
+    }
+
     // ── TurnResult.info tests ─────────────────────────────────────────────────
 
     #[test]
