@@ -60,7 +60,9 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   complementary/accessibility cue on every bleep — and the only cue when sound
   is disabled. Controlled by `enable_sound` (default on) + `volume` (0-100,
   default 100); toggle with the `/toggle-sound` command or `F2` settings row,
-  adjust with `/volume <0-100>`. `zvm-cli` takes `--no-sound` and
+  adjust with `/volume <0-100>`; `/play-sound <resource-id>` plays a Blorb
+  `Snd ` resource on demand (a diagnostic for verifying the audio path).
+  `zvm-cli` takes `--no-sound` and
   `--volume <0-100>`. Unimplemented-opcode warnings surface in the transcript
   as meta lines (hidden by `/filter story`) rather than on stderr.
 - **Timed / interrupt input** — v4+ `read` and `read_char` `time`+`routine`
