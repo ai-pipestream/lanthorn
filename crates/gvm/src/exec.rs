@@ -906,6 +906,14 @@ impl Machine {
     /// Call the function at `func_addr` with `args`, storing its eventual return
     /// value per `dest`. Pushes a call stub, then builds the callee frame.
     pub(crate) fn call_function(&mut self, func_addr: u32, args: &[u32], dest: Dest) -> R<()> {
+        if self.acceleration {
+            if let Some(num) = self.accel_func_for(func_addr) {
+                if crate::accel::accel_impl_supported(num) {
+                    let result = self.accel_dispatch(num, args)?;
+                    return self.store(dest, result);
+                }
+            }
+        }
         let (dtype, daddr) = dest.to_stub();
         let ret_pc = self.pc;
         let caller_fp = self.fp as u32;
@@ -1569,6 +1577,12 @@ impl Machine {
         self.accel_params.insert(index, value);
     }
 
+    /// Test-only: assign an accelerated-function number directly, bypassing `accelfunc`.
+    #[cfg(test)]
+    pub(crate) fn set_accel_func(&mut self, addr: u32, num: u32) {
+        self.accel_funcs.insert(addr, num);
+    }
+
     /// Enable/disable accelerated-function interception (debug escape hatch).
     pub fn set_acceleration(&mut self, on: bool) {
         self.acceleration = on;
@@ -1855,6 +1869,14 @@ impl Machine {
         let mut args = Vec::with_capacity(argc as usize);
         for _ in 0..argc {
             args.push(self.pop32()?);
+        }
+        if self.acceleration {
+            if let Some(num) = self.accel_func_for(func) {
+                if crate::accel::accel_impl_supported(num) {
+                    let result = self.accel_dispatch(num, &args)?;
+                    return self.return_value(result);
+                }
+            }
         }
         // Destroy the current frame but keep the call stub beneath it, so the new
         // function returns to the current function's caller.
@@ -3374,6 +3396,69 @@ mod tests {
         m.step_once().unwrap(); // f1: tailcall f2
         m.step_once().unwrap(); // f2: return 0x77
         assert_eq!(m.mem.read32(0x100).unwrap(), 0x77);
+        assert!(!m.halted); // returned into start, not halted
+    }
+
+    // ── Task 4: accelerated-function interception ─────────────────────────────
+
+    /// A RAM address (within [ramstart, endmem), ≥36) marked as a routine
+    /// (type byte 0xC0), so `Z__Region(ROUTINE_ADDR) == 2`.
+    const ROUTINE_ADDR: u32 = 0x104;
+
+    /// Builds a machine with a function `FADDR` whose *bytecode* returns the
+    /// sentinel `0xBAD`, assigned accel number 1 (`Z__Region`) via
+    /// `set_accel_func`. Returns the machine and `FADDR`.
+    fn accel_installed_machine() -> (Machine, u32) {
+        let faddr_func = asm::func(0xC1, &[], &asm::ins(0x31, &[asm::Op::C16(0x0BAD)]));
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[faddr_func, start], 1, 0x100);
+        let faddr = built.addrs[0];
+        let mut m = machine(built);
+        m.mem.write8(ROUTINE_ADDR, 0xC0).unwrap();
+        m.set_accel_func(faddr, 1); // Z__Region
+        (m, faddr)
+    }
+
+    #[test]
+    fn call_uses_accelerated_function_when_installed() {
+        let (mut m, faddr) = accel_installed_machine();
+        m.call_function(faddr, &[ROUTINE_ADDR], Dest::Push).unwrap();
+        assert_eq!(m.pop32().unwrap(), 2); // Z__Region(ROUTINE_ADDR) == 2, not 0xBAD
+    }
+
+    #[test]
+    fn no_accel_runs_the_bytecode() {
+        let (mut m, faddr) = accel_installed_machine();
+        m.set_acceleration(false);
+        m.call_function(faddr, &[ROUTINE_ADDR], Dest::Push).unwrap();
+        m.step_once().unwrap(); // interpreted path: execute the callee's `return 0xBAD`
+        assert_eq!(m.pop32().unwrap(), 0x0BAD);
+    }
+
+    #[test]
+    fn tailcall_uses_accelerated_function() {
+        // f2 (FADDR, addr 0x24): bytecode returns 0xBAD if actually run.
+        let f2 = asm::func(0xC1, &[], &asm::ins(0x31, &[asm::Op::C16(0x0BAD)]));
+        let f1_addr = 0x24 + f2.len() as u32;
+        // f1: push ROUTINE_ADDR (the arg), then tailcall f2(ROUTINE_ADDR).
+        let mut f1_body = asm::ins(0x40, &[asm::Op::C32(ROUTINE_ADDR), asm::Op::Stack]);
+        f1_body.extend(asm::ins(0x34, &[asm::Op::C32(0x24), asm::Op::C8(1)]));
+        let f1 = asm::func(0xC1, &[], &f1_body);
+        let start = asm::func(
+            0xC1,
+            &[],
+            &asm::ins(0x30, &[asm::Op::C32(f1_addr), asm::Op::C8(0), asm::Op::Mem16(0x0100)]),
+        );
+        let built = asm::assemble(&[f2, f1, start], 2, 0x100);
+        assert_eq!(built.addrs[1], f1_addr);
+        let mut m = machine(built);
+        m.mem.write8(ROUTINE_ADDR, 0xC0).unwrap();
+        m.set_accel_func(0x24, 1); // Z__Region
+
+        m.step_once().unwrap(); // start: call f1
+        m.step_once().unwrap(); // f1: push arg
+        m.step_once().unwrap(); // f1: tailcall f2 (accelerated → delivers to start's stub)
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2); // Z__Region(ROUTINE_ADDR) == 2, not 0xBAD
         assert!(!m.halted); // returned into start, not halted
     }
 
