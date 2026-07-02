@@ -110,9 +110,10 @@ pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<St
 ///
 /// It fires ONLY where the left-justified first segment is empty, so it never
 /// changes left-justified behavior. A centered line can be a banner/title
-/// rather than a room, so `detect_location` accepts this result only when it
-/// validates against the object tree (PlayerParent or StatusName) — never as an
-/// unvalidated `NameOnly`.
+/// rather than a room, so `detect_location` accepts this result only under the
+/// strongest validation — the avatar's ancestor chain reaches a room of this
+/// name (PlayerParent). A bare name match (StatusName) or unvalidated `NameOnly`
+/// is NOT trusted here.
 fn centered_status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<String> {
     let scan = active_rows.min(2).min(upper.rows);
     if scan < 1 {
