@@ -865,6 +865,22 @@ fn run_story_picker(
     let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
     let (cs, _set, _w2) = app::style::resolve(&base, &cfg.user_dir);
 
+    // Row badges: one saves-dir readdir + one shared hint index, computed once.
+    let save_dir = saves_dir(&cfg.user_dir);
+    let save_names: std::collections::HashSet<String> = std::fs::read_dir(&save_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .collect();
+    let hint_index = app::hints::load_hint_index(&cfg.user_dir);
+    let row_badges: Vec<app::picker::RowBadges> = stories
+        .iter()
+        .map(|e| app::picker::compute_row_badges(e, &save_names, &hint_index))
+        .collect();
+    let sym_cfg = app::style::finalize_symbols(&base.symbols);
+    let badge_glyphs = app::picker::BadgeGlyphs::from_symbols(&sym_cfg);
+
     // Terminal setup mirrors the game loop. If any step fails we can't be
     // interactive — fall back to the first story rather than abort.
     if enable_raw_mode().is_err() {
@@ -892,7 +908,8 @@ fn run_story_picker(
         let _ = terminal.draw(|f| {
             let area = f.area();
             let buf = f.buffer_mut();
-            let (rects, vp) = draw_story_picker(&stories, &list, dir, &cs, area, buf);
+            let (rects, vp) =
+                draw_story_picker(&stories, &list, &row_badges, &badge_glyphs, dir, &cs, area, buf);
             row_rects = rects;
             viewport = vp;
         });
@@ -950,6 +967,8 @@ fn run_story_picker(
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
     list: &app::list_scroll::ListScroll,
+    badges: &[app::picker::RowBadges],
+    glyphs: &app::picker::BadgeGlyphs,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
     area: Rect,
@@ -1005,6 +1024,23 @@ fn draw_story_picker(
         let marker = if sel { "▸ " } else { "  " };
         let line = format!("{}{}   ({})", marker, entry.title, entry.filename);
         draw_str_clipped(buf, area.x, y, &line, style, row_rect);
+
+        // Right-aligned badge cluster: type glyph then present artifact glyphs.
+        let b = badges.get(i).copied().unwrap_or_default();
+        let type_glyph = match entry.meta.engine {
+            app::picker::Engine::ZCode => glyphs.zcode,
+            app::picker::Engine::Glulx => glyphs.glulx,
+        };
+        let mut cluster: Vec<&str> = vec![type_glyph];
+        if b.blorb { cluster.push(glyphs.blorb); }
+        if b.save { cluster.push(glyphs.save); }
+        if b.hint { cluster.push(glyphs.hint); }
+        let cluster_str = cluster.join(" ");
+        let cluster_w = cluster_str.chars().count() as u16;
+        if cluster_w + 1 < row_w {
+            let bx = area.left() + row_w - cluster_w;
+            draw_str_clipped(buf, bx, y, &cluster_str, cs.story_badge, row_rect);
+        }
     }
 
     if scrollbar_visible {
@@ -5276,5 +5312,80 @@ mod tests {
         assert!(line.contains("CounterfeitMonkey-11.gblorb"), "names the story");
         assert!(line.contains("11.3 MB"), "shows size in MB, got: {line}");
         assert!(line.ends_with('/'), "ends with the spinner frame glyph");
+    }
+
+    // ── Story-picker row badges (type + present artifacts) ─────────────────────
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16, area: ratatui::layout::Rect) -> String {
+        (area.left()..area.right())
+            .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+            .collect()
+    }
+
+    fn make_two_test_stories() -> Vec<app::picker::StoryEntry> {
+        use app::picker::{Engine, Features, StoryEntry, StoryMeta};
+        let mk = |title: &str, engine: Engine| StoryEntry {
+            path: std::path::PathBuf::from(format!("/tmp/{title}.z5")),
+            title: title.into(),
+            filename: format!("{title}.z5"),
+            meta: StoryMeta {
+                size_bytes: 1, modified: None, engine, format: "Z-code".into(),
+                version: None, serial: None, release: None, ifid: title.into(),
+                features: Features::default(), self_blorb: None,
+            },
+        };
+        vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
+    }
+
+    #[test]
+    fn row_renders_type_badge_and_present_artifacts() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+
+        // One Z-code story with all three artifacts, one Glulx story with only a save.
+        let stories = make_two_test_stories();
+        let badges = vec![
+            app::picker::RowBadges { blorb: true, save: true, hint: true },
+            app::picker::RowBadges { blorb: false, save: true, hint: false },
+        ];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        let dir = std::path::Path::new("/tmp");
+        super::draw_story_picker(&stories, &list, &badges, &glyphs, dir, &cs, area, &mut buf);
+
+        let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
+        let row1 = row_text(&buf, 3, area);
+        assert!(row0.contains("Z B S H"), "got: {row0:?}");
+        assert!(row1.contains("G S"), "got: {row1:?}");
+        assert!(!row1.contains("G B"), "absent artifacts omitted: {row1:?}");
+    }
+
+    #[test]
+    fn row_uses_configured_badge_glyphs() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut sym = app::config::SymbolConfig::default();
+        sym.badge_zcode = "z!".into();
+        sym.badge_blorb = "◆".into();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+
+        let stories = make_two_test_stories();
+        let badges = vec![
+            app::picker::RowBadges { blorb: true, save: false, hint: false },
+            app::picker::RowBadges::default(),
+        ];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+                          &cs, area, &mut buf);
+        let row0 = row_text(&buf, 2, area);
+        assert!(row0.contains("z! ◆"), "configured glyphs used: {row0:?}");
     }
 }
