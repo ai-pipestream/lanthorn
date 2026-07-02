@@ -378,6 +378,18 @@ fn location_to_snapshot(loc: &Location) -> zvm::ObjectSnapshot {
 /// No-op when `result.location` is `None`.
 pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
     if let Some(snap) = &result.location {
+        // Suppress an unvalidated NameOnly location until the map holds a real,
+        // object-backed room. A NameOnly before any room is a pre-game
+        // banner/menu/character-sheet — e.g. BeyondZork's VT220 setup shows the
+        // player's name ("Frank Booth") in a status-line-shaped character sheet.
+        // Because NameOnly is gated while the map is empty, the first room to
+        // populate it is always object-backed; thereafter NameOnly still works
+        // as a legitimate mid-game fallback.
+        if result.location_method == Some(LocationMethod::NameOnly)
+            && mapper.graph.rooms().next().is_none()
+        {
+            return;
+        }
         mapper.observe(snap.number, &snap.name, parse_direction(command));
         if mapper.mode == mapper::layout::LayoutMode::Auto {
             crate::render::map::cleanup_overlaps(&mut mapper.graph, 2, 20);
@@ -901,6 +913,43 @@ mod tests {
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
+    }
+
+    #[test]
+    fn apply_turn_gates_nameonly_until_first_real_room() {
+        // BeyondZork VT220 setup shows the player's name ("Frank Booth") in a
+        // status-line-shaped character sheet → NameOnly. It must NOT seed the
+        // map before real play establishes an object-backed room.
+        let mk = |method: Option<LocationMethod>, num: u16, name: &str| TurnResult {
+            transcript: String::new(),
+            transcript_runs: Vec::new(),
+            location: Some(ObjectSnapshot { number: num, parent: 0, name: name.into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            diagnostics: vec![],
+            location_method: method,
+            pending_io: None,
+            timed_out: false,
+        };
+
+        let mut m = Mapper::default();
+
+        // 1. Pre-game NameOnly on an empty map → suppressed.
+        apply_turn(&mut m, "", &mk(Some(LocationMethod::NameOnly), 111, "Frank Booth"));
+        assert_eq!(m.graph.rooms().count(), 0, "NameOnly must not seed an empty map");
+        assert_eq!(m.graph.current(), None);
+
+        // 2. Real play: an object-backed room is observed.
+        apply_turn(&mut m, "", &mk(Some(LocationMethod::PlayerParent), 48, "Hilltop"));
+        assert_eq!(m.graph.current(), Some(48));
+        assert_eq!(m.graph.rooms().count(), 1);
+
+        // 3. NameOnly is now trusted as a mid-game fallback (map non-empty).
+        apply_turn(&mut m, "north", &mk(Some(LocationMethod::NameOnly), 222, "Foggy Place"));
+        assert_eq!(m.graph.current(), Some(222));
+        assert_eq!(m.graph.rooms().count(), 2);
     }
 
     // ── TurnResult.info tests ─────────────────────────────────────────────────

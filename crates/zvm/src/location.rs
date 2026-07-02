@@ -58,6 +58,21 @@ fn clean_room_text(s: &str) -> String {
     s.split(',').next().unwrap_or(s).trim().to_string()
 }
 
+/// Map Unicode box-drawing (U+2500–U+257F) and block-element (U+2580–U+259F)
+/// glyphs to a space for status-line PARSING only (never for display).
+///
+/// BeyondZork's VT220 mode frames the centered room title with half-block bars
+/// (`▐`…`▌`, U+2590/U+258C); without this the leading bar reads as a bogus
+/// left-justified "room name" and defeats the centered fallback. Ordinary room
+/// names never contain these glyphs, so this is a no-op for every other game.
+fn deframe(ch: char) -> char {
+    if ('\u{2500}'..='\u{259F}').contains(&ch) {
+        ' '
+    } else {
+        ch
+    }
+}
+
 /// Extract a candidate room name from the v4+ status-line grid, or None.
 ///
 /// Scans at most the first 2 active rows. Prefers a `Location:` label segment;
@@ -69,7 +84,7 @@ pub fn status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Option<St
     let row_text = |r: u16| -> String {
         let mut s = String::new();
         for c in 1..=upper.cols {
-            s.push(upper.cell(r, c).ch);
+            s.push(deframe(upper.cell(r, c).ch));
         }
         s
     };
@@ -119,7 +134,7 @@ fn centered_status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Opti
     if scan < 1 {
         return None;
     }
-    let line: String = (1..=upper.cols).map(|c| upper.cell(1, c).ch).collect();
+    let line: String = (1..=upper.cols).map(|c| deframe(upper.cell(1, c).ch)).collect();
     // Only a centered title: the left-justified first segment must be empty
     // (the line begins with 2+ spaces). Otherwise the common form handled it.
     if !line.split("  ").next().unwrap_or("").trim().is_empty() {
@@ -442,6 +457,24 @@ mod tests {
         assert_eq!(centered_status_line_room_name(&multi, 1).as_deref(), Some("Palace Gate"));
         let empty = upper_with(&["                                                                        "]);
         assert_eq!(centered_status_line_room_name(&empty, 1), None);
+    }
+
+    #[test]
+    fn bordered_centered_title_vt220() {
+        // BeyondZork VT220 mode frames the centered room title with half-block
+        // bars: `▐  <spaces>  Hilltop  <spaces>  ▌  <trailing spaces>`. The
+        // leading bar must NOT be read as a left-justified room name, and the
+        // centered fallback must recover the true name.
+        let u = upper_with(&["▐                          Hilltop                           ▌                  "]);
+        assert_eq!(status_line_room_name(&u, 1), None, "leading bar must not become a bogus room name");
+        assert_eq!(centered_status_line_room_name(&u, 1).as_deref(), Some("Hilltop"));
+    }
+
+    #[test]
+    fn bordered_centered_title_vt220_multiword() {
+        let u = upper_with(&["▐                     Palace Gate                            ▌                  "]);
+        assert_eq!(status_line_room_name(&u, 1), None);
+        assert_eq!(centered_status_line_room_name(&u, 1).as_deref(), Some("Palace Gate"));
     }
 
     #[test]

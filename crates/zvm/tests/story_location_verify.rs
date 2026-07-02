@@ -188,3 +188,36 @@ fn beyondzork_centered_status_line_now_resolves() {
         loc.method()
     );
 }
+
+#[test]
+fn beyondzork_vt220_mode_bordered_title_resolves() {
+    // VT220 mode (answer "yes" to "Is this a VT220?") frames the centered room
+    // title with half-block bars: `▐  Hilltop  ▌`. The leading bar defeated
+    // detection until `deframe` mapped box/block glyphs to spaces for parsing.
+    // This locks in that fix at the story level.
+    let Some(story) = load_story("beyondzork-r57-s871221.z5") else {
+        return; // fixture absent — skip.
+    };
+    let Some(mut machine) = boot_to_first_read(story) else {
+        panic!("beyondzork: never reached a line-read prompt");
+    };
+    for input in ["yes", "begin"] {
+        run_one_turn(&mut machine, input);
+    }
+    for _ in 0..4 {
+        run_one_turn(&mut machine, "");
+    }
+
+    let upper = &machine.screen.upper;
+    let row1: String = (1..=upper.cols).map(|c| upper.cell(1, c).ch).collect();
+    assert!(
+        row1.contains('▐') && row1.contains("Hilltop"),
+        "expected the bordered VT220 Hilltop title, upper row1={row1:?}"
+    );
+
+    let loc = detect_location(&machine)
+        .unwrap_or_else(|| panic!("VT220 bordered status line should resolve a location, got None"));
+    assert_eq!(loc.method(), LocationMethod::PlayerParent, "must validate via the avatar's parent chain");
+    let name = loc.object().map(|o| o.name.clone()).unwrap_or_default();
+    assert!(name.starts_with("Hilltop"), "expected Hilltop, got {name:?}");
+}
