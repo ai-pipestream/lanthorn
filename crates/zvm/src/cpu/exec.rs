@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, init_header_caps, ScreenState, StreamState};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenState, StreamState};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -143,6 +143,9 @@ pub struct Machine {
     /// Whether to advertise Flags1 bit 0 (colour available) to the game. Default
     /// false; set via `set_honor_game_colours`. v3 stories ignore this entirely.
     pub honor_game_colours: bool,
+    /// Whether to advertise sound-effects capability (Flags1 bit 5 v4+, Flags2
+    /// bit 7). Default false; set via `set_sound_available`.
+    pub sound_available: bool,
     /// Interpreter number to advertise in header byte 0x1E. `None` = auto (Frotz's
     /// rule: 6 for v6, else 1). `Some(n)` overrides. Applied at `init_caps`.
     pub interpreter_number: Option<u8>,
@@ -193,6 +196,7 @@ impl Machine {
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
             honor_game_colours: false,
+            sound_available: false,
             interpreter_number: None,
         }
     }
@@ -209,7 +213,7 @@ impl Machine {
     /// `step()`. Not needed for test harnesses built from `sample_story` (whose
     /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
-        init_header_caps(&mut self.mem, self.honor_game_colours, self.interpreter_number);
+        init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
     }
@@ -219,6 +223,14 @@ impl Machine {
     pub fn set_honor_game_colours(&mut self, on: bool) {
         self.honor_game_colours = on;
         advertise_colour(&mut self.mem, on);
+    }
+
+    /// Enable/disable advertising sound-effects capability. Advertises (or
+    /// clears) the sound header bits immediately so a not-yet-run game sees
+    /// the capability.
+    pub fn set_sound_available(&mut self, on: bool) {
+        self.sound_available = on;
+        advertise_sound(&mut self.mem, on);
     }
 
     /// Set the interpreter number to advertise (header 0x1E). `None` restores the
@@ -4299,6 +4311,43 @@ pub(crate) mod tests {
         // Interpreter number and version.
         assert_eq!(m.mem.read_byte(0x1E), 1, "interpreter number defaults to DEC-20 (1)");
         assert_eq!(m.mem.read_byte(0x1F), b'A', "interpreter version = 'A'");
+    }
+
+    #[test]
+    fn set_sound_available_advertises_and_clears() {
+        let mut buf = sample_story(5);
+        buf[0x80] = 0xBA;                 // quit at 0x80
+        buf[0x06] = 0x00; buf[0x07] = 0x80; // initial_pc = 0x0080
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+
+        m.set_sound_available(true);
+        let f1 = m.mem.read_byte(0x01);
+        let f2 = m.mem.read_word(0x10);
+        assert_ne!(f1 & (1 << 5), 0, "Flags1 bit 5 (sound) should be set");
+        assert_ne!(f2 & (1 << 7), 0, "Flags2 bit 7 (sound) should be set");
+
+        m.set_sound_available(false);
+        let f1 = m.mem.read_byte(0x01);
+        let f2 = m.mem.read_word(0x10);
+        assert_eq!(f1 & (1 << 5), 0, "Flags1 bit 5 (sound) should be clear");
+        assert_eq!(f2 & (1 << 7), 0, "Flags2 bit 7 (sound) should be clear");
+    }
+
+    #[test]
+    fn init_caps_forwards_sound_available_field() {
+        let mut buf = sample_story(5);
+        buf[0x80] = 0xBA;                 // quit at 0x80
+        buf[0x06] = 0x00; buf[0x07] = 0x80; // initial_pc = 0x0080
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.sound_available = true;
+        m.init_caps();
+
+        let f1 = m.mem.read_byte(0x01);
+        let f2 = m.mem.read_word(0x10);
+        assert_ne!(f1 & (1 << 5), 0, "Flags1 bit 5 (sound) should be set via init_caps");
+        assert_ne!(f2 & (1 << 7), 0, "Flags2 bit 7 (sound) should be set via init_caps");
     }
 
     #[test]

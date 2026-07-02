@@ -186,7 +186,7 @@ mod tests {
             .join("../zvm/tests/fixtures/minizork.z3");
         let Ok(story) = std::fs::read(&fixture) else { return };
 
-        let mut session = GameSession::new(story, true, None).expect("GameSession::new");
+        let mut session = GameSession::new(story, true, false, None).expect("GameSession::new");
         let mut mapper = Mapper::default();
         let mut hist: Vec<TurnRecord> = Vec::new();
 

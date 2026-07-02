@@ -6,9 +6,10 @@ edition = "2021"
 [features]
 default = ["playback", "mod-music"]
 playback = ["dep:rodio"]
-mod-music = ["dep:xmrs", "dep:xmrsplayer"]
+mod-music = ["dep:xmrs", "dep:xmrsplayer", "dep:self_cell"]
 
 [dependencies]
 rodio = { version = "0.19", optional = true }
 xmrs = { version = "0.14", optional = true, default-features = false, features = ["std", "import_mod"] }
 xmrsplayer = { version = "0.14", optional = true, default-features = false, features = ["std", "import_mod"] }
+self_cell = { version = "1", optional = true }

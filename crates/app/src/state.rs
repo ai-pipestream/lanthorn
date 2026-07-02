@@ -236,13 +236,87 @@ pub fn unpack_zcolour(p: u32) -> zvm::screen::ZColour {
 }
 
 /// Map a Blorb sound kind to a backend format, or None for unsupported kinds.
-fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
+pub fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
     match k {
         blorb::SoundKind::Aiff => Some(audio::SoundFormat::Aiff),
         blorb::SoundKind::Ogg => Some(audio::SoundFormat::Ogg),
         blorb::SoundKind::Mod => Some(audio::SoundFormat::Mod),
         blorb::SoundKind::Other => None,
     }
+}
+
+/// Short display label for a [`blorb::SoundKind`].
+pub fn sound_kind_label(k: blorb::SoundKind) -> &'static str {
+    match k {
+        blorb::SoundKind::Aiff => "AIFF",
+        blorb::SoundKind::Ogg => "OGG",
+        blorb::SoundKind::Mod => "MOD",
+        blorb::SoundKind::Other => "other",
+    }
+}
+
+/// Format the `Snd ` resources of a (possibly absent) sound Blorb for the
+/// `/play-sound` diagnostic's list mode (no argument).
+pub fn format_sound_resource_list(blorb: Option<&blorb::Blorb>) -> Vec<String> {
+    let Some(blorb) = blorb else {
+        return vec!["no sound blorb resolved".to_string()];
+    };
+    let sounds: Vec<_> = blorb.resources().iter().filter(|r| &r.usage == b"Snd ").collect();
+    if sounds.is_empty() {
+        return vec!["no Snd resources".to_string()];
+    }
+    let mut lines = vec![format!("{} sound resource(s):", sounds.len())];
+    for r in sounds {
+        let kind = match &r.chunk_type {
+            b"FORM" => blorb::SoundKind::Aiff,
+            b"OGGV" => blorb::SoundKind::Ogg,
+            b"MOD " => blorb::SoundKind::Mod,
+            _ => blorb::SoundKind::Other,
+        };
+        let playable = if sound_kind_to_format(kind).is_some() { "playable" } else { "not decodable" };
+        lines.push(format!("  #{}  {}  {} bytes  {playable}", r.number, sound_kind_label(kind), r.len));
+    }
+    lines
+}
+
+/// Step-by-step report for the `/play-sound <n>` diagnostic, built by the
+/// (impure) glue in `main.rs` and rendered here as plain transcript lines.
+#[derive(Debug, Default, Clone)]
+pub struct PlaySoundReport {
+    pub number: u32,
+    pub enable_sound: bool,
+    pub backend_present: bool,
+    pub blorb_present: bool,
+    pub resource: Option<(blorb::SoundKind, usize)>,
+    pub format: Option<audio::SoundFormat>,
+    pub sound_id: Option<audio::SoundId>,
+}
+
+/// Render a [`PlaySoundReport`] as transcript lines, stopping early at the
+/// first failed stage (resource not found, or format not decodable).
+pub fn format_play_sound_report(r: &PlaySoundReport) -> Vec<String> {
+    let mut lines = vec![format!("/play-sound {}", r.number)];
+    lines.push(format!(
+        "enable_sound: {}",
+        if r.enable_sound { "on" } else { "off (attempting playback anyway — diagnostic)" }
+    ));
+    lines.push(format!("audio backend: {}", if r.backend_present { "present" } else { "NONE" }));
+    lines.push(format!("sound blorb: {}", if r.blorb_present { "resolved" } else { "NONE" }));
+    let Some((kind, len)) = r.resource else {
+        lines.push(format!("resource #{}: NOT FOUND", r.number));
+        return lines;
+    };
+    lines.push(format!("resource #{}: found, kind={:?}, {len} bytes", r.number, kind));
+    let Some(format) = r.format else {
+        lines.push("format: not decodable".to_string());
+        return lines;
+    };
+    lines.push(format!("format: {format:?} — decodable"));
+    match r.sound_id {
+        Some(id) => lines.push(format!("playback: started (sound id {id})")),
+        None => lines.push("playback: backend returned None".to_string()),
+    }
+    lines
 }
 
 // ── Transcript filter ─────────────────────────────────────────────────────────
@@ -2533,7 +2607,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
-        let session = crate::session::GameSession::new(story_bytes, true, None).expect("GameSession::new");
+        let session = crate::session::GameSession::new(story_bytes, true, false, None).expect("GameSession::new");
         s.hints = Some(HintSession {
             source: HintSource::Zcode(session),
             transcript: vec![],
@@ -2556,7 +2630,7 @@ mod tests {
             return; // fixture absent — skip
         }
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
-        let session = crate::session::GameSession::new(story_bytes, true, None).expect("GameSession::new");
+        let session = crate::session::GameSession::new(story_bytes, true, false, None).expect("GameSession::new");
         let mut hs = HintSession {
             source: HintSource::Zcode(session),
             transcript: vec![],
@@ -2601,5 +2675,180 @@ mod tests {
         assert_eq!(s.search_idx, 0);
         s.clear_search();
         assert!(s.search_query.is_none() && s.search_matches.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod play_sound_tests {
+    use super::*;
+
+    // Build an IFF chunk: type + BE len + data + pad-to-even. Mirrors
+    // blorb::tests::chunk (not exported, so duplicated here).
+    fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(ty);
+        v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        v.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    }
+
+    // Build a Blorb with the given resources. Mirrors blorb::tests::build_blorb
+    // (not exported, so duplicated here).
+    fn build_blorb(res: &[(&[u8; 4], u32, &[u8; 4], &[u8])]) -> Vec<u8> {
+        let count = res.len() as u32;
+        let ridx_data_len = 4 + 12 * res.len();
+        let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let mut offsets = Vec::new();
+        let mut cursor = first_res_off;
+        let mut body = Vec::new();
+        for (_u, _n, ty, data) in res {
+            offsets.push(cursor as u32);
+            let c = chunk(ty, data);
+            cursor += c.len();
+            body.extend_from_slice(&c);
+        }
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&count.to_be_bytes());
+        for (i, (usage, number, _ty, _d)) in res.iter().enumerate() {
+            ridx.extend_from_slice(*usage);
+            ridx.extend_from_slice(&number.to_be_bytes());
+            ridx.extend_from_slice(&offsets[i].to_be_bytes());
+        }
+        let ridx_chunk = chunk(b"RIdx", &ridx);
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&ridx_chunk);
+        inner.extend_from_slice(&body);
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    // ── sound_kind_label ────────────────────────────────────────────────────
+
+    #[test]
+    fn sound_kind_label_maps_all_variants() {
+        assert_eq!(sound_kind_label(blorb::SoundKind::Aiff), "AIFF");
+        assert_eq!(sound_kind_label(blorb::SoundKind::Ogg), "OGG");
+        assert_eq!(sound_kind_label(blorb::SoundKind::Mod), "MOD");
+        assert_eq!(sound_kind_label(blorb::SoundKind::Other), "other");
+    }
+
+    // ── format_sound_resource_list ──────────────────────────────────────────
+
+    #[test]
+    fn resource_list_no_blorb_reports_none_resolved() {
+        let lines = format_sound_resource_list(None);
+        assert_eq!(lines, vec!["no sound blorb resolved".to_string()]);
+    }
+
+    #[test]
+    fn resource_list_no_snd_resources() {
+        let bytes = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")]);
+        let blorb = blorb::Blorb::parse(bytes).unwrap();
+        let lines = format_sound_resource_list(Some(&blorb));
+        assert_eq!(lines, vec!["no Snd resources".to_string()]);
+    }
+
+    #[test]
+    fn resource_list_enumerates_and_marks_playability() {
+        let bytes = build_blorb(&[
+            (b"Exec", 0, b"ZCOD", b"abcd"),
+            (b"Snd ", 3, b"FORM", b"aiffbytes"),
+            (b"Snd ", 5, b"OGGV", b"oggdata!"),
+            (b"Snd ", 9, b"WEIR", b"whatever"),
+        ]);
+        let blorb = blorb::Blorb::parse(bytes).unwrap();
+        let lines = format_sound_resource_list(Some(&blorb));
+        assert_eq!(lines[0], "3 sound resource(s):");
+        let three = lines.iter().find(|l| l.contains("#3")).unwrap();
+        assert!(three.contains("AIFF") && three.contains("playable") && !three.contains("not decodable"));
+        let five = lines.iter().find(|l| l.contains("#5")).unwrap();
+        assert!(five.contains("OGG") && five.contains("playable") && !five.contains("not decodable"));
+        let nine = lines.iter().find(|l| l.contains("#9")).unwrap();
+        assert!(nine.contains("other") && nine.contains("not decodable"));
+    }
+
+    // ── format_play_sound_report ────────────────────────────────────────────
+
+    #[test]
+    fn report_resource_not_found() {
+        let r = PlaySoundReport {
+            number: 42,
+            enable_sound: true,
+            backend_present: true,
+            blorb_present: true,
+            resource: None,
+            format: None,
+            sound_id: None,
+        };
+        let lines = format_play_sound_report(&r);
+        assert!(lines.iter().any(|l| l.contains("NOT FOUND")));
+    }
+
+    #[test]
+    fn report_undecodable_kind_stops_before_playback() {
+        let r = PlaySoundReport {
+            number: 9,
+            enable_sound: true,
+            backend_present: true,
+            blorb_present: true,
+            resource: Some((blorb::SoundKind::Other, 128)),
+            format: None,
+            sound_id: None,
+        };
+        let lines = format_play_sound_report(&r);
+        assert!(lines.iter().any(|l| l.contains("not decodable")));
+        assert!(!lines.iter().any(|l| l.contains("playback")));
+    }
+
+    #[test]
+    fn report_success_shows_sound_id() {
+        let r = PlaySoundReport {
+            number: 3,
+            enable_sound: true,
+            backend_present: true,
+            blorb_present: true,
+            resource: Some((blorb::SoundKind::Aiff, 256)),
+            format: Some(audio::SoundFormat::Aiff),
+            sound_id: Some(7),
+        };
+        let lines = format_play_sound_report(&r);
+        assert!(lines.iter().any(|l| l.contains("sound id 7")));
+    }
+
+    #[test]
+    fn report_backend_none_when_playback_fails() {
+        let r = PlaySoundReport {
+            number: 3,
+            enable_sound: true,
+            backend_present: true,
+            blorb_present: true,
+            resource: Some((blorb::SoundKind::Aiff, 256)),
+            format: Some(audio::SoundFormat::Aiff),
+            sound_id: None,
+        };
+        let lines = format_play_sound_report(&r);
+        assert!(lines.iter().any(|l| l.contains("playback: backend returned None")));
+    }
+
+    #[test]
+    fn report_notes_disabled_gate() {
+        let r = PlaySoundReport {
+            number: 3,
+            enable_sound: false,
+            backend_present: true,
+            blorb_present: true,
+            resource: None,
+            format: None,
+            sound_id: None,
+        };
+        let lines = format_play_sound_report(&r);
+        assert!(lines.iter().any(|l| l.contains("off (attempting playback anyway")));
     }
 }

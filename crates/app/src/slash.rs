@@ -59,6 +59,10 @@ pub enum SlashOutcome {
     /// Print the resolved color scheme to the transcript. `actual` = render each
     /// selector line in its own style instead of the plain meta color.
     PrintColors { actual: bool },
+    /// Diagnostic: list Blorb `Snd` resources (`None`) or play resource `n`
+    /// (`Some(n)`). Handled in `main.rs::dispatch_slash_outcome` because it
+    /// needs `AppState` (audio backend + sound blorb).
+    PlaySound(Option<u32>),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -167,6 +171,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |a| match a.first().and_then(|s| s.parse::<u8>().ok()) {
             Some(v) if v <= 100 => SlashOutcome::Action(crate::input::Action::SetVolume(v)),
             _ => err("volume requires an integer 0-100 (e.g. volume 60)"),
+        } },
+    CommandSpec { name: "play-sound", category: Category::Game, context: Context::Global,
+        usage: "play-sound [n]", description: "diagnostic: list Snd resources, or play resource n",
+        dispatch: |a| match a.first() {
+            None => SlashOutcome::PlaySound(None),
+            Some(s) => match s.parse::<u32>() {
+                Ok(n) => SlashOutcome::PlaySound(Some(n)),
+                Err(_) => err(format!("play-sound: expected a resource number, got '{s}'")),
+            },
         } },
 
     // ── Map ───────────────────────────────────────────────────────────────
@@ -614,9 +627,9 @@ mod tests {
         assert_eq!(by("save-game").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (51 commands: Game 11, Map 20, View 4,
+        // Total count matches the spec table (52 commands: Game 12, Map 20, View 4,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 51, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 52, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -653,6 +666,18 @@ mod tests {
         assert!(find_command("print-colors").is_some());
         assert!(matches!(parse("print-colors", '/'), SlashOutcome::PrintColors { actual: false }));
         assert!(matches!(parse("print-colors color", '/'), SlashOutcome::PrintColors { actual: true }));
+    }
+
+    #[test]
+    fn play_sound_command_parses_optional_number() {
+        assert!(matches!(parse("play-sound", '/'), SlashOutcome::PlaySound(None)));
+        assert!(matches!(parse("play-sound 3", '/'), SlashOutcome::PlaySound(Some(3))));
+        assert!(matches!(parse("play-sound nope", '/'), SlashOutcome::Error(_)));
+    }
+
+    #[test]
+    fn play_sound_command_present() {
+        assert_eq!(find_command("play-sound").expect("play-sound").category, Category::Game);
     }
 
     #[test]

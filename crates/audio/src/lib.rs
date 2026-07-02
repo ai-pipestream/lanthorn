@@ -65,10 +65,20 @@ fn extended80_to_u32(b: &[u8; 10]) -> u32 {
 /// big-endian 16-bit PCM). Returns None on a malformed or non-16-bit AIFF.
 #[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
-    if bytes.len() < 12 || &bytes[0..4] != b"FORM" || &bytes[8..12] != b"AIFF" {
+    // Blorb's `Blorb::sound` returns the FORM chunk's PAYLOAD (the 8-byte
+    // `FORM`+len header already stripped), so the bytes it hands us usually
+    // start directly with the form type `AIFF`/`AIFC`. Accept both that shape
+    // and a full `FORM`...`AIFF`/`AIFC` container (e.g. a standalone .aiff file).
+    let mut pos = if bytes.len() >= 12
+        && &bytes[0..4] == b"FORM"
+        && (&bytes[8..12] == b"AIFF" || &bytes[8..12] == b"AIFC")
+    {
+        12
+    } else if bytes.len() >= 4 && (&bytes[0..4] == b"AIFF" || &bytes[0..4] == b"AIFC") {
+        4
+    } else {
         return None;
-    }
-    let mut pos = 12;
+    };
     let mut channels: u16 = 0;
     let mut sample_rate: u32 = 0;
     let mut sample_size: u16 = 0;
@@ -92,11 +102,18 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
                 // Skip offset (u32) + blockSize (u32); the rest is big-endian PCM.
                 let pcm_start = data_start + 8;
                 let pcm_end = data_start + len;
-                if sample_size <= 16 {
-                    let mut i = pcm_start;
+                let mut i = pcm_start;
+                if sample_size <= 8 {
+                    while i < pcm_end {
+                        let s = bytes[i] as i8;
+                        pcm.push((s as i16) << 8);
+                        i += 1;
+                    }
+                } else {
+                    let bps = ((sample_size as usize + 7) / 8).max(2);
                     while i + 1 < pcm_end {
                         pcm.push(i16::from_be_bytes([bytes[i], bytes[i + 1]]));
-                        i += 2;
+                        i += bps;
                     }
                 }
             }
@@ -110,26 +127,73 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     Some((channels, sample_rate, pcm))
 }
 
-/// Render a ProTracker MOD to interleaved stereo i16 PCM via `xmrsplayer`.
-/// Returns None on a malformed module (xmrs `Module::load` returns `Err`) — no
-/// panic, no temp file, no stdout. Plays the song through once
-/// (`set_max_loop_count(1)`); looping/repeat is handled by the caller via
-/// `repeat_plan` (same path as AIFF). A safety cap bounds memory and guarantees
-/// termination even if a pathological song never signals its end.
+/// A lazy, streaming ProTracker MOD source. Wraps an `XmrsPlayer` that renders
+/// interleaved stereo `i16` samples on demand (one per `next()`), so playback
+/// starts immediately instead of pre-rendering the whole track. `rodio` pulls
+/// samples on its own audio thread, so building and appending this never blocks
+/// the caller.
+///
+/// `XmrsPlayer<'a>` borrows the `Module`, but a `rodio::Source` appended to a
+/// `Sink` must be `Send + 'static`. `self_cell` lets us own the `Module` and the
+/// `XmrsPlayer` that borrows it in one `Send + 'static` value without leaking.
 #[cfg(feature = "mod-music")]
-fn render_mod(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
-    use xmrs::prelude::*;
-    use xmrsplayer::prelude::*;
-    let module = Module::load(bytes).ok()?;
-    let mut player = XmrsPlayer::new(&module, SAMPLE_RATE, 0);
-    player.set_max_loop_count(1); // 0 = forever; 1 = play once (iterator ends at song end)
-    const MAX_SECONDS: usize = 600;
-    let cap = SAMPLE_RATE as usize * 2 * MAX_SECONDS; // interleaved stereo
-    let pcm: Vec<i16> = player.by_ref().take(cap).collect();
-    if pcm.is_empty() {
-        return None;
+mod mod_stream {
+    use super::SAMPLE_RATE;
+    use xmrs::prelude::Module;
+    use xmrsplayer::prelude::XmrsPlayer;
+
+    self_cell::self_cell!(
+        struct PlayerCell {
+            owner: Module,
+            #[not_covariant]
+            dependent: XmrsPlayer,
+        }
+    );
+
+    pub struct ModSource {
+        cell: PlayerCell,
     }
-    Some((2, SAMPLE_RATE, pcm))
+
+    impl ModSource {
+        /// Parse `bytes` and build a streaming source. Returns `None` on a
+        /// malformed module (`Module::load` returns `Err`) — no panic, no
+        /// rendering. `forever` loops indefinitely (`set_max_loop_count(0)`);
+        /// otherwise the song plays `count` times then the iterator ends.
+        pub fn new(bytes: &[u8], forever: bool, count: u8) -> Option<Self> {
+            let module = Module::load(bytes).ok()?;
+            let cell = PlayerCell::new(module, |m| {
+                let mut player = XmrsPlayer::new(m, SAMPLE_RATE, 0);
+                player.set_max_loop_count(if forever { 0 } else { count as usize });
+                player
+            });
+            Some(ModSource { cell })
+        }
+    }
+
+    // `XmrsPlayer`'s iterator yields interleaved stereo `i16` samples — the same
+    // values the old `render_mod` collected into a `Vec<i16>`.
+    impl Iterator for ModSource {
+        type Item = i16;
+        fn next(&mut self) -> Option<i16> {
+            self.cell.with_dependent_mut(|_owner, player| player.next())
+        }
+    }
+
+    #[cfg(feature = "playback")]
+    impl rodio::Source for ModSource {
+        fn current_frame_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> u16 {
+            2
+        }
+        fn sample_rate(&self) -> u32 {
+            SAMPLE_RATE
+        }
+        fn total_duration(&self) -> Option<std::time::Duration> {
+            None
+        }
+    }
 }
 
 /// Map the Z-machine repeat count to (loop_forever, finite_play_count).
@@ -225,14 +289,8 @@ impl AudioBackend {
             SoundFormat::Mod => {
                 #[cfg(feature = "mod-music")]
                 {
-                    let (channels, rate, pcm) = render_mod(bytes)?;
-                    if forever {
-                        sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()).repeat_infinite());
-                    } else {
-                        for _ in 0..count {
-                            sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()));
-                        }
-                    }
+                    let source = mod_stream::ModSource::new(bytes, forever, count)?;
+                    sink.append(source);
                 }
                 #[cfg(not(feature = "mod-music"))]
                 {
@@ -412,6 +470,47 @@ mod tests {
         assert_eq!(pcm, vec![256i16, -256i16]);
     }
 
+    /// Build a blorb-shaped AIFF payload: the FORM chunk's PAYLOAD as `Blorb::sound`
+    /// actually hands to `decode_aiff` — starts with the form type `AIFF` (no
+    /// leading `FORM`+len header), COMM is 8-bit mono, SSND holds signed 8-bit
+    /// samples. Reuses the same 80-bit extended sample-rate bytes as `tiny_aiff()`.
+    fn blorb_aiff_payload_8bit() -> Vec<u8> {
+        fn be_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(id);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 { v.push(0); }
+            v
+        }
+        // COMM: channels=1, numFrames=3, sampleSize=8, rate = 44100 as 80-bit ext
+        // (same extended-float bytes tiny_aiff() uses).
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&1u16.to_be_bytes());       // channels
+        comm.extend_from_slice(&3u32.to_be_bytes());       // numSampleFrames
+        comm.extend_from_slice(&8u16.to_be_bytes());       // sampleSize
+        comm.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100
+        // SSND: offset=0, blockSize=0, then three signed 8-bit samples.
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // offset
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // blockSize
+        ssnd.extend_from_slice(&[0x7f, 0x80, 0x00]);       // i8: +127, -128, 0
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"AIFF");
+        payload.extend_from_slice(&be_chunk(b"COMM", &comm));
+        payload.extend_from_slice(&be_chunk(b"SSND", &ssnd));
+        payload
+    }
+
+    #[test]
+    fn decode_aiff_accepts_blorb_payload_8bit() {
+        let (channels, rate, pcm) = decode_aiff(&blorb_aiff_payload_8bit()).expect("valid blorb AIFF payload");
+        assert_eq!(channels, 1);
+        assert_eq!(rate, 44100);
+        assert_eq!(pcm, vec![32512i16, -32768i16, 0i16]);
+    }
+
     #[cfg(not(feature = "playback"))]
     #[test]
     fn play_sample_returns_none_without_playback() {
@@ -439,17 +538,34 @@ mod tests {
 
     #[cfg(feature = "mod-music")]
     #[test]
-    fn render_mod_rejects_malformed_without_panic() {
-        assert!(render_mod(&[0u8; 100]).is_none(), "short input rejected, not panicked on");
-        assert!(render_mod(&[]).is_none(), "empty input rejected, not panicked on");
+    fn mod_source_rejects_malformed_without_panic() {
+        use mod_stream::ModSource;
+        assert!(ModSource::new(&[0u8; 100], false, 1).is_none(), "short input rejected, not panicked on");
+        assert!(ModSource::new(&[], false, 1).is_none(), "empty input rejected, not panicked on");
+    }
+
+    #[cfg(all(feature = "mod-music", feature = "playback"))]
+    #[test]
+    fn mod_source_reports_stereo_format() {
+        use rodio::Source;
+        let source = mod_stream::ModSource::new(&minimal_mod(), false, 1).expect("valid minimal MOD");
+        assert_eq!(source.channels(), 2, "MOD is streamed as stereo");
+        assert_eq!(source.sample_rate(), SAMPLE_RATE);
+        assert!(source.current_frame_len().is_none());
+        assert!(source.total_duration().is_none());
     }
 
     #[cfg(feature = "mod-music")]
     #[test]
-    fn render_mod_produces_stereo_buffer() {
-        let (channels, rate, pcm) = render_mod(&minimal_mod()).expect("valid minimal MOD renders");
-        assert_eq!(channels, 2, "MOD is rendered as stereo");
-        assert_eq!(rate, SAMPLE_RATE);
+    fn mod_source_streams_lazily_and_terminates() {
+        use mod_stream::ModSource;
+        // A first sample is available immediately (lazy: no full pre-render).
+        let mut src = ModSource::new(&minimal_mod(), false, 1).expect("valid minimal MOD");
+        assert!(src.next().is_some(), "source yields at least a first sample");
+        // With a finite loop count, collecting the whole stream terminates and
+        // is non-empty (mirrors the old render_mod_produces_stereo_buffer guarantee).
+        let src = ModSource::new(&minimal_mod(), false, 1).expect("valid minimal MOD");
+        let pcm: Vec<i16> = src.collect();
         assert!(!pcm.is_empty(), "one pattern still yields frames");
     }
 }
