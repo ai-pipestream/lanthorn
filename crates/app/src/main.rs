@@ -1056,6 +1056,170 @@ fn draw_story_picker(
     (row_rects, rows)
 }
 
+/// Draw the highlighted story's metadata panel: title, filesystem info,
+/// format/version/release, serial (Z only), IFID, present features, bundled
+/// resources (self-blorb or an associated sibling blorb), and saves. Pure
+/// renderer — no state, no interaction (see the Task 9 caller for that).
+#[cfg_attr(not(test), allow(dead_code))]
+fn draw_info_panel(
+    title: &str,
+    filename: &str,
+    meta: &app::picker::StoryMeta,
+    aux: Option<&app::picker::StoryAux>,
+    area: Rect,
+    cs: &app::colors::ColorScheme,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    // Background fill.
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_symbol(" ").set_style(cs.story_info);
+            }
+        }
+    }
+
+    // Single-line border box titled " Info ".
+    let frame = app::render::paneframe::draw_pane_frame(
+        buf,
+        area,
+        app::render::paneframe::BorderStyle::Single,
+        &app::render::paneframe::PaneGlyphs::default(),
+        cs.story_info,
+    );
+    draw_str_clipped(buf, area.x + 2, area.y, " Info ", cs.story_info_title, area);
+
+    let inner = frame.content;
+    let mut lines: Vec<(String, ratatui::style::Style)> = Vec::new();
+
+    // Title.
+    lines.push((title.to_string(), cs.story_info_title));
+    // filename · size · modified.
+    let mut fs_line = format!("{} · {}", filename, human_size(meta.size_bytes));
+    if let Some(m) = &meta.modified {
+        fs_line.push_str(&format!(" · {m}"));
+    }
+    lines.push((fs_line, cs.story_info_value));
+    // format + version · release.
+    let mut fmt_line = meta.format.clone();
+    if let Some(v) = &meta.version {
+        fmt_line = match meta.engine {
+            app::picker::Engine::ZCode => format!("{} v{}", meta.format, v),
+            app::picker::Engine::Glulx => format!("{} {}", meta.format, v),
+        };
+    }
+    if let Some(r) = meta.release {
+        fmt_line.push_str(&format!(" · Release {r}"));
+    }
+    lines.push((fmt_line, cs.story_info_value));
+    // serial (Z only).
+    if let Some(s) = &meta.serial {
+        lines.push((format!("Serial {s}"), cs.story_info_value));
+    }
+    // ifid.
+    lines.push((format!("IFID {}", meta.ifid), cs.story_info_value));
+    // features line (present badges only).
+    let feats = feature_words(&meta.features, aux);
+    if !feats.is_empty() {
+        lines.push((format!("Features: {}", feats.join(" ")), cs.story_info_value));
+    }
+
+    // Resources: self_blorb, else aux.assoc_blorb.
+    let (res_header, chunks): (Option<String>, &[app::picker::ChunkInfo]) =
+        if let Some(c) = &meta.self_blorb {
+            (Some(format!("Resources ({filename})")), c.as_slice())
+        } else if let Some((src, c)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
+            let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("blorb");
+            (Some(format!("Resources ({name})")), c.as_slice())
+        } else {
+            (None, &[])
+        };
+    if let Some(h) = res_header {
+        lines.push((String::new(), cs.story_info_value));
+        lines.push((h, cs.story_info_label));
+        for c in chunks {
+            lines.push((
+                format!(" {:<4} #{} {:<4} {}", c.usage, c.number, c.chunk_type, human_size(c.len as u64)),
+                cs.story_info_value,
+            ));
+        }
+    }
+
+    // Saves.
+    if let Some(saves) = aux.map(|a| &a.saves) {
+        if !saves.is_empty() {
+            lines.push((String::new(), cs.story_info_value));
+            lines.push((format!("Saves ({})", saves.len()), cs.story_info_label));
+            for s in saves {
+                let when = s.saved_at.get(0..10).unwrap_or(&s.saved_at);
+                lines.push((format!(" {}  turn {} · {}", s.name, s.turns, when), cs.story_info_value));
+            }
+        }
+    }
+
+    // Reserve a 1-col gutter for the scrollbar when content overflows.
+    let overflow = lines.len() as u16 > inner.height;
+    let text_area = if overflow {
+        Rect::new(inner.x, inner.y, inner.width.saturating_sub(1), inner.height)
+    } else {
+        inner
+    };
+    for (i, (text, style)) in lines.iter().enumerate() {
+        if i as u16 >= inner.height {
+            break;
+        }
+        let y = inner.y + i as u16;
+        draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
+    }
+    if overflow {
+        let sb_area = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, 0, cs.scrollbar);
+    }
+}
+
+/// Format a byte count as `"N B"` / `"N KB"` / `"N.N MB"`.
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Present-only feature badge words, folding in aux-derived signals (an
+/// associated blorb's sound/picture chunks, or a resolved hint index).
+fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>) -> Vec<&'static str> {
+    let mut v = Vec::new();
+    let mut sound = f.sound;
+    let mut graphics = f.graphics;
+    if let Some((_, chunks)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
+        if chunks.iter().any(|c| c.usage == "Snd ") {
+            sound = true;
+        }
+        if chunks.iter().any(|c| c.usage == "Pict") {
+            graphics = true;
+        }
+    }
+    if sound {
+        v.push("sound");
+    }
+    if graphics {
+        v.push("graphics");
+    }
+    if f.colour == Some(true) {
+        v.push("colour");
+    }
+    if f.hints || aux.map(|a| a.hints_available).unwrap_or(false) {
+        v.push("hints");
+    }
+    v
+}
+
 /// Format the one-line loading indicator shown while a (possibly large) story
 /// boots to its first prompt. `frame` is the spinner glyph for this tick. Large
 /// Glulx games (e.g. Counterfeit Monkey at ~11 MB) take several seconds to reach
@@ -5387,5 +5551,56 @@ mod tests {
                           &cs, area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         assert!(row0.contains("z! ◆"), "configured glyphs used: {row0:?}");
+    }
+
+    // ── Story-picker info panel ─────────────────────────────────────────────────
+
+    fn buffer_to_string(buf: &ratatui::buffer::Buffer, area: ratatui::layout::Rect) -> String {
+        let mut out = String::new();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                if let Some(c) = buf.cell((x, y)) {
+                    out.push_str(c.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn info_panel_renders_metadata_features_and_resources() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = app::picker::StoryMeta {
+            size_bytes: 92 * 1024,
+            modified: Some("2026-06-30".into()),
+            engine: app::picker::Engine::ZCode,
+            format: "Z-code".into(),
+            version: Some("3".into()),
+            serial: Some("840726".into()),
+            release: Some(88),
+            ifid: "ZCODE-88-840726".into(),
+            features: app::picker::Features { sound: true, graphics: true, colour: Some(false), hints: true },
+            self_blorb: Some(vec![
+                app::picker::ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 92 * 1024 },
+            ]),
+        };
+        let area = Rect::new(0, 0, 34, 20);
+        let mut buf = Buffer::empty(area);
+        super::draw_info_panel("Zork I", "zork1.z3", &meta, None, area, &cs, &mut buf);
+
+        let text = buffer_to_string(&buf, area);
+        assert!(text.contains("Zork I"), "title line: {text:?}");
+        assert!(text.contains("zork1.z3"), "filename: {text:?}");
+        assert!(text.contains("Z-code"), "format line: {text:?}");
+        assert!(text.contains("Release 88"));
+        assert!(text.contains("840726"));
+        assert!(text.contains("ZCODE-88-840726"));
+        assert!(text.contains("sound"));
+        assert!(text.contains("graphics"));
+        assert!(text.contains("hints"));
+        assert!(text.contains("Exec"));
+        assert!(text.contains("ZCOD"));
     }
 }
