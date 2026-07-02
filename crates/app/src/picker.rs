@@ -4,10 +4,10 @@
 //! Titles are resolved cheaply (no game is run): the known-title table keyed by
 //! the IFID, falling back to the filename stem.
 
-// Consumed by Task 5 (row badges); unused for now.
-#[allow(unused_imports)]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use crate::hints;
 
 /// The VM engine a story runs on (version-agnostic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +289,58 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
     out
 }
 
+/// Cheap existence flags shown on every list row (panel-independent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RowBadges {
+    pub blorb: bool,
+    pub save: bool,
+    pub hint: bool,
+}
+
+/// True if a same-stem `.blb`/`.blorb`/`.zblorb` sibling of `path` exists.
+fn sibling_blorb_exists(path: &Path) -> bool {
+    ["blb", "blorb", "zblorb"].iter().any(|ext| {
+        let cand = path.with_extension(ext);
+        cand != *path && cand.exists()
+    })
+}
+
+/// Compute a row's artifact badges. `save_names` is the saves-dir listing read
+/// once; `hint_index` is loaded once at picker start. No archive reads.
+pub fn compute_row_badges(
+    entry: &StoryEntry,
+    save_names: &HashSet<String>,
+    hint_index: &hints::HintIndex,
+) -> RowBadges {
+    let ifid = &entry.meta.ifid;
+    RowBadges {
+        blorb: entry.meta.self_blorb.is_some() || sibling_blorb_exists(&entry.path),
+        save: save_names.iter().any(|n| n.starts_with(ifid.as_str())),
+        hint: hint_index.get(ifid).is_some(),
+    }
+}
+
+/// Borrowed badge glyphs from the `[symbols]` config, for row rendering.
+pub struct BadgeGlyphs<'a> {
+    pub zcode: &'a str,
+    pub glulx: &'a str,
+    pub blorb: &'a str,
+    pub save: &'a str,
+    pub hint: &'a str,
+}
+
+impl<'a> BadgeGlyphs<'a> {
+    pub fn from_symbols(s: &'a crate::config::SymbolConfig) -> Self {
+        Self {
+            zcode: &s.badge_zcode,
+            glulx: &s.badge_glulx,
+            blorb: &s.badge_blorb,
+            save: &s.badge_save,
+            hint: &s.badge_hint,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +460,50 @@ mod tests {
         assert_eq!(m.features.colour, Some(true));
         assert!(m.size_bytes > 0);
         assert!(m.self_blorb.is_none());
+    }
+
+    // Build a StoryEntry with a controllable ifid + self_blorb, on a synthetic path.
+    fn entry_with(ifid: &str, path: PathBuf, self_blorb: Option<Vec<ChunkInfo>>) -> StoryEntry {
+        StoryEntry {
+            path,
+            title: "T".into(),
+            filename: "t.z5".into(),
+            meta: StoryMeta {
+                size_bytes: 1, modified: None, engine: Engine::ZCode,
+                format: "Z-code".into(), version: Some("5".into()),
+                serial: None, release: None, ifid: ifid.into(),
+                features: Features::default(), self_blorb,
+            },
+        }
+    }
+
+    #[test]
+    fn compute_row_badges_covers_each_signal() {
+        let dir = temp_dir("badges");
+        // A self-blorb story lights `blorb` with no sibling.
+        let e_self = entry_with("IFID-A", dir.join("a.z5"),
+            Some(vec![ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 4 }]));
+        // A story with a same-stem sibling .blorb lights `blorb`.
+        std::fs::write(dir.join("b.z5"), b"x").unwrap();
+        std::fs::write(dir.join("b.blorb"), b"x").unwrap();
+        let e_sibling = entry_with("IFID-B", dir.join("b.z5"), None);
+        // A plain story with nothing.
+        let e_bare = entry_with("IFID-C", dir.join("c.z5"), None);
+
+        let mut save_names = HashSet::new();
+        save_names.insert("IFID-A.babelmap".to_string());          // default save for A
+        save_names.insert("IFID-B-before.babelmap".to_string());   // named save for B
+
+        let hi = hints::load_hint_index(&dir); // empty index (no hints/index.toml)
+
+        let a = compute_row_badges(&e_self, &save_names, &hi);
+        let b = compute_row_badges(&e_sibling, &save_names, &hi);
+        let c = compute_row_badges(&e_bare, &save_names, &hi);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!((a.blorb, a.save, a.hint), (true, true, false));
+        assert_eq!((b.blorb, b.save, b.hint), (true, true, false));
+        assert_eq!((c.blorb, c.save, c.hint), (false, false, false));
     }
 }
 
