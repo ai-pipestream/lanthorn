@@ -1588,6 +1588,13 @@ impl Machine {
         self.acceleration = on;
     }
 
+    /// Total number of opcodes dispatched since the machine was built.
+    /// Accelerated calls bypass the opcode dispatcher, so this undercounts
+    /// work done by intercepted functions when acceleration is enabled.
+    pub fn insn_count(&self) -> u64 {
+        self.insn_count
+    }
+
     /// Advance the xorshift32 PRNG and return the next 32-bit value.
     fn next_rand(&mut self) -> u32 {
         let mut x = if self.rng == 0 { Self::DEFAULT_SEED } else { self.rng };
