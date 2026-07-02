@@ -172,6 +172,10 @@ pub struct Cli {
     /// Path to a non-default config file
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
+
+    /// Disable Glulx accelerated-function interception (debug; default: enabled)
+    #[arg(long)]
+    pub no_accel: bool,
 }
 
 // ── Hotkeys config ────────────────────────────────────────────────────────────
@@ -206,6 +210,7 @@ fn default_undo_levels() -> usize { 16 }
 fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
 fn default_honor_game_colours() -> bool { true }
+fn default_acceleration() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
 fn default_enable_sound() -> bool { true }
 fn default_volume() -> u8 { 100 }
@@ -419,6 +424,10 @@ pub struct Config {
     /// Z-scale volume.
     #[serde(default = "default_volume")]
     pub volume: u8,
+    /// Whether Glulx accel interception is active. Runtime-only (set from the
+    /// --no-accel CLI flag); intentionally not persisted or user-facing.
+    #[serde(skip, default = "default_acceleration")]
+    pub acceleration: bool,
 }
 
 impl Default for Config {
@@ -453,6 +462,7 @@ impl Default for Config {
             interpreter_number: None,
             enable_sound: default_enable_sound(),
             volume: default_volume(),
+            acceleration: default_acceleration(),
         }
     }
 }
@@ -531,6 +541,8 @@ pub fn resolve(cli: &Cli) -> Config {
     if let Some(dir) = &cli.user_dir {
         cfg.user_dir = dir.clone();
     }
+
+    cfg.acceleration = !cli.no_accel;
 
     cfg
 }
@@ -718,6 +730,7 @@ mod tests {
             story: PathBuf::from("foo.z5"),
             user_dir: Some(PathBuf::from("/tmp/from-cli")),
             config: Some(cfg_path),
+            no_accel: false,
         };
 
         let cfg = resolve(&cli);
@@ -730,6 +743,7 @@ mod tests {
             story: PathBuf::from("foo.z5"),
             user_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
+            no_accel: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
@@ -743,6 +757,7 @@ mod tests {
             story: PathBuf::from("foo.z5"),
             user_dir: None,
             config: Some(cfg_path),
+            no_accel: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -884,6 +899,7 @@ use_defaults = false
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,
             animation: AnimationConfig::default(),
+            acceleration: true,
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -1021,6 +1037,20 @@ use_defaults = false
         // explicit false overrides the default
         let off: Config = toml::from_str("honor_game_colours = false\n").unwrap();
         assert!(!off.honor_game_colours);
+    }
+
+    #[test]
+    fn acceleration_defaults_true_and_no_accel_disables() {
+        assert!(Config::default().acceleration);
+
+        let cli = Cli {
+            story: PathBuf::from("foo.z5"),
+            user_dir: None,
+            config: Some(PathBuf::from("/nonexistent/path/config.toml")),
+            no_accel: true,
+        };
+        let cfg = resolve(&cli);
+        assert!(!cfg.acceleration);
     }
 
     #[test]
