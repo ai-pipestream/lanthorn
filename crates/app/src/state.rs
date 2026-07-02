@@ -511,6 +511,11 @@ impl GalleryState {
             arrow_set: Arrows::preset_names()[self.selections[GALLERY_CATEGORY_ARROWS]].to_owned(),
             portal_icons: PortalGlyphs::preset_names()[self.selections[GALLERY_CATEGORY_PORTAL]].to_owned(),
             path_style: PathGlyphs::preset_names()[self.selections[GALLERY_CATEGORY_PATH]].to_owned(),
+            badge_zcode: crate::config::default_badge_zcode(),
+            badge_glulx: crate::config::default_badge_glulx(),
+            badge_blorb: crate::config::default_badge_blorb(),
+            badge_save: crate::config::default_badge_save(),
+            badge_hint: crate::config::default_badge_hint(),
             overrides: Default::default(),
         }
     }

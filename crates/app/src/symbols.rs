@@ -387,6 +387,11 @@ impl SymbolSet {
             arrow_set: arrow.to_owned(),
             portal_icons: portal.to_owned(),
             path_style: path.to_owned(),
+            badge_zcode: crate::config::default_badge_zcode(),
+            badge_glulx: crate::config::default_badge_glulx(),
+            badge_blorb: crate::config::default_badge_blorb(),
+            badge_save: crate::config::default_badge_save(),
+            badge_hint: crate::config::default_badge_hint(),
             overrides: std::collections::BTreeMap::new(),
         };
         SymbolSet::resolve(&cfg)
@@ -578,6 +583,11 @@ mod tests {
             arrow_set: "filled".into(),
             portal_icons: "ascii".into(),
             path_style: "light".into(),
+            badge_zcode: crate::config::default_badge_zcode(),
+            badge_glulx: crate::config::default_badge_glulx(),
+            badge_blorb: crate::config::default_badge_blorb(),
+            badge_save: crate::config::default_badge_save(),
+            badge_hint: crate::config::default_badge_hint(),
             overrides: std::collections::BTreeMap::new(),
         };
         let expected = SymbolSet::resolve(&cfg);

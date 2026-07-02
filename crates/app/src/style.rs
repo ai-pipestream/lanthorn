@@ -127,6 +127,11 @@ pub struct StyleSymbols {
     pub arrow_set: Option<String>,
     pub portal_icons: Option<String>,
     pub path_style: Option<String>,
+    pub badge_zcode: Option<String>,
+    pub badge_glulx: Option<String>,
+    pub badge_blorb: Option<String>,
+    pub badge_save: Option<String>,
+    pub badge_hint: Option<String>,
     #[serde(default)]
     pub overrides: BTreeMap<String, String>,
 }
@@ -143,6 +148,11 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         arrow_set: s.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
         portal_icons: s.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
         path_style: s.path_style.clone().unwrap_or_else(crate::config::default_path_style),
+        badge_zcode: s.badge_zcode.clone().unwrap_or_else(crate::config::default_badge_zcode),
+        badge_glulx: s.badge_glulx.clone().unwrap_or_else(crate::config::default_badge_glulx),
+        badge_blorb: s.badge_blorb.clone().unwrap_or_else(crate::config::default_badge_blorb),
+        badge_save: s.badge_save.clone().unwrap_or_else(crate::config::default_badge_save),
+        badge_hint: s.badge_hint.clone().unwrap_or_else(crate::config::default_badge_hint),
         overrides: s.overrides.clone(),
     }
 }
@@ -583,6 +593,11 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         arrow_set: over.symbols.arrow_set.clone().or(base.symbols.arrow_set.clone()),
         portal_icons: over.symbols.portal_icons.clone().or(base.symbols.portal_icons.clone()),
         path_style: over.symbols.path_style.clone().or(base.symbols.path_style.clone()),
+        badge_zcode: over.symbols.badge_zcode.clone().or(base.symbols.badge_zcode.clone()),
+        badge_glulx: over.symbols.badge_glulx.clone().or(base.symbols.badge_glulx.clone()),
+        badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
+        badge_save: over.symbols.badge_save.clone().or(base.symbols.badge_save.clone()),
+        badge_hint: over.symbols.badge_hint.clone().or(base.symbols.badge_hint.clone()),
         overrides: {
             let mut ov = base.symbols.overrides.clone();
             ov.extend(over.symbols.overrides.clone());

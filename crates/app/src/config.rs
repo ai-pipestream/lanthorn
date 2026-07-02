@@ -49,6 +49,11 @@ pub(crate) fn default_box_style() -> String { "rounded".into() }
 pub(crate) fn default_arrow_set() -> String { "filled".into() }
 pub(crate) fn default_portal_icons() -> String { "ascii".into() }
 pub(crate) fn default_path_style() -> String { "light".into() }
+pub(crate) fn default_badge_zcode() -> String { "Z".into() }
+pub(crate) fn default_badge_glulx() -> String { "G".into() }
+pub(crate) fn default_badge_blorb() -> String { "B".into() }
+pub(crate) fn default_badge_save() -> String { "S".into() }
+pub(crate) fn default_badge_hint() -> String { "H".into() }
 
 /// The `[symbols]` section of config.toml.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
@@ -66,6 +71,21 @@ pub struct SymbolConfig {
     /// Path line-art preset name.
     #[serde(default = "default_path_style")]
     pub path_style: String,
+    /// Row story-type badge glyph for Z-code stories (default "Z").
+    #[serde(default = "default_badge_zcode")]
+    pub badge_zcode: String,
+    /// Row story-type badge glyph for Glulx stories (default "G").
+    #[serde(default = "default_badge_glulx")]
+    pub badge_glulx: String,
+    /// Row "a blorb exists" artifact badge glyph (default "B").
+    #[serde(default = "default_badge_blorb")]
+    pub badge_blorb: String,
+    /// Row "a save exists" artifact badge glyph (default "S").
+    #[serde(default = "default_badge_save")]
+    pub badge_save: String,
+    /// Row "a hint file exists" artifact badge glyph (default "H").
+    #[serde(default = "default_badge_hint")]
+    pub badge_hint: String,
     /// Per-slot overrides (slot key → single-char value).
     #[serde(default)]
     pub overrides: BTreeMap<String, String>,
@@ -78,6 +98,11 @@ impl Default for SymbolConfig {
             arrow_set: default_arrow_set(),
             portal_icons: default_portal_icons(),
             path_style: default_path_style(),
+            badge_zcode: default_badge_zcode(),
+            badge_glulx: default_badge_glulx(),
+            badge_blorb: default_badge_blorb(),
+            badge_save: default_badge_save(),
+            badge_hint: default_badge_hint(),
             overrides: BTreeMap::new(),
         }
     }
@@ -1053,5 +1078,27 @@ use_defaults = true
         assert!(warns.is_empty());
         let c: crate::keymap::KeySpec = "c".parse().unwrap();
         assert_eq!(km.lookup(&c, crate::keymap::Context::Map), Some("center-map"));
+    }
+
+    #[test]
+    fn symbol_config_badge_glyph_defaults() {
+        let s = SymbolConfig::default();
+        assert_eq!(s.badge_zcode, "Z");
+        assert_eq!(s.badge_glulx, "G");
+        assert_eq!(s.badge_blorb, "B");
+        assert_eq!(s.badge_save, "S");
+        assert_eq!(s.badge_hint, "H");
+    }
+
+    #[test]
+    fn symbol_config_badge_glyph_override_and_absent_default() {
+        // Overriding one field parses; the others keep their defaults.
+        let toml = r#"
+            badge_blorb = "◆"
+        "#;
+        let s: SymbolConfig = toml::from_str(toml).unwrap();
+        assert_eq!(s.badge_blorb, "◆");
+        assert_eq!(s.badge_zcode, "Z");
+        assert_eq!(s.badge_hint, "H");
     }
 }
