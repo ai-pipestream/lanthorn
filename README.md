@@ -168,7 +168,10 @@ terminals too narrow for both list and panel. The badge glyphs are configurable
 in `[symbols]` (`badge_zcode`/`badge_glulx`/`badge_blorb`/`badge_save`/`badge_hint`),
 and both the badge cluster and the panel are themeable via the `story_badge` and
 `story_info` (`:title`/`:label`/`:value`) style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
-navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell.
+navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell. When
+the panel is open and its content overflows, scroll it with the mouse wheel over
+the panel or `Shift`+`↑`/`↓`/PgUp/PgDn (plain arrow/PgUp/PgDn keep navigating the
+list); the scroll position resets whenever the highlighted story changes.
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and

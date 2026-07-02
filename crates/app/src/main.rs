@@ -1012,6 +1012,9 @@ fn run_story_picker(
     let mut aux_cache: Vec<Option<app::picker::StoryAux>> =
         (0..stories.len()).map(|_| None).collect();
     let mut last_area = Rect::new(0, 0, 0, 0);
+    let mut last_panel_area = Rect::new(0, 0, 0, 0);
+    let mut panel_scroll: usize = 0;
+    let mut panel_max: usize = 0;
 
     let chosen: Option<std::path::PathBuf> = loop {
         let _ = terminal.draw(|f| {
@@ -1026,11 +1029,13 @@ fn run_story_picker(
             viewport = vp;
             if panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
-                    draw_info_panel(
+                    last_panel_area = panel_area;
+                    panel_max = draw_info_panel(
                         &entry.title,
                         &entry.filename,
                         &entry.meta,
                         aux_cache[list.selected].as_ref(),
+                        panel_scroll,
                         panel_area,
                         &cs,
                         buf,
@@ -1051,27 +1056,40 @@ fn run_story_picker(
         match read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
-                match k.code {
-                    Up | Char('k') => list.move_by(-1, viewport, anim),
-                    Down | Char('j') => list.move_by(1, viewport, anim),
-                    PageUp => list.page(-1, viewport, anim),
-                    PageDown => list.page(1, viewport, anim),
-                    Home => list.home(viewport, anim),
-                    End => list.end(stories.len(), viewport, anim),
-                    Enter => break Some(stories[list.selected].path.clone()),
-                    Esc | Char('q') => break None,
-                    Char('i') | Tab => {
-                        let target = !slide.open;
-                        if !target || can_open_panel(last_area.width) {
-                            let instant = !cfg.animation.enabled || cfg.animation.scroll_ms == 0;
-                            slide.toggle_to(target, instant);
-                            slide.arm(&cfg.animation);
-                            if target {
-                                ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+                let shift = k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                if slide.open && shift {
+                    let page = (last_panel_area.height.saturating_sub(2)).max(1) as usize;
+                    match k.code {
+                        Up => panel_scroll = panel_scroll.saturating_sub(1),
+                        Down => panel_scroll = (panel_scroll + 1).min(panel_max),
+                        PageUp => panel_scroll = panel_scroll.saturating_sub(page),
+                        PageDown => panel_scroll = (panel_scroll + page).min(panel_max),
+                        _ => {}
+                    }
+                } else {
+                    match k.code {
+                        Up | Char('k') => { panel_scroll = 0; list.move_by(-1, viewport, anim) }
+                        Down | Char('j') => { panel_scroll = 0; list.move_by(1, viewport, anim) }
+                        PageUp => { panel_scroll = 0; list.page(-1, viewport, anim) }
+                        PageDown => { panel_scroll = 0; list.page(1, viewport, anim) }
+                        Home => { panel_scroll = 0; list.home(viewport, anim) }
+                        End => { panel_scroll = 0; list.end(stories.len(), viewport, anim) }
+                        Enter => break Some(stories[list.selected].path.clone()),
+                        Esc | Char('q') => break None,
+                        Char('i') | Tab => {
+                            let target = !slide.open;
+                            if !target || can_open_panel(last_area.width) {
+                                let instant = !cfg.animation.enabled || cfg.animation.scroll_ms == 0;
+                                slide.toggle_to(target, instant);
+                                slide.arm(&cfg.animation);
+                                if target {
+                                    panel_scroll = 0;
+                                    ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             Ok(Event::Mouse(m)) => {
@@ -1082,7 +1100,17 @@ fn run_story_picker(
                         break Some(stories[*idx].path.clone());
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
-                    list.move_by(d, viewport, anim);
+                    let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                    if slide.open && last_panel_area.contains(pt) {
+                        if d < 0 {
+                            panel_scroll = panel_scroll.saturating_sub((-d) as usize);
+                        } else {
+                            panel_scroll = (panel_scroll + d as usize).min(panel_max);
+                        }
+                    } else {
+                        panel_scroll = 0;
+                        list.move_by(d, viewport, anim);
+                    }
                 }
             }
             Ok(Event::Resize(_, _)) => {
@@ -1091,6 +1119,7 @@ fn run_story_picker(
             Ok(_) => {}
             Err(_) => break None,
         }
+        panel_scroll = panel_scroll.min(panel_max);
         if slide.open {
             ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
         }
@@ -1227,12 +1256,13 @@ fn draw_info_panel(
     filename: &str,
     meta: &app::picker::StoryMeta,
     aux: Option<&app::picker::StoryAux>,
+    scroll: usize,
     area: Rect,
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
-) {
+) -> usize {
     if area.width < 2 || area.height < 2 {
-        return;
+        return 0;
     }
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -1334,17 +1364,19 @@ fn draw_info_panel(
     } else {
         inner
     };
-    for (i, (text, style)) in lines.iter().enumerate() {
-        if i as u16 >= inner.height {
-            break;
-        }
+    let content_height = inner.height as usize;
+    let max_scroll = lines.len().saturating_sub(content_height);
+    let eff = scroll.min(max_scroll);
+    let end = (eff + content_height).min(lines.len());
+    for (i, (text, style)) in lines[eff..end].iter().enumerate() {
         let y = inner.y + i as u16;
         draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
     }
     if overflow {
         let sb_area = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, 0, cs.scrollbar);
+        app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, eff, cs.scrollbar);
     }
+    max_scroll
 }
 
 /// Translate a raw Blorb resource usage FourCC into a human-readable label.
@@ -5790,7 +5822,7 @@ mod tests {
         };
         let area = Rect::new(0, 0, 34, 20);
         let mut buf = Buffer::empty(area);
-        super::draw_info_panel("Zork I", "zork1.z3", &meta, None, area, &cs, &mut buf);
+        super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 0, area, &cs, &mut buf);
 
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Zork I"), "title line: {text:?}");
@@ -5805,6 +5837,54 @@ mod tests {
         assert!(text.contains("Code"));
         assert!(text.contains("Sound"));
         assert!(text.contains("AIFF"));
+    }
+
+    #[test]
+    fn info_panel_scrolls_to_reveal_overflow() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let chunks: Vec<app::picker::ChunkInfo> = (0..30)
+            .map(|i| app::picker::ChunkInfo {
+                usage: "Data".into(),
+                number: i,
+                chunk_type: "IFhd".into(),
+                len: 128,
+            })
+            .collect();
+        let meta = app::picker::StoryMeta {
+            size_bytes: 92 * 1024,
+            modified: None,
+            engine: app::picker::Engine::ZCode,
+            format: "Z-code".into(),
+            version: Some("3".into()),
+            serial: None,
+            release: None,
+            ifid: "ZCODE-88-840726".into(),
+            features: app::picker::Features::default(),
+            self_blorb: Some(chunks),
+        };
+        let area = Rect::new(0, 0, 34, 10);
+        let mut buf = Buffer::empty(area);
+        let max_scroll =
+            super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 0, area, &cs, &mut buf);
+        let text_top = buffer_to_string(&buf, area);
+        assert!(max_scroll > 0, "content should overflow a 10-row panel");
+        let late_marker = " #29  ";
+        assert!(!text_top.contains(late_marker), "late resource should be offscreen at scroll 0: {text_top:?}");
+
+        let mut buf2 = Buffer::empty(area);
+        let max_scroll2 = super::draw_info_panel(
+            "Zork I", "zork1.z3", &meta, None, max_scroll, area, &cs, &mut buf2,
+        );
+        let text_scrolled = buffer_to_string(&buf2, area);
+        assert_eq!(max_scroll2, max_scroll);
+        assert!(text_scrolled.contains(late_marker), "late resource should be visible when scrolled: {text_scrolled:?}");
+
+        // Scrolling past max clamps to the same view as scroll == max_scroll.
+        let mut buf3 = Buffer::empty(area);
+        super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 999, area, &cs, &mut buf3);
+        let text_over = buffer_to_string(&buf3, area);
+        assert_eq!(text_over, text_scrolled, "scroll past max should clamp to max_scroll view");
     }
 
     // ── Story-picker info panel: toggle/slide/split ─────────────────────────────
