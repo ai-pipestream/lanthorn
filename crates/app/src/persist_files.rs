@@ -49,9 +49,9 @@ pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo> {
             continue;
         }
 
-        // Try to read Meta from the archive; skip on failure.
-        let meta = match crate::archive::load_archive(&path) {
-            Ok(ac) => ac.meta,
+        // Read only meta.json; skip on failure (corrupt/unsupported → not listed).
+        let meta = match crate::archive::read_archive_meta(&path) {
+            Ok(m) => m,
             Err(_) => continue,
         };
 

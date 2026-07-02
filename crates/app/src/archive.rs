@@ -510,6 +510,37 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history, engine })
 }
 
+/// Read ONLY the `meta.json` entry from a save archive — avoids `load_archive`
+/// unzipping the map, save image, transcript, history, screen, and aux just to
+/// show a save summary. Applies the same `format_version` rejection as
+/// `load_archive`, so a future-format archive is reported as an error (and thus
+/// skipped by `list_saves`) exactly as today.
+pub fn read_archive_meta(path: &Path) -> io::Result<Meta> {
+    let file = std::fs::File::open(path)?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let meta: Meta = {
+        let mut entry = zip.by_name(ENTRY_META).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("missing {ENTRY_META}: {e}"))
+        })?;
+        let mut buf = String::new();
+        entry.read_to_string(&mut buf)?;
+        serde_json::from_str(&buf).map_err(|e| {
+            io::Error::new(io::ErrorKind::InvalidData, format!("corrupt {ENTRY_META}: {e}"))
+        })?
+    };
+    if meta.format_version > CURRENT_FORMAT_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported archive format_version {}; expected <= {}",
+                meta.format_version, CURRENT_FORMAT_VERSION
+            ),
+        ));
+    }
+    Ok(meta)
+}
+
 impl ArchiveContents {
     /// The persisted game state as an engine-tagged [`EngineSave`], rebuilt from
     /// the archive's `game.<ext>` bytes + `engine.txt` tag (defaulting to
@@ -859,6 +890,51 @@ mod tests {
         // Meta
         assert_eq!(ac.meta.format_version, CURRENT_FORMAT_VERSION);
         assert!(ac.meta.ifid.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // read_archive_meta: cheap meta-only read matches load_archive's meta
+    // -------------------------------------------------------------------------
+    #[test]
+    fn read_archive_meta_matches_load_archive_meta() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        if !fixture.exists() {
+            return; // fixture absent — skip
+        }
+
+        let path = temp_archive_path("meta-only");
+        let machine = dummy_machine();
+        save_archive_meta(
+            &path,
+            &small_mapper(),
+            &zvm_es(&machine),
+            Some(&machine.screen),
+            &machine.aux_data,
+            Meta {
+                format_version: CURRENT_FORMAT_VERSION,
+                ifid: Some("ZCODE-1-000000-0000".to_string()),
+                name: Some("before-troll".to_string()),
+                turns: 42,
+                saved_at: "2026-06-30T12:00:00Z".to_string(),
+            },
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+        )
+        .expect("save_archive_meta");
+
+        let full = load_archive(&path).unwrap().meta;
+        let quick = read_archive_meta(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(quick.format_version, full.format_version);
+        assert_eq!(quick.ifid, full.ifid);
+        assert_eq!(quick.name, full.name);
+        assert_eq!(quick.turns, full.turns);
+        assert_eq!(quick.saved_at, full.saved_at);
     }
 
     // -------------------------------------------------------------------------
