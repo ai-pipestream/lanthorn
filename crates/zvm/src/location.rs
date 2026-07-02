@@ -804,7 +804,7 @@ mod tests {
         // the init code has had a chance to store the starting room into global 0.
         for _ in 0..100_000u64 {
             match machine.step() {
-                StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart => break,
+                StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart | StepResult::Fault => break,
                 StepResult::NeedChar => { machine.supply_char(b'\n'); }
                 StepResult::SaveRequest => { machine.complete_save(false); }
                 StepResult::RestoreRequest => { machine.complete_restore_failure(); }

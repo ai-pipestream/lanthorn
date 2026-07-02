@@ -45,7 +45,7 @@ fn boot_to_first_read(data: Vec<u8>) -> Option<Machine> {
     for _ in 0..2_000_000u64 {
         match machine.step() {
             StepResult::NeedLine { .. } => return Some(machine),
-            StepResult::Quit | StepResult::Restart => return Some(machine),
+            StepResult::Quit | StepResult::Restart | StepResult::Fault => return Some(machine),
             StepResult::Continue => {}
             StepResult::NeedChar => machine.supply_char(b'\n'),
             StepResult::SaveRequest => machine.complete_save(false),
@@ -61,7 +61,7 @@ fn run_one_turn(machine: &mut Machine, input: &str) {
     machine.supply_line(input, 13);
     for _ in 0..2_000_000u64 {
         match machine.step() {
-            StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart => return,
+            StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart | StepResult::Fault => return,
             StepResult::Continue => {}
             StepResult::NeedChar => machine.supply_char(b'\n'),
             StepResult::SaveRequest => machine.complete_save(false),

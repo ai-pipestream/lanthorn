@@ -385,6 +385,9 @@ fn decode_stks(stks: &[u8]) -> Result<(Vec<Frame>, Vec<u16>), ZError> {
                 eval_base,
                 store_var,
                 arg_count,
+                // Quetzal's Stks chunk does not record the routine's entry
+                // address; restored frames report 0 (unknown).
+                func_addr: 0,
             });
         }
     }
@@ -504,6 +507,7 @@ mod tests {
             eval_base: 0,
             store_var: Some(0x10),
             arg_count: 2,
+            func_addr: 0,
         });
         m.state.eval_stack.push(0xAAAA);
         m.state.eval_stack.push(0xBBBB);
@@ -599,6 +603,7 @@ mod tests {
             eval_base: 0,
             store_var: None,       // discarding result
             arg_count: 1,
+            func_addr: 0,
         });
         m.state.eval_stack.push(0x1234); // outer frame's eval word
 
@@ -608,6 +613,7 @@ mod tests {
             eval_base: 1,
             store_var: Some(0x12),
             arg_count: 3,
+            func_addr: 0,
         });
         m.state.eval_stack.push(0x5678); // inner frame's eval word
         m.state.eval_stack.push(0x9ABC);

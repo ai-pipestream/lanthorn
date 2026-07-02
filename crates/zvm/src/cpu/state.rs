@@ -18,6 +18,8 @@ pub struct Frame {
     pub store_var: Option<u8>,
     /// Number of arguments passed to this routine.
     pub arg_count: u8,
+    /// Routine entry address of this frame (0 for base/interrupt pseudo-frames).
+    pub func_addr: u32,
 }
 
 /// Z-machine interpreter execution state.
@@ -194,6 +196,7 @@ pub fn call_routine(
         eval_base,
         store_var,
         arg_count: args.len().min(255) as u8,
+        func_addr: routine_addr,
     });
 
     state.pc = first_instruction;
@@ -236,6 +239,7 @@ mod tests {
             eval_base: 0,
             store_var: None,
             arg_count: 0,
+            func_addr: 0,
         });
         write_var(&mut st, &mut m, 0x02, 0xABCD); // local 2
         assert_eq!(read_var(&mut st, &m, 0x02), 0xABCD);
@@ -254,6 +258,7 @@ mod tests {
             eval_base: 0,
             store_var: None,
             arg_count: 0,
+            func_addr: 0,
         });
         write_var(&mut st, &mut m, 0x00, 0x0042);
         assert_eq!(read_var(&mut st, &m, 0x00), 0x0042);
@@ -319,6 +324,7 @@ mod tests {
             eval_base: 0,
             store_var: Some(0x10), // store into global 0
             arg_count: 0,
+            func_addr: 0,
         });
 
         // Push some eval stack entries for this frame
@@ -370,6 +376,7 @@ mod tests {
             eval_base: 0,
             store_var: None,
             arg_count: 0,
+            func_addr: 0,
         });
         write_var(&mut st, &mut m, 0x10, 0x0001); // global 0
         write_var(&mut st, &mut m, 0x11, 0x0002); // global 1

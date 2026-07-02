@@ -18,6 +18,24 @@ use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenS
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
+/// Best-effort mnemonic for a decoded instruction; hex fallback when unknown.
+/// Covers the memory/stack opcodes most likely to fault, plus common ones.
+fn opcode_name(count: OperandCount, opcode: u8) -> String {
+    let fallback = format!("op:{:?}/0x{:02x}", count, opcode);
+    let name = match (count, opcode) {
+        (OperandCount::Two, 0x0F) => "loadw",
+        (OperandCount::Two, 0x10) => "loadb",
+        (OperandCount::Two, 0x01) => "je",
+        (OperandCount::One, 0x0F) => "call_1n",
+        (OperandCount::Var, 0x01) => "storew",
+        (OperandCount::Var, 0x02) => "storeb",
+        (OperandCount::Var, 0x00) => "call",
+        (OperandCount::Var, 0x06) => "print_num",
+        _ => return fallback,
+    };
+    name.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -54,6 +72,8 @@ pub enum StepResult {
     SaveRequest,
     /// `restore` — host must read interpreter state from a file.
     RestoreRequest,
+    /// A runtime fault halted the machine. The host reads `take_fault_trace()`.
+    Fault,
 }
 
 /// State saved while waiting for player input (`read` / `read_char`).
@@ -149,6 +169,8 @@ pub struct Machine {
     /// Interpreter number to advertise in header byte 0x1E. `None` = auto (Frotz's
     /// rule: 6 for v6, else 1). `Some(n)` overrides. Applied at `init_caps`.
     pub interpreter_number: Option<u8>,
+    /// Set when `step()` returns `Fault`; the host drains it for display.
+    pub fault_trace: Option<crate::cpu::trace::StackTrace>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -198,6 +220,7 @@ impl Machine {
             honor_game_colours: false,
             sound_available: false,
             interpreter_number: None,
+            fault_trace: None,
         }
     }
 
@@ -256,12 +279,55 @@ impl Machine {
     /// jump offsets are computed relative to `state.pc` (= next_pc) too.
     pub fn step(&mut self) -> StepResult {
         let version = self.mem.version();
+        let instr_start_pc = self.state.pc;
         let instr = decode(&self.mem, self.state.pc, version);
+        let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
 
         // CRITICAL: advance PC before executing so call/branch targets are correct.
         self.state.pc = instr.next_pc;
 
-        self.execute(instr)
+        let result = self.execute(instr);
+
+        // A latched OOB access or stack underflow overrides the normal result.
+        if let Some((is_write, size, addr)) = self.mem.take_mem_fault() {
+            let kind = if is_write { "write".to_string() } else { format!("read{}", size as u32 * 8) };
+            let msg = format!("memory fault: {kind} @{addr:#010x}");
+            self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
+            return StepResult::Fault;
+        }
+        if let Some(msg) = self.state.fault.take() {
+            self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
+            return StepResult::Fault;
+        }
+        result
+    }
+
+    /// Take and clear the stack trace captured at the last fault.
+    pub fn take_fault_trace(&mut self) -> Option<crate::cpu::trace::StackTrace> {
+        self.fault_trace.take()
+    }
+
+    fn build_trace(&self, fault: String, fault_pc: u32, fault_op: String)
+        -> crate::cpu::trace::StackTrace
+    {
+        use crate::cpu::trace::{StackTrace, TraceFrame};
+        let st = &self.state;
+        let n = st.frames.len();
+        let mut frames = Vec::with_capacity(n);
+        // Innermost (last) frame first.
+        for i in (0..n).rev() {
+            let f = &st.frames[i];
+            let upper = st.frames.get(i + 1).map(|nf| nf.eval_base).unwrap_or(st.eval_stack.len());
+            let operands = st.eval_stack[f.eval_base..upper]
+                .iter().map(|&w| w as i64).collect();
+            frames.push(TraceFrame {
+                func_addr: f.func_addr,
+                return_pc: f.return_pc,
+                locals: f.locals.iter().map(|&w| w as i64).collect(),
+                operands,
+            });
+        }
+        StackTrace { fault, fault_pc, fault_op, width: 2, frames }
     }
 
     // -----------------------------------------------------------------------
@@ -5041,7 +5107,7 @@ pub(crate) mod tests {
         // Frame A: the routine that calls catch; its result lands in global 0.
         m.state.frames.push(crate::cpu::state::Frame {
             return_pc: 0x4242, locals: vec![], eval_base: 0,
-            store_var: Some(0x10), arg_count: 0,
+            store_var: Some(0x10), arg_count: 0, func_addr: 0,
         });
         // catch -> store depth in global 1.
         m.exec_0op(0x09, Some(0x11), None, None);
@@ -5051,11 +5117,11 @@ pub(crate) mod tests {
         // A calls deeper into B then C.
         m.state.frames.push(crate::cpu::state::Frame {
             return_pc: 0x0010, locals: vec![], eval_base: 0,
-            store_var: Some(0x12), arg_count: 0,
+            store_var: Some(0x12), arg_count: 0, func_addr: 0,
         });
         m.state.frames.push(crate::cpu::state::Frame {
             return_pc: 0x0020, locals: vec![], eval_base: 0,
-            store_var: Some(0x13), arg_count: 0,
+            store_var: Some(0x13), arg_count: 0, func_addr: 0,
         });
         assert_eq!(m.state.frames.len(), 3);
 
@@ -5521,5 +5587,55 @@ pub(crate) mod tests {
         run_print_char(&mut m, 0x18);
         run_print_char(&mut m, 0x82);
         assert_eq!(buf_output(&m), "??", "non-IBM-PC: graphics codes stay standard ZSCII ('?')");
+    }
+
+    // ── Task 3: StepResult::Fault + stack trace capture ──
+
+    #[test]
+    fn loadw_out_of_bounds_faults_with_trace() {
+        // loadw (2OP:0x0F), variable-form encoding with two Large operands:
+        // array=0xFFFF index=0xFFFF -> addr = 0xFFFF + 2*0xFFFF = 0x2FFFD,
+        // far past the 0x400-byte sample story's memory.
+        let mut buf = sample_story(5);
+        buf[0x10] = 0xCF; // variable form, bit5=0 -> 2OP, opcode=0x0F (loadw)
+        buf[0x11] = 0x0F; // type byte: large, large, omitted, omitted
+        buf[0x12] = 0xFF; buf[0x13] = 0xFF; // operand a (array) = 0xFFFF
+        buf[0x14] = 0xFF; buf[0x15] = 0xFF; // operand b (index) = 0xFFFF
+        buf[0x16] = 0x00; // store var 0x00 = push onto stack
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        // A non-empty call stack so the trace has at least one frame.
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0,
+            locals: vec![],
+            eval_base: 0,
+            store_var: None,
+            arg_count: 0,
+            func_addr: 0,
+        });
+
+        let start_pc = m.state.pc;
+        let r = m.step();
+        assert_eq!(r, StepResult::Fault);
+        let t = m.take_fault_trace().expect("fault trace present");
+        assert!(t.fault.starts_with("memory fault: read16 @"), "fault: {}", t.fault);
+        assert_eq!(t.fault_op, "loadw");
+        assert_eq!(t.fault_pc, start_pc, "fault_pc is the instruction start, not next_pc");
+        assert_eq!(t.width, 2);
+        assert!(!t.frames.is_empty());
+    }
+
+    #[test]
+    fn clean_quit_produces_no_fault_trace() {
+        let mut buf = sample_story(5);
+        buf[0x10] = 0xBA; // quit (0OP:0x0A short form)
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+
+        let r = m.step();
+        assert_eq!(r, StepResult::Quit);
+        assert!(m.take_fault_trace().is_none());
     }
 }
