@@ -1611,7 +1611,11 @@ impl Machine {
         if top > Self::MAX_MEMSIZE as u64 {
             return 0; // would exceed the heap ceiling
         }
-        let top = top as u32;
+        // Grow the map to fit the block, keeping ENDMEM a multiple of 256 (the
+        // spec invariant; see GLULX_NOTES §1). The alignment slack also lets
+        // Inform's memory-stream idiom write its result struct at buf+len, one
+        // word past the block, without faulting — as on other interpreters.
+        let top = (top as u32).next_multiple_of(256);
         if top > self.mem.mem_size() {
             self.mem.set_raw_size(top);
         }
@@ -3928,6 +3932,25 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert_eq!(m.mem.read32(0x100).unwrap(), 0);
+    }
+
+    #[test]
+    fn malloc_growth_keeps_memsize_256_aligned() {
+        use asm::Op::{C8, Mem16};
+        // ENDMEM (memsize) is a multiple of 256 (GLULX_NOTES §1). Heap growth
+        // must preserve that invariant, which also leaves slack above the block.
+        // Inform's memory-stream idiom relies on this: it opens a memory stream
+        // over a malloc'd buffer, then closes it with resultptr = buf + len,
+        // writing the 8-byte stream_result struct one word past the buffer end.
+        let mut body = asm::ins(0x178, &[C8(24), Mem16(0x0100)]); // malloc 24 → block @ 0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = run_program(body);
+        let block = m.mem.read32(0x100).unwrap();
+        assert_eq!(m.mem.mem_size() % 256, 0, "heap growth must keep ENDMEM 256-aligned");
+        assert!(
+            m.mem.write32(block + 24, 0xDEAD_BEEF).is_ok(),
+            "a write just past the block end must be in-range (alignment slack)"
+        );
     }
 
     #[test]

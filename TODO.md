@@ -5,6 +5,7 @@
 ### Near Term
 
 1. [ ] Test our save files with online z-machine and glulx for compatibility
+1. [ ] Crash stack-trace diagnostic: when a VM fault halts the machine (memory fault, bad opcode, stack under/overflow), emit a call-frame stack trace — each frame's function address + return PC — plus the faulting PC and opcode, instead of the current single one-line diagnostic. Surface in gvm-cli/zvm-cli stderr and the app. Would have made the Brain Guzzlers heap fault a glance instead of an investigation. Brainstorm scope (both VMs share the pattern; rides the fault path in step()). [tooling/dev; gvm+zvm fault path + host display]
 1. [ ] Allow the app story/map split to be resizable via mouse and /slash commands
 1. [ ] add list of color schemes (from Ghostty?) and create a popup dialog that allows user to scroll through each one (with real-time preview), save/cancel button
 1. [ ] Refactor main app code to be more modular and more efficient to maintain
