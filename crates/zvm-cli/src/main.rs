@@ -764,6 +764,7 @@ fn main() {
         }
     };
     machine.set_honor_game_colours(honor);
+    machine.set_sound_available(sound_enabled);
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut sound: Option<CliSound> = if sound_enabled {
