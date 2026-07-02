@@ -1563,6 +1563,12 @@ impl Machine {
         self.accel_params.get(&index).copied()
     }
 
+    /// Test-only: set an acceleration parameter directly, bypassing `accelparam`.
+    #[cfg(test)]
+    pub(crate) fn set_accel_param(&mut self, index: u32, value: u32) {
+        self.accel_params.insert(index, value);
+    }
+
     /// Enable/disable accelerated-function interception (debug escape hatch).
     pub fn set_acceleration(&mut self, on: bool) {
         self.acceleration = on;
