@@ -4,7 +4,6 @@
 
 ### Near Term
 
-1. [ ] On the story list page (when a directory is selected) support a side-panel that shows info about the highlighted story: e.g. story name, filename, size, and various meta data if available (file type, engine, story version, date, etc.) For blorb files list the file-structure
 1. [ ] Test our save files with online z-machine and glulx for compatibility
 1. [ ] Allow the app story/map split to be resizable via mouse and /slash commands
 1. [ ] add list of color schemes (from Ghostty?) and create a popup dialog that allows user to scroll through each one (with real-time preview), save/cancel button

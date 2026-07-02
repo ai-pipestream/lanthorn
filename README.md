@@ -164,7 +164,10 @@ existing **S**ave, available **H**int file). `i` or `Tab` slides in a themeable
 info side-panel for the highlighted story (format/version/release/serial,
 IFID, feature flags, bundled resources, and saves), animated per the
 `animation` config and closed by default each launch; it refuses to open on
-terminals too narrow for both list and panel. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
+terminals too narrow for both list and panel. The badge glyphs are configurable
+in `[symbols]` (`badge_zcode`/`badge_glulx`/`badge_blorb`/`badge_save`/`badge_hint`),
+and both the badge cluster and the panel are themeable via the `story_badge` and
+`story_info` (`:title`/`:label`/`:value`) style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
 navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell.
 
 ### Saves & persistence
