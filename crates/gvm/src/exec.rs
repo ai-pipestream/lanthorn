@@ -137,6 +137,8 @@ pub struct Machine {
     accel_funcs: std::collections::HashMap<u32, u32>,
     /// Acceleration parameter table: index → value (`accelparam`).
     accel_params: std::collections::HashMap<u32, u32>,
+    /// Total number of opcodes dispatched since the machine was built.
+    pub(crate) insn_count: u64,
     /// PRNG state (xorshift32); seeded by `setrandom`.
     rng: u32,
 
@@ -242,6 +244,7 @@ impl Machine {
             undo_stack: Vec::new(),
             accel_funcs: std::collections::HashMap::new(),
             accel_params: std::collections::HashMap::new(),
+            insn_count: 0,
             rng: Self::DEFAULT_SEED,
             cur_frame_len: 0,
             cur_localspos: 0,
@@ -407,6 +410,7 @@ impl Machine {
     /// Decode and execute one instruction. Grown task-by-task; `step()`/`run()`
     /// (the public loop with fault handling) wrap this in Task 6.
     pub(crate) fn step_once(&mut self) -> R<()> {
+        self.insn_count += 1;
         let opcode = self.decode_opcode()?;
         self.execute(opcode)
     }
