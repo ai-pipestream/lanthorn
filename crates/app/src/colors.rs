@@ -774,6 +774,10 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
         "background" => return Some(scheme.background),
         "foreground" => return Some(scheme.foreground),
         "default" => return Some(Color::Reset),
+        // Explicit "unset" sentinel written by `style::write_style_full` for a colour
+        // that is None. Resolves to no colour (patches nothing) so an unset field
+        // stays unset — distinct from "default"/"reset" (explicit terminal default).
+        "none" => return None,
         _ => {}
     }
 

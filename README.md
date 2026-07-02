@@ -258,6 +258,8 @@ list); the scroll position resets whenever the highlighted story changes.
   edit it, and `/reload` — it layers over `style.toml` for that game only
   (including its own statusbar / transcript rules). The watcher picks up the
   styles dir once it exists, so the very first file create may need one `/reload`.
+  A per-game field left at the terminal default now stays default on reload
+  instead of silently re-inheriting the global colour.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/a notched **picture-frame**). The map defaults to the picture-frame; the
   story pane defaults to a single-line border. The map's top border carries

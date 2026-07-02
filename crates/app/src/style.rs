@@ -1000,8 +1000,15 @@ pub fn personal_style_path(user_dir: &std::path::Path) -> std::path::PathBuf {
 /// because every ColorScheme constructor carries REVERSED/BOLD modifiers on the relevant fields.
 fn style_to_decl(s: &Style) -> Decl {
     Decl {
-        fg: s.fg.map(color_to_str),
-        bg: s.bg.map(color_to_str),
+        // Emit an explicit `"none"` sentinel for an UNSET colour instead of omitting
+        // the key. A self-contained style file (write_style_full) is merged OVER the
+        // global style.toml per-game; an omitted field would field-merge-inherit the
+        // global's non-default colour (the "freeze" bug), whereas the sentinel wins at
+        // merge. `"none"` resolves back to unset (parse_color_value returns None), so
+        // it patches nothing — preserving both self-containment and the compositional
+        // inheritance that a genuinely-unset fg/bg relies on (e.g. input:prompt).
+        fg: Some(s.fg.map_or_else(|| "none".to_string(), color_to_str)),
+        bg: Some(s.bg.map_or_else(|| "none".to_string(), color_to_str)),
         bold: modifier_flag(s.add_modifier, Modifier::BOLD),
         italic: modifier_flag(s.add_modifier, Modifier::ITALIC),
         underline: modifier_flag(s.add_modifier, Modifier::UNDERLINED),
@@ -2205,6 +2212,61 @@ box_style = "rounded"
         let d2 = doc2.colors.selectors.get("map_border").unwrap();
         assert_eq!(d2.glyph_top.as_deref(), Some("═"));
         assert_eq!(d2.glyph_tl.as_deref(), Some("╔"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_game_default_field_freezes_after_write_round_trip() {
+        // A per-game live look where `input:prompt` is at terminal default (fg unset,
+        // meaning "inherit the surrounding text colour"). The GLOBAL style paints
+        // input:prompt green. Saving the per-game look self-contained and reloading
+        // (global merged UNDER per-game) must FREEZE the per-game default: the prompt
+        // must NOT re-inherit the global green.
+        let dir = std::env::temp_dir().join(format!("bm-freeze-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pergame.toml");
+
+        let cs = crate::colors::ColorScheme::terminal_default(); // input_prompt.fg == None
+        assert_eq!(cs.input_prompt.fg, None, "precondition: default input:prompt fg is unset");
+        let set = crate::symbols::SymbolSet::default();
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let per_game = parse_style_toml(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let global = parse_style_toml("[colors]\n\"input:prompt\" = { fg = \"green\" }\n").unwrap();
+        let merged = merge(&global, &per_game);
+        let (cs2, _set2, _w) = resolve(&merged, &dir);
+
+        assert_eq!(
+            cs2.input_prompt.fg, None,
+            "per-game default (unset) input:prompt must freeze over the global green, not re-inherit it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_is_stable_and_back_compatible() {
+        // (a) A written style file re-parses, re-resolves, and RE-WRITES byte-identically
+        //     — the unset-field sentinel is stable across a second round trip.
+        let dir = std::env::temp_dir().join(format!("bm-stable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("a.toml");
+        let p2 = dir.join("b.toml");
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let set = crate::symbols::SymbolSet::default();
+        write_style_full(&p1, &cs, &set).unwrap();
+        let text1 = std::fs::read_to_string(&p1).unwrap();
+        let (cs_rt, set_rt, _w) = resolve(&parse_style_toml(&text1).unwrap(), &dir);
+        write_style_full(&p2, &cs_rt, &set_rt).unwrap();
+        let text2 = std::fs::read_to_string(&p2).unwrap();
+        assert_eq!(text1, text2, "write -> read -> write must be byte-stable");
+
+        // (b) An existing on-disk file in the OLD format (a color field omitted, no
+        //     sentinel) still parses and leaves that field unset — back-compatible.
+        let legacy = "[colors]\n\"input:prompt\" = { bold = true }\n";
+        let doc = parse_style_toml(legacy).unwrap();
+        assert_eq!(doc.colors.selectors["input:prompt"].fg, None, "legacy omitted fg stays unset");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
