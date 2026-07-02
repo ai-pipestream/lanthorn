@@ -4,7 +4,50 @@
 //! Titles are resolved cheaply (no game is run): the known-title table keyed by
 //! the IFID, falling back to the filename stem.
 
+// Consumed by Task 5 (row badges); unused for now.
+#[allow(unused_imports)]
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+/// The VM engine a story runs on (version-agnostic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Engine {
+    ZCode,
+    Glulx,
+}
+
+/// One blorb resource-index entry, string-rendered for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkInfo {
+    pub usage: String,      // "Exec" | "Pict" | "Snd " | "Data" …
+    pub number: u32,
+    pub chunk_type: String, // "ZCOD" | "GLUL" | "PNG " | "OGGV" …
+    pub len: usize,
+}
+
+/// Best-effort static feature signals. Glulx-unknowable features are `None`/false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Features {
+    pub sound: bool,
+    pub graphics: bool,
+    pub colour: Option<bool>, // Z: Some(bit6); Glulx: None (runtime Glk → omit)
+    pub hints: bool,          // folded in from StoryAux when the aux resolves
+}
+
+/// Eager per-story metadata, derived from bytes `scan_stories` already reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoryMeta {
+    pub size_bytes: u64,
+    pub modified: Option<String>, // "YYYY-MM-DD"
+    pub engine: Engine,
+    pub format: String,           // "Z-code" | "Glulx" | "Blorb (Z-code)" | "Blorb (Glulx)"
+    pub version: Option<String>,  // Z: "3"; Glulx: "3.1.2"
+    pub serial: Option<String>,   // Z only
+    pub release: Option<u16>,     // Z only
+    pub ifid: String,
+    pub features: Features,
+    pub self_blorb: Option<Vec<ChunkInfo>>, // Some when the story file itself is a blorb
+}
 
 /// One selectable story in the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +57,7 @@ pub struct StoryEntry {
     pub title: String,
     /// The bare filename (e.g. `zork1.z5`), shown beside the title.
     pub filename: String,
+    pub meta: StoryMeta,
 }
 
 /// Candidate story-file extensions (matched case-insensitively). `.zblorb` /
@@ -28,6 +72,110 @@ fn has_story_ext(path: &Path) -> bool {
         .and_then(|e| e.to_str())
         .map(|e| STORY_EXTS.contains(&e.to_ascii_lowercase().as_str()))
         .unwrap_or(false)
+}
+
+/// True for blorb-container extensions (case-insensitive).
+fn is_blorb_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "zblorb" | "blorb" | "gblorb" | "blb"))
+        .unwrap_or(false)
+}
+
+/// Format a `SystemTime` mtime as "YYYY-MM-DD" (UTC, civil-date arithmetic; no
+/// chrono dependency). Returns None if the time is before the Unix epoch.
+fn format_mtime_ymd(t: std::time::SystemTime) -> Option<String> {
+    let secs = t.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let days = secs.div_euclid(86_400);
+    // Civil-from-days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    Some(format!("{y:04}-{m:02}-{d:02}"))
+}
+
+/// Z-machine version byte at header offset 0x00.
+fn z_version(exec: &[u8]) -> Option<u8> {
+    exec.first().copied()
+}
+
+/// Z-machine release: big-endian word at header offset 0x02.
+fn z_release(exec: &[u8]) -> Option<u16> {
+    match (exec.get(0x02), exec.get(0x03)) {
+        (Some(&h), Some(&l)) => Some(u16::from_be_bytes([h, l])),
+        _ => None,
+    }
+}
+
+/// Z-machine serial: 6 ASCII bytes at header offset 0x12..0x18.
+fn z_serial(exec: &[u8]) -> Option<String> {
+    let s = exec.get(0x12..0x18)?;
+    Some(String::from_utf8_lossy(s).into_owned())
+}
+
+/// Z-machine Flags2: big-endian word at header offset 0x10.
+/// bit 3 (0x0008)=graphics, bit 6 (0x0040)=colours, bit 7 (0x0080)=sound.
+fn z_flags2(exec: &[u8]) -> u16 {
+    match (exec.get(0x10), exec.get(0x11)) {
+        (Some(&h), Some(&l)) => u16::from_be_bytes([h, l]),
+        _ => 0,
+    }
+}
+
+/// Glulx version: 16-bit major at 0x04, minor at 0x06, subminor at 0x07 →
+/// "major.minor.subminor".
+fn glulx_version(exec: &[u8]) -> Option<String> {
+    let major = u16::from_be_bytes([*exec.get(0x04)?, *exec.get(0x05)?]);
+    let minor = *exec.get(0x06)?;
+    let subminor = *exec.get(0x07)?;
+    Some(format!("{major}.{minor}.{subminor}"))
+}
+
+/// Convert a parsed blorb's resource index into displayable `ChunkInfo`.
+pub fn chunks_of(b: &blorb::Blorb) -> Vec<ChunkInfo> {
+    b.resources()
+        .iter()
+        .map(|r| ChunkInfo {
+            usage: String::from_utf8_lossy(&r.usage).into_owned(),
+            number: r.number,
+            chunk_type: String::from_utf8_lossy(&r.chunk_type).into_owned(),
+            len: r.len,
+        })
+        .collect()
+}
+
+/// Eager `Features` for a Z-code exec image, folding in self-blorb resources.
+fn z_features(exec: &[u8], self_blorb: Option<&[ChunkInfo]>) -> Features {
+    let f2 = z_flags2(exec);
+    let mut sound = f2 & 0x0080 != 0;
+    let mut graphics = f2 & 0x0008 != 0;
+    if let Some(chunks) = self_blorb {
+        if chunks.iter().any(|c| c.usage == "Snd ") {
+            sound = true;
+        }
+        if chunks.iter().any(|c| c.usage == "Pict") {
+            graphics = true;
+        }
+    }
+    Features { sound, graphics, colour: Some(f2 & 0x0040 != 0), hints: false }
+}
+
+/// Eager `Features` for a Glulx story — colour is runtime Glk (None); sound and
+/// graphics come from a self-blorb only.
+fn glulx_features(self_blorb: Option<&[ChunkInfo]>) -> Features {
+    let mut f = Features { sound: false, graphics: false, colour: None, hints: false };
+    if let Some(chunks) = self_blorb {
+        f.sound = chunks.iter().any(|c| c.usage == "Snd ");
+        f.graphics = chunks.iter().any(|c| c.usage == "Pict");
+    }
+    f
 }
 
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
@@ -72,7 +220,65 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
                     .unwrap_or(&filename)
                     .to_string()
             });
-        out.push(StoryEntry { path, title, filename });
+
+        // fs metadata: size + mtime → "YYYY-MM-DD".
+        let fs_meta = std::fs::metadata(&path).ok();
+        let size_bytes = fs_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = fs_meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(format_mtime_ymd);
+
+        // Self-blorb chunks: only blorb-container files carry a resource index,
+        // and extraction (`load_story`) discards it — re-read the raw file for
+        // those extensions only, so plain .z* files stay single-read.
+        let self_blorb = if is_blorb_ext(&path) {
+            std::fs::read(&path).ok().and_then(|raw| {
+                if blorb::Blorb::is_blorb(&raw) {
+                    blorb::Blorb::parse(raw).ok().map(|b| chunks_of(&b))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        let engine = match &loaded {
+            crate::hints::LoadedStory::ZCode(_) => Engine::ZCode,
+            crate::hints::LoadedStory::Glulx(_) => Engine::Glulx,
+        };
+        let is_container = self_blorb.is_some();
+        let (version, serial, release, features, format) = match engine {
+            Engine::ZCode => {
+                let version = z_version(&bytes).map(|v| v.to_string());
+                let serial = z_serial(&bytes);
+                let release = z_release(&bytes);
+                let features = z_features(&bytes, self_blorb.as_deref());
+                let format = if is_container { "Blorb (Z-code)" } else { "Z-code" };
+                (version, serial, release, features, format.to_string())
+            }
+            Engine::Glulx => {
+                let version = glulx_version(&bytes);
+                let features = glulx_features(self_blorb.as_deref());
+                let format = if is_container { "Blorb (Glulx)" } else { "Glulx" };
+                (version, None, None, features, format.to_string())
+            }
+        };
+
+        let meta = StoryMeta {
+            size_bytes,
+            modified,
+            engine,
+            format,
+            version,
+            serial,
+            release,
+            ifid,
+            features,
+            self_blorb,
+        };
+        out.push(StoryEntry { path, title, filename, meta });
     }
     out.sort_by(|a, b| {
         a.title
@@ -151,6 +357,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let titles: Vec<&str> = stories.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["apple", "zebra"]);
+    }
+
+    #[test]
+    fn z_header_helpers_parse_version_release_serial_flags() {
+        let mut b = minimal_v3_story();
+        b[0x00] = 3;                       // version
+        b[0x02] = 0x00; b[0x03] = 0x58;    // release 88
+        b[0x12..0x18].copy_from_slice(b"840726");
+        b[0x10] = 0x00; b[0x11] = 0x08 | 0x40 | 0x80; // flags2: graphics|colour|sound
+
+        assert_eq!(z_version(&b), Some(3));
+        assert_eq!(z_release(&b), Some(88));
+        assert_eq!(z_serial(&b).as_deref(), Some("840726"));
+        let f2 = z_flags2(&b);
+        assert!(f2 & 0x0008 != 0, "graphics bit");
+        assert!(f2 & 0x0040 != 0, "colour bit");
+        assert!(f2 & 0x0080 != 0, "sound bit");
+    }
+
+    #[test]
+    fn glulx_version_formats_major_minor_subminor() {
+        let mut b = vec![0u8; 0x40];
+        b[0x00..0x04].copy_from_slice(b"Glul");
+        b[0x04] = 0x00; b[0x05] = 0x03;    // major = 3
+        b[0x06] = 0x01;                    // minor = 1
+        b[0x07] = 0x02;                    // subminor = 2
+        assert_eq!(glulx_version(&b).as_deref(), Some("3.1.2"));
+    }
+
+    #[test]
+    fn scan_populates_story_meta_for_v3() {
+        let dir = temp_dir("meta");
+        let mut b = minimal_v3_story();
+        b[0x02] = 0x00; b[0x03] = 0x58;                 // release 88
+        b[0x12..0x18].copy_from_slice(b"840726");
+        b[0x10] = 0x00; b[0x11] = 0x40;                 // colour bit set
+        std::fs::write(dir.join("game.z3"), &b).unwrap();
+
+        let stories = scan_stories(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1);
+        let m = &stories[0].meta;
+        assert_eq!(m.engine, Engine::ZCode);
+        assert_eq!(m.format, "Z-code");
+        assert_eq!(m.version.as_deref(), Some("3"));
+        assert_eq!(m.release, Some(88));
+        assert_eq!(m.serial.as_deref(), Some("840726"));
+        assert_eq!(m.features.colour, Some(true));
+        assert!(m.size_bytes > 0);
+        assert!(m.self_blorb.is_none());
     }
 }
 
