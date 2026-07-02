@@ -21,8 +21,7 @@ use crate::text::decode::{decode_string, zscii_to_char};
 /// Best-effort mnemonic for a decoded instruction; hex fallback when unknown.
 /// Covers the memory/stack opcodes most likely to fault, plus common ones.
 fn opcode_name(count: OperandCount, opcode: u8) -> String {
-    let fallback = format!("op:{:?}/0x{:02x}", count, opcode);
-    let name = match (count, opcode) {
+    let name = match (count.clone(), opcode) {
         (OperandCount::Two, 0x0F) => "loadw",
         (OperandCount::Two, 0x10) => "loadb",
         (OperandCount::Two, 0x01) => "je",
@@ -31,7 +30,7 @@ fn opcode_name(count: OperandCount, opcode: u8) -> String {
         (OperandCount::Var, 0x02) => "storeb",
         (OperandCount::Var, 0x00) => "call",
         (OperandCount::Var, 0x06) => "print_num",
-        _ => return fallback,
+        _ => return format!("op:{:?}/0x{:02x}", count, opcode),
     };
     name.to_string()
 }
@@ -289,13 +288,17 @@ impl Machine {
         let result = self.execute(instr);
 
         // A latched OOB access or stack underflow overrides the normal result.
-        if let Some((is_write, size, addr)) = self.mem.take_mem_fault() {
+        // Drain BOTH latches unconditionally first so a single instruction that
+        // fires both never leaks the undrained one into the next step().
+        let mem_fault = self.mem.take_mem_fault();
+        let state_fault = self.state.fault.take();
+        if let Some((is_write, size, addr)) = mem_fault {
             let kind = if is_write { "write".to_string() } else { format!("read{}", size as u32 * 8) };
             let msg = format!("memory fault: {kind} @{addr:#010x}");
             self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
             return StepResult::Fault;
         }
-        if let Some(msg) = self.state.fault.take() {
+        if let Some(msg) = state_fault {
             self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
             return StepResult::Fault;
         }
@@ -318,7 +321,13 @@ impl Machine {
         for i in (0..n).rev() {
             let f = &st.frames[i];
             let upper = st.frames.get(i + 1).map(|nf| nf.eval_base).unwrap_or(st.eval_stack.len());
-            let operands = st.eval_stack[f.eval_base..upper]
+            // Defensive clamp: a corrupt stack must never panic a trace builder
+            // that exists to report a fault. Identical to the unclamped slice
+            // under the normal (valid-invariant) case.
+            let lo = f.eval_base.min(st.eval_stack.len());
+            let hi = upper.min(st.eval_stack.len());
+            let hi = hi.max(lo);
+            let operands = st.eval_stack[lo..hi]
                 .iter().map(|&w| w as i64).collect();
             frames.push(TraceFrame {
                 func_addr: f.func_addr,
@@ -5624,6 +5633,39 @@ pub(crate) mod tests {
         assert_eq!(t.fault_pc, start_pc, "fault_pc is the instruction start, not next_pc");
         assert_eq!(t.width, 2);
         assert!(!t.frames.is_empty());
+    }
+
+    #[test]
+    fn mem_fault_drains_state_fault_latch_too() {
+        // A single instruction that fires BOTH latches in one step():
+        // operand a is a Variable reference to local var 2, resolved with an
+        // empty call-frame stack — read_var's 0x01..=0x0F arm sets
+        // state.fault ("stack underflow") and yields 0 as the operand value.
+        // operand b is the Large constant 0xFFFF, so addr = 0 + 2*0xFFFF =
+        // 0x1FFFE, far past the 0x400-byte sample story — read_word latches
+        // mem.mem_fault too. Under the old early-return code, the mem-fault
+        // branch returns before draining state.fault, leaking "stack
+        // underflow" into the NEXT step() and misattributing it there.
+        let mut buf = sample_story(5);
+        buf[0x10] = 0xCF; // variable form, bit5=0 -> 2OP, opcode=0x0F (loadw)
+        buf[0x11] = 0x8F; // types: variable, large, omitted, omitted
+        buf[0x12] = 0x02; // operand a: Variable ref to local var 2
+        buf[0x13] = 0xFF; buf[0x14] = 0xFF; // operand b (large const) = 0xFFFF
+        buf[0x15] = 0x00; // store var 0x00 = push onto stack
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        // Deliberately no call frame pushed, so the Variable operand resolves
+        // through the frames-empty arm of read_var and sets state.fault.
+
+        let r = m.step();
+        assert_eq!(r, StepResult::Fault);
+        let t = m.take_fault_trace().expect("fault trace present");
+        // Mem fault takes precedence in the reported trace.
+        assert!(t.fault.starts_with("memory fault:"), "fault: {}", t.fault);
+        // But the state-fault latch must ALWAYS be drained, or it leaks into
+        // the next step() and misattributes a fault to a later instruction.
+        assert!(m.state.fault.is_none(), "state.fault leaked past step()");
     }
 
     #[test]
