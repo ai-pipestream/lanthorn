@@ -3462,6 +3462,127 @@ mod tests {
         assert!(!m.halted); // returned into start, not halted
     }
 
+    // ── Task 5 (accel): differential native-vs-interpreted Z__Region ──────────
+    //
+    // Hand-transcribes algorithms.md §1's Z__Region into Glulx bytecode (a
+    // "veneer"), runs it *interpreted* (acceleration off), and checks it agrees
+    // with `accel_dispatch(1, ..)` (the native path) for the same inputs. This
+    // is the differential harness from spec Task 5: best-effort, Z__Region only
+    // (the property functions' veneers are far more involved and are left to
+    // Task 8's full-story on/off equivalence, the primary anti-divergence
+    // guarantee).
+    //
+    // Veneer control flow (local0 = addr, local1(byte) = tb = mem[addr]):
+    //   if addr < 36            -> return 0   (branch-offset-0 shortcut)
+    //   if addr >= endmem       -> return 0   (branch-offset-0 shortcut)
+    //   tb = aloadb(addr, 0)
+    //   if tb < 0xE0 goto L1 else return 3
+    //   L1: if tb < 0xC0 goto L2 else return 2
+    //   L2: if tb < 0x70 goto RET0
+    //   if tb > 0x7F goto RET0
+    //   if addr < ramstart goto RET0
+    //   return 1
+    //   RET0: return 0
+    //
+    // ramstart/endmem are read live from the header (Mem32(0x08)/Mem32(0x10))
+    // rather than hardcoded, so the veneer tracks whatever image it runs in.
+
+    /// The Z__Region veneer body. All conditional branches use a fixed-width
+    /// `C16` offset operand, so each branch instruction's byte length doesn't
+    /// depend on the (forward-only) offset value it carries — lengths of the
+    /// pieces already emitted are enough to compute every jump target.
+    fn z_region_veneer_body() -> Vec<u8> {
+        use asm::Op::{C8, C16, C32, Local8, Mem32, Zero};
+
+        let addr = Local8(0);
+        let tb = Local8(4);
+
+        let guard_lt36 = asm::ins(0x2A, &[addr, C32(36), Zero]); // jltu addr,36 -> return 0
+        let guard_endmem = asm::ins(0x2B, &[addr, Mem32(0x10), Zero]); // jgeu addr,endmem -> return 0
+        let load_tb = asm::ins(0x4A, &[addr, C8(0), tb]); // aloadb: tb = mem[addr]
+        let ret3 = asm::ins(0x31, &[C8(3)]);
+        let ret2 = asm::ins(0x31, &[C8(2)]);
+        let ret1 = asm::ins(0x31, &[C8(1)]);
+        let ret0 = asm::ins(0x31, &[Zero]);
+
+        // Every branch below shares this shape (Local8 + 4-byte constant/mem +
+        // C16 offset), so they're all the same length.
+        let branch_len = asm::ins(0x2A, &[addr, C32(0), C16(0)]).len() as i16;
+
+        let off_skip_ret3 = ret3.len() as i16 + 2; // jltu tb,0xE0 -> just past ret3
+        let off_skip_ret2 = ret2.len() as i16 + 2; // jltu tb,0xC0 -> just past ret2
+        let off_to_ret0_from_g = ret1.len() as i16 + 2; // jltu addr,ramstart -> ret0
+        let off_to_ret0_from_f = branch_len + off_to_ret0_from_g; // jgtu tb,0x7F -> ret0 (over G)
+        let off_to_ret0_from_e = branch_len + off_to_ret0_from_f; // jltu tb,0x70 -> ret0 (over F,G)
+
+        let branch_e = asm::ins(0x2A, &[tb, C32(0x70), C16(off_to_ret0_from_e)]);
+        let branch_f = asm::ins(0x2C, &[tb, C32(0x7F), C16(off_to_ret0_from_f)]);
+        let branch_g = asm::ins(0x2A, &[addr, Mem32(0x08), C16(off_to_ret0_from_g)]); // ramstart
+
+        let mut body = Vec::new();
+        body.extend(guard_lt36);
+        body.extend(guard_endmem);
+        body.extend(load_tb);
+        body.extend(asm::ins(0x2A, &[tb, C32(0xE0), C16(off_skip_ret3)])); // tb<0xE0 -> skip ret3
+        body.extend(ret3);
+        body.extend(asm::ins(0x2A, &[tb, C32(0xC0), C16(off_skip_ret2)])); // tb<0xC0 -> skip ret2
+        body.extend(ret2);
+        body.extend(branch_e);
+        body.extend(branch_f);
+        body.extend(branch_g);
+        body.extend(ret1);
+        body.extend(ret0);
+        body
+    }
+
+    /// Builds a machine whose function `FADDR` is the Z__Region veneer
+    /// (locals: local0 = addr (word), local1 = tb (byte)), plus a trivial
+    /// `start` function. Returns the machine, `FADDR`, and object/routine/
+    /// string RAM addresses (type bytes 0x70/0xC0/0xE0) at `ramstart..`.
+    fn z_region_differential_machine() -> (Machine, u32, u32, u32, u32) {
+        let veneer = asm::func(0xC1, &[(4, 1), (1, 1)], &z_region_veneer_body());
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[veneer, start], 1, 0x100);
+        let faddr = built.addrs[0];
+        let mut m = machine(built);
+        assert_eq!(m.mem.ramstart(), 0x100, "test assumes RAMSTART == 0x100");
+
+        let obj_addr = m.mem.ramstart();
+        let routine_addr = obj_addr + 4;
+        let string_addr = obj_addr + 8;
+        m.mem.write8(obj_addr, 0x70).unwrap();
+        m.mem.write8(routine_addr, 0xC0).unwrap();
+        m.mem.write8(string_addr, 0xE0).unwrap();
+
+        (m, faddr, obj_addr, routine_addr, string_addr)
+    }
+
+    #[test]
+    fn differential_z_region_matches_interpreter() {
+        let (mut m, faddr, obj_addr, routine_addr, string_addr) = z_region_differential_machine();
+        let endmem = m.mem.endmem();
+        let inputs = [0u32, 35, 36, obj_addr, routine_addr, string_addr, endmem];
+
+        for &addr in &inputs {
+            m.set_acceleration(true);
+            let native = m.accel_dispatch(1, &[addr]).unwrap();
+
+            m.set_acceleration(false);
+            let entry_fp = m.fp;
+            m.call_function(faddr, &[addr], Dest::Push).unwrap();
+            let mut steps = 0;
+            while m.fp != entry_fp {
+                m.step_once().unwrap();
+                steps += 1;
+                assert!(steps < 100, "veneer did not return for addr {addr:#x}");
+            }
+            assert!(!m.halted);
+            let interp = m.pop32().unwrap();
+
+            assert_eq!(native, interp, "Z__Region diverged at {addr:#x}: native={native} interp={interp}");
+        }
+    }
+
     // ── Task 6: output, iosys, @glk, run loop ─────────────────────────────────
 
     /// All text the program printed: the migrated `TestBackend`'s accumulated
