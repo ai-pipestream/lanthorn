@@ -1178,7 +1178,18 @@ fn draw_story_picker(
         let cluster_w = cluster_str.chars().count() as u16;
         if cluster_w + 2 < row_w {
             let bx = area.left() + row_w - cluster_w - 1;
-            draw_str_clipped(buf, bx, y, &cluster_str, cs.story_badge, row_rect);
+            // On the selection bar the plain badge fg (e.g. green) is low-contrast
+            // against the highlight, so reverse it into a block: the badge colour
+            // becomes the background and the selection bar's text colour the glyph
+            // — readable and still distinct. Unselected rows keep plain letters.
+            let badge_style = if sel {
+                Style::new()
+                    .fg(cs.dialog_button_active.fg.unwrap_or(Color::Reset))
+                    .bg(cs.story_badge.fg.unwrap_or(Color::Reset))
+            } else {
+                cs.story_badge
+            };
+            draw_str_clipped(buf, bx, y, &cluster_str, badge_style, row_rect);
         }
     }
 
