@@ -143,6 +143,11 @@ pub struct Machine {
     pub(crate) insn_count: u64,
     /// PRNG state (xorshift32); seeded by `setrandom`.
     rng: u32,
+    /// PC at the start of the instruction currently executing (captured before
+    /// operand reads); used as the fault site if this instruction faults.
+    instr_start_pc: u32,
+    /// Stack trace captured when a fault converted to Quit. Host drains it.
+    pub fault_trace: Option<crate::trace::StackTrace>,
 
     // Cached layout of the current frame (recomputed whenever `fp` changes).
     cur_frame_len: u32,
@@ -153,6 +158,21 @@ pub struct Machine {
 
 fn align_up(v: u32, to: u32) -> u32 {
     (v + to - 1) / to * to
+}
+
+/// Best-effort Glulx opcode mnemonic; hex fallback when unknown.
+fn opcode_name(opcode: u32) -> String {
+    let name = match opcode {
+        0x30 => "call",
+        0x31 => "return",
+        0x40 => "copy",
+        0x48 => "aload",
+        0x4C => "astore",
+        0x70 => "streamchar",
+        0x160..=0x163 => "callf",
+        _ => return format!("0x{opcode:x}"),
+    };
+    name.to_string()
 }
 
 /// `glk_char_to_lower`: Latin-1 lowercasing (ASCII A–Z and the Latin-1 uppercase
@@ -249,6 +269,8 @@ impl Machine {
             acceleration: true,
             insn_count: 0,
             rng: Self::DEFAULT_SEED,
+            instr_start_pc: 0,
+            fault_trace: None,
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
@@ -414,6 +436,7 @@ impl Machine {
     /// (the public loop with fault handling) wrap this in Task 6.
     pub(crate) fn step_once(&mut self) -> R<()> {
         self.insn_count += 1;
+        self.instr_start_pc = self.pc;
         let opcode = self.decode_opcode()?;
         self.execute(opcode)
     }
@@ -2914,10 +2937,111 @@ impl Machine {
             // A glk_select this step may have suspended for input.
             Ok(()) => self.suspend_result().unwrap_or(StepResult::Continue),
             Err(msg) => {
+                self.fault_trace = Some(self.build_trace(msg.clone()));
                 self.diagnostics.push(msg);
                 self.halted = true;
                 StepResult::Quit
             }
+        }
+    }
+
+    /// Drain the trace captured by the last fault, if any.
+    pub fn take_fault_trace(&mut self) -> Option<crate::trace::StackTrace> {
+        self.fault_trace.take()
+    }
+
+    /// Build a [`crate::trace::StackTrace`] by walking the frame-pointer chain
+    /// from the current (innermost) frame down to the start frame (`fp == 0`).
+    /// Read-only: never mutates the machine.
+    fn build_trace(&self, fault: String) -> crate::trace::StackTrace {
+        use crate::trace::{StackTrace, TraceFrame};
+        let fault_op = self.opcode_name_at(self.instr_start_pc);
+        let mut frames = Vec::new();
+        let mut f = self.fp; // innermost frame offset
+        let mut inner_bottom = self.sp; // top of innermost value region
+        loop {
+            let frame_len = self.st_r32(f) as usize;
+            let localspos = self.st_r32(f + 4) as usize;
+            // Walk the locals-format list at f+8 to read each local value.
+            let locals = self.read_frame_locals(f, localspos);
+            // Value/operand region: above this frame's frame_len, up to inner_bottom.
+            let val_lo = f + frame_len;
+            let operands = self.read_stack_words(val_lo, inner_bottom);
+            let (caller_fp, this_ret_pc) = if f == 0 {
+                (0usize, 0u32) // start frame: no stub beneath it
+            } else {
+                let caller_fp = self.st_r32(f - 4) as usize;
+                let ret_pc = self.st_r32(f - 8);
+                (caller_fp, ret_pc)
+            };
+            frames.push(TraceFrame {
+                func_addr: 0, // Glulx does not store per-frame entry addresses
+                return_pc: this_ret_pc,
+                locals,
+                operands,
+            });
+            if f == 0 {
+                break;
+            }
+            inner_bottom = f.saturating_sub(16); // stub sits at [f-16, f)
+            f = caller_fp;
+            if frames.len() > 256 {
+                break; // guard against a corrupt chain
+            }
+        }
+        StackTrace { fault, fault_pc: self.instr_start_pc, fault_op, width: 4, frames }
+    }
+
+    /// Read a frame's local values by walking its (type,count) format list.
+    fn read_frame_locals(&self, f: usize, localspos: usize) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut fmt = f + 8;
+        let mut off = 0usize;
+        loop {
+            let ty = self.stack_byte(fmt);
+            let count = self.stack_byte(fmt + 1);
+            if ty == 0 && count == 0 {
+                break;
+            }
+            let size = ty as usize; // Glulx local sizes: 1, 2, or 4 bytes
+            for _ in 0..count {
+                off = align_up(off as u32, size as u32) as usize;
+                let base = f + localspos + off;
+                let v = match size {
+                    1 => self.stack_byte(base) as i64,
+                    2 => (((self.stack_byte(base) as u32) << 8) | self.stack_byte(base + 1) as u32) as i64,
+                    _ => self.st_r32(base) as i64,
+                };
+                out.push(v);
+                off += size.max(1);
+            }
+            fmt += 2;
+            if out.len() > 256 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn read_stack_words(&self, lo: usize, hi: usize) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut a = lo;
+        while a + 4 <= hi {
+            out.push(self.st_r32(a) as i64);
+            a += 4;
+        }
+        out
+    }
+
+    fn stack_byte(&self, off: usize) -> u8 {
+        self.stack.get(off).copied().unwrap_or(0)
+    }
+
+    fn opcode_name_at(&self, pc: u32) -> String {
+        // Best-effort: decode just the opcode number at pc for a name.
+        match self.mem.read8(pc) {
+            Some(b) => opcode_name(b),
+            None => "<unknown>".to_string(),
         }
     }
 
@@ -2979,6 +3103,44 @@ mod tests {
         let m = machine(built);
         assert_eq!(m.mem.ramstart(), 0x100, "test assumes RAMSTART == 0x100");
         m
+    }
+
+    #[test]
+    fn oob_load_captures_fault_trace() {
+        use asm::Op::{Mem32, Stack};
+        // copy from a wildly OOB main-memory address -> push (faults on the load).
+        let body = asm::ins(0x40, &[Mem32(0x7FFF_FFFF), Stack]);
+        let mut m = machine_with_body(&[], body);
+        let mut steps = 0;
+        loop {
+            match m.step() {
+                StepResult::Continue => {
+                    steps += 1;
+                    assert!(steps < 1000, "runaway");
+                }
+                StepResult::Quit => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        let t = m.take_fault_trace().expect("fault trace present");
+        assert!(t.fault.starts_with("memory fault: "), "fault: {}", t.fault);
+        assert_eq!(t.width, 4);
+        assert!(!t.frames.is_empty());
+        assert_eq!(t.frames[0].func_addr, 0, "gvm func_addr is always 0 (unknown)");
+    }
+
+    #[test]
+    fn clean_quit_has_no_fault_trace() {
+        let body = asm::ins(0x120, &[]); // quit
+        let mut m = machine_with_body(&[], body);
+        loop {
+            match m.step() {
+                StepResult::Quit => break,
+                StepResult::Continue => {}
+                o => panic!("{o:?}"),
+            }
+        }
+        assert!(m.take_fault_trace().is_none());
     }
 
     #[test]

@@ -16,8 +16,10 @@ pub mod exec;
 pub mod glk;
 pub mod header;
 pub mod memory;
+pub mod trace;
 
 pub use error::GError;
 pub use exec::{Machine, StepResult};
 pub use glk::{GlkBackend, GlkStyle, Model as GlkModel, TestBackend, WinType};
 pub use memory::{Memory, WriteFault};
+pub use trace::{StackTrace, TraceFrame};
