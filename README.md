@@ -91,6 +91,12 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   `zvm-cli -I N` / `--interpreter N` (e.g. `-I 6` to select the IBM PC path,
   which draws Beyond Zork's map box and cursor arrows as CP437 character
   graphics instead of Font 3).
+- **Glk line-input terminators** — the Glulx engine honors
+  `glk_set_terminators_line_event`: a game can register special keys (Escape and
+  the function keys `Func1`–`Func12`) that end line input, and the terminating
+  keycode is reported back in the line event's second value (`val2`; `0` for a
+  normal Enter). `glk_gestalt(gestalt_LineTerminators/LineTerminatorKey)` answers
+  truthfully so games can probe support.
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned

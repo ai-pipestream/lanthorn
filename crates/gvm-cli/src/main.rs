@@ -75,11 +75,13 @@ fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine
 
 // ── input helpers ─────────────────────────────────────────────────────────────
 
-/// Read a cooked line of input from stdin (the terminal echoes it).
-fn read_line_stdin() -> String {
+/// Read a cooked line of input from stdin (the terminal echoes it). The second
+/// value is the Glk line terminator keycode; cooked stdin only ever completes a
+/// line with Enter, so it is always 0 (normal termination).
+fn read_line_stdin() -> (String, u32) {
     let mut line = String::new();
     let _ = io::stdin().lock().read_line(&mut line);
-    line
+    (line, 0)
 }
 
 /// Read one keypress. On a TTY: enter raw mode, read a crossterm `Event::Key`,
@@ -121,7 +123,7 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
 fn drive(
     machine: &mut Machine,
     mut before_input: impl FnMut(&mut Machine),
-    mut read_line: impl FnMut() -> String,
+    mut read_line: impl FnMut() -> (String, u32),
     mut read_char: impl FnMut() -> u32,
 ) {
     loop {
@@ -130,8 +132,8 @@ fn drive(
             StepResult::Quit => break,
             StepResult::NeedLine { .. } => {
                 before_input(machine);
-                let line = read_line();
-                machine.supply_line(line.trim_end_matches(['\n', '\r']));
+                let (line, terminator) = read_line();
+                machine.supply_line_terminated(line.trim_end_matches(['\n', '\r']), terminator);
             }
             StepResult::NeedChar { .. } => {
                 before_input(machine);
@@ -468,7 +470,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, |_| {}, String::new, move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, |_| {}, || (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -492,7 +494,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, |_| {}, move || lines.next().unwrap_or_default(), || keycode::RETURN);
+        drive(&mut m, |_| {}, move || (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }

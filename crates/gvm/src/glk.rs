@@ -213,6 +213,14 @@ pub mod keycode {
     /// The lowest value in the special-keycode block (`keycode_Func12`); any
     /// `glui32` ≥ this is a special key rather than a Unicode code point.
     pub const SPECIAL_FLOOR: u32 = FUNC12;
+
+    /// Whether `key` may be set as a line-input terminator (Glk spec §11.2 /
+    /// `gestalt_LineTerminatorKey`): only `keycode_Escape` and the function keys
+    /// `keycode_Func1`..`keycode_Func12`. Return, arrows, Delete, and Tab are
+    /// reserved by the input editor and can never terminate a line.
+    pub fn is_terminator(key: u32) -> bool {
+        key == ESCAPE || (FUNC12..=FUNC1).contains(&key)
+    }
 }
 
 /// A delivered Glk event: the four `glui32` words written at the `event_t*`
@@ -483,6 +491,10 @@ struct Window {
     line_req: Option<LineReq>,
     /// A pending char-input request (None when not awaiting a key).
     char_req: Option<CharReq>,
+    /// The line-input terminator keycodes set for this window
+    /// (`glk_set_terminators_line_event`); persists across line requests until
+    /// reset. Empty = Enter-only (the default).
+    terminators: Vec<u32>,
     // Pair-window fields (all 0 for leaf windows):
     child1: u32,
     child2: u32,
@@ -621,6 +633,7 @@ impl Model {
             grid: Grid::default(),
             line_req: None,
             char_req: None,
+            terminators: Vec::new(),
             child1: 0,
             child2: 0,
             key: 0,
@@ -1076,6 +1089,26 @@ impl Model {
         self.win_mut(win).and_then(|w| w.char_req.take())
     }
 
+    /// Record the line-input terminator keys for `win`
+    /// (`glk_set_terminators_line_event`). Invalid keycodes are silently dropped
+    /// (see [`keycode::is_terminator`]); an empty set restores Enter-only. The
+    /// set persists across line requests. Returns `false` for a non-existent or
+    /// pair window.
+    pub fn set_line_terminators(&mut self, win: u32, keys: &[u32]) -> bool {
+        match self.win_mut(win) {
+            Some(w) if w.wintype != WinType::Pair => {
+                w.terminators = keys.iter().copied().filter(|&k| keycode::is_terminator(k)).collect();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `key` is an active line-input terminator for `win`.
+    pub fn is_line_terminator(&self, win: u32, key: u32) -> bool {
+        self.win(win).map(|w| w.terminators.contains(&key)).unwrap_or(false)
+    }
+
     /// The first window (lowest id) with a pending line request: `(win, unicode)`.
     pub fn first_line_request(&self) -> Option<(u32, bool)> {
         self.windows
@@ -1235,7 +1268,8 @@ impl Model {
             };
             let char_req = if r.u32()? != 0 { Some(CharReq { unicode: r.u32()? != 0 }) } else { None };
             windows.push(Some(Window {
-                id, wintype, rock, parent, stream, rect, grid, line_req, char_req, child1, child2, key, method, size,
+                id, wintype, rock, parent, stream, rect, grid, line_req, char_req,
+                terminators: Vec::new(), child1, child2, key, method, size,
             }));
         }
 

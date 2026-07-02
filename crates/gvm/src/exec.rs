@@ -2481,7 +2481,12 @@ impl Machine {
                     .push("glk_cancel_mouse_event: mouse input unsupported (ignored)".to_string());
                 0
             }
-            0x0150 | 0x0151 => 0, // glk_set_echo_line_event / set_terminators_line_event: best-effort no-op
+            0x0150 => 0, // glk_set_echo_line_event: best-effort no-op
+            0x0151 => {
+                // glk_set_terminators_line_event(win, keycodes, count)
+                self.glk_set_terminators(a(0), a(1), a(2))?;
+                0
+            }
             0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
             0x0005 => self.glk_gestalt(a(0), a(1)), // glk_gestalt_ext(sel, val, arr, len)
             0x0001 => {
@@ -2639,6 +2644,24 @@ impl Machine {
         }
     }
 
+    /// `glk_set_terminators_line_event(win, keycodes, count)`: record the special
+    /// keys that terminate line input on `win`. A null pointer or zero count
+    /// clears the set (back to Enter-only); invalid keycodes are dropped by the
+    /// model (Glk spec §11.2). Diagnose a bad window.
+    fn glk_set_terminators(&mut self, win: u32, keycodes: u32, count: u32) -> R<()> {
+        let mut keys = Vec::with_capacity(count as usize);
+        if keycodes != 0 {
+            for i in 0..count {
+                keys.push(self.m32(keycodes + i * 4)?);
+            }
+        }
+        if !self.glk.set_line_terminators(win, &keys) {
+            self.diagnostics
+                .push(format!("glk_set_terminators_line_event: bad window {win}"));
+        }
+        Ok(())
+    }
+
     /// Record a pending char-input request; diagnose a bad window.
     fn glk_request_char(&mut self, win: u32, unicode: bool) {
         if !self.glk.request_char_event(win, unicode) {
@@ -2713,11 +2736,20 @@ impl Machine {
         })
     }
 
+    /// Complete a suspended line-input `glk_select` ended by the normal Enter
+    /// key (terminator `val2` = 0). See [`Machine::supply_line_terminated`].
+    pub fn supply_line(&mut self, text: &str) {
+        self.supply_line_terminated(text, 0);
+    }
+
     /// Complete a suspended line-input `glk_select`: write `text` into the
     /// request's Glulx buffer (truncated to `maxlen`, Latin-1 or 32-bit), fill
     /// the `event_t` with `evtype_LineInput` + the character count, and resume.
+    /// If `terminator` is a special keycode the game registered for this window
+    /// via `glk_set_terminators_line_event`, it is delivered in the event's
+    /// second value (`val2`); otherwise `val2` is 0 (Glk spec §4.2 / §11.2).
     /// A no-op (with a diagnostic) if no line request is pending.
-    pub fn supply_line(&mut self, text: &str) {
+    pub fn supply_line_terminated(&mut self, text: &str, terminator: u32) {
         let pi = match self.pending_input.take() {
             Some(pi) if pi.line => pi,
             Some(pi) => {
@@ -2750,7 +2782,15 @@ impl Machine {
                 break;
             }
         }
-        let ev = GlkEvent { etype: glk::evtype::LINE_INPUT, win: pi.win, val1: n, val2: 0 };
+        // Deliver the terminator keycode in val2 only if the game actually
+        // registered it for this window; a normal Enter (or any other key)
+        // reports 0 (Glk spec §4.2).
+        let val2 = if terminator != 0 && self.glk.is_line_terminator(pi.win, terminator) {
+            terminator
+        } else {
+            0
+        };
+        let ev = GlkEvent { etype: glk::evtype::LINE_INPUT, win: pi.win, val1: n, val2 };
         if let Err(e) = self.write_event(pi.event_addr, ev) {
             self.diagnostics.push(e);
         }
@@ -2795,15 +2835,17 @@ impl Machine {
 
     /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
     /// Unicode are supported; input/timer/graphics/sound are not yet (0).
-    fn glk_gestalt(&self, sel: u32, _val: u32) -> u32 {
+    fn glk_gestalt(&self, sel: u32, val: u32) -> u32 {
         match sel {
             0 => Self::GLK_VERSION, // gestalt_Version
             1 => 1,                 // gestalt_CharInput → supported
             2 => 1,                 // gestalt_LineInput → supported
             3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
             15 => 1,                // gestalt_Unicode
-            // MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)/Hyperlinks(11)/echo +
-            // terminators(17/18) and the rest are not supported.
+            17 => 1,                // gestalt_LineTerminators → set_terminators supported
+            18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
+            // MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)/Hyperlinks(11)/echo and
+            // the rest are not supported.
             _ => 0,
         }
     }
@@ -4869,6 +4911,60 @@ mod tests {
         assert_eq!(m.mem.read32(0x180).unwrap(), b'A' as u32, "word 0 = 'A'");
         assert_eq!(m.mem.read32(0x184).unwrap(), b'B' as u32, "word 1 = 'B'");
         assert_eq!(read_event(&m, 0x100), (3, 1, 2, 0));
+    }
+
+    #[test]
+    fn glk_gestalt_reports_line_terminator_support() {
+        use crate::glk::keycode;
+        let m = machine_with_body(&[], vec![]);
+        // gestalt_LineTerminators (17): the call is supported.
+        assert_eq!(m.glk_gestalt(17, 0), 1, "gestalt_LineTerminators supported");
+        // gestalt_LineTerminatorKey (18): TRUE only for Escape + the function keys.
+        assert_eq!(m.glk_gestalt(18, keycode::FUNC1), 1, "Func1 is a valid terminator");
+        assert_eq!(m.glk_gestalt(18, keycode::FUNC12), 1, "Func12 is a valid terminator");
+        assert_eq!(m.glk_gestalt(18, keycode::ESCAPE), 1, "Escape is a valid terminator");
+        assert_eq!(m.glk_gestalt(18, keycode::RETURN), 0, "Return is never a terminator");
+        assert_eq!(m.glk_gestalt(18, keycode::LEFT), 0, "arrow keys are not terminators");
+        assert_eq!(m.glk_gestalt(18, b'a' as u32), 0, "a printable char is not a terminator");
+    }
+
+    #[test]
+    fn glk_line_terminator_delivered_in_val2() {
+        use asm::Op::{C16, C8, Zero};
+        use crate::glk::keycode;
+        // set_terminators_line_event(win=1, keycodes=@0x0190, count=1) with Func1,
+        // then request_line_event + select.
+        let mut body = glk_call(0x151, &[C8(1), C16(0x0190), C8(1)], Zero);
+        body.extend(glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero));
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        m.mem.write32(0x190, keycode::FUNC1).unwrap(); // the registered terminator key
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line_terminated("look", keycode::FUNC1);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        // val1 = char count; val2 = the terminator keycode that ended input.
+        assert_eq!(read_event(&m, 0x100), (3, 1, 4, keycode::FUNC1));
+    }
+
+    #[test]
+    fn glk_line_terminator_val2_zero_for_unregistered_key() {
+        use asm::Op::{C16, C8, Zero};
+        use crate::glk::keycode;
+        // Register Func1, but end the line with Func2 — a valid terminator keycode
+        // the game did NOT register. Per spec, val2 reports only registered keys.
+        let mut body = glk_call(0x151, &[C8(1), C16(0x0190), C8(1)], Zero);
+        body.extend(glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero));
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        m.mem.write32(0x190, keycode::FUNC1).unwrap();
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line_terminated("look", keycode::FUNC1 - 1); // Func2, not registered
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        assert_eq!(read_event(&m, 0x100).3, 0, "unregistered terminator -> val2 = 0");
     }
 
     #[test]
