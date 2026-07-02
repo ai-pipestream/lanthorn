@@ -22,6 +22,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
 use crate::session::{clamp_runs, strip_read_prompt, InputKind, TurnResult};
+use zvm::location::LocationMethod;
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
 pub const GLULX_ENGINE: &str = "glulx";
@@ -73,6 +74,9 @@ pub struct GlulxSession {
     /// Auxiliary persistent data (Glulx aux persistence is a later phase).
     aux: BTreeMap<String, Vec<u8>>,
     aux_dirty: bool,
+    /// The current room, derived from the last Inform `Subheader` heading and
+    /// held sticky across heading-less turns (examine/talk/failed-move).
+    last_room: Option<LocationInfo>,
 }
 
 /// Step the machine until it pauses for input or quits, returning
@@ -107,8 +111,11 @@ impl GlulxSession {
             screen_cache: blank_screen(),
             aux: BTreeMap::new(),
             aux_dirty: false,
+            last_room: None,
         };
         session.refresh_screen();
+        session.last_room =
+            session.appglk().take_room_heading().map(|n| heading_to_room(&n));
         Ok(session)
     }
 
@@ -140,20 +147,35 @@ impl GlulxSession {
         let transcript = strip_read_prompt(&raw).to_owned();
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         self.refresh_screen();
+        if let Some(name) = self.appglk().take_room_heading() {
+            self.last_room = Some(heading_to_room(&name));
+        }
+        let location = self.last_room.clone();
+        let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
         TurnResult {
             transcript,
             transcript_runs,
-            location: None,
+            location,
             quit: self.quit,
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
             diagnostics,
-            location_method: None,
+            location_method,
             pending_io: None,
             timed_out: false,
         }
+    }
+}
+
+/// Build a name-based room snapshot from an Inform room heading. Glulx has no
+/// readable object tree, so identity is the synthetic id of the normalized name.
+fn heading_to_room(name: &str) -> LocationInfo {
+    zvm::ObjectSnapshot {
+        number: crate::roomid::synthetic_room_id(name),
+        parent: 0,
+        name: name.to_string(),
     }
 }
 
@@ -251,7 +273,7 @@ impl Engine for GlulxSession {
     }
 
     fn current_location(&self) -> Option<LocationInfo> {
-        None // Glulx automapping is SP4.
+        self.last_room.clone()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -544,10 +566,19 @@ mod tests {
     }
 
     #[test]
-    fn introspect_and_location_are_none() {
+    fn introspect_is_none() {
         let sess = GlulxSession::new(simple_line_image(), 80, 24, true).expect("new");
         assert!(sess.introspect().is_none(), "Glulx introspection is SP4");
-        assert!(sess.current_location().is_none(), "Glulx automapping is SP4");
+    }
+
+    #[test]
+    fn heading_to_room_uses_synthetic_id() {
+        let r = super::heading_to_room("Studio Apartment");
+        assert_eq!(r.name, "Studio Apartment");
+        assert_eq!(r.parent, 0);
+        assert_eq!(r.number, crate::roomid::synthetic_room_id("Studio Apartment"));
+        // Same name → same id (identity is name-based).
+        assert_eq!(super::heading_to_room("Studio Apartment").number, r.number);
     }
 
     #[test]
