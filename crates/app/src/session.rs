@@ -324,14 +324,7 @@ impl GameSession {
         let transcript = strip_read_prompt(&raw).to_owned();
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         let detected = detect_location(&self.machine);
-        let location = detected.as_ref().map(|loc| match loc {
-            Location::NameOnly(name) => zvm::ObjectSnapshot {
-                number: crate::roomid::synthetic_room_id(name),
-                parent: 0,
-                name: name.clone(),
-            },
-            _ => loc.object().expect("non-NameOnly variants carry an object").clone(),
-        });
+        let location = detected.as_ref().map(location_to_snapshot);
         let location_method = detected.as_ref().map(Location::method);
 
         let info = if v3_failed {
@@ -357,6 +350,21 @@ impl GameSession {
             pending_io,
             timed_out,
         }
+    }
+}
+
+/// Convert a detected `Location` into the `ObjectSnapshot` used as a room id.
+/// `NameOnly` (no backing object) gets a stable synthetic id from its name;
+/// every other variant carries a real object. Shared by per-turn draining and
+/// the startup seed so both assign the same room id.
+fn location_to_snapshot(loc: &Location) -> zvm::ObjectSnapshot {
+    match loc {
+        Location::NameOnly(name) => zvm::ObjectSnapshot {
+            number: crate::roomid::synthetic_room_id(name),
+            parent: 0,
+            name: name.clone(),
+        },
+        _ => loc.object().expect("non-NameOnly variants carry an object").clone(),
     }
 }
 
@@ -739,7 +747,10 @@ impl Engine for GameSession {
     }
 
     fn current_location(&self) -> Option<LocationInfo> {
-        zvm::current_location(&self.machine)
+        // Version-aware detection (same as a turn), NOT the v3-only global-0 read:
+        // v4+ games have no location global, so `zvm::current_location` returns
+        // None at boot, leaving the starting room off the map until the first turn.
+        detect_location(&self.machine).as_ref().map(location_to_snapshot)
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1061,6 +1072,23 @@ mod tests {
         let session = GameSession::new(story, true, false, None).expect("GameSession::new with czech.z5");
         assert_eq!(session.pending_input(), InputKind::Line,
             "a story that quits without requesting input should leave pending == Line");
+    }
+
+    #[test]
+    fn v5_start_room_detected_at_boot() {
+        // Regression: v4+ games have no location global, so `current_location`
+        // must use version-aware detection at boot. With the old global-0 read it
+        // returned None for v5 and the starting room stayed off the map until the
+        // first turn. Skips when the (git-ignored) story is absent.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/zork1-invclues-r52-s871125.z5");
+        if !path.exists() {
+            return; // story absent — skip
+        }
+        let story = std::fs::read(&path).expect("read zork1 r52");
+        let session = GameSession::new(story, false, false, None).expect("GameSession::new");
+        let loc = session.current_location().expect("v5 starting room must be detected at boot");
+        assert!(loc.name.starts_with("West"), "expected West of House, got {:?}", loc.name);
     }
 
     #[test]

@@ -122,12 +122,29 @@ pub fn status_name_matches(candidate: &str, short: &str) -> bool {
 /// The current player object: the lowest-numbered object whose normalized short
 /// name is one of {yourself, you, me, myself, self}. None if not found.
 pub fn find_player_object(machine: &Machine) -> Option<u16> {
-    const NAMES: [&str; 5] = ["yourself", "you", "me", "myself", "self"];
     let n = max_object_number(&machine.mem);
     (1..=n).find(|&obj| {
         let nm = normalize_name(&short_name(&machine.mem, obj));
-        NAMES.contains(&nm.as_str())
+        PLAYER_NAMES[..5].contains(&nm.as_str())
     })
+}
+
+/// Object short-names that plausibly denote the player avatar. Broader than
+/// `find_player_object`'s set — it adds ZIL's "cretin"/"adventurer" — because
+/// `detect_location` picks the avatar by ancestor validation, not name alone, so
+/// a wrong guess is harmless (it simply fails to validate and is skipped).
+const PLAYER_NAMES: [&str; 7] = ["yourself", "you", "me", "myself", "self", "cretin", "adventurer"];
+
+/// All objects whose short name plausibly denotes the player avatar, in ascending
+/// object order. `detect_location` validates each against the status-line room.
+fn player_candidates(machine: &Machine) -> Vec<u16> {
+    let n = max_object_number(&machine.mem);
+    (1..=n)
+        .filter(|&obj| {
+            let nm = normalize_name(&short_name(&machine.mem, obj));
+            PLAYER_NAMES.contains(&nm.as_str())
+        })
+        .collect()
 }
 
 /// Nearest ancestor of `start` (exclusive) whose short name matches `name` via
@@ -212,7 +229,12 @@ pub fn detect_location(machine: &Machine) -> Option<Location> {
         return current_location(machine).map(Location::GlobalVar0);
     }
     let name = status_line_room_name(&machine.screen.upper, machine.screen.upper_window_rows)?;
-    if let Some(player) = find_player_object(machine) {
+    // Prefer the avatar whose ancestor chain validates against the status-line
+    // room name. Trying every plausible player object (and using the first whose
+    // parent chain reaches the shown room) distinguishes same-named rooms that a
+    // name-only match would collapse — e.g. Zork's several "Forest" rooms — and
+    // rejects decorative "you"/"self" objects whose parent never tracks the player.
+    for player in player_candidates(machine) {
         if let Some(room) = nearest_matching_ancestor(machine, player, &name) {
             return Some(Location::PlayerParent(room));
         }
@@ -501,6 +523,88 @@ mod tests {
     /// Build a Machine from story bytes.
     fn make_machine(buf: Vec<u8>) -> Machine {
         Machine::new(Memory::new(buf).unwrap())
+    }
+
+    // ── v5 avatar-based detection ────────────────────────────────────────────
+    // Regression for the Zork1-r52 forest collapse: same-named rooms must be
+    // distinguished by the true avatar's parent, not by a name-only match that
+    // resolves every "forest" to one scenery object.
+
+    const V5_ENTRIES: u32 = OBJ_TABLE + 63 * 2; // prop-defaults = 63 words (v4+)
+    fn v5_entry(obj: u16) -> usize {
+        (V5_ENTRIES + (obj as u32 - 1) * 14) as usize
+    }
+
+    /// Build a v5 story with 5 objects reproducing the r52 topology:
+    ///   #1 "forest" scenery (top-level)   — what StatusName wrongly resolves to
+    ///   #2 "you"    decorative, parent 0  — what find_player_object picks
+    ///   #3 "forest" a real forest ROOM
+    ///   #4 "cretin" the true avatar, child of #3
+    ///   #5 "forest" a second real forest ROOM
+    /// Lowercase names avoid A1/A2 shift-encoding; the status line matches case-
+    /// insensitively.
+    fn build_v5_forests() -> Vec<u8> {
+        let mut buf = sample_story(5);
+        let props: [(u16, &str); 5] =
+            [(0x1D2, "forest"), (0x1DA, "you"), (0x1E2, "forest"), (0x1EA, "cretin"), (0x1F2, "forest")];
+        let parents: [u16; 5] = [0, 0, 0, 3, 0];
+        for (i, (ptbl, name)) in props.iter().enumerate() {
+            let obj = (i + 1) as u16;
+            let e = v5_entry(obj);
+            put_word(&mut buf, e + 6, parents[i]); // parent (word, v4+)
+            put_word(&mut buf, e + 8, 0); // sibling
+            put_word(&mut buf, e + 10, 0); // child
+            put_word(&mut buf, e + 12, *ptbl); // property-table pointer
+            let nm = crate::text::encode::encode_word(name, 5);
+            let p = *ptbl as usize;
+            buf[p] = (nm.len() / 2) as u8; // name length in words
+            buf[p + 1..p + 1 + nm.len()].copy_from_slice(&nm);
+            buf[p + 1 + nm.len()] = 0x00; // end-of-properties sentinel
+        }
+        buf
+    }
+
+    /// v5 machine with the avatar (#4 cretin) placed in `cretin_parent` and a
+    /// status line showing "forest".
+    fn machine_in_forest(cretin_parent: u16) -> Machine {
+        let mut buf = build_v5_forests();
+        put_word(&mut buf, v5_entry(4) + 6, cretin_parent);
+        let mut m = make_machine(buf);
+        m.screen.upper = upper_with(&[" forest                              Score: 0    Moves: 0"]);
+        m.screen.upper_window_rows = 1;
+        m
+    }
+
+    #[test]
+    fn v5_builder_encodes_names() {
+        // Guard: distinguish a builder bug from a detection bug.
+        let m = machine_in_forest(3);
+        assert_eq!(normalize_name(&short_name(&m.mem, 3)), "forest");
+        assert_eq!(normalize_name(&short_name(&m.mem, 4)), "cretin");
+        assert_eq!(status_line_room_name(&m.screen.upper, m.screen.upper_window_rows).as_deref(), Some("forest"));
+    }
+
+    #[test]
+    fn v5_same_named_rooms_resolve_via_avatar_not_name() {
+        // Avatar #4 is in forest ROOM #3; scenery "forest" is #1. Name-only
+        // resolution would return #1; the avatar's parent gives the true #3.
+        let m = machine_in_forest(3);
+        let loc = detect_location(&m).expect("should detect a location");
+        assert_eq!(loc.method(), LocationMethod::PlayerParent, "must validate the avatar, not match by name");
+        assert_eq!(loc.object().unwrap().number, 3, "true room is #3, not scenery #1");
+    }
+
+    #[test]
+    fn v5_distinct_forests_get_distinct_ids() {
+        let a = detect_location(&machine_in_forest(3)).unwrap();
+        let b = detect_location(&machine_in_forest(5)).unwrap();
+        assert_eq!(a.object().unwrap().number, 3);
+        assert_eq!(b.object().unwrap().number, 5);
+        assert_ne!(
+            a.object().unwrap().number,
+            b.object().unwrap().number,
+            "two different forest rooms must not collapse to one id"
+        );
     }
 
     // ── TDD Step 1: write the failing tests ───────────────────────────────────
