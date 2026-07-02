@@ -1164,24 +1164,26 @@ fn draw_story_picker(
         let line = format!("{}{}   ({})", marker, entry.title, entry.filename);
         draw_str_clipped(buf, area.x, y, &line, style, row_rect);
 
-        // Right-aligned badge cluster: type glyph then present artifact glyphs.
+        // Right-aligned badge cluster: fixed columns for [type][blorb][save][hint],
+        // no separators, so present badges stay vertically aligned across rows.
         let b = badges.get(i).copied().unwrap_or_default();
         let type_glyph = match entry.meta.engine {
             app::picker::Engine::ZCode => glyphs.zcode,
             app::picker::Engine::Glulx => glyphs.glulx,
         };
-        let mut cluster: Vec<&str> = vec![type_glyph];
-        if b.blorb { cluster.push(glyphs.blorb); }
-        if b.save { cluster.push(glyphs.save); }
-        if b.hint { cluster.push(glyphs.hint); }
-        let cluster_str = cluster.join(" ");
-        let cluster_w = cluster_str.chars().count() as u16;
+        let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
+        let blorb_w = glyphs.blorb.chars().count() as u16;
+        let save_w = glyphs.save.chars().count() as u16;
+        let hint_w = glyphs.hint.chars().count() as u16;
+        let cluster_w = type_w + blorb_w + save_w + hint_w;
         if cluster_w + 2 < row_w {
-            let bx = area.left() + row_w - cluster_w - 1;
+            let bx = area.left() + row_w - 1 - cluster_w;
             // On the selection bar the plain badge fg (e.g. green) is low-contrast
             // against the highlight, so reverse it into a block: the badge colour
             // becomes the background and the selection bar's text colour the glyph
             // — readable and still distinct. Unselected rows keep plain letters.
+            // Blank slots are left untouched so they show the plain selection bar,
+            // not a green block.
             let badge_style = if sel {
                 Style::new()
                     .fg(cs.dialog_button_active.fg.unwrap_or(Color::Reset))
@@ -1189,7 +1191,16 @@ fn draw_story_picker(
             } else {
                 cs.story_badge
             };
-            draw_str_clipped(buf, bx, y, &cluster_str, badge_style, row_rect);
+            draw_str_clipped(buf, bx, y, type_glyph, badge_style, row_rect);
+            if b.blorb {
+                draw_str_clipped(buf, bx + type_w, y, glyphs.blorb, badge_style, row_rect);
+            }
+            if b.save {
+                draw_str_clipped(buf, bx + type_w + blorb_w, y, glyphs.save, badge_style, row_rect);
+            }
+            if b.hint {
+                draw_str_clipped(buf, bx + type_w + blorb_w + save_w, y, glyphs.hint, badge_style, row_rect);
+            }
         }
     }
 
@@ -5706,9 +5717,17 @@ mod tests {
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
         let row1 = row_text(&buf, 3, area);
-        assert!(row0.contains("Z B S H"), "got: {row0:?}");
-        assert!(row1.contains("G S"), "got: {row1:?}");
-        assert!(!row1.contains("G B"), "absent artifacts omitted: {row1:?}");
+        assert!(row0.contains("ZBSH"), "adjacent, no separators: {row0:?}");
+        assert!(row1.contains("S"), "got: {row1:?}");
+        assert!(!row1.contains("B"), "absent blorb omitted: {row1:?}");
+        assert!(!row1.contains("H"), "absent hint omitted: {row1:?}");
+
+        // Fixed-slot alignment: the save glyph must land at the same column
+        // in both rows regardless of which other artifacts are present.
+        // (char index, not byte index — row0's "▸ " marker is multi-byte.)
+        let save_x0 = row0.chars().position(|c| c == 'S').expect("row0 has save glyph");
+        let save_x1 = row1.chars().position(|c| c == 'S').expect("row1 has save glyph");
+        assert_eq!(save_x0, save_x1, "save glyph column must be fixed across rows");
     }
 
     #[test]
@@ -5732,7 +5751,7 @@ mod tests {
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
                           &cs, area, &mut buf);
         let row0 = row_text(&buf, 2, area);
-        assert!(row0.contains("z! ◆"), "configured glyphs used: {row0:?}");
+        assert!(row0.contains("z!◆"), "configured glyphs used, no separators: {row0:?}");
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
