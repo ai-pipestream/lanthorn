@@ -327,7 +327,8 @@ cargo run -p zvm-cli -- story.z5 # DOS-style CLI player (no map)
 via ANSI when interactive, clearing the screen on start) and degrades to a clean
 line stream when piped. Interactively it does single-key input (arrow/function
 keys decoded for `read_char` menus) and `[MORE]` paging on long output; aux save
-tables persist per game by IFID. The flags `--no-status` (byte-identical
+tables persist per game by IFID. On piped stdin, a `read_char` menu exits
+cleanly at true EOF instead of spinning. The flags `--no-status` (byte-identical
 lower-stream output), `--no-aux`, and `--no-more` keep the headless test harness
 deterministic; `--no-sound` disables audio and `--volume <0-100>` sets the
 master volume.

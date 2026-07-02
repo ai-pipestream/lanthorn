@@ -633,12 +633,26 @@ fn read_line_raw(
     (buf, terminator, last_resize, aborted)
 }
 
+/// Read one line from `r` and return its first byte, or `None` at true EOF.
+/// A 0-byte `read_line` result is EOF; a blank line still yields 1 byte
+/// (`\n`), which must NOT be confused with EOF (that confusion previously
+/// caused piped/closed stdin to busy-spin forever on a synthesized `\n`).
+fn read_byte_or_eof<R: BufRead>(r: &mut R) -> Option<u8> {
+    let mut line = String::new();
+    match r.read_line(&mut line) {
+        Ok(0) => None,
+        _ => Some(line.bytes().next().unwrap_or(b'\n')),
+    }
+}
+
 fn read_byte_stdin() -> u8 {
     let stdin = io::stdin();
-    let mut line = String::new();
-    let _ = stdin.lock().read_line(&mut line);
-    // Return the first byte of the input, or newline if empty.
-    line.bytes().next().unwrap_or(b'\n')
+    match read_byte_or_eof(&mut stdin.lock()) {
+        Some(b) => b,
+        // True EOF on piped stdin: there is no more input to synthesize, so
+        // exit cleanly instead of looping on a fabricated newline forever.
+        None => std::process::exit(0),
+    }
 }
 
 // ── terminal resize helper ────────────────────────────────────────────────────
@@ -1025,6 +1039,32 @@ mod arg_tests {
     #[test]
     fn parse_interpreter_bad_value_is_none() {
         assert_eq!(parse_interpreter(&["-I".into(), "notanumber".into(), "story.z5".into()]), None);
+    }
+}
+
+#[cfg(test)]
+mod stdin_eof_tests {
+    use super::*;
+
+    #[test]
+    fn true_eof_returns_none_instead_of_looping() {
+        // A closed/empty stdin yields a 0-byte read_line, which must be
+        // reported as EOF (None) rather than a synthesized b'\n' — the bug
+        // that caused read_byte_stdin() to busy-spin forever on piped input.
+        let mut empty: &[u8] = b"";
+        assert_eq!(read_byte_or_eof(&mut empty), None);
+    }
+
+    #[test]
+    fn blank_line_is_not_confused_with_eof() {
+        let mut input: &[u8] = b"\n";
+        assert_eq!(read_byte_or_eof(&mut input), Some(b'\n'));
+    }
+
+    #[test]
+    fn returns_first_byte_of_line() {
+        let mut input: &[u8] = b"abc\n";
+        assert_eq!(read_byte_or_eof(&mut input), Some(b'a'));
     }
 }
 
