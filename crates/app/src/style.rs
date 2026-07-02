@@ -186,6 +186,11 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "map_border",
     "story_border",
     "story_title",
+    "story_info",
+    "story_info:title",
+    "story_info:label",
+    "story_info:value",
+    "story_badge",
     "map_layer_tab",
     "map_layer_tab_active",
     "status_header",
@@ -225,6 +230,10 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Chrome", &[
         "statusbar", "helpbar", "story_border", "story_title",
         "status_header", "input_line", "border:focused", "border",
+    ]),
+    ("Story picker", &[
+        "story_info", "story_info:title", "story_info:label",
+        "story_info:value", "story_badge",
     ]),
     ("Dialogs", &[
         "dialog", "dialog:title", "dialog:button", "dialog:button:active", "dialog:shadow",
@@ -276,6 +285,11 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "sound_beep_high"      => cs.sound_beep_high,
         "sound_beep_low"       => cs.sound_beep_low,
         "loc_indicator"        => cs.loc_indicator,
+        "story_info"        => cs.story_info,
+        "story_info:title"  => cs.story_info_title,
+        "story_info:label"  => cs.story_info_label,
+        "story_info:value"  => cs.story_info_value,
+        "story_badge"       => cs.story_badge,
         // Composite selectors: each has a single color-bearing Style field.
         // Confirmed by reading apply_color_decls arms (style.rs lines 239-293).
         "map_border"           => cs.map_border,
@@ -417,6 +431,11 @@ pub fn apply_color_decls(
                 if let Some(h) = decl.header { cs.story_header_on = h; }
             }
             "story_title"        => cs.story_title = cs.story_title.patch(style),
+            "story_info"        => cs.story_info = cs.story_info.patch(style),
+            "story_info:title"  => cs.story_info_title = cs.story_info_title.patch(style),
+            "story_info:label"  => cs.story_info_label = cs.story_info_label.patch(style),
+            "story_info:value"  => cs.story_info_value = cs.story_info_value.patch(style),
+            "story_badge"       => cs.story_badge = cs.story_badge.patch(style),
             "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
             "map_layer_tab_active" => cs.map_layer_tab_active = cs.map_layer_tab_active.patch(style),
             "status_header" => {
@@ -2132,6 +2151,27 @@ box_style = "rounded"
         assert_eq!(style_for_selector(&cs, "room:current").fg, Some(ratatui::style::Color::Green));
         // Unknown selector → default (empty) style, no panic.
         assert_eq!(style_for_selector(&cs, "nope"), ratatui::style::Style::default());
+    }
+
+    #[test]
+    fn story_info_and_badge_selectors_are_grouped() {
+        // Every selector field must appear in exactly one group (existing invariant).
+        for sel in ["story_info", "story_info:title", "story_info:label",
+                    "story_info:value", "story_badge"] {
+            assert!(SELECTOR_FIELDS.contains(&sel), "{sel} missing from SELECTOR_FIELDS");
+            let count = SELECTOR_GROUPS.iter().filter(|(_, xs)| xs.contains(&sel)).count();
+            assert_eq!(count, 1, "{sel} must be in exactly one group, found {count}");
+        }
+    }
+
+    #[test]
+    fn story_badge_selector_reads_the_badge_style() {
+        let mut cs = colors::ColorScheme::terminal_default();
+        cs.story_badge = ratatui::style::Style::new()
+            .fg(ratatui::style::Color::Black)
+            .bg(ratatui::style::Color::Magenta);
+        let got = style_for_selector(&cs, "story_badge");
+        assert_eq!(got.bg, Some(ratatui::style::Color::Magenta));
     }
 
     #[test]

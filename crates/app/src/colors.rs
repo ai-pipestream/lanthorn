@@ -245,6 +245,16 @@ pub struct ColorScheme {
     pub story_border: Style,
     /// Story pane title (centered in border).
     pub story_title: Style,
+    /// Story-picker info panel body + border.
+    pub story_info: Style,
+    /// Story-picker info panel title (story name).
+    pub story_info_title: Style,
+    /// Story-picker info panel field labels.
+    pub story_info_label: Style,
+    /// Story-picker info panel field values.
+    pub story_info_value: Style,
+    /// Story-picker row badge cluster (type badge + artifact letters); fg + bg.
+    pub story_badge: Style,
     /// Map layer tab (inactive).
     pub map_layer_tab: Style,
     /// Map layer tab (active).
@@ -362,6 +372,11 @@ impl ColorScheme {
             map_border: Style::new().fg(Color::Cyan),
             story_border: Style::new().fg(Color::Cyan),
             story_title: Style::new().fg(Color::White),
+            story_info: Style::new().fg(Color::Cyan),
+            story_info_title: Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
+            story_info_label: Style::new().fg(Color::DarkGray),
+            story_info_value: Style::new().fg(Color::White),
+            story_badge: Style::new().fg(Color::Black).bg(Color::Cyan),
             // The shown layer reads brighter than the others: inactive tabs are
             // dimmed, the active one is the bold accent colour. Both themeable.
             map_layer_tab: Style::new().fg(Color::DarkGray),
@@ -537,6 +552,11 @@ impl ColorScheme {
             map_border: Style::new().fg(scheme.palette[6]),
             story_border: Style::new().fg(scheme.palette[6]),
             story_title: Style::new().fg(fg),
+            story_info: Style::new().fg(scheme.palette[6]),
+            story_info_title: Style::new().fg(fg).add_modifier(Modifier::BOLD),
+            story_info_label: Style::new().fg(fg).add_modifier(Modifier::DIM),
+            story_info_value: Style::new().fg(fg),
+            story_badge: Style::new().fg(Color::Black).bg(scheme.palette[6]),
             map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
             status_header: Style::new(),
