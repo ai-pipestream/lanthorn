@@ -848,6 +848,109 @@ fn toggle_style_watch(
     }
 }
 
+/// Minimum column widths for the story list and info panel, respectively.
+/// The panel refuses to open when the terminal is narrower than their sum.
+const LIST_MIN_W: u16 = 24;
+const PANEL_MIN_W: u16 = 28;
+
+/// True if the terminal is wide enough to show list + panel.
+fn can_open_panel(width: u16) -> bool {
+    width >= LIST_MIN_W + PANEL_MIN_W
+}
+
+/// Split `area` into (list, panel) given an eased open fraction in [0,1].
+/// Panel target width is a third of the area, clamped to
+/// [PANEL_MIN_W, area.width - LIST_MIN_W]; the eased width is that × fraction.
+fn split_picker_area(area: Rect, fraction: f64) -> (Rect, Rect) {
+    if fraction <= 0.0 || !can_open_panel(area.width) {
+        return (area, Rect::new(area.right(), area.y, 0, area.height));
+    }
+    let target = (area.width / 3).clamp(PANEL_MIN_W, area.width - LIST_MIN_W);
+    let panel_w = ((target as f64) * fraction).round() as u16;
+    let panel_w = panel_w.min(area.width - LIST_MIN_W);
+    let list_w = area.width - panel_w;
+    let list_area = Rect::new(area.x, area.y, list_w, area.height);
+    let panel_area = Rect::new(area.x + list_w, area.y, panel_w, area.height);
+    (list_area, panel_area)
+}
+
+/// Session-only slide state for the info panel. Holds a target fraction and an
+/// optional tween easing the displayed fraction toward it (so a mid-slide
+/// reverse starts from the current position).
+struct PanelSlide {
+    open: bool,
+    from: f64,
+    to: f64,
+    tween: Option<app::anim::Tween>,
+}
+
+impl PanelSlide {
+    fn closed() -> Self {
+        Self { open: false, from: 0.0, to: 0.0, tween: None }
+    }
+
+    /// The displayed fraction right now (tween-eased), given a raw progress.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn fraction_at(&self, progress: f64) -> f64 {
+        app::anim::lerp(self.from, self.to, progress)
+    }
+
+    /// Current displayed fraction from the live tween (or the settled `to`).
+    fn fraction(&self) -> f64 {
+        match &self.tween {
+            Some(t) => app::anim::lerp(self.from, self.to, t.progress()),
+            None => self.to,
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.tween.as_ref().is_some_and(|t| !t.done())
+    }
+
+    /// Toggle to `open`, arming a tween unless `instant`.
+    fn toggle_to(&mut self, open: bool, instant: bool) {
+        self.open = open;
+        let target = if open { 1.0 } else { 0.0 };
+        let current = self.fraction();
+        self.from = current;
+        self.to = target;
+        self.tween = None; // set by caller with duration; see arm()
+        if instant {
+            self.from = target;
+        }
+    }
+
+    /// Arm the tween with the configured duration/easing (call after toggle_to).
+    fn arm(&mut self, cfg: &app::config::AnimationConfig) {
+        if !cfg.enabled || cfg.scroll_ms == 0 || (self.from - self.to).abs() < f64::EPSILON {
+            self.from = self.to;
+            self.tween = None;
+        } else {
+            self.tween = Some(app::anim::Tween::new(
+                std::time::Duration::from_millis(cfg.scroll_ms),
+                cfg.easing,
+            ));
+        }
+    }
+}
+
+/// Resolve and cache the aux data for `idx` if not already cached.
+fn ensure_aux(
+    cache: &mut [Option<app::picker::StoryAux>],
+    stories: &[app::picker::StoryEntry],
+    idx: usize,
+    save_dir: &std::path::Path,
+    hint_index: &app::hints::HintIndex,
+) {
+    if let Some(slot) = cache.get_mut(idx) {
+        if slot.is_none() {
+            if let Some(entry) = stories.get(idx) {
+                *slot = Some(app::picker::resolve_aux(entry, save_dir, hint_index));
+            }
+        }
+    }
+}
+
 /// Run the pre-game story picker for a directory passed at launch. Returns the
 /// chosen story path, or `None` if the user quit. Exits the process with a
 /// message when the directory contains no launchable stories.
@@ -904,19 +1007,41 @@ fn run_story_picker(
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
     let mut viewport: usize = 0;
 
+    // Info panel: always starts closed each launch (session-only state).
+    let mut slide = PanelSlide::closed();
+    let mut aux_cache: Vec<Option<app::picker::StoryAux>> =
+        (0..stories.len()).map(|_| None).collect();
+    let mut last_area = Rect::new(0, 0, 0, 0);
+
     let chosen: Option<std::path::PathBuf> = loop {
         let _ = terminal.draw(|f| {
             let area = f.area();
+            last_area = area;
             let buf = f.buffer_mut();
-            let (rects, vp) =
-                draw_story_picker(&stories, &list, &row_badges, &badge_glyphs, dir, &cs, area, buf);
+            let (list_area, panel_area) = split_picker_area(area, slide.fraction());
+            let (rects, vp) = draw_story_picker(
+                &stories, &list, &row_badges, &badge_glyphs, dir, &cs, list_area, buf,
+            );
             row_rects = rects;
             viewport = vp;
+            if panel_area.width > 0 {
+                if let Some(entry) = stories.get(list.selected) {
+                    draw_info_panel(
+                        &entry.title,
+                        &entry.filename,
+                        &entry.meta,
+                        aux_cache[list.selected].as_ref(),
+                        panel_area,
+                        &cs,
+                        buf,
+                    );
+                }
+            }
         });
 
-        // Tick while a scroll animation eases so the motion is visible; otherwise
-        // block until the next event.
-        if list.has_active_animation()
+        // Tick while a scroll or panel-slide animation eases so the motion is
+        // visible; otherwise block until the next event.
+        if (list.has_active_animation() || slide.active())
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -935,6 +1060,17 @@ fn run_story_picker(
                     End => list.end(stories.len(), viewport, anim),
                     Enter => break Some(stories[list.selected].path.clone()),
                     Esc | Char('q') => break None,
+                    Char('i') | Tab => {
+                        let target = !slide.open;
+                        if !target || can_open_panel(last_area.width) {
+                            let instant = !cfg.animation.enabled || cfg.animation.scroll_ms == 0;
+                            slide.toggle_to(target, instant);
+                            slide.arm(&cfg.animation);
+                            if target {
+                                ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -954,6 +1090,9 @@ fn run_story_picker(
             }
             Ok(_) => {}
             Err(_) => break None,
+        }
+        if slide.open {
+            ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
         }
         list.finalize_if_done();
     };
@@ -989,7 +1128,7 @@ fn draw_story_picker(
 
     // Header.
     let header = format!(
-        " babelmap — choose a story  ({} found in {})",
+        " babelmap — choose a story  ({} found in {})   [i: info]",
         stories.len(),
         dir.display()
     );
@@ -1049,7 +1188,7 @@ fn draw_story_picker(
     }
 
     // Footer hint.
-    let footer = " ↑/↓ or j/k: move   PgUp/PgDn   Enter / click: open   q / Esc: quit";
+    let footer = " ↑/↓ or j/k: move   PgUp/PgDn   Enter / click: open   i/Tab: info   q / Esc: quit";
     let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
     draw_str_clipped(buf, area.x, list_bottom, footer, fstyle, area);
 
@@ -1059,8 +1198,8 @@ fn draw_story_picker(
 /// Draw the highlighted story's metadata panel: title, filesystem info,
 /// format/version/release, serial (Z only), IFID, present features, bundled
 /// resources (self-blorb or an associated sibling blorb), and saves. Pure
-/// renderer — no state, no interaction (see the Task 9 caller for that).
-#[cfg_attr(not(test), allow(dead_code))]
+/// renderer — no state, no interaction (the picker loop wires toggling/
+/// slide/lazy-resolve).
 fn draw_info_panel(
     title: &str,
     filename: &str,
@@ -5602,5 +5741,51 @@ mod tests {
         assert!(text.contains("hints"));
         assert!(text.contains("Exec"));
         assert!(text.contains("ZCOD"));
+    }
+
+    // ── Story-picker info panel: toggle/slide/split ─────────────────────────────
+
+    #[test]
+    fn slide_fraction_interpolates_and_reverses() {
+        // A closed→open slide at t=0 is 0.0, at t=1 is 1.0; reversing mid-slide
+        // starts from the current fraction.
+        let mut s = super::PanelSlide::closed();
+        assert_eq!(s.fraction_at(0.0), 0.0);
+        s.toggle_to(true, /*instant=*/true);
+        assert_eq!(s.fraction_at(1.0), 1.0);
+        s.toggle_to(false, true);
+        assert_eq!(s.fraction_at(1.0), 0.0);
+    }
+
+    #[test]
+    fn panel_refuses_to_open_when_too_narrow() {
+        // Below LIST_MIN_W + PANEL_MIN_W the toggle is a no-op.
+        assert!(!super::can_open_panel(super::LIST_MIN_W + super::PANEL_MIN_W - 1));
+        assert!(super::can_open_panel(super::LIST_MIN_W + super::PANEL_MIN_W));
+    }
+
+    #[test]
+    fn draw_story_picker_full_width_then_split() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = make_two_test_stories();
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(2);
+
+        // Closed: list uses full width, no panel border cell on the right edge.
+        let area = Rect::new(0, 0, 70, 12);
+        let mut buf = Buffer::empty(area);
+        let (list_area, panel_area) = super::split_picker_area(area, 0.0);
+        assert_eq!(list_area.width, area.width);
+        assert_eq!(panel_area.width, 0);
+
+        // Open (fraction 1.0): list shrinks, a panel area with width >= PANEL_MIN_W appears.
+        let (list_area, panel_area) = super::split_picker_area(area, 1.0);
+        assert!(list_area.width < area.width);
+        assert!(panel_area.width >= super::PANEL_MIN_W);
+        let _ = (&stories, &badges, &glyphs, &cs, &mut buf, &mut list);
     }
 }

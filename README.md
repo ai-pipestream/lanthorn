@@ -156,6 +156,17 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is on the roadmap.
   independently themeable; meta and warning lines are set off with their own
   configurable gutter markers (`▏` / `!`).
 
+### Story picker
+Launching with a directory instead of a story file (`babelmap path/to/stories/`)
+opens a picker: each row shows the title/filename plus right-aligned badges —
+story type (**Z**/**G**) and present artifacts (bundled/sibling **B**lorb,
+existing **S**ave, available **H**int file). `i` or `Tab` slides in a themeable
+info side-panel for the highlighted story (format/version/release/serial,
+IFID, feature flags, bundled resources, and saves), animated per the
+`animation` config and closed by default each launch; it refuses to open on
+terminals too narrow for both list and panel. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
+navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell.
+
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and
   metadata. By default a story starts fog-of-war (only what you've explored);
