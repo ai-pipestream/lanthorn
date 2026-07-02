@@ -137,6 +137,8 @@ pub struct Machine {
     accel_funcs: std::collections::HashMap<u32, u32>,
     /// Acceleration parameter table: index → value (`accelparam`).
     accel_params: std::collections::HashMap<u32, u32>,
+    /// Whether accelerated-function interception is active (default true).
+    pub(crate) acceleration: bool,
     /// Total number of opcodes dispatched since the machine was built.
     pub(crate) insn_count: u64,
     /// PRNG state (xorshift32); seeded by `setrandom`.
@@ -244,6 +246,7 @@ impl Machine {
             undo_stack: Vec::new(),
             accel_funcs: std::collections::HashMap::new(),
             accel_params: std::collections::HashMap::new(),
+            acceleration: true,
             insn_count: 0,
             rng: Self::DEFAULT_SEED,
             cur_frame_len: 0,
@@ -1209,8 +1212,8 @@ impl Machine {
             6 => 1,                                    // MemCopy
             7 => 1,                                    // MAlloc
             8 => self.heap_start,                      // MAllocHeap (0 if inactive)
-            9 => 0,                                    // Acceleration (2c)
-            10 => 0,                                   // AccelFunc (2c)
+            9 => 1,                                    // Acceleration: interception implemented
+            10 => u32::from((1..=13).contains(&arg)),  // AccelFunc: implemented function numbers
             11 => 0,                                   // Float
             _ => 0,
         }
@@ -1550,8 +1553,7 @@ impl Machine {
     // ── acceleration storage + PRNG (GLULX_NOTES §17, §18) ────────────────────
 
     /// The accelerated-function number assigned to the VM function at `addr` via
-    /// `accelfunc`, or `None`. Acceleration interception is not implemented, so
-    /// this is advisory storage (gestalt reports Acceleration unsupported).
+    /// `accelfunc`, or `None`.
     pub fn accel_func_for(&self, addr: u32) -> Option<u32> {
         self.accel_funcs.get(&addr).copied()
     }
@@ -1559,6 +1561,11 @@ impl Machine {
     /// The acceleration parameter stored at `index` via `accelparam`, or `None`.
     pub fn accel_param(&self, index: u32) -> Option<u32> {
         self.accel_params.get(&index).copied()
+    }
+
+    /// Enable/disable accelerated-function interception (debug escape hatch).
+    pub fn set_acceleration(&mut self, on: bool) {
+        self.acceleration = on;
     }
 
     /// Advance the xorshift32 PRNG and return the next 32-bit value.
@@ -4171,8 +4178,8 @@ mod tests {
         assert_eq!(m.gestalt(6, 0), 1); // MemCopy
         assert_eq!(m.gestalt(7, 0), 1); // MAlloc
         assert_eq!(m.gestalt(8, 0), 0); // MAllocHeap inactive → 0
-        assert_eq!(m.gestalt(9, 0), 0); // Acceleration (deferred)
-        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc (deferred)
+        assert_eq!(m.gestalt(9, 0), 1); // Acceleration: interception implemented
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc 0 is "cancel", not a function
         assert_eq!(m.gestalt(11, 0), 0); // Float (deferred)
         assert_eq!(m.gestalt(999, 0), 0); // unknown selector
     }
@@ -4551,11 +4558,29 @@ mod tests {
     }
 
     #[test]
-    fn gestalt_reports_undo_supported_accel_not() {
+    fn gestalt_reports_undo_and_accel_supported() {
         let m = machine_with_body(&[], vec![]);
         assert_eq!(m.gestalt(3, 0), 1); // Undo now supported
-        assert_eq!(m.gestalt(9, 0), 0); // Acceleration: not intercepted
-        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc: not intercepted
+        assert_eq!(m.gestalt(9, 0), 1); // Acceleration: interception implemented
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc 0 is "cancel", not a function
+    }
+
+    #[test]
+    fn gestalt_reports_acceleration_supported() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(9, 0), 1); // Acceleration: interception implemented
+        assert_eq!(m.gestalt(10, 0), 0); // AccelFunc 0 is "cancel", not a function
+        assert_eq!(m.gestalt(10, 1), 1); // Z__Region implemented
+        assert_eq!(m.gestalt(10, 13), 1); // last implemented
+        assert_eq!(m.gestalt(10, 14), 0); // beyond the set
+    }
+
+    #[test]
+    fn acceleration_defaults_on_and_toggles() {
+        let mut m = machine_with_body(&[], vec![]);
+        assert!(m.acceleration);
+        m.set_acceleration(false);
+        assert!(!m.acceleration);
     }
 
     // ── Task 1 (Glk model): seam migration behaviors ──────────────────────────
