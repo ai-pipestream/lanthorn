@@ -132,6 +132,13 @@ impl Blorb {
         &self.bytes[e.start + 8..e.start + 8 + e.len]
     }
 
+    /// Public counterpart of [`Blorb::chunk_data`]: the raw payload bytes for
+    /// resource `e` (post 8-byte chunk header, pre pad byte). For callers that
+    /// need to inspect a resource's raw bytes (e.g. format-detail parsing).
+    pub fn resource_data(&self, e: &ResourceEntry) -> &[u8] {
+        self.chunk_data(e)
+    }
+
     /// The embedded executable: its [`ExecKind`] plus a slice of its chunk data.
     ///
     /// Finds the `Exec` resource, mapping a `ZCOD` chunk to [`ExecKind::ZCode`]

@@ -1332,16 +1332,17 @@ fn draw_info_panel(
         lines.push((String::new(), cs.story_info_value));
         lines.push((h, cs.story_info_label));
         for c in chunks {
-            lines.push((
-                format!(
-                    " #{}  {} — {} ({})",
-                    c.number,
-                    resource_usage_label(&c.usage),
-                    resource_type_label(&c.chunk_type),
-                    human_size(c.len as u64)
-                ),
-                cs.story_info_value,
-            ));
+            let base = format!(
+                " #{}  {} — {}",
+                c.number,
+                resource_usage_label(&c.usage),
+                resource_type_label(&c.chunk_type),
+            );
+            let line = match &c.detail {
+                Some(d) => format!("{base} · {d} ({})", human_size(c.len as u64)),
+                None => format!("{base} ({})", human_size(c.len as u64)),
+            };
+            lines.push((line, cs.story_info_value));
         }
     }
 
@@ -5816,11 +5817,15 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features { sound: true, graphics: true, colour: Some(false), hints: true },
             self_blorb: Some(vec![
-                app::picker::ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 92 * 1024 },
-                app::picker::ChunkInfo { usage: "Snd ".into(), number: 32, chunk_type: "FORM".into(), len: 12 * 1024 },
+                app::picker::ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 92 * 1024, detail: None },
+                app::picker::ChunkInfo {
+                    usage: "Snd ".into(), number: 32, chunk_type: "FORM".into(), len: 12 * 1024,
+                    detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
+                },
             ]),
         };
-        let area = Rect::new(0, 0, 34, 20);
+        // Wide enough that the resource detail suffix isn't clipped.
+        let area = Rect::new(0, 0, 70, 20);
         let mut buf = Buffer::empty(area);
         super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 0, area, &cs, &mut buf);
 
@@ -5837,6 +5842,7 @@ mod tests {
         assert!(text.contains("Code"));
         assert!(text.contains("Sound"));
         assert!(text.contains("AIFF"));
+        assert!(text.contains("15.4 kHz · 8-bit · mono · 2.2s"), "parsed detail: {text:?}");
     }
 
     #[test]
@@ -5849,6 +5855,7 @@ mod tests {
                 number: i,
                 chunk_type: "IFhd".into(),
                 len: 128,
+                detail: None,
             })
             .collect();
         let meta = app::picker::StoryMeta {

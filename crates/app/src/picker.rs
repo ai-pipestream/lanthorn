@@ -23,6 +23,10 @@ pub struct ChunkInfo {
     pub number: u32,
     pub chunk_type: String, // "ZCOD" | "GLUL" | "PNG " | "OGGV" …
     pub len: usize,
+    /// Parsed format detail (e.g. "15.4 kHz · 8-bit · mono · 2.2s" for a sound,
+    /// "800×600 · 32bpp" for an image). `None` when the resource isn't a
+    /// sound/image, or its header couldn't be parsed.
+    pub detail: Option<String>,
 }
 
 /// Best-effort static feature signals. Glulx-unknowable features are `None`/false.
@@ -174,8 +178,228 @@ pub fn chunks_of(b: &blorb::Blorb) -> Vec<ChunkInfo> {
             number: r.number,
             chunk_type: String::from_utf8_lossy(&r.chunk_type).into_owned(),
             len: r.len,
+            detail: resource_detail(&r.usage, &r.chunk_type, b.resource_data(r)),
         })
         .collect()
+}
+
+// ── Resource format-detail parsing ──────────────────────────────────────
+//
+// Best-effort header-only parsing of Blorb `Snd `/`Pict` resources, for the
+// info panel's Resources listing. Never decodes actual audio/pixel data, and
+// is panic-proof on malformed/truncated input: every read is bounds-checked
+// and a parse failure simply yields `None`.
+
+/// Dispatch a resource's format detail by usage, or `None` when the usage
+/// isn't a sound/image or the payload doesn't parse.
+fn resource_detail(usage: &[u8; 4], chunk_type: &[u8; 4], data: &[u8]) -> Option<String> {
+    match usage {
+        b"Snd " => sound_detail(chunk_type, data),
+        b"Pict" => image_detail(chunk_type, data),
+        _ => None,
+    }
+}
+
+/// Big-endian u16 at `off`, bounds-checked.
+fn be_u16(data: &[u8], off: usize) -> Option<u16> {
+    let s = data.get(off..off + 2)?;
+    Some(u16::from_be_bytes([s[0], s[1]]))
+}
+
+/// Big-endian u32 at `off`, bounds-checked.
+fn be_u32(data: &[u8], off: usize) -> Option<u32> {
+    let s = data.get(off..off + 4)?;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+/// Decode an IEEE 80-bit extended-precision float (as used for AIFF sample
+/// rates) to its nearest `u32`. Returns 0 on malformed/negative-exponent
+/// input rather than panicking.
+fn extended80_to_u32(e: &[u8]) -> u32 {
+    if e.len() < 10 {
+        return 0;
+    }
+    let exp = ((((e[0] as u16) << 8) | e[1] as u16) & 0x7fff) as i32 - 16383;
+    let mant = u64::from_be_bytes([e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9]]);
+    if exp < 0 {
+        return 0;
+    }
+    let shift = 63 - exp;
+    if !(0..=63).contains(&shift) {
+        return 0;
+    }
+    (mant >> shift) as u32
+}
+
+/// Sound resource format detail, dispatched by chunk type (matches
+/// [`blorb::SoundKind`] detection: `FORM` → AIFF/AIFC, `OGGV` → Ogg, `MOD ` →
+/// module).
+fn sound_detail(chunk_type: &[u8; 4], data: &[u8]) -> Option<String> {
+    match chunk_type {
+        b"FORM" => aiff_detail(data),
+        b"OGGV" => ogg_detail(data),
+        b"MOD " => mod_detail(data),
+        _ => None,
+    }
+}
+
+/// AIFF/AIFC sample-rate + bit depth + channels + duration, parsed from the
+/// `COMM` subchunk. Blorb strips the outer `FORM` header, so `data` starts
+/// with the form type (`AIFF`/`AIFC`) followed by subchunks.
+fn aiff_detail(data: &[u8]) -> Option<String> {
+    let sig = data.get(0..4)?;
+    if sig != b"AIFF" && sig != b"AIFC" {
+        return None;
+    }
+    let mut pos = 4;
+    while pos + 8 <= data.len() {
+        let id = data.get(pos..pos + 4)?;
+        let clen = be_u32(data, pos + 4)? as usize;
+        let cs = pos + 8;
+        if cs.checked_add(clen)? > data.len() {
+            return None;
+        }
+        if id == b"COMM" {
+            if clen < 18 {
+                return None;
+            }
+            let channels = be_u16(data, cs)?;
+            let num_frames = be_u32(data, cs + 2)?;
+            let sample_size = be_u16(data, cs + 6)?;
+            let rate_bytes = data.get(cs + 8..cs + 18)?;
+            let rate = extended80_to_u32(rate_bytes);
+            let mut parts = vec![format!("{:.1} kHz", rate as f64 / 1000.0)];
+            parts.push(format!("{sample_size}-bit"));
+            parts.push(match channels {
+                1 => "mono".to_string(),
+                2 => "stereo".to_string(),
+                n => format!("{n}ch"),
+            });
+            if rate != 0 {
+                parts.push(format!("{:.1}s", num_frames as f64 / rate as f64));
+            }
+            return Some(parts.join(" · "));
+        }
+        pos = cs + clen + (clen & 1);
+    }
+    None
+}
+
+/// Ogg Vorbis sample rate + channels, found by scanning for the Vorbis
+/// identification-header packet (`\x01vorbis`) within the first ~512 bytes.
+fn ogg_detail(data: &[u8]) -> Option<String> {
+    if data.get(0..4)? != b"OggS" {
+        return None;
+    }
+    let window = data.get(0..data.len().min(512))?;
+    let needle = b"\x01vorbis";
+    let p = window.windows(needle.len()).position(|w| w == needle)?;
+    let channels = *data.get(p + 11)?;
+    let rate_bytes = data.get(p + 12..p + 16)?;
+    let rate = u32::from_le_bytes([rate_bytes[0], rate_bytes[1], rate_bytes[2], rate_bytes[3]]);
+    let ch_word = match channels {
+        1 => "mono".to_string(),
+        2 => "stereo".to_string(),
+        n => format!("{n}ch"),
+    };
+    Some(format!("{:.1} kHz · {ch_word}", rate as f64 / 1000.0))
+}
+
+/// Amiga ProTracker module channel count, read from the format tag at
+/// offset 1080..1084 (present only when the module has 31 instruments).
+fn mod_detail(data: &[u8]) -> Option<String> {
+    if data.len() < 1084 {
+        return None;
+    }
+    let tag = data.get(1080..1084)?;
+    let n: u32 = match tag {
+        b"M.K." | b"M!K!" | b"FLT4" | b"4CHN" => 4,
+        b"6CHN" => 6,
+        b"8CHN" | b"FLT8" => 8,
+        _ => {
+            let s = std::str::from_utf8(tag).unwrap_or("");
+            let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+            digits.parse().unwrap_or(4)
+        }
+    };
+    Some(format!("{n}ch"))
+}
+
+/// Image resource format detail, dispatched by chunk type.
+fn image_detail(chunk_type: &[u8; 4], data: &[u8]) -> Option<String> {
+    match chunk_type {
+        b"PNG " => png_detail(data),
+        b"JPEG" => jpeg_detail(data),
+        _ => None,
+    }
+}
+
+/// PNG width × height + bits-per-pixel, parsed from the IHDR chunk (fixed
+/// offsets right after the 8-byte PNG signature).
+fn png_detail(data: &[u8]) -> Option<String> {
+    const SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if data.len() < 26 {
+        return None;
+    }
+    if data.get(0..8)? != SIG {
+        return None;
+    }
+    let width = be_u32(data, 16)?;
+    let height = be_u32(data, 20)?;
+    let bit_depth = *data.get(24)?;
+    let color_type = *data.get(25)?;
+    let channels: u32 = match color_type {
+        0 => 1, // grayscale
+        2 => 3, // RGB
+        3 => 1, // palette
+        4 => 2, // grayscale + alpha
+        6 => 4, // RGBA
+        _ => 1,
+    };
+    let bpp = bit_depth as u32 * channels;
+    Some(format!("{width}×{height} · {bpp}bpp"))
+}
+
+/// JPEG width × height + precision + component count, parsed by scanning
+/// markers for the first SOF (start-of-frame) segment.
+fn jpeg_detail(data: &[u8]) -> Option<String> {
+    if data.get(0..2)? != [0xFF, 0xD8] {
+        return None;
+    }
+    let mut pos = 2;
+    while pos < data.len() {
+        if data[pos] != 0xFF {
+            pos += 1;
+            continue;
+        }
+        // Skip fill bytes (runs of 0xFF before the real marker byte).
+        let mut m_pos = pos;
+        while data.get(m_pos) == Some(&0xFF) {
+            m_pos += 1;
+        }
+        let marker = *data.get(m_pos)?;
+        let seg_start = m_pos + 1;
+        // Markers with no length field: SOI/EOI/RSTn.
+        if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+            pos = seg_start;
+            continue;
+        }
+        let len = be_u16(data, seg_start)? as usize;
+        if len < 2 {
+            return None;
+        }
+        let body_off = seg_start + 2;
+        let is_sof = (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
+        if is_sof {
+            let precision = *data.get(body_off)?;
+            let height = be_u16(data, body_off + 1)?;
+            let width = be_u16(data, body_off + 3)?;
+            let components = *data.get(body_off + 5)?;
+            return Some(format!("{width}×{height} · {precision}-bit · {components}ch"));
+        }
+        pos = body_off.checked_add(len - 2)?;
+    }
+    None
 }
 
 /// Eager `Features` for a Z-code exec image, folding in self-blorb resources.
@@ -509,7 +733,7 @@ mod tests {
         let dir = temp_dir("badges");
         // A self-blorb story lights `blorb` with no sibling.
         let e_self = entry_with("IFID-A", dir.join("a.z5"),
-            Some(vec![ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 4 }]));
+            Some(vec![ChunkInfo { usage: "Exec".into(), number: 0, chunk_type: "ZCOD".into(), len: 4, detail: None }]));
         // A story with a same-stem sibling .blorb lights `blorb`.
         std::fs::write(dir.join("b.z5"), b"x").unwrap();
         std::fs::write(dir.join("b.blorb"), b"x").unwrap();
@@ -577,6 +801,146 @@ mod tests {
         assert!(chunks.iter().any(|c| c.usage == "Snd "));
         assert!(aux.saves.is_empty());
         assert!(!aux.hints_available);
+    }
+
+    // ── Resource format-detail parsing ──────────────────────────────────
+
+    /// Encode `rate` as an IEEE 80-bit extended-precision float, the inverse
+    /// of `extended80_to_u32`, for building AIFF `COMM` fixtures.
+    fn encode_extended80(rate: u32) -> [u8; 10] {
+        let bits = 32 - rate.leading_zeros(); // significant bits in `rate`
+        let exp = 16383 + (bits as i32 - 1);
+        let mantissa = (rate as u64) << (63 - (bits - 1));
+        let mut out = [0u8; 10];
+        out[0] = (exp >> 8) as u8;
+        out[1] = exp as u8;
+        out[2..10].copy_from_slice(&mantissa.to_be_bytes());
+        out
+    }
+
+    /// Build a minimal AIFF `Snd ` payload (post-FORM-header, as blorb stores
+    /// it): form type + one `COMM` subchunk.
+    fn aiff_fixture(channels: u16, sample_size: u16, num_frames: u32, rate: u32) -> Vec<u8> {
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&channels.to_be_bytes());
+        comm.extend_from_slice(&num_frames.to_be_bytes());
+        comm.extend_from_slice(&sample_size.to_be_bytes());
+        comm.extend_from_slice(&encode_extended80(rate));
+        let mut data = b"AIFF".to_vec();
+        data.extend_from_slice(b"COMM");
+        data.extend_from_slice(&(comm.len() as u32).to_be_bytes());
+        data.extend_from_slice(&comm);
+        data
+    }
+
+    #[test]
+    fn aiff_sound_detail_parses_rate_bit_depth_and_channels() {
+        let data = aiff_fixture(1, 8, 16000, 8000);
+        let detail = sound_detail(b"FORM", &data).expect("valid AIFF COMM parses");
+        assert!(detail.contains("8.0 kHz"), "{detail:?}");
+        assert!(detail.contains("8-bit"), "{detail:?}");
+        assert!(detail.contains("mono"), "{detail:?}");
+        assert!(detail.contains("2.0s"), "{detail:?}");
+    }
+
+    #[test]
+    fn aiff_sound_detail_rejects_garbage() {
+        assert_eq!(sound_detail(b"FORM", b"not aiff at all"), None);
+        assert_eq!(sound_detail(b"FORM", b"AIFF"), None); // no COMM subchunk
+        assert_eq!(sound_detail(b"FORM", &[]), None);
+    }
+
+    #[test]
+    fn ogg_sound_detail_parses_rate_and_channels() {
+        let mut data = b"OggS".to_vec();
+        data.extend_from_slice(&[0u8; 20]); // leading page-header padding
+        data.extend_from_slice(b"\x01vorbis");
+        data.extend_from_slice(&[0u8; 4]); // vorbis_version (unused)
+        data.push(2); // channels: stereo
+        data.extend_from_slice(&44_100u32.to_le_bytes());
+        let detail = sound_detail(b"OGGV", &data).expect("valid Ogg Vorbis header parses");
+        assert!(detail.contains("44.1 kHz"), "{detail:?}");
+        assert!(detail.contains("stereo"), "{detail:?}");
+    }
+
+    #[test]
+    fn ogg_sound_detail_rejects_garbage() {
+        assert_eq!(sound_detail(b"OGGV", b"not ogg"), None);
+        assert_eq!(sound_detail(b"OGGV", b"OggS"), None); // no vorbis ident packet
+    }
+
+    #[test]
+    fn mod_sound_detail_reads_channel_tag() {
+        let mut data = vec![0u8; 1084];
+        data[1080..1084].copy_from_slice(b"M.K.");
+        assert_eq!(sound_detail(b"MOD ", &data).as_deref(), Some("4ch"));
+
+        let mut data6 = vec![0u8; 1084];
+        data6[1080..1084].copy_from_slice(b"6CHN");
+        assert_eq!(sound_detail(b"MOD ", &data6).as_deref(), Some("6ch"));
+    }
+
+    #[test]
+    fn mod_sound_detail_rejects_too_short() {
+        assert_eq!(sound_detail(b"MOD ", &[0u8; 100]), None);
+    }
+
+    #[test]
+    fn png_image_detail_parses_dimensions_and_bpp() {
+        let mut data = vec![0u8; 26];
+        data[0..8].copy_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+        data[8..12].copy_from_slice(&13u32.to_be_bytes()); // IHDR length
+        data[12..16].copy_from_slice(b"IHDR");
+        data[16..20].copy_from_slice(&800u32.to_be_bytes()); // width
+        data[20..24].copy_from_slice(&600u32.to_be_bytes()); // height
+        data[24] = 8; // bit depth
+        data[25] = 6; // color type: RGBA → 4 channels
+        let detail = image_detail(b"PNG ", &data).expect("valid PNG IHDR parses");
+        assert!(detail.contains("800×600"), "{detail:?}");
+        assert!(detail.contains("32bpp"), "{detail:?}");
+    }
+
+    #[test]
+    fn png_image_detail_rejects_truncated() {
+        assert_eq!(image_detail(b"PNG ", b"\x89PNG\r\n\x1a\n"), None); // signature only
+        assert_eq!(image_detail(b"PNG ", b"not a png"), None);
+    }
+
+    #[test]
+    fn jpeg_image_detail_parses_dimensions_and_components() {
+        let mut data = vec![0xFFu8, 0xD8, 0xFF, 0xC0]; // SOI, SOF0 marker
+        data.extend_from_slice(&17u16.to_be_bytes()); // segment length
+        data.push(8); // precision
+        data.extend_from_slice(&100u16.to_be_bytes()); // height
+        data.extend_from_slice(&200u16.to_be_bytes()); // width
+        data.push(3); // components
+        data.extend_from_slice(&[0u8; 9]); // 3 components × 3 bytes each
+        let detail = image_detail(b"JPEG", &data).expect("valid JPEG SOF0 parses");
+        assert!(detail.contains("200×100"), "{detail:?}");
+        assert!(detail.contains("8-bit"), "{detail:?}");
+        assert!(detail.contains("3ch"), "{detail:?}");
+    }
+
+    #[test]
+    fn jpeg_image_detail_rejects_garbage() {
+        assert_eq!(image_detail(b"JPEG", b"not a jpeg"), None);
+        assert_eq!(image_detail(b"JPEG", &[0xFF, 0xD8]), None); // SOI only, no SOF
+    }
+
+    #[test]
+    fn resource_detail_dispatches_by_usage_none_for_unknown() {
+        let png = {
+            let mut data = vec![0u8; 26];
+            data[0..8].copy_from_slice(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+            data[16..20].copy_from_slice(&1u32.to_be_bytes());
+            data[20..24].copy_from_slice(&1u32.to_be_bytes());
+            data[24] = 8;
+            data[25] = 2;
+            data
+        };
+        assert!(resource_detail(b"Pict", b"PNG ", &png).is_some());
+        assert_eq!(resource_detail(b"Data", b"PNG ", &png), None);
+        assert_eq!(resource_detail(b"Exec", b"ZCOD", b"whatever"), None);
     }
 }
 
