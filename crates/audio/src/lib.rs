@@ -127,26 +127,73 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     Some((channels, sample_rate, pcm))
 }
 
-/// Render a ProTracker MOD to interleaved stereo i16 PCM via `xmrsplayer`.
-/// Returns None on a malformed module (xmrs `Module::load` returns `Err`) — no
-/// panic, no temp file, no stdout. Plays the song through once
-/// (`set_max_loop_count(1)`); looping/repeat is handled by the caller via
-/// `repeat_plan` (same path as AIFF). A safety cap bounds memory and guarantees
-/// termination even if a pathological song never signals its end.
+/// A lazy, streaming ProTracker MOD source. Wraps an `XmrsPlayer` that renders
+/// interleaved stereo `i16` samples on demand (one per `next()`), so playback
+/// starts immediately instead of pre-rendering the whole track. `rodio` pulls
+/// samples on its own audio thread, so building and appending this never blocks
+/// the caller.
+///
+/// `XmrsPlayer<'a>` borrows the `Module`, but a `rodio::Source` appended to a
+/// `Sink` must be `Send + 'static`. `self_cell` lets us own the `Module` and the
+/// `XmrsPlayer` that borrows it in one `Send + 'static` value without leaking.
 #[cfg(feature = "mod-music")]
-fn render_mod(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
-    use xmrs::prelude::*;
-    use xmrsplayer::prelude::*;
-    let module = Module::load(bytes).ok()?;
-    let mut player = XmrsPlayer::new(&module, SAMPLE_RATE, 0);
-    player.set_max_loop_count(1); // 0 = forever; 1 = play once (iterator ends at song end)
-    const MAX_SECONDS: usize = 600;
-    let cap = SAMPLE_RATE as usize * 2 * MAX_SECONDS; // interleaved stereo
-    let pcm: Vec<i16> = player.by_ref().take(cap).collect();
-    if pcm.is_empty() {
-        return None;
+mod mod_stream {
+    use super::SAMPLE_RATE;
+    use xmrs::prelude::Module;
+    use xmrsplayer::prelude::XmrsPlayer;
+
+    self_cell::self_cell!(
+        struct PlayerCell {
+            owner: Module,
+            #[not_covariant]
+            dependent: XmrsPlayer,
+        }
+    );
+
+    pub struct ModSource {
+        cell: PlayerCell,
     }
-    Some((2, SAMPLE_RATE, pcm))
+
+    impl ModSource {
+        /// Parse `bytes` and build a streaming source. Returns `None` on a
+        /// malformed module (`Module::load` returns `Err`) — no panic, no
+        /// rendering. `forever` loops indefinitely (`set_max_loop_count(0)`);
+        /// otherwise the song plays `count` times then the iterator ends.
+        pub fn new(bytes: &[u8], forever: bool, count: u8) -> Option<Self> {
+            let module = Module::load(bytes).ok()?;
+            let cell = PlayerCell::new(module, |m| {
+                let mut player = XmrsPlayer::new(m, SAMPLE_RATE, 0);
+                player.set_max_loop_count(if forever { 0 } else { count as usize });
+                player
+            });
+            Some(ModSource { cell })
+        }
+    }
+
+    // `XmrsPlayer`'s iterator yields interleaved stereo `i16` samples — the same
+    // values the old `render_mod` collected into a `Vec<i16>`.
+    impl Iterator for ModSource {
+        type Item = i16;
+        fn next(&mut self) -> Option<i16> {
+            self.cell.with_dependent_mut(|_owner, player| player.next())
+        }
+    }
+
+    #[cfg(feature = "playback")]
+    impl rodio::Source for ModSource {
+        fn current_frame_len(&self) -> Option<usize> {
+            None
+        }
+        fn channels(&self) -> u16 {
+            2
+        }
+        fn sample_rate(&self) -> u32 {
+            SAMPLE_RATE
+        }
+        fn total_duration(&self) -> Option<std::time::Duration> {
+            None
+        }
+    }
 }
 
 /// Map the Z-machine repeat count to (loop_forever, finite_play_count).
@@ -242,14 +289,8 @@ impl AudioBackend {
             SoundFormat::Mod => {
                 #[cfg(feature = "mod-music")]
                 {
-                    let (channels, rate, pcm) = render_mod(bytes)?;
-                    if forever {
-                        sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()).repeat_infinite());
-                    } else {
-                        for _ in 0..count {
-                            sink.append(rodio::buffer::SamplesBuffer::new(channels, rate, pcm.clone()));
-                        }
-                    }
+                    let source = mod_stream::ModSource::new(bytes, forever, count)?;
+                    sink.append(source);
                 }
                 #[cfg(not(feature = "mod-music"))]
                 {
@@ -497,17 +538,34 @@ mod tests {
 
     #[cfg(feature = "mod-music")]
     #[test]
-    fn render_mod_rejects_malformed_without_panic() {
-        assert!(render_mod(&[0u8; 100]).is_none(), "short input rejected, not panicked on");
-        assert!(render_mod(&[]).is_none(), "empty input rejected, not panicked on");
+    fn mod_source_rejects_malformed_without_panic() {
+        use mod_stream::ModSource;
+        assert!(ModSource::new(&[0u8; 100], false, 1).is_none(), "short input rejected, not panicked on");
+        assert!(ModSource::new(&[], false, 1).is_none(), "empty input rejected, not panicked on");
+    }
+
+    #[cfg(all(feature = "mod-music", feature = "playback"))]
+    #[test]
+    fn mod_source_reports_stereo_format() {
+        use rodio::Source;
+        let source = mod_stream::ModSource::new(&minimal_mod(), false, 1).expect("valid minimal MOD");
+        assert_eq!(source.channels(), 2, "MOD is streamed as stereo");
+        assert_eq!(source.sample_rate(), SAMPLE_RATE);
+        assert!(source.current_frame_len().is_none());
+        assert!(source.total_duration().is_none());
     }
 
     #[cfg(feature = "mod-music")]
     #[test]
-    fn render_mod_produces_stereo_buffer() {
-        let (channels, rate, pcm) = render_mod(&minimal_mod()).expect("valid minimal MOD renders");
-        assert_eq!(channels, 2, "MOD is rendered as stereo");
-        assert_eq!(rate, SAMPLE_RATE);
+    fn mod_source_streams_lazily_and_terminates() {
+        use mod_stream::ModSource;
+        // A first sample is available immediately (lazy: no full pre-render).
+        let mut src = ModSource::new(&minimal_mod(), false, 1).expect("valid minimal MOD");
+        assert!(src.next().is_some(), "source yields at least a first sample");
+        // With a finite loop count, collecting the whole stream terminates and
+        // is non-empty (mirrors the old render_mod_produces_stereo_buffer guarantee).
+        let src = ModSource::new(&minimal_mod(), false, 1).expect("valid minimal MOD");
+        let pcm: Vec<i16> = src.collect();
         assert!(!pcm.is_empty(), "one pattern still yields frames");
     }
 }
