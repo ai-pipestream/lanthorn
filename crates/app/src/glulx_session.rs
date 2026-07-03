@@ -16,6 +16,7 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
 
 use gvm::{GError, Machine, Memory, StepResult};
 
@@ -79,12 +80,41 @@ pub struct GlulxSession {
     last_room: Option<LocationInfo>,
 }
 
+/// Wall-clock budget for a single drive (one turn's worth of execution). A
+/// well-behaved game reaches an input request in milliseconds; if it runs this
+/// long it is assumed to be in a runaway loop (e.g. layout code that cannot
+/// converge on a given screen geometry) and the turn is aborted as a recoverable
+/// fault so the app survives instead of hard-hanging. Generous, because this is a
+/// last-resort backstop — the tree-driven size snapping in `gvm` already prevents
+/// the known cause. Set via env `BABELMAP_TURN_BUDGET_MS` for testing.
+fn turn_budget() -> Duration {
+    std::env::var("BABELMAP_TURN_BUDGET_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(10))
+}
+
 /// Step the machine until it pauses for input or quits, returning
-/// `(pending_kind, quit)`.
+/// `(pending_kind, quit)`. Aborts a runaway turn via the wall-clock watchdog.
 fn drive(machine: &mut Machine) -> (InputKind, bool) {
+    let budget = turn_budget();
+    let start = Instant::now();
+    let mut steps: u64 = 0;
     loop {
         match machine.step() {
-            StepResult::Continue => {}
+            StepResult::Continue => {
+                steps += 1;
+                // Checking the clock every step is too costly; sample periodically.
+                if steps.is_multiple_of(1_000_000) && start.elapsed() > budget {
+                    machine.abort_with_fault(format!(
+                        "turn aborted after {:?} / {steps} steps with no input request \
+                         (runaway game loop); the app stays interactive",
+                        start.elapsed()
+                    ));
+                    return (InputKind::Line, true);
+                }
+            }
             StepResult::Quit => return (InputKind::Line, true),
             StepResult::NeedLine { .. } => return (InputKind::Line, false),
             StepResult::NeedChar { .. } => return (InputKind::Char, false),
