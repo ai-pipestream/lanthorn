@@ -101,11 +101,18 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is also supported.
   reach the first prompt substantially faster: well-known Inform veneer functions
   set up via `accelfunc` are recognized and executed natively instead of through
   full VM dispatch. On by default; disable with `--no-accel` (`gvm-cli` and the app).
+- **Floating-point math (Glulx)** — the full single-precision floating-point
+  opcode set (conversions, arithmetic, `sqrt`/`exp`/`log`/`pow`, trigonometry, and
+  the fuzzy comparisons `jfeq`…`jisinf`) is implemented, so games that compute with
+  floats — for instance CounterfeitMonkey's in-game graphics scaling — run instead
+  of faulting. `glk_gestalt(gestalt_Float)` answers truthfully.
 - **Graceful VM crash reporting** — when a story faults (out-of-bounds memory,
-  stack under/overflow), the interpreter halts with a call-frame stack trace —
-  the faulting PC and opcode plus each frame's return address and locals —
-  instead of crashing. The trace appears inline in the app transcript and on
-  `zvm-cli`/`gvm-cli` stderr (which exit 70).
+  stack under/overflow, an unimplemented opcode), the game halts with a call-frame
+  stack trace — the faulting PC and opcode plus each frame's return address and
+  locals — instead of taking the interpreter down. In the app the trace appears
+  inline in the transcript and the app **stays interactive** (the map, scrollback,
+  and a deliberate quit still work); a durable copy is written to
+  `~/.babelmap/crash.log`. `zvm-cli`/`gvm-cli` print it to stderr (exit 70).
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
