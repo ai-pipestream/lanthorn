@@ -338,6 +338,8 @@ type DrawRec = (u32, i32, i32, Option<(u32, u32)>);
 pub struct TestBackend {
     /// Reported display size.
     pub screen: (u32, u32),
+    /// Reported character-cell pixel size (w, h). Defaults to (1, 1).
+    pub char_px: (u32, u32),
     /// Styled output runs per text-buffer window id, in print order.
     runs: BTreeMap<u32, Vec<(GlkStyle, String)>>,
     /// Grid cells per text-grid window id, keyed `(row, col) -> char`.
@@ -363,6 +365,7 @@ impl TestBackend {
     pub fn new() -> Self {
         TestBackend {
             screen: (80, 24),
+            char_px: (1, 1),
             runs: BTreeMap::new(),
             grid: BTreeMap::new(),
             dims: BTreeMap::new(),
@@ -374,6 +377,11 @@ impl TestBackend {
     /// A backend reporting a specific display size.
     pub fn with_screen(width: u32, height: u32) -> Self {
         TestBackend { screen: (width, height), ..Self::new() }
+    }
+    /// A backend reporting a specific character-cell pixel size.
+    pub fn with_char_pixels(mut self, cw: u32, ch: u32) -> Self {
+        self.char_px = (cw, ch);
+        self
     }
     /// Accumulated text for one text-buffer window (empty if none).
     pub fn text(&self, win: u32) -> String {
@@ -426,6 +434,9 @@ impl TestBackend {
 impl GlkBackend for TestBackend {
     fn screen_size(&self) -> (u32, u32) {
         self.screen
+    }
+    fn char_pixels(&self) -> (u32, u32) {
+        self.char_px
     }
     fn window_open(&mut self, id: u32, wintype: WinType) {
         match wintype {
@@ -586,6 +597,9 @@ pub struct Model {
     /// Colour style hints, indexed `[row][style]` where row 0 = text-buffer and
     /// row 1 = text-grid (see [`Model::hint_row`]). Set via `glk_stylehint_set`.
     style_hints: [[StyleColour; NUMSTYLES as usize]; 2],
+    /// Pixel size of one character cell (w, h), set by `relayout` for graphics
+    /// fixed-split conversion. (1,1) until the backend reports otherwise.
+    char_px: (u32, u32),
 }
 
 impl Default for Model {
@@ -604,6 +618,7 @@ impl Model {
             cur_stream: 0,
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
+            char_px: (1, 1),
         }
     }
 
@@ -847,7 +862,8 @@ impl Model {
     /// Recompute every window's rectangle from the tree and `(width, height)`,
     /// returning the leaf-window layout `(id, type, rect)` in id order (to hand
     /// to [`GlkBackend::window_layout`]).
-    pub fn relayout(&mut self, width: u32, height: u32) -> Vec<(u32, WinType, Rect)> {
+    pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32)) -> Vec<(u32, WinType, Rect)> {
+        self.char_px = char_px;
         if self.root != 0 {
             let r = Rect { left: 0, top: 0, width, height };
             self.layout_window(self.root, r);
@@ -883,7 +899,18 @@ impl Model {
             WinType::Graphics => {}
             WinType::Pair => {
                 let _ = key;
-                let (r_old, r_new) = split_rect(rect, method, size);
+                // Graphics fixed-splits size in PIXELS; convert to cells.
+                let key_is_graphics = self.win(child2).map(|w| w.wintype) == Some(WinType::Graphics);
+                let is_fixed = (method & WINMETHOD_DIVISIONMASK) == WINMETHOD_FIXED;
+                let eff_size = if key_is_graphics && is_fixed {
+                    let dir = method & WINMETHOD_DIRMASK;
+                    let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
+                    let cell_px = if vertical { self.char_px.1 } else { self.char_px.0 }.max(1);
+                    size.div_ceil(cell_px)
+                } else {
+                    size
+                };
+                let (r_old, r_new) = split_rect(rect, method, eff_size);
                 self.layout_window(child1, r_old);
                 self.layout_window(child2, r_new);
             }
@@ -918,6 +945,20 @@ impl Model {
     /// A window's `(width, height)` in characters. `None` if invalid.
     pub fn window_size(&self, win: u32) -> Option<(u32, u32)> {
         self.win(win).map(|w| (w.rect.width, w.rect.height))
+    }
+    /// Whether any open window is a graphics window (used to gate Redraw events
+    /// on arrangement — text-only trees never need one).
+    pub fn has_graphics_window(&self) -> bool {
+        self.windows.iter().flatten().any(|w| w.wintype == WinType::Graphics)
+    }
+    /// A graphics window's `(width, height)` in PIXELS = cells × char_px.
+    /// `None` if the window is invalid or not a graphics window.
+    pub fn window_pixel_size(&self, win: u32, char_px: (u32, u32)) -> Option<(u32, u32)> {
+        let w = self.win(win)?;
+        if w.wintype != WinType::Graphics {
+            return None;
+        }
+        Some((w.rect.width * char_px.0, w.rect.height * char_px.1))
     }
     /// A window's own output stream id (0 for a pair window).
     pub fn window_stream(&self, win: u32) -> Option<u32> {
@@ -1203,6 +1244,10 @@ impl Model {
     pub fn pop_event(&mut self) -> Option<GlkEvent> {
         self.events.pop_front()
     }
+    /// Drain all queued non-input events (test accessor).
+    pub fn take_pending_events(&mut self) -> Vec<GlkEvent> {
+        self.events.drain(..).collect()
+    }
 
     // ── snapshot serialization (the Glulx-Quetzal "Glk " chunk; GLULX_NOTES §20) ──
 
@@ -1366,6 +1411,7 @@ impl Model {
             cur_stream,
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
+            char_px: (1, 1),
         })
     }
 }

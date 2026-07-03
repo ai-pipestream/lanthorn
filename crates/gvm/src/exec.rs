@@ -2296,8 +2296,11 @@ impl Machine {
                 0
             }
             0x0025 => {
-                // glk_window_get_size(win, awidthptr, aheightptr)
-                if let Some((w, h)) = self.glk.window_size(a(0)) {
+                // glk_window_get_size(win, awidthptr, aheightptr) — PIXELS for a
+                // graphics window, cells (unchanged) for other window types.
+                let cp = self.backend.char_pixels();
+                let size = self.glk.window_pixel_size(a(0), cp).or_else(|| self.glk.window_size(a(0)));
+                if let Some((w, h)) = size {
                     self.glk_store_ptr(a(1), w)?;
                     self.glk_store_ptr(a(2), h)?;
                 }
@@ -2307,8 +2310,13 @@ impl Machine {
                 // glk_window_set_arrangement(win, method, size, keywin)
                 self.glk.window_set_arrangement(a(0), a(1), a(2), a(3));
                 self.relayout_glk();
-                // A program-driven rearrangement generates an arrange event.
+                // A program-driven rearrangement generates an arrange event, plus
+                // a redraw when a graphics window is in play (arrangement can
+                // resize it); text-only trees don't need one.
                 self.glk.push_event(GlkEvent { etype: glk::evtype::ARRANGE, win: 0, val1: 0, val2: 0 });
+                if self.glk.has_graphics_window() {
+                    self.glk.push_event(GlkEvent { etype: glk::evtype::REDRAW, win: 0, val1: 0, val2: 0 });
+                }
                 0
             }
             0x0027 => {
@@ -2700,6 +2708,9 @@ impl Machine {
                     self.backend.window_open(id, ty);
                 }
                 self.relayout_glk();
+                if self.glk.window_type(id) == Some(WinType::Graphics) {
+                    self.glk.push_event(GlkEvent { etype: glk::evtype::REDRAW, win: id, val1: 0, val2: 0 });
+                }
                 id
             }
             None => {
@@ -2713,7 +2724,8 @@ impl Machine {
     /// Recompute the window layout from the backend's screen size and notify it.
     fn relayout_glk(&mut self) {
         let (w, h) = self.backend.screen_size();
-        let layout = self.glk.relayout(w, h);
+        let cp = self.backend.char_pixels();
+        let layout = self.glk.relayout(w, h, cp);
         self.backend.window_layout(&layout);
     }
 
@@ -3215,6 +3227,25 @@ mod tests {
         let built = asm::assemble(&[start], 0, 0x100);
         let mem = Memory::new(built.image).expect("valid image");
         Machine::with_glk(mem, Box::new(TestBackend::new()))
+    }
+
+    /// A bare machine (no windows opened) whose [`TestBackend`] reports a
+    /// `(cols, rows)` screen and `(cw, ch)`-pixel character cells — for tests
+    /// exercising graphics-window pixel↔cell layout conversion.
+    fn machine_with_glk_charpx(cols: u32, rows: u32, cw: u32, ch: u32) -> Machine {
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        let backend = TestBackend::with_screen(cols, rows).with_char_pixels(cw, ch);
+        Machine::with_glk(mem, Box::new(backend))
+    }
+
+    impl Machine {
+        /// Test accessor: a graphics window's `(width, height)` in pixels, per
+        /// the backend's current `char_pixels()`.
+        fn graphics_window_pixels(&self, win: u32) -> Option<(u32, u32)> {
+            self.glk.window_pixel_size(win, self.backend.char_pixels())
+        }
     }
 
     #[test]
@@ -4834,7 +4865,7 @@ mod tests {
         // grid stream, and a positioned grid cursor.
         let buf = m.glk.window_open(0, 0, 0, 3, 0xB0).unwrap(); // root TextBuffer
         let grid = m.glk.window_open(buf, 0x12, 3, 4, 0x61).unwrap(); // grid above, fixed 3
-        m.glk.relayout(80, 24);
+        m.glk.relayout(80, 24, (1, 1));
         let mem_stream = m.glk.stream_open_memory(0x180, 16, false, 0x5E);
         m.glk.stream_set_position(mem_stream, 5, 0);
         let grid_stream = m.glk.window_stream(grid).unwrap();
@@ -4873,7 +4904,7 @@ mod tests {
         // Routing after a cross-session restore: a put on the current (grid)
         // stream lands in the grid window at its restored cursor (row 1, col 2+).
         // (The host re-lays the restored tree out to its fresh backend first.)
-        let layout = m2.glk.relayout(80, 24);
+        let layout = m2.glk.relayout(80, 24, (1, 1));
         m2.backend.window_layout(&layout);
         m2.glk_stream_put(grid_stream, "Hi");
         assert_eq!(backend_of(&m2).grid_line(grid, 1), "  Hi");
@@ -6126,5 +6157,60 @@ mod tests {
         assert_eq!(tb.fills(1), Vec::new(), "no backend calls recorded when disabled");
         assert_eq!(tb.draws(1), Vec::new());
         assert_eq!(tb.background(1), None);
+    }
+
+    #[test]
+    fn graphics_fixed_split_converts_pixels_to_cells() {
+        // A backend reporting 8x16 px cells; a 150px-tall fixed graphics window
+        // below a text buffer → ceil(150/16) = 10 cells tall.
+        let mut m = super::tests::machine_with_glk_charpx(80, 24, 8, 16);
+        m.set_graphics(true);
+        let buf = m.glk_open_window(0, 0, 0, 3, 0); // text buffer root
+        // winmethod: BELOW(0x03) | FIXED(0x10) = 0x13, size=150 px, wintype_Graphics=5
+        let gfx = m.glk_open_window(buf, 0x13, 150, 5, 0);
+        assert_ne!(gfx, 0);
+        // get_size returns PIXELS for a graphics window: 10 cells * 16 = 160 tall,
+        // 80 cells * 8 = 640 wide.
+        let (w_px, h_px) = m.graphics_window_pixels(gfx).unwrap();
+        assert_eq!(h_px, 160);
+        assert_eq!(w_px, 640);
+    }
+
+    #[test]
+    fn graphics_window_open_pushes_redraw() {
+        let mut m = super::tests::machine_with_glk_charpx(80, 24, 8, 16);
+        m.set_graphics(true);
+        let _gfx = m.glk_open_window(0, 0, 0, 5, 0);
+        assert!(
+            m.glk.take_pending_events().iter().any(|e| e.etype == glk::evtype::REDRAW),
+            "opening a graphics window queues a Redraw"
+        );
+    }
+
+    #[test]
+    fn arrangement_pushes_redraw_only_when_graphics_window_present() {
+        // A pair of text windows only: rearranging never needs a redraw.
+        let mut m = super::tests::machine_with_glk_charpx(80, 24, 8, 16);
+        let buf = m.glk_open_window(0, 0, 0, 3, 0); // text buffer root
+        let grid = m.glk_open_window(buf, 0x12, 3, 4, 0); // grid above, fixed 3
+        m.glk_dispatch(0x0026, &[m.glk.window_parent(grid).unwrap(), 0x12, 5, grid]).unwrap(); // set_arrangement
+        let evs = m.glk.take_pending_events();
+        assert!(evs.iter().any(|e| e.etype == glk::evtype::ARRANGE));
+        assert!(
+            !evs.iter().any(|e| e.etype == glk::evtype::REDRAW),
+            "no graphics window in the tree — no redraw needed"
+        );
+
+        // Add a graphics window to the tree: now rearranging queues a redraw too.
+        m.set_graphics(true);
+        let gfx = m.glk_open_window(buf, 0x13, 150, 5, 0); // graphics below, fixed 150px
+        m.glk.take_pending_events(); // drain the open-triggered redraw
+        m.glk_dispatch(0x0026, &[m.glk.window_parent(gfx).unwrap(), 0x13, 100, gfx]).unwrap(); // set_arrangement
+        let evs = m.glk.take_pending_events();
+        assert!(evs.iter().any(|e| e.etype == glk::evtype::ARRANGE));
+        assert!(
+            evs.iter().any(|e| e.etype == glk::evtype::REDRAW),
+            "a graphics window is in the tree — arrangement queues a redraw"
+        );
     }
 }
