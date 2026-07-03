@@ -134,6 +134,24 @@ impl GlulxSession {
         self.appglk().set_screen_size(cols, rows);
     }
 
+    /// React to a change in the host story-pane size: report it to the backend,
+    /// relayout the window tree to the new geometry (rescaling graphics canvases),
+    /// and — if the game is waiting on input — deliver a Glk Arrange event so it
+    /// redraws (e.g. a graphics window repaints its image at the new size). Drives
+    /// the game's redraw to its next input request and refreshes the screen cache.
+    /// A no-op once the game has quit.
+    pub fn resize(&mut self, cols: u32, rows: u32) {
+        if self.quit {
+            return;
+        }
+        self.set_screen_size(cols, rows);
+        self.machine.rearrange();
+        let (pending, quit) = drive(&mut self.machine);
+        self.pending = pending;
+        self.quit = quit;
+        self.refresh_screen();
+    }
+
     fn appglk(&mut self) -> &mut AppGlk {
         self.machine
             .backend_mut()
@@ -521,6 +539,82 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
         body.extend(enc(0x120, &[])); // quit
         image_for(body, 1)
+    }
+
+    /// Program: open a buffer, split off a proportional (50%) graphics window
+    /// below it, fill a rect to create its canvas, request a line, then select
+    /// twice so the game stays alive across an Arrange (re-suspending on the
+    /// persisted line request). local0 = buffer, local1 = graphics window.
+    fn graphics_split_line_image() -> Vec<u8> {
+        use E::*;
+        let mut body = open_buffer_prelude();
+        // window_open(split=buffer, method=Below|Proportional=0x23, size=50,
+        // wintype_Graphics=5, rock=0) → local1. Push order is args reversed.
+        for v in [Imm(0), Imm(5), Imm(50), Imm(0x23), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0x23), Imm(5), LocStore(4)])); // window_open → local1 (byte offset 4)
+        // fill_rect(win=graphics, color=0x00FFFFFF, left=0, top=0, w=4, h=4) to
+        // materialize the canvas so relayout has something to resize.
+        for v in [Imm(4), Imm(4), Imm(0), Imm(0), Imm(0x00FF_FFFF), LocLoad(4)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xEA), Imm(6), Discard])); // glk_window_fill_rect
+        // request_line_event(win=buffer, LINEBUF, maxlen=20, initlen=0).
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        // Three selects: #1 drains the Redraw queued by opening the graphics
+        // window; #2 is where new() suspends on the line request; #3 is where the
+        // game re-suspends after the resize()-delivered Arrange (proving survival).
+        for _ in 0..3 {
+            body.extend(enc(0x40, &[Imm(EVENT), Push]));
+            body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+        }
+        body.extend(enc(0x120, &[])); // quit
+        image_for(body, 2)
+    }
+
+    /// Find the first Graphics leaf's canvas pixel size in a screen model.
+    fn graphics_canvas_dims(node: &WinNode) -> Option<(u32, u32)> {
+        match node {
+            WinNode::Graphics(g) => Some((g.canvas.width(), g.canvas.height())),
+            WinNode::Pair { first, second, .. } => {
+                graphics_canvas_dims(first).or_else(|| graphics_canvas_dims(second))
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn resize_rescales_graphics_canvas_and_game_survives_arrange() {
+        // char_px = (2, 2): a 50%-height graphics window under an 80x24 screen is
+        // 80 cols x 12 rows → 160 x 24 px. Shrinking the pane to 40 cols halves
+        // its width to 80 px; the game re-suspends on its line request (not quit).
+        let mut sess =
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, (2, 2), None)
+                .expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Line);
+        let (w0, h0) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
+        assert_eq!((w0, h0), (160, 24), "initial canvas from the 80-col virtual screen");
+
+        sess.resize(40, 24);
+        assert_eq!(sess.pending_input(), InputKind::Line, "game re-suspended on its line request");
+        assert!(!sess.has_quit(), "an Arrange must not end the game");
+        let (w1, h1) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
+        assert_eq!((w1, h1), (80, 24), "canvas tracks the narrower pane after resize");
+    }
+
+    #[test]
+    fn resize_after_quit_is_a_noop() {
+        // A quit session must ignore resize (no drive, no panic).
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None)
+            .expect("new");
+        let r = sess.submit("go"); // drives to quit
+        assert!(r.quit);
+        sess.resize(40, 12); // must be a harmless no-op
+        assert!(sess.has_quit());
     }
 
     #[test]

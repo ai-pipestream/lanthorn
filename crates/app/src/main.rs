@@ -1948,6 +1948,17 @@ fn main() {
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
 
+    // Glulx re-arrange debounce (SQ-0201). The Glulx VM starts on a fixed virtual
+    // screen; once the real story-pane size is known (and whenever it changes: a
+    // terminal resize, a map/sidebar toggle) we report it and deliver a Glk
+    // Arrange so graphics windows repaint at the new size — but only after the
+    // size settles, so a drag doesn't run the game's redraw on every tick.
+    // `vm_story_size` = size last reported to the VM; `story_size_seen` = size at
+    // the previous frame; `resize_dirty` = when the size last moved.
+    let mut vm_story_size: Option<(u16, u16)> = None;
+    let mut story_size_seen: Option<(u16, u16)> = None;
+    let mut resize_dirty: Option<std::time::Instant> = None;
+
     // Poll FPS while a background tidy is in flight.
     const TIDY_POLL_MS: u64 = 33;
 
@@ -1994,6 +2005,30 @@ fn main() {
                         &format!("style reload failed: {}", msg),
                         TranscriptKind::Warning,
                     );
+                }
+            }
+        }
+
+        // ── Glulx re-arrange on settled story-pane size (SQ-0201) ─────────────
+        // Uses last frame's story rect (one-frame lag is fine). Runs BEFORE the
+        // draw so the resized graphics show on the next frame. Glulx-only; the
+        // Z-machine renders its own fixed virtual screen into the pane.
+        if session.as_any().is::<GlulxSession>() {
+            let now = std::time::Instant::now();
+            let cur = (last_panes.story.width, last_panes.story.height);
+            if cur.0 > 0 && cur.1 > 0 {
+                if Some(cur) != story_size_seen {
+                    story_size_seen = Some(cur);
+                    resize_dirty = Some(now); // size moved; (re)start the settle timer
+                }
+                if Some(cur) != vm_story_size
+                    && app::watch::due(resize_dirty, now, Duration::from_millis(150))
+                {
+                    resize_dirty = None;
+                    vm_story_size = Some(cur);
+                    if let Some(gs) = session.as_any_mut().downcast_mut::<GlulxSession>() {
+                        gs.resize(cur.0 as u32, cur.1 as u32);
+                    }
                 }
             }
         }
