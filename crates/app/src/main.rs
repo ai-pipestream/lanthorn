@@ -66,14 +66,44 @@ fn restore_terminal() {
     let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }
 
-/// Install a panic hook that restores the terminal before printing the panic
-/// message.  This ensures a broken terminal never survives a panic.
-fn install_panic_hook() {
+/// Install a panic hook that restores the terminal, writes the panic and a
+/// backtrace to a durable `crash.log`, and then prints the panic message.
+///
+/// The durable file matters because the panic message is printed to stderr
+/// only *after* `LeaveAlternateScreen`, where the terminal's alternate-screen
+/// restore can hide or overwrite it — so a real crash could otherwise leave no
+/// visible trace. The log survives that teardown. (An abort — OOM, stack
+/// overflow, double-panic — bypasses this hook entirely and leaves no entry;
+/// an empty `crash.log` after a crash is itself evidence of an abort.)
+fn install_panic_hook(user_dir: std::path::PathBuf) {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         restore_terminal();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let log_path = user_dir.join("crash.log");
+        let path = match write_crash_log(&log_path, info, &backtrace) {
+            Ok(()) => log_path,
+            // Fall back to the temp dir if the user dir isn't writable.
+            Err(_) => {
+                let tmp = std::env::temp_dir().join("babelmap-crash.log");
+                let _ = write_crash_log(&tmp, info, &backtrace);
+                tmp
+            }
+        };
+        eprintln!("babelmap crashed — details written to {}", path.display());
         default_hook(info);
     }));
+}
+
+/// Append one panic record (message + backtrace) to `path`.
+fn write_crash_log(
+    path: &std::path::Path,
+    info: &std::panic::PanicHookInfo<'_>,
+    backtrace: &std::backtrace::Backtrace,
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(f, "\n=== babelmap panic ===\n{info}\n\nbacktrace:\n{backtrace}")
 }
 
 // ── Map directory ─────────────────────────────────────────────────────────────
@@ -1885,7 +1915,7 @@ fn main() {
 
     // Install the panic hook FIRST so that any panic after this point (including
     // one between enable_raw_mode and EnterAlternateScreen) restores the terminal.
-    install_panic_hook();
+    install_panic_hook(state.config.user_dir.clone());
 
     if let Err(e) = enable_raw_mode() {
         eprintln!("babelmap: cannot enable raw mode (not a TTY?): {}", e);
@@ -3144,7 +3174,7 @@ fn main() {
                     }
                 }
 
-                if result.quit {
+                if should_exit_on_turn(&result, &state) {
                     break;
                 }
             }
@@ -4040,6 +4070,7 @@ fn reset_game(
         Ok(()) => {
             let start_loc = session.current_location();
             state.turns = 0;
+            state.vm_halted = false;
             state.input.clear();
             state.suggestions.clear();
             state.suggestion_idx = 0;
@@ -4390,6 +4421,9 @@ fn finish_resumed_turn(
             }
         }
     }
+    // Captured before the partial move below (of `result.pending_io`) makes a
+    // subsequent whole-struct borrow of `result` a borrow-checker error.
+    let should_exit = should_exit_on_turn(&result, state);
     // A chained request: the resumed turn suspended on another @save/@restore.
     // Mirror the submit path, which defers bookkeeping until the chain resolves;
     // run bookkeeping only when this turn finished without chaining.
@@ -4399,7 +4433,7 @@ fn finish_resumed_turn(
         let arc_file = archive_path(save_dir, ifid);
         post_turn_bookkeeping(state, mapper, session, &result, "", rooms_before, conns_before, ifid, &arc_file);
     }
-    result.quit
+    should_exit
 }
 
 /// Resolve a pending in-game save/restore after the dialog interaction:
@@ -4889,6 +4923,31 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 
 // ── Game-driven input helpers (char-mode keypress, timed-input interrupt) ──────
 
+/// Append a gvm runtime fault (diagnostics + fault trace) to `user_dir/crash.log`.
+/// A fault ends the game via a silent `Quit`, so this makes the failure durable
+/// regardless of terminal state. IO errors are ignored (best-effort logging).
+fn log_gvm_fault(user_dir: &std::path::Path, fault: &[String], diagnostics: &[String]) {
+    use std::io::Write as _;
+    let Ok(mut f) =
+        std::fs::OpenOptions::new().create(true).append(true).open(user_dir.join("crash.log"))
+    else {
+        return;
+    };
+    let _ = writeln!(f, "\n=== gvm runtime fault (game halted) ===");
+    for d in diagnostics {
+        let _ = writeln!(f, "diag: {d}");
+    }
+    for line in fault {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Whether a turn result should terminate the app: only a CLEAN game exit
+/// (glk_exit) does. A VM fault halts the game but keeps the app alive.
+fn should_exit_on_turn(result: &TurnResult, state: &AppState) -> bool {
+    result.quit && result.fault.is_none() && !state.vm_halted
+}
+
 /// Route a turn's sound/diagnostic events: diagnostics become Warning transcript
 /// lines; the latest beep arms a one-shot story-border pulse; the current room
 /// name is tracked for the built-in location story rule.
@@ -4902,6 +4961,14 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
             state.push_transcript_styled(line, app::state::TranscriptKind::Warning, crash);
         }
         state.push_transcript_styled("(game halted)", app::state::TranscriptKind::Warning, crash);
+        // A gvm runtime fault ends the game via a silent Quit; if the app then
+        // exits before this transcript is rendered, the error would vanish. Record
+        // it durably so a "silent" crash always leaves a trace.
+        log_gvm_fault(&state.config.user_dir, lines, &result.diagnostics);
+        // Keep the app alive: a VM fault is not a clean glk_exit. The run loop's
+        // exit checks all gate on `should_exit_on_turn`, which consults this flag.
+        state.vm_halted = true;
+        state.set_status("VM fault — the game has halted; you can review the map/transcript or quit.");
     }
     if let Some(kind) = result.sounds.iter().rev().find_map(|ev| match ev.number {
         1 => Some(app::state::BeepKind::High),
@@ -4962,7 +5029,7 @@ fn apply_game_driven_result(
             }
         }
     }
-    result.quit
+    should_exit_on_turn(result, state)
 }
 
 /// Decide the timed-input deadline for this loop iteration. `should_arm` is true
@@ -6192,5 +6259,68 @@ mod tests {
         assert!(list_area.width < area.width);
         assert!(panel_area.width >= super::PANEL_MIN_W);
         let _ = (&stories, &badges, &glyphs, &cs, &mut buf, &mut list);
+    }
+
+    // ── gvm-fault survival (app must not silently exit on a VM runtime fault) ──
+
+    fn fault_test_result(quit: bool, fault: Option<Vec<String>>) -> super::TurnResult {
+        super::TurnResult {
+            transcript: String::new(),
+            transcript_runs: Vec::new(),
+            location: None,
+            quit,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            diagnostics: vec![],
+            fault,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+        }
+    }
+
+    #[test]
+    fn should_exit_on_turn_gates_on_clean_quit_only() {
+        let mut state = app::state::AppState::default();
+
+        // Clean glk_exit: quit, no fault, not already halted → exit.
+        let clean = fault_test_result(true, None);
+        assert!(super::should_exit_on_turn(&clean, &state));
+
+        // VM fault: quit, fault present → do not exit.
+        let fault = fault_test_result(true, Some(vec!["boom".to_string()]));
+        assert!(!super::should_exit_on_turn(&fault, &state));
+
+        // Already halted from a prior fault: even a fault-free quit (the VM is a
+        // no-op once halted) must not re-trigger an exit.
+        state.vm_halted = true;
+        let post_halt = fault_test_result(true, None);
+        assert!(!super::should_exit_on_turn(&post_halt, &state));
+
+        // Not a quit at all → never exit regardless of vm_halted.
+        state.vm_halted = false;
+        let not_quit = fault_test_result(false, None);
+        assert!(!super::should_exit_on_turn(&not_quit, &state));
+    }
+
+    #[test]
+    fn apply_turn_events_halts_and_logs_on_fault() {
+        let tmp = std::env::temp_dir().join(format!("babelmap-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp user_dir");
+        let mut state = app::state::AppState::default();
+        state.config.user_dir = tmp.clone();
+
+        let result = fault_test_result(true, Some(vec!["some fault line".to_string()]));
+        super::apply_turn_events(&mut state, &result);
+
+        assert!(state.vm_halted, "a fault must set vm_halted");
+        assert!(state.status_msg.is_some(), "a fault must set a user-visible status");
+
+        let log = std::fs::read_to_string(tmp.join("crash.log")).expect("crash.log written");
+        assert!(log.contains("gvm runtime fault"), "crash.log must record the fault header");
+        assert!(log.contains("some fault line"), "crash.log must record the fault line");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
