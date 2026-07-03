@@ -229,6 +229,17 @@ fn main() {
     // Ensure raw mode is not left active on exit (harmless if already off).
     let _ = terminal::disable_raw_mode();
 
+    if let Some(trace) = machine.take_fault_trace() {
+        for line in trace.to_lines() {
+            eprintln!("{line}");
+        }
+        // Still surface any other diagnostics, then exit non-zero.
+        for d in &machine.diagnostics {
+            eprintln!("gvm: {d}");
+        }
+        std::process::exit(70);
+    }
+
     for d in &machine.diagnostics {
         eprintln!("gvm: {d}");
     }
