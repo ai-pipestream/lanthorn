@@ -300,6 +300,24 @@ pub trait GlkBackend {
     fn grid_clear(&mut self, _win: u32) {}
     /// Clear a text-buffer window.
     fn window_clear(&mut self, _win: u32) {}
+    /// Character cell size in pixels `(width, height)`, used to convert
+    /// text-grid coordinates for mixed-window layouts. Defaults to `(1, 1)`.
+    fn char_pixels(&self) -> (u32, u32) {
+        (1, 1)
+    }
+    /// Pixel dimensions of image resource `resnum`, if it exists and decodes.
+    fn image_info(&mut self, _resnum: u32) -> Option<(u32, u32)> {
+        None
+    }
+    /// Fill a rectangle of a graphics window with `color`.
+    fn graphics_fill_rect(&mut self, _win: u32, _color: u32, _left: i32, _top: i32, _w: u32, _h: u32) {}
+    /// Erase a rectangle of a graphics window to its background color.
+    fn graphics_erase_rect(&mut self, _win: u32, _left: i32, _top: i32, _w: u32, _h: u32) {}
+    /// Set a graphics window's background color.
+    fn graphics_set_background(&mut self, _win: u32, _color: u32) {}
+    /// Draw image `resnum` into a graphics window at `(x, y)`, optionally
+    /// scaled to `(width, height)`.
+    fn graphics_draw_image(&mut self, _win: u32, _resnum: u32, _x: i32, _y: i32, _scale: Option<(u32, u32)>) {}
     /// Flush any buffered output to the display.
     fn flush(&mut self) {}
     /// Immutable downcast support (used by tests to read recorded output).
@@ -309,6 +327,11 @@ pub trait GlkBackend {
 }
 
 // ── Test backend ──────────────────────────────────────────────────────────────
+
+/// One recorded `fill_rect`/`erase_rect` call: `(color, left, top, w, h)`.
+type FillRec = (u32, i32, i32, u32, u32);
+/// One recorded `draw_image` call: `(resnum, x, y, scale)`.
+type DrawRec = (u32, i32, i32, Option<(u32, u32)>);
 
 /// A [`GlkBackend`] that records each window's text/grid in memory, replacing
 /// the old `BufferOutput`: tests downcast to it and read the asserted strings.
@@ -321,6 +344,12 @@ pub struct TestBackend {
     grid: BTreeMap<u32, BTreeMap<(u32, u32), char>>,
     /// Last laid-out rect per window id.
     dims: BTreeMap<u32, Rect>,
+    /// Recorded `fill_rect`/`erase_rect` calls per graphics window.
+    fills: BTreeMap<u32, Vec<FillRec>>,
+    /// Recorded `draw_image` calls per graphics window.
+    draws: BTreeMap<u32, Vec<DrawRec>>,
+    /// Last background color set per graphics window.
+    backgrounds: BTreeMap<u32, u32>,
 }
 
 impl Default for TestBackend {
@@ -332,7 +361,15 @@ impl Default for TestBackend {
 impl TestBackend {
     /// A backend with a default 80×24 display.
     pub fn new() -> Self {
-        TestBackend { screen: (80, 24), runs: BTreeMap::new(), grid: BTreeMap::new(), dims: BTreeMap::new() }
+        TestBackend {
+            screen: (80, 24),
+            runs: BTreeMap::new(),
+            grid: BTreeMap::new(),
+            dims: BTreeMap::new(),
+            fills: BTreeMap::new(),
+            draws: BTreeMap::new(),
+            backgrounds: BTreeMap::new(),
+        }
     }
     /// A backend reporting a specific display size.
     pub fn with_screen(width: u32, height: u32) -> Self {
@@ -371,6 +408,18 @@ impl TestBackend {
             s.push(cells.get(&(row, col)).copied().unwrap_or(' '));
         }
         s.trim_end().to_string()
+    }
+    /// Recorded `fill_rect`/`erase_rect` calls for one graphics window (empty if none).
+    pub fn fills(&self, win: u32) -> Vec<FillRec> {
+        self.fills.get(&win).cloned().unwrap_or_default()
+    }
+    /// Recorded `draw_image` calls for one graphics window (empty if none).
+    pub fn draws(&self, win: u32) -> Vec<DrawRec> {
+        self.draws.get(&win).cloned().unwrap_or_default()
+    }
+    /// The last background color set for one graphics window, if any.
+    pub fn background(&self, win: u32) -> Option<u32> {
+        self.backgrounds.get(&win).copied()
     }
 }
 
@@ -418,6 +467,20 @@ impl GlkBackend for TestBackend {
         if let Some(rs) = self.runs.get_mut(&win) {
             rs.clear();
         }
+    }
+    fn graphics_fill_rect(&mut self, win: u32, color: u32, left: i32, top: i32, w: u32, h: u32) {
+        self.fills.entry(win).or_default().push((color, left, top, w, h));
+    }
+    fn graphics_erase_rect(&mut self, win: u32, left: i32, top: i32, w: u32, h: u32) {
+        // erase records as a fill with the window's background (or 0).
+        let color = self.backgrounds.get(&win).copied().unwrap_or(0);
+        self.fills.entry(win).or_default().push((color, left, top, w, h));
+    }
+    fn graphics_set_background(&mut self, win: u32, color: u32) {
+        self.backgrounds.insert(win, color);
+    }
+    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) {
+        self.draws.entry(win).or_default().push((resnum, x, y, scale));
     }
     fn as_any(&self) -> &dyn Any {
         self

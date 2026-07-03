@@ -2598,6 +2598,60 @@ impl Machine {
             //   0x0063 destroy         0x0065 get_rock         0x0066 delete_file
             //   0x0067 does_file_exist 0x0068 create_from_fileref
             0x0060 | 0x0061 | 0x0062 | 0x0063 | 0x0065 | 0x0066 | 0x0067 | 0x0068 => 0,
+            // ── graphics (GLULX_NOTES §21) ──────────────────────────────────────
+            0x00E0 => {
+                // glk_image_get_info(image, widthptr, heightptr) -> 1 if it exists
+                if self.graphics_enabled {
+                    if let Some((w, h)) = self.backend.image_info(a(0)) {
+                        self.glk_store_ptr(a(1), w)?;
+                        self.glk_store_ptr(a(2), h)?;
+                        1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+            0x00E1 => {
+                // glk_image_draw(win, image, val1=x, val2=y)
+                if self.graphics_enabled {
+                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, None);
+                    1
+                } else {
+                    0
+                }
+            }
+            0x00E2 => {
+                // glk_image_draw_scaled(win, image, val1=x, val2=y, width, height)
+                if self.graphics_enabled {
+                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some((a(4), a(5))));
+                    1
+                } else {
+                    0
+                }
+            }
+            0x00E9 => {
+                // glk_window_erase_rect(win, left, top, width, height)
+                if self.graphics_enabled {
+                    self.backend.graphics_erase_rect(a(0), a(1) as i32, a(2) as i32, a(3), a(4));
+                }
+                0
+            }
+            0x00EA => {
+                // glk_window_fill_rect(win, color, left, top, width, height)
+                if self.graphics_enabled {
+                    self.backend.graphics_fill_rect(a(0), a(1), a(2) as i32, a(3) as i32, a(4), a(5));
+                }
+                0
+            }
+            0x00EB => {
+                // glk_window_set_background_color(win, color)
+                if self.graphics_enabled {
+                    self.backend.graphics_set_background(a(0), a(1));
+                }
+                0
+            }
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -6030,5 +6084,47 @@ mod tests {
         assert_eq!(m.glk_open_window(0, 0, 0, 5, 0), 0, "graphics window rejected when disabled");
         m.set_graphics(true);
         assert_ne!(m.glk_open_window(0, 0, 0, 5, 0), 0, "graphics window opens when enabled");
+    }
+
+    #[test]
+    fn graphics_ops_dispatch_to_backend() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.set_graphics(true);
+        let win = m.glk_open_window(0, 0, 0, 5, 0); // graphics root
+        assert_ne!(win, 0);
+
+        // Verified arg order: glk_dispatch's `a(i)` reads args[i] as the i-th Glk
+        // parameter in natural left-to-right order (confirmed against the
+        // glk_window_get_size arm at selector 0x0025, which does
+        // a(0)=win, a(1)=awidthptr, a(2)=aheightptr — and op_glk pops args off
+        // the stack in that same first-arg-first order before calling
+        // glk_dispatch). So fill_rect(win, color, left, top, w, h) takes
+        // &[win, color, left, top, w, h].
+        m.glk_dispatch(0x00EA, &[win, 0x00FF_0000, 1, 2, 3, 4]).unwrap(); // fill_rect
+        m.glk_dispatch(0x00EB, &[win, 0x0000_00FF]).unwrap(); // set_background_color
+        m.glk_dispatch(0x00E1, &[win, 7, 5, 6]).unwrap(); // image_draw(win, resnum=7, x=5, y=6)
+
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert_eq!(tb.fills(win), vec![(0x00FF_0000, 1, 2, 3, 4)]);
+        assert_eq!(tb.background(win), Some(0x0000_00FF));
+        assert_eq!(tb.draws(win), vec![(7, 5, 6, None)]);
+    }
+
+    #[test]
+    fn graphics_ops_noop_when_disabled() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        // graphics_enabled stays false (default); no window exists, but the
+        // selectors must still no-op silently and return 0 rather than panic.
+        assert_eq!(m.glk_dispatch(0x00EA, &[1, 0x00FF_0000, 1, 2, 3, 4]).unwrap(), 0);
+        assert_eq!(m.glk_dispatch(0x00EB, &[1, 0x0000_00FF]).unwrap(), 0);
+        assert_eq!(m.glk_dispatch(0x00E1, &[1, 7, 5, 6]).unwrap(), 0);
+        assert_eq!(m.glk_dispatch(0x00E9, &[1, 1, 2, 3, 4]).unwrap(), 0);
+        assert_eq!(m.glk_dispatch(0x00E2, &[1, 7, 5, 6, 10, 20]).unwrap(), 0);
+        assert_eq!(m.glk_dispatch(0x00E0, &[7, 0, 0]).unwrap(), 0, "image_get_info returns 0/false");
+
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert_eq!(tb.fills(1), Vec::new(), "no backend calls recorded when disabled");
+        assert_eq!(tb.draws(1), Vec::new());
+        assert_eq!(tb.background(1), None);
     }
 }
