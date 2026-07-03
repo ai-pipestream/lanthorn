@@ -88,6 +88,7 @@ fn glulxercise_in_scope_groups_pass() {
     }
 
     let _ = child.kill();
+    let _ = child.wait(); // reap the killed child instead of leaving a zombie
     drop(stdin);
     let _ = reader.join();
 
