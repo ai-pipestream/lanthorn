@@ -205,9 +205,12 @@ fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) {
     }
 }
 
+/// Parsed IFZS chunks: each is `(4-byte id, chunk data slice)`.
+type IfzsChunks<'a> = Vec<([u8; 4], &'a [u8])>;
+
 /// Parse a `FORM IFZS` container into its `(id, data)` chunks. Never panics;
 /// returns a [`GError::BadSave`] on any structural problem.
-fn parse_ifzs(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>, GError> {
+fn parse_ifzs<'a>(data: &'a [u8]) -> Result<IfzsChunks<'a>, GError> {
     let bad = |m: &str| GError::BadSave(m.to_string());
     if data.len() < 12 || &data[0..4] != b"FORM" || &data[8..12] != b"IFZS" {
         return Err(bad("not a FORM IFZS container"));

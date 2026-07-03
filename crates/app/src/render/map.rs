@@ -1673,11 +1673,14 @@ pub(crate) fn cleanup_overlaps(graph: &mut mapper::graph::MapGraph, radius: i32,
     cleanup_overlaps_observed(graph, radius, max_passes, None);
 }
 
+/// Observer for animated tidy passes: `(graph, kind, detail, stats)` per step.
+type TidyObserver<'a> = &'a mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats);
+
 pub(crate) fn cleanup_overlaps_observed(
     graph: &mut mapper::graph::MapGraph,
     radius: i32,
     max_passes: usize,
-    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+    mut obs: Option<TidyObserver>,
 ) {
     let moves: Vec<(i32, i32)> = {
         let mut v = Vec::new();
@@ -1776,7 +1779,7 @@ pub(crate) fn repair_directional_hints_observed(
     graph: &mut mapper::graph::MapGraph,
     radius: i32,
     max_passes: usize,
-    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+    mut obs: Option<TidyObserver>,
 ) {
     let moves: Vec<(i32, i32)> = {
         let mut v = Vec::new();
@@ -1860,7 +1863,7 @@ pub(crate) fn compact_empty_lines(graph: &mut mapper::graph::MapGraph) {
 
 pub(crate) fn compact_empty_lines_observed(
     graph: &mut mapper::graph::MapGraph,
-    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+    mut obs: Option<TidyObserver>,
 ) {
     let stats = mapper::layout::TidyStats::default();
 
@@ -2196,7 +2199,7 @@ fn exact_alignment_count(graph: &mapper::graph::MapGraph) -> usize {
 
 pub(crate) fn stack_updown_rooms_observed(
     graph: &mut mapper::graph::MapGraph,
-    mut obs: Option<&mut dyn FnMut(&mapper::graph::MapGraph, &str, &str, &mapper::layout::TidyStats)>,
+    mut obs: Option<TidyObserver>,
 ) {
     let pos_before: std::collections::HashMap<mapper::graph::RoomId, (i32, i32)> =
         graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();

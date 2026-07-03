@@ -54,7 +54,7 @@ use app::session::{apply_turn, GameSession, TurnResult};
 use app::export::export_transcript;
 use app::hints;
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, SoundPulse, StyleRun, TidyJob, TranscriptFilter, TranscriptKind};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, SoundPulse, TidyJob, TranscriptFilter, TranscriptKind};
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
@@ -1579,14 +1579,14 @@ fn main() {
     // Load mapper (and optionally restore the game save) from the archive.
     // Migration: if no archive exists but a legacy .map.json does, load that.
     // use_default_map = true: also fall back to legacy map when no archive.
-    let mut startup_transcript: Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>)> = None;
+    let mut startup_transcript: app::state::LoadedTranscript = None;
     // Rewind/replay history carried from the archive when the game is auto-restored.
     let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
     // Command history (Up/Down recall) carried from the archive, always loaded.
     let mut startup_command_history: Vec<String> = Vec::new();
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
-    let mut pending_resume_stash: Option<(app::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)> = None;
+    let mut pending_resume_stash: app::state::PendingResume = None;
     let mut mapper = if arc_file.exists() {
         match load_archive(&arc_file) {
             Ok(ac) => {

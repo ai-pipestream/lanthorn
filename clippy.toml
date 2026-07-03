@@ -1,0 +1,6 @@
+# Several render/save/main functions legitimately take 8-11 parameters
+# (e.g. render fns threading area/buffer/state/model/focus/theme, and the
+# archive save functions passing the transcript as parallel slices). Raise
+# clippy's default too_many_arguments cap (7) instead of bundling these into
+# throwaway parameter structs.
+too-many-arguments-threshold = 12

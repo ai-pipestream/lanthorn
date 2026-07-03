@@ -15,6 +15,9 @@ use crate::state::{AppState, Focus, StyleRun, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
+/// One wrapped display row: `(text, kind, base style, per-run style spans)`.
+type WrappedRow = (String, TranscriptKind, Style, Vec<StyleRun>);
+
 // ── Styles ─────────────────────────────────────────────────────────────────────
 //
 // Status, normal text, and suggestion styles are read from `state.colors` at
@@ -388,7 +391,7 @@ pub(crate) fn visible_wrapped_lines_kinded(
     scroll: u16,
     width: u16,
     clear_anchor: Option<usize>,
-) -> (Vec<(String, TranscriptKind, Style, Vec<StyleRun>)>, usize) {
+) -> (Vec<WrappedRow>, usize) {
     if rows == 0 || transcript.is_empty() {
         return (Vec::new(), 0);
     }

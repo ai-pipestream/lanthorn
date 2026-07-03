@@ -885,6 +885,15 @@ impl Zoom {
     }
 }
 
+/// Stashed restore data for the launch dialog: (engine save, transcript lines,
+/// transcript kinds, screen state).
+pub type PendingResume =
+    Option<(crate::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>;
+
+/// Transcript bundle loaded from an archive at startup: (lines, kinds, per-line
+/// style runs).
+pub type LoadedTranscript = Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>)>;
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -1129,7 +1138,7 @@ pub struct AppState {
     pub launch_dialog: bool,
     /// Stashed restore data shown while the launch dialog is open.
     /// Tuple is (engine-tagged save, transcript lines, transcript kinds, screen).
-    pub pending_resume: Option<(crate::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>,
+    pub pending_resume: PendingResume,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
     /// How the current room was detected (for the map indicator). Retained
@@ -2697,7 +2706,8 @@ mod play_sound_tests {
 
     // Build a Blorb with the given resources. Mirrors blorb::tests::build_blorb
     // (not exported, so duplicated here).
-    fn build_blorb(res: &[(&[u8; 4], u32, &[u8; 4], &[u8])]) -> Vec<u8> {
+    type BlorbRes<'a> = (&'a [u8; 4], u32, &'a [u8; 4], &'a [u8]);
+    fn build_blorb(res: &[BlorbRes]) -> Vec<u8> {
         let count = res.len() as u32;
         let ridx_data_len = 4 + 12 * res.len();
         let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);

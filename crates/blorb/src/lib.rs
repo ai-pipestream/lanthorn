@@ -320,7 +320,8 @@ mod tests {
 
     /// Build a Blorb with the given resources. Each resource is
     /// (usage, number, chunk_type, data). Returns the file bytes.
-    fn build_blorb(res: &[(&[u8; 4], u32, &[u8; 4], &[u8])]) -> Vec<u8> {
+    type BlorbRes<'a> = (&'a [u8; 4], u32, &'a [u8; 4], &'a [u8]);
+    fn build_blorb(res: &[BlorbRes]) -> Vec<u8> {
         // Lay out the resource chunks after the RIdx chunk to compute offsets.
         let count = res.len() as u32;
         let ridx_data_len = 4 + 12 * res.len();
