@@ -854,6 +854,18 @@ fn main() {
                 break;
             }
 
+            StepResult::Fault => {
+                print!("{}", view.leave());
+                let _ = io::stdout().flush();
+                let _ = terminal::disable_raw_mode();
+                if let Some(trace) = machine.take_fault_trace() {
+                    for line in trace.to_lines() {
+                        eprintln!("{line}");
+                    }
+                }
+                std::process::exit(70); // EX_SOFTWARE: internal software error
+            }
+
             StepResult::Restart => {
                 machine = match build_machine(
                     original_bytes.clone(),
