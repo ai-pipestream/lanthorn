@@ -110,7 +110,7 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
                         i += 1;
                     }
                 } else {
-                    let bps = ((sample_size as usize + 7) / 8).max(2);
+                    let bps = (sample_size as usize).div_ceil(8).max(2);
                     while i + 1 < pcm_end {
                         pcm.push(i16::from_be_bytes([bytes[i], bytes[i + 1]]));
                         i += bps;
@@ -527,12 +527,12 @@ mod tests {
     #[cfg(feature = "mod-music")]
     fn minimal_mod() -> Vec<u8> {
         let mut v = vec![0u8; 20];          // title
-        v.extend(std::iter::repeat(0u8).take(31 * 30)); // 31 sample records
+        v.extend(std::iter::repeat_n(0u8, 31 * 30)); // 31 sample records
         v.push(1);                          // song length = 1 pattern in the order
         v.push(127);                        // restart position
-        v.extend(std::iter::repeat(0u8).take(128)); // order table (pattern 0)
+        v.extend(std::iter::repeat_n(0u8, 128)); // order table (pattern 0)
         v.extend_from_slice(b"M.K.");       // 4-channel tag
-        v.extend(std::iter::repeat(0u8).take(64 * 4 * 4)); // one zero pattern
+        v.extend(std::iter::repeat_n(0u8, 64 * 4 * 4)); // one zero pattern
         v
     }
 

@@ -466,7 +466,7 @@ fn run_until_input(machine: &mut Machine) -> (RunStop, bool) {
 /// inside a score display like "score > 10") is unaffected because it will not
 /// be the last non-whitespace character after a newline.
 pub(crate) fn strip_read_prompt(s: &str) -> &str {
-    let trimmed = s.trim_end_matches(|c: char| c == ' ' || c == '\t');
+    let trimmed = s.trim_end_matches([' ', '\t']);
     // After stripping trailing spaces/tabs the string may still end with "\n>"
     // or just ">".  Check for that and strip.
     if let Some(without_gt) = trimmed.strip_suffix('>') {
@@ -474,7 +474,7 @@ pub(crate) fn strip_read_prompt(s: &str) -> &str {
         // or if it's the only character remaining.
         let preceded_by_newline = without_gt.ends_with('\n') || without_gt.is_empty();
         if preceded_by_newline {
-            return without_gt.trim_end_matches(|c: char| c == ' ' || c == '\t' || c == '\n' || c == '\r');
+            return without_gt.trim_end_matches([' ', '\t', '\n', '\r']);
         }
     }
     trimmed

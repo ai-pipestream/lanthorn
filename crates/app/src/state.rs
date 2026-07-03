@@ -2166,7 +2166,7 @@ mod tests {
         };
         // Right after construction progress is ~0, so current() is near `from`.
         let c = a.current();
-        assert!(c >= 2.0 && c < 3.0, "current near from at start, got {c}");
+        assert!((2.0..3.0).contains(&c), "current near from at start, got {c}");
     }
 
     #[test]

@@ -1363,12 +1363,12 @@ fn draw_portal_icons(
 /// Pick the outline `BoxStyle` for a room given its flags.
 ///
 /// Precedence: current > portal > selected > normal.
-fn outline_for<'a>(
-    sym: &'a SymbolSet,
+fn outline_for(
+    sym: &SymbolSet,
     is_current: bool,
     has_portal: bool,
     selected: bool,
-) -> &'a BoxStyle {
+) -> &BoxStyle {
     if is_current { &sym.room_current }
     else if has_portal { &sym.room_portal }
     else if selected { &sym.room_selected }

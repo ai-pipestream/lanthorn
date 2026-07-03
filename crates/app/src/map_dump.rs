@@ -344,7 +344,7 @@ mod tests {
         // Five spoke rooms at column 0, rows 1..5.
         for row in 1i32..=5 {
             let id = (row + 1) as u16;
-            g.upsert_room(id, format!("S{row}").into());
+            g.upsert_room(id, format!("S{row}"));
             g.set_pos(id, (0, row));
             g.add_edge(id, Direction::E, 1);
         }

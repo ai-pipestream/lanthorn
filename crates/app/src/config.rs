@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn record_turn_history_defaults_false_and_round_trips() {
-        assert_eq!(Config::default().record_turn_history, false);
+        assert!(!Config::default().record_turn_history);
         let cfg: Config = toml::from_str("record_turn_history = true\n").unwrap();
         assert!(cfg.record_turn_history);
     }
@@ -665,23 +665,23 @@ mod tests {
 
     #[test]
     fn config_show_room_numbers_default_false_and_round_trips() {
-        assert_eq!(Config::default().show_room_numbers, false);
+        assert!(!Config::default().show_room_numbers);
         let cfg: Config = toml::from_str("show_room_numbers = true\n").unwrap();
-        assert_eq!(cfg.show_room_numbers, true);
+        assert!(cfg.show_room_numbers);
     }
 
     #[test]
     fn config_show_loc_method_default_false_and_round_trips() {
-        assert_eq!(Config::default().show_loc_method, false);
+        assert!(!Config::default().show_loc_method);
         let cfg: Config = toml::from_str("show_loc_method = true\n").unwrap();
-        assert_eq!(cfg.show_loc_method, true);
+        assert!(cfg.show_loc_method);
     }
 
     #[test]
     fn config_show_status_bar_default_true_and_round_trips() {
-        assert_eq!(Config::default().show_status_bar, true);
+        assert!(Config::default().show_status_bar);
         let cfg: Config = toml::from_str("show_status_bar = false\n").unwrap();
-        assert_eq!(cfg.show_status_bar, false);
+        assert!(!cfg.show_status_bar);
     }
 
     #[test]
@@ -932,22 +932,22 @@ use_defaults = false
 
     #[test]
     fn prompt_flags_default_true_and_round_trip() {
-        assert_eq!(Config::default().prompt_save_on_quit, true);
-        assert_eq!(Config::default().prompt_load_on_launch, true);
+        assert!(Config::default().prompt_save_on_quit);
+        assert!(Config::default().prompt_load_on_launch);
         // Setting one to false parses correctly, other keeps default true.
         let cfg: Config = toml::from_str("prompt_save_on_quit = false\n").unwrap();
-        assert_eq!(cfg.prompt_save_on_quit, false);
-        assert_eq!(cfg.prompt_load_on_launch, true);
+        assert!(!cfg.prompt_save_on_quit);
+        assert!(cfg.prompt_load_on_launch);
     }
 
     #[test]
     fn search_config_defaults_and_round_trip() {
         let d = Config::default();
-        assert_eq!(d.search.start_backward, true);
+        assert!(d.search.start_backward);
         assert_eq!(d.search.key_back, 'n');
         assert_eq!(d.search.key_forward, 'N');
         let cfg: Config = toml::from_str("[search]\nstart_backward = false\nkey_forward = \"j\"\n").unwrap();
-        assert_eq!(cfg.search.start_backward, false);
+        assert!(!cfg.search.start_backward);
         assert_eq!(cfg.search.key_forward, 'j');
         assert_eq!(cfg.search.key_back, 'n'); // default kept
     }

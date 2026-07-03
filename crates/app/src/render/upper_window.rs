@@ -468,7 +468,7 @@ mod tests {
         // Give the cell under the cursor distinct game colours so the logical
         // ordering (fg/bg not swapped in buffer) can be verified.
         upper.put(2, 3, 'C', 0); // style=0 (normal, non-reverse)
-        let idx = (2 - 1) * 5 + (3 - 1);
+        let idx = 5 + (3 - 1);
         upper.cells[idx].fg = crate::state::pack_zcolour(ZColour::Standard(3)); // -> palette[1]
         upper.cells[idx].bg = crate::state::pack_zcolour(ZColour::Standard(6)); // -> palette[4]
 

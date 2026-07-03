@@ -437,14 +437,13 @@ fn read_char_input(
     let _ = terminal::enable_raw_mode();
     let mut last_resize: Option<(u16, u16)> = None;
     let result = loop {
-        if timeout.is_none() && sound.as_ref().map_or(false, |cs| !cs.routines.is_empty()) {
-            if !event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+        if timeout.is_none() && sound.as_ref().is_some_and(|cs| !cs.routines.is_empty())
+            && !event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 let _ = terminal::disable_raw_mode();
                 poll_sound_finish(sound.as_mut(), machine, view, is_tty);
                 let _ = terminal::enable_raw_mode();
                 continue;
             }
-        }
         if let Some((t, _)) = timeout {
             if !event::poll(std::time::Duration::from_millis(t as u64 * 100)).unwrap_or(false) {
                 let _ = terminal::disable_raw_mode();
@@ -552,14 +551,13 @@ fn read_line_raw(
         let _ = io::stdout().flush();
     }
     loop {
-        if timeout.is_none() && sound.as_ref().map_or(false, |cs| !cs.routines.is_empty()) {
-            if !event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+        if timeout.is_none() && sound.as_ref().is_some_and(|cs| !cs.routines.is_empty())
+            && !event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
                 let _ = terminal::disable_raw_mode();
                 poll_sound_finish(sound.as_mut(), machine, view, is_tty);
                 let _ = terminal::enable_raw_mode();
                 continue;
             }
-        }
         if let Some((t, _)) = timeout {
             if !event::poll(std::time::Duration::from_millis(t as u64 * 100)).unwrap_or(false) {
                 let _ = terminal::disable_raw_mode();

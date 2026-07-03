@@ -155,7 +155,7 @@ pub struct Built {
 }
 
 fn align_up(v: u32, to: u32) -> u32 {
-    (v + to - 1) / to * to
+    v.div_ceil(to) * to
 }
 
 /// Assemble `funcs` consecutively into ROM starting at offset 0x24 (just past

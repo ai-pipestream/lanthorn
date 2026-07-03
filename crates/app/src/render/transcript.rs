@@ -984,8 +984,7 @@ fn render_middle(
 
     // ── Suggestion line or search hint: above inventory ──────────────────────
     // When search is active, the search hint replaces the suggestion line.
-    let rows_from_bottom = 0u16
-        + if has_inventory && area.height >= 2 && inventory_y > area.y { 1 } else { 0 };
+    let rows_from_bottom = if has_inventory && area.height >= 2 && inventory_y > area.y { 1 } else { 0 };
     let suggestion_y = middle_bottom.saturating_sub(1 + rows_from_bottom);
     let has_search = state.search_query.is_some();
     let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty() && !has_search;
@@ -1700,7 +1699,7 @@ mod tests {
             "Classic status bar must always render (reversed modifier) regardless of toggle"
         );
         // Transcript is below y=0, not at y=0.
-        let top: String = (0..area.width as u16)
+        let top: String = (0..area.width)
             .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
         assert!(!top.contains("some story text"),

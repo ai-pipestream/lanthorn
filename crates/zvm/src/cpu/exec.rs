@@ -2067,7 +2067,7 @@ fn font3_translate(ch: char) -> char {
         69  => '\u{2596}', // ▖
         70  => '\u{2598}', // ▘
         // 71-74: not assigned in the bocfel/§16 table → replacement character
-        71 | 72 | 73 | 74 => '\u{FFFD}',
+        71..=74 => '\u{FFFD}',
         75  => '\u{2594}', // ▔
         76  => '\u{2581}', // ▁
         77  => '\u{258F}', // ▏
@@ -2420,7 +2420,7 @@ pub(crate) mod tests {
 
     /// Emit branch data (single-byte for 0..=63, two-byte otherwise).
     fn emit_branch(out: &mut Vec<u8>, on_true: bool, offset: i16) {
-        if offset >= 0 && offset <= 63 {
+        if (0..=63).contains(&offset) {
             // Single-byte: bit7=on_true, bit6=1 (short form), bits5-0=offset
             out.push(if on_true { 0x80 } else { 0x00 } | 0x40 | (offset as u8 & 0x3F));
         } else {
@@ -3325,7 +3325,7 @@ pub(crate) mod tests {
         ];
         let mut m = build_obj_machine_raw(buf, prog);
         run_until_quit(&mut m);
-        let len = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
+        let len = m.mem.read_word(m.mem.global_vars() as u32 + 2);
         assert_eq!(len, 2, "get_prop_len for prop10 (2 bytes) should be 2");
     }
 
@@ -3771,7 +3771,7 @@ pub(crate) mod tests {
         m.supply_line("hello", 13);
 
         // G1 should have been set to 13 (Enter).
-        let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
+        let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 2);
         assert_eq!(g1, 13, "v5 read terminator stored in G1 = 13");
     }
 
@@ -3790,7 +3790,7 @@ pub(crate) mod tests {
         m.step();
         m.supply_line("look", 129);
 
-        let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 1 * 2);
+        let g1 = m.mem.read_word(m.mem.global_vars() as u32 + 2);
         assert_eq!(g1, 129, "v5 read stores the function-key terminator in G1");
     }
 
@@ -4633,7 +4633,7 @@ pub(crate) mod tests {
         m.state.pc = 0x10;
         run_until_quit(&mut m);
         let result = m.global(0);
-        assert!(result >= 1 && result <= 10,
+        assert!((1..=10).contains(&result),
             "random(10) must be in [1,10], got {result}");
     }
 

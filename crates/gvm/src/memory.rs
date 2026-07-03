@@ -83,7 +83,7 @@ impl Memory {
     /// the original ENDMEM floor. Growth is zero-filled; shrink truncates.
     /// Returns `Ok(())` on success, `Err(())` if the request is illegal.
     pub fn set_mem_size(&mut self, new: u32) -> Result<(), ()> {
-        if new % 256 != 0 || new < self.endmem_floor {
+        if !new.is_multiple_of(256) || new < self.endmem_floor {
             return Err(());
         }
         self.bytes.resize(new as usize, 0);

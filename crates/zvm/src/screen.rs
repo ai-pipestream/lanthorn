@@ -44,16 +44,13 @@ pub struct StatusLine {
 /// by the Glulx host, whose Glk stylehint colours are 24-bit — carried at full
 /// fidelity rather than downsampled to 15-bit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ZColour {
+    #[default]
     Default,
     Standard(u8),
     True(u16),
     True24(u32),
-}
-impl Default for ZColour {
-    fn default() -> Self {
-        ZColour::Default
-    }
 }
 
 /// Expand a 15-bit RGB (0bbbbbgggggrrrrr) to 8-bit `(r, g, b)`. Shared by the

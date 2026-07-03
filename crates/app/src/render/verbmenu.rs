@@ -139,7 +139,7 @@ pub fn draw_verb_menu(
         let prep_list = Rect { x: prep_x, y: list_y, width: prep_w, height: list_h };
 
         draw_list(
-            &VERB_MENU_VERBS.iter().map(|s| *s).collect::<Vec<_>>(),
+            &VERB_MENU_VERBS.to_vec(),
             &vm.verb_scroll,
             vm.pane == VerbMenuPane::Verbs,
             verb_list,
@@ -158,7 +158,7 @@ pub fn draw_verb_menu(
         );
 
         draw_list(
-            &VERB_MENU_PREPS.iter().map(|s| *s).collect::<Vec<_>>(),
+            &VERB_MENU_PREPS.to_vec(),
             &vm.prep_scroll,
             vm.pane == VerbMenuPane::Preps,
             prep_list,

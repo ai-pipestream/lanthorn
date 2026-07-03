@@ -57,7 +57,7 @@ pub fn parse_header(image: &[u8]) -> Result<Header, GError> {
 
     // Memory-map invariants (GLULX_NOTES §2): all three boundaries are multiples
     // of 256 and ordered RAMSTART ≤ EXTSTART ≤ ENDMEM.
-    let aligned = |v: u32| v % 256 == 0;
+    let aligned = |v: u32| v.is_multiple_of(256);
     if !aligned(h.ramstart) || !aligned(h.extstart) || !aligned(h.endmem) {
         return Err(GError::BadMemoryMap);
     }

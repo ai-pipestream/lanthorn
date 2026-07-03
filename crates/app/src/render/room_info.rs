@@ -79,7 +79,7 @@ pub fn draw_room_info(
     let notes_lines = if room.notes.is_empty() { 0u16 } else {
         // Wrap notes to panel inner width.
         let inner_w = WIDTH.saturating_sub(2) as usize;
-        ((room.notes.len() + inner_w - 1) / inner_w) as u16
+        room.notes.len().div_ceil(inner_w) as u16
     };
     let exit_rows = exits.len() as u16;
     let obj_rows = if objects.is_empty() { 0u16 } else { objects.len() as u16 + 1 }; // +1 for header

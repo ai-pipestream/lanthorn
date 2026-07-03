@@ -250,7 +250,7 @@ mod tests {
         m.write_word(0x0040, 0x0040);
 
         // Write main string at 0x0100: [1, 0, 5] with terminator.
-        let main_word: u16 = 0x8000 | (1 << 10) | (0 << 5) | 5;
+        let main_word: u16 = (0x8000 | (1 << 10)) | 5;
         m.write_word(0x0100, main_word);
 
         let (s, end) = decode_string(&m, 0x0100);
@@ -391,7 +391,7 @@ mod tests {
         // So total output: one space (' ', ZSCII 32).
         let bytes = sample_story(3);
         let w1: u16 = (5 << 10) | (6 << 5) | 1;
-        let w2: u16 = 0x8000 | (0 << 10) | (5 << 5) | 5;
+        let w2: u16 = 0x8000 | (5 << 5) | 5;
         let mut m = Memory::new(bytes).unwrap();
         m.write_word(0x100, w1);
         m.write_word(0x102, w2);

@@ -408,7 +408,7 @@ impl GlkBackend for TerminalBackend {
                     self.flush_pending_word();
                     // Drop a trailing space that would push past the right margin
                     // (same normalisation as the previous soft_wrap helper).
-                    if self.current_col + 1 <= self.cols {
+                    if self.current_col < self.cols {
                         let _ = self.out.write_all(b" ");
                         self.current_col += 1;
                     }

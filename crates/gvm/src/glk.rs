@@ -785,11 +785,9 @@ impl Model {
             self.layout_window(self.root, r);
         }
         let mut out = Vec::new();
-        for slot in &self.windows {
-            if let Some(w) = slot {
-                if w.wintype != WinType::Pair {
-                    out.push((w.id, w.wintype, w.rect));
-                }
+        for w in self.windows.iter().flatten() {
+            if w.wintype != WinType::Pair {
+                out.push((w.id, w.wintype, w.rect));
             }
         }
         out
@@ -860,10 +858,8 @@ impl Model {
     /// (`prev == 0` → the first), or 0 when exhausted. Returns `(id, rock)`.
     pub fn window_iterate(&self, prev: u32) -> (u32, u32) {
         // ids are 1-based; slot index = id-1, so the next candidate is slot `prev`.
-        for slot in self.windows.iter().skip(prev as usize) {
-            if let Some(w) = slot {
-                return (w.id, w.rock);
-            }
+        if let Some(w) = self.windows.iter().skip(prev as usize).flatten().next() {
+            return (w.id, w.rock);
         }
         (0, 0)
     }
@@ -966,10 +962,8 @@ impl Model {
     }
     /// Iterate streams: smallest existing id greater than `prev`, with its rock.
     pub fn stream_iterate(&self, prev: u32) -> (u32, u32) {
-        for slot in self.streams.iter().skip(prev as usize) {
-            if let Some(s) = slot {
-                return (s.id, s.rock);
-            }
+        if let Some(s) = self.streams.iter().skip(prev as usize).flatten().next() {
+            return (s.id, s.rock);
         }
         (0, 0)
     }

@@ -41,7 +41,7 @@ fn decode_glk_keycode(code: KeyCode) -> u32 {
         KeyCode::End => keycode::END,
         KeyCode::PageUp => keycode::PAGE_UP,
         KeyCode::PageDown => keycode::PAGE_DOWN,
-        KeyCode::F(n) if n >= 1 && n <= 12 => keycode::FUNC1 - (n as u32 - 1),
+        KeyCode::F(n) if (1..=12).contains(&n) => keycode::FUNC1 - (n as u32 - 1),
         _ => keycode::UNKNOWN,
     }
 }

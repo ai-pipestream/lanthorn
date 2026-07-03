@@ -1862,7 +1862,7 @@ fn main() {
         // ── Background tidy job: poll and apply ───────────────────────────────
         // Check whether the in-flight tidy job has finished. Do this BEFORE the
         // draw so the first fully-drawn frame after completion shows the new layout.
-        if state.tidy_job.as_ref().map_or(false, |j| j.handle.is_finished()) {
+        if state.tidy_job.as_ref().is_some_and(|j| j.handle.is_finished()) {
             let job = state.tidy_job.take().unwrap();
             let current_gen = state.graph_gen;
             let active_layer = job.layer;
@@ -2112,9 +2112,9 @@ fn main() {
                         let row = m.row;
                         let pt = ratatui::layout::Position { x: col, y: row };
                         if let Some(ad) = &last_panes.aux_dialog {
-                            let in_close   = ad.close.map_or(false, |r| r.contains(pt));
-                            let in_archive = ad.archive.map_or(false, |r| r.contains(pt));
-                            let in_global  = ad.global.map_or(false, |r| r.contains(pt));
+                            let in_close   = ad.close.is_some_and(|r| r.contains(pt));
+                            let in_archive = ad.archive.is_some_and(|r| r.contains(pt));
+                            let in_global  = ad.global.is_some_and(|r| r.contains(pt));
                             let in_dialog  = ad.area.contains(pt);
                             if in_close || (!in_archive && !in_global && !in_dialog) {
                                 // Close button or click outside → Archive (conservative default).
@@ -2184,9 +2184,9 @@ fn main() {
                         let pt = ratatui::layout::Position { x: col, y: row };
                         if let Some(rd) = &last_panes.reset_dialog {
                             // Check buttons and close in order: close > reset > cancel > checkbox.
-                            let in_close = rd.close.map_or(false, |r| r.contains(pt));
-                            let in_reset = rd.reset.map_or(false, |r| r.contains(pt));
-                            let in_cancel = rd.cancel.map_or(false, |r| r.contains(pt));
+                            let in_close = rd.close.is_some_and(|r| r.contains(pt));
+                            let in_reset = rd.reset.is_some_and(|r| r.contains(pt));
+                            let in_cancel = rd.cancel.is_some_and(|r| r.contains(pt));
                             let in_checkbox = rd.checkbox.contains(pt);
                             let in_dialog = rd.area.contains(pt);
                             if in_close || in_cancel {
@@ -2255,10 +2255,10 @@ fn main() {
                     if m.kind == MouseEventKind::Down(MouseButton::Left) {
                         let pt = ratatui::layout::Position { x: m.column, y: m.row };
                         if let Some(qd) = &last_panes.quit_dialog {
-                            let in_close = qd.close.map_or(false, |r| r.contains(pt));
-                            let in_save = qd.save.map_or(false, |r| r.contains(pt));
-                            let in_quit = qd.quit.map_or(false, |r| r.contains(pt));
-                            let in_cancel = qd.cancel.map_or(false, |r| r.contains(pt));
+                            let in_close = qd.close.is_some_and(|r| r.contains(pt));
+                            let in_save = qd.save.is_some_and(|r| r.contains(pt));
+                            let in_quit = qd.quit.is_some_and(|r| r.contains(pt));
+                            let in_cancel = qd.cancel.is_some_and(|r| r.contains(pt));
                             let in_dialog = qd.area.contains(pt);
                             if in_save {
                                 state.quit_dialog = false;
@@ -2325,9 +2325,9 @@ fn main() {
                     if m.kind == MouseEventKind::Down(MouseButton::Left) {
                         let pt = ratatui::layout::Position { x: m.column, y: m.row };
                         if let Some(ld) = &last_panes.launch_dialog {
-                            let in_resume = ld.resume.map_or(false, |r| r.contains(pt));
-                            let in_new_game = ld.new_game.map_or(false, |r| r.contains(pt));
-                            let in_close = ld.close.map_or(false, |r| r.contains(pt));
+                            let in_resume = ld.resume.is_some_and(|r| r.contains(pt));
+                            let in_new_game = ld.new_game.is_some_and(|r| r.contains(pt));
+                            let in_close = ld.close.is_some_and(|r| r.contains(pt));
                             let in_dialog = ld.area.contains(pt);
                             if in_resume {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
@@ -2395,7 +2395,7 @@ fn main() {
                     if m.kind == MouseEventKind::Down(MouseButton::Left) {
                         let pt = ratatui::layout::Position { x: m.column, y: m.row };
                         if let Some(hp) = &last_panes.hints_panel {
-                            let in_close = hp.close.map_or(false, |r| r.contains(pt));
+                            let in_close = hp.close.is_some_and(|r| r.contains(pt));
                             if in_close {
                                 state.hints = None;
                             }
@@ -2478,7 +2478,7 @@ fn main() {
                     match k.code {
                         KeyCode::Esc => {
                             // In custom-entry focus: exit focus only; otherwise cancel picker.
-                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 if let Some(p) = &mut state.glyph_picker {
                                     p.custom_focus = false;
                                 }
@@ -2489,7 +2489,7 @@ fn main() {
                         KeyCode::Enter => {
                             // In custom-entry focus: commit the typed range (custom_start already
                             // updated on each digit) and exit focus so the grid is browsable.
-                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 if let Some(p) = &mut state.glyph_picker {
                                     p.custom_focus = false;
                                 }
@@ -2498,7 +2498,7 @@ fn main() {
                             }
                         }
                         KeyCode::Delete | KeyCode::Backspace => {
-                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerCustomBackspace, &mut state, &mut mapper);
                             } else {
                                 // Clear the pending selection (revert to grid cursor).
@@ -2508,22 +2508,22 @@ fn main() {
                             }
                         }
                         KeyCode::Left => {
-                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(-1), &mut state, &mut mapper);
                             }
                         }
                         KeyCode::Right => {
-                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(1), &mut state, &mut mapper);
                             }
                         }
                         KeyCode::Up => {
-                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(-(app::input::GLYPH_GRID_COLS as i32)), &mut state, &mut mapper);
                             }
                         }
                         KeyCode::Down => {
-                            if !state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(app::input::GLYPH_GRID_COLS as i32), &mut state, &mut mapper);
                             }
                         }
@@ -2534,7 +2534,7 @@ fn main() {
                             apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
                         }
                         KeyCode::Char(c) => {
-                            if state.glyph_picker.as_ref().map_or(false, |p| p.custom_focus) {
+                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 // In custom-entry mode: only hex digits are accepted.
                                 if c.is_ascii_hexdigit() {
                                     apply_action(Action::GlyphPickerCustomChar(c), &mut state, &mut mapper);
@@ -2553,7 +2553,7 @@ fn main() {
                         let pt = ratatui::layout::Position { x: m.column, y: m.row };
                         if let Some(gp) = &last_panes.glyph_picker {
                             // Close button.
-                            if gp.close.map_or(false, |r| r.contains(pt)) {
+                            if gp.close.is_some_and(|r| r.contains(pt)) {
                                 apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
                             // Glyph cells: set pending + pick.
                             } else {
@@ -2577,13 +2577,13 @@ fn main() {
                                     }
                                 }
                                 if !picked {
-                                    if gp.blocks_prev.map_or(false, |r| r.contains(pt)) {
+                                    if gp.blocks_prev.is_some_and(|r| r.contains(pt)) {
                                         apply_action(Action::GlyphPickerBlock(-1), &mut state, &mut mapper);
-                                    } else if gp.blocks_next.map_or(false, |r| r.contains(pt)) {
+                                    } else if gp.blocks_next.is_some_and(|r| r.contains(pt)) {
                                         apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
-                                    } else if gp.clear.map_or(false, |r| r.contains(pt)) {
+                                    } else if gp.clear.is_some_and(|r| r.contains(pt)) {
                                         apply_action(Action::GlyphPickerClear, &mut state, &mut mapper);
-                                    } else if gp.custom.map_or(false, |r| r.contains(pt)) {
+                                    } else if gp.custom.is_some_and(|r| r.contains(pt)) {
                                         apply_action(Action::GlyphPickerCustomFocus, &mut state, &mut mapper);
                                     }
                                     // Clicks outside modal area: swallow (modal is top).
@@ -2751,7 +2751,7 @@ fn main() {
                                     let hex = state.style_editor.as_ref()
                                         .and_then(|ed| ed.mru.get(i).cloned());
                                     if let Some(hex) = hex {
-                                        let is_bg = state.style_editor.as_ref().map_or(false, |e| e.color_target);
+                                        let is_bg = state.style_editor.as_ref().is_some_and(|e| e.color_target);
                                         apply_action(Action::StyleSetColor { is_bg, value: Some(hex) }, &mut state, &mut mapper);
                                     }
                                     continue 'event_loop;
@@ -4192,7 +4192,7 @@ fn post_turn_bookkeeping(
                     .unwrap_or(0),
             ),
         };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+        if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
             state.push_transcript(&format!("[Auto-save failed: {}]", e));
         }
     }

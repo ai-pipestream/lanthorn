@@ -157,7 +157,7 @@ pub struct Machine {
 }
 
 fn align_up(v: u32, to: u32) -> u32 {
-    (v + to - 1) / to * to
+    v.div_ceil(to) * to
 }
 
 /// Best-effort Glulx opcode mnemonic; hex fallback when unknown.

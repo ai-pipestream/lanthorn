@@ -467,11 +467,10 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     // Comes after steps 2-6 (prompt/anim/gallery/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
     // Room panel is read-only (no text input), so Enter is safe as a close key.
-    if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE {
-        if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+    if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE
+        && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
             return KeyResolve::Action(Action::CloseRoomPanel);
         }
-    }
 
     // 7. Prefix key → open the hotkey dialog.
     let spec = KeySpec::from_key_event(key);
@@ -2073,7 +2072,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SetVolume(v) => {
             let v = v.min(100);
             state.config.volume = v;
-            state.set_status(&format!("volume {v}"));
+            state.set_status(format!("volume {v}"));
             if let Some(b) = state.audio.as_mut() { b.set_volume(v); }
         }
         Action::ToggleInspector => {
@@ -2614,11 +2613,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                             match f {
                                 StyleFocus::Fg => ed.color_target = false,
                                 StyleFocus::Bg => ed.color_target = true,
-                                StyleFocus::Custom => {
-                                    if ed.custom_buf.is_empty() {
+                                StyleFocus::Custom
+                                    if ed.custom_buf.is_empty() => {
                                         ed.custom_buf = "#".to_string();
                                     }
-                                }
                                 _ => {}
                             }
                         }

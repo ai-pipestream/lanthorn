@@ -477,7 +477,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                         BorderZone::Bl => 5, BorderZone::Bottom => 6, BorderZone::Br => 7,
                     };
                     let is_cursor = border_focused && ed.border_zone == zone_idx;
-                    let has_override = active_decl.map_or(false, |d| match zone {
+                    let has_override = active_decl.is_some_and(|d| match zone {
                         BorderZone::Top    => d.glyph_top.is_some(),
                         BorderZone::Bottom => d.glyph_bottom.is_some(),
                         BorderZone::Left   => d.glyph_left.is_some(),
@@ -596,7 +596,7 @@ fn draw_swatch_row(
     }
 
     // Default cell (1 char); index == ANSI_NAMES.len() == 16.
-    if x + 1 <= prop.right() {
+    if x < prop.right() {
         let is_selected = current_val == "default" || current_val == "reset";
         let is_cursor = show_cursor && swatch_cursor == crate::style_mru::ANSI_NAMES.len();
         let mut dflt_style = if is_selected { active_style } else { normal_style };

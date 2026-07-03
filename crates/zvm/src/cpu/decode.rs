@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(ins.operands.len(), 1);
         assert_eq!(ins.operands[0], Operand::Large(0xABCD));
         let br = ins.branch.as_ref().unwrap();
-        assert_eq!(br.on_true, true);
+        assert!(br.on_true);
         assert_eq!(br.offset, 100);
         assert_eq!(ins.next_pc, 0x15);
     }
@@ -565,7 +565,7 @@ mod tests {
         let ins = decode(&m, 0x10, 3);
         assert_eq!(ins.opcode, 0);
         let br = ins.branch.as_ref().unwrap();
-        assert_eq!(br.on_true, false);
+        assert!(!br.on_true);
         assert_eq!(br.offset, -1);
         assert_eq!(ins.next_pc, 0x14);
     }
@@ -581,7 +581,7 @@ mod tests {
         m.write_byte(0x12, 0x80 | 0x40 | 42); // on_true, single-byte, offset=42
         let ins = decode(&m, 0x10, 3);
         let br = ins.branch.as_ref().unwrap();
-        assert_eq!(br.on_true, true);
+        assert!(br.on_true);
         assert_eq!(br.offset, 42);
         assert_eq!(ins.next_pc, 0x13);
     }
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(ins.operand_count, OperandCount::Two);
         assert_eq!(ins.operands.len(), 2);
         let br = ins.branch.as_ref().unwrap();
-        assert_eq!(br.on_true, true);
+        assert!(br.on_true);
         assert_eq!(br.offset, 2);
         assert_eq!(ins.next_pc, 0x15);
     }
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(ins.store, Some(0x04));
         assert!(ins.branch.is_some(), "scan_table must branch");
         let br = ins.branch.as_ref().unwrap();
-        assert_eq!(br.on_true, true);
+        assert!(br.on_true);
         assert_eq!(br.offset, 5);
         // 1 opcode + 1 type byte + 3 operand bytes + 1 store byte + 1 branch byte = 7 bytes
         assert_eq!(ins.next_pc, 0x17);

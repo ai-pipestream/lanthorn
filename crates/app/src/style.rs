@@ -351,7 +351,7 @@ fn resolve_sides(base: paneframe::BorderStyle, decl: &Decl) -> (paneframe::PaneS
             None => base,
             Some(s) => {
                 if s == "picture-frame" {
-                    warnings.push(format!("per-side 'picture-frame' is invalid; using base style"));
+                    warnings.push("per-side 'picture-frame' is invalid; using base style".to_string());
                     base
                 } else {
                     paneframe::parse_border_style(s)

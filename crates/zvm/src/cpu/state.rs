@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn read_local_with_no_frame_latches_underflow() {
-        let mut m = Memory::new(sample_story(3)).unwrap();
+        let m = Memory::new(sample_story(3)).unwrap();
         let mut st = State::new(0x0400);
         let v = read_var(&mut st, &m, 0x01); // local 1, no frame
         assert_eq!(v, 0);

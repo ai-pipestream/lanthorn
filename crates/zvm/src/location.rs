@@ -162,7 +162,7 @@ pub fn status_name_matches(candidate: &str, short: &str) -> bool {
         return true;
     }
     match c.strip_prefix(&s) {
-        Some(rest) => rest.chars().next().map_or(true, |ch| !ch.is_alphanumeric()),
+        Some(rest) => rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric()),
         None => false,
     }
 }
@@ -222,7 +222,7 @@ fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> 
         let sn = short_name(mem, obj);
         if status_name_matches(name, &sn) {
             let len = normalize_name(&sn).len();
-            if best.map_or(true, |(blen, _)| len > blen) {
+            if best.is_none_or(|(blen, _)| len > blen) {
                 best = Some((len, obj));
             }
         }
