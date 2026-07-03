@@ -3085,6 +3085,32 @@ impl Machine {
         }
     }
 
+    /// Deliver an `evtype_Arrange` into a suspended `glk_select`, if one is
+    /// pending. Unlike a line/char event, an Arrange does **not** consume the
+    /// window's input request: the event resolves this `glk_select`, the game
+    /// runs its arrange handler (redrawing graphics windows to their new size),
+    /// then loops back to `glk_select` and re-suspends on the still-pending
+    /// request. A no-op when the VM is not currently waiting on input (e.g. it
+    /// has quit) — an Arrange is only meaningful at a blocked `glk_select`.
+    pub fn deliver_arrange(&mut self) {
+        let Some(pi) = self.pending_input.take() else {
+            return;
+        };
+        let ev = GlkEvent { etype: glk::evtype::ARRANGE, win: 0, val1: 0, val2: 0 };
+        if let Err(e) = self.write_event(pi.event_addr, ev) {
+            self.diagnostics.push(e);
+        }
+    }
+
+    /// Recompute the window layout from the backend's (freshly updated) screen
+    /// size and notify a suspended game via an Arrange event. Call after the
+    /// host reports a new display size: the relayout resizes graphics canvases
+    /// to the new geometry, and the Arrange lets the game redraw into them.
+    pub fn rearrange(&mut self) {
+        self.relayout_glk();
+        self.deliver_arrange();
+    }
+
     /// The Glk version this layer implements (0.7.5), reported by
     /// `glk_gestalt(gestalt_Version)`.
     const GLK_VERSION: u32 = 0x0000_0705;
@@ -5764,6 +5790,45 @@ mod tests {
         m.supply_char(b'q' as u32);
         step_to_event(&mut m);
         assert_eq!(read_event(&m, 0x110), (2, 1, b'q' as u32, 0), "then the char event");
+    }
+
+    #[test]
+    fn deliver_arrange_interrupts_suspended_select_without_consuming_request() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event(win=1, buf=0x180, maxlen=10, initlen=0), then select
+        // twice. The first select suspends on the line request; the host injects
+        // an Arrange into it. The game loops and selects again, re-suspending on
+        // the SAME still-pending request, which the real line input then resolves.
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select again → re-suspend @0x110
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "first select suspends");
+        m.deliver_arrange();
+        assert_eq!(read_event(&m, 0x100), (5, 0, 0, 0), "evtype_Arrange written to the suspended select");
+
+        // The line request was NOT consumed: the next select re-suspends on it.
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedLine { win: 1 },
+            "re-suspends; the line request persisted across the Arrange"
+        );
+        m.supply_line("north");
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        assert_eq!(read_event(&m, 0x110), (3, 1, 5, 0), "the real line event on the second select");
+    }
+
+    #[test]
+    fn deliver_arrange_is_a_noop_when_not_suspended() {
+        // With nothing waiting on input, deliver_arrange must not touch memory or
+        // push diagnostics — an Arrange is only meaningful at a blocked select.
+        let mut m = machine_ram(asm::ins(0x120, &[]), 0x200);
+        m.mem.write32(0x0100, 0xDEAD_BEEF).unwrap();
+        m.deliver_arrange();
+        assert_eq!(m.mem.read32(0x0100).unwrap(), 0xDEAD_BEEF, "memory untouched when not suspended");
+        assert!(m.diagnostics.is_empty(), "no diagnostic when there is no pending select");
     }
 
     #[test]
