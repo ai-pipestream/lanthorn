@@ -3168,6 +3168,20 @@ impl Machine {
         self.fault_trace.take()
     }
 
+    /// Halt the machine with a synthetic recoverable fault, as if a runtime error
+    /// had occurred. Used by the host to abort a runaway turn (an unbounded game
+    /// loop) so the app can survive instead of hard-hanging. Records the same
+    /// fault trace + diagnostic a real fault would, and halts; the next `step`
+    /// returns `Quit`.
+    pub fn abort_with_fault(&mut self, msg: String) {
+        if self.halted {
+            return;
+        }
+        self.fault_trace = Some(self.build_trace(msg.clone()));
+        self.diagnostics.push(msg);
+        self.halted = true;
+    }
+
     /// Build a [`crate::trace::StackTrace`] by walking the frame-pointer chain
     /// from the current (innermost) frame down to the start frame (`fp == 0`).
     /// Read-only: never mutates the machine.
@@ -5821,6 +5835,22 @@ mod tests {
     }
 
     #[test]
+    fn abort_with_fault_halts_and_records_a_recoverable_fault() {
+        // The host watchdog calls this to end a runaway turn. It must halt the VM
+        // (next step → Quit) and record a fault trace + diagnostic, exactly like a
+        // real runtime fault, so the app's survival path keeps it interactive.
+        let mut m = machine_ram(asm::ins(0x00, &[]), 0x200); // a nop program, not run
+        m.abort_with_fault("runaway game loop (test)".to_string());
+        assert_eq!(m.step(), StepResult::Quit, "halted after abort");
+        assert!(m.take_fault_trace().is_some(), "fault trace recorded");
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("runaway")),
+            "diagnostic explains the abort: {:?}",
+            m.diagnostics
+        );
+    }
+
+    #[test]
     fn deliver_arrange_is_a_noop_when_not_suspended() {
         // With nothing waiting on input, deliver_arrange must not touch memory or
         // push diagnostics — an Arrange is only meaningful at a blocked select.
@@ -6388,18 +6418,19 @@ mod tests {
     #[test]
     fn graphics_fixed_split_converts_pixels_to_cells() {
         // A backend reporting 8x16 px cells; a 150px-tall fixed graphics window
-        // below a text buffer → ceil(150/16) = 10 cells tall.
+        // below a text buffer. The terminal footprint rounds up to ceil(150/16)
+        // = 10 cells, but get_size reports the EXACT 150px the game requested (a
+        // rounded 160 would throw off layout code that echoes its request).
         let mut m = super::tests::machine_with_glk_charpx(80, 24, 8, 16);
         m.set_graphics(true);
         let buf = m.glk_open_window(0, 0, 0, 3, 0); // text buffer root
         // winmethod: BELOW(0x03) | FIXED(0x10) = 0x13, size=150 px, wintype_Graphics=5
         let gfx = m.glk_open_window(buf, 0x13, 150, 5, 0);
         assert_ne!(gfx, 0);
-        // get_size returns PIXELS for a graphics window: 10 cells * 16 = 160 tall,
-        // 80 cells * 8 = 640 wide.
+        // Fixed axis (height): exact requested 150px. Free axis (width): 80 cells * 8 = 640.
         let (w_px, h_px) = m.graphics_window_pixels(gfx).unwrap();
-        assert_eq!(h_px, 160);
-        assert_eq!(w_px, 640);
+        assert_eq!(h_px, 150, "fixed height reports the exact requested pixels");
+        assert_eq!(w_px, 640, "free width is cells × char_px");
     }
 
     #[test]

@@ -864,6 +864,11 @@ impl Model {
     /// to [`GlkBackend::window_layout`]).
     pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32)) -> Vec<(u32, WinType, Rect)> {
         self.char_px = char_px;
+        // Snap the working screen size down so every proportional split lands on
+        // whole cells (see `clean_dims`). Any leftover row/column is simply not
+        // covered by a window — a harmless margin — rather than forcing a
+        // fractional split a game's layout code may loop on.
+        let (width, height) = self.clean_dims(width, height);
         if self.root != 0 {
             let r = Rect { left: 0, top: 0, width, height };
             self.layout_window(self.root, r);
@@ -875,6 +880,62 @@ impl Model {
             }
         }
         out
+    }
+
+    /// Largest `(w, h) ≤ (width, height)` at which every **proportional** split in
+    /// the window tree divides into whole cells, so no two siblings end up off by
+    /// a rounding cell.
+    ///
+    /// Why: a terminal quantizes windows to character cells, so a 50 % split of an
+    /// odd column count rounds to unequal halves (e.g. 40 | 39). Some games — an
+    /// Inform 7 graphics/map sidebar among them — assume their proportional split
+    /// is exact and spin forever on a fractional one, where a pixel interpreter's
+    /// ≤1-pixel error is invisible. Snapping width/height independently (a
+    /// Left/Right split constrains columns, an Above/Below split constrains rows)
+    /// gives such splits the equal cells they expect. A non-halving ratio (e.g.
+    /// 37 %) has no small clean size; there we fall back to the requested size and
+    /// rely on the host's per-turn watchdog.
+    fn clean_dims(&self, width: u32, height: u32) -> (u32, u32) {
+        let w = (1..=width).rev().find(|&s| self.axis_splits_exact(self.root, s, true)).unwrap_or(width);
+        let h = (1..=height).rev().find(|&s| self.axis_splits_exact(self.root, s, false)).unwrap_or(height);
+        (w.max(1), h.max(1))
+    }
+
+    /// Does every proportional split that divides the given axis land on whole
+    /// cells, if this subtree occupies `size` cells along that axis? `horizontal`
+    /// selects the column axis (Left/Right splits) vs the row axis (Above/Below).
+    fn axis_splits_exact(&self, id: u32, size: u32, horizontal: bool) -> bool {
+        let w = match self.win(id) {
+            Some(w) if w.wintype == WinType::Pair => w,
+            _ => return true, // leaf or missing: nothing to constrain
+        };
+        let dir = w.method & WINMETHOD_DIRMASK;
+        let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
+        if vertical != horizontal {
+            // This split divides the axis under test.
+            let proportional = (w.method & WINMETHOD_DIVISIONMASK) == WINMETHOD_PROPORTIONAL;
+            if proportional && !(size * w.size).is_multiple_of(100) {
+                return false; // (total * pct) / 100 would truncate → fractional split
+            }
+            let new = if proportional {
+                (size * w.size) / 100
+            } else {
+                let key_is_graphics = self.win(w.child2).map(|c| c.wintype) == Some(WinType::Graphics);
+                if key_is_graphics {
+                    let cell_px = if vertical { self.char_px.1 } else { self.char_px.0 }.max(1);
+                    w.size.div_ceil(cell_px)
+                } else {
+                    w.size
+                }
+            }
+            .min(size);
+            self.axis_splits_exact(w.child1, size - new, horizontal)
+                && self.axis_splits_exact(w.child2, new, horizontal)
+        } else {
+            // Splits the other axis: this axis passes full `size` to both children.
+            self.axis_splits_exact(w.child1, size, horizontal)
+                && self.axis_splits_exact(w.child2, size, horizontal)
+        }
     }
 
     fn layout_window(&mut self, id: u32, rect: Rect) {
@@ -899,7 +960,11 @@ impl Model {
             WinType::Graphics => {}
             WinType::Pair => {
                 let _ = key;
-                // Graphics fixed-splits size in PIXELS; convert to cells.
+                // Graphics fixed-splits size in PIXELS; convert to whole cells
+                // (rounding up so the requested pixels aren't clipped). The
+                // window's *logical* pixel size reported to the game stays exactly
+                // what it asked for — see `window_pixel_size` — so its layout math
+                // isn't thrown off by the cell rounding.
                 let key_is_graphics = self.win(child2).map(|w| w.wintype) == Some(WinType::Graphics);
                 let is_fixed = (method & WINMETHOD_DIVISIONMASK) == WINMETHOD_FIXED;
                 let eff_size = if key_is_graphics && is_fixed {
@@ -951,14 +1016,33 @@ impl Model {
     pub fn has_graphics_window(&self) -> bool {
         self.windows.iter().flatten().any(|w| w.wintype == WinType::Graphics)
     }
-    /// A graphics window's `(width, height)` in PIXELS = cells × char_px.
-    /// `None` if the window is invalid or not a graphics window.
+    /// A graphics window's `(width, height)` in PIXELS. Normally cells × char_px,
+    /// but when the window is the key of a **fixed-pixel** split we report the
+    /// exact pixels the game requested on the split axis rather than the
+    /// cell-rounded value. A terminal can only allocate whole cells, so the
+    /// footprint is rounded up (see `layout_window`) and the spare pixels are
+    /// letterboxed — but the game drew its content for the pixel size it asked
+    /// for, and reporting a rounded value here throws off layout code that
+    /// assumes `get_size` echoes its request (an Inform 7 map sidebar spins
+    /// forever on the mismatch). `None` if invalid or not a graphics window.
     pub fn window_pixel_size(&self, win: u32, char_px: (u32, u32)) -> Option<(u32, u32)> {
         let w = self.win(win)?;
         if w.wintype != WinType::Graphics {
             return None;
         }
-        Some((w.rect.width * char_px.0, w.rect.height * char_px.1))
+        let mut px = (w.rect.width * char_px.0, w.rect.height * char_px.1);
+        if let Some((method, size, keywin)) = self.window_parent(win).and_then(|p| self.window_arrangement(p)) {
+            let is_fixed = (method & WINMETHOD_DIVISIONMASK) == WINMETHOD_FIXED;
+            if is_fixed && keywin == win {
+                let dir = method & WINMETHOD_DIRMASK;
+                if dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW {
+                    px.1 = size.min(px.1); // fixed rows: exact requested height
+                } else {
+                    px.0 = size.min(px.0); // fixed cols: exact requested width
+                }
+            }
+        }
+        Some(px)
     }
     /// A window's own output stream id (0 for a pair window).
     pub fn window_stream(&self, win: u32) -> Option<u32> {
@@ -1479,6 +1563,79 @@ fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
             Rect { top: rect.top, height: old_size, ..rect },
             Rect { top: rect.top + old_size, height: new_size, ..rect },
         ),
+    }
+}
+
+#[cfg(test)]
+mod layout_snap_tests {
+    use super::*;
+
+    // Left|Proportional 50% sidebar (like an Inform 7 map): an odd column count
+    // must snap down so the two halves are equal cells, not 41|40.
+    #[test]
+    fn relayout_snaps_odd_width_so_proportional_halves_are_equal() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
+        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+        m.relayout(81, 41, (9, 19));
+        let gw = m.window_size(gfx).unwrap().0;
+        let bw = m.window_size(buf).unwrap().0;
+        assert_eq!(gw, bw, "50% split must be equal halves (gfx={gw}, buf={bw})");
+        assert_eq!(gw + bw, 80, "snapped to the largest even width ≤ 81");
+    }
+
+    #[test]
+    fn relayout_leaves_even_width_untouched() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+        m.relayout(80, 40, (9, 19));
+        assert_eq!(m.window_size(gfx).unwrap().0, 40);
+        assert_eq!(m.window_size(buf).unwrap().0, 40);
+    }
+
+    // A vertical proportional split constrains rows, not columns.
+    #[test]
+    fn relayout_snaps_odd_height_for_vertical_proportional_split() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let top = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+        m.relayout(80, 41, (9, 19));
+        assert_eq!(m.window_size(top).unwrap().1, m.window_size(buf).unwrap().1, "equal rows");
+        assert_eq!(m.window_size(top).unwrap().1 + m.window_size(buf).unwrap().1, 40, "snapped 41→40 rows");
+        // Width (no horizontal proportional split) is untouched.
+        assert_eq!(m.window_size(top).unwrap().0, 80);
+    }
+
+    // A fixed-pixel graphics sidebar (e.g. an Inform 7 map at its max size):
+    // the terminal footprint rounds up to whole cells, but glk_window_get_size
+    // must report the exact pixels the game requested — otherwise layout code
+    // that assumes get_size echoes its request loops forever on the mismatch.
+    #[test]
+    fn fixed_graphics_split_reports_exact_requested_pixels() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        // Fixed Left 722px sidebar; 722/9 = 80.2 → 81-cell footprint (729px).
+        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 722, 5, 0).unwrap();
+        m.relayout(200, 48, (9, 19));
+        assert_eq!(m.window_size(gfx).unwrap().0, 81, "footprint rounds up to whole cells");
+        let (pw, ph) = m.window_pixel_size(gfx, (9, 19)).unwrap();
+        assert_eq!(pw, 722, "reports the exact requested width, not 81×9=729");
+        // The non-fixed axis stays cells × char_px.
+        assert_eq!(ph, m.window_size(gfx).unwrap().1 * 19, "height still cells × char_px");
+    }
+
+    // A fixed split imposes no proportional constraint: an odd screen passes through.
+    #[test]
+    fn relayout_does_not_snap_a_fixed_split() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let _grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
+        let leaves = m.relayout(81, 41, (9, 19));
+        let right = leaves.iter().map(|(_, _, r)| r.left + r.width).max().unwrap();
+        let bottom = leaves.iter().map(|(_, _, r)| r.top + r.height).max().unwrap();
+        assert_eq!(right, 81, "no proportional split → full width used");
+        assert_eq!(bottom, 41, "no proportional split → full height used");
     }
 }
 
