@@ -203,6 +203,10 @@ list); the scroll position resets whenever the highlighted story changes.
   cover image in the picker's info panel, using the terminal's best graphics
   protocol (Kitty / iTerm2 / Sixel) with a universal half-block fallback.
   Force a mode with `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`.
+- **In-game graphics (Glulx).** Games that open graphics windows now render
+  their filled shapes and images in the terminal, using the best graphics
+  protocol (Kitty / iTerm2 / Sixel) with a half-block fallback. Disable all
+  image rendering (in-game graphics *and* cover art) with `--no-images`.
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and

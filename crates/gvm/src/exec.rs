@@ -6159,6 +6159,68 @@ mod tests {
         assert_eq!(tb.background(1), None);
     }
 
+    /// Assemble a start routine that opens a graphics root window, fills a
+    /// rect, and draws image #1 — all via hand-assembled `@glk` (0x130)
+    /// instructions decoded and executed by the real opcode-dispatch loop
+    /// (`op_glk` pops the args off the VM stack and calls `glk_dispatch`),
+    /// rather than calling `glk_dispatch`/`glk_open_window` directly as the
+    /// tests above do. `win` is stashed at RAM address 0x0100 so later calls
+    /// can pass it back in and the driving test can read it out afterward.
+    fn synthetic_graphics_story_body() -> Vec<u8> {
+        use asm::Op::{C8, C32, Mem16, Zero};
+        // glk_window_open(split=0, method=0, size=0, wintype_Graphics=5, rock=0)
+        let mut body = glk_call(0x0023, &[C8(0), C8(0), C8(0), C8(5), C8(0)], Mem16(0x0100));
+        // glk_window_fill_rect(win, color=0x00112233, left=1, top=2, w=3, h=4)
+        body.extend(glk_call(0x00EA, &[Mem16(0x0100), C32(0x0011_2233), C8(1), C8(2), C8(3), C8(4)], Zero));
+        // glk_image_draw(win, image=1, x=5, y=6)
+        body.extend(glk_call(0x00E1, &[Mem16(0x0100), C8(1), C8(5), C8(6)], Zero));
+        body.extend(asm::ins(0x120, &[])); // quit
+        body
+    }
+
+    /// End-to-end confidence check: with graphics enabled, the assembled
+    /// story's `@glk` calls flow through opcode decode -> `op_glk` -> arg
+    /// popping -> `glk_dispatch` -> the backend, landing the exact fill/draw
+    /// ops on the exact window the story opened.
+    #[test]
+    fn synthetic_graphics_story_records_ops_when_enabled() {
+        let start = asm::func(0xC1, &[], &synthetic_graphics_story_body());
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        m.set_graphics(true);
+        m.run();
+
+        let win = m.mem.read32(0x0100).unwrap();
+        assert_ne!(win, 0, "graphics root window opened when enabled");
+
+        let tb = backend_of(&m);
+        assert_eq!(tb.fills(win), vec![(0x0011_2233, 1, 2, 3, 4)]);
+        assert_eq!(tb.draws(win), vec![(1, 5, 6, None)]);
+        assert!(m.diagnostics.is_empty(), "no noise: {:?}", m.diagnostics);
+    }
+
+    /// The same assembled story, but graphics never gets enabled (the
+    /// default): the gate holds end-to-end — `glk_window_open` rejects the
+    /// graphics wintype (win stays 0), and the subsequent fill/draw selectors
+    /// no-op rather than recording anything against window 0.
+    #[test]
+    fn synthetic_graphics_story_gated_off_by_default() {
+        let start = asm::func(0xC1, &[], &synthetic_graphics_story_body());
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        // graphics_enabled left at its default (false) — no `set_graphics` call.
+        m.run();
+
+        let win = m.mem.read32(0x0100).unwrap();
+        assert_eq!(win, 0, "graphics window rejected when disabled");
+
+        let tb = backend_of(&m);
+        assert_eq!(tb.fills(0), Vec::new(), "no fill recorded with graphics off");
+        assert_eq!(tb.draws(0), Vec::new(), "no draw recorded with graphics off");
+    }
+
     #[test]
     fn graphics_fixed_split_converts_pixels_to_cells() {
         // A backend reporting 8x16 px cells; a 150px-tall fixed graphics window
