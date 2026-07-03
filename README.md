@@ -101,6 +101,11 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is also supported.
   reach the first prompt substantially faster: well-known Inform veneer functions
   set up via `accelfunc` are recognized and executed natively instead of through
   full VM dispatch. On by default; disable with `--no-accel` (`gvm-cli` and the app).
+- **Graceful VM crash reporting** — when a story faults (out-of-bounds memory,
+  stack under/overflow), the interpreter halts with a call-frame stack trace —
+  the faulting PC and opcode plus each frame's return address and locals —
+  instead of crashing. The trace appears inline in the app transcript and on
+  `zvm-cli`/`gvm-cli` stderr (which exit 70).
 
 ### Live automapping
 - **Automatic room placement** as you explore — each new location is positioned
