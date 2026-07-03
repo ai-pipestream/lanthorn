@@ -737,6 +737,13 @@ impl Machine {
         ])
     }
 
+    /// Bounds-checked big-endian u32 read from the stack for trace-building.
+    /// Returns None instead of panicking on an out-of-range offset.
+    fn st_r32_opt(&self, off: usize) -> Option<u32> {
+        let b = self.stack.get(off..off + 4)?;
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     // ── value stack (operands above the current frame) ────────────────────────
 
     /// Byte offset where the current frame's value stack begins.
@@ -2960,8 +2967,17 @@ impl Machine {
         let mut f = self.fp; // innermost frame offset
         let mut inner_bottom = self.sp; // top of innermost value region
         loop {
-            let frame_len = self.st_r32(f) as usize;
-            let localspos = self.st_r32(f + 4) as usize;
+            // A frame header needs 8 bytes at [f, f+8) for FrameLen/LocalsPos,
+            // and (if not the start frame) a 16-byte call stub at [f-16, f).
+            // On a corrupt/attacker-influenced fp, bail out with whatever
+            // frames we've collected rather than risk a panic below.
+            if f + 8 > self.stack.len() || (f != 0 && f < 16) {
+                break;
+            }
+            let (frame_len, localspos) = match (self.st_r32_opt(f), self.st_r32_opt(f + 4)) {
+                (Some(fl), Some(lp)) => (fl as usize, lp as usize),
+                _ => break,
+            };
             // Walk the locals-format list at f+8 to read each local value.
             let locals = self.read_frame_locals(f, localspos);
             // Value/operand region: above this frame's frame_len, up to inner_bottom.
@@ -2970,9 +2986,10 @@ impl Machine {
             let (caller_fp, this_ret_pc) = if f == 0 {
                 (0usize, 0u32) // start frame: no stub beneath it
             } else {
-                let caller_fp = self.st_r32(f - 4) as usize;
-                let ret_pc = self.st_r32(f - 8);
-                (caller_fp, ret_pc)
+                match (self.st_r32_opt(f - 4), self.st_r32_opt(f - 8)) {
+                    (Some(caller_fp), Some(ret_pc)) => (caller_fp as usize, ret_pc),
+                    _ => break, // corrupt stub: stop, keeping frames collected so far
+                }
             };
             frames.push(TraceFrame {
                 func_addr: 0, // Glulx does not store per-frame entry addresses
@@ -2997,7 +3014,7 @@ impl Machine {
         let mut out = Vec::new();
         let mut fmt = f + 8;
         let mut off = 0usize;
-        loop {
+        'walk: loop {
             let ty = self.stack_byte(fmt);
             let count = self.stack_byte(fmt + 1);
             if ty == 0 && count == 0 {
@@ -3010,7 +3027,10 @@ impl Machine {
                 let v = match size {
                     1 => self.stack_byte(base) as i64,
                     2 => (((self.stack_byte(base) as u32) << 8) | self.stack_byte(base + 1) as u32) as i64,
-                    _ => self.st_r32(base) as i64,
+                    _ => match self.st_r32_opt(base) {
+                        Some(v) => v as i64,
+                        None => break 'walk,
+                    },
                 };
                 out.push(v);
                 off += size.max(1);
@@ -3025,9 +3045,16 @@ impl Machine {
 
     fn read_stack_words(&self, lo: usize, hi: usize) -> Vec<i64> {
         let mut out = Vec::new();
+        let hi = hi.min(self.stack.len());
+        if lo > hi {
+            return out;
+        }
         let mut a = lo;
         while a + 4 <= hi {
-            out.push(self.st_r32(a) as i64);
+            match self.st_r32_opt(a) {
+                Some(v) => out.push(v as i64),
+                None => break,
+            }
             a += 4;
         }
         out
@@ -3141,6 +3168,21 @@ mod tests {
             }
         }
         assert!(m.take_fault_trace().is_none());
+    }
+
+    #[test]
+    fn build_trace_handles_corrupt_fp_without_panicking() {
+        // Simulate the op_throw hazard: self.fp set to an attacker-influenced,
+        // out-of-range stack offset before reload_frame_meta() had a chance to
+        // validate it. build_trace() must never panic while reporting a fault.
+        let mut m = machine_with_body(&[], asm::ins(0x120, &[])); // body unused
+        m.fp = m.stack.len() + 64; // corrupt frame pointer, wildly out of range
+        m.sp = m.fp;
+        let t = m.build_trace("memory fault: test".to_string());
+        assert_eq!(t.fault, "memory fault: test");
+        assert_eq!(t.width, 4);
+        // Frame-chain walk must bail out gracefully (truncated/empty), not panic.
+        assert!(t.frames.len() <= 1, "expected a truncated trace, got {} frames", t.frames.len());
     }
 
     #[test]
