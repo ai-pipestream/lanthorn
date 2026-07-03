@@ -50,6 +50,16 @@ fn grid_cell_to_zvm(cell: GridCell) -> zvm::screen::Cell {
     }
 }
 
+/// Terminal rows the grid's border chrome adds on top of its content rows
+/// (top + bottom borders, per-side aware). The generic multi-window path widens
+/// a stacked grid's allotment by this much so the chrome isn't squished into the
+/// grid's exact Glk split (SQ-0200); `draw_grid` sizes its own frame with it too.
+pub fn grid_border_overhead(colors: &ColorScheme) -> u16 {
+    let sides = colors.upper_window_border_sides;
+    (if sides.top != BorderStyle::None { 1 } else { 0 })
+        + (if sides.bottom != BorderStyle::None { 1 } else { 0 })
+}
+
 // ── Core grid renderer ────────────────────────────────────────────────────────
 
 /// Draw the upper-window grid into `area`.
@@ -81,13 +91,9 @@ pub fn draw_grid(
     let content_style = colors.upper_window;
     let border_color = colors.upper_window_border;
 
-    // How many terminal rows does the border frame consume? Derive from which
-    // horizontal sides are actually present (per-side aware), so a top/bottom-only
-    // or left/right-only frame reserves the right number of rows.
+    // How many terminal rows does the border frame consume? (top + bottom sides).
     let sides = colors.upper_window_border_sides;
-    let border_overhead: u16 =
-        (if sides.top != BorderStyle::None { 1 } else { 0 })
-        + (if sides.bottom != BorderStyle::None { 1 } else { 0 });
+    let border_overhead: u16 = grid_border_overhead(colors);
 
     // Total terminal rows needed: grid rows + optional border.
     // Clamp to the available area height.

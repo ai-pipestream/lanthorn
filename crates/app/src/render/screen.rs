@@ -12,9 +12,10 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+use crate::colors::ColorScheme;
 use crate::engine::{BufferWindow, Introspect, ScreenModel, StatusModel, WinNode};
 use crate::render::transcript::{draw_str_runs, render_transcript, visible_wrapped_lines_kinded};
-use crate::render::upper_window::{draw_grid, draw_upper_window};
+use crate::render::upper_window::{draw_grid, draw_upper_window, grid_border_overhead};
 use crate::state::{AppState, TranscriptKind};
 
 /// Metrics the story-pane render reports back for scrollbar / mouse routing.
@@ -136,7 +137,7 @@ fn render_node(
     }
     match node {
         WinNode::Pair { vertical, split, first, second } => {
-            let (a1, a2) = split_area(area, *vertical, split.fixed);
+            let (a1, a2) = pair_areas(*vertical, split.fixed, first, second, &state.colors, area);
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input);
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input);
             m1.or(m2)
@@ -184,9 +185,9 @@ fn render_node(
 /// inside it); pass an empty rect when the story pane isn't shown.
 ///
 /// With no graphics windows this returns `frame` unchanged (today's behavior).
-pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect) -> Rect {
+pub fn dialog_bounds(model: &ScreenModel, colors: &ColorScheme, story_area: Rect, frame: Rect) -> Rect {
     let mut graphics: Vec<Rect> = Vec::new();
-    collect_graphics_rects(&model.root, story_area, &mut graphics);
+    collect_graphics_rects(&model.root, colors, story_area, &mut graphics);
     let mut bounds = frame;
     for g in graphics {
         bounds = subtract_rect(bounds, g);
@@ -195,16 +196,16 @@ pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect) -> Rect
 }
 
 /// Walk the tree assigning each leaf its terminal rect (exactly as `render_node`
-/// does), collecting every graphics leaf's rect.
-fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
+/// does, including grid border-row borrowing), collecting every graphics leaf's rect.
+fn collect_graphics_rects(node: &WinNode, colors: &ColorScheme, area: Rect, out: &mut Vec<Rect>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     match node {
         WinNode::Pair { vertical, split, first, second } => {
-            let (a1, a2) = split_area(area, *vertical, split.fixed);
-            collect_graphics_rects(first, a1, out);
-            collect_graphics_rects(second, a2, out);
+            let (a1, a2) = pair_areas(*vertical, split.fixed, first, second, colors, area);
+            collect_graphics_rects(first, colors, a1, out);
+            collect_graphics_rects(second, colors, a2, out);
         }
         WinNode::Graphics(_) => out.push(area),
         WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
@@ -247,6 +248,47 @@ fn split_area(area: Rect, vertical: bool, fixed: u16) -> (Rect, Rect) {
         let second = Rect::new(area.x + w, area.y, area.width - w, area.height);
         (first, second)
     }
+}
+
+/// Split `area` for a `Pair`, granting a stacked (vertical) active grid child
+/// the extra rows its border chrome needs — borrowed from its sibling — so the
+/// chrome isn't squished into the grid's exact Glk allotment (SQ-0200). This
+/// mirrors the simple path, where the framed grid takes its border rows from the
+/// transcript below. Horizontal splits and non-grid children are unaffected.
+///
+/// Used by both `render_node` (to draw) and `collect_graphics_rects` (so
+/// `dialog_bounds` sees graphics where they're actually rendered).
+fn pair_areas(
+    vertical: bool,
+    split_fixed: u16,
+    first: &WinNode,
+    second: &WinNode,
+    colors: &ColorScheme,
+    area: Rect,
+) -> (Rect, Rect) {
+    let (mut a1, mut a2) = split_area(area, vertical, split_fixed);
+    if vertical {
+        let overhead = grid_border_overhead(colors);
+        if overhead > 0 {
+            if grid_is_active(first) {
+                let take = overhead.min(a2.height);
+                a1.height += take;
+                a2.y += take;
+                a2.height -= take;
+            } else if grid_is_active(second) {
+                let take = overhead.min(a1.height);
+                a1.height -= take;
+                a2.y -= take;
+                a2.height += take;
+            }
+        }
+    }
+    (a1, a2)
+}
+
+/// True for a text-grid leaf that will actually draw (has active rows).
+fn grid_is_active(node: &WinNode) -> bool {
+    matches!(node, WinNode::Grid(g) if g.active_rows > 0)
 }
 
 /// Draw an inline (non-primary) buffer window's wrapped, styled lines.
@@ -411,6 +453,49 @@ mod tests {
         assert!(right[10..].contains("RIGHT"), "right buffer at col>=10: {:?}", right);
     }
 
+    /// SQ-0200: in the generic multi-window path a bordered status grid must not
+    /// be squished into its exact 1-row Glk split — it borrows its border rows
+    /// from the sibling below (as the simple path does), so the chrome fits.
+    #[test]
+    fn generic_grid_borrows_border_rows_from_sibling() {
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        // status grid (1 row) over [graphics banner | primary buffer]; the
+        // graphics leaf forces the generic path.
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                first: Box::new(WinNode::Grid(grid_with("HI"))),
+                second: Box::new(WinNode::Pair {
+                    vertical: true,
+                    split: Split { fixed: 3 },
+                    first: Box::new(graphics_node()),
+                    second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+                }),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+        };
+        assert!(!is_simple(&model));
+
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.virtual_window_border = BorderStyle::Single;
+        colors.upper_window_border_sides = PaneSides::all(BorderStyle::Single);
+        let mut state = AppState::default();
+        state.colors = colors;
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // Grid "HI" (2 cols) framed: uw_w = 2 + 2 borders = 4, centered in 20 →
+        // x_off = 8, content at x=9. Top border row 0, content row 1.
+        assert_ne!(buf.cell((8, 0)).unwrap().symbol(), " ", "top-left border corner drawn");
+        assert_eq!(buf.cell((9, 1)).unwrap().symbol(), "H", "grid content sits inside the border, not squished");
+        assert_eq!(buf.cell((10, 1)).unwrap().symbol(), "I");
+    }
+
     #[test]
     fn inline_buffer_renders_styled_runs() {
         let mut b = inline_buffer("abCD");
@@ -507,12 +592,16 @@ mod tests {
         ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0 }
     }
 
+    fn dialog_colors() -> ColorScheme {
+        crate::colors::ColorScheme::terminal_default()
+    }
+
     #[test]
     fn dialog_bounds_returns_frame_when_no_graphics() {
         // A pure-text tree: no graphics → dialogs keep full-frame centering.
         let model = model_with(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }));
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame), frame);
+        assert_eq!(dialog_bounds(&model, &dialog_colors(), Rect::new(0, 0, 20, 12), frame), frame);
     }
 
     #[test]
@@ -528,7 +617,7 @@ mod tests {
         });
         let story_area = Rect::new(0, 0, 20, 12);
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, story_area, frame), Rect::new(10, 0, 30, 12));
+        assert_eq!(dialog_bounds(&model, &dialog_colors(), story_area, frame), Rect::new(10, 0, 30, 12));
     }
 
     #[test]
@@ -541,7 +630,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let area = Rect::new(0, 0, 20, 12);
-        assert_eq!(dialog_bounds(&model, area, area), Rect::new(0, 3, 20, 9));
+        assert_eq!(dialog_bounds(&model, &dialog_colors(), area, area), Rect::new(0, 3, 20, 9));
     }
 
     #[test]
@@ -555,7 +644,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, Rect::default(), frame), frame);
+        assert_eq!(dialog_bounds(&model, &dialog_colors(), Rect::default(), frame), frame);
     }
 
     #[test]
