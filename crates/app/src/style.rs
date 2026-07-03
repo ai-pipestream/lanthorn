@@ -521,7 +521,7 @@ impl<'de> serde::Deserialize<'de> for StyleColors {
         #[serde(untagged)]
         enum SchemeOrDecl {
             Scheme(String),
-            Decl(Decl),
+            Decl(Box<Decl>),
         }
 
         let raw: BTreeMap<String, SchemeOrDecl> = BTreeMap::deserialize(deserializer)?;
@@ -532,7 +532,7 @@ impl<'de> serde::Deserialize<'de> for StyleColors {
                     out.scheme = Some(s);
                 }
             } else if let SchemeOrDecl::Decl(d) = val {
-                out.selectors.insert(key, d);
+                out.selectors.insert(key, *d);
             }
             // Unknown shapes (e.g. non-string scheme) are ignored, never fatal.
         }
