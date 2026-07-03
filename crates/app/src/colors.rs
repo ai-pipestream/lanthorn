@@ -323,6 +323,8 @@ pub struct ColorScheme {
     pub transcript_meta: Style,
     /// VM warning text.
     pub transcript_warning: Style,
+    /// VM crash / fault trace lines in the transcript.
+    pub transcript_crash: Style,
     /// Built-in story rule: room-name / location header line.
     pub transcript_location: Style,
     /// Built-in story rule: bracketed system line.
@@ -418,6 +420,7 @@ impl ColorScheme {
             transcript_input: Style::new().fg(Color::Cyan),
             transcript_meta: Style::new().fg(Color::DarkGray),
             transcript_warning: Style::new().fg(Color::Yellow),
+            transcript_crash: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
             transcript_location: Style::new().add_modifier(Modifier::BOLD),
             transcript_system: Style::new().fg(Color::DarkGray),
             warning_marker: Style::new().fg(Color::Yellow),
@@ -596,6 +599,7 @@ impl ColorScheme {
             transcript_input: Style::new().fg(scheme.palette[6]),
             transcript_meta: Style::new().fg(scheme.palette[8]),
             transcript_warning: Style::new().fg(scheme.palette[3]),
+            transcript_crash: Style::new().fg(scheme.palette[1]).add_modifier(Modifier::BOLD),
             transcript_location: Style::new().add_modifier(Modifier::BOLD),
             transcript_system: Style::new().fg(scheme.palette[8]),
             warning_marker: Style::new().fg(scheme.palette[3]),

@@ -174,6 +174,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "transcript:input",
     "transcript:meta",
     "transcript:warning",
+    "transcript:crash",
     "transcript:location",
     "transcript:system",
     "warning_marker",
@@ -223,7 +224,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ]),
     ("Transcript", &[
         "transcript", "transcript:input", "transcript:meta", "transcript:warning",
-        "transcript:location", "transcript:system",
+        "transcript:crash", "transcript:location", "transcript:system",
         "suggestion", "input:text", "input:prompt",
         "warning_marker", "meta_marker", "scrollbar",
     ]),
@@ -265,6 +266,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "transcript:input"     => cs.transcript_input,
         "transcript:meta"      => cs.transcript_meta,
         "transcript:warning"   => cs.transcript_warning,
+        "transcript:crash"     => cs.transcript_crash,
         "transcript:location"  => cs.transcript_location,
         "transcript:system"    => cs.transcript_system,
         "warning_marker"       => cs.warning_marker,
@@ -403,6 +405,7 @@ pub fn apply_color_decls(
             "transcript:input"    => cs.transcript_input = cs.transcript_input.patch(style),
             "transcript:meta"     => cs.transcript_meta = cs.transcript_meta.patch(style),
             "transcript:warning"  => cs.transcript_warning = cs.transcript_warning.patch(style),
+            "transcript:crash"    => cs.transcript_crash = cs.transcript_crash.patch(style),
             "transcript:location" => cs.transcript_location = cs.transcript_location.patch(style),
             "transcript:system"   => cs.transcript_system = cs.transcript_system.patch(style),
             "warning_marker"      => cs.warning_marker = cs.warning_marker.patch(style),
@@ -1256,6 +1259,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("transcript:input".to_string(),    style_to_decl(&cs.transcript_input));
     doc.colors.selectors.insert("transcript:meta".to_string(),     style_to_decl(&cs.transcript_meta));
     doc.colors.selectors.insert("transcript:warning".to_string(),  style_to_decl(&cs.transcript_warning));
+    doc.colors.selectors.insert("transcript:crash".to_string(),    style_to_decl(&cs.transcript_crash));
     doc.colors.selectors.insert("transcript:location".to_string(), style_to_decl(&cs.transcript_location));
     doc.colors.selectors.insert("transcript:system".to_string(),   style_to_decl(&cs.transcript_system));
     doc.colors.selectors.insert("warning_marker".to_string(),      style_to_decl(&cs.warning_marker));
@@ -1723,6 +1727,21 @@ fg = "green"
         assert!(s.add_modifier.contains(Modifier::BOLD));
         assert!(s.add_modifier.contains(Modifier::REVERSED));
         assert_eq!(s.bg, None); // bg omitted => unset
+    }
+
+    #[test]
+    fn crash_selector_maps_to_transcript_crash_field() {
+        use ratatui::style::Color;
+        let scheme = crate::colors::GhosttyScheme::default();
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        // style_for_selector resolves the new selector to the crash field.
+        let _ = style_for_selector(&cs, "transcript:crash");
+        // apply_color_decls patches the crash field.
+        let mut decls = std::collections::BTreeMap::new();
+        decls.insert("transcript:crash".to_string(), Decl { fg: Some("red".into()), ..Default::default() });
+        let warns = apply_color_decls(&mut cs, &decls, &scheme);
+        assert!(warns.is_empty());
+        assert_eq!(style_for_selector(&cs, "transcript:crash").fg, Some(Color::Red));
     }
 
     #[test]
