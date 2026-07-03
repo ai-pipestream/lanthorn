@@ -2895,12 +2895,13 @@ impl Machine {
             }
         };
         let _ = self.glk.take_char_request(pi.win);
-        let val = if pi.unicode {
+        // A Unicode request carries any code point; a non-Unicode request carries
+        // only Latin-1 (<=0xFF) or special keycodes, and maps anything else to
+        // keycode_Unknown.
+        let val = if pi.unicode || key <= 0xFF || key >= glk::keycode::SPECIAL_FLOOR {
             key
-        } else if key <= 0xFF || key >= glk::keycode::SPECIAL_FLOOR {
-            key // a Latin-1 code or a special keycode
         } else {
-            glk::keycode::UNKNOWN // an out-of-range Unicode key a Latin-1 request can't carry
+            glk::keycode::UNKNOWN
         };
         let ev = GlkEvent { etype: glk::evtype::CHAR_INPUT, win: pi.win, val1: val, val2: 0 };
         if let Err(e) = self.write_event(pi.event_addr, ev) {
