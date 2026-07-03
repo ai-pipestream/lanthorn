@@ -144,6 +144,8 @@ pub struct TurnResult {
     /// completed as timed-out, either directly or because `run_timed_interrupt`'s
     /// routine aborted the read). `false` for every other turn.
     pub timed_out: bool,
+    /// Pre-formatted crash stack-trace lines when the VM faulted this turn.
+    pub fault: Option<Vec<String>>,
 }
 
 /// A running Z-machine game session.
@@ -334,6 +336,7 @@ impl GameSession {
         };
 
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
+        let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
         let sounds = std::mem::take(&mut self.machine.pending_sounds);
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
 
@@ -346,6 +349,7 @@ impl GameSession {
             info,
             sounds,
             diagnostics,
+            fault,
             location_method,
             pending_io,
             timed_out,
@@ -421,6 +425,7 @@ fn run_until_input(machine: &mut Machine) -> (RunStop, bool) {
     loop {
         match machine.step() {
             StepResult::Quit => return (RunStop::Quit, v3_failed),
+            StepResult::Fault => return (RunStop::Quit, v3_failed),
             StepResult::NeedLine { .. } => return (RunStop::Input(InputKind::Line), v3_failed),
             StepResult::NeedChar => return (RunStop::Input(InputKind::Char), v3_failed),
             StepResult::SaveRequest => {
@@ -861,6 +866,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: None,
             pending_io: None,
             timed_out: false,
@@ -880,6 +886,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: None,
             pending_io: None,
             timed_out: false,
@@ -907,6 +914,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: None,
             pending_io: None,
             timed_out: false,
@@ -929,6 +937,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: method,
             pending_io: None,
             timed_out: false,
@@ -967,6 +976,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: Some(LocationMethod::RoomHeading),
             pending_io: None,
             timed_out: false,
@@ -994,6 +1004,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: None,
             pending_io: None,
             timed_out: false,
@@ -1014,6 +1025,7 @@ mod tests {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: None,
             pending_io: None,
             timed_out: false,
@@ -1162,6 +1174,38 @@ mod tests {
         let session = GameSession::new(story, false, false, None).expect("GameSession::new");
         let loc = session.current_location().expect("v5 starting room must be detected at boot");
         assert!(loc.name.starts_with("West"), "expected West of House, got {:?}", loc.name);
+    }
+
+    /// Variant of `read_char_story_v5`: after the read_char completes, instead
+    /// of `quit` the program executes a `loadw` with an out-of-bounds address
+    /// (array=0xFFFF, index=0xFFFF), which faults the VM mid-turn (ZMSD memory
+    /// fault). Mirrors zvm's own `loadw_out_of_bounds_faults_with_trace` test.
+    fn faulting_read_char_story_v5() -> Vec<u8> {
+        let mut buf = read_char_story_v5();
+        // loadw (2OP:0x0F), variable-form encoding with two Large operands:
+        // array=0xFFFF index=0xFFFF -> addr = 0xFFFF + 2*0xFFFF, far past this
+        // 0x0800-byte story's memory.
+        buf[0x0044] = 0xCF; // variable form, bit5=0 -> 2OP, opcode=0x0F (loadw)
+        buf[0x0045] = 0x0F; // type byte: large, large, omitted, omitted
+        buf[0x0046] = 0xFF; buf[0x0047] = 0xFF; // operand a (array) = 0xFFFF
+        buf[0x0048] = 0xFF; buf[0x0049] = 0xFF; // operand b (index) = 0xFFFF
+        buf[0x004A] = 0x00; // store var 0x00 = push onto stack
+        buf
+    }
+
+    #[test]
+    fn turn_result_carries_fault_trace_when_vm_faults() {
+        // End-to-end: submit a turn whose VM step faults mid-execution and
+        // confirm the drained TurnResult.fault carries the formatted trace.
+        let mut sess = GameSession::new(faulting_read_char_story_v5(), true, false, None)
+            .expect("GameSession::new");
+        assert_eq!(sess.pending_input(), InputKind::Char);
+
+        let turn_result = sess.submit_char(b'x');
+        assert!(turn_result.quit, "a faulted VM halts (routed through RunStop::Quit)");
+        let lines = turn_result.fault.expect("TurnResult.fault must be Some after a VM fault");
+        assert_eq!(lines[0], "*** VM FAULT ***");
+        assert!(lines[1].starts_with("memory fault: read16 @"), "fault line: {}", lines[1]);
     }
 
     #[test]

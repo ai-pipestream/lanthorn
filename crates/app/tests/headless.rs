@@ -51,6 +51,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
         info: None,
         sounds: Vec::new(),
         diagnostics: vec![],
+        fault: None,
         location_method: None,
         pending_io: None,
         timed_out: false,

@@ -153,6 +153,7 @@ impl GlulxSession {
         let location = self.last_room.clone();
         let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
+        let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
         TurnResult {
             transcript,
             transcript_runs,
@@ -162,6 +163,7 @@ impl GlulxSession {
             info: None,
             sounds: Vec::new(),
             diagnostics,
+            fault,
             location_method,
             pending_io: None,
             timed_out: false,

@@ -1725,6 +1725,7 @@ fn main() {
             info: None,
             sounds: Vec::new(),
             diagnostics: vec![],
+            fault: None,
             location_method: None,
             pending_io: None,
             timed_out: false,
@@ -3105,6 +3106,7 @@ fn main() {
                                         info: None,
                                         sounds: Vec::new(),
                                         diagnostics: vec![],
+                                        fault: None,
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
@@ -3245,6 +3247,7 @@ fn main() {
                                         info: None,
                                         sounds: Vec::new(),
                                         diagnostics: vec![],
+                                        fault: None,
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
@@ -3366,6 +3369,7 @@ fn main() {
                                             info: None,
                                             sounds: Vec::new(),
                                             diagnostics: vec![],
+                                            fault: None,
                                             location_method: None,
                                             pending_io: None,
                                             timed_out: false,
@@ -3434,6 +3438,7 @@ fn main() {
                                         info: None,
                                         sounds: Vec::new(),
                                         diagnostics: vec![],
+                                        fault: None,
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
@@ -3735,6 +3740,7 @@ fn dispatch_slash_outcome(
                                             info: None,
                                             sounds: Vec::new(),
                                             diagnostics: vec![],
+                                            fault: None,
                                             location_method: None,
                                             pending_io: None,
                                             timed_out: false,
@@ -3930,6 +3936,7 @@ fn reset_game(
                     info: None,
                     sounds: Vec::new(),
                     diagnostics: vec![],
+                    fault: None,
                     location_method: None,
                     pending_io: None,
                     timed_out: false,
@@ -4704,6 +4711,7 @@ fn apply_launch_resume(
                     info: None,
                     sounds: Vec::new(),
                     diagnostics: vec![],
+                    fault: None,
                     location_method: None,
                     pending_io: None,
                     timed_out: false,
@@ -4758,6 +4766,13 @@ fn scroll_for_match(match_visible_pos: usize, total_visible: usize, pane_rows: u
 fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     for line in &result.diagnostics {
         state.push_transcript_kind(line, app::state::TranscriptKind::Warning);
+    }
+    if let Some(lines) = &result.fault {
+        let crash = state.colors.transcript_crash;
+        for line in lines {
+            state.push_transcript_styled(line, app::state::TranscriptKind::Warning, crash);
+        }
+        state.push_transcript_styled("(game halted)", app::state::TranscriptKind::Warning, crash);
     }
     if let Some(kind) = result.sounds.iter().rev().find_map(|ev| match ev.number {
         1 => Some(app::state::BeepKind::High),

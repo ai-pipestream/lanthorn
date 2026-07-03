@@ -1745,6 +1745,29 @@ mod tests {
     }
 
     #[test]
+    fn crash_lines_render_with_crash_style() {
+        use ratatui::style::Color;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        let crash_style = state.colors.transcript_crash;
+        state.push_transcript_styled("*** VM FAULT ***", TranscriptKind::Warning, crash_style);
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        // Single Warning-kind line → its gutter '!' marks the crash row.
+        let y = (1u16..9)
+            .find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some("!"))
+            .expect("crash line gutter '!' must appear in column 0");
+        // The crash TEXT (past the 2-col gutter) must carry the crash style's fg (Red),
+        // NOT the default Warning yellow — proving the explicit style override applied.
+        assert_eq!(buf.cell((2, y)).unwrap().style().fg, crash_style.fg);
+        assert_eq!(crash_style.fg, Some(Color::Red));
+    }
+
+    #[test]
     fn wrapped_system_line_keeps_style_on_all_rows() {
         // Regression: a bracketed system line long enough to wrap must keep its
         // transcript:system style on EVERY wrapped row. The style is resolved on
