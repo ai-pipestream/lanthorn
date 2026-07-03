@@ -191,6 +191,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "story_info:title",
     "story_info:label",
     "story_info:value",
+    "story_info:cover",
     "story_badge",
     "map_layer_tab",
     "map_layer_tab_active",
@@ -234,7 +235,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ]),
     ("Story picker", &[
         "story_info", "story_info:title", "story_info:label",
-        "story_info:value", "story_badge",
+        "story_info:value", "story_info:cover", "story_badge",
     ]),
     ("Dialogs", &[
         "dialog", "dialog:title", "dialog:button", "dialog:button:active", "dialog:shadow",
@@ -291,6 +292,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "story_info:title"  => cs.story_info_title,
         "story_info:label"  => cs.story_info_label,
         "story_info:value"  => cs.story_info_value,
+        "story_info:cover"  => cs.story_info_cover,
         "story_badge"       => cs.story_badge,
         // Composite selectors: each has a single color-bearing Style field.
         // Confirmed by reading apply_color_decls arms (style.rs lines 239-293).
@@ -438,6 +440,7 @@ pub fn apply_color_decls(
             "story_info:title"  => cs.story_info_title = cs.story_info_title.patch(style),
             "story_info:label"  => cs.story_info_label = cs.story_info_label.patch(style),
             "story_info:value"  => cs.story_info_value = cs.story_info_value.patch(style),
+            "story_info:cover"  => cs.story_info_cover = cs.story_info_cover.patch(style),
             "story_badge"       => cs.story_badge = cs.story_badge.patch(style),
             "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
             "map_layer_tab_active" => cs.map_layer_tab_active = cs.map_layer_tab_active.patch(style),
@@ -1877,6 +1880,21 @@ fg = "green"
         // a field with no decl keeps the terminal-default value:
         let def = crate::colors::ColorScheme::terminal_default();
         assert_eq!(cs.transcript, def.transcript);
+    }
+
+    #[test]
+    fn story_info_cover_selector_round_trips() {
+        use ratatui::style::Color;
+        // The selector maps to the story_info_cover field.
+        let mut cs = colors::ColorScheme::default();
+        cs.story_info_cover = ratatui::style::Style::new().bg(Color::Rgb(10, 20, 30));
+        assert_eq!(
+            style_for_selector(&cs, "story_info:cover"),
+            ratatui::style::Style::new().bg(Color::Rgb(10, 20, 30)),
+        );
+        // It is a recognized, grouped selector.
+        assert!(SELECTOR_FIELDS.contains(&"story_info:cover"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, sels)| sels.contains(&"story_info:cover")));
     }
 
     #[test]
