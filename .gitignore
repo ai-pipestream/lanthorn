@@ -6,7 +6,6 @@
 /target/
 
 # Local-only project files
-# NOTE: TODO.md and COMPLETED.md are now tracked (see .githooks/ bookkeeping enforcement)
 /stories/
 
 # Internal tooling / agent workspaces (machine-local, never committed)

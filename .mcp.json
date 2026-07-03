@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "side-quest": {
+      "command": "side-quest",
+      "args": ["serve"]
+    }
+  }
+}
