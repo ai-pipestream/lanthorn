@@ -7,4 +7,4 @@ edition = "2021"
 zvm = { path = "../zvm" }
 blorb = { path = "../blorb" }
 audio = { path = "../audio" }
-crossterm = "0.28"
+crossterm = "0.29"
