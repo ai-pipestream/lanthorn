@@ -671,6 +671,71 @@ impl Machine {
                 self.diagnostics.push("@restore: file layer not implemented; returning failure".to_string());
                 self.store(s[0], 1)
             }
+            // Floating point (single-precision, GLULX_NOTES §13.1).
+            0x190 => {
+                // numtof L1 S1 — signed int -> nearest float.
+                let (l, s) = self.read_operands(1, 1)?;
+                self.store(s[0], (l[0] as i32 as f32).to_bits())
+            }
+            0x191 => {
+                // ftonumz L1 S1 — float -> int, truncating toward zero.
+                let (l, s) = self.read_operands(1, 1)?;
+                let v = Self::dec(l[0]);
+                let r = if v.is_nan() { 0x7FFF_FFFF } else { v as i32 as u32 };
+                self.store(s[0], r)
+            }
+            0x192 => {
+                // ftonumn L1 S1 — float -> int, rounding to nearest (half away from zero).
+                let (l, s) = self.read_operands(1, 1)?;
+                let v = Self::dec(l[0]);
+                let r = if v.is_nan() { 0x7FFF_FFFF } else { v.round() as i32 as u32 };
+                self.store(s[0], r)
+            }
+            0x198 => self.funop(f32::ceil),
+            0x199 => self.funop(f32::floor),
+            0x1A0 => self.fbinop(|a, b| a + b),
+            0x1A1 => self.fbinop(|a, b| a - b),
+            0x1A2 => self.fbinop(|a, b| a * b),
+            0x1A3 => self.fbinop(|a, b| a / b),
+            0x1A4 => {
+                // fmod L1 L2 S1 S2 — S1 = remainder (sign of L1), S2 = quotient
+                // truncated toward zero (as a float).
+                let (l, s) = self.read_operands(2, 2)?;
+                let (a, b) = (Self::dec(l[0]), Self::dec(l[1]));
+                let q = (a / b).trunc();
+                let r = a - q * b;
+                self.store(s[0], r.to_bits())?;
+                self.store(s[1], q.to_bits())
+            }
+            0x1A8 => self.funop(f32::sqrt),
+            0x1A9 => self.funop(f32::exp),
+            0x1AA => self.funop(f32::ln),
+            0x1AB => self.fbinop(f32::powf),
+            0x1B0 => self.funop(f32::sin),
+            0x1B1 => self.funop(f32::cos),
+            0x1B2 => self.funop(f32::tan),
+            0x1B3 => self.funop(f32::asin),
+            0x1B4 => self.funop(f32::acos),
+            0x1B5 => self.funop(f32::atan),
+            0x1B6 => self.fbinop(f32::atan2),
+            0x1C0 => {
+                // jfeq L1 L2 L3 offset — fuzzy float equality (see Self::feq).
+                let (l, _) = self.read_operands(4, 0)?;
+                let taken = Self::feq(Self::dec(l[0]), Self::dec(l[1]), Self::dec(l[2]));
+                self.branch(l[3], taken)
+            }
+            0x1C1 => {
+                // jfne L1 L2 L3 offset — inverse of jfeq (branches on NaN input).
+                let (l, _) = self.read_operands(4, 0)?;
+                let taken = !Self::feq(Self::dec(l[0]), Self::dec(l[1]), Self::dec(l[2]));
+                self.branch(l[3], taken)
+            }
+            0x1C2 => self.branch2(|x, y| Self::dec(x) < Self::dec(y)),
+            0x1C3 => self.branch2(|x, y| Self::dec(x) <= Self::dec(y)),
+            0x1C4 => self.branch2(|x, y| Self::dec(x) > Self::dec(y)),
+            0x1C5 => self.branch2(|x, y| Self::dec(x) >= Self::dec(y)),
+            0x1C8 => self.branch1(|x| Self::dec(x).is_nan()),
+            0x1C9 => self.branch1(|x| Self::dec(x).is_infinite()),
             other => Err(format!("illegal/unimplemented opcode {other:#x}")),
         }
     }
@@ -685,6 +750,38 @@ impl Machine {
         let (l, s) = self.read_operands(1, 1)?;
         let v = f(l[0]);
         self.store(s[0], v)
+    }
+
+    /// Decode a Glulx word as the IEEE-754 single-precision float it holds.
+    fn dec(v: u32) -> f32 {
+        f32::from_bits(v)
+    }
+
+    /// A 1-value float op (ceil, sqrt, sin, …): decode, apply, re-encode.
+    fn funop(&mut self, f: impl Fn(f32) -> f32) -> R<()> {
+        let (l, s) = self.read_operands(1, 1)?;
+        let v = f(Self::dec(l[0]));
+        self.store(s[0], v.to_bits())
+    }
+
+    /// A 2-value float op (fadd…fdiv, pow, atan2): decode, apply, re-encode.
+    fn fbinop(&mut self, f: impl Fn(f32, f32) -> f32) -> R<()> {
+        let (l, s) = self.read_operands(2, 1)?;
+        let v = f(Self::dec(l[0]), Self::dec(l[1]));
+        self.store(s[0], v.to_bits())
+    }
+
+    /// `jfeq`'s fuzzy float equality: any NaN input is never equal; same-signed
+    /// infinities are equal (opposite-signed are not); otherwise the values are
+    /// equal if `|a - b| <= |tolerance|`.
+    fn feq(a: f32, b: f32, c: f32) -> bool {
+        if a.is_nan() || b.is_nan() || c.is_nan() {
+            return false;
+        }
+        if a.is_infinite() && b.is_infinite() {
+            return a == b;
+        }
+        (a - b).abs() <= c.abs()
     }
 
     /// `div` (false) / `mod` (true): signed, truncating toward zero, faulting on
@@ -1258,7 +1355,7 @@ impl Machine {
             8 => self.heap_start,                      // MAllocHeap (0 if inactive)
             9 => 1,                                    // Acceleration: interception implemented
             10 => u32::from(crate::accel::accel_impl_supported(arg)), // AccelFunc: implemented function numbers
-            11 => 0,                                   // Float
+            11 => 1,                                   // Float
             _ => 0,
         }
     }
@@ -4737,7 +4834,7 @@ mod tests {
         assert_eq!(m.gestalt(8, 0), 0); // MAllocHeap inactive → 0
         assert_eq!(m.gestalt(9, 0), 1); // Acceleration: interception implemented
         assert_eq!(m.gestalt(10, 0), 0); // AccelFunc 0 is "cancel", not a function
-        assert_eq!(m.gestalt(11, 0), 0); // Float (deferred)
+        assert_eq!(m.gestalt(11, 0), 1); // Float (single-precision implemented)
         assert_eq!(m.gestalt(999, 0), 0); // unknown selector
     }
 
@@ -6276,5 +6373,172 @@ mod tests {
             evs.iter().any(|e| e.etype == glk::evtype::REDRAW),
             "a graphics window is in the tree — arrangement queues a redraw"
         );
+    }
+
+    // ── Floating point (single-precision, GLULX_NOTES §13.1) ──────────────────
+
+    fn f32c(v: f32) -> asm::Op {
+        asm::Op::C32(v.to_bits())
+    }
+
+    /// Execute a 1-load, 1-store float op; `a` is encoded as its float bits.
+    fn farith1(op: u32, a: f32) -> u32 {
+        arith1(op, f32c(a))
+    }
+
+    /// Execute a 2-load, 1-store float op; `a`/`b` are encoded as float bits.
+    fn farith2(op: u32, a: f32, b: f32) -> u32 {
+        arith2(op, f32c(a), f32c(b))
+    }
+
+    /// fmod L1 L2 S1 S2 — returns (S1 = remainder, S2 = quotient).
+    fn fmod2(a: f32, b: f32) -> (u32, u32) {
+        let body = asm::ins(0x1A4, &[f32c(a), f32c(b), asm::Op::Mem16(0x0100), asm::Op::Mem16(0x0104)]);
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        (m.mem.read32(0x100).unwrap(), m.mem.read32(0x104).unwrap())
+    }
+
+    /// Whether a float branch opcode taken with the given float load operands
+    /// (offset 40 appended) actually jumps.
+    fn ftaken(op: u32, loads: &[f32]) -> bool {
+        let mut ops: Vec<asm::Op> = loads.iter().map(|&v| f32c(v)).collect();
+        ops.push(asm::Op::C8(40));
+        let body = asm::ins(op, &ops);
+        let blen = body.len() as u32;
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        m.step_once().unwrap();
+        m.pc != pc0 + blen
+    }
+
+    #[test]
+    fn numtof_converts_signed_int_to_nearest_float() {
+        use asm::Op::C8;
+        assert_eq!(arith1(0x190, C8(3)), 3.0f32.to_bits());
+        assert_eq!(arith1(0x190, C8(-2)), (-2.0f32).to_bits());
+    }
+
+    #[test]
+    fn ftonumz_truncates_toward_zero_with_overflow_and_nan() {
+        assert_eq!(farith1(0x191, 3.7), 3u32);
+        assert_eq!(farith1(0x191, -3.7), (-3i32) as u32);
+        assert_eq!(farith1(0x191, 1e30), 0x7FFF_FFFF);
+        assert_eq!(farith1(0x191, -1e30), 0x8000_0000);
+        assert_eq!(farith1(0x191, f32::INFINITY), 0x7FFF_FFFF);
+        assert_eq!(farith1(0x191, f32::NAN), 0x7FFF_FFFF);
+    }
+
+    #[test]
+    fn ftonumn_rounds_to_nearest_half_away_from_zero() {
+        assert_eq!(farith1(0x192, 3.5), 4u32);
+        assert_eq!(farith1(0x192, 2.5), 3u32);
+        assert_eq!(farith1(0x192, -2.5), (-3i32) as u32);
+    }
+
+    #[test]
+    fn ceil_and_floor_round_toward_infinity() {
+        assert_eq!(farith1(0x198, 2.3), 3.0f32.to_bits());
+        assert_eq!(farith1(0x199, 2.7), 2.0f32.to_bits());
+        assert_eq!(farith1(0x199, -2.1), (-3.0f32).to_bits());
+        let ceil_neg_half = f32::from_bits(farith1(0x198, -0.5));
+        assert_eq!(ceil_neg_half, 0.0);
+        assert!(ceil_neg_half.is_sign_negative(), "ceil(-0.5) should be -0.0");
+    }
+
+    #[test]
+    fn fadd_fsub_fmul_fdiv_basic_and_special_values() {
+        assert_eq!(farith2(0x1A0, 1.5, 2.5), 4.0f32.to_bits());
+        assert_eq!(farith2(0x1A1, 5.0, 2.0), 3.0f32.to_bits());
+        assert_eq!(farith2(0x1A2, 3.0, 4.0), 12.0f32.to_bits());
+        assert_eq!(farith2(0x1A3, 10.0, 2.0), 5.0f32.to_bits());
+        assert_eq!(farith2(0x1A3, 1.0, 0.0), f32::INFINITY.to_bits());
+        assert!(f32::from_bits(farith2(0x1A3, 0.0, 0.0)).is_nan());
+    }
+
+    #[test]
+    fn fmod_remainder_and_quotient_signs() {
+        let (rem, quot) = fmod2(7.0, 3.0);
+        assert_eq!(rem, 1.0f32.to_bits());
+        assert_eq!(quot, 2.0f32.to_bits());
+        let (rem, quot) = fmod2(-7.0, 3.0);
+        assert_eq!(quot, (-2.0f32).to_bits());
+        assert_eq!(rem, (-1.0f32).to_bits());
+    }
+
+    #[test]
+    fn sqrt_exp_log_pow_domain_and_values() {
+        assert_eq!(farith1(0x1A8, 4.0), 2.0f32.to_bits());
+        assert!(f32::from_bits(farith1(0x1A8, -1.0)).is_nan());
+        let exp1 = f32::from_bits(farith1(0x1A9, 1.0));
+        assert!((exp1 - std::f32::consts::E).abs() < 1e-5);
+        let ln_e = f32::from_bits(farith1(0x1AA, std::f32::consts::E));
+        assert!((ln_e - 1.0).abs() < 1e-5);
+        let p = f32::from_bits(farith2(0x1AB, 2.0, 10.0));
+        assert!((p - 1024.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn trig_known_values() {
+        let sin90 = f32::from_bits(farith1(0x1B0, std::f32::consts::FRAC_PI_2));
+        assert!((sin90 - 1.0).abs() < 1e-5);
+        let cos0 = f32::from_bits(farith1(0x1B1, 0.0));
+        assert!((cos0 - 1.0).abs() < 1e-5);
+        let tan0 = f32::from_bits(farith1(0x1B2, 0.0));
+        assert!(tan0.abs() < 1e-5);
+        let asin1 = f32::from_bits(farith1(0x1B3, 1.0));
+        assert!((asin1 - std::f32::consts::FRAC_PI_2).abs() < 1e-5);
+        let acos1 = f32::from_bits(farith1(0x1B4, 1.0));
+        assert!(acos1.abs() < 1e-5);
+        let atan1 = f32::from_bits(farith1(0x1B5, 1.0));
+        assert!((atan1 - std::f32::consts::FRAC_PI_4).abs() < 1e-5);
+        let atan2_11 = f32::from_bits(farith2(0x1B6, 1.0, 1.0));
+        assert!((atan2_11 - std::f32::consts::FRAC_PI_4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn jfeq_fuzzy_equality_and_special_cases() {
+        assert!(ftaken(0x1C0, &[1.0, 1.0, 0.0]));
+        assert!(ftaken(0x1C0, &[1.0, 1.05, 0.1]));
+        assert!(!ftaken(0x1C0, &[1.0, 2.0, 0.1]));
+        assert!(!ftaken(0x1C0, &[f32::NAN, 1.0, 0.1]));
+        assert!(!ftaken(0x1C0, &[1.0, f32::NAN, 0.1]));
+        assert!(!ftaken(0x1C0, &[1.0, 1.0, f32::NAN]));
+        assert!(ftaken(0x1C0, &[f32::INFINITY, f32::INFINITY, 0.0]));
+        assert!(!ftaken(0x1C0, &[f32::INFINITY, f32::NEG_INFINITY, 0.0]));
+    }
+
+    #[test]
+    fn jfne_is_the_inverse_of_jfeq_including_nan() {
+        assert!(!ftaken(0x1C1, &[1.0, 1.0, 0.0]));
+        assert!(ftaken(0x1C1, &[1.0, 2.0, 0.1]));
+        // Spec: jfne DOES branch when any argument is NaN (feq is false → !feq is true).
+        assert!(ftaken(0x1C1, &[f32::NAN, 1.0, 0.1]));
+    }
+
+    #[test]
+    fn jflt_jfle_jfgt_jfge_basics_and_nan() {
+        assert!(ftaken(0x1C2, &[1.0, 2.0])); // jflt
+        assert!(!ftaken(0x1C2, &[2.0, 1.0]));
+        assert!(ftaken(0x1C3, &[1.0, 1.0])); // jfle
+        assert!(ftaken(0x1C4, &[2.0, 1.0])); // jfgt
+        assert!(!ftaken(0x1C4, &[1.0, 2.0]));
+        assert!(ftaken(0x1C5, &[1.0, 1.0])); // jfge
+        assert!(!ftaken(0x1C2, &[f32::NAN, 1.0]), "NaN compares false");
+    }
+
+    #[test]
+    fn jisnan_jisinf_true_and_false() {
+        assert!(ftaken(0x1C8, &[f32::NAN]));
+        assert!(!ftaken(0x1C8, &[1.0]));
+        assert!(ftaken(0x1C9, &[f32::INFINITY]));
+        assert!(ftaken(0x1C9, &[f32::NEG_INFINITY]));
+        assert!(!ftaken(0x1C9, &[1.0]));
+    }
+
+    #[test]
+    fn gestalt_reports_float_support() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(11, 0), 1);
     }
 }
