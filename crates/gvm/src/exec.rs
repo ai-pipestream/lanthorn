@@ -139,6 +139,8 @@ pub struct Machine {
     accel_params: std::collections::HashMap<u32, u32>,
     /// Whether accelerated-function interception is active (default true).
     pub(crate) acceleration: bool,
+    /// Whether Glk graphics windows are enabled (default false; hosts opt in).
+    pub(crate) graphics_enabled: bool,
     /// Total number of opcodes dispatched since the machine was built.
     pub(crate) insn_count: u64,
     /// PRNG state (xorshift32); seeded by `setrandom`.
@@ -270,6 +272,7 @@ impl Machine {
             accel_funcs: std::collections::HashMap::new(),
             accel_params: std::collections::HashMap::new(),
             acceleration: true,
+            graphics_enabled: false,
             insn_count: 0,
             rng: Self::DEFAULT_SEED,
             instr_start_pc: 0,
@@ -1621,6 +1624,11 @@ impl Machine {
         self.acceleration = on;
     }
 
+    /// Enable/disable Glk graphics windows (gestalt + graphics-window open).
+    pub fn set_graphics(&mut self, on: bool) {
+        self.graphics_enabled = on;
+    }
+
     /// Total number of opcodes dispatched since the machine was built.
     /// Accelerated calls bypass the opcode dispatcher, so this undercounts
     /// work done by intercepted functions when acceleration is enabled.
@@ -2627,6 +2635,11 @@ impl Machine {
     /// `glk_window_open`: open a window in the model, tell the backend, and
     /// recompute the layout. Returns the new window id (0 on a malformed call).
     fn glk_open_window(&mut self, split: u32, method: u32, size: u32, wintype: u32, rock: u32) -> u32 {
+        if wintype == 5 && !self.graphics_enabled {
+            self.diagnostics
+                .push("glk_window_open(Graphics) rejected — graphics disabled".to_string());
+            return 0;
+        }
         match self.glk.window_open(split, method, size, wintype, rock) {
             Some(id) => {
                 if let Some(ty) = self.glk.window_type(id) {
@@ -2924,8 +2937,11 @@ impl Machine {
             15 => 1,                // gestalt_Unicode
             17 => 1,                // gestalt_LineTerminators → set_terminators supported
             18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
-            // MouseInput(4)/Timer(5)/Graphics(6)/Sound(8)/Hyperlinks(11)/echo and
-            // the rest are not supported.
+            6 => self.graphics_enabled as u32,                // gestalt_Graphics
+            7 => (self.graphics_enabled && val == 5) as u32,  // gestalt_DrawImage(wintype)
+            14 => self.graphics_enabled as u32,               // gestalt_GraphicsTransparency
+            // MouseInput(4)/Timer(5)/Sound(8)/Hyperlinks(11)/echo and the rest
+            // are not supported.
             _ => 0,
         }
     }
@@ -3135,6 +3151,16 @@ mod tests {
         let m = machine(built);
         assert_eq!(m.mem.ramstart(), 0x100, "test assumes RAMSTART == 0x100");
         m
+    }
+
+    /// A bare machine over a minimal image with a [`TestBackend`] and no
+    /// windows opened — for tests that exercise `glk_gestalt`/`glk_open_window`
+    /// directly without needing a printable window or a running program.
+    fn machine_with_glk(body: &[u8]) -> Machine {
+        let start = asm::func(0xC1, &[], body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        Machine::with_glk(mem, Box::new(TestBackend::new()))
     }
 
     #[test]
@@ -5982,5 +6008,27 @@ mod tests {
         assert_eq!(m.mem.read32(0x124).unwrap(), 1, "Unicode supported");
         assert_eq!(m.mem.read32(0x128).unwrap(), 0, "ResourceStream not supported");
         assert!(m.diagnostics.is_empty(), "no noise: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn graphics_gestalt_gated_on_flag() {
+        let mut m = super::tests::machine_with_glk(&[]); // helper that builds a Machine over minimal mem + TestBackend
+        // Default: graphics OFF → gestalt reports none.
+        assert_eq!(m.glk_gestalt(6, 0), 0, "gestalt_Graphics off by default");
+        assert_eq!(m.glk_gestalt(7, 5), 0, "gestalt_DrawImage(Graphics) off");
+        m.set_graphics(true);
+        assert_eq!(m.glk_gestalt(6, 0), 1, "gestalt_Graphics on");
+        assert_eq!(m.glk_gestalt(7, 5), 1, "gestalt_DrawImage(wintype_Graphics=5) on");
+        assert_eq!(m.glk_gestalt(7, 3), 0, "gestalt_DrawImage(wintype_TextBuffer=3) off — Surface A deferred");
+        assert_eq!(m.glk_gestalt(14, 0), 1, "gestalt_GraphicsTransparency on");
+    }
+
+    #[test]
+    fn graphics_window_open_gated_on_flag() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        // wintype_Graphics = 5; open a root graphics window.
+        assert_eq!(m.glk_open_window(0, 0, 0, 5, 0), 0, "graphics window rejected when disabled");
+        m.set_graphics(true);
+        assert_ne!(m.glk_open_window(0, 0, 0, 5, 0), 0, "graphics window opens when enabled");
     }
 }

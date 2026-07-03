@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 // ── Window types (`wintype_*`, the `wintype` argument to glk_window_open) ──────
 
-/// The window kinds this subset supports. (Blank/Graphics are out of scope.)
+/// The window kinds this subset supports. (Blank is out of scope.)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WinType {
     /// Internal layout node created by a split (`wintype_Pair` = 1).
@@ -26,6 +26,8 @@ pub enum WinType {
     TextBuffer,
     /// Fixed character grid / status window (`wintype_TextGrid` = 4).
     TextGrid,
+    /// Pixel-canvas graphics window (`wintype_Graphics` = 5).
+    Graphics,
 }
 
 impl WinType {
@@ -35,6 +37,7 @@ impl WinType {
             1 => Some(WinType::Pair),
             3 => Some(WinType::TextBuffer),
             4 => Some(WinType::TextGrid),
+            5 => Some(WinType::Graphics),
             _ => None,
         }
     }
@@ -44,6 +47,7 @@ impl WinType {
             WinType::Pair => 1,
             WinType::TextBuffer => 3,
             WinType::TextGrid => 4,
+            WinType::Graphics => 5,
         }
     }
 }
@@ -383,6 +387,7 @@ impl GlkBackend for TestBackend {
                 self.grid.entry(id).or_default();
             }
             WinType::Pair => {}
+            WinType::Graphics => {}
         }
     }
     fn window_close(&mut self, id: u32) {
@@ -589,7 +594,7 @@ impl Model {
         let row = match wintype {
             WinType::TextBuffer => 0,
             WinType::TextGrid => 1,
-            WinType::Pair => return StyleColour::default(),
+            WinType::Pair | WinType::Graphics => return StyleColour::default(),
         };
         self.style_hints[row][style as usize]
     }
@@ -812,6 +817,7 @@ impl Model {
                 }
             }
             WinType::TextBuffer => {}
+            WinType::Graphics => {}
             WinType::Pair => {
                 let _ = key;
                 let (r_old, r_new) = split_rect(rect, method, size);
