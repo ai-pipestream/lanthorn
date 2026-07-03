@@ -274,8 +274,14 @@ impl AppGlk {
                 WinType::TextGrid => WinNode::Grid(self.grid_node(id, rect)),
                 WinType::TextBuffer => WinNode::Buffer(self.buffer_node(id)),
                 WinType::Pair => continue, // pair windows are never in the layout
-                // Task 5 replaces this with real WinNode::Graphics emission.
-                WinType::Graphics => continue,
+                WinType::Graphics => {
+                    let c = self.graphics.get(&id);
+                    WinNode::Graphics(crate::engine::GraphicsWindow {
+                        win: id,
+                        canvas: c.map(|c| c.arc()).unwrap_or_else(|| std::sync::Arc::new(image::RgbaImage::new(1, 1))),
+                        version: c.map(|c| c.version).unwrap_or(0),
+                    })
+                }
             };
             leaves.push((rect, node));
         }
@@ -794,6 +800,24 @@ mod tests {
         let canvas = g.graphics.get(&1).unwrap();
         assert_eq!(canvas.img.dimensions(), (8, 8));
         assert_eq!(canvas.img.get_pixel(0, 0).0, [0xFF, 0, 0, 0xFF]);
+    }
+
+    #[test]
+    fn screen_model_emits_graphics_leaf() {
+        let mut g = AppGlk::with_graphics(80, 24, (1, 1), crate::graphics::PictSource::new(None));
+        g.window_open(1, gvm::glk::WinType::Graphics);
+        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 10, height: 4 })]);
+        g.graphics_fill_rect(1, 0x00FF00, 0, 0, 10, 4);
+        let model = g.screen_model();
+        // The tree's single leaf is a Graphics node for window 1.
+        fn find_graphics(n: &crate::engine::WinNode) -> bool {
+            match n {
+                crate::engine::WinNode::Graphics(_) => true,
+                crate::engine::WinNode::Pair { first, second, .. } => find_graphics(first) || find_graphics(second),
+                _ => false,
+            }
+        }
+        assert!(find_graphics(&model.root), "graphics window should appear as a Graphics leaf");
     }
 }
 

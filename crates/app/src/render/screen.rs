@@ -34,6 +34,9 @@ fn count_leaves(node: &WinNode) -> (u32, u32, u32) {
         WinNode::Grid(_) => (1, 0, 0),
         WinNode::Buffer(_) => (0, 1, 0),
         WinNode::Blank => (0, 0, 1),
+        // Task 6 replaces this with real pixel-canvas rendering; a Graphics
+        // leaf routes through the generic path like Blank until then.
+        WinNode::Graphics(_) => (0, 0, 1),
         WinNode::Pair { first, second, .. } => {
             let a = count_leaves(first);
             let b = count_leaves(second);
@@ -154,6 +157,11 @@ fn render_node(
             }
         }
         WinNode::Blank => {
+            fill(area, buf, &state.colors);
+            None
+        }
+        // Task 6 replaces this with real pixel-canvas rendering.
+        WinNode::Graphics(_) => {
             fill(area, buf, &state.colors);
             None
         }

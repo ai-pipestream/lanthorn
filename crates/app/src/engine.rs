@@ -172,6 +172,14 @@ pub struct Split {
     pub fixed: u16,
 }
 
+/// A graphics-window leaf: a snapshot of the window's canvas for rendering.
+#[derive(Debug, Clone)]
+pub struct GraphicsWindow {
+    pub win: u32,
+    pub canvas: std::sync::Arc<image::RgbaImage>,
+    pub version: u64,
+}
+
 /// A node in the engine-neutral window tree.
 #[derive(Debug, Clone)]
 pub enum WinNode {
@@ -186,6 +194,8 @@ pub enum WinNode {
     Grid(GridWindow),
     /// A text-buffer window.
     Buffer(BufferWindow),
+    /// A pixel-canvas graphics window.
+    Graphics(GraphicsWindow),
     /// An empty placeholder.
     Blank,
 }
