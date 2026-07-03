@@ -1187,6 +1187,11 @@ pub struct AppState {
     /// the wall-clock instant the next interrupt tick is due. `None` when no timer
     /// is armed (untimed read, honor disabled, or an overlay/dialog is open).
     pub input_deadline: Option<std::time::Instant>,
+
+    /// The in-game graphics Picker (None when images are disabled or unbuilt).
+    pub game_picker: Option<ratatui_image::picker::Picker>,
+    /// Cached graphics-window protocols (interior-mutable for the render pass).
+    pub graphics_render: std::cell::RefCell<crate::render::graphics::GraphicsRender>,
 }
 
 impl Default for AppState {
@@ -1278,6 +1283,8 @@ impl Default for AppState {
             dialog_focus: 0,
             char_mode: false,
             input_deadline: None,
+            game_picker: None,
+            graphics_render: std::cell::RefCell::new(Default::default()),
         }
     }
 }

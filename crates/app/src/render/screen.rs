@@ -34,8 +34,8 @@ fn count_leaves(node: &WinNode) -> (u32, u32, u32) {
         WinNode::Grid(_) => (1, 0, 0),
         WinNode::Buffer(_) => (0, 1, 0),
         WinNode::Blank => (0, 0, 1),
-        // Task 6 replaces this with real pixel-canvas rendering; a Graphics
-        // leaf routes through the generic path like Blank until then.
+        // A Graphics leaf can't use the simple text path — counts as "other",
+        // forcing the generic path.
         WinNode::Graphics(_) => (0, 0, 1),
         WinNode::Pair { first, second, .. } => {
             let a = count_leaves(first);
@@ -160,9 +160,12 @@ fn render_node(
             fill(area, buf, &state.colors);
             None
         }
-        // Task 6 replaces this with real pixel-canvas rendering.
-        WinNode::Graphics(_) => {
-            fill(area, buf, &state.colors);
+        WinNode::Graphics(gw) => {
+            if let Some(picker) = state.game_picker.as_ref() {
+                state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.graphics, buf);
+            } else {
+                fill(area, buf, &state.colors);
+            }
             None
         }
     }
@@ -428,5 +431,22 @@ mod tests {
 
         assert_eq!(buf_a, buf_b, "the simple path must be byte-identical to the legacy path");
         assert_eq!((ma.scrollbar, ma.max_scroll, ma.viewport_rows), (sb, ms, tarea.height));
+    }
+
+    #[test]
+    fn graphics_leaf_renders_pixels() {
+        use ratatui::layout::Rect;
+        use ratatui::buffer::Buffer;
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 50, 50, 255]));
+        let gw = crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let mut gr = crate::render::graphics::GraphicsRender::default();
+        let area = Rect::new(0, 0, 12, 6);
+        let mut buf = Buffer::empty(area);
+        let style = ratatui::style::Style::default();
+        gr.render(&picker, &gw, area, style, &mut buf);
+        let has_pixels = (area.top()..area.bottom()).any(|y| (area.left()..area.right())
+            .any(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}")));
+        assert!(has_pixels, "graphics canvas should render half-block pixels");
     }
 }

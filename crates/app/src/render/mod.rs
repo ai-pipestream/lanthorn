@@ -5,6 +5,7 @@ pub mod dialog;
 pub mod paneframe;
 pub mod filebrowser;
 pub mod gallery;
+pub mod graphics;
 pub mod hints_panel;
 pub mod history;
 pub mod hotkeys;
