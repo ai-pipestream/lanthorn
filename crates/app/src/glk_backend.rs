@@ -270,6 +270,13 @@ impl AppGlk {
         // the guillotine tree from the rects.
         let mut leaves: Vec<(GlkRect, WinNode)> = Vec::new();
         for &(id, ty, rect) in &self.layout {
+            // A zero-area window (e.g. a collapsed/hidden graphics window a game
+            // keeps around) is invisible, and a degenerate rect sitting on a
+            // boundary defeats the guillotine reconstruction in `assemble` —
+            // making it drop every other window. Skip it entirely.
+            if rect.width == 0 || rect.height == 0 {
+                continue;
+            }
             let node = match ty {
                 WinType::TextGrid => WinNode::Grid(self.grid_node(id, rect)),
                 WinType::TextBuffer => WinNode::Buffer(self.buffer_node(id)),
@@ -818,6 +825,50 @@ mod tests {
             }
         }
         assert!(find_graphics(&model.root), "graphics window should appear as a Graphics leaf");
+    }
+
+    /// Regression (CounterfeitMonkey layout): a game keeps a zero-height
+    /// graphics window (win 4) around alongside a real graphics window (win 6,
+    /// the image), a status grid, and the text buffer. The degenerate rect must
+    /// not defeat the guillotine reconstruction — the real graphics window and
+    /// the buffer must both survive.
+    #[test]
+    fn screen_model_survives_zero_area_window() {
+        use gvm::glk::{Rect, WinType};
+        let mut g = AppGlk::with_graphics(80, 24, (9, 19), crate::graphics::PictSource::new(None));
+        g.window_open(1, WinType::TextBuffer);
+        g.window_open(2, WinType::TextGrid);
+        g.window_open(4, WinType::Graphics);
+        g.window_open(6, WinType::Graphics);
+        g.window_layout(&[
+            (1, WinType::TextBuffer, Rect { left: 40, top: 1, width: 40, height: 23 }),
+            (2, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }),
+            (4, WinType::Graphics, Rect { left: 0, top: 24, width: 80, height: 0 }), // collapsed
+            (6, WinType::Graphics, Rect { left: 0, top: 1, width: 40, height: 23 }), // the image
+        ]);
+        g.graphics_fill_rect(6, 0x00FF00, 0, 0, 40, 23);
+        let model = g.screen_model();
+
+        fn collect(n: &crate::engine::WinNode, out: &mut Vec<(&'static str, u32)>) {
+            match n {
+                crate::engine::WinNode::Graphics(gw) => out.push(("graphics", gw.win)),
+                crate::engine::WinNode::Buffer(_) => out.push(("buffer", 0)),
+                crate::engine::WinNode::Grid(_) => out.push(("grid", 0)),
+                crate::engine::WinNode::Pair { first, second, .. } => {
+                    collect(first, out);
+                    collect(second, out);
+                }
+                crate::engine::WinNode::Blank => {}
+            }
+        }
+        let mut leaves = Vec::new();
+        collect(&model.root, &mut leaves);
+        assert!(
+            leaves.iter().any(|&(k, w)| k == "graphics" && w == 6),
+            "the real graphics window (win 6) must survive; got {leaves:?}"
+        );
+        assert!(leaves.iter().any(|&(k, _)| k == "buffer"), "the text buffer must survive; got {leaves:?}");
+        assert!(leaves.iter().any(|&(k, _)| k == "grid"), "the status grid must survive; got {leaves:?}");
     }
 }
 
