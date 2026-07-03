@@ -176,6 +176,26 @@ pub struct Cli {
     /// Disable Glulx accelerated-function interception (debug; default: enabled)
     #[arg(long)]
     pub no_accel: bool,
+
+    /// Force the terminal image protocol for cover art (default: auto-detect).
+    #[arg(long, value_enum, default_value_t = ImageProtocol::Auto)]
+    pub image_protocol: ImageProtocol,
+}
+
+/// Terminal image protocol for cover art. `Auto` detects the best available
+/// (falling back to half-blocks); the rest force a specific mode for testing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "lowercase")]
+pub enum ImageProtocol {
+    Auto,
+    Halfblocks,
+    Kitty,
+    Sixel,
+    Iterm2,
+}
+
+fn default_image_protocol() -> ImageProtocol {
+    ImageProtocol::Auto
 }
 
 // ── Hotkeys config ────────────────────────────────────────────────────────────
@@ -428,6 +448,10 @@ pub struct Config {
     /// --no-accel CLI flag); intentionally not persisted or user-facing.
     #[serde(skip, default = "default_acceleration")]
     pub acceleration: bool,
+    /// Cover-art image protocol. Runtime-only (set from --image-protocol);
+    /// not persisted or user-facing.
+    #[serde(skip, default = "default_image_protocol")]
+    pub image_protocol: ImageProtocol,
 }
 
 impl Default for Config {
@@ -463,6 +487,7 @@ impl Default for Config {
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
+            image_protocol: default_image_protocol(),
         }
     }
 }
@@ -543,6 +568,7 @@ pub fn resolve(cli: &Cli) -> Config {
     }
 
     cfg.acceleration = !cli.no_accel;
+    cfg.image_protocol = cli.image_protocol;
 
     cfg
 }
@@ -731,6 +757,7 @@ mod tests {
             user_dir: Some(PathBuf::from("/tmp/from-cli")),
             config: Some(cfg_path),
             no_accel: false,
+            image_protocol: ImageProtocol::Auto,
         };
 
         let cfg = resolve(&cli);
@@ -744,6 +771,7 @@ mod tests {
             user_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
+            image_protocol: ImageProtocol::Auto,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
@@ -758,6 +786,7 @@ mod tests {
             user_dir: None,
             config: Some(cfg_path),
             no_accel: false,
+            image_protocol: ImageProtocol::Auto,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -900,6 +929,7 @@ use_defaults = false
             virtual_screen_rows: 24,
             animation: AnimationConfig::default(),
             acceleration: true,
+            image_protocol: ImageProtocol::Auto,
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -1048,6 +1078,7 @@ use_defaults = false
             user_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: true,
+            image_protocol: ImageProtocol::Auto,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);

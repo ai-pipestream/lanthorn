@@ -955,6 +955,41 @@ fn ensure_aux(
     }
 }
 
+/// Decode the selected story's cover once (skipped if already decoded for it).
+fn ensure_cover(
+    cover: &mut app::cover::CoverState,
+    stories: &[app::picker::StoryEntry],
+    idx: usize,
+) {
+    if let Some(entry) = stories.get(idx) {
+        if !cover.has(&entry.path) {
+            cover.set(&entry.path, app::cover::load_cover(&entry.path));
+        }
+    }
+}
+
+/// Build the ratatui-image picker for cover art per the CLI mode. `Auto`
+/// queries the terminal (falling back to half-blocks); forced modes query for
+/// font size then pin the protocol. Returns `None` only if construction fails.
+fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<ratatui_image::picker::Picker> {
+    use app::config::ImageProtocol as M;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    match mode {
+        M::Halfblocks => Some(Picker::halfblocks()),
+        M::Auto => Some(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
+        M::Kitty | M::Sixel | M::Iterm2 => {
+            let mut p = Picker::from_query_stdio().ok()?;
+            p.set_protocol_type(match mode {
+                M::Kitty => ProtocolType::Kitty,
+                M::Sixel => ProtocolType::Sixel,
+                M::Iterm2 => ProtocolType::Iterm2,
+                _ => unreachable!(),
+            });
+            Some(p)
+        }
+    }
+}
+
 /// Run the pre-game story picker for a directory passed at launch. Returns the
 /// chosen story path, or `None` if the user quit. Exits the process with a
 /// message when the directory contains no launchable stories.
@@ -1005,6 +1040,9 @@ fn run_story_picker(
         }
     };
 
+    let cover_picker = build_cover_picker(cfg.image_protocol);
+    let mut cover = app::cover::CoverState::default();
+
     let mut list = app::list_scroll::ListScroll::new();
     list.len(stories.len());
     let anim = &cfg.animation;
@@ -1041,6 +1079,9 @@ fn run_story_picker(
                         aux_cache[list.selected].as_ref(),
                         panel_scroll,
                         panel_area,
+                        cover_picker.as_ref(),
+                        &mut cover,
+                        &entry.path,
                         &cs,
                         buf,
                     );
@@ -1089,6 +1130,7 @@ fn run_story_picker(
                                 if target {
                                     panel_scroll = 0;
                                     ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+                                    ensure_cover(&mut cover, &stories, list.selected);
                                 }
                             }
                         }
@@ -1126,6 +1168,7 @@ fn run_story_picker(
         panel_scroll = panel_scroll.min(panel_max);
         if slide.open {
             ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+            ensure_cover(&mut cover, &stories, list.selected);
         }
         list.finalize_if_done();
     };
@@ -1262,6 +1305,9 @@ fn draw_info_panel(
     aux: Option<&app::picker::StoryAux>,
     scroll: usize,
     area: Rect,
+    picker: Option<&ratatui_image::picker::Picker>,
+    cover: &mut app::cover::CoverState,
+    entry_path: &std::path::Path,
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
 ) -> usize {
@@ -1287,7 +1333,35 @@ fn draw_info_panel(
     );
     draw_str_clipped(buf, area.x + 2, area.y, " Info ", cs.story_info_title, area);
 
-    let inner = frame.content;
+    let mut inner = frame.content;
+
+    // Cover band: top of the panel, ≤50% of the panel's inner height, only when
+    // the selected story has a decoded frontispiece and a picker exists.
+    if let Some(picker) = picker {
+        if cover.has(entry_path) {
+            let cover_h = (inner.height / 2).min(inner.height.saturating_sub(1));
+            if cover_h >= 1 {
+                let cover_area = Rect::new(inner.x, inner.y, inner.width, cover_h);
+                // Themed letterbox fill behind/around the fitted image.
+                for y in cover_area.top()..cover_area.bottom() {
+                    for x in cover_area.left()..cover_area.right() {
+                        if let Some(c) = buf.cell_mut((x, y)) {
+                            c.set_symbol(" ").set_style(cs.story_info_cover);
+                        }
+                    }
+                }
+                if let Some(proto) = cover.protocol(picker, entry_path, cover_area) {
+                    ratatui::widgets::Widget::render(
+                        ratatui_image::Image::new(proto),
+                        cover_area,
+                        buf,
+                    );
+                }
+                inner = Rect::new(inner.x, inner.y + cover_h, inner.width, inner.height - cover_h);
+            }
+        }
+    }
+
     let mut lines: Vec<(String, ratatui::style::Style)> = Vec::new();
 
     // Title.
@@ -5876,7 +5950,11 @@ mod tests {
         // Wide enough that the resource detail suffix isn't clipped.
         let area = Rect::new(0, 0, 70, 20);
         let mut buf = Buffer::empty(area);
-        super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 0, area, &cs, &mut buf);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("zork1.z3");
+        super::draw_info_panel(
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, &cs, &mut buf,
+        );
 
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Zork I"), "title line: {text:?}");
@@ -5921,8 +5999,11 @@ mod tests {
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
-        let max_scroll =
-            super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 0, area, &cs, &mut buf);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("zork1.z3");
+        let max_scroll = super::draw_info_panel(
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, &cs, &mut buf,
+        );
         let text_top = buffer_to_string(&buf, area);
         assert!(max_scroll > 0, "content should overflow a 10-row panel");
         let late_marker = " #29  ";
@@ -5930,7 +6011,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, max_scroll, area, &cs, &mut buf2,
+            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, &cs, &mut buf2,
         );
         let text_scrolled = buffer_to_string(&buf2, area);
         assert_eq!(max_scroll2, max_scroll);
@@ -5938,9 +6019,58 @@ mod tests {
 
         // Scrolling past max clamps to the same view as scroll == max_scroll.
         let mut buf3 = Buffer::empty(area);
-        super::draw_info_panel("Zork I", "zork1.z3", &meta, None, 999, area, &cs, &mut buf3);
+        super::draw_info_panel(
+            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, &cs, &mut buf3,
+        );
         let text_over = buffer_to_string(&buf3, area);
         assert_eq!(text_over, text_scrolled, "scroll past max should clamp to max_scroll view");
+    }
+
+    fn minimal_story_meta() -> app::picker::StoryMeta {
+        app::picker::StoryMeta {
+            size_bytes: 1, modified: None, engine: app::picker::Engine::Glulx,
+            format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
+            serial: None, release: None, ifid: "IFID-X".into(),
+            features: app::picker::Features::default(), self_blorb: None,
+        }
+    }
+
+    #[test]
+    fn info_panel_renders_cover_band_when_present() {
+        use ratatui::layout::Rect;
+        use ratatui::buffer::Buffer;
+
+        // A tiny valid PNG (via the image crate) as the decoded cover.
+        let img = image::RgbImage::from_pixel(4, 4, image::Rgb([200, 50, 50]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+
+        let path = std::path::PathBuf::from("cover-test.gblorb");
+        let mut cover = app::cover::CoverState::default();
+        cover.set(&path, app::cover::decode(&png));
+
+        // Deterministic, terminal-free protocol.
+        let picker = ratatui_image::picker::Picker::halfblocks();
+
+        // Mirror draw_story_picker_full_width_then_split for cs + buffer setup.
+        let cs = app::colors::ColorScheme::default();
+        let area = Rect::new(0, 0, 40, 24);
+        let mut buf = Buffer::empty(area);
+
+        let meta = minimal_story_meta(); // helper defined below
+
+        super::draw_info_panel(
+            "Cover Test", "cover-test.gblorb", &meta, None,
+            0, area, Some(&picker), &mut cover, &path, &cs, &mut buf,
+        );
+
+        // Half-blocks emit the upper-half-block glyph in the reserved top band.
+        let top_band_has_image = (area.top()..area.top() + area.height / 2)
+            .any(|y| (area.left()..area.right())
+                .any(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}")));
+        assert!(top_band_has_image, "cover band should contain half-block pixels");
     }
 
     // ── Story-picker info panel: toggle/slide/split ─────────────────────────────
