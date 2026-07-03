@@ -1,6 +1,6 @@
 //! Per-turn rewind/replay history: a `TurnRecord` per played turn (Quetzal save
 //! + optional map snapshot + transcript), plus pure helpers used by the capture
-//! loop (`main.rs`), the archive (`archive.rs`), and the replay modal.
+//!   loop (`main.rs`), the archive (`archive.rs`), and the replay modal.
 
 use mapper::mapper::Mapper;
 

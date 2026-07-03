@@ -641,8 +641,7 @@ pub fn render_map_layered(
                 let y = area.bottom() - 1;
                 let x = area.right().saturating_sub(w.min(area.width));
                 let style = state.colors.loc_indicator;
-                let mut cx = x;
-                for ch in label.chars() {
+                for (cx, ch) in (x..).zip(label.chars()) {
                     if cx >= area.right() {
                         break;
                     }
@@ -650,7 +649,6 @@ pub fn render_map_layered(
                         let mut b = [0u8; 4];
                         cell.set_symbol(ch.encode_utf8(&mut b)).set_style(style);
                     }
-                    cx += 1;
                 }
             }
         }

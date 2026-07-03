@@ -286,7 +286,7 @@ mod tests {
 
     /// Write a v3 short-name property table header at `offset`.
     /// Uses zvm's encode_word to produce a 4-byte Z-string (2 words).
-    fn write_name(buf: &mut Vec<u8>, offset: usize, text: &str) {
+    fn write_name(buf: &mut [u8], offset: usize, text: &str) {
         let encoded = zvm::text::encode::encode_word(text, 3); // 4 bytes
         assert_eq!(encoded.len(), 4);
         buf[offset] = 2; // 2 Z-words

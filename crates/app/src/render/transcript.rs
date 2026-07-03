@@ -595,8 +595,7 @@ pub(crate) fn draw_str_runs(
         Some((q, _)) if !q.is_empty() => highlight_mask(text, q),
         _ => Vec::new(),
     };
-    let mut col = x;
-    for (i, ch) in text.chars().enumerate() {
+    for (col, (i, ch)) in (x..).zip(text.chars().enumerate()) {
         if col >= area.right() {
             break;
         }
@@ -624,7 +623,6 @@ pub(crate) fn draw_str_runs(
             s
         };
         crate::render::draw_char_clipped(buf, col, y, ch, style, area);
-        col += 1;
     }
 }
 
@@ -745,9 +743,9 @@ pub(crate) fn format_inventory_line(
 /// - Bottom row(s): `"> " + state.input`; cursor indicator `_` when `state.focus == Focus::Game`.
 ///   When `state.colors.input_line_style != None`, the input line is wrapped in a box
 ///   (3 rows total).  Falls back to plain when the area is too small.
-/// Renders the GAME pane. Returns `(scrollbar_drawn, max_scroll)`: whether the
-/// transcript drew a scrollbar gutter (so the caller can exclude that column
-/// from text selection) and the largest meaningful `transcript_scroll` value.
+///   Renders the GAME pane. Returns `(scrollbar_drawn, max_scroll)`: whether the
+///   transcript drew a scrollbar gutter (so the caller can exclude that column
+///   from text selection) and the largest meaningful `transcript_scroll` value.
 pub fn render_transcript(
     status: &StatusModel,
     introspect: Option<&dyn Introspect>,

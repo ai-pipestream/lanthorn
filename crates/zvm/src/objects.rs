@@ -400,7 +400,7 @@ mod tests {
     const PROP3_TBL: u32 = 0x0230; // property table for object 3
 
     /// Write `val` as a big-endian word into a byte buffer at `offset`.
-    fn put_word(buf: &mut Vec<u8>, offset: usize, val: u16) {
+    fn put_word(buf: &mut [u8], offset: usize, val: u16) {
         buf[offset] = (val >> 8) as u8;
         buf[offset + 1] = (val & 0xFF) as u8;
     }

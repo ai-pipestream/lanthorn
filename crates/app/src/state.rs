@@ -1601,8 +1601,7 @@ impl AppState {
             first = false;
 
             let mut runs: Vec<StyleRun> = Vec::new();
-            let mut col = 0usize;
-            for _ch in line.chars() {
+            for (col, _ch) in line.chars().enumerate() {
                 refill(&mut rem, &mut bits, &mut fg, &mut bg);
                 let pfg = pack_zcolour(fg);
                 let pbg = pack_zcolour(bg);
@@ -1615,7 +1614,6 @@ impl AppState {
                         _ => runs.push(StyleRun { start: col, end: col + 1, bits, fg: pfg, bg: pbg }),
                     }
                 }
-                col += 1;
                 rem = rem.saturating_sub(1);
             }
 

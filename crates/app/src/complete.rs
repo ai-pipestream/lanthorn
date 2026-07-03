@@ -10,8 +10,8 @@
 //! Ranking (highest priority first):
 //!   1. Room words that share the prefix (most contextually relevant).
 //!   2. Dictionary words that share the prefix.
-//!   Within each group, words are sorted alphabetically.
-//!   Duplicates across groups are deduplicated (room-word wins).
+//!      Within each group, words are sorted alphabetically.
+//!      Duplicates across groups are deduplicated (room-word wins).
 
 /// Return up to `limit` completions for `partial` drawn from `dictionary` and
 /// `room_words`.

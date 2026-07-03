@@ -537,7 +537,7 @@ pub fn title_from_banner(intro_text: &str) -> Option<String> {
         .lines()
         .map(str::trim)
         .filter(|l| {
-            !l.is_empty() && !(l.starts_with('>') && l.trim_start_matches('>').trim().is_empty())
+            !(l.is_empty() || l.starts_with('>') && l.trim_start_matches('>').trim().is_empty())
         })
         .collect();
 

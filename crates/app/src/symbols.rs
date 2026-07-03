@@ -1,7 +1,7 @@
-/// Configurable map symbols for the babelmap renderer.
-///
-/// All glyphs the map renderer uses are centralized here. The defaults reproduce
-/// today's hardcoded literals exactly, so an absent `[symbols]` config changes nothing.
+// /// Configurable map symbols for the babelmap renderer.
+// ///
+// /// All glyphs the map renderer uses are centralized here. The defaults reproduce
+// /// today's hardcoded literals exactly, so an absent `[symbols]` config changes nothing.
 
 // ── Sub-structs ───────────────────────────────────────────────────────────────
 
@@ -154,7 +154,7 @@ impl BoxStyle {
     /// - "double"     — double-line box-drawing (matches `room_portal`)
     /// - "solid"      — full-block walls: every edge/corner is `█` (single-width)
     /// - "super-thick" — full-block edges `█` with quadrant-block corners `▛▜▙▟`
-    ///                   (heavy block frame with beveled inner corners)
+    ///   (heavy block frame with beveled inner corners)
     /// - "ascii"      — ASCII-only: corners `+`, horizontal `-`, vertical `|`
     /// - "borderless" — all spaces (invisible walls)
     pub fn preset(name: &str) -> Option<BoxStyle> {
@@ -183,17 +183,17 @@ impl Arrows {
     /// - "filled"     — filled triangle glyphs ▲▼▶◀ + diagonal arrows ↗↖↘↙ (default)
     /// - "line"       — thin Unicode arrows ↑↓→← + diagonal ↗↖↘↙
     /// - "nerdfont"   — Nerd Font single-width chevron codepoints (requires patched font)
-    ///                  Cardinal: chevron-up (U+F0143) chevron-down (U+F0140)
-    ///                            chevron-right (U+F0142) chevron-left (U+F0141)
-    ///                  Diagonal: same as "line" (↗↖↘↙)
+    ///   Cardinal: chevron-up (U+F0143) chevron-down (U+F0140)
+    ///   chevron-right (U+F0142) chevron-left (U+F0141)
+    ///   Diagonal: same as "line" (↗↖↘↙)
     /// - "nf-bold"    — MDI arrow-{up,down,left,right}-bold (F0737/F072E/F0731/F0734)
-    ///                  Diagonal: Unicode fallback ↖↗↙↘ (no native MDI bold diagonals)
+    ///   Diagonal: Unicode fallback ↖↗↙↘ (no native MDI bold diagonals)
     /// - "nf-box"     — MDI arrow-{up,down,left,right}-bold-box (F0738/F072F/F0732/F0735)
-    ///                  Diagonal: native MDI bold-box diagonals (F1968/F196A/F1964/F1966)
+    ///   Diagonal: native MDI bold-box diagonals (F1968/F196A/F1964/F1966)
     /// - "nf-circle"  — MDI arrow-{up,down,left,right}-bold-circle (F005F/F0047/F004F/F0056)
-    ///                  Diagonal: Unicode fallback ↖↗↙↘ (no native MDI circle diagonals)
+    ///   Diagonal: Unicode fallback ↖↗↙↘ (no native MDI circle diagonals)
     /// - "nf-outline" — MDI arrow-{up,down,left,right}-bold-outline (F09C7/F09BF/F09C0/F09C2)
-    ///                  Diagonal: native MDI bold-outline diagonals (F09C3/F09C5/F09B7/F09B9)
+    ///   Diagonal: native MDI bold-outline diagonals (F09C3/F09C5/F09B7/F09B9)
     pub fn preset(name: &str) -> Option<Arrows> {
         Some(match name {
             "filled" => Arrows {
@@ -298,12 +298,12 @@ impl PortalGlyphs {
     /// Presets:
     /// - "ascii"            — ASCII-compatible glyphs (default): ●/↑/↓/⊙/⊗/? with ┊┄ connectors
     /// - "nerdfont"         — Nerd Font single-width icon codepoints (requires patched font)
-    ///                        nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
-    ///                        nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
-    ///                        nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
+    ///   nf-fa-circle (U+F111) for marker, nf-md-arrow_up_circle (U+F0B71) for up,
+    ///   nf-md-arrow_down_circle (U+F0B72) for down, nf-fa-sign_in (U+F090) for in,
+    ///   nf-fa-sign_out (U+F08B) for out, nf-fa-question_circle (U+F059) for unknown
     /// - "nerdfont-stairs"  — Nerd Font 4 distinct direction icons (requires patched font)
-    ///                        up=mdi-stairs-up (U+F12BD), down=mdi-stairs-down (U+F12BE),
-    ///                        in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48)
+    ///   up=mdi-stairs-up (U+F12BD), down=mdi-stairs-down (U+F12BE),
+    ///   in=mdi-location-enter (U+F0FC4), out=mdi-exit-run (U+F0A48)
     pub fn preset(name: &str) -> Option<PortalGlyphs> {
         Some(match name {
             "ascii" => PortalGlyphs {

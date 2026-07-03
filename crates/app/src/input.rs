@@ -399,8 +399,8 @@ pub enum KeyResolve {
 /// 1. Ctrl+Q / Ctrl+C → Quit (hardwired, always wins).
 /// 2. Prompt active → prompt_key_to_action; everything else absorbed.
 /// 3. Tidy-anim active → Anim context lookup (Ctrl+Left/Right stage-jump hardwired).
-/// 4-6. Modal sub-modes (gallery/saves/replay/file-browser/verb-menu/style-editor/
-///      config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
+///    4-6. Modal sub-modes (gallery/saves/replay/file-browser/verb-menu/style-editor/
+///    config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
 /// 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 /// 8. Tab (no modifiers) → autocomplete-or-ToggleFocus.
 /// 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct_name.
@@ -874,7 +874,7 @@ pub fn wheel_delta(kind: MouseEventKind, invert: bool) -> Option<isize> {
 /// - close `[X]` click → the active modal's close action
 /// - button click → the button's mapped action
 /// - any click OUTSIDE the dialog `area` → swallowed (Action::None)
-/// Only when no dialog is open does normal map/room routing apply.
+///   Only when no dialog is open does normal map/room routing apply.
 ///
 /// Returns `Action::None` for events outside both panes or with no binding.
 pub fn mouse_to_action(

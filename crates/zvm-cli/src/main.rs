@@ -406,9 +406,8 @@ fn wait_for_keypress(is_tty: bool) {
     }
     let _ = terminal::enable_raw_mode();
     loop {
-        match event::read() {
-            Ok(Event::Key(_)) => break,
-            _ => {} // ignore resize and other events during [MORE] wait
+        if let Ok(Event::Key(_)) = event::read() {
+            break;
         }
     }
     let _ = terminal::disable_raw_mode();

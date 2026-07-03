@@ -5741,7 +5741,7 @@ mod tests {
         // If an overlay is open, the gate must not fire.
         s.hotkey_dialog = true;
         assert!(s.any_overlay_open(), "hotkey_dialog open => overlay open");
-        assert!(!(s.char_mode && !s.any_overlay_open()),
+        assert!(!s.char_mode || s.any_overlay_open(),
             "char_mode gate must not fire when overlay is open");
     }
 

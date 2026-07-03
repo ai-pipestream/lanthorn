@@ -112,7 +112,7 @@ pub fn draw_verb_menu(
     // Divide width: verbs (~30%), nouns (~50%), preps (~20%).
     let total_w = content.width;
     let verb_w = (total_w / 10 * 3).max(12).min(total_w.saturating_sub(20));
-    let prep_w = (total_w / 10 * 2).max(10).min(16);
+    let prep_w = (total_w / 10 * 2).clamp(10, 16);
     let noun_w = total_w.saturating_sub(verb_w).saturating_sub(prep_w);
 
     let verb_x = content.x;
@@ -139,7 +139,7 @@ pub fn draw_verb_menu(
         let prep_list = Rect { x: prep_x, y: list_y, width: prep_w, height: list_h };
 
         draw_list(
-            &VERB_MENU_VERBS.to_vec(),
+            VERB_MENU_VERBS,
             &vm.verb_scroll,
             vm.pane == VerbMenuPane::Verbs,
             verb_list,
@@ -158,7 +158,7 @@ pub fn draw_verb_menu(
         );
 
         draw_list(
-            &VERB_MENU_PREPS.to_vec(),
+            VERB_MENU_PREPS,
             &vm.prep_scroll,
             vm.pane == VerbMenuPane::Preps,
             prep_list,

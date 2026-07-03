@@ -68,9 +68,7 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
     let key_style = state.colors.dialog;
     let label_style = state.colors.dialog;
 
-    let mut y = content.y;
-
-    for row in &rows {
+    for (y, row) in (content.y..).zip(rows.iter()) {
         if y >= content.bottom() {
             break;
         }
@@ -88,7 +86,6 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         } else {
             draw_str_clipped(buf, content.x, y, row, label_style, content);
         }
-        y += 1;
     }
 
     Some(rects)

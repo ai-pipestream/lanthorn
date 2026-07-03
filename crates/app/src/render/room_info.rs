@@ -52,7 +52,7 @@ pub fn draw_room_info(
     buf: &mut Buffer,
     dialog_style: &DialogStyle,
 ) -> Option<DialogRects> {
-    let Some(room) = graph.room(room_id) else { return None };
+    let room = graph.room(room_id)?;
 
     // Compute exits for this room.
     let exits: Vec<_> = graph
