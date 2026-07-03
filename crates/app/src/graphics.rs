@@ -57,10 +57,18 @@ impl Canvas {
     }
 
     /// Composite `src` at `(x, y)`, optionally scaled to `(sw, sh)`, honoring alpha.
+    ///
+    /// `(sw, sh)` come from the game (`glk_image_draw_scaled`) and are clamped
+    /// to the canvas dimensions before allocating the scaled bitmap — anything
+    /// larger is clipped by `overlay` anyway, and clamping bounds the
+    /// allocation against a malicious/buggy game requesting e.g. a
+    /// 0x40000000 x 0x40000000 image.
     pub fn draw_image(&mut self, src: &DynamicImage, x: i32, y: i32, scale: Option<(u32, u32)>) {
         let scaled;
         let view: &DynamicImage = match scale {
             Some((sw, sh)) if sw > 0 && sh > 0 => {
+                let sw = sw.min(self.img.width());
+                let sh = sh.min(self.img.height());
                 scaled = src.resize_exact(sw, sh, image::imageops::FilterType::Triangle);
                 &scaled
             }
@@ -147,6 +155,17 @@ mod tests {
         c.draw_image(&image::DynamicImage::ImageRgba8(img), 1, 1, Some((4, 4)));
         assert_eq!(c.img.get_pixel(1, 1).0, [10, 20, 30, 255]);
         assert_eq!(c.img.get_pixel(4, 4).0, [10, 20, 30, 255]); // scaled to 4x4
+    }
+
+    #[test]
+    fn draw_image_clamps_absurd_scale() {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]));
+        let mut c = Canvas::new(8, 8);
+        // A malicious/buggy game could request a ~4 exabyte scaled bitmap;
+        // this must clamp to the canvas size instead of allocating it.
+        c.draw_image(&image::DynamicImage::ImageRgba8(img), 0, 0, Some((1_000_000_000, 1_000_000_000)));
+        assert_eq!(c.img.dimensions(), (8, 8));
+        assert_eq!(c.img.get_pixel(0, 0).0, [10, 20, 30, 255]);
     }
 
     #[test]

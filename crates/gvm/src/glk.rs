@@ -300,8 +300,8 @@ pub trait GlkBackend {
     fn grid_clear(&mut self, _win: u32) {}
     /// Clear a text-buffer window.
     fn window_clear(&mut self, _win: u32) {}
-    /// Character cell size in pixels `(width, height)`, used to convert
-    /// text-grid coordinates for mixed-window layouts. Defaults to `(1, 1)`.
+    /// Pixel size of one character cell `(width, height)`, used to convert a
+    /// graphics window's pixel geometry into terminal cells. Defaults to `(1, 1)`.
     fn char_pixels(&self) -> (u32, u32) {
         (1, 1)
     }

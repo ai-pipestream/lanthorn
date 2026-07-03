@@ -2993,7 +2993,9 @@ impl Machine {
     const GLK_VERSION: u32 = 0x0000_0705;
 
     /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
-    /// Unicode are supported; input/timer/graphics/sound are not yet (0).
+    /// Unicode are supported; graphics is supported conditionally (per
+    /// `graphics_enabled`, see the selector 6/7/14 arms below); input/timer/
+    /// sound are not yet (0).
     fn glk_gestalt(&self, sel: u32, val: u32) -> u32 {
         match sel {
             0 => Self::GLK_VERSION, // gestalt_Version
