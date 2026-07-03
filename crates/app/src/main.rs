@@ -1,3 +1,7 @@
+// Test fixtures build structs by defaulting then setting a few fields; silence
+// the pedantic lint in tests only (see the matching attribute in lib.rs).
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 use std::io::stdout;
 use std::time::Duration;
 

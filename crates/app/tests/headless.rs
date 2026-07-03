@@ -2,6 +2,7 @@
 //!
 //! Drives a scripted 3-room walk through state + render + export + persistence
 //! without a real TTY, using `ratatui::backend::TestBackend` buffers.
+#![allow(clippy::field_reassign_with_default)]
 
 use app::export_svg::render_svg;
 use app::persist_files::{load_map, save_map};

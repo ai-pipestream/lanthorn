@@ -1,3 +1,7 @@
+// Test fixtures build structs by defaulting then setting a few fields, which is
+// clearer than a full struct literal here. Silence the pedantic lint in tests only.
+#![cfg_attr(test, allow(clippy::field_reassign_with_default))]
+
 pub mod anim;
 pub mod archive;
 pub mod aux_store;
