@@ -182,12 +182,12 @@ pub struct KeyMap {
     pub bindings: Vec<(KeySpec, String, Context)>,
 }
 
-impl KeyMap {
+impl Default for KeyMap {
     /// Build the default keymap from today's `key_to_action` dispatch.
     ///
     /// This is the single source of truth for back-compat. Every binding here
     /// must match `input.rs` exactly.
-    pub fn default() -> KeyMap {
+    fn default() -> Self {
         use KeyCode::*;
 
         // Shorthand constructors.
@@ -305,7 +305,9 @@ impl KeyMap {
 
         KeyMap { bindings: b }
     }
+}
 
+impl KeyMap {
     /// Look up a key in the given context.
     ///
     /// - `Context::Map` also searches `Context::Global` on miss (fall-through).
@@ -438,9 +440,9 @@ pub struct HotkeyLayout {
     pub groups: Vec<(String, Vec<String>)>,
 }
 
-impl HotkeyLayout {
+impl Default for HotkeyLayout {
     /// Build the built-in default layout.
-    pub fn default() -> HotkeyLayout {
+    fn default() -> Self {
         let prefix: KeySpec = "ctrl+k".parse().expect("ctrl+k must parse");
 
         let direct = DEFAULT_DIRECT_COMMANDS.iter().map(|s| s.to_string()).collect();
@@ -454,7 +456,9 @@ impl HotkeyLayout {
 
         HotkeyLayout { prefix, direct, groups }
     }
+}
 
+impl HotkeyLayout {
     /// Resolve a `HotkeyLayout` from config, producing warnings for unknown command names.
     ///
     /// Fields that are `None` in the config use the built-in defaults.
