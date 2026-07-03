@@ -111,6 +111,13 @@ pub struct AppGlk {
     /// Whether `heading_acc` is an active heading run (a `Subheader` run that
     /// began at line start and has not yet been terminated).
     in_heading: bool,
+    /// Graphics-window pixel canvases, keyed by window id.
+    graphics: std::collections::BTreeMap<u32, crate::graphics::Canvas>,
+    /// The `(width, height)` of one text-grid cell in pixels, for pixel↔cell
+    /// layout of graphics windows.
+    char_px: (u32, u32),
+    /// Resolves + caches Blorb `Pict` resources for `graphics_draw_image`.
+    picts: crate::graphics::PictSource,
 }
 
 impl Default for AppGlk {
@@ -123,6 +130,17 @@ impl AppGlk {
     /// A backend reporting a `cols × rows` display. Stylehint colour is always
     /// recorded; the `honor_game_colours` gate is applied at render time.
     pub fn new(cols: u32, rows: u32) -> AppGlk {
+        AppGlk::with_graphics(cols, rows, (1, 1), crate::graphics::PictSource::new(None))
+    }
+
+    /// A backend also carrying the char-cell pixel size and a `Pict` source,
+    /// needed for graphics windows.
+    pub fn with_graphics(
+        cols: u32,
+        rows: u32,
+        char_px: (u32, u32),
+        picts: crate::graphics::PictSource,
+    ) -> AppGlk {
         AppGlk {
             cols,
             rows,
@@ -134,7 +152,23 @@ impl AppGlk {
             last_heading: None,
             at_line_start: true,
             in_heading: false,
+            graphics: BTreeMap::new(),
+            char_px,
+            picts,
         }
+    }
+
+    /// The pixel size of a graphics window `win` as laid out, from `layout` ×
+    /// `char_px`. Does not borrow `self.graphics`, so it can be called while
+    /// `self.graphics.entry(..)` is held.
+    fn canvas_size(&self, win: u32) -> (u32, u32) {
+        let cells = self
+            .layout
+            .iter()
+            .find(|&&(id, _, _)| id == win)
+            .map(|&(_, _, r)| (r.width, r.height))
+            .unwrap_or((1, 1));
+        (cells.0 * self.char_px.0, cells.1 * self.char_px.1)
     }
 
     /// Update the reported display size (the host story-pane size each frame).
@@ -240,6 +274,8 @@ impl AppGlk {
                 WinType::TextGrid => WinNode::Grid(self.grid_node(id, rect)),
                 WinType::TextBuffer => WinNode::Buffer(self.buffer_node(id)),
                 WinType::Pair => continue, // pair windows are never in the layout
+                // Task 5 replaces this with real WinNode::Graphics emission.
+                WinType::Graphics => continue,
             };
             leaves.push((rect, node));
         }
@@ -416,12 +452,14 @@ impl GlkBackend for AppGlk {
                 }
             }
             WinType::Pair => {}
+            WinType::Graphics => {}
         }
     }
 
     fn window_close(&mut self, id: u32) {
         self.grids.remove(&id);
         self.buffers.remove(&id);
+        self.graphics.remove(&id);
         self.layout.retain(|&(wid, _, _)| wid != id);
         if self.primary == Some(id) {
             self.primary = None;
@@ -435,6 +473,14 @@ impl GlkBackend for AppGlk {
                 let g = self.grids.entry(id).or_default();
                 g.width = rect.width;
                 g.height = rect.height;
+            }
+        }
+        for &(id, ty, rect) in wins {
+            if ty == WinType::Graphics {
+                let (cw, ch) = (rect.width * self.char_px.0, rect.height * self.char_px.1);
+                if let Some(c) = self.graphics.get_mut(&id) {
+                    c.resize(cw, ch);
+                }
             }
         }
     }
@@ -475,6 +521,10 @@ impl GlkBackend for AppGlk {
             b.log.clear();
             b.drained = 0;
         }
+        if let Some(c) = self.graphics.get_mut(&win) {
+            let (w, h) = (c.img.width(), c.img.height());
+            c.erase_rect(0, 0, w, h);
+        }
         // A cleared primary window puts the cursor back at line start, so a
         // heading printed at the top of the fresh window is a valid line-start
         // heading. Reset the detector; discard any partial heading run whose
@@ -487,6 +537,48 @@ impl GlkBackend for AppGlk {
     }
 
     fn flush(&mut self) {}
+
+    fn char_pixels(&self) -> (u32, u32) {
+        self.char_px
+    }
+
+    fn image_info(&mut self, resnum: u32) -> Option<(u32, u32)> {
+        self.picts.info(resnum)
+    }
+
+    fn graphics_fill_rect(&mut self, win: u32, color: u32, left: i32, top: i32, w: u32, h: u32) {
+        let (cw, ch) = self.canvas_size(win);
+        self.graphics
+            .entry(win)
+            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .fill_rect(color, left, top, w, h);
+    }
+
+    fn graphics_erase_rect(&mut self, win: u32, left: i32, top: i32, w: u32, h: u32) {
+        let (cw, ch) = self.canvas_size(win);
+        self.graphics
+            .entry(win)
+            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .erase_rect(left, top, w, h);
+    }
+
+    fn graphics_set_background(&mut self, win: u32, color: u32) {
+        let (cw, ch) = self.canvas_size(win);
+        self.graphics
+            .entry(win)
+            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .set_background(color);
+    }
+
+    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) {
+        if let Some(src) = self.picts.image(resnum).cloned() {
+            let (cw, ch) = self.canvas_size(win);
+            self.graphics
+                .entry(win)
+                .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+                .draw_image(&src, x, y, scale);
+        }
+    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -690,6 +782,18 @@ mod tests {
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
         assert_eq!(cell.bg, crate::state::pack_zcolour(ZColour::True24(0x00FF_FFFF)));
+    }
+
+    #[test]
+    fn appglk_graphics_fill_composites_into_canvas() {
+        let mut g = AppGlk::with_graphics(80, 24, (2, 2), crate::graphics::PictSource::new(None));
+        // Simulate a laid-out graphics window id=1 occupying 4x4 cells → 8x8 px.
+        g.window_open(1, gvm::glk::WinType::Graphics);
+        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 4, height: 4 })]);
+        g.graphics_fill_rect(1, 0x00FF_0000, 0, 0, 8, 8);
+        let canvas = g.graphics.get(&1).unwrap();
+        assert_eq!(canvas.img.dimensions(), (8, 8));
+        assert_eq!(canvas.img.get_pixel(0, 0).0, [0xFF, 0, 0, 0xFF]);
     }
 }
 

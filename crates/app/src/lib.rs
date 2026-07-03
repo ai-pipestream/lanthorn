@@ -17,6 +17,7 @@ pub mod cover;
 pub mod engine;
 pub mod glk_backend;
 pub mod glulx_session;
+pub mod graphics;
 pub mod inventory;
 pub mod export_dot;
 pub mod export_svg;
