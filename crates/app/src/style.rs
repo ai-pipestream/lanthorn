@@ -193,6 +193,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "story_info:value",
     "story_info:cover",
     "story_badge",
+    "graphics",
     "map_layer_tab",
     "map_layer_tab_active",
     "status_header",
@@ -242,6 +243,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ]),
     ("Upper window", &["upper_window", "upper_window_border"]),
     ("Sound", &["sound_beep_high", "sound_beep_low"]),
+    ("Graphics", &["graphics"]),
 ];
 
 // ── style_for_selector ────────────────────────────────────────────────────────
@@ -294,6 +296,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "story_info:value"  => cs.story_info_value,
         "story_info:cover"  => cs.story_info_cover,
         "story_badge"       => cs.story_badge,
+        "graphics"          => cs.graphics,
         // Composite selectors: each has a single color-bearing Style field.
         // Confirmed by reading apply_color_decls arms (style.rs lines 239-293).
         "map_border"           => cs.map_border,
@@ -442,6 +445,7 @@ pub fn apply_color_decls(
             "story_info:value"  => cs.story_info_value = cs.story_info_value.patch(style),
             "story_info:cover"  => cs.story_info_cover = cs.story_info_cover.patch(style),
             "story_badge"       => cs.story_badge = cs.story_badge.patch(style),
+            "graphics"          => cs.graphics = cs.graphics.patch(style),
             "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
             "map_layer_tab_active" => cs.map_layer_tab_active = cs.map_layer_tab_active.patch(style),
             "status_header" => {
@@ -1895,6 +1899,16 @@ fg = "green"
         // It is a recognized, grouped selector.
         assert!(SELECTOR_FIELDS.contains(&"story_info:cover"));
         assert!(SELECTOR_GROUPS.iter().any(|(_, sels)| sels.contains(&"story_info:cover")));
+    }
+
+    #[test]
+    fn graphics_selector_round_trips() {
+        use ratatui::style::Color;
+        let mut cs = colors::ColorScheme::default();
+        cs.graphics = ratatui::style::Style::new().bg(Color::Rgb(1, 2, 3));
+        assert_eq!(style_for_selector(&cs, "graphics"), ratatui::style::Style::new().bg(Color::Rgb(1, 2, 3)));
+        assert!(SELECTOR_FIELDS.contains(&"graphics"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, s)| s.contains(&"graphics")));
     }
 
     #[test]
