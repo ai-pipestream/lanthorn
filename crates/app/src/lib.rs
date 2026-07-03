@@ -13,6 +13,7 @@ pub mod slash;
 pub mod colors;
 pub mod complete;
 pub mod config;
+pub mod cover;
 pub mod engine;
 pub mod glk_backend;
 pub mod glulx_session;
