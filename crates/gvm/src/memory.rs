@@ -81,13 +81,13 @@ impl Memory {
 
     /// Resize the memory map. `new` must be a multiple of 256 and not less than
     /// the original ENDMEM floor. Growth is zero-filled; shrink truncates.
-    /// Returns `Ok(())` on success, `Err(())` if the request is illegal.
-    pub fn set_mem_size(&mut self, new: u32) -> Result<(), ()> {
+    /// Returns `true` on success, `false` if the request is illegal.
+    pub fn set_mem_size(&mut self, new: u32) -> bool {
         if !new.is_multiple_of(256) || new < self.endmem_floor {
-            return Err(());
+            return false;
         }
         self.bytes.resize(new as usize, 0);
-        Ok(())
+        true
     }
 
     /// Resize the byte map directly, bypassing the `set_mem_size`
@@ -303,11 +303,11 @@ mod tests {
         let img = asm::image_with_map(0x100, 0x100, 0x200, 0x400, 0x40, 0);
         let mut mem = Memory::new(img).unwrap();
         // Grow by 256, new bytes zeroed.
-        assert!(mem.set_mem_size(0x300).is_ok());
+        assert!(mem.set_mem_size(0x300));
         assert_eq!(mem.mem_size(), 0x300);
         assert_eq!(mem.read32(0x280), Some(0));
         // Shrink back to the floor.
-        assert!(mem.set_mem_size(0x200).is_ok());
+        assert!(mem.set_mem_size(0x200));
         assert_eq!(mem.mem_size(), 0x200);
     }
 
@@ -315,8 +315,8 @@ mod tests {
     fn set_mem_size_rejects_below_floor_and_unaligned() {
         let img = asm::image_with_map(0x100, 0x100, 0x200, 0x400, 0x40, 0);
         let mut mem = Memory::new(img).unwrap();
-        assert!(mem.set_mem_size(0x100).is_err()); // below 0x200 floor
-        assert!(mem.set_mem_size(0x250).is_err()); // not 256-aligned
+        assert!(!mem.set_mem_size(0x100)); // below 0x200 floor
+        assert!(!mem.set_mem_size(0x250)); // not 256-aligned
         assert_eq!(mem.mem_size(), 0x200); // unchanged after failures
     }
 
@@ -326,7 +326,7 @@ mod tests {
         let img = asm::image_with_map(0x100, 0x100, 0x200, 0x400, 0x40, 0);
         let mut mem = Memory::new(img).unwrap();
         // Grow the map, then write some values into RAM.
-        mem.set_mem_size(0x300).unwrap();
+        assert!(mem.set_mem_size(0x300));
         mem.write32(0x100, 0xDEAD_BEEF).unwrap();
         mem.write32(0x280, 0x1234_5678).unwrap();
         assert_eq!(mem.mem_size(), 0x300);

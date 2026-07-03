@@ -621,7 +621,7 @@ impl Machine {
                         .push("setmemsize while the heap is active is illegal".to_string());
                     1
                 } else {
-                    u32::from(self.mem.set_mem_size(l[0]).is_err())
+                    u32::from(!self.mem.set_mem_size(l[0]))
                 };
                 self.store(s[0], r)
             }
