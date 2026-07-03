@@ -58,6 +58,8 @@ pub enum SoundKind {
 pub struct Blorb {
     bytes: Vec<u8>,
     index: Vec<ResourceEntry>,
+    /// Frontispiece (cover) Pict resource number from the top-level `Fspc` chunk.
+    fspc: Option<u32>,
 }
 
 fn be_u32(b: &[u8], off: usize) -> Result<u32, BlorbError> {
@@ -88,6 +90,7 @@ impl Blorb {
         let end = bytes.len();
         // Walk top-level chunks (start at 12, after FORM+len+IFRS) to find RIdx.
         let mut ridx: Option<(usize, usize)> = None; // (entries_start, count)
+        let mut fspc: Option<u32> = None;
         let mut pos = 12;
         while pos + 8 <= end {
             let ctype = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
@@ -99,7 +102,8 @@ impl Blorb {
             if &ctype == b"RIdx" {
                 let count = be_u32(&bytes, data_start)? as usize;
                 ridx = Some((data_start + 4, count));
-                break;
+            } else if &ctype == b"Fspc" && clen >= 4 {
+                fspc = be_u32(&bytes, data_start).ok();
             }
             pos = data_start + clen + (clen & 1);
         }
@@ -120,12 +124,19 @@ impl Blorb {
             index.push(ResourceEntry { usage, number, start, chunk_type, len });
             p += 12;
         }
-        Ok(Blorb { bytes, index })
+        Ok(Blorb { bytes, index, fspc })
     }
 
     /// The parsed resource index (for enumeration).
     pub fn resources(&self) -> &[ResourceEntry] {
         &self.index
+    }
+
+    /// The frontispiece (cover) Pict resource number, if the blorb declares one
+    /// via a top-level `Fspc` chunk. Combine with [`Blorb::resource`] to fetch
+    /// the image bytes: `blorb.resource(b"Pict", blorb.frontispiece()?)`.
+    pub fn frontispiece(&self) -> Option<u32> {
+        self.fspc
     }
 
     fn chunk_data(&self, e: &ResourceEntry) -> &[u8] {
@@ -414,6 +425,41 @@ mod tests {
             Blorb::parse(b).unwrap().executable().unwrap_err(),
             BlorbError::NoExecutable
         );
+    }
+
+    #[test]
+    fn frontispiece_reads_fspc_number() {
+        // FORM/IFRS with an RIdx (one Pict) followed by a top-level Fspc chunk
+        // whose 4-byte payload is the frontispiece resource number (7).
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes()); // count
+        ridx.extend_from_slice(b"Pict");
+        ridx.extend_from_slice(&7u32.to_be_bytes()); // number
+        // start offset patched below once we know the layout.
+        let ridx_chunk_len = 8 + (4 + 12);
+        let fspc_chunk_len = 8 + 4;
+        let pict_off = 12 + ridx_chunk_len + fspc_chunk_len;
+        ridx.extend_from_slice(&(pict_off as u32).to_be_bytes()); // start
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(b"Fspc", &7u32.to_be_bytes()));
+        inner.extend_from_slice(&chunk(b"PNG ", b"\x89PNG")); // dummy Pict payload
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+
+        let b = Blorb::parse(file).unwrap();
+        assert_eq!(b.frontispiece(), Some(7));
+        // The referenced Pict resource is reachable via the generic accessor.
+        assert_eq!(b.resource(b"Pict", 7).unwrap().0, b"PNG ");
+    }
+
+    #[test]
+    fn frontispiece_absent_is_none() {
+        let b = Blorb::parse(build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")])).unwrap();
+        assert_eq!(b.frontispiece(), None);
     }
 
     #[test]
