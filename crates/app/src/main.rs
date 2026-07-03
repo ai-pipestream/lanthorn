@@ -1351,9 +1351,19 @@ fn draw_info_panel(
                     }
                 }
                 if let Some(proto) = cover.protocol(picker, entry_path, cover_area) {
+                    // Center the fitted image within the letterboxed band.
+                    let sz = proto.size();
+                    let w = sz.width.min(cover_area.width);
+                    let h = sz.height.min(cover_area.height);
+                    let dest = Rect::new(
+                        cover_area.x + (cover_area.width - w) / 2,
+                        cover_area.y + (cover_area.height - h) / 2,
+                        w,
+                        h,
+                    );
                     ratatui::widgets::Widget::render(
                         ratatui_image::Image::new(proto),
-                        cover_area,
+                        dest,
                         buf,
                     );
                 }
@@ -6067,10 +6077,27 @@ mod tests {
         );
 
         // Half-blocks emit the upper-half-block glyph in the reserved top band.
-        let top_band_has_image = (area.top()..area.top() + area.height / 2)
-            .any(|y| (area.left()..area.right())
-                .any(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}")));
-        assert!(top_band_has_image, "cover band should contain half-block pixels");
+        // Collect the columns holding image pixels.
+        let band_rows = area.top()..area.top() + area.height / 2;
+        let img_cols: Vec<u16> = (area.left()..area.right())
+            .filter(|&x| {
+                band_rows
+                    .clone()
+                    .any(|y| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}"))
+            })
+            .collect();
+        assert!(!img_cols.is_empty(), "cover band should contain half-block pixels");
+
+        // The fitted (square) cover is CENTERED within the band, not left-aligned:
+        // there is letterbox margin on both sides. Panel border is at x=0, so the
+        // band's inner content starts at x=1.
+        let min_x = *img_cols.iter().min().unwrap();
+        let max_x = *img_cols.iter().max().unwrap();
+        assert!(min_x > 1, "cover should have a left letterbox margin (leftmost col = {min_x})");
+        assert!(
+            max_x < area.right() - 2,
+            "cover should have a right letterbox margin (rightmost col = {max_x})"
+        );
     }
 
     // ── Story-picker info panel: toggle/slide/split ─────────────────────────────
