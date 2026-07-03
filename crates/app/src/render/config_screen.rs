@@ -69,7 +69,7 @@ pub fn draw_config_screen(
         focus: Some(state.dialog_focus),
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // Draw column headers inside content

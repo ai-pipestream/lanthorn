@@ -171,6 +171,67 @@ fn render_node(
     }
 }
 
+/// The region a modal dialog should center within: the whole `frame`, minus any
+/// Glulx graphics windows.
+///
+/// Graphics windows are painted through the terminal's own image protocol
+/// (kitty/sixel), which draws on top of whatever cells they cover — so a dialog
+/// centered over a graphics window is obscured in the real terminal even though
+/// it was written into the buffer afterward. This returns the largest rectangle
+/// of `frame` that touches no graphics window, so a dialog still spans the story
+/// text and the map together where the geometry allows, avoiding only the
+/// graphics. `story_area` is where the window tree is laid out (graphics live
+/// inside it); pass an empty rect when the story pane isn't shown.
+///
+/// With no graphics windows this returns `frame` unchanged (today's behavior).
+pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect) -> Rect {
+    let mut graphics: Vec<Rect> = Vec::new();
+    collect_graphics_rects(&model.root, story_area, &mut graphics);
+    let mut bounds = frame;
+    for g in graphics {
+        bounds = subtract_rect(bounds, g);
+    }
+    bounds
+}
+
+/// Walk the tree assigning each leaf its terminal rect (exactly as `render_node`
+/// does), collecting every graphics leaf's rect.
+fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    match node {
+        WinNode::Pair { vertical, split, first, second } => {
+            let (a1, a2) = split_area(area, *vertical, split.fixed);
+            collect_graphics_rects(first, a1, out);
+            collect_graphics_rects(second, a2, out);
+        }
+        WinNode::Graphics(_) => out.push(area),
+        WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
+    }
+}
+
+/// Remove `g` from `bounds` by a guillotine cut, keeping the largest remaining
+/// rectangle. If `g` doesn't overlap `bounds`, `bounds` is returned unchanged.
+fn subtract_rect(bounds: Rect, g: Rect) -> Rect {
+    let ix = g.x.max(bounds.x);
+    let iy = g.y.max(bounds.y);
+    let ir = g.right().min(bounds.right());
+    let ib = g.bottom().min(bounds.bottom());
+    if ix >= ir || iy >= ib {
+        return bounds; // no overlap
+    }
+    // The four rectangles of `bounds` lying outside the overlap band.
+    let left = Rect::new(bounds.x, bounds.y, ix.saturating_sub(bounds.x), bounds.height);
+    let right = Rect::new(ir, bounds.y, bounds.right().saturating_sub(ir), bounds.height);
+    let above = Rect::new(bounds.x, bounds.y, bounds.width, iy.saturating_sub(bounds.y));
+    let below = Rect::new(bounds.x, ib, bounds.width, bounds.bottom().saturating_sub(ib));
+    [left, right, above, below]
+        .into_iter()
+        .max_by_key(|r| r.width as u32 * r.height as u32)
+        .unwrap_or(bounds)
+}
+
 /// Split `area` into `(first, second)`: a vertical pair stacks first-on-top
 /// (first gets `fixed` rows); a horizontal pair places first-on-left (first gets
 /// `fixed` cols). `fixed` is clamped to the available extent.
@@ -431,6 +492,70 @@ mod tests {
 
         assert_eq!(buf_a, buf_b, "the simple path must be byte-identical to the legacy path");
         assert_eq!((ma.scrollbar, ma.max_scroll, ma.viewport_rows), (sb, ms, tarea.height));
+    }
+
+    fn graphics_node() -> WinNode {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+        WinNode::Graphics(crate::engine::GraphicsWindow {
+            win: 1,
+            canvas: std::sync::Arc::new(img),
+            version: 1,
+        })
+    }
+
+    fn model_with(root: WinNode) -> ScreenModel {
+        ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0 }
+    }
+
+    #[test]
+    fn dialog_bounds_returns_frame_when_no_graphics() {
+        // A pure-text tree: no graphics → dialogs keep full-frame centering.
+        let model = model_with(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }));
+        let frame = Rect::new(0, 0, 40, 12);
+        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame), frame);
+    }
+
+    #[test]
+    fn dialog_bounds_excludes_left_graphics_sidebar_and_spans_map() {
+        // Story pane (cols 0..20) = graphics sidebar (cols 0..10) | text buffer
+        // (cols 10..20); the map occupies cols 20..40 of the frame. The dialog
+        // region must be everything right of the graphics — text + map.
+        let model = model_with(WinNode::Pair {
+            vertical: false,
+            split: Split { fixed: 10 },
+            first: Box::new(graphics_node()),
+            second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        });
+        let story_area = Rect::new(0, 0, 20, 12);
+        let frame = Rect::new(0, 0, 40, 12);
+        assert_eq!(dialog_bounds(&model, story_area, frame), Rect::new(10, 0, 30, 12));
+    }
+
+    #[test]
+    fn dialog_bounds_excludes_top_graphics_band() {
+        // Graphics banner (rows 0..3) over the text buffer; no map (TranscriptFull).
+        let model = model_with(WinNode::Pair {
+            vertical: true,
+            split: Split { fixed: 3 },
+            first: Box::new(graphics_node()),
+            second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        });
+        let area = Rect::new(0, 0, 20, 12);
+        assert_eq!(dialog_bounds(&model, area, area), Rect::new(0, 3, 20, 9));
+    }
+
+    #[test]
+    fn dialog_bounds_ignores_graphics_when_story_pane_hidden() {
+        // MapFull: story pane isn't laid out (empty), so graphics aren't on screen
+        // and the dialog centers over the whole frame.
+        let model = model_with(WinNode::Pair {
+            vertical: false,
+            split: Split { fixed: 10 },
+            first: Box::new(graphics_node()),
+            second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        });
+        let frame = Rect::new(0, 0, 40, 12);
+        assert_eq!(dialog_bounds(&model, Rect::default(), frame), frame);
     }
 
     #[test]

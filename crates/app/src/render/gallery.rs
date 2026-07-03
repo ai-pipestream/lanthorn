@@ -48,7 +48,7 @@ pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         focus: Some(state.dialog_focus),
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // ── Tabbed picker: category tabs across the top, option list + preview below ─

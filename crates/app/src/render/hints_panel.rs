@@ -66,7 +66,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         focus: None,
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     if content.height == 0 || content.width == 0 {

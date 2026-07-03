@@ -29,7 +29,8 @@ pub fn draw_tidy_panel(frame: &TidyFrame, area: Rect, buf: &mut Buffer, dialog_s
         default: Some(ButtonId::Ok),
         focus: None,
     };
-    let dr = draw_dialog(buf, &spec, dialog_style);
+    let bounds = *buf.area();
+    let dr = draw_dialog(buf, bounds, &spec, dialog_style);
 
     let content = dr.content;
 

@@ -54,7 +54,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
         focus: Some(state.dialog_focus),
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // Draw body text into the content area.

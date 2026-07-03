@@ -55,7 +55,7 @@ pub fn draw_file_browser(
         focus: None,
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // ── CWD row ───────────────────────────────────────────────────────────────

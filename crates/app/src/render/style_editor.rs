@@ -90,7 +90,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         focus: if ed.focus == StyleFocus::Buttons { Some(state.dialog_focus) } else { None },
     };
 
-    let dialog_rects = draw_dialog(buf, &spec, &ds);
+    let dialog_rects = draw_dialog(buf, area, &spec, &ds);
     let content = dialog_rects.content;
 
     // Split content into board (left) and property pane (right) if wide enough.

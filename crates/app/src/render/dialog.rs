@@ -202,17 +202,20 @@ pub struct DialogRects {
 
 // ── draw_dialog ───────────────────────────────────────────────────────────────
 
-pub fn draw_dialog(buf: &mut Buffer, spec: &DialogSpec, st: &DialogStyle) -> DialogRects {
+/// Draw a modal dialog. `Placement::Centered` is centered/anchored within
+/// `bounds` (usually the caller's region, e.g. a graphics-free dialog area);
+/// pass `*buf.area()` to center over the whole terminal.
+pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &DialogStyle) -> DialogRects {
     // Coerce BorderStyle::None to Single so every modal always has a visible border.
     let box_style = match st.box_style {
         BorderStyle::None => BorderStyle::Single,
         other => other,
     };
 
-    // (1) Resolve area from placement
+    // (1) Resolve area from placement — centered within `bounds`; positioned as-is.
     let buf_area = *buf.area();
     let area = match spec.placement {
-        Placement::Centered { w, h } => resolve_dialog_rect(st.placement, st.margin, w, h, buf_area),
+        Placement::Centered { w, h } => resolve_dialog_rect(st.placement, st.margin, w, h, bounds),
         Placement::Positioned(r) => r,
     };
 
@@ -348,12 +351,35 @@ mod tests {
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
         let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None };
-        let r = draw_dialog(&mut buf, &spec, &st);
+        let r = draw_dialog(&mut buf, full, &spec, &st);
         // opaque: the covered cell no longer REVERSED
         assert!(!buf.cell((20,6)).unwrap().modifier.contains(Modifier::REVERSED));
         assert!(r.close.is_some());
         assert_eq!(r.buttons.len(), 2);
         assert!(r.content.width > 0 && r.content.height > 0);
+    }
+
+    #[test]
+    fn dialog_centers_within_bounds_not_whole_buffer() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        // Buffer is 40 wide, but the dialog is confined to the right half — as if
+        // the left half held a graphics window (SQ-0203).
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
+        let bounds = Rect::new(20, 0, 20, 12);
+        let st = DialogStyle {
+            frame: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            title: Style::default(), button: Style::default(), button_active: Style::default(),
+            shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
+        };
+        let spec = DialogSpec {
+            title: "T", placement: Placement::Centered { w: 10, h: 4 },
+            buttons: &[], show_close: false, default: None, focus: None,
+        };
+        let r = draw_dialog(&mut buf, bounds, &spec, &st);
+        // Centered within bounds: x = 20 + (20-10)/2 = 25 — not 15 (whole-buffer center).
+        assert_eq!(r.area, Rect::new(25, 4, 10, 4));
+        // Entirely inside the bounds; never spills into the left (graphics) half.
+        assert!(r.area.x >= bounds.x && r.area.right() <= bounds.right());
     }
 
     #[test]
@@ -462,7 +488,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
         let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None };
-        let r = draw_dialog(&mut buf, &spec, &st);
+        let r = draw_dialog(&mut buf, Rect::new(0,0,40,12), &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
         let sx = r.area.right(); let sy = r.area.bottom();
         if sx < 40 && sy < 12 { assert_eq!(buf.cell((sx, sy)).unwrap().style().bg, Some(Color::DarkGray)); }
@@ -496,7 +522,7 @@ mod tests {
             default: Some(ButtonId::Save),
             focus: Some(1),
         };
-        let rects = draw_dialog(&mut buf, &spec, &st);
+        let rects = draw_dialog(&mut buf, full, &spec, &st);
         // The Save (default) button label cells carry UNDERLINED.
         let (_, save_rect) = rects.buttons.iter().find(|(id, _)| *id == ButtonId::Save).unwrap();
         let save_cell = buf.cell((save_rect.x + 2, save_rect.y)).unwrap(); // inside "[ "

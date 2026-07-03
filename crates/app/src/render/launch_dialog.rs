@@ -54,7 +54,7 @@ pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         focus: Some(state.dialog_focus),
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // Draw body line into the content area.

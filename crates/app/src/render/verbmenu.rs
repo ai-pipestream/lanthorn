@@ -100,7 +100,7 @@ pub fn draw_verb_menu(
         focus: None,
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // ── Column layout within content ──────────────────────────────────────────

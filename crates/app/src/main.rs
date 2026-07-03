@@ -700,76 +700,81 @@ fn draw_frame(
         }
         draw_str_clipped(buf, help_row.x, help_row.y, &help_text, help_style, help_row);
 
+        // Modal dialogs center within the graphics-free text region (story text +
+        // map together), never over a Glulx graphics window — the terminal image
+        // protocol would otherwise overpaint them (SQ-0203). No graphics → `full`.
+        let dialog_area = app::render::screen::dialog_bounds(&screen_model, story_area, full);
+
         // ── Hotkey dialog overlay — drawn over everything ─────────────────────
         if state.hotkey_dialog {
-            dialog_rects_out = draw_hotkey_dialog(state, full, buf);
+            dialog_rects_out = draw_hotkey_dialog(state, dialog_area, buf);
         }
 
         // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
         if state.gallery.is_some() {
-            if let Some(dr) = draw_gallery(state, full, buf) {
+            if let Some(dr) = draw_gallery(state, dialog_area, buf) {
                 dialog_rects_out = Some(dr);
             }
         }
 
         // ── Saves-manager overlay — drawn after gallery ───────────────────────
         if state.saves.is_some() {
-            dialog_rects_out = draw_saves(state, full, buf, &mut modal_list_viewport);
+            dialog_rects_out = draw_saves(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
         // ── Replay/rewind overlay ─────────────────────────────────────────────
         if state.replay.is_some() {
-            dialog_rects_out = draw_history(state, full, buf, &mut modal_list_viewport);
+            dialog_rects_out = draw_history(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
         // ── File-browser overlay — drawn after saves ──────────────────────────
         if state.file_browser.is_some() {
-            dialog_rects_out = draw_file_browser(state, full, buf, &mut modal_list_viewport);
+            dialog_rects_out = draw_file_browser(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
         // ── Verb-menu overlay — drawn after saves ─────────────────────────────
         if state.verb_menu.is_some() {
-            dialog_rects_out = draw_verb_menu(state, full, buf, &mut modal_list_viewport);
+            dialog_rects_out = draw_verb_menu(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
         // ── Config screen overlay — drawn after other modals ──────────────────
         if state.config_screen.is_some() {
-            dialog_rects_out = draw_config_screen(state, full, buf, &mut modal_list_viewport);
+            dialog_rects_out = draw_config_screen(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
         // ── Style editor overlay — full-screen, drawn after config screen ──────
         if state.style_editor.is_some() {
-            style_editor_rects_out = draw_style_editor(state, full, buf);
+            style_editor_rects_out = draw_style_editor(state, dialog_area, buf);
         }
 
         // ── Glyph-picker modal — drawn over the style editor ──────────────────
         if state.glyph_picker.is_some() {
-            glyph_picker_rects_out = app::render::glyph_picker::draw_glyph_picker(state, full, buf);
+            glyph_picker_rects_out = app::render::glyph_picker::draw_glyph_picker(state, dialog_area, buf);
         }
 
         // ── Aux-storage prompt — drawn over everything ────────────────────────
         if state.aux_prompt {
-            aux_dialog_rects_out = draw_aux_dialog(state, full, buf);
+            aux_dialog_rects_out = draw_aux_dialog(state, dialog_area, buf);
         }
 
         // ── Reset dialog overlay — drawn over everything ───────────────────────
         if state.reset_dialog {
-            reset_dialog_rects_out = draw_reset_dialog(state, full, buf);
+            reset_dialog_rects_out = draw_reset_dialog(state, dialog_area, buf);
         }
 
         // ── Quit dialog overlay — drawn over everything ────────────────────────
         if state.quit_dialog {
-            quit_dialog_rects_out = draw_quit_dialog(state, full, buf);
+            quit_dialog_rects_out = draw_quit_dialog(state, dialog_area, buf);
         }
 
         // ── Launch dialog overlay — drawn over everything ──────────────────────
         if state.launch_dialog {
-            launch_dialog_rects_out = draw_launch_dialog(state, full, buf);
+            launch_dialog_rects_out = draw_launch_dialog(state, dialog_area, buf);
         }
 
         // ── Hints panel overlay — drawn after other overlays ───────────────────
         if state.hints.is_some() {
-            hints_panel_rects_out = draw_hints_panel(state, full, buf);
+            hints_panel_rects_out = draw_hints_panel(state, dialog_area, buf);
         }
 
         // ── Story-pane text-selection highlight (during a left-drag) ──────────

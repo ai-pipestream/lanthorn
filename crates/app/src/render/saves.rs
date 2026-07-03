@@ -52,7 +52,7 @@ pub fn draw_saves(
         focus: Some(state.dialog_focus),
     };
 
-    let rects = draw_dialog(buf, &spec, &st);
+    let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
     // ── Column headers ────────────────────────────────────────────────────────
