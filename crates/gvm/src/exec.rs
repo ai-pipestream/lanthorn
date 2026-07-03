@@ -3021,6 +3021,7 @@ impl Machine {
                 break;
             }
             let size = ty as usize; // Glulx local sizes: 1, 2, or 4 bytes
+            if !matches!(size, 1 | 2 | 4) { break; }
             for _ in 0..count {
                 off = align_up(off as u32, size as u32) as usize;
                 let base = f + localspos + off;
@@ -3183,6 +3184,22 @@ mod tests {
         assert_eq!(t.width, 4);
         // Frame-chain walk must bail out gracefully (truncated/empty), not panic.
         assert!(t.frames.len() <= 1, "expected a truncated trace, got {} frames", t.frames.len());
+    }
+
+    #[test]
+    fn build_trace_handles_corrupt_frame_format_without_panicking() {
+        // In-range corrupt fp: passes build_trace's length/alignment guards,
+        // but the locals-format bytes at [fp+8, fp+9] decode to (ty=0, count>0),
+        // which previously reached align_up(_, 0) and panicked (div by zero).
+        let mut m = machine_with_body(&[], asm::ins(0x120, &[])); // body unused
+        let f = 0usize;
+        m.stack[f + 8] = 0; // ty = 0
+        m.stack[f + 9] = 1; // count = 1 (nonzero, so the ty==0 && count==0 exit doesn't fire)
+        m.fp = f;
+        m.sp = m.stack.len();
+        let t = m.build_trace("memory fault: test".to_string());
+        assert_eq!(t.fault, "memory fault: test");
+        assert_eq!(t.width, 4);
     }
 
     #[test]
