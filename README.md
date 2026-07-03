@@ -199,6 +199,10 @@ navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell.
 the panel is open and its content overflows, scroll it with the mouse wheel over
 the panel or `Shift`+`↑`/`↓`/PgUp/PgDn (plain arrow/PgUp/PgDn keep navigating the
 list); the scroll position resets whenever the highlighted story changes.
+- **Cover art in the story picker.** Blorb games with a frontispiece show their
+  cover image in the picker's info panel, using the terminal's best graphics
+  protocol (Kitty / iTerm2 / Sixel) with a universal half-block fallback.
+  Force a mode with `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`.
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and
