@@ -97,7 +97,7 @@ impl Blorb {
             let clen = be_u32(&bytes, pos + 4)? as usize;
             let data_start = pos + 8;
             if data_start + clen > end {
-                return Err(BlorbError::Truncated);
+                break;
             }
             if &ctype == b"RIdx" {
                 let count = be_u32(&bytes, data_start)? as usize;
@@ -533,6 +533,23 @@ mod tests {
         file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
         file.extend_from_slice(&inner);
         assert_eq!(Blorb::parse(file).unwrap_err(), BlorbError::BadOffset);
+    }
+
+    #[test]
+    fn parse_tolerates_malformed_trailing_chunk() {
+        // A valid RIdx + Exec (ZCOD) resource, followed by a malformed
+        // TRAILING top-level chunk whose declared length overruns EOF. The
+        // chunk-walk loop must stop scanning rather than fail the whole
+        // parse — the resource index was already fully built from RIdx.
+        let mut file = build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")]);
+        file.extend_from_slice(b"XXXX");
+        file.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // declared len far past EOF
+
+        let blorb = Blorb::parse(file).expect("malformed trailing chunk must not fail parse");
+        let (kind, data) = blorb.executable().unwrap();
+        assert_eq!(kind, ExecKind::ZCode);
+        assert_eq!(data, b"abcd");
+        assert!(blorb.resources().iter().any(|r| &r.usage == b"Exec"));
     }
 
     // ── resolve_sound_blorb / has_sounds ────────────────────────────────────
