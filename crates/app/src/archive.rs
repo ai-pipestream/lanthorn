@@ -131,22 +131,25 @@ impl ScreenDto {
     }
 
     fn to_screen(&self) -> zvm::screen::ScreenState {
-        let mut s = zvm::screen::ScreenState::default();
-        s.upper_window_rows = self.upper_window_rows;
-        s.current_window = self.current_window;
-        s.text_style = self.text_style;
-        s.cursor_row = self.cursor_row;
-        s.cursor_col = self.cursor_col;
-        s.buffer_mode = self.buffer_mode;
-        s.show_status_requested = self.show_status_requested;
-        s.upper.cols = self.cols;
-        s.upper.rows = self.rows;
-        s.upper.cells = self
-            .cells
-            .iter()
-            .map(|&(ch, style)| zvm::screen::Cell { ch, style, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default })
-            .collect();
-        s
+        zvm::screen::ScreenState {
+            upper_window_rows: self.upper_window_rows,
+            current_window: self.current_window,
+            text_style: self.text_style,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            buffer_mode: self.buffer_mode,
+            show_status_requested: self.show_status_requested,
+            upper: zvm::screen::UpperWindow {
+                cols: self.cols,
+                rows: self.rows,
+                cells: self
+                    .cells
+                    .iter()
+                    .map(|&(ch, style)| zvm::screen::Cell { ch, style, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default })
+                    .collect(),
+            },
+            ..Default::default()
+        }
     }
 }
 
