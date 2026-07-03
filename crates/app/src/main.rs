@@ -1040,7 +1040,7 @@ fn run_story_picker(
         }
     };
 
-    let cover_picker = build_cover_picker(cfg.image_protocol);
+    let cover_picker = if cfg.images { build_cover_picker(cfg.image_protocol) } else { None };
     let mut cover = app::cover::CoverState::default();
 
     let mut list = app::list_scroll::ListScroll::new();
@@ -1602,6 +1602,18 @@ fn main() {
         })
     };
 
+    // In-game graphics Picker (None when --no-images or unavailable). Built once
+    // and reused both for the Glulx session's char-cell pixel size and, below,
+    // AppState.game_picker (the render side already tolerates None).
+    let game_picker = if cfg.images { build_cover_picker(cfg.image_protocol) } else { None };
+    let char_px = game_picker
+        .as_ref()
+        .map(|p| {
+            let f = p.font_size();
+            (f.width as u32, f.height as u32)
+        })
+        .unwrap_or((8, 16));
+
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -1633,11 +1645,19 @@ fn main() {
             Box::new(s)
         }
         app::hints::LoadedStory::Glulx(bytes) => {
+            let pict_blorb = if cfg.images {
+                blorb::resolve_sound_blorb(&story_path).map(|(b, _)| b)
+            } else {
+                None
+            };
             match GlulxSession::new(
                 bytes,
                 cfg.virtual_screen_cols as u32,
                 cfg.virtual_screen_rows as u32,
                 cfg.acceleration,
+                cfg.images,
+                char_px,
+                pict_blorb,
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {
@@ -1760,6 +1780,7 @@ fn main() {
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_loc_method = cfg.show_loc_method;
     state.show_status_bar = cfg.show_status_bar;
+    state.game_picker = game_picker;
     state.config = cfg;
 
     // Resolve the sound container + construct the audio backend (silent if the
@@ -3979,11 +4000,31 @@ fn reset_game(
             })
         }
         Ok(app::hints::LoadedStory::Glulx(bytes)) => {
+            // Restart re-resolves the Pict Blorb straight from the original story
+            // bytes (a .gblorb container holds its own Pict resources), and reuses
+            // the stored game Picker for char-cell size, so graphics come back
+            // enabled per config.images — matching the initial launch.
+            let char_px = state
+                .game_picker
+                .as_ref()
+                .map(|p| {
+                    let f = p.font_size();
+                    (f.width as u32, f.height as u32)
+                })
+                .unwrap_or((8, 16));
+            let pict_blorb = if state.config.images && blorb::Blorb::is_blorb(story_bytes) {
+                blorb::Blorb::parse(story_bytes.to_vec()).ok()
+            } else {
+                None
+            };
             GlulxSession::new(
                 bytes,
                 state.config.virtual_screen_cols as u32,
                 state.config.virtual_screen_rows as u32,
                 state.config.acceleration,
+                state.config.images,
+                char_px,
+                pict_blorb,
             )
             .map_err(|e| format!("{e:?}"))
             .map(|new_session| {
@@ -5046,10 +5087,17 @@ mod tests {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../gvm-cli/tests/fixtures/glulxercise.ulx");
         let Ok(bytes) = std::fs::read(&fixture) else { return };
-        let mut engine: Box<dyn app::engine::Engine> =
-            Box::new(app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true).expect("glulx session"));
+        let mut engine: Box<dyn app::engine::Engine> = Box::new(
+            app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true, false, (1, 1), None)
+                .expect("glulx session"),
+        );
         let mut mapper = mapper::mapper::Mapper::default();
         let mut state = app::state::AppState::default();
+        // config.images defaults true, so restart drives the graphics-enabled
+        // rebuild branch: the non-Blorb .ulx yields no Pict source (is_blorb =
+        // false → None) and graphics_enabled = true is threaded in — the rebuild
+        // must succeed without panicking.
+        assert!(state.config.images, "default config enables images");
         state.turns = 5;
         super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, false);
         assert_eq!(state.turns, 0, "restart resets the turn counter for Glulx");

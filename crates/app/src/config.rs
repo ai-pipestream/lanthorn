@@ -180,6 +180,10 @@ pub struct Cli {
     /// Force the terminal image protocol for cover art (default: auto-detect).
     #[arg(long, value_enum, default_value_t = ImageProtocol::Auto)]
     pub image_protocol: ImageProtocol,
+
+    /// Disable all image rendering (in-game graphics + story-picker cover art).
+    #[arg(long)]
+    pub no_images: bool,
 }
 
 /// Terminal image protocol for cover art. `Auto` detects the best available
@@ -197,6 +201,8 @@ pub enum ImageProtocol {
 fn default_image_protocol() -> ImageProtocol {
     ImageProtocol::Auto
 }
+
+fn default_images() -> bool { true }
 
 // ── Hotkeys config ────────────────────────────────────────────────────────────
 
@@ -452,6 +458,10 @@ pub struct Config {
     /// not persisted or user-facing.
     #[serde(skip, default = "default_image_protocol")]
     pub image_protocol: ImageProtocol,
+    /// Whether image rendering (in-game graphics + cover art) is enabled.
+    /// Runtime-only (set from --no-images); not persisted.
+    #[serde(skip, default = "default_images")]
+    pub images: bool,
 }
 
 impl Default for Config {
@@ -488,6 +498,7 @@ impl Default for Config {
             volume: default_volume(),
             acceleration: default_acceleration(),
             image_protocol: default_image_protocol(),
+            images: default_images(),
         }
     }
 }
@@ -569,6 +580,7 @@ pub fn resolve(cli: &Cli) -> Config {
 
     cfg.acceleration = !cli.no_accel;
     cfg.image_protocol = cli.image_protocol;
+    cfg.images = !cli.no_images;
 
     cfg
 }
@@ -758,6 +770,7 @@ mod tests {
             config: Some(cfg_path),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
+            no_images: false,
         };
 
         let cfg = resolve(&cli);
@@ -772,6 +785,7 @@ mod tests {
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
+            no_images: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
@@ -787,6 +801,7 @@ mod tests {
             config: Some(cfg_path),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
+            no_images: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -930,6 +945,7 @@ use_defaults = false
             animation: AnimationConfig::default(),
             acceleration: true,
             image_protocol: ImageProtocol::Auto,
+            images: true,
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -1079,9 +1095,26 @@ use_defaults = false
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: true,
             image_protocol: ImageProtocol::Auto,
+            no_images: false,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
+    }
+
+    #[test]
+    fn images_defaults_true_and_no_images_disables() {
+        assert!(Config::default().images);
+
+        let cli = Cli {
+            story: PathBuf::from("foo.z5"),
+            user_dir: None,
+            config: Some(PathBuf::from("/nonexistent/path/config.toml")),
+            no_accel: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: true,
+        };
+        let cfg = resolve(&cli);
+        assert!(!cfg.images);
     }
 
     #[test]
