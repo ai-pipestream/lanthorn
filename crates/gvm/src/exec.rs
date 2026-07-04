@@ -2736,6 +2736,12 @@ impl Machine {
                     0
                 }
             }
+            0x00E8 => {
+                // glk_window_flow_break(win) — block-mode inline images already
+                // break the text flow; nothing to do.
+                let _win = a(0);
+                0
+            }
             0x00E9 => {
                 // glk_window_erase_rect(win, left, top, width, height)
                 if self.graphics_enabled {
@@ -6333,6 +6339,18 @@ mod tests {
         assert_eq!(tb.fills(win), vec![(0x00FF_0000, 1, 2, 3, 4)]);
         assert_eq!(tb.background(win), Some(0x0000_00FF));
         assert_eq!(tb.draws(win), vec![(7, 5, 6, None)]);
+    }
+
+    #[test]
+    fn glk_window_flow_break_is_silent_noop() {
+        // glk_window_flow_break(win) — selector 0x00E8 per the Glk spec's
+        // selector table (falls between 0x00E2 glk_image_draw_scaled and
+        // 0x00E9 glk_window_erase_rect). Block-mode inline images already
+        // break the text flow, so this must be accepted as a no-op rather
+        // than falling into the "unhandled @glk selector" diagnostic arm.
+        let mut m = super::tests::machine_with_glk(&[]);
+        assert_eq!(m.glk_dispatch(0x00E8, &[1]).unwrap(), 0);
+        assert!(m.diagnostics.is_empty(), "flow_break must be a handled selector: {:?}", m.diagnostics);
     }
 
     #[test]
