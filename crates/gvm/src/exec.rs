@@ -2771,6 +2771,53 @@ impl Machine {
                 }
                 0
             }
+            // ── sound channels (Glk Sound; GLULX_NOTES) ─────────────────────────
+            0x00F0 => {
+                // glk_schannel_create(rock) -> chan
+                if self.sound_enabled { self.backend.schannel_create(a(0)) } else { 0 }
+            }
+            0x00F1 => {
+                // glk_schannel_destroy(chan)
+                if self.sound_enabled { self.backend.schannel_destroy(a(0)); }
+                0
+            }
+            0x00F2 => {
+                // glk_schannel_iterate(chan, &rock) -> next chan
+                if self.sound_enabled {
+                    let (next, rock) = self.backend.schannel_iterate(a(0));
+                    self.glk_store_ptr(a(1), rock)?;
+                    next
+                } else {
+                    self.glk_store_ptr(a(1), 0)?;
+                    0
+                }
+            }
+            0x00F3 => {
+                // glk_schannel_get_rock(chan) -> rock
+                if self.sound_enabled { self.backend.schannel_get_rock(a(0)) } else { 0 }
+            }
+            0x00F8 => {
+                // glk_schannel_play(chan, snd) -> 1/0  (repeats=1, no notify)
+                if self.sound_enabled { self.backend.schannel_play(a(0), a(1), 1, 0) } else { 0 }
+            }
+            0x00F9 => {
+                // glk_schannel_play_ext(chan, snd, repeats, notify) -> 1/0
+                if self.sound_enabled { self.backend.schannel_play(a(0), a(1), a(2), a(3)) } else { 0 }
+            }
+            0x00FA => {
+                // glk_schannel_stop(chan)
+                if self.sound_enabled { self.backend.schannel_stop(a(0)); }
+                0
+            }
+            0x00FB => {
+                // glk_schannel_set_volume(chan, vol)
+                if self.sound_enabled { self.backend.schannel_set_volume(a(0), a(1)); }
+                0
+            }
+            0x00FC => {
+                // glk_sound_load_hint(snd, flag) — decoding is on-demand; accept + ignore.
+                0
+            }
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -5924,6 +5971,53 @@ mod tests {
         assert_eq!(m.glk_gestalt(9, 0), 1, "SoundVolume supported");
         assert_eq!(m.glk_gestalt(10, 0), 1, "SoundNotify supported");
         assert_eq!(m.glk_gestalt(21, 0), 0, "Sound2 never supported");
+    }
+
+    #[test]
+    fn schannel_dispatch_routes_to_backend_when_enabled() {
+        use asm::Op::{C32, C8, Mem16};
+        // create(rock=7)->0x100, get_rock(1)->0x104, play(1, snd=5)->0x108,
+        // play_ext(1, snd=6, repeats=3, notify=9)->0x10C, set_volume(1, 0x8000),
+        // stop(1), destroy(1).
+        let mut body = glk_call(0xF0, &[C8(7)], Mem16(0x0100)); // schannel_create
+        body.extend(glk_call(0xF3, &[C8(1)], Mem16(0x0104)));   // schannel_get_rock
+        body.extend(glk_call(0xF8, &[C8(1), C8(5)], Mem16(0x0108))); // schannel_play
+        body.extend(glk_call(0xF9, &[C8(1), C8(6), C8(3), C8(9)], Mem16(0x010C))); // play_ext
+        body.extend(glk_call(0xFB, &[C8(1), C32(0x8000)], asm::Op::Zero)); // set_volume
+        body.extend(glk_call(0xFA, &[C8(1)], asm::Op::Zero)); // stop
+        body.extend(glk_call(0xF1, &[C8(1)], asm::Op::Zero)); // destroy
+        body.extend(asm::ins(0x120, &[]));                    // quit
+        let m = run_with_ram(body, 0x200, |m| m.set_sound(true));
+
+        assert_eq!(m.mem.read32(0x0100).unwrap(), 1, "create returns the first channel ref");
+        assert_eq!(m.mem.read32(0x0104).unwrap(), 7, "get_rock returns the stored rock");
+        assert_eq!(m.mem.read32(0x0108).unwrap(), 1, "play returns success");
+        assert_eq!(m.mem.read32(0x010C).unwrap(), 1, "play_ext returns success");
+
+        let log = backend_of(&m).sound_log();
+        assert!(log.iter().any(|l| l == "play chan=1 snd=5 repeats=1 notify=0"),
+            "plain play forwards repeats=1 notify=0: {log:?}");
+        assert!(log.iter().any(|l| l == "play chan=1 snd=6 repeats=3 notify=9"),
+            "play_ext threads repeats+notify: {log:?}");
+        assert!(log.iter().any(|l| l == "setvol chan=1 vol=32768"), "set_volume forwarded: {log:?}");
+        assert!(log.iter().any(|l| l == "stop chan=1"), "stop forwarded: {log:?}");
+        assert!(log.iter().any(|l| l == "destroy chan=1"), "destroy forwarded: {log:?}");
+        assert!(!m.diagnostics.iter().any(|d| d.contains("unhandled")),
+            "no unhandled-selector diagnostic: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn schannel_dispatch_is_inert_when_sound_disabled() {
+        use asm::Op::{C8, Mem16};
+        // With sound disabled, create returns 0 (NULL channel) and nothing is
+        // recorded. (A spec-correct game won't call these — gestalt reports 0 —
+        // but a probe must get a safe 0, not a diagnostic-spamming fallthrough.)
+        let mut body = glk_call(0xF0, &[C8(7)], Mem16(0x0100)); // schannel_create
+        body.extend(glk_call(0xFC, &[C8(5), C8(1)], asm::Op::Zero)); // sound_load_hint
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {}); // sound left disabled
+        assert_eq!(m.mem.read32(0x0100).unwrap(), 0, "create returns NULL when sound is off");
+        assert!(backend_of(&m).sound_log().is_empty(), "no backend calls when sound is off");
     }
 
     #[test]

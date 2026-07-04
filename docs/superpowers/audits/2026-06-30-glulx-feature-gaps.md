@@ -299,7 +299,7 @@ The following groups are fully implemented and pass glulxercise: arithmetic (§2
 
 ### 4g. Sound Channels (Glk spec §9)
 
-All sound-channel API functions fall to the diagnostic arm. Games that probe for sound will see "unhandled @glk selector" in diagnostics but won't crash (returns 0). This includes: `glk_schannel_create` (0x0100), `glk_schannel_destroy` (0x0101), `glk_schannel_iterate` (0x0102), `glk_schannel_get_rock` (0x0103), `glk_schannel_play` (0x0104), `glk_schannel_play_ext` (0x0105), `glk_schannel_stop` (0x0106), `glk_schannel_set_volume` (0x0107), and Sound2 extensions.
+All sound-channel API functions fall to the diagnostic arm. Games that probe for sound will see "unhandled @glk selector" in diagnostics but won't crash (returns 0). This includes: `glk_schannel_create` (0x00F0), `glk_schannel_destroy` (0x00F1), `glk_schannel_iterate` (0x00F2), `glk_schannel_get_rock` (0x00F3), `glk_schannel_play` (0x00F8), `glk_schannel_play_ext` (0x00F9), `glk_schannel_stop` (0x00FA), `glk_schannel_set_volume` (0x00FB), and Sound2 extensions (0x00F4–0x00F7, 0x00FD). (corrected 2026-07-04: was swapped)
 
 | Feature | Glk spec § | Status | Effort | Rec | Already tracked? |
 |---|---|---|---|---|---|
@@ -307,7 +307,7 @@ All sound-channel API functions fall to the diagnostic arm. Games that probe for
 
 ### 4h. Hyperlinks (Glk spec §10)
 
-All hyperlink API functions fall to the diagnostic arm: `glk_set_hyperlink` (0x00F0), `glk_set_hyperlink_stream` (0x00F1), `glk_request_hyperlink_event` (0x00F2), `glk_cancel_hyperlink_event` (0x00F3).
+All hyperlink API functions fall to the diagnostic arm: `glk_set_hyperlink` (0x0100), `glk_set_hyperlink_stream` (0x0101), `glk_request_hyperlink_event` (0x0102), `glk_cancel_hyperlink_event` (0x0103). (corrected 2026-07-04: was swapped)
 
 | Feature | Glk spec § | Status | Effort | Rec | Already tracked? |
 |---|---|---|---|---|---|

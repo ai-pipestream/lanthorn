@@ -318,6 +318,23 @@ pub trait GlkBackend {
     /// Draw image `resnum` into a graphics window at `(x, y)`, optionally
     /// scaled to `(width, height)`.
     fn graphics_draw_image(&mut self, _win: u32, _resnum: u32, _x: i32, _y: i32, _scale: Option<(u32, u32)>) {}
+    /// Create a sound channel with rock `rock`; return its Glk ref (0 = failure).
+    fn schannel_create(&mut self, _rock: u32) -> u32 { 0 }
+    /// Destroy a sound channel.
+    fn schannel_destroy(&mut self, _chan: u32) {}
+    /// Iterate channels: `chan == 0` → first; else the channel after `chan`.
+    /// Return `(next_ref_or_0, that_channel_rock_or_0)`.
+    fn schannel_iterate(&mut self, _chan: u32) -> (u32, u32) { (0, 0) }
+    /// The rock of channel `chan` (0 if unknown).
+    fn schannel_get_rock(&mut self, _chan: u32) -> u32 { 0 }
+    /// Play sound resource `snd` on `chan`, `repeats` times (0xFFFFFFFF = forever),
+    /// posting an `Evtype_SoundNotify` with value `notify` on completion when
+    /// `notify != 0`. Return 1 on success, 0 on failure.
+    fn schannel_play(&mut self, _chan: u32, _snd: u32, _repeats: u32, _notify: u32) -> u32 { 0 }
+    /// Stop whatever is playing on `chan` (no notify is posted for a stop).
+    fn schannel_stop(&mut self, _chan: u32) {}
+    /// Set `chan`'s volume (Glk scale: 0x10000 = full).
+    fn schannel_set_volume(&mut self, _chan: u32, _vol: u32) {}
     /// Flush any buffered output to the display.
     fn flush(&mut self) {}
     /// Immutable downcast support (used by tests to read recorded output).
@@ -352,6 +369,12 @@ pub struct TestBackend {
     draws: BTreeMap<u32, Vec<DrawRec>>,
     /// Last background color set per graphics window.
     backgrounds: BTreeMap<u32, u32>,
+    /// Next schannel ref to hand out (pre-incremented; first create → 1).
+    next_schannel: u32,
+    /// Rock per live schannel ref.
+    schannel_rocks: BTreeMap<u32, u32>,
+    /// Human-readable log of schannel calls, in order (for dispatch assertions).
+    sound_log: Vec<String>,
 }
 
 impl Default for TestBackend {
@@ -372,6 +395,9 @@ impl TestBackend {
             fills: BTreeMap::new(),
             draws: BTreeMap::new(),
             backgrounds: BTreeMap::new(),
+            next_schannel: 0,
+            schannel_rocks: BTreeMap::new(),
+            sound_log: Vec::new(),
         }
     }
     /// A backend reporting a specific display size.
@@ -428,6 +454,10 @@ impl TestBackend {
     /// The last background color set for one graphics window, if any.
     pub fn background(&self, win: u32) -> Option<u32> {
         self.backgrounds.get(&win).copied()
+    }
+    /// The recorded schannel call log (create/play/stop/setvol/destroy), in order.
+    pub fn sound_log(&self) -> &[String] {
+        &self.sound_log
     }
 }
 
@@ -492,6 +522,41 @@ impl GlkBackend for TestBackend {
     }
     fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) {
         self.draws.entry(win).or_default().push((resnum, x, y, scale));
+    }
+    fn schannel_create(&mut self, rock: u32) -> u32 {
+        self.next_schannel += 1;
+        let id = self.next_schannel;
+        self.schannel_rocks.insert(id, rock);
+        self.sound_log.push(format!("create rock={rock} -> {id}"));
+        id
+    }
+    fn schannel_destroy(&mut self, chan: u32) {
+        self.schannel_rocks.remove(&chan);
+        self.sound_log.push(format!("destroy chan={chan}"));
+    }
+    fn schannel_iterate(&mut self, chan: u32) -> (u32, u32) {
+        let next = if chan == 0 {
+            self.schannel_rocks.keys().next().copied()
+        } else {
+            self.schannel_rocks.range((chan + 1)..).next().map(|(k, _)| *k)
+        };
+        match next {
+            Some(id) => (id, *self.schannel_rocks.get(&id).unwrap_or(&0)),
+            None => (0, 0),
+        }
+    }
+    fn schannel_get_rock(&mut self, chan: u32) -> u32 {
+        *self.schannel_rocks.get(&chan).unwrap_or(&0)
+    }
+    fn schannel_play(&mut self, chan: u32, snd: u32, repeats: u32, notify: u32) -> u32 {
+        self.sound_log.push(format!("play chan={chan} snd={snd} repeats={repeats} notify={notify}"));
+        1
+    }
+    fn schannel_stop(&mut self, chan: u32) {
+        self.sound_log.push(format!("stop chan={chan}"));
+    }
+    fn schannel_set_volume(&mut self, chan: u32, vol: u32) {
+        self.sound_log.push(format!("setvol chan={chan} vol={vol}"));
     }
     fn as_any(&self) -> &dyn Any {
         self
