@@ -380,9 +380,9 @@ impl AppGlk {
             return BufferWindow { primary: true, ..Default::default() };
         }
         let buf = self.buffers.get(&id);
-        let (lines, runs) = buf.map(|b| log_to_lines(&b.log)).unwrap_or_default();
+        let (lines, runs, images) = buf.map(|b| log_to_lines(&b.log)).unwrap_or_default();
         let scroll = buf.map(|b| b.scroll).unwrap_or(0);
-        BufferWindow { lines, runs, scroll, primary: false }
+        BufferWindow { lines, runs, images, scroll, primary: false }
     }
 }
 
@@ -464,37 +464,66 @@ fn bounding_box(leaves: &[(GlkRect, WinNode)]) -> GlkRect {
     GlkRect { left, top, width: right - left, height: bottom - top }
 }
 
-/// Split a buffer window's styled log into `(lines, per-line runs)`, merging
-/// adjacent same-style chars into one [`StyleRun`].
-fn log_to_lines(log: &[BufElem]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
+/// Split a buffer window's styled log into `(lines, per-line runs, per-line
+/// image)`, merging adjacent same-style chars into one [`StyleRun`]. The three
+/// vecs are always kept the same length: an image occupies its own logical
+/// line (a fresh line is started before it if the current line has content,
+/// and a fresh line is always started after it).
+fn log_to_lines(
+    log: &[BufElem],
+) -> (Vec<String>, Vec<Vec<StyleRun>>, Vec<Option<crate::inline_image::InlineImage>>) {
     let mut lines: Vec<String> = vec![String::new()];
     let mut runs: Vec<Vec<StyleRun>> = vec![Vec::new()];
+    let mut images: Vec<Option<crate::inline_image::InlineImage>> = vec![None];
     for elem in log {
-        let BufElem::Text { bits, fg, bg, text } = elem else { continue };
-        for ch in text.chars() {
-            if ch == '\n' {
+        match elem {
+            BufElem::Text { bits, fg, bg, text } => {
+                for ch in text.chars() {
+                    if ch == '\n' {
+                        lines.push(String::new());
+                        runs.push(Vec::new());
+                        images.push(None);
+                        continue;
+                    }
+                    let li = lines.len() - 1;
+                    let col = lines[li].chars().count();
+                    lines[li].push(ch);
+                    // A run is emitted whenever any styling is active (bits or a colour).
+                    if *bits != 0 || *fg != 0 || *bg != 0 {
+                        let r = &mut runs[li];
+                        match r.last_mut() {
+                            Some(last)
+                                if last.bits == *bits
+                                    && last.fg == *fg
+                                    && last.bg == *bg
+                                    && last.end == col =>
+                            {
+                                last.end = col + 1
+                            }
+                            _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg }),
+                        }
+                    }
+                }
+            }
+            BufElem::Image(img) => {
+                // An image occupies its own logical line: start a fresh line
+                // before it if the current line already has content.
+                if !lines.last().map(|l| l.is_empty()).unwrap_or(true) {
+                    lines.push(String::new());
+                    runs.push(Vec::new());
+                    images.push(None);
+                }
+                if let Some(last) = images.last_mut() {
+                    *last = Some(img.clone());
+                }
+                // Always start a fresh line after the image.
                 lines.push(String::new());
                 runs.push(Vec::new());
-                continue;
-            }
-            let li = lines.len() - 1;
-            let col = lines[li].chars().count();
-            lines[li].push(ch);
-            // A run is emitted whenever any styling is active (bits or a colour).
-            if *bits != 0 || *fg != 0 || *bg != 0 {
-                let r = &mut runs[li];
-                match r.last_mut() {
-                    Some(last)
-                        if last.bits == *bits && last.fg == *fg && last.bg == *bg && last.end == col =>
-                    {
-                        last.end = col + 1
-                    }
-                    _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg }),
-                }
+                images.push(None);
             }
         }
     }
-    (lines, runs)
+    (lines, runs, images)
 }
 
 // ── GlkBackend impl ────────────────────────────────────────────────────────────
@@ -685,6 +714,32 @@ mod tests {
         assert_eq!(glk_style_bits(GlkStyle::Header), 0x02);
         assert_eq!(glk_style_bits(GlkStyle::Alert), 0x03);
         assert_eq!(glk_style_bits(GlkStyle::Preformatted), 0x08);
+    }
+
+    #[test]
+    fn non_primary_buffer_carries_inline_image() {
+        // A resolvable Pict needs a Blorb, which the test harness lacks (see
+        // `take_transcript_elems_coalesces_text_and_keeps_image_between`), so
+        // seed the non-primary buffer's log directly: Text, Image, Text.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer); // primary
+        glk.window_open(2, WinType::TextBuffer); // non-primary
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        let log = &mut glk.buffers.get_mut(&2).unwrap().log;
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "a\n".into() });
+        log.push(BufElem::Image(dummy));
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "b".into() });
+
+        let bw = glk.buffer_node(2);
+        assert_eq!(bw.lines.len(), bw.runs.len());
+        assert_eq!(bw.lines.len(), bw.images.len());
+        let img_idx = bw.images.iter().position(|o| o.is_some()).expect("image line present");
+        assert_eq!(bw.lines[img_idx], "", "image occupies its own logical line");
+        assert!(img_idx > 0 && img_idx < bw.lines.len() - 1, "image line sits between a and b");
     }
 
     #[test]

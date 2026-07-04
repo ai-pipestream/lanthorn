@@ -349,6 +349,7 @@ mod tests {
         BufferWindow {
             lines: vec![line.to_string()],
             runs: vec![Vec::new()],
+            images: vec![None],
             scroll: 0,
             primary: false,
         }
