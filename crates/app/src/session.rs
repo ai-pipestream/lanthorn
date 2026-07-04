@@ -165,6 +165,19 @@ pub(crate) fn trim_elems_to_len(elems: &mut [TranscriptElem], keep: usize) {
     }
 }
 
+/// One buffered Glk sound-channel operation, emitted by `AppGlk` during a turn
+/// and drained into `TurnResult.glulx_sound_ops` for `AppState` to play. Channel
+/// *state* (refs, rocks, volume) lives in `AppGlk`; only the playback-affecting
+/// operations travel here. `Play.volume` snapshots the channel's current Glk
+/// volume so the player (which cannot see `AppGlk`) can compute gain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SchannelOp {
+    Play { chan: u32, snd: u32, repeats: u32, notify: u32, volume: u32 },
+    Stop { chan: u32 },
+    SetVolume { chan: u32, vol: u32 },
+    Destroy { chan: u32 },
+}
+
 /// Result of one player turn.
 pub struct TurnResult {
     pub transcript: String,

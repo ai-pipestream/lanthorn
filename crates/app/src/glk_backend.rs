@@ -93,6 +93,13 @@ struct BufBuf {
 
 // ── The backend ────────────────────────────────────────────────────────────────
 
+/// A live Glk sound channel's app-side state.
+struct SoundChannel {
+    rock: u32,
+    /// Glk volume (0x10000 = full); snapshotted into each `Play` op.
+    volume: u32,
+}
+
 /// The app Glk display backend (see the module docs).
 pub struct AppGlk {
     /// Reported display size (the story-pane size the game lays windows out in).
@@ -125,6 +132,12 @@ pub struct AppGlk {
     char_px: (u32, u32),
     /// Resolves + caches Blorb `Pict` resources for `graphics_draw_image`.
     picts: crate::graphics::PictSource,
+    /// Live sound channels, keyed by Glk channel ref (BTree for stable iterate).
+    schannels: BTreeMap<u32, SoundChannel>,
+    /// Next channel ref to hand out (pre-incremented; first create → 1).
+    next_schannel: u32,
+    /// Buffered per-turn sound operations, drained by `take_sound_ops`.
+    sound_ops: Vec<crate::session::SchannelOp>,
 }
 
 impl Default for AppGlk {
@@ -162,6 +175,9 @@ impl AppGlk {
             graphics: BTreeMap::new(),
             char_px,
             picts,
+            schannels: BTreeMap::new(),
+            next_schannel: 0,
+            sound_ops: Vec::new(),
         }
     }
 
@@ -254,6 +270,11 @@ impl AppGlk {
         flush(&mut out, &mut cur_text, &mut cur_runs);
         buf.drained = buf.log.len();
         out
+    }
+
+    /// Drain the sound operations buffered this turn (see [`crate::session::SchannelOp`]).
+    pub fn take_sound_ops(&mut self) -> Vec<crate::session::SchannelOp> {
+        std::mem::take(&mut self.sound_ops)
     }
 
     /// Test seam: append an inline image to the primary buffer's undrained log,
@@ -702,6 +723,45 @@ impl GlkBackend for AppGlk {
         }
     }
 
+    fn schannel_create(&mut self, rock: u32) -> u32 {
+        self.next_schannel += 1;
+        let id = self.next_schannel;
+        self.schannels.insert(id, SoundChannel { rock, volume: 0x10000 });
+        id
+    }
+    fn schannel_destroy(&mut self, chan: u32) {
+        self.schannels.remove(&chan);
+        self.sound_ops.push(crate::session::SchannelOp::Destroy { chan });
+    }
+    fn schannel_iterate(&mut self, chan: u32) -> (u32, u32) {
+        let next = if chan == 0 {
+            self.schannels.keys().next().copied()
+        } else {
+            self.schannels.range((chan + 1)..).next().map(|(k, _)| *k)
+        };
+        match next {
+            Some(id) => (id, self.schannels.get(&id).map(|c| c.rock).unwrap_or(0)),
+            None => (0, 0),
+        }
+    }
+    fn schannel_get_rock(&mut self, chan: u32) -> u32 {
+        self.schannels.get(&chan).map(|c| c.rock).unwrap_or(0)
+    }
+    fn schannel_play(&mut self, chan: u32, snd: u32, repeats: u32, notify: u32) -> u32 {
+        let volume = self.schannels.get(&chan).map(|c| c.volume).unwrap_or(0x10000);
+        self.sound_ops.push(crate::session::SchannelOp::Play { chan, snd, repeats, notify, volume });
+        1
+    }
+    fn schannel_stop(&mut self, chan: u32) {
+        self.sound_ops.push(crate::session::SchannelOp::Stop { chan });
+    }
+    fn schannel_set_volume(&mut self, chan: u32, vol: u32) {
+        if let Some(c) = self.schannels.get_mut(&chan) {
+            c.volume = vol;
+        }
+        self.sound_ops.push(crate::session::SchannelOp::SetVolume { chan, vol });
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1078,6 +1138,57 @@ mod tests {
         glk.graphics_draw_image(5, 0, 10, 10, None);
         // No primary buffer is open → elems empty.
         assert!(glk.take_transcript_elems().is_empty());
+    }
+
+    #[test]
+    fn appglk_schannel_create_allocates_refs_and_rocks() {
+        use gvm::glk::GlkBackend;
+        let mut g = AppGlk::new(80, 24);
+        let a = g.schannel_create(11);
+        let b = g.schannel_create(22);
+        assert_ne!(a, 0, "a created channel has a nonzero ref");
+        assert_ne!(a, b, "distinct channels get distinct refs");
+        assert_eq!(g.schannel_get_rock(a), 11);
+        assert_eq!(g.schannel_get_rock(b), 22);
+        assert_eq!(g.schannel_get_rock(9999), 0, "unknown channel → rock 0");
+        // iterate: 0 → first, then next, then 0 at the end.
+        let (first, first_rock) = g.schannel_iterate(0);
+        assert_eq!((first, first_rock), (a, 11));
+        let (second, second_rock) = g.schannel_iterate(first);
+        assert_eq!((second, second_rock), (b, 22));
+        assert_eq!(g.schannel_iterate(second), (0, 0), "past the end → (0,0)");
+    }
+
+    #[test]
+    fn appglk_schannel_ops_buffer_in_order_with_volume_snapshot() {
+        use gvm::glk::GlkBackend;
+        use crate::session::SchannelOp;
+        let mut g = AppGlk::new(80, 24);
+        let c = g.schannel_create(0);
+        g.schannel_set_volume(c, 0x8000);          // half volume
+        g.schannel_play(c, 5, 3, 9);               // play_ext(chan, snd, repeats, notify)
+        g.schannel_stop(c);
+        g.schannel_destroy(c);
+        let ops = g.take_sound_ops();
+        assert_eq!(ops, vec![
+            SchannelOp::SetVolume { chan: c, vol: 0x8000 },
+            SchannelOp::Play { chan: c, snd: 5, repeats: 3, notify: 9, volume: 0x8000 },
+            SchannelOp::Stop { chan: c },
+            SchannelOp::Destroy { chan: c },
+        ]);
+        assert!(g.take_sound_ops().is_empty(), "draining clears the buffer");
+        assert_eq!(g.schannel_get_rock(c), 0, "destroy removed the channel");
+    }
+
+    #[test]
+    fn appglk_play_snapshots_default_full_volume() {
+        use gvm::glk::GlkBackend;
+        use crate::session::SchannelOp;
+        let mut g = AppGlk::new(80, 24);
+        let c = g.schannel_create(0); // no set_volume → default 0x10000 (Glk full)
+        g.schannel_play(c, 1, 1, 0);
+        let ops = g.take_sound_ops();
+        assert_eq!(ops, vec![SchannelOp::Play { chan: c, snd: 1, repeats: 1, notify: 0, volume: 0x10000 }]);
     }
 }
 
