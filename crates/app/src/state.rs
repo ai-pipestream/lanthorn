@@ -261,6 +261,25 @@ pub fn sound_kind_to_format(k: blorb::SoundKind) -> Option<audio::SoundFormat> {
     }
 }
 
+/// Map a Glk channel volume (`0x10000` = full; may exceed for amplification) to a
+/// linear pre-master gain fraction for the audio backend.
+pub fn glk_volume_to_gain(vol: u32) -> f32 {
+    vol as f32 / 65536.0
+}
+
+/// Map Glk `repeats` to the audio backend's `repeats` byte, or `None` to skip
+/// playing entirely. Glk: `0xFFFFFFFF` = loop forever; `0` = play zero times;
+/// `N` = N plays. The audio byte reserves `255` for "forever", so finite counts
+/// are clamped to `254`.
+fn glk_repeats_to_audio(repeats: u32) -> Option<u8> {
+    match repeats {
+        0 => None,
+        0xFFFF_FFFF => Some(255),
+        n if n >= 255 => Some(254),
+        n => Some(n as u8),
+    }
+}
+
 /// Short display label for a [`blorb::SoundKind`].
 pub fn sound_kind_label(k: blorb::SoundKind) -> &'static str {
     match k {
@@ -982,6 +1001,10 @@ pub struct AppState {
     pub sound_ids: std::collections::HashMap<u16, audio::SoundId>,
     /// Finish-routines to fire when a sampled sound ends, keyed by its SoundId.
     pub sound_routines: std::collections::HashMap<audio::SoundId, u16>,
+    /// Playing Glulx sounds keyed by Glk channel ref (for stop / replace).
+    pub glulx_channels: std::collections::HashMap<u32, audio::SoundId>,
+    /// Pending sound-notify per playing SoundId: `(sound resource, notify value)`.
+    pub glulx_sound_notify: std::collections::HashMap<audio::SoundId, (u32, u32)>,
     /// In-flight smooth transcript-scroll animation, if any. `transcript_scroll`
     /// holds the target; this eases the displayed offset toward it.
     pub scroll_anim: Option<ScrollAnim>,
@@ -1254,6 +1277,8 @@ impl Default for AppState {
             sound_blorb: None,
             sound_ids: std::collections::HashMap::new(),
             sound_routines: std::collections::HashMap::new(),
+            glulx_channels: std::collections::HashMap::new(),
+            glulx_sound_notify: std::collections::HashMap::new(),
             scroll_anim: None,
             graph_gen: 0,
             viewed_layer: None,
@@ -1381,6 +1406,55 @@ impl AppState {
                         }
                     }
                 },
+            }
+        }
+    }
+
+    /// Apply this turn's Glk sound-channel operations to the shared audio backend
+    /// (Glulx). Mirrors `play_turn_sounds`: gated on the sound config flag and a
+    /// present backend; resolves sound resources from `sound_blorb` and tracks the
+    /// channel→SoundId and SoundId→notify maps.
+    pub fn play_glulx_sound_ops(&mut self, ops: &[crate::session::SchannelOp]) {
+        use crate::session::SchannelOp;
+        if !self.config.enable_sound {
+            return;
+        }
+        let Some(backend) = self.audio.as_mut() else { return };
+        for op in ops {
+            match *op {
+                SchannelOp::Play { chan, snd, repeats, notify, volume } => {
+                    // Playing on a busy channel stops the old sound first; the
+                    // replaced sound fires no notify.
+                    if let Some(old) = self.glulx_channels.remove(&chan) {
+                        backend.stop(old);
+                        self.glulx_sound_notify.remove(&old);
+                    }
+                    let Some(reps) = glk_repeats_to_audio(repeats) else { continue };
+                    if let Some(blorb) = &self.sound_blorb {
+                        if let Some((bytes, kind)) = blorb.sound(snd) {
+                            if let Some(fmt) = sound_kind_to_format(kind) {
+                                let gain = glk_volume_to_gain(volume);
+                                if let Some(id) = backend.play_sample_gain(bytes, fmt, gain, reps) {
+                                    self.glulx_channels.insert(chan, id);
+                                    if notify != 0 {
+                                        self.glulx_sound_notify.insert(id, (snd, notify));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                SchannelOp::Stop { chan } | SchannelOp::Destroy { chan } => {
+                    if let Some(id) = self.glulx_channels.remove(&chan) {
+                        backend.stop(id);
+                        self.glulx_sound_notify.remove(&id);
+                    }
+                }
+                SchannelOp::SetVolume { chan, vol } => {
+                    if let Some(&id) = self.glulx_channels.get(&chan) {
+                        backend.set_sample_gain(id, glk_volume_to_gain(vol));
+                    }
+                }
             }
         }
     }
@@ -2197,6 +2271,23 @@ mod tests {
         let ev3 = SoundEvent { number: 3, effect: 2, volume: 8, repeats: 1, routine: 0 };
         s.play_turn_sounds(&[ev3]);
         assert!(s.sound_ids.is_empty(), "no sound id remembered without a blorb");
+    }
+
+    #[test]
+    fn glk_volume_to_gain_is_linear_over_0x10000() {
+        assert_eq!(glk_volume_to_gain(0), 0.0);
+        assert_eq!(glk_volume_to_gain(0x10000), 1.0);   // Glk full
+        assert_eq!(glk_volume_to_gain(0x8000), 0.5);    // half
+        assert!(glk_volume_to_gain(0x20000) > 1.0, "amplification passes through");
+    }
+
+    #[test]
+    fn glk_repeats_to_audio_maps_counts_and_forever() {
+        assert_eq!(glk_repeats_to_audio(0), None);            // play zero times → skip
+        assert_eq!(glk_repeats_to_audio(1), Some(1));         // once
+        assert_eq!(glk_repeats_to_audio(5), Some(5));         // N times
+        assert_eq!(glk_repeats_to_audio(0xFFFF_FFFF), Some(255)); // -1 → forever
+        assert_eq!(glk_repeats_to_audio(300), Some(254));     // clamp below the forever sentinel
     }
 
     #[test]

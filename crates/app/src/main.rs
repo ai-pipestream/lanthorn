@@ -325,6 +325,12 @@ fn zvm_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GameSession> {
     engine.as_any_mut().downcast_mut::<GameSession>()
 }
 
+/// Mutable non-panicking downcast to the Glulx session: `Some` for a Glulx
+/// game, `None` for Z-code. Used to deliver Glk sound-notify events.
+fn glulx_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GlulxSession> {
+    engine.as_any_mut().downcast_mut::<GlulxSession>()
+}
+
 /// The engine tag (`"zmachine"` / `"glulx"`) of the running engine, for wrapping
 /// raw same-engine save bytes (e.g. a rewind/replay snapshot) into an
 /// [`app::engine::EngineSave`] before `restore_state`.
@@ -2227,6 +2233,18 @@ fn main() {
                             ) {
                                 break 'event_loop;
                             }
+                        }
+                    }
+                }
+                // Glulx sound-notify: a finished channel delivers Evtype_SoundNotify.
+                if let Some((snd, notify)) = state.glulx_sound_notify.remove(&id) {
+                    state.glulx_channels.retain(|_, v| *v != id);
+                    if let Some(gs) = glulx_session_opt_mut(&mut *session) {
+                        let result = gs.sound_notify(snd, notify);
+                        if apply_game_driven_result(
+                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                        ) {
+                            break 'event_loop;
                         }
                     }
                 }
@@ -5072,6 +5090,8 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
     }
     // Audio is additive on top of the border pulse; gated inside play_turn_sounds.
     state.play_turn_sounds(&result.sounds);
+    // Glulx Glk sound channels (empty for the Z-machine path).
+    state.play_glulx_sound_ops(&result.glulx_sound_ops);
     state.loc_method = result.location_method.or(state.loc_method);
     // Retain the previous name when this turn has no location signal.
     if let Some(loc) = &result.location {
