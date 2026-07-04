@@ -3135,7 +3135,7 @@ impl Machine {
             17 => 1,                // gestalt_LineTerminators → set_terminators supported
             18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
-            7 => (self.graphics_enabled && val == 5) as u32,  // gestalt_DrawImage(wintype)
+            7 => (self.graphics_enabled && (val == 5 || val == 3)) as u32, // gestalt_DrawImage(wintype): Graphics + TextBuffer (inline images)
             14 => self.graphics_enabled as u32,               // gestalt_GraphicsTransparency
             // MouseInput(4)/Timer(5)/Sound(8)/Hyperlinks(11)/echo and the rest
             // are not supported.
@@ -6304,7 +6304,8 @@ mod tests {
         m.set_graphics(true);
         assert_eq!(m.glk_gestalt(6, 0), 1, "gestalt_Graphics on");
         assert_eq!(m.glk_gestalt(7, 5), 1, "gestalt_DrawImage(wintype_Graphics=5) on");
-        assert_eq!(m.glk_gestalt(7, 3), 0, "gestalt_DrawImage(wintype_TextBuffer=3) off — Surface A deferred");
+        assert_eq!(m.glk_gestalt(7, 3), 1, "gestalt_DrawImage(wintype_TextBuffer=3) on — inline images (Surface A)");
+        assert_eq!(m.glk_gestalt(7, 4), 0, "gestalt_DrawImage(wintype_TextGrid=4) off — grids can't draw images");
         assert_eq!(m.glk_gestalt(14, 0), 1, "gestalt_GraphicsTransparency on");
     }
 
