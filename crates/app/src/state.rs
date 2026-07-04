@@ -916,6 +916,11 @@ pub struct AppState {
     /// length). Empty for the common unstyled line. Populated only by game-turn
     /// output via `push_transcript_runs`; persisted in `transcript.json`.
     pub transcript_runs: Vec<Vec<StyleRun>>,
+    /// Optional inline image parallel to `transcript` (always same length).
+    /// `Some` marks a logical unit that renders as an image band instead of
+    /// text; its `transcript` entry is an empty placeholder. In-memory only
+    /// (not persisted — pixels don't serialize).
+    pub transcript_images: Vec<Option<crate::inline_image::InlineImage>>,
     /// Which categories of transcript entries are currently visible.
     pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
@@ -1213,6 +1218,7 @@ impl Default for AppState {
             transcript_kinds: Vec::new(),
             transcript_styles: Vec::new(),
             transcript_runs: Vec::new(),
+            transcript_images: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
             clear_anchor: None,
@@ -1531,11 +1537,13 @@ impl AppState {
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
+        self.transcript_images.resize(self.transcript.len(), None); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(None);
             self.transcript_runs.push(Vec::new());
+            self.transcript_images.push(None);
         }
     }
 
@@ -1543,11 +1551,13 @@ impl AppState {
     pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
+        self.transcript_images.resize(self.transcript.len(), None); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(Some(style));
             self.transcript_runs.push(Vec::new());
+            self.transcript_images.push(None);
         }
     }
 
@@ -1572,6 +1582,7 @@ impl AppState {
         }
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_images.resize(self.transcript.len(), None);
 
         // Walk `text` char-by-char while consuming the chunk list in lockstep.
         let mut chunk_iter = chunks.iter().copied();
@@ -1635,7 +1646,21 @@ impl AppState {
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(None);
             self.transcript_runs.push(runs);
+            self.transcript_images.push(None);
         }
+    }
+
+    /// Append a logical image unit: an empty placeholder line tagged `Story`
+    /// carrying an inline image, keeping the parallel Vecs length-synced.
+    pub fn push_transcript_image(&mut self, img: crate::inline_image::InlineImage) {
+        self.transcript_styles.resize(self.transcript.len(), None);
+        self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_images.resize(self.transcript.len(), None);
+        self.transcript.push(String::new());
+        self.transcript_kinds.push(TranscriptKind::Story);
+        self.transcript_styles.push(None);
+        self.transcript_runs.push(Vec::new());
+        self.transcript_images.push(Some(img));
     }
 
     /// Set the transient status message (displayed on the status line until cleared).
@@ -1971,6 +1996,29 @@ mod tests {
         s.transcript_kinds = vec![TranscriptKind::Story; 3];
         s.push_transcript_kind("w", TranscriptKind::Meta); // must self-heal
         assert_eq!(s.transcript.len(), s.transcript_styles.len(), "self-heal re-aligns lengths");
+    }
+
+    #[test]
+    fn push_transcript_image_keeps_parallel_vecs_synced() {
+        let mut st = AppState::default();
+        st.push_transcript("hello");
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        st.push_transcript_image(dummy);
+        st.push_transcript("world");
+        let n = st.transcript.len();
+        assert_eq!(st.transcript_kinds.len(), n);
+        assert_eq!(st.transcript_styles.len(), n);
+        assert_eq!(st.transcript_runs.len(), n);
+        assert_eq!(st.transcript_images.len(), n);
+        // The image unit sits between the two text lines.
+        let img_idx = st.transcript_images.iter().position(|o| o.is_some()).unwrap();
+        assert_eq!(st.transcript[img_idx], "");
+        assert_eq!(st.transcript_kinds[img_idx], TranscriptKind::Story);
+        assert!(st.transcript_images.iter().filter(|o| o.is_some()).count() == 1);
     }
 
     #[test]
