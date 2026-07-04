@@ -121,6 +121,50 @@ pub enum TranscriptElem {
     Image(crate::inline_image::InlineImage),
 }
 
+/// Trim trailing `Text` elements of `elems` so the total char-count of their
+/// text equals `keep` — the element-list counterpart to `strip_read_prompt`
+/// shortening the flat text by a trailing read prompt. Walks from the end,
+/// clearing whole `Text` elements and truncating the boundary one (its `text`
+/// AND its `runs`, via `clamp_runs`) so the concatenation of element text stays
+/// exactly equal to the stripped flat `raw`. `Image` elements carry no text, so
+/// a strip that reaches across one still lands on the preceding text.
+pub(crate) fn trim_elems_to_len(elems: &mut [TranscriptElem], keep: usize) {
+    let total: usize = elems
+        .iter()
+        .map(|e| match e {
+            TranscriptElem::Text { text, .. } => text.chars().count(),
+            TranscriptElem::Image(_) => 0,
+        })
+        .sum();
+    if total <= keep {
+        return;
+    }
+    let mut remove = total - keep;
+    for e in elems.iter_mut().rev() {
+        if remove == 0 {
+            break;
+        }
+        if let TranscriptElem::Text { text, runs } = e {
+            let n = text.chars().count();
+            if n <= remove {
+                remove -= n;
+                text.clear();
+                runs.clear();
+            } else {
+                let keep_here = n - remove;
+                let byte = text
+                    .char_indices()
+                    .nth(keep_here)
+                    .map(|(i, _)| i)
+                    .unwrap_or(text.len());
+                text.truncate(byte);
+                *runs = clamp_runs(std::mem::take(runs), keep_here);
+                remove = 0;
+            }
+        }
+    }
+}
+
 /// Result of one player turn.
 pub struct TurnResult {
     pub transcript: String,
@@ -154,6 +198,11 @@ pub struct TurnResult {
     pub timed_out: bool,
     /// Pre-formatted crash stack-trace lines when the VM faulted this turn.
     pub fault: Option<Vec<String>>,
+    /// Ordered buffer output for this turn (text runs + inline images). Empty
+    /// for the Z-machine path (no images); the Glulx path fills it and the run
+    /// loop pushes from it. When empty, the loop falls back to `transcript` +
+    /// `transcript_runs`.
+    pub transcript_elems: Vec<TranscriptElem>,
 }
 
 /// A running Z-machine game session.
@@ -361,6 +410,7 @@ impl GameSession {
             location_method,
             pending_io,
             timed_out,
+            transcript_elems: Vec::new(),
         }
     }
 }
@@ -858,6 +908,50 @@ mod tests {
         ]);
     }
 
+    fn dummy_inline_image() -> crate::inline_image::InlineImage {
+        crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        }
+    }
+
+    #[test]
+    fn trim_elems_strips_trailing_prompt_from_last_text() {
+        use zvm::screen::ZColour;
+        // raw ends in "\n> " — strip_read_prompt shortens it; the LAST Text
+        // element (and its runs) must be trimmed to match the flat stripped text.
+        let raw = "You see a rock.\n> ";
+        let kept = strip_read_prompt(raw).chars().count();
+        let mut elems = vec![TranscriptElem::Text {
+            text: raw.to_string(),
+            runs: vec![(raw.chars().count(), 0, ZColour::Default, ZColour::Default)],
+        }];
+        trim_elems_to_len(&mut elems, kept);
+        let TranscriptElem::Text { text, runs } = &elems[0] else { panic!("expected Text") };
+        assert_eq!(text, "You see a rock.");
+        assert_eq!(runs.iter().map(|r| r.0).sum::<usize>(), kept);
+    }
+
+    #[test]
+    fn trim_elems_reaches_across_image_to_reach_length() {
+        use zvm::screen::ZColour;
+        // Text("foo\n"), Image, Text(">") — flat text "foo\n>" strips to "foo".
+        // The trim clears the trailing ">" element and reaches back past the
+        // image to trim the "\n" off "foo\n".
+        let mut elems = vec![
+            TranscriptElem::Text { text: "foo\n".into(), runs: vec![(4, 0, ZColour::Default, ZColour::Default)] },
+            TranscriptElem::Image(dummy_inline_image()),
+            TranscriptElem::Text { text: ">".into(), runs: vec![(1, 0, ZColour::Default, ZColour::Default)] },
+        ];
+        trim_elems_to_len(&mut elems, 3);
+        let TranscriptElem::Text { text, .. } = &elems[0] else { panic!("expected Text") };
+        assert_eq!(text, "foo");
+        assert!(matches!(&elems[1], TranscriptElem::Image(_)));
+        let TranscriptElem::Text { text, .. } = &elems[2] else { panic!("expected Text") };
+        assert_eq!(text, "");
+    }
+
     // ── Pure bridge test ──────────────────────────────────────────────────────
 
     #[test]
@@ -878,6 +972,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "look", &first);
         assert_eq!(m.graph.current(), Some(1));
@@ -898,6 +993,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "north", &second);
         assert!(m.graph.room(2).is_some());
@@ -926,6 +1022,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
@@ -949,6 +1046,7 @@ mod tests {
             location_method: method,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
 
         let mut m = Mapper::default();
@@ -988,6 +1086,7 @@ mod tests {
             location_method: Some(LocationMethod::RoomHeading),
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "", &result);
         assert_eq!(m.graph.current(), Some(333));
@@ -1016,6 +1115,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
         assert!(r.info.is_none());
     }
@@ -1037,6 +1137,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         }
     }
 

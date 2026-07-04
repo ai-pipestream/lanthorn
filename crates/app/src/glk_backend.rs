@@ -962,6 +962,46 @@ mod tests {
     }
 
     #[test]
+    fn take_transcript_elems_coalesces_text_and_keeps_image_between() {
+        // Seed the primary buffer log directly (a resolvable Pict needs a Blorb,
+        // which the test harness lacks): Text, Text (different style bits), Image,
+        // Text. take_transcript_elems must coalesce the two leading Text runs into
+        // ONE element carrying TWO run-chunks, keep the Image between, and flush
+        // the trailing Text as a final element.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer);
+        let pid = glk.primary.expect("primary open");
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        let log = &mut glk.buffers.get_mut(&pid).unwrap().log;
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "foo".into() });
+        log.push(BufElem::Text { bits: 0x02, fg: 0, bg: 0, text: "bar".into() });
+        log.push(BufElem::Image(dummy));
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "baz".into() });
+
+        let elems = glk.take_transcript_elems();
+        assert_eq!(elems.len(), 3, "coalesced Text, Image, trailing Text");
+        match &elems[0] {
+            crate::session::TranscriptElem::Text { text, runs } => {
+                assert_eq!(text, "foobar", "the two leading runs coalesce into one element");
+                assert_eq!(runs.len(), 2, "each source run kept as its own chunk, in order");
+                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
+                assert_eq!(runs[1].0, 3);
+                assert_eq!(runs[1].1, 0x02, "second chunk carries the different style bits");
+            }
+            _ => panic!("elems[0] must be Text"),
+        }
+        assert!(matches!(&elems[1], crate::session::TranscriptElem::Image(_)), "image sits between");
+        match &elems[2] {
+            crate::session::TranscriptElem::Text { text, .. } => assert_eq!(text, "baz"),
+            _ => panic!("trailing Text must flush as a final element"),
+        }
+    }
+
+    #[test]
     fn image_draw_to_graphics_window_still_hits_canvas() {
         // A graphics-window draw must NOT push a buffer image elem; it updates
         // a Canvas via the existing graphics path.

@@ -22,7 +22,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
-use crate::session::{clamp_runs, strip_read_prompt, InputKind, TurnResult};
+use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, InputKind, TranscriptElem, TurnResult};
 use zvm::location::LocationMethod;
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
@@ -198,12 +198,29 @@ impl GlulxSession {
     /// result. Shared by `submit`/`submit_key`/`resume_*`.
     fn finish_turn(&mut self) -> TurnResult {
         self.machine.flush();
+        // Drain the primary window's ordered elements (text runs + inline
+        // images). Derive the flat `raw`/`raw_runs` from the Text elements for
+        // the existing consumers (banner-strip, location, tests): the
+        // concatenation of element text equals what the old text-only drain
+        // produced.
+        let mut elems = self.appglk().take_transcript_elems();
+        let mut raw = String::new();
+        let mut raw_runs = Vec::new();
+        for e in &elems {
+            if let TranscriptElem::Text { text, runs } = e {
+                raw.push_str(text);
+                raw_runs.extend(runs.iter().copied());
+            }
+        }
         // Strip the game's trailing read prompt (e.g. a final "\n>") so the app's
         // own bottom input bar is the only ">" shown -- mirroring the Z-machine
-        // path. clamp_runs keeps the style chunks aligned with the shortened text.
-        let (raw, raw_runs) = self.appglk().take_transcript();
+        // path. clamp_runs keeps the style chunks aligned with the shortened text,
+        // and trim_elems_to_len applies the same shortening to the element list so
+        // the ordered elems stay consistent with the flat `transcript`.
         let transcript = strip_read_prompt(&raw).to_owned();
-        let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
+        let kept = transcript.chars().count();
+        let transcript_runs = clamp_runs(raw_runs, kept);
+        trim_elems_to_len(&mut elems, kept);
         self.refresh_screen();
         if let Some(name) = self.appglk().take_room_heading() {
             self.last_room = Some(heading_to_room(&name));
@@ -225,6 +242,7 @@ impl GlulxSession {
             location_method,
             pending_io: None,
             timed_out: false,
+            transcript_elems: elems,
         }
     }
 }

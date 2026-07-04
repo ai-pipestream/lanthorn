@@ -1873,6 +1873,7 @@ fn main() {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         };
         apply_turn(&mut mapper, "", &seed_result);
         let rid = snap_number as mapper::graph::RoomId;
@@ -3125,7 +3126,11 @@ fn main() {
                 let result = session.submit(&cmd);
                 if result.erase_lower { state.mark_screen_clear(); }
                 state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
-                state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+                if result.transcript_elems.is_empty() {
+                    state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+                } else {
+                    app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
+                }
                 apply_turn_events(&mut state, &result);
                 if let Some(note) = &result.info {
                     state.push_transcript(note);
@@ -3289,6 +3294,7 @@ fn main() {
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
+                                        transcript_elems: Vec::new(),
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -3430,6 +3436,7 @@ fn main() {
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
+                                        transcript_elems: Vec::new(),
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -3552,6 +3559,7 @@ fn main() {
                                             location_method: None,
                                             pending_io: None,
                                             timed_out: false,
+                                            transcript_elems: Vec::new(),
                                         };
                                         apply_turn(&mut mapper, "", &restore_result);
                                         state.set_viewed_layer(None);
@@ -3621,6 +3629,7 @@ fn main() {
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
+                                        transcript_elems: Vec::new(),
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
                                     state.set_viewed_layer(None);
@@ -3923,6 +3932,7 @@ fn dispatch_slash_outcome(
                                             location_method: None,
                                             pending_io: None,
                                             timed_out: false,
+                                            transcript_elems: Vec::new(),
                                         };
                                         apply_turn(mapper, "", &restore_result);
                                         state.set_viewed_layer(None);
@@ -4140,6 +4150,7 @@ fn reset_game(
                     location_method: None,
                     pending_io: None,
                     timed_out: false,
+                    transcript_elems: Vec::new(),
                 };
                 apply_turn(mapper, "", &seed_result);
                 let rid = snap_number as mapper::graph::RoomId;
@@ -4918,6 +4929,7 @@ fn apply_launch_resume(
                     location_method: None,
                     pending_io: None,
                     timed_out: false,
+                    transcript_elems: Vec::new(),
                 };
                 apply_turn(mapper, "", &restore_result);
                 state.set_viewed_layer(None);
@@ -5043,7 +5055,11 @@ fn apply_game_driven_result(
     map_area: Rect,
 ) -> bool {
     if result.erase_lower { state.mark_screen_clear(); }
-    state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+    if result.transcript_elems.is_empty() {
+        state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+    } else {
+        app::state::apply_transcript_elems(state, &result.transcript_elems);
+    }
     apply_turn_events(state, result);
     if let Some(note) = &result.info {
         state.push_transcript(note);
@@ -6317,6 +6333,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            transcript_elems: Vec::new(),
         }
     }
 

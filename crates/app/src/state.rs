@@ -196,6 +196,22 @@ pub enum TranscriptKind {
     Warning,
 }
 
+/// Push a turn's ordered elements into the transcript: text runs via
+/// `push_transcript_runs`, images via `push_transcript_image`, in order. The
+/// Glulx run-loop path uses this when a `TurnResult` carries interleaved inline
+/// images; the plain-text path stays on `push_transcript_runs`.
+pub fn apply_transcript_elems(state: &mut AppState, elems: &[crate::session::TranscriptElem]) {
+    use crate::session::TranscriptElem;
+    for e in elems {
+        match e {
+            TranscriptElem::Text { text, runs } => {
+                state.push_transcript_runs(text, TranscriptKind::Story, runs);
+            }
+            TranscriptElem::Image(img) => state.push_transcript_image(img.clone()),
+        }
+    }
+}
+
 /// A run of characters in a transcript line carrying Z-machine text-style bits and colour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StyleRun {
@@ -1834,6 +1850,26 @@ mod tests {
     fn appstate_history_defaults_empty() {
         let s = AppState::default();
         assert!(s.history.is_empty(), "history starts empty");
+    }
+
+    #[test]
+    fn turn_elems_interleave_text_and_image_in_transcript() {
+        use crate::session::TranscriptElem;
+        let mut st = AppState::default();
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        let elems = vec![
+            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default)] },
+            TranscriptElem::Image(dummy),
+            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default)] },
+        ];
+        apply_transcript_elems(&mut st, &elems);
+        assert_eq!(st.transcript, vec!["a".to_string(), "".to_string(), "b".to_string()]);
+        assert!(st.transcript_images[1].is_some());
+        assert!(st.transcript_images[0].is_none() && st.transcript_images[2].is_none());
     }
 
     // ── Command history (feature D) ────────────────────────────────────────────
