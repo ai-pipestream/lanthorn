@@ -294,6 +294,25 @@ impl Engine for GlulxSession {
         strip_read_prompt(&self.appglk().take_transcript().0).to_owned()
     }
 
+    fn take_transcript_elems(&mut self) -> Vec<TranscriptElem> {
+        // Ordered banner/startup drain: text runs + any inline images the game
+        // drew before the first turn (title/cover art). Mirrors `finish_turn`'s
+        // trailing-read-prompt handling so the returned elements stay consistent
+        // with the flat `take_transcript()` string: the concatenation of the
+        // returned `Text` equals `strip_read_prompt(raw)`.
+        self.machine.flush();
+        let mut elems = self.appglk().take_transcript_elems();
+        let mut raw = String::new();
+        for e in &elems {
+            if let TranscriptElem::Text { text, .. } = e {
+                raw.push_str(text);
+            }
+        }
+        let kept = strip_read_prompt(&raw).chars().count();
+        trim_elems_to_len(&mut elems, kept);
+        elems
+    }
+
     fn pending_input(&self) -> InputKind {
         self.pending
     }
@@ -698,6 +717,49 @@ mod tests {
         assert_eq!(sess.take_transcript(), "Hi", "banner drops the trailing prompt");
         let r = sess.submit("x");
         assert_eq!(r.transcript, "done", "turn output drops the trailing prompt");
+    }
+
+    #[test]
+    fn banner_take_transcript_elems_keeps_startup_image_and_strips_prompt() {
+        // A game that draws a startup/cover image before the first turn: the
+        // banner "Hi\n> " lands in the primary buffer, then an inline image is
+        // drawn (seeded directly, as a resolvable Pict needs a Blorb the harness
+        // lacks). `take_transcript_elems` must return the image in order AND strip
+        // the trailing read prompt from the Text element — mirroring the
+        // string-only `take_transcript` (which returns "Hi").
+        use E::*;
+        let mut body = open_buffer_prelude();
+        for c in b"Hi\n> " {
+            body.extend(streamchar(*c));
+        }
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (banner)
+        let image = image_for(body, 1);
+
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, (1, 1), None).expect("new");
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        sess.appglk().test_push_primary_image(dummy);
+
+        let elems = sess.take_transcript_elems();
+        assert_eq!(elems.len(), 2, "one Text element + the startup image");
+        match &elems[0] {
+            TranscriptElem::Text { text, .. } => {
+                assert_eq!(text, "Hi", "trailing read prompt stripped from the Text element")
+            }
+            _ => panic!("elems[0] must be Text"),
+        }
+        assert!(
+            matches!(&elems[1], TranscriptElem::Image(_)),
+            "the startup image survives in order",
+        );
     }
 
     #[test]

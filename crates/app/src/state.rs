@@ -1682,6 +1682,20 @@ impl AppState {
         self.transcript_images.push(Some(img));
     }
 
+    /// Reset the in-memory transcript sidecars (`transcript_styles`,
+    /// `transcript_images`) to match a freshly reassigned `transcript`. Call this
+    /// after replacing `transcript` wholesale (load / restore / reset / history
+    /// jump). These sidecars carry no persisted data — the `.babelmap` archive
+    /// stores only lines/kinds/runs (see `archive::TranscriptData`) — so the
+    /// correct post-reassignment state is all-`None`, sized to the new transcript.
+    /// A plain `resize` cannot do this: it only truncates the tail, leaving stale
+    /// `Some(..)` at retained head indices (e.g. an inline image a Glulx game drew
+    /// before the load, now indexing a different, shorter transcript).
+    pub fn reset_transcript_sidecars(&mut self) {
+        self.transcript_styles = vec![None; self.transcript.len()];
+        self.transcript_images = vec![None; self.transcript.len()];
+    }
+
     /// Set the transient status message (displayed on the status line until cleared).
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_msg = Some(msg.into());
@@ -2058,6 +2072,35 @@ mod tests {
         assert_eq!(st.transcript[img_idx], "");
         assert_eq!(st.transcript_kinds[img_idx], TranscriptKind::Story);
         assert!(st.transcript_images.iter().filter(|o| o.is_some()).count() == 1);
+    }
+
+    #[test]
+    fn reset_transcript_sidecars_clears_stale_head_entries() {
+        // Reproduce the load/restore/reset bug: a Glulx game drew an inline image
+        // (sidecar holds `Some` at a head index), then the transcript is replaced
+        // wholesale with a SHORTER one. `resize` alone would keep the stale `Some`
+        // at index 0 indexing the wrong line; `reset_transcript_sidecars` must wipe
+        // it and length-match the new transcript.
+        let mut s = AppState::default();
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        s.push_transcript_image(dummy); // transcript_images[0] = Some, len 1
+        s.push_transcript("a\nb"); // grow to len 3
+        assert!(s.transcript_images[0].is_some(), "precondition: stale image present");
+
+        // Wholesale reassign to a shorter transcript, then apply the fix.
+        s.transcript = vec!["only".into()];
+        s.reset_transcript_sidecars();
+
+        assert_eq!(s.transcript_images.len(), s.transcript.len(), "length matches");
+        assert_eq!(s.transcript_styles.len(), s.transcript.len(), "length matches");
+        assert!(
+            s.transcript_images.iter().all(Option::is_none),
+            "no stale Some survives within range",
+        );
     }
 
     #[test]

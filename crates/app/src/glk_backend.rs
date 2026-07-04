@@ -256,6 +256,19 @@ impl AppGlk {
         out
     }
 
+    /// Test seam: append an inline image to the primary buffer's undrained log,
+    /// as a game's `glk_image_draw` into the buffer window would (a resolvable
+    /// Pict needs a Blorb the unit harness lacks). Lets a `GlulxSession` test
+    /// exercise the banner/startup image path without a Blorb.
+    #[cfg(test)]
+    pub(crate) fn test_push_primary_image(&mut self, img: crate::inline_image::InlineImage) {
+        if let Some(pid) = self.primary {
+            if let Some(buf) = self.buffers.get_mut(&pid) {
+                buf.log.push(BufElem::Image(img));
+            }
+        }
+    }
+
     /// Feed one primary-window output run into the room-heading detector.
     ///
     /// The Inform 7 room heading is a `Subheader` run printed on its OWN line, so

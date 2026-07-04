@@ -1469,6 +1469,27 @@ mod tests {
     }
 
     #[test]
+    fn zmachine_take_transcript_elems_is_empty() {
+        // The Z-machine has no inline images, so it keeps the trait DEFAULT:
+        // `take_transcript_elems` returns empty (draining nothing), and callers
+        // fall back to the flat `take_transcript` string path. This guarantees
+        // the banner/startup dispatch is byte-identical to the pre-feature path.
+        let mut sess = GameSession::new(read_char_story_v5(), true, false, None).expect("new");
+        assert!(
+            sess.take_transcript_elems().is_empty(),
+            "zvm uses the default empty elems; the string path stays authoritative",
+        );
+        // The default elems method drained nothing: the banner string is identical
+        // to a fresh session that never called take_transcript_elems.
+        let mut fresh = GameSession::new(read_char_story_v5(), true, false, None).expect("new");
+        assert_eq!(
+            sess.take_transcript(),
+            fresh.take_transcript(),
+            "take_transcript_elems must not consume the banner for the Z-machine",
+        );
+    }
+
+    #[test]
     fn engine_screen_v3_is_classic_status() {
         let sess = GameSession::new(read_char_story_v3(), true, false, None).expect("new v3");
         let model = sess.screen();

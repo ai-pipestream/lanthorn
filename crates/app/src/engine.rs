@@ -358,6 +358,15 @@ pub trait Engine {
     fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult>;
     /// Drain the transcript accumulated since the last drain.
     fn take_transcript(&mut self) -> String;
+    /// Drain the accumulated transcript as ordered elements (text runs + inline
+    /// images) — the element counterpart to `take_transcript`, mirroring the
+    /// per-turn `TurnResult::transcript_elems`. The DEFAULT returns empty, meaning
+    /// "no ordered elements; use the flat `take_transcript` string path" — the
+    /// Z-machine has no inline images, so it keeps the default and drains nothing
+    /// here. `GlulxSession` overrides it so banner/startup images survive.
+    fn take_transcript_elems(&mut self) -> Vec<crate::session::TranscriptElem> {
+        Vec::new()
+    }
     /// Which kind of input the VM is currently waiting for.
     fn pending_input(&self) -> InputKind;
     /// Resume after the host performed an in-game SAVE.

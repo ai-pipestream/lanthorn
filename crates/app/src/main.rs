@@ -1834,8 +1834,22 @@ fn main() {
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
 
-    // Push the game's opening banner and capture the title from it.
-    let banner = session.take_transcript();
+    // Push the game's opening banner and capture the title from it. Glulx returns
+    // ordered elements (text + any startup/cover images); the Z-machine returns
+    // empty here and falls back to the flat string path. Either way `banner` is the
+    // banner text for title extraction (the elems' concatenated Text equals it).
+    let banner_elems = session.take_transcript_elems();
+    let banner: String = if banner_elems.is_empty() {
+        session.take_transcript()
+    } else {
+        banner_elems
+            .iter()
+            .filter_map(|e| match e {
+                app::session::TranscriptElem::Text { text, .. } => Some(text.as_str()),
+                app::session::TranscriptElem::Image(_) => None,
+            })
+            .collect()
+    };
     let banner_title = app::session::title_from_banner(&banner);
     state.title = app::session::resolve_title(None, &ifid, banner_title.as_deref(), &story_path);
     state.ifid = ifid.clone();
@@ -1844,7 +1858,11 @@ fn main() {
     // initial resolve above is global-only (ifid wasn't set yet). On a per-game
     // parse error the global look already set above stands.
     let _ = app::reload::reload_style(&mut state);
-    state.push_transcript(&banner);
+    if banner_elems.is_empty() {
+        state.push_transcript(&banner);
+    } else {
+        app::state::apply_transcript_elems(&mut state, &banner_elems);
+    }
 
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
     if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(&cli)) {
@@ -1896,6 +1914,7 @@ fn main() {
         state.clear_anchor = None;
         state.transcript_kinds = kinds;
         state.transcript_runs = runs;
+        state.reset_transcript_sidecars();
     }
     if !startup_history.is_empty() {
         state.history = startup_history;
@@ -3275,6 +3294,7 @@ fn main() {
                                 state.clear_anchor = None;
                                 state.transcript_kinds = ac.transcript_kinds;
                                 state.transcript_runs = ac.transcript_runs;
+                                state.reset_transcript_sidecars();
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
@@ -3534,6 +3554,7 @@ fn main() {
                                     state.clear_anchor = None;
                                     state.transcript_kinds = ac.transcript_kinds;
                                     state.transcript_runs = ac.transcript_runs;
+                                    state.reset_transcript_sidecars();
                                     state.history = ac.history;
                                     // Named-slot archives carry no command history; only
                                     // adopt it when present so a slot load doesn't wipe it.
@@ -3611,6 +3632,7 @@ fn main() {
                                 // History replay carries no style runs; keep the
                                 // parallel vec length-synced (unstyled rows).
                                 state.transcript_runs = vec![Vec::new(); state.transcript.len()];
+                                state.reset_transcript_sidecars();
                                 state.turns = plan.turn;
                                 state.graph_gen = state.graph_gen.wrapping_add(1);
                                 // Re-observe current location (mirror the restore path).
@@ -3912,6 +3934,7 @@ fn dispatch_slash_outcome(
                                     state.clear_anchor = None;
                                     state.transcript_kinds = ac.transcript_kinds;
                                     state.transcript_runs = ac.transcript_runs;
+                                    state.reset_transcript_sidecars();
                                     state.history = ac.history;
                                     if !ac.command_history.is_empty() {
                                         state.command_history = ac.command_history;
@@ -4133,8 +4156,15 @@ fn reset_game(
             if clear_map {
                 *mapper = Mapper::default();
             }
-            let banner = session.take_transcript();
-            state.push_transcript(&banner);
+            // Glulx returns ordered elements (text + any startup images); the
+            // Z-machine returns empty and uses the flat string path.
+            let banner_elems = session.take_transcript_elems();
+            if banner_elems.is_empty() {
+                let banner = session.take_transcript();
+                state.push_transcript(&banner);
+            } else {
+                app::state::apply_transcript_elems(state, &banner_elems);
+            }
             if let Some(snap) = start_loc {
                 let snap_number = snap.number;
                 let seed_result = TurnResult {
@@ -4912,6 +4942,7 @@ fn apply_launch_resume(
             // The launch-resume stash carries no style runs; keep the parallel
             // vec length-synced (unstyled rows).
             state.transcript_runs = vec![Vec::new(); state.transcript.len()];
+            state.reset_transcript_sidecars();
             // Re-observe current location (same as Action::RestoreGame).
             let loc = session.current_location();
             if let Some(snap) = loc {
