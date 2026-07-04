@@ -1459,6 +1459,20 @@ impl AppState {
         }
     }
 
+    /// Stop all playing audio and clear the per-game sound-tracking maps. Call on
+    /// game restart and when sound is turned off, so a finished/blorb SoundId from a
+    /// prior game can never misfire a finish-routine or Glk sound-notify into a new
+    /// game state, and no sink keeps playing across a restart.
+    pub fn reset_sound_sidecars(&mut self) {
+        if let Some(b) = self.audio.as_mut() {
+            b.stop_all();
+        }
+        self.sound_ids.clear();
+        self.sound_routines.clear();
+        self.glulx_channels.clear();
+        self.glulx_sound_notify.clear();
+    }
+
     /// Set the transcript scroll target to `target`. When animation is enabled
     /// and `scroll_ms > 0`, arm (or retarget) a smooth-scroll animation from the
     /// current displayed offset toward `target`; otherwise jump instantly and
@@ -1941,6 +1955,20 @@ mod tests {
     fn appstate_history_defaults_empty() {
         let s = AppState::default();
         assert!(s.history.is_empty(), "history starts empty");
+    }
+
+    #[test]
+    fn reset_sound_sidecars_clears_tracking_maps() {
+        let mut state = AppState::default();
+        state.sound_ids.insert(3, 1);
+        state.sound_routines.insert(1, 0x1234);
+        state.glulx_channels.insert(1, 5);
+        state.glulx_sound_notify.insert(5, (7, 42));
+        state.reset_sound_sidecars();
+        assert!(state.sound_ids.is_empty());
+        assert!(state.sound_routines.is_empty());
+        assert!(state.glulx_channels.is_empty());
+        assert!(state.glulx_sound_notify.is_empty());
     }
 
     #[test]

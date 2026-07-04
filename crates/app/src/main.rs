@@ -4168,6 +4168,7 @@ fn reset_game(
     match rebuilt {
         Ok(()) => {
             let start_loc = session.current_location();
+            state.reset_sound_sidecars();
             state.turns = 0;
             state.vm_halted = false;
             state.input.clear();

@@ -2064,7 +2064,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.config.enable_sound = !state.config.enable_sound;
             state.set_status(if state.config.enable_sound { "sound on" } else { "sound off" });
             if !state.config.enable_sound {
-                if let Some(b) = state.audio.as_mut() { b.stop_all(); }
+                state.reset_sound_sidecars();
             } else if state.audio.is_none() {
                 state.audio = Some(audio::AudioBackend::new(state.config.volume));
             }
@@ -3011,9 +3011,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 state.config = clone_config(&cs.working);
                 if let Some(b) = state.audio.as_mut() {
                     b.set_volume(state.config.volume);
-                    if !state.config.enable_sound { b.stop_all(); }
                 } else if state.config.enable_sound {
                     state.audio = Some(audio::AudioBackend::new(state.config.volume));
+                }
+                if !state.config.enable_sound {
+                    state.reset_sound_sidecars();
                 }
                 // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
