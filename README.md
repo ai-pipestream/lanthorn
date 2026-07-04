@@ -68,6 +68,9 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is also supported.
 - **Glulx sound** — Glk sound channels (`glk_schannel_*`) play a blorb's
   AIFF/OGG/MOD `Snd ` resources, with per-channel volume and sound-finished
   (notify) events, complementing the Z-machine `@sound_effect` support above.
+  Sound always plays on the local device babelmap runs on; see
+  [`docs/remote-sound.md`](docs/remote-sound.md) for routing audio from a
+  remote/SSH session back to your machine.
 - **Timed / interrupt input** — v4+ `read` and `read_char` `time`+`routine`
   operands are honored: while waiting for input the game's interrupt routine is
   called every N tenths of a second (real-time clocks, countdowns — e.g. Border
