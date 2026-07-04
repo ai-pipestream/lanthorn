@@ -15,8 +15,35 @@ use crate::state::{AppState, Focus, StyleRun, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
-/// One wrapped display row: `(text, kind, base style, per-run style spans)`.
-type WrappedRow = (String, TranscriptKind, Style, Vec<StyleRun>);
+/// One wrapped display row: its `text`, `kind`, resolved base `style`, per-run
+/// style `runs`, and — for a row that is part of an inline-image band — the
+/// `band` geometry to blit (Task 8). Text rows carry `band: None`.
+#[derive(Clone)]
+pub(crate) struct WrappedRow {
+    pub text: String,
+    pub kind: TranscriptKind,
+    pub style: Style,
+    pub runs: Vec<StyleRun>,
+    // Consumed by the Task 8 render path; unread in the current text-only build.
+    #[allow(dead_code)]
+    pub band: Option<ImageBand>,
+}
+
+/// Geometry for one terminal row of an inline-image band: the source `image`,
+/// the band's total `cols`x`rows` cell footprint, this row's index `row` in
+/// `0..rows`, and the horizontal cell offset `x_off` (nonzero for margin-right).
+///
+/// The fields are read by the Task 8 blitter; until then they are unread in the
+/// non-test build (bands are only constructed under `images_enabled`).
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct ImageBand {
+    pub image: crate::inline_image::InlineImage,
+    pub cols: u16,
+    pub rows: u16,
+    pub row: u16,
+    pub x_off: u16,
+}
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 //
@@ -342,12 +369,37 @@ pub(crate) fn wrap_lines_kinded(
     kinds: &[TranscriptKind],
     styles: &[Style],
     runs: &[Vec<StyleRun>],
+    images: &[Option<crate::inline_image::InlineImage>],
+    char_px: (u16, u16),
+    images_enabled: bool,
     width: u16,
-) -> Vec<(String, TranscriptKind, Style, Vec<StyleRun>)> {
+) -> Vec<WrappedRow> {
     transcript
         .iter()
         .enumerate()
         .flat_map(|(i, line)| {
+            // An image unit expands into an N-row band (or zero rows when images
+            // are disabled). `images.get(i)` yields `None` for a plain text line
+            // (and for any `images` slice shorter than `transcript`).
+            if let Some(Some(img)) = images.get(i) {
+                if !images_enabled {
+                    return Vec::new();
+                }
+                let (cols, rows) = img.fitted_cells(width, char_px);
+                let x_off = match img.align {
+                    crate::inline_image::ImageAlign::MarginRight => width.saturating_sub(cols),
+                    _ => 0,
+                };
+                return (0..rows)
+                    .map(|r| WrappedRow {
+                        text: String::new(),
+                        kind: TranscriptKind::Story,
+                        style: Style::default(),
+                        runs: Vec::new(),
+                        band: Some(ImageBand { image: img.clone(), cols, rows, row: r, x_off }),
+                    })
+                    .collect();
+            }
             let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
             let style = styles.get(i).copied().unwrap_or_default();
             let line_runs = runs.get(i);
@@ -355,19 +407,25 @@ pub(crate) fn wrap_lines_kinded(
                 TranscriptKind::Meta | TranscriptKind::Warning => width.saturating_sub(META_GUTTER),
                 TranscriptKind::Story | TranscriptKind::Input => width,
             };
-            let out: Vec<(String, TranscriptKind, Style, Vec<StyleRun>)> = match kind {
+            let out: Vec<WrappedRow> = match kind {
                 // Meta/Warning are app-generated (always unstyled) and use hanging
                 // wrap, whose indentation shifts offsets — emit empty runs.
                 TranscriptKind::Meta | TranscriptKind::Warning => {
                     wrap_line_hanging(line, w, leading_spaces(line).max(2))
                         .into_iter()
-                        .map(|row| (row, kind, style, Vec::new()))
+                        .map(|row| WrappedRow { text: row, kind, style, runs: Vec::new(), band: None })
                         .collect()
                 }
                 TranscriptKind::Story | TranscriptKind::Input => {
                     wrap_line_ranges(line, w)
                         .into_iter()
-                        .map(|(row, start, end)| (row, kind, style, rebase_runs(line_runs, start, end)))
+                        .map(|(row, start, end)| WrappedRow {
+                            text: row,
+                            kind,
+                            style,
+                            runs: rebase_runs(line_runs, start, end),
+                            band: None,
+                        })
                         .collect()
                 }
             };
@@ -387,6 +445,9 @@ pub(crate) fn visible_wrapped_lines_kinded(
     kinds: &[TranscriptKind],
     styles: &[Style],
     runs: &[Vec<StyleRun>],
+    images: &[Option<crate::inline_image::InlineImage>],
+    char_px: (u16, u16),
+    images_enabled: bool,
     rows: usize,
     scroll: u16,
     width: u16,
@@ -395,7 +456,7 @@ pub(crate) fn visible_wrapped_lines_kinded(
     if rows == 0 || transcript.is_empty() {
         return (Vec::new(), 0);
     }
-    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, width);
+    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, images, char_px, images_enabled, width);
     let n = display_rows.len();
     // Screen-clear top-anchor: when the view is at the bottom (scroll == 0) and
     // the post-clear content still fits the viewport, pin those lines to the TOP
@@ -414,6 +475,9 @@ pub(crate) fn visible_wrapped_lines_kinded(
                     &kinds[..a.min(kinds.len())],
                     &styles[..a.min(styles.len())],
                     &runs[..a.min(runs.len())],
+                    &images[..a.min(images.len())],
+                    char_px,
+                    images_enabled,
                     width,
                 )
                 .len();
@@ -1074,11 +1138,17 @@ fn render_middle(
     let clear_anchor_filtered = state
         .clear_anchor
         .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
+    // Image bands stay unwired here: Task 8 supplies the real per-line images,
+    // cell pixel size, and enable flag. Passing empty/disabled preserves the
+    // current text-only behavior (no band rows produced).
     let (lines, total_rows) = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
         &filtered_styles,
         &filtered_runs,
+        &[],
+        (1, 1),
+        false,
         transcript_rows,
         effective_scroll,
         body_area.width,
@@ -1088,7 +1158,7 @@ fn render_middle(
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
 
-    for (i, (line, kind, style, runs)) in lines.iter().enumerate() {
+    for (i, wr) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
@@ -1096,7 +1166,7 @@ fn render_middle(
         // Meta/Warning reserve the 2-col gutter and draw their marker glyph;
         // Story/Input draw flush left. The text style was resolved per logical
         // line above and is carried on every wrapped row.
-        let (gutter, marker_style) = match kind {
+        let (gutter, marker_style) = match wr.kind {
             TranscriptKind::Meta    => (Some(state.symbols.meta_gutter), state.colors.meta_marker),
             TranscriptKind::Warning => (Some(state.symbols.warning_gutter), state.colors.warning_marker),
             TranscriptKind::Story | TranscriptKind::Input => (None, Style::default()),
@@ -1108,7 +1178,7 @@ fn render_middle(
             body_area.x
         };
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
-        draw_str_runs(buf, text_x, row_y, line, *style, runs, search, body_area, state.config.honor_game_colours.then_some(&state.colors));
+        draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, state.config.honor_game_colours.then_some(&state.colors));
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
@@ -1152,12 +1222,73 @@ mod tests {
         let line = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
         // Input: full width 8 (no gutter) → unsplit.
-        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], 8);
-        assert_eq!(i.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], &[], (1, 1), false, 8);
+        assert_eq!(i.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
         // Warning: wraps to width-2 = 6 like Meta; continuation gets 2-space
         // hanging indent (leading_spaces("abcdefgh")=0, .max(2)=2).
-        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], 8);
-        assert_eq!(w.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
+        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], &[], (1, 1), false, 8);
+        assert_eq!(w.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
+    }
+
+    // ── Inline-image band wrapping ────────────────────────────────────────────
+
+    fn dummy_img(w: u32, h: u32, align: crate::inline_image::ImageAlign) -> crate::inline_image::InlineImage {
+        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None }
+    }
+
+    #[test]
+    fn image_unit_expands_to_band_rows() {
+        // Two text lines with an image unit between; image 16x24 px, cell 8x8 →
+        // 2 cols x 3 rows band.
+        let transcript = vec!["hi".to_string(), String::new(), "bye".to_string()];
+        let kinds = vec![TranscriptKind::Story; 3];
+        let styles = vec![Style::default(); 3];
+        let runs = vec![Vec::new(); 3];
+        let images = vec![None, Some(dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp)), None];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        // 1 (hi) + 3 (band) + 1 (bye) = 5 rows.
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].band.is_none(), true);
+        assert_eq!(rows[1].band.as_ref().unwrap().rows, 3);
+        assert_eq!(rows[1].band.as_ref().unwrap().row, 0);
+        assert_eq!(rows[3].band.as_ref().unwrap().row, 2);
+        assert_eq!(rows[4].text, "bye");
+    }
+
+    #[test]
+    fn image_unit_emits_zero_rows_when_disabled() {
+        let transcript = vec!["hi".to_string(), String::new()];
+        let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![Vec::new(); 2];
+        let images = vec![None, Some(dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp))];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), false, 40);
+        assert_eq!(rows.len(), 1); // only "hi"
+    }
+
+    #[test]
+    fn band_reflows_narrower_on_smaller_width() {
+        // 800x400 px, cell 8x8: width 40 → 40x20; width 20 → 20x10.
+        let transcript = vec![String::new()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![Vec::new()];
+        let images = vec![Some(dummy_img(800, 400, crate::inline_image::ImageAlign::InlineUp))];
+        let wide = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        let narrow = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 20);
+        assert_eq!(wide.len(), 20);
+        assert_eq!(narrow.len(), 10);
+    }
+
+    #[test]
+    fn margin_right_sets_x_offset() {
+        let transcript = vec![String::new()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![Vec::new()];
+        let images = vec![Some(dummy_img(16, 8, crate::inline_image::ImageAlign::MarginRight))]; // 2x1 cells
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        assert_eq!(rows[0].band.as_ref().unwrap().x_off, 38); // 40 - 2
     }
 
     fn fields_score() -> StatusFields {
@@ -1322,10 +1453,10 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0 }]]; // bold "BBBBB"
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, 5);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], (1, 1), false, 5);
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
-        assert!(out[0].3.is_empty());
-        assert_eq!(out[1].3, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0 }]);
+        assert!(out[0].runs.is_empty());
+        assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0 }]);
     }
 
     #[test]
@@ -1370,8 +1501,8 @@ mod tests {
         let kinds = vec![TranscriptKind::Story; 2];
         let styles = vec![Style::default(); 2];
         // width 5: "hello" + "world" + "test" + "short"
-        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], 5);
-        let rows: Vec<&str> = result.iter().map(|(s, _, _, _)| s.as_str()).collect();
+        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], &[], (1, 1), false, 5);
+        let rows: Vec<&str> = result.iter().map(|wr| wr.text.as_str()).collect();
         assert_eq!(rows, vec!["hello", "world", "test", "short"]);
     }
 
@@ -1382,11 +1513,11 @@ mod tests {
         // .max(2)=2).
         let transcript = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
-        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], 8);
-        assert_eq!(m.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
-        assert!(m.iter().all(|(_, k, _, _)| matches!(k, TranscriptKind::Meta)));
-        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], 8);
-        assert_eq!(s.iter().map(|(s, _, _, _)| s.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
+        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], &[], (1, 1), false, 8);
+        assert_eq!(m.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
+        assert!(m.iter().all(|wr| matches!(wr.kind, TranscriptKind::Meta)));
+        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], &[], (1, 1), false, 8);
+        assert_eq!(s.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
     }
 
     #[test]
@@ -1395,9 +1526,9 @@ mod tests {
         // One logical line that wraps to 3 rows; its style must appear on all rows.
         let transcript = vec!["alpha beta gamma".to_string()];
         let styles = [Style::new().fg(Color::Magenta)];
-        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], 5);
+        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], &[], (1, 1), false, 5);
         assert!(rows.len() >= 3, "expected wrap to >= 3 rows, got {}", rows.len());
-        assert!(rows.iter().all(|(_, _, s, _)| s.fg == Some(Color::Magenta)),
+        assert!(rows.iter().all(|wr| wr.style.fg == Some(Color::Magenta)),
             "every wrapped row must carry the logical line's style");
     }
 
@@ -1407,10 +1538,10 @@ mod tests {
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
         let styles = vec![Style::default(); 3];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, None);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
         assert_eq!(vis.len(), 3);
         assert_eq!(total, 3, "total wrapped rows reported");
-        assert_eq!(vis[2].0, "ghi");
+        assert_eq!(vis[2].text, "ghi");
     }
 
     #[test]
@@ -1420,12 +1551,12 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 1, 5, None);
-        assert_eq!(vis[0].0, "hello");
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 1, 5, None);
+        assert_eq!(vis[0].text, "hello");
         assert_eq!(total, 2, "both wrapped rows counted");
         // scroll=0: end=2, start=1 → ["world"]
-        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 1, 0, 5, None);
-        assert_eq!(vis2[0].0, "world");
+        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 0, 5, None);
+        assert_eq!(vis2[0].text, "world");
     }
 
     #[test]
@@ -1435,11 +1566,11 @@ mod tests {
         let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 999, 10, None);
+        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 999, 10, None);
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 3, "over-scroll still fills the viewport");
-        assert_eq!(vis[0].0, "L0", "top line stays at the top");
-        assert_eq!(vis[2].0, "L2");
+        assert_eq!(vis[0].text, "L0", "top line stays at the top");
+        assert_eq!(vis[2].text, "L2");
     }
 
     #[test]
@@ -1457,27 +1588,27 @@ mod tests {
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
         let (vis, total) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, Some(3));
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, Some(3));
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 2, "only post-clear lines returned (top-anchored)");
-        assert_eq!(vis[0].0, "L3");
-        assert_eq!(vis[1].0, "L4");
+        assert_eq!(vis[0].text, "L3");
+        assert_eq!(vis[1].text, "L4");
         // No anchor → full viewport, bottom-stick (history stays in view).
         let (vis2, _) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, None);
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
         assert_eq!(vis2.len(), 3);
-        assert_eq!(vis2[0].0, "L2", "bottom-stick pulls in the pre-clear line");
+        assert_eq!(vis2[0].text, "L2", "bottom-stick pulls in the pre-clear line");
         // Scrolled up (scroll>0): anchor ignored so history is reachable.
         let (vis3, _) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 1, 10, Some(3));
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 1, 10, Some(3));
         assert_eq!(vis3.len(), 3, "scrolled up ignores the clear anchor");
-        assert_eq!(vis3[2].0, "L3");
+        assert_eq!(vis3[2].text, "L3");
         // Once post-clear content overflows the viewport, top-anchor stops
         // triggering and normal bottom-stick resumes (anchor at 0, 5 lines > 3).
         let (vis4, _) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], 3, 0, 10, Some(0));
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, Some(0));
         assert_eq!(vis4.len(), 3);
-        assert_eq!(vis4[2].0, "L4", "overflow → bottom-stick");
+        assert_eq!(vis4[2].text, "L4", "overflow → bottom-stick");
     }
 
     // ── Render tests: transcript + input rows (no Machine) ───────────────────
