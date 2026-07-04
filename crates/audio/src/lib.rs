@@ -210,10 +210,29 @@ fn repeat_plan(repeats: u8) -> (bool, u8) {
 
 // ── Real backend (playback feature on) ────────────────────────────────────────
 
+/// Per-sample volume: either the Z-machine 1..=8 scale (`0`/`255` = full) or a
+/// linear pre-master gain fraction (the Glk channel model). Stored per playing
+/// sample so a later master-volume change re-applies the correct formula.
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
+#[derive(Clone, Copy)]
+enum SampleVol {
+    Z(u8),
+    Lin(f32),
+}
+
+/// Final pre-output gain for a sample: `master/100` times the sample's own level.
+#[cfg_attr(not(feature = "playback"), allow(dead_code))]
+fn vol_gain(master: u8, v: SampleVol) -> f32 {
+    match v {
+        SampleVol::Z(z) => gain(master, z),
+        SampleVol::Lin(f) => (master.min(100) as f32 / 100.0) * f.max(0.0),
+    }
+}
+
 #[cfg(feature = "playback")]
 pub struct AudioBackend {
     stream: Option<(rodio::OutputStream, rodio::OutputStreamHandle)>,
-    samples: std::collections::HashMap<SoundId, (rodio::Sink, u8)>,
+    samples: std::collections::HashMap<SoundId, (rodio::Sink, SampleVol)>,
     tones: Vec<(rodio::Sink, u8)>,
     next_id: SoundId,
     master: u8,
@@ -253,15 +272,13 @@ impl AudioBackend {
         self.tones.push((sink, z_volume));
     }
 
-    /// Decode `bytes` per `format`, play on a fresh sink at gain(master, z_volume),
-    /// looping per `repeats` (see `repeat_plan`: 255 = forever, 0/omitted = once).
-    /// Returns a SoundId to `stop`/track.
-    /// Returns None if there is no device, the format is unsupported, or decode fails.
-    pub fn play_sample(&mut self, bytes: &[u8], format: SoundFormat, z_volume: u8, repeats: u8) -> Option<SoundId> {
+    /// Build a sink that will play `bytes` (decoded per `format`) `repeats` times.
+    /// Volume is NOT set here — the caller applies it. Returns None if there is
+    /// no device, the format is unsupported, or decode fails.
+    fn build_sample_sink(&self, bytes: &[u8], format: SoundFormat, repeats: u8) -> Option<rodio::Sink> {
         use rodio::Source;
         let (_, handle) = self.stream.as_ref()?;
         let sink = rodio::Sink::try_new(handle).ok()?;
-        sink.set_volume(gain(self.master, z_volume));
         let (forever, count) = repeat_plan(repeats);
         match format {
             SoundFormat::Aiff => {
@@ -299,10 +316,39 @@ impl AudioBackend {
                 }
             }
         }
+        Some(sink)
+    }
+
+    /// Decode `bytes` per `format`, play on a fresh sink at gain(master, z_volume),
+    /// looping per `repeats` (see `repeat_plan`: 255 = forever, 0/omitted = once).
+    /// Returns a SoundId to `stop`/track.
+    /// Returns None if there is no device, the format is unsupported, or decode fails.
+    pub fn play_sample(&mut self, bytes: &[u8], format: SoundFormat, z_volume: u8, repeats: u8) -> Option<SoundId> {
+        let sink = self.build_sample_sink(bytes, format, repeats)?;
+        sink.set_volume(vol_gain(self.master, SampleVol::Z(z_volume)));
         let id = self.next_id;
         self.next_id += 1;
-        self.samples.insert(id, (sink, z_volume));
+        self.samples.insert(id, (sink, SampleVol::Z(z_volume)));
         Some(id)
+    }
+
+    /// Like `play_sample`, but with a linear pre-master `gain` fraction (the Glk
+    /// channel volume model) instead of the Z-machine z-scale.
+    pub fn play_sample_gain(&mut self, bytes: &[u8], format: SoundFormat, gain: f32, repeats: u8) -> Option<SoundId> {
+        let sink = self.build_sample_sink(bytes, format, repeats)?;
+        sink.set_volume(vol_gain(self.master, SampleVol::Lin(gain)));
+        let id = self.next_id;
+        self.next_id += 1;
+        self.samples.insert(id, (sink, SampleVol::Lin(gain)));
+        Some(id)
+    }
+
+    /// Set a live sample's linear pre-master gain (Glk `schannel_set_volume`).
+    pub fn set_sample_gain(&mut self, id: SoundId, gain: f32) {
+        if let Some((sink, v)) = self.samples.get_mut(&id) {
+            *v = SampleVol::Lin(gain);
+            sink.set_volume(vol_gain(self.master, SampleVol::Lin(gain)));
+        }
     }
 
     pub fn stop(&mut self, id: SoundId) {
@@ -322,8 +368,8 @@ impl AudioBackend {
 
     pub fn set_volume(&mut self, volume: u8) {
         self.master = volume.min(100);
-        for (s, z_volume) in self.samples.values() {
-            s.set_volume(gain(self.master, *z_volume));
+        for (s, v) in self.samples.values() {
+            s.set_volume(vol_gain(self.master, *v));
         }
         for (s, z_volume) in &self.tones {
             s.set_volume(gain(self.master, *z_volume));
@@ -357,6 +403,8 @@ impl AudioBackend {
     pub fn new(_volume: u8) -> AudioBackend { AudioBackend }
     pub fn play_tone(&mut self, _freq_hz: f32, _ms: u32, _z_volume: u8) {}
     pub fn play_sample(&mut self, _bytes: &[u8], _format: SoundFormat, _z_volume: u8, _repeats: u8) -> Option<SoundId> { None }
+    pub fn play_sample_gain(&mut self, _bytes: &[u8], _format: SoundFormat, _gain: f32, _repeats: u8) -> Option<SoundId> { None }
+    pub fn set_sample_gain(&mut self, _id: SoundId, _gain: f32) {}
     pub fn stop(&mut self, _id: SoundId) {}
     pub fn stop_all(&mut self) {}
     pub fn set_volume(&mut self, _volume: u8) {}
@@ -366,6 +414,27 @@ impl AudioBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vol_gain_linear_combines_with_master() {
+        // Linear (Glk) per-sample gain multiplies master/100, independent of the
+        // z-scale path.
+        assert_eq!(vol_gain(100, SampleVol::Lin(1.0)), 1.0);
+        assert_eq!(vol_gain(50, SampleVol::Lin(1.0)), 0.5);
+        assert_eq!(vol_gain(100, SampleVol::Lin(0.5)), 0.5);
+        assert_eq!(vol_gain(0, SampleVol::Lin(1.0)), 0.0);
+    }
+
+    #[test]
+    fn vol_gain_z_matches_legacy_gain() {
+        // The z-scale variant must equal the historical gain() for every input,
+        // so the Z-machine path is byte-for-byte unchanged.
+        for master in [0u8, 25, 50, 100] {
+            for z in [0u8, 1, 4, 8, 255] {
+                assert_eq!(vol_gain(master, SampleVol::Z(z)), gain(master, z));
+            }
+        }
+    }
 
     #[test]
     fn gain_combines_master_and_z_volume() {
