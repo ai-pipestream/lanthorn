@@ -1178,17 +1178,17 @@ fn render_middle(
         // Inline-image band row: blit the strip for this row instead of text.
         if let Some(band) = &wr.band {
             if let Some(picker) = state.game_picker.as_ref() {
-                let dest = Rect::new(
-                    body_area.x + band.x_off.min(body_area.width),
-                    row_y,
-                    band.cols.min(body_area.width.saturating_sub(band.x_off)),
-                    1,
-                );
                 // TODO(Task 11): switch to colors.inline_image
-                state
-                    .inline_image_render
-                    .borrow_mut()
-                    .render_row(picker, band, dest, state.colors.graphics, buf);
+                crate::render::inline_image::blit_band(
+                    &state.inline_image_render,
+                    picker,
+                    band,
+                    body_area.x,
+                    body_area.width,
+                    row_y,
+                    state.colors.graphics,
+                    buf,
+                );
             }
             continue;
         }

@@ -300,21 +300,52 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
     let base = state.colors.transcript;
     let kinds = vec![TranscriptKind::Story; b.lines.len()];
     let styles = vec![base; b.lines.len()];
+    // Inline images render as bands only when a game picker exists (same as the
+    // transcript); `char_px` is that picker's cell pixel size for pixel-accurate
+    // fit. Mirrors `render_middle`.
+    let images_enabled = state.game_picker.is_some();
+    let char_px = state
+        .game_picker
+        .as_ref()
+        .map(|p| {
+            let f = p.font_size();
+            (f.width, f.height)
+        })
+        .unwrap_or((1, 1));
     let (rows, _total) = visible_wrapped_lines_kinded(
         &b.lines,
         &kinds,
         &styles,
         &b.runs,
-        &[],
-        (1, 1),
-        false,
+        &b.images,
+        char_px,
+        images_enabled,
         area.height as usize,
         b.scroll,
         area.width,
         None,
     );
     for (i, wr) in rows.iter().enumerate() {
-        draw_str_runs(buf, area.x, area.y + i as u16, &wr.text, wr.style, &wr.runs, None, area, state.config.honor_game_colours.then_some(&state.colors));
+        let row_y = area.y + i as u16;
+        // Inline-image band row: blit the strip for this row instead of text
+        // (same branch as the transcript draw loop, Task 8).
+        if let Some(band) = &wr.band {
+            if let Some(picker) = state.game_picker.as_ref() {
+                // TODO(Task 11): switch to colors.inline_image
+                crate::render::inline_image::blit_band(
+                    &state.inline_image_render,
+                    picker,
+                    band,
+                    area.x,
+                    area.width,
+                    row_y,
+                    state.colors.graphics,
+                    buf,
+                );
+            }
+            continue;
+        }
+        draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, state.config.honor_game_colours.then_some(&state.colors));
     }
 }
 
@@ -513,6 +544,39 @@ mod tests {
         // 'C' (col 2) carries the bold modifier.
         assert!(buf.cell((2, 0)).unwrap().modifier.contains(ratatui::style::Modifier::BOLD));
         assert!(!buf.cell((0, 0)).unwrap().modifier.contains(ratatui::style::Modifier::BOLD));
+    }
+
+    #[test]
+    fn inline_buffer_pushes_text_below_image_band() {
+        // lines a / <image> / b. With a picker present the image at index 1
+        // expands into a multi-row band, pushing "b" below the row it occupies
+        // when images are off. Halfblocks font is 10x20 px; a 16x48-px image at
+        // width 10 fits to a 2x3-cell band, so "b" lands on row 1 + 3 = 4.
+        let mut px = image::RgbaImage::new(16, 48);
+        for p in px.pixels_mut() {
+            *p = image::Rgba([200, 40, 60, 255]);
+        }
+        let dummy = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        let b = BufferWindow {
+            lines: vec!["a".to_string(), String::new(), "b".to_string()],
+            runs: vec![Vec::new(), Vec::new(), Vec::new()],
+            images: vec![None, Some(dummy), None],
+            scroll: 0,
+            primary: false,
+        };
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        let area = Rect::new(0, 0, 10, 8);
+        let mut buf = Buffer::empty(area);
+        render_inline_buffer(&b, &state, area, &mut buf);
+        assert_eq!(row_text(&buf, 0, 1), "a", "first text line stays on row 0");
+        let b_row = (0..8).find(|&y| row_text(&buf, y, 1).starts_with('b'));
+        assert_eq!(b_row, Some(4), "\"b\" pushed below the 3-row image band");
     }
 
     #[test]

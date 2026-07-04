@@ -16,6 +16,30 @@ use ratatui_image::{Image, Resize};
 
 use crate::render::transcript::ImageBand;
 
+/// Compute the clamped 1-row `dest` for an image band within a body area and
+/// blit its strip. Shared by the transcript draw loop (Task 8) and non-primary
+/// buffer windows (Task 9): both offset by `band.x_off`, clamp the width to the
+/// drawable body, and render the strip via `InlineImageRender::render_row`, so a
+/// game-supplied band can never exceed the area.
+pub(crate) fn blit_band(
+    render: &std::cell::RefCell<InlineImageRender>,
+    picker: &Picker,
+    band: &ImageBand,
+    area_x: u16,
+    area_width: u16,
+    row_y: u16,
+    letterbox: Style,
+    buf: &mut Buffer,
+) {
+    let dest = Rect::new(
+        area_x + band.x_off.min(area_width),
+        row_y,
+        band.cols.min(area_width.saturating_sub(band.x_off)),
+        1,
+    );
+    render.borrow_mut().render_row(picker, band, dest, letterbox, buf);
+}
+
 #[derive(Default)]
 pub struct InlineImageRender;
 
