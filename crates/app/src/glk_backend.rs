@@ -78,7 +78,6 @@ enum BufElem {
     /// A run of printed text with its style bits and packed colours.
     Text { bits: u8, fg: u32, bg: u32, text: String },
     /// An image drawn into this buffer window (Glk `glk_image_draw`).
-    #[allow(dead_code)] // constructed once image routing lands (a later task)
     Image(crate::inline_image::InlineImage),
 }
 
@@ -213,6 +212,48 @@ impl AppGlk {
         }
         buf.drained = buf.log.len();
         (text, chunks)
+    }
+
+    /// Drain the primary window's undrained log into ordered transcript
+    /// elements (consecutive text runs coalesced; images preserved in place).
+    pub fn take_transcript_elems(&mut self) -> Vec<crate::session::TranscriptElem> {
+        use crate::session::TranscriptElem;
+        let Some(pid) = self.primary else { return Vec::new() };
+        let Some(buf) = self.buffers.get_mut(&pid) else { return Vec::new() };
+        let mut out: Vec<TranscriptElem> = Vec::new();
+        // Accumulate consecutive Text runs into one element, matching the
+        // char-count chunk shape `push_transcript_runs` expects:
+        // (char_count, bits, fg, bg).
+        let mut cur_text = String::new();
+        let mut cur_runs: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)> = Vec::new();
+        let flush = |out: &mut Vec<TranscriptElem>, text: &mut String, runs: &mut Vec<_>| {
+            if !text.is_empty() {
+                out.push(TranscriptElem::Text { text: std::mem::take(text), runs: std::mem::take(runs) });
+            } else {
+                runs.clear();
+            }
+        };
+        for elem in &buf.log[buf.drained..] {
+            match elem {
+                BufElem::Text { bits, fg, bg, text } => {
+                    let n = text.chars().count();
+                    if n > 0 {
+                        // Convert packed u32 colours back to ZColour to match
+                        // the chunk type push_transcript_runs consumes.
+                        let (f, b) = (crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg));
+                        cur_runs.push((n, *bits, f, b));
+                        cur_text.push_str(text);
+                    }
+                }
+                BufElem::Image(img) => {
+                    flush(&mut out, &mut cur_text, &mut cur_runs);
+                    out.push(TranscriptElem::Image(img.clone()));
+                }
+            }
+        }
+        flush(&mut out, &mut cur_text, &mut cur_runs);
+        buf.drained = buf.log.len();
+        out
     }
 
     /// Feed one primary-window output run into the room-heading detector.
@@ -594,6 +635,22 @@ impl GlkBackend for AppGlk {
     }
 
     fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) {
+        // Buffer-window target: `x` is really the Glk imagealign flag; the image
+        // flows inline with the window's text rather than onto a pixel canvas.
+        if self.buffers.contains_key(&win) {
+            if let Some(src) = self.picts.image(resnum).cloned() {
+                let img = crate::inline_image::InlineImage {
+                    pixels: std::sync::Arc::new(src.to_rgba8()),
+                    align: crate::inline_image::ImageAlign::from_glk(x as u32),
+                    scaled: scale,
+                };
+                if let Some(buf) = self.buffers.get_mut(&win) {
+                    buf.log.push(BufElem::Image(img));
+                }
+            }
+            return;
+        }
+        // Graphics-window target: existing canvas path.
         if let Some(src) = self.picts.image(resnum).cloned() {
             let (cw, ch) = self.canvas_size(win);
             self.graphics
@@ -879,6 +936,40 @@ mod tests {
         );
         assert!(leaves.iter().any(|&(k, _)| k == "buffer"), "the text buffer must survive; got {leaves:?}");
         assert!(leaves.iter().any(|&(k, _)| k == "grid"), "the status grid must survive; got {leaves:?}");
+    }
+
+    #[test]
+    fn image_draw_to_buffer_window_records_image_elem() {
+        // No Blorb is registered (`PictSource::new(None)`), so the draw is a
+        // silent no-op — this asserts the routing path (surrounding Text order
+        // survives a buffer-targeted `graphics_draw_image`), not image presence.
+        // Resolvable-image coverage comes via Task 5's `glulx_session` test.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer); // primary buffer
+        glk.put_text(1, GlkStyle::Normal, "before\n");
+        glk.graphics_draw_image(1, /*resnum*/ 0, /*imagealign*/ 1, 0, None);
+        glk.put_text(1, GlkStyle::Normal, "after");
+        let elems = glk.take_transcript_elems();
+        let kinds: Vec<&str> = elems
+            .iter()
+            .map(|e| match e {
+                crate::session::TranscriptElem::Text { .. } => "T",
+                crate::session::TranscriptElem::Image(_) => "I",
+            })
+            .collect();
+        assert_eq!(kinds.first().copied(), Some("T"));
+        assert_eq!(kinds.last().copied(), Some("T"));
+    }
+
+    #[test]
+    fn image_draw_to_graphics_window_still_hits_canvas() {
+        // A graphics-window draw must NOT push a buffer image elem; it updates
+        // a Canvas via the existing graphics path.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(5, WinType::Graphics);
+        glk.graphics_draw_image(5, 0, 10, 10, None);
+        // No primary buffer is open → elems empty.
+        assert!(glk.take_transcript_elems().is_empty());
     }
 }
 

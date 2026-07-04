@@ -113,6 +113,14 @@ pub(crate) fn clamp_runs(
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// One ordered piece of a turn's buffer output: a text run (with its style
+/// chunks) or an inline image. Preserves emission order so images land between
+/// the right lines.
+pub enum TranscriptElem {
+    Text { text: String, runs: Vec<(usize, u8, ZColour, ZColour)> },
+    Image(crate::inline_image::InlineImage),
+}
+
 /// Result of one player turn.
 pub struct TurnResult {
     pub transcript: String,
