@@ -3163,6 +3163,23 @@ impl Machine {
         }
     }
 
+    /// Deliver a Glk `Evtype_SoundNotify` for a finished sound: `sound` is the
+    /// resource number, `notify` the value the game passed to
+    /// `glk_schannel_play_ext`. Mirrors [`Machine::deliver_arrange`] — written
+    /// directly into a suspended `glk_select` (without consuming the window's
+    /// input request, so the game handles it and re-suspends), or queued for the
+    /// next select when the VM is not currently blocked.
+    pub fn deliver_sound_notify(&mut self, sound: u32, notify: u32) {
+        let ev = GlkEvent { etype: glk::evtype::SOUND_NOTIFY, win: 0, val1: sound, val2: notify };
+        if let Some(pi) = self.pending_input.take() {
+            if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else {
+            self.glk.push_event(ev);
+        }
+    }
+
     /// Recompute the window layout from the backend's (freshly updated) screen
     /// size and notify a suspended game via an Arrange event. Call after the
     /// host reports a new display size: the relayout resizes graphics canvases
@@ -5897,6 +5914,40 @@ mod tests {
         m.supply_line("north");
         assert_eq!(step_to_event(&mut m), StepResult::Quit);
         assert_eq!(read_event(&m, 0x110), (3, 1, 5, 0), "the real line event on the second select");
+    }
+
+    #[test]
+    fn deliver_sound_notify_writes_into_a_suspended_select() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event then select: the select suspends on the line request;
+        // a sound-notify is written into it WITHOUT consuming the line request, so
+        // the next select re-suspends on the still-pending read.
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select again → re-suspend @0x110
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "first select suspends");
+        m.deliver_sound_notify(6, 42);
+        // evtype_SoundNotify = 7, win = 0, val1 = sound (6), val2 = notify (42).
+        assert_eq!(read_event(&m, 0x100), (7, 0, 6, 42), "sound-notify written to the suspended select");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "line request persisted across the notify");
+    }
+
+    #[test]
+    fn deliver_sound_notify_queues_when_not_suspended() {
+        use asm::Op::{C16, Zero};
+        // With nothing waiting, a notify is queued and delivered by the NEXT select.
+        let body = {
+            let mut b = glk_call(0xC0, &[C16(0x0100)], Zero); // select → drains the queued event
+            b.extend(asm::ins(0x120, &[]));
+            b
+        };
+        let mut m = machine_ram(body, 0x200);
+        m.deliver_sound_notify(3, 99); // not suspended yet → queue
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "select consumes the queued event and runs to quit");
+        assert_eq!(read_event(&m, 0x100), (7, 0, 3, 99), "queued sound-notify delivered by the select");
     }
 
     #[test]
