@@ -73,12 +73,20 @@ struct GridBuf {
     cells: BTreeMap<(u32, u32), (char, u8, u32, u32)>,
 }
 
-/// A text-buffer window's styled output log.
+/// One entry in a text-buffer window's ordered output log.
+enum BufElem {
+    /// A run of printed text with its style bits and packed colours.
+    Text { bits: u8, fg: u32, bg: u32, text: String },
+    /// An image drawn into this buffer window (Glk `glk_image_draw`).
+    #[allow(dead_code)] // constructed once image routing lands (a later task)
+    Image(crate::inline_image::InlineImage),
+}
+
+/// A text-buffer window's ordered output log (text runs + inline images).
 #[derive(Default)]
 struct BufBuf {
-    /// Every `put_text` run in order, as `(style-bits, packed-fg, packed-bg, text)`.
-    log: Vec<(u8, u32, u32, String)>,
-    /// Number of leading log entries already drained by `take_transcript`.
+    log: Vec<BufElem>,
+    /// Number of leading log entries already drained by `take_transcript*`.
     drained: usize,
     /// Scrollback offset for an inline (non-primary) buffer window.
     scroll: u16,
@@ -194,7 +202,8 @@ impl AppGlk {
         };
         let mut text = String::new();
         let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)> = Vec::new();
-        for (bits, fg, bg, s) in &buf.log[buf.drained..] {
+        for elem in &buf.log[buf.drained..] {
+            let BufElem::Text { bits, fg, bg, text: s } = elem else { continue };
             let n = s.chars().count();
             if n == 0 {
                 continue;
@@ -416,10 +425,11 @@ fn bounding_box(leaves: &[(GlkRect, WinNode)]) -> GlkRect {
 
 /// Split a buffer window's styled log into `(lines, per-line runs)`, merging
 /// adjacent same-style chars into one [`StyleRun`].
-fn log_to_lines(log: &[(u8, u32, u32, String)]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
+fn log_to_lines(log: &[BufElem]) -> (Vec<String>, Vec<Vec<StyleRun>>) {
     let mut lines: Vec<String> = vec![String::new()];
     let mut runs: Vec<Vec<StyleRun>> = vec![Vec::new()];
-    for (bits, fg, bg, text) in log {
+    for elem in log {
+        let BufElem::Text { bits, fg, bg, text } = elem else { continue };
         for ch in text.chars() {
             if ch == '\n' {
                 lines.push(String::new());
@@ -508,7 +518,7 @@ impl GlkBackend for AppGlk {
         }
         let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let buf = self.buffers.entry(win).or_default();
-        buf.log.push((bits, fg, bg, s.to_string()));
+        buf.log.push(BufElem::Text { bits, fg, bg, text: s.to_owned() });
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
