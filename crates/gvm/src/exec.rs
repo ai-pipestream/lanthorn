@@ -141,6 +141,8 @@ pub struct Machine {
     pub(crate) acceleration: bool,
     /// Whether Glk graphics windows are enabled (default false; hosts opt in).
     pub(crate) graphics_enabled: bool,
+    /// Whether Glk sound channels are enabled (default false; hosts opt in).
+    pub(crate) sound_enabled: bool,
     /// Total number of opcodes dispatched since the machine was built.
     pub(crate) insn_count: u64,
     /// PRNG state (xorshift32); seeded by `setrandom`.
@@ -273,6 +275,7 @@ impl Machine {
             accel_params: std::collections::HashMap::new(),
             acceleration: true,
             graphics_enabled: false,
+            sound_enabled: false,
             insn_count: 0,
             rng: Self::DEFAULT_SEED,
             instr_start_pc: 0,
@@ -1726,6 +1729,11 @@ impl Machine {
         self.graphics_enabled = on;
     }
 
+    /// Enable/disable Glk sound (gestalt + schannel opcodes).
+    pub fn set_sound(&mut self, on: bool) {
+        self.sound_enabled = on;
+    }
+
     /// Total number of opcodes dispatched since the machine was built.
     /// Accelerated calls bypass the opcode dispatcher, so this undercounts
     /// work done by intercepted functions when acceleration is enabled.
@@ -3123,8 +3131,9 @@ impl Machine {
 
     /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
     /// Unicode are supported; graphics is supported conditionally (per
-    /// `graphics_enabled`, see the selector 6/7/14 arms below); input/timer/
-    /// sound are not yet (0).
+    /// `graphics_enabled`, see the selector 6/7/14 arms below); sound is
+    /// supported conditionally (per `sound_enabled`, see the selector
+    /// 8/9/10 arms below); input/timer are not yet (0).
     fn glk_gestalt(&self, sel: u32, val: u32) -> u32 {
         match sel {
             0 => Self::GLK_VERSION, // gestalt_Version
@@ -3137,7 +3146,10 @@ impl Machine {
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
             7 => (self.graphics_enabled && (val == 5 || val == 3)) as u32, // gestalt_DrawImage(wintype): Graphics + TextBuffer (inline images)
             14 => self.graphics_enabled as u32,               // gestalt_GraphicsTransparency
-            // MouseInput(4)/Timer(5)/Sound(8)/Hyperlinks(11)/echo and the rest
+            8 => self.sound_enabled as u32,  // gestalt_Sound
+            9 => self.sound_enabled as u32,  // gestalt_SoundVolume
+            10 => self.sound_enabled as u32, // gestalt_SoundNotify
+            // MouseInput(4)/Timer(5)/Hyperlinks(11)/echo and the rest
             // are not supported.
             _ => 0,
         }
@@ -5897,6 +5909,21 @@ mod tests {
         assert_eq!(m.mem.read32(0x104).unwrap(), 1, "LineInput supported");
         assert_eq!(m.mem.read32(0x108).unwrap(), 0, "Timer not supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "MouseInput not supported");
+    }
+
+    #[test]
+    fn glk_gestalt_reports_sound_capabilities() {
+        // gestalt_Sound(8)/SoundVolume(9)/SoundNotify(10) follow sound_enabled;
+        // gestalt_Sound2(21) is never supported.
+        let mut m = machine_with_glk(&[]);
+        assert_eq!(m.glk_gestalt(8, 0), 0, "Sound off by default");
+        assert_eq!(m.glk_gestalt(9, 0), 0);
+        assert_eq!(m.glk_gestalt(10, 0), 0);
+        m.set_sound(true);
+        assert_eq!(m.glk_gestalt(8, 0), 1, "Sound supported once enabled");
+        assert_eq!(m.glk_gestalt(9, 0), 1, "SoundVolume supported");
+        assert_eq!(m.glk_gestalt(10, 0), 1, "SoundNotify supported");
+        assert_eq!(m.glk_gestalt(21, 0), 0, "Sound2 never supported");
     }
 
     #[test]
