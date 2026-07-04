@@ -65,6 +65,9 @@ or from a **Blorb** container (`.zblorb`/`.blorb`); Glulx is also supported.
   `zvm-cli` takes `--no-sound` and
   `--volume <0-100>`. Unimplemented-opcode warnings surface in the transcript
   as meta lines (hidden by `/filter story`) rather than on stderr.
+- **Glulx sound** — Glk sound channels (`glk_schannel_*`) play a blorb's
+  AIFF/OGG/MOD `Snd ` resources, with per-channel volume and sound-finished
+  (notify) events, complementing the Z-machine `@sound_effect` support above.
 - **Timed / interrupt input** — v4+ `read` and `read_char` `time`+`routine`
   operands are honored: while waiting for input the game's interrupt routine is
   called every N tenths of a second (real-time clocks, countdowns — e.g. Border
