@@ -8,6 +8,7 @@ pub mod gallery;
 pub mod graphics;
 pub mod hints_panel;
 pub mod history;
+pub mod inline_image;
 pub mod hotkeys;
 pub mod inspector;
 pub mod launch_dialog;

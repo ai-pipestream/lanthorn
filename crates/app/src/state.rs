@@ -1213,6 +1213,8 @@ pub struct AppState {
     pub game_picker: Option<ratatui_image::picker::Picker>,
     /// Cached graphics-window protocols (interior-mutable for the render pass).
     pub graphics_render: std::cell::RefCell<crate::render::graphics::GraphicsRender>,
+    /// Inline-image band blitter (interior-mutable for the render pass).
+    pub inline_image_render: std::cell::RefCell<crate::render::inline_image::InlineImageRender>,
 
     /// Set when a gvm runtime fault has halted the VM (as opposed to a clean
     /// `glk_exit`). While true, the run loop no longer exits on `TurnResult::quit`
@@ -1313,6 +1315,7 @@ impl Default for AppState {
             input_deadline: None,
             game_picker: None,
             graphics_render: std::cell::RefCell::new(Default::default()),
+            inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,
         }
     }

@@ -24,8 +24,8 @@ pub(crate) struct WrappedRow {
     pub kind: TranscriptKind,
     pub style: Style,
     pub runs: Vec<StyleRun>,
-    // Consumed by the Task 8 render path; unread in the current text-only build.
-    #[allow(dead_code)]
+    /// For a row that is part of an inline-image band, the geometry to blit
+    /// (Task 8). Text rows carry `None`.
     pub band: Option<ImageBand>,
 }
 
@@ -33,10 +33,9 @@ pub(crate) struct WrappedRow {
 /// the band's total `cols`x`rows` cell footprint, this row's index `row` in
 /// `0..rows`, and the horizontal cell offset `x_off` (nonzero for margin-right).
 ///
-/// The fields are read by the Task 8 blitter; until then they are unread in the
-/// non-test build (bands are only constructed under `images_enabled`).
+/// The fields are read by the Task 8 blitter (`render/inline_image.rs`); bands
+/// are only constructed under `images_enabled`.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) struct ImageBand {
     pub image: crate::inline_image::InlineImage,
     pub cols: u16,
@@ -1123,6 +1122,22 @@ fn render_middle(
         .iter()
         .map(|&i| state.transcript_runs.get(i).cloned().unwrap_or_default())
         .collect();
+    // Inline images parallel the filtered lines, indexed by the SAME visible
+    // indices. Bands are only emitted when a game Picker is present (images
+    // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.
+    let filtered_images: Vec<Option<crate::inline_image::InlineImage>> = visible_indices
+        .iter()
+        .map(|&i| state.transcript_images.get(i).cloned().flatten())
+        .collect();
+    let images_enabled = state.game_picker.is_some();
+    let char_px = state
+        .game_picker
+        .as_ref()
+        .map(|p| {
+            let f = p.font_size();
+            (f.width, f.height)
+        })
+        .unwrap_or((1, 1));
     // Reserve the rightmost column of the body as the scrollbar gutter so text
     // never collides with the scrollbar. Wrap and clip to this narrower body.
     let body_area = if area.width >= 2 {
@@ -1138,17 +1153,14 @@ fn render_middle(
     let clear_anchor_filtered = state
         .clear_anchor
         .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
-    // Image bands stay unwired here: Task 8 supplies the real per-line images,
-    // cell pixel size, and enable flag. Passing empty/disabled preserves the
-    // current text-only behavior (no band rows produced).
     let (lines, total_rows) = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
         &filtered_styles,
         &filtered_runs,
-        &[],
-        (1, 1),
-        false,
+        &filtered_images,
+        char_px,
+        images_enabled,
         transcript_rows,
         effective_scroll,
         body_area.width,
@@ -1162,6 +1174,23 @@ fn render_middle(
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
             break;
+        }
+        // Inline-image band row: blit the strip for this row instead of text.
+        if let Some(band) = &wr.band {
+            if let Some(picker) = state.game_picker.as_ref() {
+                let dest = Rect::new(
+                    body_area.x + band.x_off.min(body_area.width),
+                    row_y,
+                    band.cols.min(body_area.width.saturating_sub(band.x_off)),
+                    1,
+                );
+                // TODO(Task 11): switch to colors.inline_image
+                state
+                    .inline_image_render
+                    .borrow_mut()
+                    .render_row(picker, band, dest, state.colors.graphics, buf);
+            }
+            continue;
         }
         // Meta/Warning reserve the 2-col gutter and draw their marker glyph;
         // Story/Input draw flush left. The text style was resolved per logical
