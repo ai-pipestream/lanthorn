@@ -1178,7 +1178,6 @@ fn render_middle(
         // Inline-image band row: blit the strip for this row instead of text.
         if let Some(band) = &wr.band {
             if let Some(picker) = state.game_picker.as_ref() {
-                // TODO(Task 11): switch to colors.inline_image
                 crate::render::inline_image::blit_band(
                     &state.inline_image_render,
                     picker,
@@ -1186,7 +1185,7 @@ fn render_middle(
                     body_area.x,
                     body_area.width,
                     row_y,
-                    state.colors.graphics,
+                    state.colors.inline_image,
                     buf,
                 );
             }
@@ -1277,7 +1276,7 @@ mod tests {
         let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
         // 1 (hi) + 3 (band) + 1 (bye) = 5 rows.
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].band.is_none(), true);
+        assert!(rows[0].band.is_none());
         assert_eq!(rows[1].band.as_ref().unwrap().rows, 3);
         assert_eq!(rows[1].band.as_ref().unwrap().row, 0);
         assert_eq!(rows[3].band.as_ref().unwrap().row, 2);

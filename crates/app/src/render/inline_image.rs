@@ -107,7 +107,7 @@ mod tests {
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
-        let mut r = InlineImageRender::default();
+        let mut r = InlineImageRender;
         r.render_row(&picker, &band, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
         // No panic == pass; the halfblock protocol writes into (0,0)..(2,1).
     }

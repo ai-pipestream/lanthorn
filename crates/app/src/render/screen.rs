@@ -331,7 +331,6 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         // (same branch as the transcript draw loop, Task 8).
         if let Some(band) = &wr.band {
             if let Some(picker) = state.game_picker.as_ref() {
-                // TODO(Task 11): switch to colors.inline_image
                 crate::render::inline_image::blit_band(
                     &state.inline_image_render,
                     picker,
@@ -339,7 +338,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
                     area.x,
                     area.width,
                     row_y,
-                    state.colors.graphics,
+                    state.colors.inline_image,
                     buf,
                 );
             }

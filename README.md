@@ -214,6 +214,11 @@ list); the scroll position resets whenever the highlighted story changes.
   their filled shapes and images in the terminal, using the best graphics
   protocol (Kitty / iTerm2 / Sixel) with a half-block fallback. Disable all
   image rendering (in-game graphics *and* cover art) with `--no-images`.
+- **Inline images in text.** Glk inline images placed in a text-buffer window
+  (the main transcript or another buffer window) render as full-width blocks
+  right in the flow of text, honoring the terminal's best graphics protocol
+  (Kitty / iTerm2 / Sixel) with a half-block fallback, and scroll along with
+  the surrounding text. Themeable via the `inline_image` style selector.
 
 ### Saves & persistence
 - **`.babelmap` archives** — a single file bundling the map, the game save, and

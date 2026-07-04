@@ -623,7 +623,7 @@ mod tests {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
         // Use a large area so all selectors fit and get drawn.
-        let area = Rect::new(0, 0, 120, 60);
+        let area = Rect::new(0, 0, 120, 70);
         let mut buf = Buffer::empty(area);
         let rects = draw_style_editor(&s, area, &mut buf).expect("drawn");
         assert!(!rects.samples.is_empty(), "samples have hit-rects");

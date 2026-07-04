@@ -259,6 +259,9 @@ pub struct ColorScheme {
     /// In-game Glulx graphics-window letterbox fill (behind/around the
     /// fitted canvas image).
     pub graphics: Style,
+    /// Inline-image band letterbox fill (behind/around images rendered
+    /// inline in text-buffer windows).
+    pub inline_image: Style,
     /// Story-picker row badge cluster (type badge + artifact letters); fg + bg.
     pub story_badge: Style,
     /// Map layer tab (inactive).
@@ -386,6 +389,7 @@ impl ColorScheme {
             story_info_value: Style::new().fg(Color::White),
             story_info_cover: Style::new().bg(Color::Black),
             graphics: Style::new().bg(Color::Black),
+            inline_image: Style::new().bg(Color::Black),
             story_badge: Style::new().fg(Color::Blue),
             // The shown layer reads brighter than the others: inactive tabs are
             // dimmed, the active one is the bold accent colour. Both themeable.
@@ -569,6 +573,7 @@ impl ColorScheme {
             story_info_value: Style::new().fg(fg),
             story_info_cover: Style::new().bg(bg),
             graphics: Style::new().bg(bg),
+            inline_image: Style::new().bg(bg),
             story_badge: Style::new().fg(scheme.palette[4]),
             map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
