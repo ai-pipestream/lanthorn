@@ -2176,7 +2176,7 @@ fn main() {
         // When a timed-input deadline is armed, clamp further so the loop wakes in
         // time to fire the interrupt — the normal cadence stays the ceiling, so
         // this is a no-op when no timer is running (regression guard).
-        let sound_active = !state.sound_routines.is_empty();
+        let sound_active = !state.sound_routines.is_empty() || !state.glulx_sound_notify.is_empty();
         let base_poll_ms = if state.has_active_animation() || sound_active { TIDY_POLL_MS } else { 50 };
         let poll_ms = match state.input_deadline {
             Some(dl) => {
@@ -3721,6 +3721,15 @@ fn main() {
         // (This covers the case where apply_action routed a saves/reset prompt submit.)
         if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
             handle_saves_prompt(kind, buf, &save_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes);
+        }
+
+        // After apply_action: if a sound toggle / config save flipped enable_sound,
+        // sync the running Glulx VM's Sound gestalt so games that re-check
+        // gestalt_Sound per play (e.g. sensory.blorb's gong) honor the change.
+        if let Some(on) = state.pending_vm_sound.take() {
+            if let Some(gs) = glulx_session_opt_mut(&mut *session) {
+                gs.set_sound(on);
+            }
         }
 
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was

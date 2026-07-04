@@ -1005,6 +1005,11 @@ pub struct AppState {
     pub glulx_channels: std::collections::HashMap<u32, audio::SoundId>,
     /// Pending sound-notify per playing SoundId: `(sound resource, notify value)`.
     pub glulx_sound_notify: std::collections::HashMap<audio::SoundId, (u32, u32)>,
+    /// A pending change to the running Glulx VM's Sound gestalt, set when the
+    /// sound toggle / config save flips `enable_sound`. The event loop drains it
+    /// (it holds the session) and calls `GlulxSession::set_sound`, so a game that
+    /// re-queries `gestalt_Sound` per play honors the toggle. `None` = nothing pending.
+    pub pending_vm_sound: Option<bool>,
     /// In-flight smooth transcript-scroll animation, if any. `transcript_scroll`
     /// holds the target; this eases the displayed offset toward it.
     pub scroll_anim: Option<ScrollAnim>,
@@ -1279,6 +1284,7 @@ impl Default for AppState {
             sound_routines: std::collections::HashMap::new(),
             glulx_channels: std::collections::HashMap::new(),
             glulx_sound_notify: std::collections::HashMap::new(),
+            pending_vm_sound: None,
             scroll_anim: None,
             graph_gen: 0,
             viewed_layer: None,

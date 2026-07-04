@@ -166,6 +166,13 @@ impl GlulxSession {
         self.appglk().set_screen_size(cols, rows);
     }
 
+    /// Enable/disable Glk sound on the running VM (the Sound gestalt + schannel
+    /// dispatch), so a runtime sound toggle reaches games that re-check
+    /// `gestalt_Sound` before playing.
+    pub fn set_sound(&mut self, on: bool) {
+        self.machine.set_sound(on);
+    }
+
     /// React to a change in the host story-pane size: report it to the backend,
     /// relayout the window tree to the new geometry (rescaling graphics canvases),
     /// and — if the game is waiting on input — deliver a Glk Arrange event so it

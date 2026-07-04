@@ -2068,6 +2068,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             } else if state.audio.is_none() {
                 state.audio = Some(audio::AudioBackend::new(state.config.volume));
             }
+            // Sync the running Glulx VM's Sound gestalt (applied by the event loop).
+            state.pending_vm_sound = Some(state.config.enable_sound);
         }
         Action::SetVolume(v) => {
             let v = v.min(100);
@@ -3017,6 +3019,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 if !state.config.enable_sound {
                     state.reset_sound_sidecars();
                 }
+                // Sync the running Glulx VM's Sound gestalt (applied by the event loop).
+                state.pending_vm_sound = Some(state.config.enable_sound);
                 // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
                     crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);
@@ -4232,6 +4236,12 @@ mod tests {
         apply_action(Action::ToggleSound, &mut s, &mut m);
         assert!(s.config.enable_sound, "ToggleSound should turn sound on");
         assert!(s.audio.is_some(), "ToggleSound should lazily construct the AudioBackend");
+        // The toggle also queues a VM Sound-gestalt sync (drained by the event
+        // loop) so a running Glulx game that re-checks gestalt_Sound honors it.
+        assert_eq!(s.pending_vm_sound, Some(true), "turning sound on queues a gestalt sync to true");
+        apply_action(Action::ToggleSound, &mut s, &mut m);
+        assert!(!s.config.enable_sound, "second toggle turns sound off");
+        assert_eq!(s.pending_vm_sound, Some(false), "turning sound off queues a gestalt sync to false");
     }
 
     #[test]
