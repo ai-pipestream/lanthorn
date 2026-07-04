@@ -51,6 +51,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
         erase_lower: false,
         info: None,
         sounds: Vec::new(),
+        glulx_sound_ops: Vec::new(),
         diagnostics: vec![],
         fault: None,
         location_method: None,

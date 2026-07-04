@@ -134,6 +134,7 @@ impl GlulxSession {
         rows: u32,
         acceleration: bool,
         graphics_enabled: bool,
+        sound_enabled: bool,
         char_px: (u32, u32),
         pict_blorb: Option<blorb::Blorb>,
     ) -> Result<GlulxSession, GError> {
@@ -143,6 +144,7 @@ impl GlulxSession {
         let mut machine = Machine::with_glk(mem, backend);
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
+        machine.set_sound(sound_enabled);
         let (pending, quit) = drive(&mut machine);
         let mut session = GlulxSession {
             machine,
@@ -229,6 +231,7 @@ impl GlulxSession {
         let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
+        let glulx_sound_ops = self.appglk().take_sound_ops();
         TurnResult {
             transcript,
             transcript_runs,
@@ -237,6 +240,7 @@ impl GlulxSession {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops,
             diagnostics,
             fault,
             location_method,
@@ -244,6 +248,20 @@ impl GlulxSession {
             timed_out: false,
             transcript_elems: elems,
         }
+    }
+
+    /// A sound finished: deliver a Glk `Evtype_SoundNotify` to the game and drive
+    /// it to its next input request, returning the resulting turn (which carries
+    /// any sound ops the game buffered while handling the notify — sound
+    /// sequencing). A no-op turn once the game has quit.
+    pub fn sound_notify(&mut self, sound: u32, notify: u32) -> TurnResult {
+        if !self.quit {
+            self.machine.deliver_sound_notify(sound, notify);
+            let (pending, quit) = drive(&mut self.machine);
+            self.pending = pending;
+            self.quit = quit;
+        }
+        self.finish_turn()
     }
 }
 
@@ -540,7 +558,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0x84), Imm(2), Discard])); // glk_put_buffer
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 2), 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 2), 80, 24, true, false, false, (1, 1), None).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         // Banner drained.
         assert_eq!(sess.take_transcript(), "OK");
@@ -583,7 +601,7 @@ mod tests {
 
     #[test]
     fn submit_key_delivers_char_and_skips_unmapped() {
-        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
         // An unmapped key (Insert) leaves the VM untouched.
         assert!(sess.submit_key(KeyInput::Insert).is_none());
@@ -660,7 +678,7 @@ mod tests {
         // 80 cols x 12 rows → 160 x 24 px. Shrinking the pane to 40 cols halves
         // its width to 80 px; the game re-suspends on its line request (not quit).
         let mut sess =
-            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, (2, 2), None)
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None)
                 .expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         let (w0, h0) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
@@ -676,12 +694,31 @@ mod tests {
     #[test]
     fn resize_after_quit_is_a_noop() {
         // A quit session must ignore resize (no drive, no panic).
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None)
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None)
             .expect("new");
         let r = sess.submit("go"); // drives to quit
         assert!(r.quit);
         sess.resize(40, 12); // must be a harmless no-op
         assert!(sess.has_quit());
+    }
+
+    #[test]
+    fn finish_turn_drains_buffered_sound_ops() {
+        use crate::session::SchannelOp;
+        use gvm::glk::GlkBackend;
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, true, (1, 1), None)
+            .expect("new");
+        {
+            let g = sess.appglk();
+            let c = g.schannel_create(0);
+            g.schannel_play(c, 7, 1, 0);
+        }
+        let result = sess.submit(""); // finish_turn drains the buffered op
+        assert!(
+            result.glulx_sound_ops.iter().any(|op| matches!(op, SchannelOp::Play { snd: 7, .. })),
+            "buffered play reached the TurnResult: {:?}",
+            result.glulx_sound_ops
+        );
     }
 
     #[test]
@@ -713,7 +750,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None).expect("new");
         assert_eq!(sess.take_transcript(), "Hi", "banner drops the trailing prompt");
         let r = sess.submit("x");
         assert_eq!(r.transcript, "done", "turn output drops the trailing prompt");
@@ -740,7 +777,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (banner)
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None).expect("new");
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
@@ -764,7 +801,7 @@ mod tests {
 
     #[test]
     fn save_state_is_tagged_and_round_trips_with_guard() {
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
         let save = sess.save_state();
         assert_eq!(save.engine, GLULX_ENGINE);
         assert!(!save.bytes.is_empty(), "gvm snapshot is non-empty");
@@ -783,7 +820,7 @@ mod tests {
 
     #[test]
     fn introspect_is_none() {
-        let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None).expect("new");
+        let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
         assert!(sess.introspect().is_none(), "Glulx introspection is SP4");
     }
 
@@ -803,7 +840,7 @@ mod tests {
         // A Glulx engine save survives a .babelmap archive round-trip: write its
         // EngineSave (no screen.json), reload, and restore into a FRESH session
         // through Engine::restore_state — state is preserved, no panic.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
         let _ = sess.take_transcript(); // drain the banner
         let es = sess.save_state();
         assert_eq!(es.engine, GLULX_ENGINE);
@@ -820,7 +857,7 @@ mod tests {
         assert!(ac.screen.is_none(), "Glulx archive carries no screen.json");
         assert_eq!(ac.save, es.bytes, "archived bytes are the Glulx save");
 
-        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None).expect("new");
+        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
         let _ = fresh.take_transcript();
         fresh.restore_state(&ac.engine_save()).expect("Glulx restore from archive");
         assert_eq!(fresh.pending_input(), InputKind::Line, "restored input state");
@@ -831,7 +868,7 @@ mod tests {
     fn glulx_restore_refuses_zmachine_archive() {
         // The foreign-engine guard fires gracefully (no panic) when a zmachine
         // save is offered to a Glulx session.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
         let foreign = EngineSave::new("zmachine", 1, vec![1, 2, 3]);
         assert!(matches!(
             sess.restore_state(&foreign),
@@ -868,7 +905,7 @@ mod tests {
             image_for(body, 1)
         };
 
-        let mut sess = GlulxSession::new(image, 78, 20, true, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 78, 20, true, false, false, (1, 1), None).expect("new");
 
         // Mirror the app loop: drain the banner into the transcript, take a turn.
         let mut state = AppState::default();

@@ -1691,6 +1691,7 @@ fn main() {
                 cfg.virtual_screen_rows as u32,
                 cfg.acceleration,
                 cfg.images,
+                cfg.enable_sound,
                 char_px,
                 pict_blorb,
             ) {
@@ -1886,6 +1887,7 @@ fn main() {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: None,
@@ -3309,6 +3311,7 @@ fn main() {
                                         erase_lower: false,
                                         info: None,
                                         sounds: Vec::new(),
+                                        glulx_sound_ops: Vec::new(),
                                         diagnostics: vec![],
                                         fault: None,
                                         location_method: None,
@@ -3451,6 +3454,7 @@ fn main() {
                                         erase_lower: false,
                                         info: None,
                                         sounds: Vec::new(),
+                                        glulx_sound_ops: Vec::new(),
                                         diagnostics: vec![],
                                         fault: None,
                                         location_method: None,
@@ -3575,6 +3579,7 @@ fn main() {
                                             erase_lower: false,
                                             info: None,
                                             sounds: Vec::new(),
+                                            glulx_sound_ops: Vec::new(),
                                             diagnostics: vec![],
                                             fault: None,
                                             location_method: None,
@@ -3646,6 +3651,7 @@ fn main() {
                                         erase_lower: false,
                                         info: None,
                                         sounds: Vec::new(),
+                                        glulx_sound_ops: Vec::new(),
                                         diagnostics: vec![],
                                         fault: None,
                                         location_method: None,
@@ -3950,6 +3956,7 @@ fn dispatch_slash_outcome(
                                             erase_lower: false,
                                             info: None,
                                             sounds: Vec::new(),
+                                            glulx_sound_ops: Vec::new(),
                                             diagnostics: vec![],
                                             fault: None,
                                             location_method: None,
@@ -4126,6 +4133,7 @@ fn reset_game(
                 state.config.virtual_screen_rows as u32,
                 state.config.acceleration,
                 state.config.images,
+                state.config.enable_sound,
                 char_px,
                 pict_blorb,
             )
@@ -4175,6 +4183,7 @@ fn reset_game(
                     erase_lower: false,
                     info: None,
                     sounds: Vec::new(),
+                    glulx_sound_ops: Vec::new(),
                     diagnostics: vec![],
                     fault: None,
                     location_method: None,
@@ -4955,6 +4964,7 @@ fn apply_launch_resume(
                     erase_lower: false,
                     info: None,
                     sounds: Vec::new(),
+                    glulx_sound_ops: Vec::new(),
                     diagnostics: vec![],
                     fault: None,
                     location_method: None,
@@ -5242,7 +5252,7 @@ mod tests {
             .join("../gvm-cli/tests/fixtures/glulxercise.ulx");
         let Ok(bytes) = std::fs::read(&fixture) else { return };
         let mut engine: Box<dyn app::engine::Engine> = Box::new(
-            app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true, false, (1, 1), None)
+            app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true, false, false, (1, 1), None)
                 .expect("glulx session"),
         );
         let mut mapper = mapper::mapper::Mapper::default();
@@ -6359,6 +6369,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault,
             location_method: None,

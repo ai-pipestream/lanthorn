@@ -197,6 +197,9 @@ pub struct TurnResult {
     pub info: Option<String>,
     /// Sound events emitted this turn (drained from the VM), in order.
     pub sounds: Vec<SoundEvent>,
+    /// Glk sound-channel operations emitted this turn (Glulx only; empty for the
+    /// Z-machine, which uses `sounds`). Played by `AppState::play_glulx_sound_ops`.
+    pub glulx_sound_ops: Vec<SchannelOp>,
     /// Host-facing diagnostic lines emitted this turn (drained from the VM).
     pub diagnostics: Vec<String>,
     /// How the current room was detected this turn (drives the map indicator).
@@ -418,6 +421,7 @@ impl GameSession {
             erase_lower,
             info,
             sounds,
+            glulx_sound_ops: Vec::new(),
             diagnostics,
             fault,
             location_method,
@@ -980,6 +984,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: None,
@@ -1001,6 +1006,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: None,
@@ -1030,6 +1036,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: None,
@@ -1054,6 +1061,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: method,
@@ -1094,6 +1102,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: Some(LocationMethod::RoomHeading),
@@ -1123,6 +1132,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: None,
@@ -1145,6 +1155,7 @@ mod tests {
             erase_lower: false,
             info: None,
             sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
             diagnostics: vec![],
             fault: None,
             location_method: None,
