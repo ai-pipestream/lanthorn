@@ -125,12 +125,16 @@ pub fn set_sound(&mut self, on: bool) {  // near set_graphics (:1725)
 Inserted before the catch-all at `exec.rs:2766`, each gated
 `if self.sound_enabled { ... } else { 0 }`:
 
+Selector numbers per the Glk dispatch table (`gi_dispa.c`) — the sound block
+uses the same `iterate / get_rock / create / destroy` layout as the window
+(0x0020) and stream (0x0040) blocks:
+
 | Sel | Function | Backend call | Returns |
 |-----|----------|--------------|---------|
-| 0x00F0 | schannel_create | `backend.schannel_create(a(0))` | chan ref |
-| 0x00F1 | schannel_destroy | `backend.schannel_destroy(a(0))` | 0 |
-| 0x00F2 | schannel_iterate | `(next, rock) = backend.schannel_iterate(a(0))`; write `rock` to the out-ref `a(1)` via `glk_out_ref` | next ref |
-| 0x00F3 | schannel_get_rock | `backend.schannel_get_rock(a(0))` | rock |
+| 0x00F0 | schannel_iterate | `(next, rock) = backend.schannel_iterate(a(0))`; write `rock` to the out-ref `a(1)` via `glk_out_ref` | next ref |
+| 0x00F1 | schannel_get_rock | `backend.schannel_get_rock(a(0))` | rock |
+| 0x00F2 | schannel_create | `backend.schannel_create(a(0))` | chan ref |
+| 0x00F3 | schannel_destroy | `backend.schannel_destroy(a(0))` | 0 |
 | 0x00F8 | schannel_play | `backend.schannel_play(a(0), a(1), 1, 0)` | 1/0 |
 | 0x00F9 | schannel_play_ext | `backend.schannel_play(a(0), a(1), a(2), a(3))` | 1/0 |
 | 0x00FA | schannel_stop | `backend.schannel_stop(a(0))` | 0 |

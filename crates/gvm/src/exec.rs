@@ -2773,15 +2773,6 @@ impl Machine {
             }
             // ── sound channels (Glk Sound; GLULX_NOTES) ─────────────────────────
             0x00F0 => {
-                // glk_schannel_create(rock) -> chan
-                if self.sound_enabled { self.backend.schannel_create(a(0)) } else { 0 }
-            }
-            0x00F1 => {
-                // glk_schannel_destroy(chan)
-                if self.sound_enabled { self.backend.schannel_destroy(a(0)); }
-                0
-            }
-            0x00F2 => {
                 // glk_schannel_iterate(chan, &rock) -> next chan
                 if self.sound_enabled {
                     let (next, rock) = self.backend.schannel_iterate(a(0));
@@ -2792,9 +2783,18 @@ impl Machine {
                     0
                 }
             }
-            0x00F3 => {
+            0x00F1 => {
                 // glk_schannel_get_rock(chan) -> rock
                 if self.sound_enabled { self.backend.schannel_get_rock(a(0)) } else { 0 }
+            }
+            0x00F2 => {
+                // glk_schannel_create(rock) -> chan
+                if self.sound_enabled { self.backend.schannel_create(a(0)) } else { 0 }
+            }
+            0x00F3 => {
+                // glk_schannel_destroy(chan)
+                if self.sound_enabled { self.backend.schannel_destroy(a(0)); }
+                0
             }
             0x00F8 => {
                 // glk_schannel_play(chan, snd) -> 1/0  (repeats=1, no notify)
@@ -6026,24 +6026,33 @@ mod tests {
 
     #[test]
     fn schannel_dispatch_routes_to_backend_when_enabled() {
-        use asm::Op::{C32, C8, Mem16};
-        // create(rock=7)->0x100, get_rock(1)->0x104, play(1, snd=5)->0x108,
-        // play_ext(1, snd=6, repeats=3, notify=9)->0x10C, set_volume(1, 0x8000),
-        // stop(1), destroy(1).
-        let mut body = glk_call(0xF0, &[C8(7)], Mem16(0x0100)); // schannel_create
-        body.extend(glk_call(0xF3, &[C8(1)], Mem16(0x0104)));   // schannel_get_rock
-        body.extend(glk_call(0xF8, &[C8(1), C8(5)], Mem16(0x0108))); // schannel_play
-        body.extend(glk_call(0xF9, &[C8(1), C8(6), C8(3), C8(9)], Mem16(0x010C))); // play_ext
+        use asm::Op::{C16, C32, C8, Mem16};
+        // Glk dispatch selector numbers (gi_dispa.c), same iterate/get_rock/create/
+        // destroy block layout as window (0x0020) and stream (0x0040):
+        //   F0 iterate, F1 get_rock, F2 create, F3 destroy;
+        //   F8 play, F9 play_ext, FA stop, FB set_volume, FC sound_load_hint.
+        let mut body = glk_call(0xF2, &[C8(7)], Mem16(0x0100)); // create(rock=7)
+        body.extend(glk_call(0xF1, &[C8(1)], Mem16(0x0104)));   // get_rock(1)
+        body.extend(glk_call(0xF0, &[C8(0), C16(0x0120)], Mem16(0x0108))); // iterate(0,&rock)
+        body.extend(glk_call(0xF0, &[C8(1), C16(0x0124)], Mem16(0x010C))); // iterate(1,&rock)
+        body.extend(glk_call(0xF8, &[C8(1), C8(5)], Mem16(0x0110))); // play(1, snd=5)
+        body.extend(glk_call(0xF9, &[C8(1), C8(6), C8(3), C8(9)], Mem16(0x0114))); // play_ext
         body.extend(glk_call(0xFB, &[C8(1), C32(0x8000)], asm::Op::Zero)); // set_volume
         body.extend(glk_call(0xFA, &[C8(1)], asm::Op::Zero)); // stop
-        body.extend(glk_call(0xF1, &[C8(1)], asm::Op::Zero)); // destroy
+        body.extend(glk_call(0xF3, &[C8(1)], asm::Op::Zero)); // destroy
         body.extend(asm::ins(0x120, &[]));                    // quit
         let m = run_with_ram(body, 0x200, |m| m.set_sound(true));
 
         assert_eq!(m.mem.read32(0x0100).unwrap(), 1, "create returns the first channel ref");
         assert_eq!(m.mem.read32(0x0104).unwrap(), 7, "get_rock returns the stored rock");
-        assert_eq!(m.mem.read32(0x0108).unwrap(), 1, "play returns success");
-        assert_eq!(m.mem.read32(0x010C).unwrap(), 1, "play_ext returns success");
+        // iterate(0) yields the first channel and writes its rock; iterate(that
+        // channel) yields 0 — the loop MUST terminate (regression: a create/iterate
+        // selector swap made iterate hand out endless fresh channels, hanging the game).
+        assert_eq!(m.mem.read32(0x0108).unwrap(), 1, "iterate(0) returns the first channel");
+        assert_eq!(m.mem.read32(0x0120).unwrap(), 7, "iterate writes the channel's rock to the out-ref");
+        assert_eq!(m.mem.read32(0x010C).unwrap(), 0, "iterate past the last channel returns 0 (terminates)");
+        assert_eq!(m.mem.read32(0x0110).unwrap(), 1, "play returns success");
+        assert_eq!(m.mem.read32(0x0114).unwrap(), 1, "play_ext returns success");
 
         let log = backend_of(&m).sound_log();
         assert!(log.iter().any(|l| l == "play chan=1 snd=5 repeats=1 notify=0"),
@@ -6060,10 +6069,10 @@ mod tests {
     #[test]
     fn schannel_dispatch_is_inert_when_sound_disabled() {
         use asm::Op::{C8, Mem16};
-        // With sound disabled, create returns 0 (NULL channel) and nothing is
+        // With sound disabled, create (0xF2) returns 0 (NULL channel) and nothing is
         // recorded. (A spec-correct game won't call these — gestalt reports 0 —
         // but a probe must get a safe 0, not a diagnostic-spamming fallthrough.)
-        let mut body = glk_call(0xF0, &[C8(7)], Mem16(0x0100)); // schannel_create
+        let mut body = glk_call(0xF2, &[C8(7)], Mem16(0x0100)); // schannel_create
         body.extend(glk_call(0xFC, &[C8(5), C8(1)], asm::Op::Zero)); // sound_load_hint
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |_| {}); // sound left disabled
