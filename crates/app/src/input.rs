@@ -1447,6 +1447,112 @@ pub fn cycle_focus(idx: usize, len: usize, delta: i32) -> usize {
 
 // ── Tidy pipeline ─────────────────────────────────────────────────────────────
 
+/// Rebuild the layer from scratch by replaying discovery order (the subgraph's
+/// connection insertion order), emitting one "Build" frame (with the connection
+/// manifest) followed by one "Placement" frame per room. Returns the fully-placed
+/// rebuilt graph for the tidy stages to consume. Respects `max_frames`.
+fn replay_build_and_placement(
+    sub: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+    frames: &mut Vec<crate::state::TidyFrame>,
+    max_frames: usize,
+) -> mapper::graph::MapGraph {
+    use crate::state::TidyFrame;
+    use mapper::graph::{MapGraph, RoomId};
+    use mapper::layout::{place_incremental, TidyStats};
+
+    let name_of = |g: &MapGraph, id: RoomId| -> String {
+        g.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
+    };
+
+    let conns = sub.connections();
+    let mut rebuild = MapGraph::new();
+
+    // Placement order: anchor first (origin of the first connection, else the first
+    // room), then each room as it first appears in the connection list, then any
+    // isolated rooms with no connections at all.
+    let anchor: Option<RoomId> =
+        conns.first().map(|c| c.origin).or_else(|| sub.rooms().next().map(|r| r.id));
+    let mut order: Vec<RoomId> = Vec::new();
+    let mut seen: std::collections::BTreeSet<RoomId> = std::collections::BTreeSet::new();
+    if let Some(a) = anchor {
+        order.push(a);
+        seen.insert(a);
+    }
+    for c in conns {
+        for id in [c.origin, c.dest] {
+            if seen.insert(id) { order.push(id); }
+        }
+    }
+    for r in sub.rooms() {
+        if seen.insert(r.id) { order.push(r.id); }
+    }
+
+    // ── Build: construct rooms + edges (no positions) on the same layer. ──
+    for &id in &order {
+        rebuild.upsert_room(id, name_of(sub, id));
+        rebuild.set_room_layer(id, layer);
+    }
+    for c in conns {
+        rebuild.add_edge(c.origin, c.dir, c.dest);
+    }
+    let manifest: Vec<String> = conns.iter()
+        .map(|c| format!("{} \u{2192}{:?}\u{2192} {}", name_of(sub, c.origin), c.dir, name_of(sub, c.dest)))
+        .collect();
+    if frames.len() < max_frames {
+        frames.push(TidyFrame {
+            label: "Build".into(),
+            graph: rebuild.clone(),
+            description: format!("Graph built: {} rooms, {} connections", order.len(), conns.len()),
+            stats: TidyStats::default(),
+            stage_start: true,
+            manifest: Some(manifest),
+        });
+    }
+
+    // ── Placement: anchor at origin, then place each room in discovery order. ──
+    let mut first = true;
+    let emit = |rebuild: &MapGraph, desc: String, first: &mut bool, frames: &mut Vec<TidyFrame>| {
+        if frames.len() < max_frames {
+            frames.push(TidyFrame {
+                label: "Placement".into(),
+                graph: rebuild.clone(),
+                description: desc,
+                stats: TidyStats::default(),
+                stage_start: *first,
+                manifest: None,
+            });
+        }
+        *first = false;
+    };
+
+    if let Some(a) = anchor {
+        rebuild.set_pos(a, (0, 0));
+        emit(&rebuild, format!("placed room {} ({}) at origin", a, name_of(sub, a)), &mut first, frames);
+    }
+    for c in conns {
+        if rebuild.room(c.dest).and_then(|r| r.pos).is_some() { continue; } // revisit
+        if rebuild.room(c.origin).and_then(|r| r.pos).is_none() { continue; } // defensive
+        place_incremental(&mut rebuild, c.origin, c.dest, c.dir);
+        let pos = rebuild.room(c.dest).and_then(|r| r.pos).unwrap_or((0, 0));
+        emit(&rebuild, format!("placed room {} ({}) {:?} of room {} at ({},{})",
+            c.dest, name_of(sub, c.dest), c.dir, c.origin, pos.0, pos.1), &mut first, frames);
+    }
+    // Isolated rooms (no in-layer connection): place relative to the anchor.
+    if let Some(a) = anchor {
+        let unplaced: Vec<RoomId> =
+            order.iter().copied().filter(|&id| rebuild.room(id).and_then(|r| r.pos).is_none()).collect();
+        for id in unplaced {
+            place_incremental(&mut rebuild, a, id, mapper::direction::Direction::Unknown);
+            let pos = rebuild.room(id).and_then(|r| r.pos).unwrap_or((0, 0));
+            emit(&rebuild, format!("placed room {} ({}) at ({},{})",
+                id, name_of(sub, id), pos.0, pos.1), &mut first, frames);
+        }
+    }
+
+    rebuild
+}
+
 /// Run the auto-tidy pipeline on the given `layer`, returning a labelled snapshot of the
 /// sub-graph after each stage (frame 0 is the pre-tidy state). The tidied positions are written
 /// back into `graph` for every room in `layer`; all other rooms are untouched. Caller must be in
@@ -1461,7 +1567,7 @@ pub(crate) fn run_tidy_pipeline(
 
     const MAX_TIDY_FRAMES: usize = 2000;
 
-    let mut sub = graph.layer_subgraph(layer);
+    let sub = graph.layer_subgraph(layer);
     let mut frames: Vec<TidyFrame> = Vec::new();
 
     let mut pipe_overlaps: u32 = 0;
@@ -1469,15 +1575,9 @@ pub(crate) fn run_tidy_pipeline(
     let mut pipe_rooms_moved: u32 = 0;
     let mut pipe_constraints: u32 = 0;
 
-    // "before" frame
-    frames.push(TidyFrame {
-        label: "before".into(),
-        graph: sub.clone(),
-        description: "Initial state before tidy pipeline.".into(),
-        stats: TidyStats::default(),
-        stage_start: true,
-        manifest: None,
-    });
+    // Build + placement replay produces the front frames and the rebuilt graph
+    // that the tidy stages run on.
+    let mut sub = replay_build_and_placement(&sub, layer, &mut frames, MAX_TIDY_FRAMES);
 
     // Layout stages via relayout_auto_observed
     mapper::layout::relayout_auto_observed(&mut sub, Some(&mut |g: &mapper::graph::MapGraph, label: &str, desc: &str, s: &TidyStats| {
@@ -3619,6 +3719,86 @@ mod tests {
         let (a, b, c) = (p(180), p(80), p(81));
         assert!(a.0 < b.0 && a.1 < b.1, "180 {a:?} must be NW of 80 {b:?}");
         assert!(a.0 < c.0 && a.1 > c.1, "180 {a:?} must be SW of 81 {c:?}");
+    }
+
+    #[test]
+    fn pipeline_prepends_build_and_placement_frames() {
+        use mapper::mapper::Mapper; // constructed via Mapper::default() (Auto mode)
+        use mapper::direction::Direction;
+
+        // A →N→ B →E→ C, placed incrementally (no tidy yet).
+        let mut m = Mapper::default();
+        m.observe(1, "Foyer", None);
+        m.observe(2, "Hall", Some(Direction::N));
+        m.observe(3, "Study", Some(Direction::E));
+
+        let layer = m.graph.layer_of(1);
+        let frames = run_tidy_pipeline(&mut m.graph, layer);
+
+        // First frame is the single Build stop, carrying a manifest and no positioned rooms.
+        assert_eq!(frames[0].label, "Build");
+        let manifest = frames[0].manifest.as_ref().expect("build frame has a manifest");
+        assert_eq!(manifest.len(), 2, "one manifest line per connection");
+        assert!(frames[0].graph.rooms().all(|r| r.pos.is_none()),
+            "no room is positioned during the build stop");
+        assert!(frames[0].description.contains("3 rooms"));
+        assert!(frames[0].description.contains("2 connections"));
+
+        // Next three frames are Placement, one per room, all with manifest = None.
+        assert_eq!(frames[1].label, "Placement");
+        assert_eq!(frames[2].label, "Placement");
+        assert_eq!(frames[3].label, "Placement");
+        assert!(frames[1..4].iter().all(|f| f.manifest.is_none()));
+
+        // The last placement frame has all three rooms positioned.
+        assert_eq!(frames[3].graph.rooms().filter(|r| r.pos.is_some()).count(), 3);
+
+        // Existing tidy stages still follow the placement frames (each stage marks a
+        // stage_start frame; the "before" frame is gone now).
+        assert!(frames.len() > 4);
+        assert!(frames[4..].iter().any(|f| f.stage_start));
+    }
+
+    #[test]
+    fn pipeline_final_positions_match_silent_for_raw_incremental() {
+        use mapper::mapper::Mapper; // constructed via Mapper::default() (Auto mode)
+        use mapper::direction::Direction;
+
+        let build = || {
+            let mut m = Mapper::default();
+            m.observe(1, "Foyer", None);
+            m.observe(2, "Hall", Some(Direction::N));
+            m.observe(3, "Study", Some(Direction::E));
+            m.observe(4, "Attic", Some(Direction::N));
+            m
+        };
+        let mut animated = build();
+        let mut silent = build();
+        let layer = animated.graph.layer_of(1);
+
+        let _ = run_tidy_pipeline(&mut animated.graph, layer);
+        tidy_layer_silent(&mut silent.graph, layer);
+
+        for id in [1u16, 2, 3, 4] {
+            assert_eq!(
+                animated.graph.room(id).unwrap().pos,
+                silent.graph.room(id).unwrap().pos,
+                "room {id} final position must match the silent (today's) pipeline"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_single_room_layer() {
+        use mapper::mapper::Mapper;
+        let mut m = Mapper::default();
+        m.observe(1, "Foyer", None);
+        let layer = m.graph.layer_of(1);
+        let frames = run_tidy_pipeline(&mut m.graph, layer);
+        assert_eq!(frames[0].label, "Build");
+        assert_eq!(frames[0].manifest.as_ref().unwrap().len(), 0, "no connections");
+        assert_eq!(frames[1].label, "Placement");
+        assert_eq!(frames[1].graph.room(1).unwrap().pos, Some((0, 0)));
     }
 
     #[test]
