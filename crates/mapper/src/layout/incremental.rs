@@ -5,7 +5,7 @@
 //! insertion point on collision (Trizbort's strategy). Existing rooms
 //! otherwise never move, so the map is stable turn-to-turn.
 
-use crate::direction::{grid_offset, Direction};
+use crate::direction::{layout_offset, Direction};
 use crate::graph::{MapGraph, RoomId};
 
 use super::{nearest_free_cell, occupied_cells_in_layer};
@@ -25,16 +25,10 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
     let layer = graph.layer_of(prev);
     graph.set_room_layer(dest, layer);
 
-    // Up/Down are a soft directional HINT: a newly discovered up/down room prefers the cell
-    // directly north / south, but it yields (nearest free cell) instead of pushing rooms aside,
-    // and never overrides a compass placement. Other non-planar directions (In/Out/Unknown) have
-    // no spatial offset.
-    let updown = matches!(dir, Direction::Up | Direction::Down);
-    let delta = grid_offset(dir).or(match dir {
-        Direction::Up => Some((0, -1)),  // hint: directly north
-        Direction::Down => Some((0, 1)), // hint: directly south
-        _ => None,
-    });
+    // Up/Down are now treated as true cardinal moves: a newly discovered up/down room
+    // claims the cell directly north/south and pushes rooms aside on collision.
+    // Other non-planar directions (In/Out/Unknown) have no spatial offset.
+    let delta = layout_offset(dir);
     match delta {
         Some(delta) => {
             let ideal = (prev_pos.0 + delta.0, prev_pos.1 + delta.1);
@@ -43,10 +37,10 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
                 graph.set_pos(dest, ideal);
                 return;
             }
-            // Occupied. A real cardinal compass move shifts rooms beyond aside to open the ideal
-            // cell; an up/down hint (or a diagonal) instead yields to the nearest free cell.
+            // Occupied. A cardinal move (including up/down) shifts rooms beyond aside to open
+            // the ideal cell; a diagonal instead yields to the nearest free cell.
             let is_cardinal = (delta.0 == 0) ^ (delta.1 == 0);
-            if is_cardinal && !updown {
+            if is_cardinal {
                 shift_beyond(graph, ideal, delta, layer);
                 graph.set_pos(dest, ideal);
             } else {
@@ -186,22 +180,22 @@ mod tests {
     }
 
     #[test]
-    fn up_room_yields_to_blocker_without_pushing() {
-        // prev at (0,0); a blocker already sits directly north at (0,-1). An up/down HINT must
-        // YIELD to the nearest free cell, never push the blocker aside (that is the absolute
-        // cardinal behavior, which up/down no longer use).
+    fn up_room_pushes_blocker_like_cardinal() {
+        // prev at (0,0); a blocker already sits directly north at (0,-1). Up/down are now
+        // true cardinal moves, so they push the blocker aside (not yield to nearest free cell).
         let mut g = g_with(1, (0, 0));
         g.upsert_room(9, "blocker".into());
         g.set_pos(9, (0, -1));
         g.upsert_room(2, "attic".into());
         place_incremental(&mut g, 1, 2, Direction::Up);
-        assert_eq!(g.room(9).unwrap().pos, Some((0, -1)), "blocker is NOT pushed (hint yields)");
-        let p2 = g.room(2).unwrap().pos.unwrap();
-        assert_ne!(p2, (0, -1), "up room takes a different (nearest free) cell");
-        assert_ne!(p2, (0, 0), "up room is not on prev");
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -1)), "up room claims the north cell");
+        assert_eq!(g.room(9).unwrap().pos, Some((0, -2)), "blocker is pushed further north");
+        // prev did not move (it is south of the ideal line).
+        assert_eq!(g.room(1).unwrap().pos, Some((0, 0)));
+        // no overlap
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
         let set: std::collections::BTreeSet<_> = cells.iter().collect();
-        assert_eq!(cells.len(), set.len(), "no overlap");
+        assert_eq!(cells.len(), set.len());
     }
 
     #[test]
@@ -242,5 +236,23 @@ mod tests {
         g.upsert_room(3, "New".into());
         place_incremental(&mut g, 1, 3, Direction::E);
         assert_eq!(g.room(9).unwrap().pos, Some((1, 0)), "other-layer room must not move");
+    }
+
+    #[test]
+    fn updown_shoves_like_a_cardinal() {
+        // A at origin; an ordinary room X already sits directly north of A at (0,-1).
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "X".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+
+        // Discover B by going Up from A. B should CLAIM (0,-1) and shove X to (0,-2),
+        // instead of yielding to a nearby free cell.
+        g.upsert_room(3, "B".into());
+        place_incremental(&mut g, 1, 3, Direction::Up);
+
+        assert_eq!(g.room(3).unwrap().pos, Some((0, -1)), "Up dest lands directly north of A");
+        assert_eq!(g.room(2).unwrap().pos, Some((0, -2)), "the ordinary room was shoved aside");
     }
 }
