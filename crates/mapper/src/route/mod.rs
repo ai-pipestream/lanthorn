@@ -4,9 +4,9 @@
 //! lane counts that the renderer turns into gap widths.
 
 use std::collections::BTreeMap;
-use crate::direction::{grid_offset, opposite, Direction};
+use crate::direction::{layout_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
-use crate::router::{side_for, Side};
+use crate::router::{route_side, side_for, Side};
 
 /// A routing channel: `H(r)` is the horizontal gap below room-row `r` (line y=2r+1);
 /// `V(c)` is the vertical gap right of room-column `c` (line x=2c+1).
@@ -354,7 +354,9 @@ fn polylines_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
 /// arrow lands on the matching side regardless of the rooms' exact offset. A cardinal enters the
 /// side opposite the one it left — it reads as travelling straight through (N enters from the
 /// south, S from the north, E from the west, W from the east). A diagonal enters a chosen cardinal
-/// side: NW→N, NE→E, SE→S, SW→W. Non-planar directions (already filtered from `compass`) → None.
+/// side: NW→N, NE→E, SE→S, SW→W. Up/Down enter opposite the side they departed, same as a
+/// cardinal (Up→Bottom, Down→Top). The remaining non-planar directions (In/Out/Unknown, already
+/// filtered from `compass`) → None.
 fn oneway_entry_side(dir: Direction) -> Option<Side> {
     Some(match dir {
         Direction::N => Side::Bottom,
@@ -365,9 +367,9 @@ fn oneway_entry_side(dir: Direction) -> Option<Side> {
         Direction::NE => Side::Right,
         Direction::SE => Side::Bottom,
         Direction::SW => Side::Left,
-        Direction::Up | Direction::Down | Direction::In | Direction::Out | Direction::Unknown => {
-            return None
-        }
+        Direction::Up => Side::Bottom,
+        Direction::Down => Side::Top,
+        Direction::In | Direction::Out | Direction::Unknown => return None,
     })
 }
 
@@ -524,14 +526,26 @@ fn total_crossings(conns: &[RoutedConnector]) -> usize {
 
 /// The unconsumed reverse edge (b→a) paired with edge `ci`, preferring the exact compass-opposite
 /// so the trunk keeps its natural straight / single-L shape, falling back to the first reverse edge.
+///
+/// Up/Down edges are NEVER paired: an Up/Down `c` never has a back-edge (a reciprocal Up+Down pair
+/// must stay two separate one-way connectors, not collapse into one reciprocal connector), and an
+/// Up/Down candidate is never treated as another edge's back-edge either (the fallback would
+/// otherwise pair e.g. `1→N→2` with an unrelated `2→Down→1`, which are not geometrically opposite).
 fn back_edge_idx(
     compass: &[&Connection],
     ci: usize,
     c: &Connection,
     consumed: &std::collections::BTreeSet<usize>,
 ) -> Option<usize> {
+    if matches!(c.dir, Direction::Up | Direction::Down) {
+        return None;
+    }
     let is_back = |pi: usize, p: &Connection| {
-        pi != ci && !consumed.contains(&pi) && p.origin == c.dest && p.dest == c.origin
+        pi != ci
+            && !consumed.contains(&pi)
+            && p.origin == c.dest
+            && p.dest == c.origin
+            && !matches!(p.dir, Direction::Up | Direction::Down)
     };
     compass
         .iter()
@@ -569,7 +583,7 @@ fn direct_route_losers(
         }
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue };
-        let Some(exit) = side_for(c.dir) else { continue };
+        let Some(exit) = route_side(c.dir) else { continue };
         let required_entry =
             back_edge_idx(compass, ci, c, &empty).and_then(|pi| side_for(compass[pi].dir));
         if let Some((sentry, pts)) = direct_route(a, exit, b, occupied) {
@@ -608,7 +622,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     let compass: Vec<&crate::graph::Connection> = graph
         .connections()
         .iter()
-        .filter(|c| grid_offset(c.dir).is_some())
+        .filter(|c| layout_offset(c.dir).is_some())
         .collect();
     // Edge indices already drawn — either as their own connector or consumed as the
     // back-edge of an earlier bidirectional pairing.
@@ -632,7 +646,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // departure arrow is drawn; no independent line reaches the destination.
         if let Some(trunk) = trunk_points.get(&pair) {
             if let (Some(a), Some(exit)) =
-                (graph.room(c.origin).and_then(|r| r.pos), side_for(c.dir))
+                (graph.room(c.origin).and_then(|r| r.pos), route_side(c.dir))
             {
                 if let Some(pts) = merge_stub_points(a, exit, trunk) {
                     out.push(RoutedConnector {
@@ -669,7 +683,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         let has_reciprocal = back.is_some();
         let (Some(a), Some(b)) = (graph.room(c.origin).and_then(|r| r.pos),
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue; };
-        let Some(exit) = side_for(c.dir) else { continue; };
+        let Some(exit) = route_side(c.dir) else { continue; };
 
         // Direct route: if the path from `a` to `b` is clear along the room grid, draw it as a
         // straight line / single-corner L instead of dipping into channels — fewer turns, no
@@ -1182,8 +1196,13 @@ mod tests {
         assert_eq!(oneway_entry_side(NE), Some(Side::Right));
         assert_eq!(oneway_entry_side(SE), Some(Side::Bottom));
         assert_eq!(oneway_entry_side(SW), Some(Side::Left));
-        // Non-planar directions have no side.
-        assert_eq!(oneway_entry_side(Up), None);
+        // Up/Down enter opposite the side they departed, same as a cardinal.
+        assert_eq!(oneway_entry_side(Up), Some(Side::Bottom));
+        assert_eq!(oneway_entry_side(Down), Some(Side::Top));
+        // The remaining non-planar directions have no side.
+        assert_eq!(oneway_entry_side(In), None);
+        assert_eq!(oneway_entry_side(Out), None);
+        assert_eq!(oneway_entry_side(Unknown), None);
     }
 
     #[test]
@@ -1510,13 +1529,15 @@ mod tests {
 
     #[test]
     fn stub_excluded_non_compass() {
+        // Up/Down are now routed as lane connectors (see `updown_is_routed_as_a_lane_connector_not_collapsed`
+        // below); only the truly non-planar directions (In/Out/Unknown) remain excluded stubs.
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
         g.set_pos(1, (0, 0));
         g.set_pos(2, (1, 0));
-        g.add_edge(1, Direction::Up, 2); // non-compass stub
-        assert!(route_topology(&g).is_empty(), "non-compass edges are not routed");
+        g.add_edge(1, Direction::In, 2); // non-planar stub
+        assert!(route_topology(&g).is_empty(), "non-planar edges are not routed");
     }
 
     #[test]
@@ -1551,5 +1572,46 @@ mod tests {
             dirs.contains(&Direction::SW) && dirs.contains(&Direction::NE),
             "both diagonal directions carried: {dirs:?}"
         );
+    }
+
+    #[test]
+    fn updown_is_routed_as_a_lane_connector_not_collapsed() {
+        // A--Up-->B (B north of A). Up should now be a lane connector, not just a stub.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+
+        let plan = route_lanes(&g);
+        let up_connectors: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| matches!(c.exit_dir, Direction::Up))
+            .collect();
+        assert_eq!(up_connectors.len(), 1, "the Up edge produces one lane connector");
+        assert!(!up_connectors[0].reciprocal, "up/down connectors are never reciprocal");
+    }
+
+    #[test]
+    fn reciprocal_updown_pair_is_not_collapsed() {
+        // A--Up-->B and B--Down-->A: must stay TWO connectors, never collapsed to one.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+
+        let plan = route_lanes(&g);
+        let vertical: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .collect();
+        assert_eq!(vertical.len(), 2, "the Up and Down edges are drawn separately, not collapsed");
+        assert!(vertical.iter().all(|c| !c.reciprocal));
     }
 }

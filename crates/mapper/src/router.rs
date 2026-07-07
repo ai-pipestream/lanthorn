@@ -79,6 +79,17 @@ pub fn side_for(dir: Direction) -> Option<Side> {
     }
 }
 
+/// Like [`side_for`], but also gives Up/Down a routed box side (Up→Top, Down→Bottom).
+/// Used ONLY by the lane router so vertical connectors get lanes + border anchors;
+/// the old stub router (`route_all`) keeps using `side_for` (None for up/down).
+pub fn route_side(dir: Direction) -> Option<Side> {
+    match dir {
+        Direction::Up => Some(Side::Top),
+        Direction::Down => Some(Side::Bottom),
+        _ => side_for(dir),
+    }
+}
+
 // ── Fine grid helpers ─────────────────────────────────────────────────────────
 
 /// Convert a logical room position to its fine-grid cell.
