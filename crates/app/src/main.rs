@@ -2252,7 +2252,9 @@ fn main() {
             // No key this tick — advance the tidy animation if one is playing. The next loop
             // iteration redraws, so an advanced frame appears without waiting for input.
             if let Some(anim) = &mut state.tidy_anim {
-                anim.tick(Duration::from_millis(700));
+                // Short auto-play dwell — stepping is mostly done manually with the
+                // arrow keys, so the delay only needs to be long enough to follow.
+                anim.tick(Duration::from_millis(100));
             }
             if let Some(r) = &mut state.replay {
                 r.tick(Duration::from_millis(700), state.history.len());
