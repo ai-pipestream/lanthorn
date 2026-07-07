@@ -1573,7 +1573,7 @@ pub(crate) fn run_tidy_pipeline(
     graph: &mut mapper::graph::MapGraph,
     layer: mapper::layer::LayerId,
 ) -> Vec<crate::state::TidyFrame> {
-    use crate::render::map::{cleanup_overlaps_observed, compact_empty_lines_observed, repair_directional_hints_observed, stack_updown_rooms_observed};
+    use crate::render::map::{cleanup_overlaps_observed, compact_empty_lines_observed, repair_directional_hints_observed};
     use crate::state::TidyFrame;
     use mapper::layout::TidyStats;
 
@@ -1660,25 +1660,6 @@ pub(crate) fn run_tidy_pipeline(
         }));
     }
 
-    // stack_updown_rooms
-    stack_updown_rooms_observed(&mut sub, Some(&mut |g, _label, desc, _s| {
-        if frames.len() < MAX_TIDY_FRAMES {
-            frames.push(TidyFrame {
-                label: "stack_updown".into(),
-                graph: g.clone(),
-                description: desc.into(),
-                stats: TidyStats {
-                    rooms_moved: pipe_rooms_moved,
-                    constraints_dropped: pipe_constraints,
-                    overlaps_resolved: pipe_overlaps,
-                    hints_repaired: pipe_hints,
-                },
-                stage_start: true,
-                manifest: None,
-            });
-        }
-    }));
-
     // Second cleanup_overlaps pass
     {
         let mut first = true;
@@ -1759,13 +1740,12 @@ pub fn tidy_layer_silent(
     graph: &mut mapper::graph::MapGraph,
     layer: mapper::layer::LayerId,
 ) {
-    use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints, stack_updown_rooms};
+    use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints};
 
     let mut sub = graph.layer_subgraph(layer);
     mapper::layout::relayout_auto(&mut sub);
     cleanup_overlaps(&mut sub, 3, 40);
     repair_directional_hints(&mut sub, 3, 40);
-    stack_updown_rooms(&mut sub);
     cleanup_overlaps(&mut sub, 3, 40);
     compact_empty_lines(&mut sub);
 
@@ -3731,6 +3711,35 @@ mod tests {
         let (a, b, c) = (p(180), p(80), p(81));
         assert!(a.0 < b.0 && a.1 < b.1, "180 {a:?} must be NW of 80 {b:?}");
         assert!(a.0 < c.0 && a.1 > c.1, "180 {a:?} must be SW of 81 {c:?}");
+    }
+
+    #[test]
+    fn reciprocal_ns_keeps_column_when_updown_contends() {
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        // A--N-->B and B--S-->A  (reciprocal N/S pair, should share a column).
+        // A also has an Up exit to C, which contends for the cell north of A.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(3, "C".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.set_pos(3, (0, -1)); // deliberately conflicting to force the tidy to resolve
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        g.add_edge(1, Direction::Up, 3);
+
+        let layer = g.layer_of(1);
+        let _ = run_tidy_pipeline(&mut g, layer);
+
+        // The reciprocal pair keeps its shared column; the up/down room yields off it.
+        let a = g.room(1).unwrap().pos.unwrap();
+        let b = g.room(2).unwrap().pos.unwrap();
+        let c = g.room(3).unwrap().pos.unwrap();
+        assert_eq!(a.0, b.0, "reciprocal N/S pair shares a column");
+        assert_ne!(c, b, "the up/down room does not sit on top of the reciprocal neighbor");
     }
 
     #[test]
