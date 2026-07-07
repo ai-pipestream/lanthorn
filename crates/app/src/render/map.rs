@@ -441,9 +441,20 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // truncated (diagnostic view).
     if let Some(anim) = &state.tidy_anim {
         if let Some(lines) = anim.current().manifest.as_ref() {
-            for (i, line) in lines.iter().take(area.height as usize).enumerate() {
+            // The tidy transport panel overlays the top-left of the map pane (see
+            // draw_tidy_panel); start the manifest below it, when the panel is drawn,
+            // so the panel doesn't cover the connection list.
+            let top = if area.width >= crate::render::tidy_panel::PANEL_W
+                && area.height >= crate::render::tidy_panel::PANEL_H
+            {
+                crate::render::tidy_panel::PANEL_H
+            } else {
+                0
+            };
+            let avail_h = area.height.saturating_sub(top);
+            for (i, line) in lines.iter().take(avail_h as usize).enumerate() {
                 let clamped: String = line.chars().take(area.width as usize).collect();
-                put_str(buf, area.x as i32, area.y as i32 + i as i32, &clamped,
+                put_str(buf, area.x as i32, (area.y + top) as i32 + i as i32, &clamped,
                     state.colors.transcript, area);
             }
             return;
@@ -4661,5 +4672,42 @@ mod tests {
         let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
         assert!(text.contains("Foyer"), "manifest line should be drawn in the map pane");
         assert!(text.contains("Hall"));
+    }
+
+    #[test]
+    fn build_frame_manifest_starts_below_tidy_panel() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use crate::render::tidy_panel::PANEL_H;
+        use crate::state::{AppState, TidyAnim, TidyFrame};
+        use mapper::graph::MapGraph;
+        use mapper::layout::TidyStats;
+
+        let mut state = AppState::default();
+        state.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {
+            label: "Build".into(),
+            graph: MapGraph::new(),
+            description: "Graph built: 2 rooms, 1 connections".into(),
+            stats: TidyStats::default(),
+            stage_start: true,
+            manifest: Some(vec!["Foyer \u{2192}N\u{2192} Hall".into()]),
+        }]));
+
+        // Pane large enough for the tidy transport panel (>= PANEL_W x PANEL_H), so the
+        // manifest must be offset below the panel rows instead of under it.
+        let rm = mapper::render::render(&MapGraph::new());
+        let area = Rect::new(0, 0, 80, 20);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let row = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        for y in 0..PANEL_H {
+            assert!(!row(y).contains("Foyer"), "manifest must not be drawn in panel row {y}");
+        }
+        assert!(row(PANEL_H).contains("Foyer"), "manifest should start at row PANEL_H");
     }
 }

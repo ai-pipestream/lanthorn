@@ -7,8 +7,8 @@ use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, Dia
 use crate::render::draw_str_clipped;
 use crate::state::TidyFrame;
 
-const PANEL_W: u16 = 62;
-const PANEL_H: u16 = 5; // border-top + desc + stats + OK button row + border-bot
+pub const PANEL_W: u16 = 62;
+pub const PANEL_H: u16 = 5; // border-top + desc + stats + OK button row + border-bot
 
 /// Render the tidy-animation panel into the top-left corner of `area`.
 ///
