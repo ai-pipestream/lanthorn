@@ -230,3 +230,120 @@ no reciprocal-collapse.
   breaking, don't cross other connectors, a matching up/down pair is a single dotted
   path anchored at the top/bottom border (yielding the center to a reciprocal N/S),
   with up/down glyphs on the border.
+
+---
+
+# Phase 3: Refinements after visual testing (SQ-0219 + #1 shove + #3 lock-in)
+
+Visual testing of Phase 2 surfaced three refinements. Two are behavior changes
+(SQ-0219 de-dup; #1 up/down paths shove instead of cross); one is a confirmation
+that an intended property already holds and only needs a regression test (#3).
+
+## #1 — up/down paths shove rooms apart instead of crossing (scoped)
+
+**Observed:** up/down connectors *cross* other connectors instead of forcing rooms
+apart to make room. **Root cause (confirmed on disk):** the tidy's cleanup loop
+exits immediately when the illegal-overlap count is zero (`overlap_stats` returns
+`(illegal, crossings)`; the loop gates on `illegal`), and the crossing count is only
+a **4th-place tiebreak** in the move-selection key. A *clean perpendicular crossing*
+of an up-path over another path is not an illegal overlap, so it triggers no room
+movement. The lane router minimizes crossings for a **fixed** layout — only the tidy
+moves rooms, and nothing converts a crossing into a room-separating move.
+
+**Design — scoped up/down crossing pressure (chosen over a general crossing
+promotion to bound blast radius):**
+
+- Extend `overlap_stats` to return a third field, `updown_crossings` — the count of
+  crossing cells (the existing clean `[ns, ew]` perpendicular case) where **at least
+  one** of the two crossing connectors is an up/down connector
+  (`exit_dir ∈ {Up, Down}`). It is a subset of `crossings`; the existing `crossings`
+  total is unchanged.
+- The cleanup loop continues while `illegal > 0` **OR** `updown_crossings > 0`
+  (today it breaks the moment `illegal == 0`).
+- Insert `updown_crossings` into the move-selection key and acceptance test at
+  **second priority — directly after `illegal`** (before alignment/side-broken and
+  before the general `crossings` tiebreak). So the tidy will move rooms to eliminate
+  an up/down crossing, but only when doing so does not increase illegal overlaps
+  (illegal stays the hard primary key), and it will **not** relocate rooms for a
+  compass-vs-compass crossing (that stays the low-priority tiebreak it is today).
+- Guard `compact_empty_lines` so it reverts a compaction that *increases*
+  `updown_crossings` (today it reverts only on increased illegal), so compaction
+  cannot undo the shove.
+
+**Explicitly unchanged:** compass-vs-compass crossing behavior (still just a
+tiebreak); `illegal` remains the hard primary constraint; the lane router is
+untouched. The change is scoped to crossings that involve an up/down path.
+
+**The 4 deferred tests.** Phase 2 marked four layout tests `#[ignore]` ("up/down now
+feed overlap_stats…pending B/A layout decision"). Phase 3 resolves that decision (A,
+scoped). Each deferred test is revisited: its post-shove layout is eyeballed for
+correctness, its assertions updated to the correct layout, and the `#[ignore]`
+removed.
+
+## SQ-0219 — a compass edge wins over an up/down path on the same room pair
+
+**Observed/confirmed:** when rooms A,B are joined by **both** a compass edge (e.g.
+`north`) **and** an up/down edge, the router emits **two** connectors — a compass
+trunk plus an up/down merge stub — and which is which is just `connections()` order.
+There is no compass-vs-portal de-dup. In/Out never route (their offset is `None`), so
+"ignore in/out" is already true.
+
+**Design:**
+
+- **Suppress the up/down connector when a compass edge shares the pair.** In
+  `route_topology_with`, precompute the set of unordered room pairs that have at least
+  one **compass** edge (`grid_offset(dir).is_some()`). Skip routing any Up/Down edge
+  whose pair is in that set — no trunk, no merge stub. The compass edge is drawn; the
+  up/down edge contributes only its layout hint (redundant here, since a compass edge
+  already governs the pair) and is not drawn as a separate dotted connector.
+- **In/Out:** unchanged — never routed, always shown as room mid-slot icons.
+- **Keep the portal symbol shown.** In the default/numbers views the *only* up/down
+  indicator today is the connector's border glyph (the independent room-level up/down
+  glyph exists only in portal-label view). Suppressing the connector would therefore
+  erase the ↑/↓. Fix: in `draw_portal_icons`, for the default/numbers views, draw the
+  room-level up/down border glyph (top = ↑, bottom = ↓) for an up/down stub **whose
+  pair has a compass connector in the plan but no up/down connector** — i.e. exactly
+  the pairs the router just de-duped. This condition is computable in the renderer
+  from `rm.plan.connectors` + `rm.edges` with no new plumbing, and it must not
+  double-draw when an up/down connector *is* present.
+
+## #3 — up glyph always on the north border, down on the south (already true)
+
+**Confirmed already satisfied on disk:** `route_side(Up) = Top`,
+`route_side(Down) = Bottom`, `oneway_entry_side(Up) = Bottom`, `Down = Top`, and no
+code path ever assigns an up/down connector a Left/Right side. The ↑/↓ glyph is chosen
+from `exit_dir` consistently with that side, and a collapsed reciprocal pair lands the
+far-end glyph on the opposite (correct) border. So the up glyph is always on a north
+(top) border and the down glyph always on a south (bottom) border, by construction.
+
+**Design:** no behavior change — add a **regression test** locking in the invariant
+(`route_side(Up)=Top`/`route_side(Down)=Bottom` at the router level, plus a render
+test that ↑ lands on a top border row and ↓ on a bottom border row for a reciprocal
+up/down map), so a future edit cannot silently break it.
+
+## Phase 3 decisions (flagged and accepted)
+
+- **#1 is scoped to up/down-involved crossings only.** Compass-vs-compass crossing
+  behavior is unchanged; `illegal` stays the hard primary key. This bounds regression
+  risk to vertical-path layouts.
+- **SQ-0219 suppresses the up/down *connector* but keeps the room's portal glyph** in
+  every view, so vertical access still reads even when a compass path is drawn.
+- **In/Out stay ignored** (never routed) and keep their room mid-slot icons.
+- **#3 needs no behavior change** — it is already true and only gets a regression
+  test.
+
+## Phase 3 verification
+
+- **Unit (mapper):** a pair with both a compass and an up/down edge yields exactly one
+  connector (the compass one) and zero up/down connectors; a pair with only an up/down
+  edge is unaffected (one up/down connector); `route_side(Up)=Top`/`Down=Bottom`.
+- **Unit (app):** `overlap_stats` counts an up/down×horizontal crossing in
+  `updown_crossings` but a compass×compass crossing not; a fixture where an up path
+  would cross a horizontal compass path ends with rooms shoved apart
+  (`updown_crossings == 0`) after tidy, while a pure compass crossing triggers no room
+  movement; a de-duped pair still renders the room-level ↑/↓; a reciprocal up/down map
+  renders ↑ on a top border row and ↓ on a bottom border row.
+- **Real game (oracle):** on a vertical-heavy map, up/down paths no longer cross other
+  paths where the tidy could make room; a room joined by both a compass and an up/down
+  edge draws a single compass path and still shows its up/down symbol; compass-only
+  regions are visually unchanged.

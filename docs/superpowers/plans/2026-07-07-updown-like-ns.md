@@ -686,3 +686,409 @@ git commit -m "feat: collapse matching up/down pairs (reciprocal) with N/S slot 
 
 - The trickiest part of Task 7 is mixing **dotted** up/down bodies with **solid** compass bodies in `render_lane_connectors`' shared per-cell mask. Prefer selecting the glyph set per-connector (draw up/down connector segments with the dotted set) over a global change; if the shared-mask junction logic makes per-cell selection hard, draw up/down connector bodies in a small dedicated pass using their `segs`, and keep compass rendering unchanged. Whatever you choose, compass connectors must render byte-identically to before.
 - Do NOT change `side_for`, `route_all`, `planar_region`, or `mark_distorted` — Phase 2 keeps `grid_offset(Up/Down) == None`; only the lane router (`route_side` + `layout_offset` filter) sees up/down as sided.
+
+---
+
+# Phase 3 — Refinements after visual testing (SQ-0219 de-dup, #1 shove-not-cross, #3 lock-in)
+
+See the spec's "Phase 3" section. Three refinements from visual testing of Phase 2. Do these AFTER Tasks 1-9. Quests: SQ-0216 (Tasks 10, 13, 14) and SQ-0219 (Tasks 11, 12).
+
+## Phase 3 Global Constraints (in addition to the top-of-plan constraints)
+
+- **#1 is scoped to up/down-involved crossings only.** Compass-vs-compass crossing behavior MUST stay byte-identical. `illegal` stays the hard primary key of the tidy — a move that reduces up/down crossings but raises illegal overlaps is rejected.
+- **SQ-0219 suppresses the up/down connector but the room's up/down glyph MUST still show in every view** (Boxes/numbers/labels), so vertical access still reads.
+- **In/Out stay ignored** (never routed) and keep their room mid-slot icons — do not change In/Out handling.
+- **#3 is a lock-in only** — no behavior change; just a regression test.
+- Compass routing/layout/rendering stays byte-identical (Phase 1/2 invariants hold).
+
+---
+
+## Task 10: Lock in "up glyph on north border, down glyph on south border" (#3, regression only)
+
+**Files:**
+- Test: `crates/mapper/src/route/mod.rs` tests (router-level side invariant)
+- Test: `crates/app/src/render/map.rs` tests (render-level border-row invariant)
+
+**Interfaces:**
+- Consumes: `crate::router::route_side` (Task 6), the reciprocal up/down rendering (Task 9). No production code changes — this task is a pure regression guard confirming an already-true property.
+
+- [ ] **Step 1: Write the regression tests**
+
+Add to the `#[cfg(test)]` module in `crates/mapper/src/route/mod.rs`:
+
+```rust
+#[test]
+fn route_side_puts_up_on_top_and_down_on_bottom() {
+    use crate::direction::Direction;
+    use crate::router::route_side;
+    use crate::router::Side;
+    // Up always departs the NORTH (top) border; Down always the SOUTH (bottom).
+    assert_eq!(route_side(Direction::Up), Some(Side::Top));
+    assert_eq!(route_side(Direction::Down), Some(Side::Bottom));
+}
+```
+
+(Match the real import paths for `Side`/`route_side` — adjust the `use` lines to wherever they live if these are wrong, but do not change the assertions.)
+
+Add to the tests module in `crates/app/src/render/map.rs` (match how the neighboring render tests build a graph, render at Boxes zoom, and scan the buffer):
+
+```rust
+#[test]
+fn reciprocal_updown_glyphs_sit_on_north_and_south_borders() {
+    // A at origin, B directly north, joined by a reciprocal Up/Down pair.
+    // The up glyph must land on a TOP border row (north side) and the down glyph
+    // on a BOTTOM border row (south side) — never swapped, never on a left/right side.
+    use mapper::direction::Direction;
+    use mapper::graph::MapGraph;
+
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::Up, 2);
+    g.add_edge(2, Direction::Down, 1);
+
+    let state = AppState::default();
+    let rm = mapper::render::render(&g);
+    let area = Rect::new(0, 0, 60, 30);
+    let mut buf = Buffer::empty(area);
+    render_map(&rm, &state, area, &mut buf);
+
+    // Find the up glyph and the down glyph, record their rows.
+    let up = state.symbols.portal.up;    // default '↑'
+    let down = state.symbols.portal.down; // default '↓'
+    let mut up_row = None;
+    let mut down_row = None;
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            let s = buf.get(x, y).symbol();
+            if s.chars().next() == Some(up) { up_row = Some(y); }
+            if s.chars().next() == Some(down) { down_row = Some(y); }
+        }
+    }
+    let (up_row, down_row) = (up_row.expect("up glyph present"), down_row.expect("down glyph present"));
+    // B is north of A, so the up glyph (on B's south / A's north border region) must be
+    // strictly below the down glyph? No — the up glyph marks the LOWER room's top border
+    // and the down glyph marks the UPPER room's bottom border, and the upper room is north
+    // (smaller y). So the down glyph (upper room, bottom border) is ABOVE the up glyph
+    // (lower room, top border): down_row < up_row.
+    assert!(down_row < up_row,
+        "down glyph (upper room's south border) sits above the up glyph (lower room's north border): down_row={down_row} up_row={up_row}");
+}
+```
+
+(The `symbols.portal.up/down` accessors and `AppState::default()` Boxes setup must match the real API — mirror the Task 7/9 render tests exactly. If those tests recenter/scroll, do the same here. The essential assertion is the vertical ordering of the two glyphs; if the exact rows differ from the comment's reasoning once you see the real geometry, keep the assertion that encodes "up glyph on the lower room's top border, down glyph on the upper room's bottom border" and fix the direction of the inequality to match the real layout — do not weaken it to "just present".)
+
+- [ ] **Step 2: Run — verify they pass as-is (property already holds)**
+
+Run: `cargo test -p mapper route_side_puts_up_on_top_and_down_on_bottom`
+Run: `cargo test -p app reciprocal_updown_glyphs_sit_on_north_and_south_borders`
+Expected: BOTH PASS with no production change (this is a lock-in of already-correct behavior). If the render test fails, the glyph geometry differs from the reasoning above — adjust the inequality to match the real north/south layout (still asserting up=north-room-top, down=south... i.e. the upper room is north), and note it; do NOT change production code unless the glyphs are genuinely on the wrong (swapped or left/right) borders, which would make this a real bug to escalate.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add crates/mapper/src/route/mod.rs crates/app/src/render/map.rs
+git commit -m "test: lock in up=north-border / down=south-border invariant (SQ-0216)"
+```
+
+---
+
+## Task 11: Suppress the up/down connector when a compass edge shares the room pair (SQ-0219, mapper)
+
+**Files:**
+- Modify: `crates/mapper/src/route/mod.rs` (`route_topology_with` working set ~635; add a pre-pass computing compass-covered pairs; skip up/down edges on those pairs)
+- Test: `crates/mapper/src/route/mod.rs` tests
+
+**Interfaces:**
+- Consumes: `grid_offset` (compass test) and the existing `route_lanes`/`RoutedConnector` API.
+- Produces: when an unordered room pair has ≥1 compass edge (`grid_offset(dir).is_some()`), any Up/Down edge on that same pair produces **no** connector (no trunk, no merge stub). Pairs with only up/down edges are unaffected. In/Out unchanged (never routed).
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the `#[cfg(test)]` module in `crates/mapper/src/route/mod.rs`:
+
+```rust
+#[test]
+fn compass_edge_suppresses_updown_connector_on_same_pair() {
+    use crate::direction::Direction;
+    use crate::graph::MapGraph;
+
+    // A--North-->B AND A--Up-->B on the same pair: only the compass path is drawn.
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::N, 2);
+    g.add_edge(1, Direction::Up, 2);
+
+    let plan = route_lanes(&g);
+    let updown: Vec<_> = plan.connectors.iter()
+        .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+        .collect();
+    assert_eq!(updown.len(), 0, "the up/down connector is suppressed when a compass edge shares the pair");
+    let compass: Vec<_> = plan.connectors.iter()
+        .filter(|c| matches!(c.exit_dir, Direction::N | Direction::S))
+        .collect();
+    assert_eq!(compass.len(), 1, "the compass connector is still drawn");
+}
+
+#[test]
+fn lone_updown_pair_is_unaffected_by_suppression() {
+    use crate::direction::Direction;
+    use crate::graph::MapGraph;
+
+    // Only an Up edge, no compass edge on this pair: the up/down connector survives.
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::Up, 2);
+
+    let plan = route_lanes(&g);
+    let updown: Vec<_> = plan.connectors.iter()
+        .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+        .collect();
+    assert_eq!(updown.len(), 1, "a pair with no compass edge keeps its up/down connector");
+}
+```
+
+- [ ] **Step 2: Run — verify the first fails**
+
+Run: `cargo test -p mapper compass_edge_suppresses_updown_connector_on_same_pair lone_updown_pair_is_unaffected_by_suppression`
+Expected: `compass_edge_suppresses...` FAILS (today the up/down edge still produces a connector/merge-stub); `lone_updown...` PASSES (guards the no-regression case).
+
+- [ ] **Step 3: Implement**
+
+Read `route_topology_with` (working-set filter ~635, the per-edge loop, `back_edge_idx`, and the `trunk_points`/merge-stub branch ~656-683) FIRST. Then:
+
+- Before the per-edge routing loop, compute the set of unordered pairs covered by a compass edge:
+  ```rust
+  use std::collections::BTreeSet;
+  let compass_pairs: BTreeSet<(RoomId, RoomId)> = graph.connections().iter()
+      .filter(|c| grid_offset(c.dir).is_some())
+      .map(|c| { let (a, b) = (c.from, c.to); if a <= b { (a, b) } else { (b, a) } })
+      .collect();
+  ```
+  (Match the real field names for a connection's endpoints — the working set already derives a pair key at ~656; reuse that exact key derivation so the `BTreeSet` key and the loop's pair key are identical. Confirm the `RoomId` type and `grid_offset` import.)
+- In the per-edge loop, when the current edge `c` is Up/Down (`matches!(c.dir, Direction::Up | Direction::Down)`) and its pair key is in `compass_pairs`, `continue` — emit no connector for it.
+
+Keep In/Out excluded as before (they never enter the working set). Do not change compass or lone-up/down handling.
+
+- [ ] **Step 4: Run — verify green**
+
+Run: `cargo test -p mapper compass_edge_suppresses_updown_connector_on_same_pair lone_updown_pair_is_unaffected_by_suppression`
+Expected: both PASS.
+Run: `cargo test -p mapper`
+Expected: all pass (the 4 app-side deferred tests are in the app crate, unaffected here). If a routing test asserted a connector for an up/down edge that shares a compass pair, that is the intended change — update it and note it.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mapper/src/route/mod.rs
+git commit -m "feat(mapper): compass edge suppresses the up/down connector on the same pair (SQ-0219)"
+```
+
+---
+
+## Task 12: Keep the room's up/down glyph when its connector is suppressed (SQ-0219, app)
+
+**Files:**
+- Modify: `crates/app/src/render/map.rs` (`draw_portal_icons` ~1214-1318 — the default/numbers-view branches ~1297-1315)
+- Test: `crates/app/src/render/map.rs` tests
+
+**Interfaces:**
+- Consumes: Task 11 (up/down connector suppressed for compass-covered pairs); `rm.plan.connectors` and `rm.edges`.
+- Behavior: in the default and numbers views, a room joined to a neighbor by both a compass and an up/down edge (whose up/down connector Task 11 suppressed) still shows the room-level up/down border glyph. When an up/down connector IS present (lone up/down pair), no room-level glyph is added (the connector carries it) — no double-draw.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to the tests module in `crates/app/src/render/map.rs` (mirror the neighboring render-test setup):
+
+```rust
+#[test]
+fn deduped_updown_pair_still_shows_room_glyph() {
+    // A--North-->B AND A--Up-->B: Task 11 suppresses the up/down connector, but the
+    // rooms must still show the up/down glyph so vertical access reads.
+    use mapper::direction::Direction;
+    use mapper::graph::MapGraph;
+
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::N, 2);
+    g.add_edge(1, Direction::Up, 2);
+
+    let state = AppState::default(); // default/Boxes view, numbers per default
+    let rm = mapper::render::render(&g);
+    let area = Rect::new(0, 0, 60, 30);
+    let mut buf = Buffer::empty(area);
+    render_map(&rm, &state, area, &mut buf);
+
+    let up = state.symbols.portal.up;
+    let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+    assert!(text.contains(up), "the up glyph still shows on the room border even though the connector was suppressed");
+}
+```
+
+- [ ] **Step 2: Run — verify it fails**
+
+Run: `cargo test -p app deduped_updown_pair_still_shows_room_glyph`
+Expected: FAIL — with the connector suppressed (Task 11) and the default view drawing no room-level up/down icon, the up glyph is absent.
+
+- [ ] **Step 3: Implement**
+
+Read `draw_portal_icons` (~1214-1318), especially the numbers/default branches (~1297-1315) and the portal-label branch (~1273-1286) that already draws the top=↑ / bottom=↓ border glyphs. Then, in the default/numbers branches:
+
+- For an up/down stub edge (`rm.edges`, `is_stub`, `dir ∈ {Up, Down}`), determine whether its pair was de-duped: the plan has a **compass** connector for that pair but **no up/down** connector. Compute the pair key the same way Task 11 does. If de-duped, draw the room-level up/down border glyph for that direction (top border cell for Up, bottom border cell for Down — reuse the portal-label branch's placement at `bx + BOX_W/2`), guarded so it is not drawn when an up/down connector for the pair is present (lone up/down pair — the connector already shows it).
+
+Keep In/Out/Unknown handling exactly as-is.
+
+- [ ] **Step 4: Run — verify green**
+
+Run: `cargo test -p app deduped_updown_pair_still_shows_room_glyph`
+Expected: PASS.
+Run: `cargo test -p app up_connector_draws_updown_glyph_on_border_not_arrow`
+Expected: PASS (lone up/down pair still shows exactly one up glyph via the connector — confirm no double-draw).
+Run: `cargo test -p app`
+Expected: all pass (the 4 deferred tests remain `#[ignore]` until Task 14).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/app/src/render/map.rs
+git commit -m "feat(app): keep room up/down glyph when the connector is suppressed (SQ-0219)"
+```
+
+---
+
+## Task 13: Up/down paths shove rooms apart instead of crossing (#1, scoped up/down crossing pressure)
+
+**Files:**
+- Modify: `crates/app/src/render/map.rs` (`overlap_stats` ~1546-1589 add third field; `cleanup_overlaps_observed` gate ~1672 + acceptance ~1705 + key ~1708/1682; `compact_empty_lines_observed` revert guard ~1862)
+- Test: `crates/app/src/render/map.rs` tests
+
+**Interfaces:**
+- Consumes: up/down lane connectors (Task 6) already feed `plan.connectors`.
+- Produces: `overlap_stats` returns `(illegal, updown_crossings, crossings)` (a 3-tuple; `updown_crossings ⊆ crossings`). The tidy moves rooms to drive `updown_crossings` toward 0 even when `illegal == 0`, at second priority after `illegal`. Compass-vs-compass crossings are untouched.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the tests module in `crates/app/src/render/map.rs`. Build a fixture where an up path is forced to cross a horizontal compass corridor unless a room moves (mirror the neighboring cleanup-test construction — `run_tidy_pipeline`/`cleanup_overlaps` on a `MapGraph`). The essential assertions:
+
+```rust
+#[test]
+fn updown_crossing_is_counted_but_compass_crossing_is_not() {
+    // Construct one graph whose plan has an up/down connector crossing a horizontal
+    // compass connector, and one whose plan has only a compass×compass crossing.
+    // overlap_stats must count the first in updown_crossings and NOT the second.
+    // (Build both via the same helpers the existing overlap_stats tests use.)
+    // ... assert stats_updown_case.1 >= 1  (updown_crossings field)
+    // ... assert stats_compass_case.1 == 0
+}
+
+#[test]
+fn tidy_shoves_rooms_to_clear_an_updown_crossing() {
+    // A vertical up path crosses a horizontal corridor with zero illegal overlaps.
+    // After the tidy, the up/down crossing is cleared by moving a room (updown_crossings == 0),
+    // and no illegal overlap was introduced.
+    // ... run the tidy; assert overlap_stats(...).1 == 0 and .0 == 0
+}
+
+#[test]
+fn tidy_does_not_move_rooms_for_a_pure_compass_crossing() {
+    // Two compass connectors cross cleanly, zero illegal overlaps. The tidy must NOT
+    // relocate rooms for it (compass crossing stays a tiebreak, not a mover).
+    // ... snapshot positions; run tidy; assert positions unchanged.
+}
+```
+
+Write these concretely against the real `overlap_stats`/`render_overlap_stats` signature and the real tidy entry points once you read them (Step 3). The three assertions are the contract; fill in the fixture construction to match the existing crossing/overlap tests in this file.
+
+- [ ] **Step 2: Run — verify they fail (or don't compile against the old 2-tuple)**
+
+Run: `cargo test -p app updown_crossing_is_counted_but_compass_crossing_is_not tidy_shoves_rooms_to_clear_an_updown_crossing tidy_does_not_move_rooms_for_a_pure_compass_crossing`
+Expected: FAIL — `overlap_stats` is still a 2-tuple (no `updown_crossings`), and the tidy does not move rooms for a crossing.
+
+- [ ] **Step 3: Implement**
+
+Read `overlap_stats` (~1546-1589), `render_overlap_stats` (~1592-1596), `cleanup_overlaps_observed` (~1649-1733, gate ~1672, acceptance ~1705, `Key`/key ~1682/1708), `compact_empty_lines_observed` (~1834-1878, revert ~1862), and the `session.rs:1181` caller FIRST. Then:
+
+1. `overlap_stats`: return `(usize, usize, usize)` = `(illegal, updown_crossings, crossings)`. When a cell is classified a crossing (the existing `[ns, ew]` branch ~1582-1583), also test whether **either** owning connector is up/down; track that by tagging each connector's up/down-ness as it is plotted (`matches!(conn.exit_dir, Direction::Up | Direction::Down)`), and if either owner of the crossing cell is up/down, increment `updown_crossings` in addition to `crossings`. `illegal` counting is unchanged.
+2. `render_overlap_stats`: forward the 3-tuple.
+3. Update the two existing 2-tuple call sites you find (the tests you keep, and `session.rs:1181` which reads `.0` — now still `.0`, unaffected, but confirm the tuple index).
+4. `cleanup_overlaps_observed`:
+   - Gate (~1672): `if base.0 == 0 && base.1 == 0 { break; }` (continue while illegal OR up/down crossings remain).
+   - `Key` type (~1682): insert the up/down-crossing count as the SECOND element: `(usize /*illegal*/, usize /*updown_crossings*/, usize /*align_broken*/, usize /*broken*/, usize /*crossings*/, usize /*degree*/, RoomId, usize)`.
+   - Acceptance (~1705): `if (s.0, s.1, s.2) < (base.0, base.1, base.2) {` (accept a move that lowers illegal, then up/down crossings, then general crossings).
+   - Key construction (~1708): `let key: Key = (s.0, s.1, align_broken, broken, s.2, degree, id, move_idx);`
+   (Adjust every `s.1`→`s.2` where the old code meant the general crossing count, and every new `s.1` means up/down crossings. Read carefully — the old 2-tuple `.1` was general crossings; it is now `.2`.)
+5. `compact_empty_lines_observed` (~1862): revert if `s.0 > base.0 || s.1 > base.1` (do not let compaction re-introduce an up/down crossing). The old check was `s.0 > base.0` only.
+6. `repair_directional_hints_observed`: it gates on `s.0 <= base.0` and uses crossings as a tiebreak — update its tuple indices (`.1`→`.2` for general crossings) so it still compiles and behaves the same; do NOT add up/down-crossing pressure there (cleanup owns the shove). Note the index shift in the report.
+
+- [ ] **Step 4: Run — verify green**
+
+Run: `cargo test -p app updown_crossing_is_counted_but_compass_crossing_is_not tidy_shoves_rooms_to_clear_an_updown_crossing tidy_does_not_move_rooms_for_a_pure_compass_crossing`
+Expected: all PASS.
+Run: `cargo test -p app`
+Expected: all pass EXCEPT the 4 still-`#[ignore]`d deferred tests (Task 14 handles them). Do not un-ignore them here. If any non-ignored test regresses on a compass-only layout, that is a real bug in the index shift — fix it so compass behavior is byte-identical.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/app/src/render/map.rs crates/app/src/session.rs
+git commit -m "feat(app): tidy shoves rooms to clear up/down path crossings (scoped, SQ-0216)"
+```
+
+---
+
+## Task 14: Un-ignore and refresh the 4 deferred layout tests + real-game smoke test (#1 follow-through)
+
+**Files:**
+- Modify: `crates/app/src/render/map.rs` (remove the 4 `#[ignore = "Phase 2: up/down now feed overlap_stats…"]` annotations; update each test's expected layout to the post-shove correct layout)
+
+**Interfaces:**
+- Consumes: Task 13 (scoped up/down crossing pressure resolves the B/A decision as A-scoped). The four tests: `cleanup_clears_overlaps_without_knocking_aligned_rooms_off_row`, `cleanup_keeps_two_room_column_chain_aligned`, `repair_puts_78_west_of_180_after_retidy`, `compact_preserves_directional_order_no_overlap`.
+
+- [ ] **Step 1: Remove one `#[ignore]` and inspect the failure**
+
+For the first deferred test, delete its `#[ignore = "Phase 2…"]` attribute and run it:
+Run: `cargo test -p app cleanup_clears_overlaps_without_knocking_aligned_rooms_off_row -- --nocapture`
+Read the actual vs expected positions. Because these fixtures contain up/down edges, the up/down crossing pressure (Task 13) may now legitimately move a room. Decide: is the new layout correct (up/down path no longer crossing, alignment preserved where it should be)? If yes, this is an expected assertion update; if the new layout is WRONG (a compass alignment the test guards was broken), that is a Task-13 regression to fix first — escalate rather than "fix" the test to match bad output.
+
+- [ ] **Step 2: Update the assertion to the correct post-shove layout**
+
+Update the test's expected coordinates to the new correct layout, keeping the property the test's NAME guarantees (e.g. `keeps_two_room_column_chain_aligned` must still assert the chain shares a column). Do not rename the test or weaken its guaranteed property.
+
+- [ ] **Step 3: Repeat for the other three**
+
+Remove each remaining `#[ignore]` in turn, inspect, and update the expected layout (or escalate a genuine regression). After all four:
+Run: `grep -rn '#\[ignore = "Phase 2' crates/app/`
+Expected: no matches.
+
+- [ ] **Step 4: Full suite green**
+
+Run: `cargo test -p app` and `cargo test -p mapper`
+Expected: ALL pass, no ignored layout tests remaining.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/app/src/render/map.rs
+git commit -m "test(app): un-ignore + refresh the 4 layout tests for scoped up/down shove (SQ-0216)"
+```
+
+- [ ] **Step 6: Controller real-game smoke test (outside the plan, per project practice)**
+
+After Task 14, the controller runs the app on a vertical-heavy story (e.g. `stories/zork1-r88-s840726.z3`), walks a shaft, and confirms: up/down paths no longer cross other paths where the tidy could make room; a room joined by both a compass and an up/down edge draws a single compass path and still shows its up/down symbol; compass-only regions look unchanged. Layout unit tests share the implementation's assumptions, so this smoke test is the real oracle.
+
+## Phase 3 notes for the implementer
+
+- **Tuple-index shift is the trap in Task 13.** `overlap_stats` goes from `(illegal, crossings)` to `(illegal, updown_crossings, crossings)`. Every existing `.1` that meant "general crossings" becomes `.2`. Grep every consumer (`overlap_stats(`, `render_overlap_stats(`) and fix each — a missed index silently changes compass tidy behavior.
+- **Scope discipline (Task 13).** The ONLY new mover is the cleanup pass reacting to `updown_crossings`. Do not add up/down-crossing pressure to `repair_directional_hints` or make general `crossings` a mover — that would churn compass layouts (the rejected "general crossings" option).
+- **SQ-0219 pair key must match on both sides (Tasks 11-12).** The router's suppression key and the renderer's "was this de-duped?" key must derive the unordered pair identically, or the glyph and the connector disagree.
