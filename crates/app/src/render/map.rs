@@ -542,6 +542,12 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     if !state.show_portal_labels {
         let current_room = rm.rooms.iter().find(|r| r.is_current).map(|r| r.id);
         draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room, current_room);
+        // Restore the room-level up/down glyph for any pair whose up/down connector was
+        // suppressed (Task 11): the compass arrowhead just drawn on the shared border cell
+        // would otherwise be the only vertical indicator, so re-stamp the glyph over it.
+        if boxes {
+            draw_deduped_updown_border_glyphs(rm, &placed, state, (off_x, off_y), area, buf);
+        }
     }
 }
 
@@ -1203,6 +1209,70 @@ fn mid_precedence(dir: Direction) -> u8 {
 /// One room's portal icon choices: three slots (Up / Mid / Down), each holding an optional
 /// `(glyph_char, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
 type PortalSlots<'a> = [Option<(char, Option<&'a str>)>; 3];
+
+/// True when `pair`'s up/down connector was suppressed (Task 11, SQ-0219) because the same
+/// room pair also has a compass connector — the plan draws only the compass path, so no
+/// connector-border glyph exists for the up/down link. Callers must then draw the room-level
+/// up/down glyph themselves so vertical access still reads. False when the pair has its own
+/// up/down connector (it already carries the glyph — drawing it again would double-draw).
+fn updown_pair_deduped(plan: &RoutePlan, pair: (RoomId, RoomId)) -> bool {
+    let key = |c: &mapper::route::RoutedConnector| (c.origin.min(c.dest), c.origin.max(c.dest));
+    let has_compass = plan
+        .connectors
+        .iter()
+        .any(|c| key(c) == pair && mapper::direction::grid_offset(c.exit_dir).is_some());
+    let has_updown = plan
+        .connectors
+        .iter()
+        .any(|c| key(c) == pair && matches!(c.exit_dir, Direction::Up | Direction::Down));
+    has_compass && !has_updown
+}
+
+/// Re-draw a room's up/down border glyph(s) (numbers/default views only) for any pair whose
+/// up/down connector was suppressed (Task 11, SQ-0219 — see `updown_pair_deduped`), using the
+/// portal-label branch's placement idiom (top border for Up, bottom border for Down, centered
+/// at `bx + BOX_W / 2`). Must run AFTER `draw_connector_arrows`: for a straight compass
+/// connector between column/row-aligned rooms, its arrowhead lands on this exact shared border
+/// cell, and since that's the only way vertical access still reads once the connector no
+/// longer draws it, the up/down glyph needs to win that cell. The portal-label view already
+/// draws every up/down glyph itself (deduped or not) and suppresses connector arrows entirely,
+/// so it never needs this pass — callers must guard on `!state.show_portal_labels`.
+fn draw_deduped_updown_border_glyphs(
+    rm: &RenderMap,
+    placed: &std::collections::HashMap<RoomId, VRect>,
+    state: &AppState,
+    offset: (i32, i32),
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let (off_x, off_y) = offset;
+    let sym_portal = &state.symbols.portal;
+    let mut updown_dest: std::collections::HashMap<(RoomId, Direction), RoomId> =
+        std::collections::HashMap::new();
+    for edge in &rm.edges {
+        if !edge.is_stub || !matches!(edge.dir, Direction::Up | Direction::Down) {
+            continue;
+        }
+        updown_dest.entry((edge.origin, edge.dir)).or_insert(edge.dest);
+    }
+    for room in &rm.rooms {
+        let Some(&rect) = placed.get(&room.id) else { continue };
+        let style = room_style(room, state);
+        let (bx, by) = (rect.x, rect.y);
+        if let Some(&dest) = updown_dest.get(&(room.id, Direction::Up)) {
+            let pair = (room.id.min(dest), room.id.max(dest));
+            if updown_pair_deduped(&rm.plan, pair) {
+                put_str(buf, bx + BOX_W / 2 + off_x, by + off_y, &sym_portal.up.to_string(), style, area); // top border
+            }
+        }
+        if let Some(&dest) = updown_dest.get(&(room.id, Direction::Down)) {
+            let pair = (room.id.min(dest), room.id.max(dest));
+            if updown_pair_deduped(&rm.plan, pair) {
+                put_str(buf, bx + BOX_W / 2 + off_x, by + BOX_H - 1 + off_y, &sym_portal.down.to_string(), style, area); // bottom border
+            }
+        }
+    }
+}
 
 /// Draw in-room portal indicators at Boxes zoom as a post-room overlay (so icons sit on top of
 /// the box interior). Each room's portal (stub) edges map to a right-interior-column slot:
@@ -1913,6 +1983,32 @@ mod tests {
         let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
         assert!(text.contains('↑'), "the Up connector shows the up glyph on the border");
         assert!(!text.contains('▲'), "the Up connector must NOT render a filled N arrow");
+    }
+
+    #[test]
+    fn deduped_updown_pair_still_shows_room_glyph() {
+        // A--North-->B AND A--Up-->B: Task 11 suppresses the up/down connector, but the
+        // rooms must still show the up/down glyph so vertical access reads.
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::Up, 2);
+
+        let state = AppState::default(); // default/Boxes view, numbers per default
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let up = state.symbols.portal.up;
+        let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+        assert!(text.contains(up), "the up glyph still shows on the room border even though the connector was suppressed");
     }
 
     #[test]
@@ -3399,11 +3495,11 @@ mod tests {
     }
 
     #[test]
-    fn up_portal_still_dotted_when_compass_edge_joins_pair() {
-        // Since Task 6, Up/Down are ALWAYS routed as their own lane connector — even when a
-        // compass edge already joins the same room pair (the Up edge becomes a merge stub onto
-        // the compass trunk). So, unlike the old draw_portal_connectors "joined" skip, a dotted
-        // Up connector (plus its border glyph) still renders alongside the solid N connector.
+    fn compass_covered_up_pair_suppresses_dotted_but_keeps_glyph() {
+        // Task 11 (SQ-0219): when a compass edge already joins the same room pair, the up/down
+        // connector is suppressed so only the compass path is drawn — no dotted connector body.
+        // Task 12 (SQ-0219): the room-level up glyph must still render (on the border) so the
+        // vertical access reads even though the connector no longer carries it.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -3419,9 +3515,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
         let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
-        assert!(has_dotted, "the Up merge stub still draws a dotted connector body");
+        assert!(!has_dotted, "the up/down connector is suppressed when a compass edge covers the pair");
         let has_up_glyph = buf.content.iter().any(|c| c.symbol() == "↑");
-        assert!(has_up_glyph, "the Up merge stub still shows the up glyph, not an arrow");
+        assert!(has_up_glyph, "the room still shows the up glyph on its border (Task 12)");
     }
 
     #[test]
