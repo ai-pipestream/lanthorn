@@ -26,6 +26,11 @@
   *fore/aft/port/starboard* (plus *bow*/*stern*/*forward*) instead of the compass
   are understood: those movements map onto north/south/west/east so the vessel's
   decks lay out correctly.
+- **Vertical connections laid out like N/S** — up/down moves place the new room
+  directly north (up) / south (down) of its neighbor, shifting ordinary rooms aside
+  just like a compass move, but yielding to confirmed reciprocal N/S adjacencies.
+  They render as dotted connectors with up/down symbols (or a stairs glyph set),
+  never as arrows, and never as "distorted" red edges.
 - **Connection routing** between rooms with overlap removal, so the map stays
   readable as it grows.
 - **Layered maps** for multi-level areas, with manual layer controls.
