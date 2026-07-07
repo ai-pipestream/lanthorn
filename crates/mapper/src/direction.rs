@@ -69,6 +69,20 @@ pub fn grid_offset(d: Direction) -> Option<(i32, i32)> {
     }
 }
 
+/// Layout-only directional offset: like [`grid_offset`], but Up/Down also carry a
+/// vertical N/S offset (Up → north, Down → south). Used ONLY by the layout,
+/// placement, and directional-scoring code so up/down lay out like N/S. Rendering,
+/// routing, layer-cutting, and `mark_distorted` keep using `grid_offset` (which
+/// returns None for Up/Down), so up/down still draw as dotted portal stubs and are
+/// never marked distorted.
+pub fn layout_offset(d: Direction) -> Option<(i32, i32)> {
+    match d {
+        Direction::Up => Some((0, -1)),
+        Direction::Down => Some((0, 1)),
+        _ => grid_offset(d),
+    }
+}
+
 pub fn opposite(d: Direction) -> Direction {
     match d {
         Direction::N => Direction::S,
@@ -135,5 +149,22 @@ mod tests {
         assert!(!is_diagonal(Direction::N));
         assert!(!is_diagonal(Direction::E));
         assert!(!is_diagonal(Direction::Up));
+    }
+
+    #[test]
+    fn layout_offset_maps_updown_to_ns_but_grid_offset_stays_none() {
+        use super::{grid_offset, layout_offset, Direction};
+        // Up/Down get an N/S layout offset...
+        assert_eq!(layout_offset(Direction::Up), Some((0, -1)));
+        assert_eq!(layout_offset(Direction::Down), Some((0, 1)));
+        // ...but grid_offset is untouched (still None) — rendering/layers rely on this.
+        assert_eq!(grid_offset(Direction::Up), None);
+        assert_eq!(grid_offset(Direction::Down), None);
+        // Compass delegates to grid_offset.
+        assert_eq!(layout_offset(Direction::N), grid_offset(Direction::N));
+        assert_eq!(layout_offset(Direction::E), grid_offset(Direction::E));
+        // In/Out/Unknown remain None.
+        assert_eq!(layout_offset(Direction::In), None);
+        assert_eq!(layout_offset(Direction::Unknown), None);
     }
 }
