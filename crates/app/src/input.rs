@@ -1530,13 +1530,25 @@ fn replay_build_and_placement(
         rebuild.set_pos(a, (0, 0));
         emit(&rebuild, format!("placed room {} ({}) at origin", a, name_of(sub, a)), &mut first, frames);
     }
-    for c in conns {
-        if rebuild.room(c.dest).and_then(|r| r.pos).is_some() { continue; } // revisit
-        if rebuild.room(c.origin).and_then(|r| r.pos).is_none() { continue; } // defensive
-        place_incremental(&mut rebuild, c.origin, c.dest, c.dir);
-        let pos = rebuild.room(c.dest).and_then(|r| r.pos).unwrap_or((0, 0));
-        emit(&rebuild, format!("placed room {} ({}) {:?} of room {} at ({},{})",
-            c.dest, name_of(sub, c.dest), c.dir, c.origin, pos.0, pos.1), &mut first, frames);
+    // Iterate to a fixed point: `conns` is raw insertion order, which can be
+    // disrupted (e.g. a deleted-then-re-added connection moves to the end), so a
+    // single forward pass can encounter an edge whose origin isn't placed yet even
+    // though an earlier edge in the list would have placed it. Repeat the scan,
+    // placing every edge whose origin is placed and dest is not, until a full pass
+    // places nothing new. Bounded by `conns.len()` passes as a safety cap: each
+    // productive pass places at least one room, so there can be at most that many.
+    for _ in 0..conns.len() {
+        let mut placed_any = false;
+        for c in conns {
+            if rebuild.room(c.dest).and_then(|r| r.pos).is_some() { continue; } // revisit
+            if rebuild.room(c.origin).and_then(|r| r.pos).is_none() { continue; } // not yet reachable
+            place_incremental(&mut rebuild, c.origin, c.dest, c.dir);
+            let pos = rebuild.room(c.dest).and_then(|r| r.pos).unwrap_or((0, 0));
+            emit(&rebuild, format!("placed room {} ({}) {:?} of room {} at ({},{})",
+                c.dest, name_of(sub, c.dest), c.dir, c.origin, pos.0, pos.1), &mut first, frames);
+            placed_any = true;
+        }
+        if !placed_any { break; }
     }
     // Isolated rooms (no in-layer connection): place relative to the anchor.
     if let Some(a) = anchor {
@@ -3799,6 +3811,44 @@ mod tests {
         assert_eq!(frames[0].manifest.as_ref().unwrap().len(), 0, "no connections");
         assert_eq!(frames[1].label, "Placement");
         assert_eq!(frames[1].graph.room(1).unwrap().pos, Some((0, 0)));
+    }
+
+    /// Regression: `sub.connections()` is raw insertion order, which can be disrupted
+    /// (e.g. a deleted-then-re-added connection moves to the end of the vec). Build a
+    /// graph where the edge that would place room 4 (3 --E--> 4) is inserted *before*
+    /// the edge that places its origin, room 3 (2 --N--> 3):
+    ///   conns = [1--N-->2, 3--E-->4, 2--N-->3]
+    /// A single forward pass places 2 (via the first edge), then skips 3--E-->4 because
+    /// 3 isn't placed yet, then places 3 (via the third edge) — leaving 4 stranded for
+    /// the isolated-room fallback even though it has a perfectly good directional edge.
+    /// The fixed-point loop must re-scan and place 4 via its real edge instead.
+    #[test]
+    fn replay_build_and_placement_reaches_fixed_point_on_disrupted_connection_order() {
+        use mapper::direction::Direction::*;
+        use mapper::graph::MapGraph;
+
+        let mut sub = MapGraph::new();
+        for id in [1u16, 2, 3, 4] {
+            sub.upsert_room(id, format!("R{id}"));
+        }
+        sub.add_edge(1, N, 2); // places room 2 from the anchor
+        sub.add_edge(3, E, 4); // placeable only once room 3 exists — inserted early
+        sub.add_edge(2, N, 3); // places room 3 — inserted last, disrupting order
+
+        let mut frames: Vec<crate::state::TidyFrame> = Vec::new();
+        let rebuild = replay_build_and_placement(&sub, 0, &mut frames, 2000);
+
+        // Room 4 must land at its true directional hop: 3 is at (0,-2), so 3--E-->4 is (1,-2).
+        assert_eq!(rebuild.room(4).unwrap().pos, Some((1, -2)),
+            "room 4 must be placed via its real edge (E of room 3), not the isolated fallback");
+
+        // The frame that places room 4 must be attributed to its real edge, not the
+        // isolated-fallback wording (which omits "of room ...").
+        let frame4 = frames.iter()
+            .find(|f| f.label == "Placement" && f.description.contains("room 4"))
+            .expect("a placement frame for room 4");
+        assert!(frame4.description.contains("of room 3"),
+            "room 4 should be placed relative to room 3 via its real edge: {}", frame4.description);
     }
 
     #[test]
