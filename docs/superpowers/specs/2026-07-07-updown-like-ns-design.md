@@ -165,12 +165,25 @@ no reciprocal-collapse.
   `grid_offset(c.dir).is_some()` to `layout_offset(c.dir).is_some()` — i.e.
   {compass + up/down}. Up/down now get `RoutedConnector`s, lanes, slots, and
   crossing elimination.
-- **No reciprocal-collapse for up/down:** guard the back-edge pairing
-  (`back_edge_idx` ~527, pairing ~667/805) so an up/down edge is never paired —
-  each stays a one-way connector with `reciprocal = false` (which also suppresses
-  the far-end arrow at render). Extend `oneway_entry_side` (~358) so a one-way
-  up/down that dips into a channel has an entry side (Up enters dest from Bottom,
-  Down from Top).
+- **Reciprocal collapse for up/down (refined after visual testing):** a matching
+  Up(A→B) + Down(B→A) pair **does** collapse to a single `RoutedConnector`
+  (`reciprocal = true`), following the normal reciprocal rules, so it draws as one
+  dotted path with a glyph at each end. (An unmatched one-way up/down stays a single
+  one-way connector.) Extend `oneway_entry_side` (~358) so a one-way up/down that
+  dips into a channel has an entry side (Up enters dest from Bottom, Down from Top).
+- **N/S reciprocal takes slot priority over an up/down reciprocal at the same
+  room.** Up and N both exit the Top border (Down and S the Bottom). When a room has
+  both a reciprocal N/S and a reciprocal up/down connector on the same side, the N/S
+  reciprocal claims the center slot (slot 0) and the up/down connector yields to a
+  fanned off-center slot — it still collapses, it just isn't centered.
+- **Render-only — must NOT leak reciprocal weight into layout.** This collapse is a
+  routing/render concept. Layout keeps up/down at weight 1 (reciprocal detection in
+  the scoring/constraint code stays keyed on `grid_offset`, Phase 1), so a hard
+  reciprocal N/S still outranks an up/down: in the very case that triggers the slot
+  priority, A↔C is a reciprocal N/S placed immediately adjacent, so the up/down room
+  B is shoved off C's cell by Phase-1 placement (B shifts). The refinement must not
+  change that — only the drawn connector gains `reciprocal = true`, not any layout
+  score/weight.
 - `RoutedConnector.exit_dir` already carries `Up`/`Down` to the renderer — no new
   field required.
 
@@ -178,10 +191,13 @@ no reciprocal-collapse.
 
 - In `render_lane_connectors`, branch on `exit_dir == Up|Down`: draw the connector
   **body dotted** (portal `┊`/`┄`, selected per-connector) and put the **up/down
-  glyph** (`sym.portal.up`/`down`, or the stairs preset) at the departure border
-  anchor instead of `arrow_for_departure`. The anchor is the centered, slot-fanned
-  `box_edge_anchor` (Top/Bottom), so the glyph sits mid-border and is pushed
-  off-center only when a reciprocal N/S connector claims the center slot.
+  glyph** (`sym.portal.up`/`down`, or the stairs preset) at the border anchor
+  instead of `arrow_for_departure`. For a **collapsed reciprocal** up/down connector,
+  draw a glyph at **both** ends (up-glyph on the lower room's top border, down-glyph
+  on the upper room's bottom border) — the same both-end treatment N/S reciprocals
+  get. The anchor is the centered, slot-fanned `box_edge_anchor` (Top/Bottom), so the
+  glyph sits mid-border and is pushed off-center only when a reciprocal N/S connector
+  claims the center slot.
 - **Delete** `draw_portal_connectors` and `portal_stub` (and their call in
   `render_map`). Make `draw_portal_icons` **skip Up/Down** — it keeps drawing the
   In/Out/Unknown in-room icons only.
@@ -190,17 +206,27 @@ no reciprocal-collapse.
 
 - **In/Out/Unknown stay as in-room portal icons.** Only Up/Down move to the
   lane/border treatment.
-- **Departure-glyph only** (like a one-way N/S arrow). A two-way vertical link is
-  two un-collapsed connectors, so it shows an up-glyph on the lower room's top
-  border and a down-glyph on the upper room's bottom border — one per direction.
+- **Matching Up+Down pairs collapse** (reciprocal, one dotted path, glyph at both
+  ends); an unmatched one-way up/down draws one connector with a single departure
+  glyph. A reciprocal N/S at the same room takes the center slot; the up/down
+  reciprocal yields to a fanned slot but still collapses. (Supersedes the earlier
+  "departure-glyph only / never collapse" decision.)
+- **Layout stays weight-1 for up/down** so reciprocal N/S still shoves the up/down
+  room aside (B shifts off C's cell). The collapse is render-only.
 
 ## Phase 2 verification
 
 - **Unit:** an up connection now produces a `RoutedConnector` in the plan (not a
-  stub) with `reciprocal = false`; a reciprocal Up+Down pair produces **two**
-  connectors, not one; rendering an up connector draws the up glyph on the border
-  (not an arrow) and a dotted body; In/Out/Unknown still draw in-room icons.
-- **Real game (oracle):** on a vertical-heavy map, vertical connectors route
-  without breaking, don't cross other connectors, anchor at the middle of the
-  top/bottom border (shifting for a reciprocal N/S), and show up/down glyphs on
-  the border.
+  stub); a matching Up+Down pair produces **one** connector with `reciprocal = true`;
+  an unmatched one-way up/down produces one connector with `reciprocal = false`;
+  rendering a reciprocal up/down connector draws the up glyph on the lower room's top
+  border and the down glyph on the upper room's bottom border, dotted body; a room
+  with both a reciprocal N/S and a reciprocal up/down gives the N/S the center slot;
+  In/Out/Unknown still draw in-room icons.
+- **Layout invariant:** with A↔C reciprocal N/S and A↔B reciprocal up/down, C sits
+  immediately N/S of A and B is shifted off that cell (Phase-1 priority unchanged by
+  the render collapse).
+- **Real game (oracle):** on a vertical-heavy map, vertical connectors route without
+  breaking, don't cross other connectors, a matching up/down pair is a single dotted
+  path anchored at the top/bottom border (yielding the center to a reciprocal N/S),
+  with up/down glyphs on the border.

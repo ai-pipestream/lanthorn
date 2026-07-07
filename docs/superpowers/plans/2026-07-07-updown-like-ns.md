@@ -640,6 +640,48 @@ git add docs/features/mapping.md
 git commit -m "docs(mapping): note up/down now route through the N/S lane system"
 ```
 
+## Task 9: Collapse matching up/down pairs (reciprocal), with N/S slot priority + both-end glyphs
+
+Refinement after visual testing (see the spec's updated Phase 2 reciprocal rules). This REVISES Task 6's "never collapse" and Task 7's "departure-glyph only".
+
+**Files:**
+- Modify: `crates/mapper/src/route/mod.rs` (`back_edge_idx` pairing guard; `assign_side_slots` for N/S-priority ordering)
+- Modify: `crates/app/src/render/map.rs` (`render_lane_connectors` far-end glyph for reciprocal up/down)
+- Test: `crates/mapper/src/route/mod.rs` tests + `crates/app/src/render/map.rs` tests
+
+**Interfaces:**
+- Behavior: a matching `Up(A→B)`+`Down(B→A)` pair collapses to ONE `RoutedConnector` with `reciprocal = true`; an unmatched one-way up/down stays `reciprocal = false`. Up/down still NEVER pair with a compass edge, and compass pairing stays byte-identical. A reciprocal N/S connector outranks a reciprocal up/down for the center slot on a shared side. The layout weight of up/down is unchanged (still weight-1; do NOT touch the scoring/constraint code).
+
+- [ ] **Step 1: Update the Task-6 pairing test and add the slot-priority + render tests**
+
+The Task-6 test `reciprocal_updown_pair_is_not_collapsed` asserted a matching pair produces TWO connectors — that is now WRONG. Replace it with `reciprocal_updown_pair_collapses_to_one` asserting ONE connector with `reciprocal == true`. Add a mapper test that a room with BOTH a reciprocal N/S and a reciprocal up/down gives the N/S connector the center slot (slot 0) and the up/down connector a non-zero (fanned) slot on that side. Add an app render test that a reciprocal up/down connector draws the up glyph on the lower room's top border AND the down glyph on the upper room's bottom border. Keep the invariant test that up/down never earns reciprocal weight in LAYOUT (unchanged Phase-1 behavior). Use the real `route_lanes`/`RoutedConnector` API and the slot field names (`exit_slot`/`entry_slot`).
+
+- [ ] **Step 2: Run — verify the new/updated tests fail**
+
+Run: `cargo test -p mapper reciprocal_updown` and the new slot test.
+Expected: FAIL (today a matching pair produces two connectors, `reciprocal == false`).
+
+- [ ] **Step 3: Implement**
+
+Read `back_edge_idx`, the pairing sites, `assign_side_slots`, and `render_lane_connectors` (reciprocal far-end block) FIRST.
+1. In `back_edge_idx` (`route/mod.rs`), revise the Task-6 guard so: for a compass `c`, back-edge candidates stay compass-only (exclude up/down — preserves compass identity); for an Up/Down `c`, allow ONLY the opposite up/down edge between the same two rooms (`opposite(Up)=Down`) as the back-edge, so a matching pair collapses (`reciprocal=true`). An up/down `c` must never pair with a compass edge.
+2. In `assign_side_slots` (`route/mod.rs`), order slot assignment on a side so a reciprocal N/S (compass) connector gets slot 0 before any up/down connector — the up/down yields to a fanned slot. (Sort the side's connectors so compass-reciprocal precede up/down; keep existing ordering among compass connectors.)
+3. In `render_lane_connectors` (`crates/app/src/render/map.rs`), for a reciprocal up/down connector draw the up/down glyph at BOTH ends: the far-end (arrival) block that currently draws `arr_ch` for `reciprocal` connectors must, for an up/down connector, use the up/down glyph derived from `entry_dir` (the arrival direction) instead of an arrow. Departure glyph handling from Task 7 stays.
+
+Do NOT change any layout scoring/constraint code (`mod.rs`/`constraints.rs`) — up/down must stay weight-1 in placement so a reciprocal N/S still shoves the up/down room aside.
+
+- [ ] **Step 4: Run — verify green**
+
+Run: `cargo test -p mapper` and `cargo test -p app` (the 4 Phase-2-deferred layout tests stay `#[ignore]`).
+Expected: all pass; compass routing unchanged.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mapper/src/route/mod.rs crates/app/src/render/map.rs
+git commit -m "feat: collapse matching up/down pairs (reciprocal) with N/S slot priority"
+```
+
 ## Phase 2 notes for the implementer
 
 - The trickiest part of Task 7 is mixing **dotted** up/down bodies with **solid** compass bodies in `render_lane_connectors`' shared per-cell mask. Prefer selecting the glyph set per-connector (draw up/down connector segments with the dotted set) over a global change; if the shared-mask junction logic makes per-cell selection hard, draw up/down connector bodies in a small dedicated pass using their `segs`, and keep compass rendering unchanged. Whatever you choose, compass connectors must render byte-identically to before.
