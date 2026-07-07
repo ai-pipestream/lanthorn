@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::direction::{grid_offset, Direction};
+use crate::direction::{grid_offset, layout_offset, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 
 mod sort;
@@ -142,21 +142,24 @@ fn place_preserving_alignment(
 
 /// Returns true iff the connection's geometry is satisfied by the current room positions.
 ///
-/// For a compass edge (one where `grid_offset(conn.dir)` returns `Some(delta)`):
+/// For an edge with a layout offset (one where `layout_offset(conn.dir)` returns `Some(delta)` —
+/// the compass directions, plus Up/Down as weight-1 N/S hints):
 ///   - Uses a sign-based check: satisfied iff each non-zero axis of `delta` agrees in SIGN
 ///     with the corresponding axis of `pos(dest) - pos(origin)`, and each zero axis of `delta`
 ///     is also zero in the actual offset.
 ///   - Rationale: when both directed edges of a connection are known, the layout may place
-///     a room at a combined diagonal (e.g. northeast) that doesn't exactly match `grid_offset`
+///     a room at a combined diagonal (e.g. northeast) that doesn't exactly match `layout_offset`
 ///     (e.g. one step north). The sign-based check treats such placements as "satisfied" as long
 ///     as the directional sense is correct (e.g. a North edge is satisfied whenever dest is
 ///     *anywhere* north, i.e. `dest.y < origin.y`).
 ///
-/// For a non-compass edge (Up/Down/In/Out/Unknown, where `grid_offset` returns `None`):
+/// For a non-compass edge (In/Out/Unknown, where `layout_offset` returns `None`):
 ///   - returns `true` unconditionally. These edges are stubs with no spatial offset to violate;
 ///     treating them as "satisfied" ensures the post-placement sweep never marks them distorted.
+///     (Note: `mark_distorted` still gates on `grid_offset`, so Up/Down are never marked
+///     distorted regardless of what this function returns for them.)
 pub fn edge_is_satisfied(graph: &MapGraph, conn: &Connection) -> bool {
-    match grid_offset(conn.dir) {
+    match layout_offset(conn.dir) {
         None => true, // non-compass stub — no offset to violate
         Some(delta) => {
             let origin_pos = graph.room(conn.origin).and_then(|r| r.pos);
@@ -278,7 +281,7 @@ fn edges_respected_at(
         } else {
             continue;
         };
-        let Some(delta) = grid_offset(c.dir) else { continue };
+        let Some(delta) = layout_offset(c.dir) else { continue };
         let Some(&oi) = index.get(&other) else { continue };
         let op = snapped[oi];
         // `actual` is always (dest - origin); flip when `id` is the destination.
@@ -314,7 +317,7 @@ pub fn room_side_score(graph: &MapGraph, id: RoomId) -> usize {
         } else {
             continue;
         };
-        let Some(delta) = grid_offset(c.dir) else { continue };
+        let Some(delta) = layout_offset(c.dir) else { continue };
         let Some(op) = graph.room(other).and_then(|r| r.pos) else { continue };
         let actual = if is_origin {
             (op.0 - p.0, op.1 - p.1)
@@ -349,7 +352,7 @@ pub fn room_alignment_score(graph: &MapGraph, id: RoomId) -> usize {
         } else {
             continue;
         };
-        let Some(delta) = grid_offset(c.dir) else { continue };
+        let Some(delta) = layout_offset(c.dir) else { continue };
         let Some(op) = graph.room(other).and_then(|r| r.pos) else { continue };
         let actual = if is_origin {
             (op.0 - p.0, op.1 - p.1)
@@ -377,7 +380,7 @@ pub fn directional_hint_score(graph: &MapGraph) -> usize {
         .connections()
         .iter()
         .filter(|c| {
-            let Some(delta) = grid_offset(c.dir) else { return false };
+            let Some(delta) = layout_offset(c.dir) else { return false };
             let (Some(op), Some(dp)) = (
                 graph.room(c.origin).and_then(|r| r.pos),
                 graph.room(c.dest).and_then(|r| r.pos),
@@ -1514,5 +1517,76 @@ mod tests {
 
         let dropped = dropped_at_stress.expect("stress stage must fire");
         assert!(dropped >= 1, "at least one cycle-closing constraint must be dropped; got {dropped}");
+    }
+
+    #[test]
+    fn directional_hint_score_counts_updown_as_ns() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        // B is directly north of A, reached by Up. Its N/S side is satisfied.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        // The single Up edge (dest on the north side of origin) counts as one satisfied side.
+        // (directional_hint_score is side-only — it does NOT require exact column alignment.)
+        assert_eq!(directional_hint_score(&g), 1, "an Up edge whose dest is north scores as satisfied");
+
+        // Move B to the WRONG side (south of A): the Up hint (expects north) is unsatisfied.
+        g.set_pos(2, (0, 3));
+        assert_eq!(directional_hint_score(&g), 0, "an Up edge whose dest is south is unsatisfied");
+    }
+
+    #[test]
+    fn updown_edge_is_not_reciprocal_weighted() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        // Build A with a single Up edge to a room directly north.
+        let updown_score = {
+            let mut g = MapGraph::new();
+            g.upsert_room(1, "A".into());
+            g.upsert_room(2, "B".into());
+            g.set_pos(1, (0, 0));
+            g.set_pos(2, (0, -1));
+            g.add_edge(1, Direction::Up, 2);
+            g.add_edge(2, Direction::Down, 1); // an Up+Down pair must NOT double-count
+            room_side_score(&g, 1)
+        };
+        // Same geometry, but a REAL reciprocal N/S pair (A--N-->B, B--S-->A), which DOES
+        // earn RECIPROCAL_WEIGHT.
+        let reciprocal_ns_score = {
+            let mut g = MapGraph::new();
+            g.upsert_room(1, "A".into());
+            g.upsert_room(2, "B".into());
+            g.set_pos(1, (0, 0));
+            g.set_pos(2, (0, -1));
+            g.add_edge(1, Direction::N, 2);
+            g.add_edge(2, Direction::S, 1);
+            room_side_score(&g, 1)
+        };
+        // The up/down pair must score STRICTLY LESS than the reciprocal N/S pair — it never
+        // gets the reciprocal doubling (reciprocal detection stays keyed on grid_offset,
+        // which is None for up/down).
+        assert!(updown_score < reciprocal_ns_score,
+            "up/down (={updown_score}) must score below a reciprocal N/S pair (={reciprocal_ns_score})");
+    }
+
+    #[test]
+    fn mark_distorted_never_marks_updown() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+        use std::collections::BTreeSet;
+        // An Up edge that is NOT axis-aligned would be "unsatisfied" per edge_is_satisfied,
+        // but mark_distorted gates on grid_offset (None for Up) and must leave it undistorted.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (5, 5)); // wildly off-axis
+        g.add_edge(1, Direction::Up, 2);
+        mark_distorted(&mut g, &BTreeSet::new());
+        assert!(!g.connections()[0].distorted, "up/down is never marked distorted");
     }
 }

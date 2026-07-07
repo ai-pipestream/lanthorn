@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::direction::grid_offset;
+use crate::direction::layout_offset;
 use crate::graph::{MapGraph, RoomId};
 
 use super::vpsc::Constraint;
@@ -83,7 +83,7 @@ pub fn build_axis_constraints(graph: &MapGraph, ids: &[RoomId], gap: f64) -> Axi
         let (Some(&o), Some(&d)) = (index.get(&conn.origin), index.get(&conn.dest)) else {
             continue;
         };
-        let Some((dx, dy)) = grid_offset(conn.dir) else {
+        let Some((dx, dy)) = layout_offset(conn.dir) else {
             continue;
         };
         let mut this_dropped = false;
@@ -173,9 +173,23 @@ mod tests {
     }
 
     #[test]
-    fn non_compass_edges_make_no_constraints() {
+    fn updown_edge_makes_a_y_constraint_like_north() {
+        // Up now counts as a weight-1 N/S layout hint (layout_offset), so it produces the
+        // same y constraint a plain N edge would — unlike a truly non-compass edge (Unknown),
+        // which still makes no constraints at all.
         let mut g = two_rooms();
-        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(1, Direction::Up, 2); // B "north" of A → y[B] <= y[A] → B is "left" on y
+        let ac = build_axis_constraints(&g, &[1, 2], 1.0);
+        assert_eq!(ac.y.len(), 1, "Up produces a y constraint, same as N");
+        assert_eq!((ac.y[0].left, ac.y[0].right), (1, 0)); // B(idx1) left, A(idx0) right
+        assert!(ac.x.is_empty());
+        assert!(ac.dropped.is_empty());
+    }
+
+    #[test]
+    fn unknown_edges_make_no_constraints() {
+        let mut g = two_rooms();
+        g.add_edge(1, Direction::Unknown, 2);
         let ac = build_axis_constraints(&g, &[1, 2], 1.0);
         assert!(ac.x.is_empty() && ac.y.is_empty() && ac.dropped.is_empty());
     }
