@@ -516,7 +516,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 3. Boxes zoom: draw line-art connectors along their assigned lanes, on top of
     //       the rooms drawn below them in step 2.
-    let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
+    let mut arrowheads: Vec<Arrowhead> = Vec::new();
     if let Some((cols, rows)) = &axes {
         arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors);
     }
@@ -756,6 +756,12 @@ fn lane_pixel(
     (px, py)
 }
 
+/// A departure/arrival glyph queued by `render_lane_connectors` for `draw_connector_arrows` to
+/// paint on top of the rooms: `(virtual pixel, glyph string, distorted, is_portal, owning room)`.
+/// `is_portal` selects `colors.portal_connector` for up/down glyphs instead of
+/// `colors.connector`/`colors.connector_distorted`.
+type Arrowhead = ((i32, i32), String, bool, bool, RoomId);
+
 /// The cells (in virtual space) one connector writes, each with the direction-bit mask it
 /// contributes there, plus its departure/arrival arrowhead anchors. This is the single
 /// source of truth for connector plotting: the renderer ORs these per-cell masks into the
@@ -887,18 +893,20 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
 }
 
 /// Draw every plan connector as box-drawing line-art along its lanes, and RETURN the departure
-/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted, room_id)`. The
-/// arrowheads are NOT drawn here: each sits ON a room's border cell, so the caller draws them
+/// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted, is_portal, room_id)`.
+/// The arrowheads are NOT drawn here: each sits ON a room's border cell, so the caller draws them
 /// AFTER the rooms (which render on top of the line-art) so the arrow replaces the box-edge glyph.
 ///
 /// Up/Down connectors (`exit_dir == Up | Down`) are lane-routed like any compass connector but
-/// render differently: their body uses the portal's DOTTED glyphs (not the shared solid set) and
-/// their departure anchor carries the up/down glyph instead of an arrowhead. They accumulate into
-/// a SEPARATE per-cell mask (`updown_cells`) from the compass connectors' `cells` map, so compass
-/// crossings/turns are computed exactly as before — up/down never contributes to or reads a
-/// compass cell's mask. A matching Up/Down pair now collapses to one RECIPROCAL connector
-/// (SQ-0216): the far-end block below draws the up/down glyph (derived from `entry_dir`) at the
-/// arrival end too, instead of an arrowhead, so both ends show their own glyph.
+/// render differently: their body uses the portal's DOTTED glyphs (not the shared solid set),
+/// styled with `colors.portal_connector` (not `colors.connector`/`colors.connector_distorted` —
+/// up/down are never distorted), and their departure anchor carries the up/down glyph instead of
+/// an arrowhead. They accumulate into a SEPARATE per-cell mask (`updown_cells`) from the compass
+/// connectors' `cells` map, so compass crossings/turns are computed exactly as before — up/down
+/// never contributes to or reads a compass cell's mask. A matching Up/Down pair now collapses to
+/// one RECIPROCAL connector (SQ-0216): the far-end block below draws the up/down glyph (derived
+/// from `entry_dir`) at the arrival end too, instead of an arrowhead, so both ends show their own
+/// glyph — styled `colors.portal_connector` just like the departure end.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -910,7 +918,7 @@ fn render_lane_connectors(
     path: &crate::symbols::PathGlyphs,
     portal: &crate::symbols::PortalGlyphs,
     colors: &crate::colors::ColorScheme,
-) -> Vec<((i32, i32), String, bool, RoomId)> {
+) -> Vec<Arrowhead> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
@@ -928,15 +936,24 @@ fn render_lane_connectors(
         ew: portal.path_h,
         ..*path
     };
-    // Arrowheads: (virtual pixel, glyph string, distorted). Returned for the caller to draw on
-    // top of the rooms (the arrow embeds in the room border).
-    // Arrowheads: (virtual pixel, glyph string, distorted, owning room id).
-    let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
+    // Arrowheads: (virtual pixel, glyph string, distorted, is_portal, owning room id). Returned
+    // for the caller to draw on top of the rooms (the arrow embeds in the room border). Up/down
+    // glyphs are flagged `is_portal` so the caller styles them with `colors.portal_connector`
+    // instead of `colors.connector`/`colors.connector_distorted`.
+    let mut arrowheads: Vec<Arrowhead> = Vec::new();
 
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
-        let style = if conn.distorted { colors.connector_distorted } else { colors.connector };
         let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
+        // Up/down connectors always use the portal selector (they're never distorted);
+        // compass connectors keep their existing connector/connector_distorted styling.
+        let style = if is_updown {
+            colors.portal_connector
+        } else if conn.distorted {
+            colors.connector_distorted
+        } else {
+            colors.connector
+        };
         let (cell_map, glyphs) = if is_updown {
             (&mut updown_cells, &dotted_path)
         } else {
@@ -967,7 +984,7 @@ fn render_lane_connectors(
         } else {
             arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, conn.origin));
+        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, is_updown, conn.origin));
         // Far-end glyph only for true reciprocal connectors (collapsed opposite pairs). An
         // up/down reciprocal draws its own up/down glyph (from the back-edge's direction) at
         // the far end too, same as the departure end, rather than an arrow.
@@ -978,7 +995,7 @@ fn render_lane_connectors(
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, conn.dest));
+            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, is_updown, conn.dest));
         }
     }
     arrowheads
@@ -991,9 +1008,10 @@ fn render_lane_connectors(
 /// for normal, current, selected, and current+selected rooms alike.  This mirrors
 /// `room_style`'s precedence.  The current room reverses only its interior, so its border
 /// (where the arrow sits) is not reverse-video and its background is the style's plain `bg`.
-/// The arrow glyph foreground is always the connector/path color.
+/// The arrow glyph foreground is always the connector/path color — `colors.portal_connector`
+/// for up/down glyphs (`is_portal`), otherwise `colors.connector`/`colors.connector_distorted`.
 fn draw_connector_arrows(
-    arrowheads: &[((i32, i32), String, bool, RoomId)],
+    arrowheads: &[Arrowhead],
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
@@ -1002,11 +1020,17 @@ fn draw_connector_arrows(
     current_room: Option<RoomId>,
 ) {
     let (off_x, off_y) = offset;
-    for (pos, glyph, distorted, room_id) in arrowheads {
+    for (pos, glyph, distorted, is_portal, room_id) in arrowheads {
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
-            let connector_style = if *distorted { colors.connector_distorted } else { colors.connector };
+            let connector_style = if *is_portal {
+                colors.portal_connector
+            } else if *distorted {
+                colors.connector_distorted
+            } else {
+                colors.connector
+            };
             let connector_fg = connector_style.fg;
             // Pick the room box's base style with the same precedence as room_style, then
             // derive its VISIBLE background (REVERSED swaps fg/bg at render time).
@@ -1941,8 +1965,8 @@ mod tests {
             &state.colors,
         );
 
-        let dep = arrowheads.iter().find(|(_, _, _, room)| *room == 1).expect("A's departure glyph");
-        let arr = arrowheads.iter().find(|(_, _, _, room)| *room == 2).expect("B's arrival glyph");
+        let dep = arrowheads.iter().find(|(_, _, _, _, room)| *room == 1).expect("A's departure glyph");
+        let arr = arrowheads.iter().find(|(_, _, _, _, room)| *room == 2).expect("B's arrival glyph");
         assert_eq!(dep.1, "↑", "A (lower room) shows the up glyph on its top border");
         assert_eq!(arr.1, "↓", "B (upper room) shows the down glyph on its bottom border, not an arrow");
     }
@@ -2738,6 +2762,74 @@ mod tests {
         assert!(count("┊") + count("┄") >= 1, "the routed Up/Down connector body is dotted");
         assert!(count("↑") >= 1, "up glyph present on a border/icon");
         assert!(count("↓") >= 1, "down glyph present on a border/icon");
+    }
+
+    #[test]
+    fn updown_connector_uses_portal_connector_color_not_connector() {
+        // Regression (SQ-0216 review finding): up/down connectors must style their dotted body
+        // AND their up/down border glyphs with `colors.portal_connector`, not the generic
+        // `colors.connector` used by compass connectors. Build a map with BOTH an up/down pair
+        // (far apart so the body draws a routed dotted line, not just a direct bridge) and an
+        // unrelated compass connector, set `portal_connector` and `connector` to distinct
+        // colors, and assert each connector kind picked up the right one.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (3, 2)); // far from (0,-1) — yielded, forces a routed body
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+
+        g.upsert_room(3, "C".into());
+        g.upsert_room(4, "D".into());
+        g.set_pos(3, (0, 4));
+        g.set_pos(4, (1, 4));
+        g.add_edge(3, Direction::E, 4);
+
+        let rm = render(&g);
+        let mut st = AppState::default();
+        st.zoom = Zoom::Boxes;
+        st.scroll = rm.bounds.0;
+        st.colors.connector = Style::new().fg(Color::Green);
+        st.colors.portal_connector = Style::new().fg(Color::Rgb(10, 20, 30));
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+
+        let portal_fg = st.colors.portal_connector.fg;
+        let connector_fg = st.colors.connector.fg;
+        assert_ne!(portal_fg, connector_fg, "test colors must be distinct to be meaningful");
+
+        // Every dotted body glyph and up/down border glyph must use portal_connector's fg.
+        let mut found_dotted = false;
+        let mut found_updown_glyph = false;
+        for cell in buf.content.iter() {
+            match cell.symbol() {
+                "┊" | "┄" => {
+                    found_dotted = true;
+                    assert_eq!(cell.fg, portal_fg.unwrap(), "dotted up/down body must use portal_connector fg");
+                }
+                "↑" | "↓" => {
+                    found_updown_glyph = true;
+                    assert_eq!(cell.fg, portal_fg.unwrap(), "up/down border glyph must use portal_connector fg");
+                }
+                _ => {}
+            }
+        }
+        assert!(found_dotted, "expected at least one dotted up/down body glyph");
+        assert!(found_updown_glyph, "expected at least one up/down border glyph");
+
+        // The unrelated compass connector (C -E-> D) must still use `colors.connector`.
+        let mut found_compass_arrow = false;
+        for cell in buf.content.iter() {
+            if cell.symbol() == "▶" {
+                found_compass_arrow = true;
+                assert_eq!(cell.fg, connector_fg.unwrap(), "compass arrowhead must keep colors.connector fg");
+                assert_ne!(cell.fg, portal_fg.unwrap(), "compass arrowhead must not use portal_connector fg");
+            }
+        }
+        assert!(found_compass_arrow, "expected the compass connector's ▶ arrowhead");
     }
 
     #[test]
@@ -3746,7 +3838,7 @@ mod tests {
         assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
 
         // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
-        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 10)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 10)];
         let colors = ColorScheme::terminal_default();
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, None);
 
@@ -3777,7 +3869,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the selected room (not current).
-        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -3811,7 +3903,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is BOTH selected AND current.
-        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), Some(7));
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -3843,7 +3935,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the current room, NOT selected.
-        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 7)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, Some(7));
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -3872,7 +3964,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow belongs to room 5; selected room is 7 — different rooms.
-        let arrowheads: Vec<((i32, i32), String, bool, RoomId)> = vec![((5, 5), ">".to_string(), false, 5)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 5)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();

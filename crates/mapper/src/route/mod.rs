@@ -1611,7 +1611,7 @@ mod tests {
             .filter(|c| matches!(c.exit_dir, Direction::Up))
             .collect();
         assert_eq!(up_connectors.len(), 1, "the Up edge produces one lane connector");
-        assert!(!up_connectors[0].reciprocal, "up/down connectors are never reciprocal");
+        assert!(!up_connectors[0].reciprocal, "an unmatched one-way Up (no reverse Down) is not reciprocal");
     }
 
     #[test]
