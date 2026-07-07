@@ -1476,6 +1476,7 @@ pub(crate) fn run_tidy_pipeline(
         description: "Initial state before tidy pipeline.".into(),
         stats: TidyStats::default(),
         stage_start: true,
+        manifest: None,
     });
 
     // Layout stages via relayout_auto_observed
@@ -1494,6 +1495,7 @@ pub(crate) fn run_tidy_pipeline(
                     hints_repaired: pipe_hints,
                 },
                 stage_start: true,
+                manifest: None,
             });
         }
     }));
@@ -1515,6 +1517,7 @@ pub(crate) fn run_tidy_pipeline(
                         hints_repaired: pipe_hints,
                     },
                     stage_start: first,
+                    manifest: None,
                 });
                 first = false;
             }
@@ -1538,6 +1541,7 @@ pub(crate) fn run_tidy_pipeline(
                         hints_repaired: pipe_hints,
                     },
                     stage_start: first,
+                    manifest: None,
                 });
                 first = false;
             }
@@ -1558,6 +1562,7 @@ pub(crate) fn run_tidy_pipeline(
                     hints_repaired: pipe_hints,
                 },
                 stage_start: true,
+                manifest: None,
             });
         }
     }));
@@ -1579,6 +1584,7 @@ pub(crate) fn run_tidy_pipeline(
                         hints_repaired: pipe_hints,
                     },
                     stage_start: first,
+                    manifest: None,
                 });
                 first = false;
             }
@@ -1601,6 +1607,7 @@ pub(crate) fn run_tidy_pipeline(
                         hints_repaired: pipe_hints,
                     },
                     stage_start: first,
+                    manifest: None,
                 });
                 first = false;
             }
@@ -4081,7 +4088,7 @@ mod tests {
         // No animation: arrows pan as usual (not stepping).
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(..)));
         // Animation active: arrows step, Space toggles, Esc exits.
-        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false };
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
         s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
@@ -4102,7 +4109,7 @@ mod tests {
     fn anim_step_clamps_pauses_and_holds_at_end() {
         use crate::state::{TidyAnim, TidyFrame};
         use std::time::Duration;
-        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false };
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
         let mut a = TidyAnim::new(vec![frame("a"), frame("b"), frame("c")]);
         assert!(a.playing && a.idx == 0);
         a.step(-1); // clamps at 0, and a manual step pauses
@@ -4710,7 +4717,7 @@ mod tests {
         // ── Anim sub-mode ─────────────────────────────────────────────────────
         let mut s = AppState::default();
         s.focus = Focus::Map;
-        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false };
+        let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
         s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
         // Step
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
@@ -6952,6 +6959,7 @@ mod tests {
             description: String::new(),
             stats: mapper::layout::TidyStats::default(),
             stage_start: false,
+            manifest: None,
         }]));
 
         let map   = Rect::default();

@@ -379,6 +379,9 @@ pub struct TidyFrame {
     pub description: String,
     pub stats: mapper::layout::TidyStats,
     pub stage_start: bool,
+    /// When `Some`, the map pane renders these lines as text (the Build frame's
+    /// connection manifest) instead of drawing rooms. `None` for every layout stage.
+    pub manifest: Option<Vec<String>>,
 }
 
 /// Transient playback state for the tidy animation. While this is `Some`, the map
@@ -2524,6 +2527,7 @@ mod tests {
             description: String::new(),
             stats: mapper::layout::TidyStats::default(),
             stage_start: false,
+            manifest: None,
         }]));
         assert!(s.any_overlay_open(), "tidy_anim active => any_overlay_open true");
         s.tidy_anim = None;
