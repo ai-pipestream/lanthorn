@@ -518,11 +518,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       the rooms drawn below them in step 2.
     let mut arrowheads: Vec<((i32, i32), String, bool, RoomId)> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.colors);
-    }
-
-    if boxes {
-        draw_portal_connectors(rm, &placed, off_x, off_y, area, buf, &state.symbols.portal, &state.colors);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors);
     }
 
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -894,6 +890,14 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
 /// (and reciprocal arrival) arrowheads as `(virtual pixel, glyph, distorted, room_id)`. The
 /// arrowheads are NOT drawn here: each sits ON a room's border cell, so the caller draws them
 /// AFTER the rooms (which render on top of the line-art) so the arrow replaces the box-edge glyph.
+///
+/// Up/Down connectors (`exit_dir == Up | Down`) are lane-routed like any compass connector but
+/// render differently: their body uses the portal's DOTTED glyphs (not the shared solid set) and
+/// their departure anchor carries the up/down glyph instead of an arrowhead. They accumulate into
+/// a SEPARATE per-cell mask (`updown_cells`) from the compass connectors' `cells` map, so compass
+/// crossings/turns are computed exactly as before — up/down never contributes to or reads a
+/// compass cell's mask. Up/down connectors are never reciprocal (enforced by the router), so the
+/// far-end arrow block below is naturally skipped for them.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -903,15 +907,26 @@ fn render_lane_connectors(
     buf: &mut Buffer,
     arrows: &crate::symbols::Arrows,
     path: &crate::symbols::PathGlyphs,
+    portal: &crate::symbols::PortalGlyphs,
     colors: &crate::colors::ColorScheme,
 ) -> Vec<((i32, i32), String, bool, RoomId)> {
     let (off_x, off_y) = offset;
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
     // two connectors (one ─, one │) combines to ┼; a connector revisiting its own cell is
-    // idempotent and harmless.
+    // idempotent and harmless. Compass connectors accumulate in `cells`; up/down connectors
+    // accumulate separately in `updown_cells` so the two never mix (dotted vs solid glyphs).
     let mut cells: std::collections::HashMap<(i32, i32), u8> =
         std::collections::HashMap::new();
+    let mut updown_cells: std::collections::HashMap<(i32, i32), u8> =
+        std::collections::HashMap::new();
+    // Dotted glyph set for up/down connector bodies: straight runs read as dotted; any turn
+    // glyph falls back to the solid corner set (up/down routes like N/S so may still turn).
+    let dotted_path = crate::symbols::PathGlyphs {
+        ns: portal.path,
+        ew: portal.path_h,
+        ..*path
+    };
     // Arrowheads: (virtual pixel, glyph string, distorted). Returned for the caller to draw on
     // top of the rooms (the arrow embeds in the room border).
     // Arrowheads: (virtual pixel, glyph string, distorted, owning room id).
@@ -920,21 +935,33 @@ fn render_lane_connectors(
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
         let style = if conn.distorted { colors.connector_distorted } else { colors.connector };
+        let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
+        let (cell_map, glyphs) = if is_updown {
+            (&mut updown_cells, &dotted_path)
+        } else {
+            (&mut cells, path)
+        };
 
         for (c, mask) in &plot.cells {
             let (sx, sy) = (c.0 + off_x, c.1 + off_y);
             if !in_area(sx, sy, area) {
                 continue;
             }
-            let entry = cells.entry(*c).or_insert(0);
+            let entry = cell_map.entry(*c).or_insert(0);
             *entry |= *mask;
-            let glyph_s = glyph_for(*entry, path).unwrap_or('·').to_string();
+            let glyph_s = glyph_for(*entry, glyphs).unwrap_or('·').to_string();
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(&glyph_s).set_style(style);
             }
         }
 
-        let dep_ch = if mapper::direction::is_diagonal(conn.exit_dir) {
+        let dep_ch = if is_updown {
+            match conn.exit_dir {
+                Direction::Up => portal.up,
+                Direction::Down => portal.down,
+                _ => unreachable!("is_updown guards to Up | Down"),
+            }
+        } else if mapper::direction::is_diagonal(conn.exit_dir) {
             diagonal_arrow(conn.exit_dir, arrows)
         } else {
             arrow_for_departure(conn.exit, arrows)
@@ -1124,120 +1151,6 @@ fn draw_stub(
     put_str(buf, lx, ly, label, connector_style, area);
 }
 
-/// Draw Up/Down portal links that no compass connector already covers. When the two rooms are
-/// directly grid-adjacent in the portal direction (a clean stack), draw one short dotted connector
-/// between them. When the portal room was YIELDED far from its partner, a full connecting line would
-/// run across the map and overwrite the paths in between — so instead draw a short dotted stub plus
-/// the up/down glyph on EACH room's border: the start room points out in the portal direction, the
-/// end room points back. Stubs are drawn before the rooms, so any stub cell that falls under an
-/// adjacent box is harmlessly covered. A reciprocal Up/Down pair is handled once, from the Up side.
-fn draw_portal_connectors(
-    rm: &RenderMap,
-    placed: &std::collections::HashMap<RoomId, VRect>,
-    off_x: i32,
-    off_y: i32,
-    area: Rect,
-    buf: &mut Buffer,
-    portal: &crate::symbols::PortalGlyphs,
-    colors: &crate::colors::ColorScheme,
-) {
-    let style = colors.portal_connector;
-    let interiors: Vec<VRect> = placed.values().copied().collect();
-    let in_interior = |x: i32, y: i32| {
-        interiors
-            .iter()
-            .any(|r| x > r.x && x < r.x + BOX_W - 1 && y > r.y && y < r.y + BOX_H - 1)
-    };
-    let cell: std::collections::HashMap<RoomId, (i32, i32)> =
-        rm.rooms.iter().map(|r| (r.id, r.cell)).collect();
-
-    for edge in &rm.edges {
-        if !edge.is_stub {
-            continue;
-        }
-        let up = match edge.dir {
-            Direction::Up => true,
-            Direction::Down => false,
-            _ => continue, // In/Out/Unknown get no dotted line
-        };
-        // A reciprocal Up/Down pair is handled once, from the Up side: skip the Down edge when a
-        // matching Up edge (dest→Up→origin) exists.
-        if !up
-            && rm
-                .edges
-                .iter()
-                .any(|e| e.dir == Direction::Up && e.origin == edge.dest && e.dest == edge.origin)
-        {
-            continue;
-        }
-        // Skip when a compass connector already joins the pair (either direction).
-        let joined = rm.edges.iter().any(|e| {
-            !e.is_stub
-                && ((e.origin == edge.origin && e.dest == edge.dest)
-                    || (e.origin == edge.dest && e.dest == edge.origin))
-        });
-        if joined {
-            continue;
-        }
-        let (Some(&o), Some(&t)) = (placed.get(&edge.origin), placed.get(&edge.dest)) else {
-            continue;
-        };
-        let (Some(&oc), Some(&dc)) = (cell.get(&edge.origin), cell.get(&edge.dest)) else {
-            continue;
-        };
-        let dy = if up { -1 } else { 1 };
-        if dc == (oc.0, oc.1 + dy) {
-            // Cleanly stacked: one short dotted connector. Vertical-first L from the origin border
-            // to the target's mid-row, clipped out of room interiors. Drawn on the right column
-            // (BOX_W - 2), aligned with the in-room up/down portal arrow icons.
-            let ocx = o.x + BOX_W - 2;
-            let start_y = if up { o.y - 1 } else { o.y + BOX_H };
-            let tcx = t.x + BOX_W - 2;
-            let tcy = t.y + BOX_H / 2;
-            for y in start_y.min(tcy)..=start_y.max(tcy) {
-                if !in_interior(ocx, y) {
-                    put_char(buf, ocx + off_x, y + off_y, portal.path, style, area);
-                }
-            }
-            for x in ocx.min(tcx)..=ocx.max(tcx) {
-                if !in_interior(x, tcy) {
-                    put_char(buf, x + off_x, tcy + off_y, portal.path_h, style, area);
-                }
-            }
-        } else {
-            // Yielded: a stub + glyph on each room instead of a long, path-stomping line. The start
-            // room points out in the portal direction; the end room points back the opposite way.
-            portal_stub(buf, o, up, off_x, off_y, area, style, portal);
-            portal_stub(buf, t, !up, off_x, off_y, area, style, portal);
-        }
-    }
-}
-
-/// Draw a one-cell dotted stub plus the up/down glyph just outside a room box — above it (`up`) or
-/// below — marking a yielded Up/Down portal without drawing a full connecting line. The stub sits on
-/// the box's right column (`BOX_W - 2`), aligned with the in-room portal icons.
-fn portal_stub(
-    buf: &mut Buffer,
-    b: VRect,
-    up: bool,
-    off_x: i32,
-    off_y: i32,
-    area: Rect,
-    style: Style,
-    portal: &crate::symbols::PortalGlyphs,
-) {
-    let cx = b.x + BOX_W - 2 + off_x;
-    let (dot_y, tip_y, glyph_ch) = if up {
-        (b.y - 1, b.y - 2, portal.up)
-    } else {
-        (b.y + BOX_H, b.y + BOX_H + 1, portal.down)
-    };
-    put_char(buf, cx, dot_y + off_y, portal.path, style, area);
-    // put_str expects &str; convert char to a short string
-    let glyph_s = glyph_ch.to_string();
-    put_str(buf, cx, tip_y + off_y, &glyph_s, style, area);
-}
-
 /// In-room icon slot for a portal direction: 0 = row 1 (Up), 1 = row 2 (mid: In/Out/Unknown),
 /// 2 = row 3 (Down). Cardinal directions have no portal slot.
 fn portal_slot(dir: Direction) -> Option<usize> {
@@ -1353,31 +1266,23 @@ fn draw_portal_icons(
                 }
             }
         } else if show_room_numbers {
-            // Numbers shown: directional icons in the interior right column (rows 1-3).
-            for (slot, cell) in slots.iter().enumerate() {
-                let Some((glyph_ch, _label)) = cell else { continue };
+            // Numbers shown: directional icon in the interior right column. Up/Down (slots 0/2)
+            // now show their glyph on the connector's border anchor instead (see
+            // `render_lane_connectors`), so only the mid slot (In/Out/Unknown) still draws here —
+            // and the notes marker (drawn by `draw_room` at this same row/col) is no longer
+            // overwritten, so it no longer needs to shift.
+            if let Some((glyph_ch, _label)) = slots[1] {
                 let gs = glyph_ch.to_string();
-                let row = by + 1 + slot as i32;
+                let row = by + 1 + 1; // mid slot's row
                 put_str(buf, bx + icon_col + off_x, row + off_y, &gs, style, area);
-                if slot == 0 && room.has_notes {
-                    put_char(buf, bx + icon_col - 1 + off_x, row + off_y, sym_portal.marker, style, area);
-                }
             }
         } else {
-            // Numbers hidden: all portal icons on interior row 3, laid out horizontally,
-            // centered within the 9-wide interior and clipped to it.
-            let present: Vec<char> = slots.iter()
-                .filter_map(|cell| cell.map(|(ch, _)| ch))
-                .collect();
-            if !present.is_empty() {
-                // Build a string of glyphs separated by single spaces, then center in 9 chars.
-                let glyph_str: String = present.iter()
-                    .flat_map(|&ch| [ch, ' '])
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string();
+            // Numbers hidden: the mid-slot icon (In/Out/Unknown) on interior row 3, centered
+            // within the 9-wide interior. Up/Down (slots 0/2) now show their glyph on the
+            // connector's border anchor instead (see `render_lane_connectors`).
+            if let Some((glyph_ch, _label)) = slots[1] {
                 let iw = (BOX_W - 2) as usize; // interior width = 9
-                put_str(buf, bx + 1 + off_x, by + 3 + off_y, &center(&glyph_str, iw), style, area);
+                put_str(buf, bx + 1 + off_x, by + 3 + off_y, &center(&glyph_ch.to_string(), iw), style, area);
             }
         }
     }
@@ -1954,6 +1859,32 @@ mod tests {
     use mapper::render::render;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn up_connector_draws_updown_glyph_on_border_not_arrow() {
+        // A at origin, B directly north, reached by Up. At Boxes zoom the Up connector
+        // must render the up glyph (default '↑') somewhere on the border between them,
+        // and must NOT render a filled N arrow ('▲') for that vertical link.
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+
+        let state = AppState::default(); // Boxes zoom by default
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+        assert!(text.contains('↑'), "the Up connector shows the up glyph on the border");
+        assert!(!text.contains('▲'), "the Up connector must NOT render a filled N arrow");
+    }
 
     #[test]
     fn loc_method_label_strings() {
@@ -2722,10 +2653,11 @@ mod tests {
     }
 
     #[test]
-    fn yielded_portal_draws_stubs_not_a_long_line() {
-        // Up/Down pair placed far apart (yielded). Instead of a long dotted L that overwrites the
-        // paths in between, each room gets a short dotted stub + ↑/↓ glyph: no horizontal dotted run
-        // and only a couple of vertical dotted cells, not a spanning line.
+    fn yielded_updown_pair_draws_a_lane_connector_not_a_stub() {
+        // Up/Down pair placed far apart (yielded from a clean stack). Task 6 routes Up/Down as a
+        // full lane connector regardless of adjacency, so the pair now draws a routed dotted line
+        // (not the old draw_portal_connectors/portal_stub right-column stub), plus the up/down
+        // glyphs on each room's border.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -2742,11 +2674,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
         let count = |s: &str| buf.content.iter().filter(|c| c.symbol() == s).count();
-        assert_eq!(count("┄"), 0, "no horizontal dotted run — the long L-line is gone");
-        assert!(count("┊") <= 4, "only short vertical stubs, not a spanning line: {}", count("┊"));
-        assert!(count("┊") >= 1, "each yielded room gets a dotted stub");
-        assert!(count("↑") >= 1, "up glyph present on a stub/icon");
-        assert!(count("↓") >= 1, "down glyph present on a stub/icon");
+        assert!(count("┊") + count("┄") >= 1, "the routed Up/Down connector body is dotted");
+        assert!(count("↑") >= 1, "up glyph present on a border/icon");
+        assert!(count("↓") >= 1, "down glyph present on a border/icon");
     }
 
     #[test]
@@ -3042,9 +2972,14 @@ mod tests {
         render_map(&rm, &state, area, &mut buf);
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
         // Box of room 1 is at screen (0,0); right interior column is col 9 (BOX_W-2).
-        assert_eq!(sym(9, 1), "↑", "up icon in upper-right interior (row 1)");
+        // In (non-spatial) still gets the mid-slot interior icon.
         assert_eq!(sym(9, 2), "⊙", "in icon in middle-right interior (row 2)");
-        assert_eq!(sym(9, 3), "↓", "down icon in lower-right interior (row 3)");
+        // Up/Down no longer draw an interior icon — they show their glyph on the connector's
+        // border anchor instead (top/bottom centre of the box, col 5 = BOX_W/2).
+        assert_ne!(sym(9, 1), "↑", "up icon leaves the upper-right interior");
+        assert_ne!(sym(9, 3), "↓", "down icon leaves the lower-right interior");
+        assert_eq!(sym(5, 0), "↑", "up glyph on the top border centre");
+        assert_eq!(sym(5, 4), "↓", "down glyph on the bottom border centre");
     }
 
     #[test]
@@ -3074,7 +3009,11 @@ mod tests {
     }
 
     #[test]
-    fn portal_icon_up_shifts_notes_marker() {
+    fn portal_icon_up_no_longer_shifts_notes_marker() {
+        // The Up icon used to claim the same interior cell as the notes marker (upper-right
+        // corner), forcing the marker to shift one cell left. Now Up shows its glyph on the
+        // connector's border anchor instead, so the interior cell is free and the notes marker
+        // stays in its normal (unshifted) spot.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
@@ -3090,8 +3029,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &state, area, &mut buf);
         let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-        assert_eq!(sym(9, 1), "↑", "up icon claims the upper-right corner");
-        assert_eq!(sym(8, 1), "●", "notes marker shifts one cell left of the up icon");
+        assert_eq!(sym(9, 1), "●", "notes marker stays put; the interior up icon is gone");
+        assert_eq!(sym(5, 0), "↑", "up glyph now appears on the top border centre");
     }
 
     #[test]
@@ -3255,7 +3194,11 @@ mod tests {
     }
 
     #[test]
-    fn up_portal_no_dotted_connector_when_compass_edge_joins_pair() {
+    fn up_portal_still_dotted_when_compass_edge_joins_pair() {
+        // Since Task 6, Up/Down are ALWAYS routed as their own lane connector — even when a
+        // compass edge already joins the same room pair (the Up edge becomes a merge stub onto
+        // the compass trunk). So, unlike the old draw_portal_connectors "joined" skip, a dotted
+        // Up connector (plus its border glyph) still renders alongside the solid N connector.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -3271,7 +3214,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
         let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
-        assert!(!has_dotted, "no dotted line when a compass edge already joins the pair");
+        assert!(has_dotted, "the Up merge stub still draws a dotted connector body");
+        let has_up_glyph = buf.content.iter().any(|c| c.symbol() == "↑");
+        assert!(has_up_glyph, "the Up merge stub still shows the up glyph, not an arrow");
     }
 
     #[test]
@@ -4079,19 +4024,21 @@ mod tests {
 
     #[test]
     fn room_number_visibility_toggles_id_and_icon_placement() {
-        // Build a one-room scene at Boxes zoom with a Down portal stub.
-        // With show_room_numbers=false (default): the "#<id>" text is absent and a portal icon
+        // Build a one-room scene at Boxes zoom with an Out portal stub (mid slot — Up/Down now
+        // show their glyph on the connector's border anchor instead, so a non-spatial direction
+        // is used here to exercise the still-interior mid-slot icon placement).
+        // With show_room_numbers=false (default): the "#<id>" text is absent and the portal icon
         //   appears on interior row 3 (the freed row), centered horizontally.
         // With show_room_numbers=true: "#<id>" appears on interior row 3 and the portal icon
-        //   appears on the far-right interior column (col BOX_W-2 = 9).
+        //   appears on the far-right interior column (col BOX_W-2 = 9), mid-slot row (row 2).
         use mapper::graph::MapGraph;
 
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
         g.upsert_room(2, "Cellar".into());
         g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, 1)); // placed so the Down edge becomes a stub in the render
-        g.add_edge(1, Direction::Down, 2);
+        g.set_pos(2, (0, 1));
+        g.add_edge(1, Direction::Out, 2);
         let rm = render(&g);
 
         // Helper: render with a given show_room_numbers value and return the buffer.
@@ -4116,15 +4063,15 @@ mod tests {
                 "show_room_numbers=false: #id must be absent from row 3; got '{row3}'"
             );
 
-            // A portal glyph (↓ for Down) should appear somewhere on interior row 3.
-            let has_down_glyph = (1u16..=9).any(|x| sym(x, 3) == "↓");
+            // A portal glyph (⊗ for Out) should appear somewhere on interior row 3.
+            let has_out_glyph = (1u16..=9).any(|x| sym(x, 3) == "⊗");
             assert!(
-                has_down_glyph,
-                "show_room_numbers=false: portal glyph '↓' must appear on interior row 3; row3='{row3}'"
+                has_out_glyph,
+                "show_room_numbers=false: portal glyph '⊗' must appear on interior row 3; row3='{row3}'"
             );
 
-            // The right interior column (col 9) on rows 1-3 should NOT have the down glyph.
-            let right_col_has_glyph = (1u16..=3).any(|y| sym(9, y) == "↓");
+            // The right interior column (col 9) on rows 1-3 should NOT have the out glyph.
+            let right_col_has_glyph = (1u16..=3).any(|y| sym(9, y) == "⊗");
             assert!(
                 !right_col_has_glyph,
                 "show_room_numbers=false: portal glyph must NOT be in the right column"
@@ -4143,10 +4090,11 @@ mod tests {
                 "show_room_numbers=true: #id must appear on row 3; got '{row3}'"
             );
 
-            // The Down portal icon should be in the far-right interior column (col 9), row 3.
+            // The Out portal icon should be in the far-right interior column (col 9), mid-slot
+            // row (row 2 = by + 1 + 1).
             assert_eq!(
-                sym(9, 3), "↓",
-                "show_room_numbers=true: portal glyph '↓' must be in the right interior column at row 3; got '{}'", sym(9, 3)
+                sym(9, 2), "⊗",
+                "show_room_numbers=true: portal glyph '⊗' must be in the right interior column at row 2; got '{}'", sym(9, 2)
             );
         }
     }
