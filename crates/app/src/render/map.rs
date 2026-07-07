@@ -1611,11 +1611,15 @@ use super::{put_char, put_str};
 /// twice). A cell written by ≥2 DISTINCT connectors is a clean crossing ONLY if exactly
 /// 2 connectors share it, one contributing exactly E|W and the other exactly N|S;
 /// everything else (≥3 connectors, corner-on-corner, parallel run-alongside) is illegal.
-/// Returns (illegal_count, clean_crossing_count). Counts are order-independent, so the
-/// internal HashMap accumulation is deterministic in its RESULT.
+/// Returns (illegal_count, updown_crossing_count, clean_crossing_count). `updown_crossings`
+/// is the subset of `crossings` where at least one of the two crossing connectors is an
+/// Up/Down connector (SQ-0216): those crossings, unlike a pure compass×compass crossing,
+/// should make the tidy shove a room apart rather than leave the ┼ in place. Counts are
+/// order-independent, so the internal HashMap accumulation is deterministic in its RESULT.
 pub(crate) fn overlap_stats(
     plan: &mapper::route::RoutePlan, cols: &PosTable, rows: &PosTable,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
+    use mapper::direction::Direction;
     use std::collections::{BTreeMap, HashMap};
     let mut owners: HashMap<(i32, i32), BTreeMap<usize, u8>> = HashMap::new();
     for (ci, conn) in plan.connectors.iter().enumerate() {
@@ -1629,7 +1633,7 @@ pub(crate) fn overlap_stats(
     let ns = DIR_N | DIR_S;
     let mut expected = [ns, ew];
     expected.sort_unstable();
-    let (mut illegal, mut crossings) = (0usize, 0usize);
+    let (mut illegal, mut updown_crossings, mut crossings) = (0usize, 0usize, 0usize);
     for per_conn in owners.values() {
         if per_conn.len() < 2 {
             continue;
@@ -1651,15 +1655,21 @@ pub(crate) fn overlap_stats(
         masks.sort_unstable();
         if per_conn.len() == 2 && masks == expected {
             crossings += 1;
+            let any_updown = per_conn.keys().any(|&ci| {
+                matches!(plan.connectors[ci].exit_dir, Direction::Up | Direction::Down)
+            });
+            if any_updown {
+                updown_crossings += 1;
+            }
         } else {
             illegal += 1;
         }
     }
-    (illegal, crossings)
+    (illegal, updown_crossings, crossings)
 }
 
-/// Render `graph` and return its (illegal_overlaps, crossings).
-pub(crate) fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, usize) {
+/// Render `graph` and return its (illegal_overlaps, updown_crossings, crossings).
+pub(crate) fn render_overlap_stats(graph: &mapper::graph::MapGraph) -> (usize, usize, usize) {
     let rm = mapper::render::render(graph);
     let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
     overlap_stats(&rm.plan, &cols, &rows)
@@ -1739,7 +1749,7 @@ pub(crate) fn cleanup_overlaps_observed(
 
     for _ in 0..max_passes {
         let base = render_overlap_stats(graph);
-        if base.0 == 0 {
+        if base.0 == 0 && base.1 == 0 {
             break;
         }
 
@@ -1749,7 +1759,7 @@ pub(crate) fn cleanup_overlaps_observed(
             .map(|r| r.id)
             .collect();
 
-        type Key = (usize, usize, usize, usize, usize, mapper::graph::RoomId, usize);
+        type Key = (usize, usize, usize, usize, usize, usize, mapper::graph::RoomId, usize);
         let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
         for &id in &room_ids {
             let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
@@ -1772,10 +1782,10 @@ pub(crate) fn cleanup_overlaps_observed(
                 if score_trial < score_orig {
                     continue;
                 }
-                if (s.0, s.1) < (base.0, base.1) {
+                if (s.0, s.1, s.2) < (base.0, base.1, base.2) {
                     let align_broken = align_orig.saturating_sub(align_trial);
                     let broken = score_orig.saturating_sub(score_trial);
-                    let key: Key = (s.0, align_broken, broken, s.1, degree, id, move_idx);
+                    let key: Key = (s.0, s.1, align_broken, broken, s.2, degree, id, move_idx);
                     if best.as_ref().is_none_or(|(bk, _, _)| key < *bk) {
                         best = Some((key, id, trial));
                     }
@@ -1861,7 +1871,7 @@ pub(crate) fn repair_directional_hints_observed(
                 graph.set_pos(id, orig);
                 if score > base_score && s.0 <= base.0 && align_trial >= align_orig {
                     let gain = score - base_score;
-                    let key: Key = (std::cmp::Reverse(gain), s.0, s.1, degree, id, move_idx);
+                    let key: Key = (std::cmp::Reverse(gain), s.0, s.2, degree, id, move_idx);
                     if best.as_ref().is_none_or(|(bk, _, _)| key < *bk) {
                         best = Some((key, id, trial));
                     }
@@ -1922,14 +1932,15 @@ pub(crate) fn compact_empty_lines_observed(
             };
             let rooms: Vec<(mapper::graph::RoomId, (i32, i32))> =
                 graph.rooms().filter_map(|r| r.pos.map(|p| (r.id, p))).collect();
-            let before = render_overlap_stats(graph).0;
+            let before = render_overlap_stats(graph);
             for &(id, p) in &rooms {
                 let c = if is_x { p.0 } else { p.1 };
                 if c > empty {
                     graph.set_pos(id, if is_x { (p.0 - 1, p.1) } else { (p.0, p.1 - 1) });
                 }
             }
-            if render_overlap_stats(graph).0 > before {
+            let after = render_overlap_stats(graph);
+            if after.0 > before.0 || after.1 > before.1 {
                 for (id, p) in rooms {
                     graph.set_pos(id, p);
                 }
@@ -2730,7 +2741,7 @@ mod tests {
         g.add_edge(1, Direction::S, 2);
         g.add_edge(2, Direction::N, 1); // vertical trunk
         g.add_edge(1, Direction::E, 2); // extra same-pair edge → merge stub
-        let (illegal, _) = render_overlap_stats(&g);
+        let (illegal, _, _) = render_overlap_stats(&g);
         assert_eq!(illegal, 0, "no illegal overlap");
         let rm = mapper::render::render(&g);
         let mut st = AppState::default();
@@ -2788,7 +2799,7 @@ mod tests {
         g.add_edge(239, Direction::N, 77);
         g.add_edge(239, Direction::S, 77);
         // The merge junction (trunk + its stubs) is exempted → no illegal overlaps.
-        let (illegal, _) = render_overlap_stats(&g);
+        let (illegal, _, _) = render_overlap_stats(&g);
         assert_eq!(illegal, 0, "a same-pair merge junction must not count as an illegal overlap");
         // Render: #239 still shows its N (▲) and S (▼) box-edge exit arrows, and a T-junction
         // glyph appears where the stubs join the trunk.
@@ -2805,6 +2816,88 @@ mod tests {
         assert!(tjuncts >= 1, "a T-junction glyph where the merge stubs join the trunk");
     }
 
+    /// Build the up/down-crossing fixture (Task 13, SQ-0216): room 1 (south) reaches room 2
+    /// (north, same column) via Up, a vertical run through column x=2. Rooms 3 and 4 sit due
+    /// west/east at row y=1 with a plain E connector between them. The vertical Up run and the
+    /// horizontal E run cross cleanly at one cell — the same clean `[ns, ew]` crossing shape as
+    /// `two_connectors_perpendicular_crossing_is_single_cross`, but here one of the two owning
+    /// connectors is Up/Down.
+    fn updown_crossing_fixture() -> mapper::graph::MapGraph {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (2, 2)); // origin, south
+        g.set_pos(2, (2, 0)); // dest, north
+        g.set_pos(3, (0, 1));
+        g.set_pos(4, (4, 1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(3, Direction::E, 4);
+        g
+    }
+
+    /// Same layout as `updown_crossing_fixture`, but the vertical connector is a plain compass
+    /// S edge (mirrors `two_connectors_perpendicular_crossing_is_single_cross`) — a pure
+    /// compass×compass crossing, no up/down connector involved.
+    fn compass_only_crossing_fixture() -> mapper::graph::MapGraph {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (2, 0));
+        g.set_pos(2, (2, 2));
+        g.set_pos(3, (0, 1));
+        g.set_pos(4, (4, 1));
+        g.add_edge(1, Direction::S, 2);
+        g.add_edge(3, Direction::E, 4);
+        g
+    }
+
+    #[test]
+    fn updown_crossing_is_counted_but_compass_crossing_is_not() {
+        // Up-run × horizontal-compass-run crossing: updown_crossings must count it.
+        let updown_case = updown_crossing_fixture();
+        let stats_updown_case = render_overlap_stats(&updown_case);
+        assert_eq!(stats_updown_case.0, 0, "no illegal overlap in the up/down-crossing fixture");
+        assert!(stats_updown_case.1 >= 1, "an up/down×compass crossing must be counted in updown_crossings");
+
+        // The same layout, but the vertical connector is a plain compass S edge instead of Up:
+        // a pure compass×compass crossing must NOT count toward updown_crossings.
+        let compass_case = compass_only_crossing_fixture();
+        let stats_compass_case = render_overlap_stats(&compass_case);
+        assert_eq!(stats_compass_case.0, 0, "no illegal overlap in the compass-crossing fixture");
+        assert_eq!(stats_compass_case.1, 0, "a pure compass×compass crossing must not count as an updown crossing");
+    }
+
+    #[test]
+    fn tidy_shoves_rooms_to_clear_an_updown_crossing() {
+        // Zero illegal overlaps, one up/down crossing. The tidy must move a room to clear it —
+        // cleanup drives updown_crossings toward 0 as its second priority (after illegal), even
+        // though illegal is already 0.
+        let mut g = updown_crossing_fixture();
+        let base = render_overlap_stats(&g);
+        assert_eq!(base, (0, 1, 1), "precondition: one clean crossing, one of them up/down, no illegal overlaps");
+
+        cleanup_overlaps(&mut g, 3, 40);
+
+        let after = render_overlap_stats(&g);
+        assert_eq!(after.0, 0, "cleanup must not introduce an illegal overlap while clearing the up/down crossing");
+        assert_eq!(after.1, 0, "cleanup must clear the up/down crossing by moving a room");
+    }
+
+    #[test]
+    fn tidy_does_not_move_rooms_for_a_pure_compass_crossing() {
+        // Two compass connectors cross cleanly (zero illegal overlaps, zero up/down crossings).
+        // The tidy must NOT relocate any room to clear a pure compass×compass crossing — that
+        // stays a tiebreak, not a mover (scope discipline: only updown_crossings is a mover).
+        let mut g = compass_only_crossing_fixture();
+        let base = render_overlap_stats(&g);
+        assert_eq!(base, (0, 0, 1), "precondition: one clean compass×compass crossing, no illegal overlaps");
+
+        let positions_before: Vec<_> = g.rooms().map(|r| (r.id, r.pos)).collect();
+        cleanup_overlaps(&mut g, 3, 40);
+        let positions_after: Vec<_> = g.rooms().map(|r| (r.id, r.pos)).collect();
+        assert_eq!(positions_before, positions_after, "no room should move for a pure compass crossing");
+    }
+
     #[test]
     fn overlap_stats_clean_pair_is_zero() {
         use mapper::graph::MapGraph;
@@ -2814,7 +2907,7 @@ mod tests {
         g.set_pos(1, (0, 0));
         g.set_pos(2, (1, 0));
         g.add_edge(1, Direction::E, 2);
-        let (illegal, _) = render_overlap_stats(&g);
+        let (illegal, _, _) = render_overlap_stats(&g);
         assert_eq!(illegal, 0);
     }
 
@@ -3126,7 +3219,7 @@ mod tests {
         ] { g.add_edge(o, d, dst); }
         relayout_auto(&mut g);
         cleanup_overlaps(&mut g, 3, 40);
-        let (illegal, _) = render_overlap_stats(&g);
+        let (illegal, _, _) = render_overlap_stats(&g);
         assert_eq!(illegal, 0, "cleanup must clear all illegal overlaps on A129");
         // rooms still distinct cells
         let cells: Vec<_> = g.rooms().filter_map(|r| r.pos).collect();
