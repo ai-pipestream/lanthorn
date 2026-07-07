@@ -1715,4 +1715,14 @@ mod tests {
         assert_eq!(ns.exit_slot, 0, "reciprocal N/S takes the center slot");
         assert_ne!(updown.exit_slot, 0, "up/down yields to a fanned slot");
     }
+
+    #[test]
+    fn route_side_puts_up_on_top_and_down_on_bottom() {
+        use crate::direction::Direction;
+        use crate::router::route_side;
+        use crate::router::Side;
+        // Up always departs the NORTH (top) border; Down always the SOUTH (bottom).
+        assert_eq!(route_side(Direction::Up), Some(Side::Top));
+        assert_eq!(route_side(Direction::Down), Some(Side::Bottom));
+    }
 }

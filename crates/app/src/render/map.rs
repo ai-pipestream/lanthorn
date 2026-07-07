@@ -1972,6 +1972,58 @@ mod tests {
     }
 
     #[test]
+    fn reciprocal_updown_glyphs_sit_on_north_and_south_borders() {
+        // Task 10 (SQ-0216, regression lock-in): A at origin, B directly north, joined by a
+        // real reciprocal Up/Down pair. The up glyph must land on a TOP border row (north
+        // side, A's border) and the down glyph on a BOTTOM border row (south side, B's
+        // border) — never swapped, never on a left/right side.
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+
+        let rm = render(&g);
+        let mut state = AppState::default();
+        state.zoom = Zoom::Boxes;
+        state.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        // Find the up glyph and the down glyph, record their rows.
+        let up = state.symbols.portal.up; // default '↑'
+        let down = state.symbols.portal.down; // default '↓'
+        let mut up_row = None;
+        let mut down_row = None;
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                let s = buf.cell((x, y)).expect("cell in area").symbol();
+                if s.chars().next() == Some(up) {
+                    up_row = Some(y);
+                }
+                if s.chars().next() == Some(down) {
+                    down_row = Some(y);
+                }
+            }
+        }
+        let (up_row, down_row) = (up_row.expect("up glyph present"), down_row.expect("down glyph present"));
+        // B is north of A (A is the lower room, B the upper room). The up glyph marks A's
+        // (lower room's) top border; the down glyph marks B's (upper room's) bottom border.
+        // Since the upper room sits at a smaller screen row than the lower room, the down
+        // glyph's row is ABOVE the up glyph's row: down_row < up_row.
+        assert!(
+            down_row < up_row,
+            "down glyph (upper room's south border) sits above the up glyph (lower room's north border): down_row={down_row} up_row={up_row}"
+        );
+    }
+
+    #[test]
     fn loc_method_label_strings() {
         use zvm::location::LocationMethod::*;
         assert_eq!(loc_method_label(GlobalVar0), "via status variable");
