@@ -113,20 +113,18 @@ special-case stacking and its helpers if nothing else uses them.
   *reciprocal* N/S; against an ordinary one-way N/S they compete on equal footing
   and existing tie-breakers (compass degree, order) decide.
 
-## What explicitly does NOT change
+## What explicitly does NOT change (Phase 1)
 
 - `grid_offset(Up/Down)` stays `None`.
-- Rendering: `draw_portal_connectors` / portal icons / dotted glyphs / stairs
-  preset — unchanged. No arrows for up/down.
 - Layers: `planar_region` still cuts on up/down; peel-layer unchanged.
-- Reciprocal-collapse in the router / `route_topology` — unchanged (up/down still
-  excluded).
 - `mark_distorted` / the "distorted" red styling — unchanged.
+- (Rendering and lane-routing DO change — see Phase 2 below.)
 
 ## Non-goals
 
-- No full grid-offset unification (explicitly rejected — it would invert router,
-  `planar_region`, reciprocal-collapse, and scoring defaults).
+- No change to `grid_offset` itself (Up/Down stay `None`); layer-cutting and the
+  never-distorted property continue to key on it. Lane routing includes up/down via
+  a routing-only `route_side` + `layout_offset`, not by changing `grid_offset`.
 - No change to how many layers a vertical shaft occupies, or to manual peeling.
 - No new config or style selectors (up/down already themeable via the existing
   `connector:portal` / portal-symbol selectors).
@@ -144,3 +142,65 @@ a real-game smoke test is required (per project practice):
   step harness before/after and eyeball the layout — vertical shafts should read as
   clean N/S stacks, reciprocal compass rooms should keep their alignment, and no
   up/down edge should render as a red distorted arrow.
+
+---
+
+# Phase 2: Route up/down through the N/S lane system (rendering unification)
+
+Phase 1 made up/down lay out like N/S but left them rendered by the separate
+stub path (`draw_portal_connectors`): dotted stubs on the box's right column,
+in-room icons, no lane routing. Phase 2 moves up/down onto the same **lane path**
+compass connectors use, so their dotted connectors get lane assignment +
+path-crossing elimination, a **border-centered** anchor, and the up/down symbol
+drawn **on the room border** (where N/S arrowheads sit) — still dotted, still
+no reciprocal-collapse.
+
+## Routing (`crates/mapper/src/route/mod.rs`, `router.rs`)
+
+- Add a routing-only `route_side(dir)` = `side_for(dir)` plus `Up => Top`,
+  `Down => Bottom`. Use it in the lane router's exit-side lookups
+  (`route/mod.rs:572, 634, 672`). Leave `side_for` and the old `route_all` stub
+  router untouched.
+- Change the lane-router working-set filter (`route/mod.rs:611`) from
+  `grid_offset(c.dir).is_some()` to `layout_offset(c.dir).is_some()` — i.e.
+  {compass + up/down}. Up/down now get `RoutedConnector`s, lanes, slots, and
+  crossing elimination.
+- **No reciprocal-collapse for up/down:** guard the back-edge pairing
+  (`back_edge_idx` ~527, pairing ~667/805) so an up/down edge is never paired —
+  each stays a one-way connector with `reciprocal = false` (which also suppresses
+  the far-end arrow at render). Extend `oneway_entry_side` (~358) so a one-way
+  up/down that dips into a channel has an entry side (Up enters dest from Bottom,
+  Down from Top).
+- `RoutedConnector.exit_dir` already carries `Up`/`Down` to the renderer — no new
+  field required.
+
+## Rendering (`crates/app/src/render/map.rs`)
+
+- In `render_lane_connectors`, branch on `exit_dir == Up|Down`: draw the connector
+  **body dotted** (portal `┊`/`┄`, selected per-connector) and put the **up/down
+  glyph** (`sym.portal.up`/`down`, or the stairs preset) at the departure border
+  anchor instead of `arrow_for_departure`. The anchor is the centered, slot-fanned
+  `box_edge_anchor` (Top/Bottom), so the glyph sits mid-border and is pushed
+  off-center only when a reciprocal N/S connector claims the center slot.
+- **Delete** `draw_portal_connectors` and `portal_stub` (and their call in
+  `render_map`). Make `draw_portal_icons` **skip Up/Down** — it keeps drawing the
+  In/Out/Unknown in-room icons only.
+
+## Phase 2 decisions (flagged and accepted)
+
+- **In/Out/Unknown stay as in-room portal icons.** Only Up/Down move to the
+  lane/border treatment.
+- **Departure-glyph only** (like a one-way N/S arrow). A two-way vertical link is
+  two un-collapsed connectors, so it shows an up-glyph on the lower room's top
+  border and a down-glyph on the upper room's bottom border — one per direction.
+
+## Phase 2 verification
+
+- **Unit:** an up connection now produces a `RoutedConnector` in the plan (not a
+  stub) with `reciprocal = false`; a reciprocal Up+Down pair produces **two**
+  connectors, not one; rendering an up connector draws the up glyph on the border
+  (not an arrow) and a dotted body; In/Out/Unknown still draw in-room icons.
+- **Real game (oracle):** on a vertical-heavy map, vertical connectors route
+  without breaking, don't cross other connectors, anchor at the middle of the
+  top/bottom border (shifting for a reciprocal N/S), and show up/down glyphs on
+  the border.

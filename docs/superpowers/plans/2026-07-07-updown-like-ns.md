@@ -435,3 +435,212 @@ git commit -m "docs(mapping): note up/down now laid out like N/S"
 - **Spec refinements baked in:** `exact_alignment_count` is deleted (dead once the stack stage is gone) rather than switched to `layout_offset`; `edge_is_satisfied` DOES switch to `layout_offset`, which is safe because `mark_distorted` gates on `grid_offset` first (Task 3's `mark_distorted_never_marks_updown` test guards this).
 - **`room_compass_degree` intentionally stays on `grid_offset`** — it is a move-preference tiebreaker in overlap cleanup; up/down anchoring is already provided by the weight-1 side/alignment scores, so leaving compass degree compass-only bounds the change. If a smoke test shows up/down rooms getting shuffled by overlap cleanup, revisit this.
 - **Controller smoke test (outside the plan):** after Task 5, run the app on a vertical-heavy story (e.g. `stories/zork1-r88-s840726.z3`), walk a shaft (up the tree / down to the cellar), and eyeball that vertical rooms read as clean N/S stacks, reciprocal compass rooms keep their alignment, and no up/down edge renders red.
+
+---
+
+# Phase 2 — Route up/down through the N/S lane system (rendering unification)
+
+See the spec's "Phase 2" section. Goal: up/down render as dotted **lane** connectors (crossing-eliminated, border-centered) with the up/down glyph on the room border, replacing the separate portal-stub path. Do these AFTER Tasks 1-5 (they build on the completed layout unification and the `layout_offset` helper).
+
+## Task 6: Route up/down through the lane router (mapper)
+
+**Files:**
+- Modify: `crates/mapper/src/router.rs` (add `route_side`, do NOT change `side_for`)
+- Modify: `crates/mapper/src/route/mod.rs` (filter ~611; exit-side lookups ~572, 634, 672; reciprocal pairing ~527/667/805; `oneway_entry_side` ~358)
+- Test: `crates/mapper/src/route/mod.rs` tests
+
+**Interfaces:**
+- Consumes: `mapper::direction::layout_offset` (Task 1).
+- Produces: up/down connections now yield `RoutedConnector`s in the lane `RoutePlan` (`route_lanes`), with `exit_dir == Up|Down` and `reciprocal == false`; they are never collapsed with a reverse up/down edge. `side_for` (old stub router) is unchanged.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the `#[cfg(test)]` module in `crates/mapper/src/route/mod.rs`. Use the crate's real lane entry point (`route_lanes(&graph) -> RoutePlan`, `route/mod.rs:914`) and `RoutedConnector` (`route/mod.rs:22-50`, fields `exit_dir: Direction`, `reciprocal: bool`). Match the exact field/accessor names in the real structs.
+
+```rust
+#[test]
+fn updown_is_routed_as_a_lane_connector_not_collapsed() {
+    use crate::direction::Direction;
+    use crate::graph::MapGraph;
+
+    // A--Up-->B (B north of A). Up should now be a lane connector, not just a stub.
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::Up, 2);
+
+    let plan = route_lanes(&g);
+    let up_connectors: Vec<_> = plan.connectors.iter()
+        .filter(|c| matches!(c.exit_dir, Direction::Up))
+        .collect();
+    assert_eq!(up_connectors.len(), 1, "the Up edge produces one lane connector");
+    assert!(!up_connectors[0].reciprocal, "up/down connectors are never reciprocal");
+}
+
+#[test]
+fn reciprocal_updown_pair_is_not_collapsed() {
+    use crate::direction::Direction;
+    use crate::graph::MapGraph;
+
+    // A--Up-->B and B--Down-->A: must stay TWO connectors, never collapsed to one.
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::Up, 2);
+    g.add_edge(2, Direction::Down, 1);
+
+    let plan = route_lanes(&g);
+    let vertical: Vec<_> = plan.connectors.iter()
+        .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+        .collect();
+    assert_eq!(vertical.len(), 2, "the Up and Down edges are drawn separately, not collapsed");
+    assert!(vertical.iter().all(|c| !c.reciprocal));
+}
+```
+
+- [ ] **Step 2: Run them — verify they fail**
+
+Run: `cargo test -p mapper updown_is_routed_as_a_lane_connector_not_collapsed reciprocal_updown_pair_is_not_collapsed`
+Expected: FAIL — today up/down are filtered out of the lane router (0 connectors).
+
+- [ ] **Step 3: Implement**
+
+Read the four functions first. Then:
+
+1. In `crates/mapper/src/router.rs`, add (leave `side_for` untouched):
+```rust
+/// Like [`side_for`], but also gives Up/Down a routed box side (Up→Top, Down→Bottom).
+/// Used ONLY by the lane router so vertical connectors get lanes + border anchors;
+/// the old stub router (`route_all`) keeps using `side_for` (None for up/down).
+pub fn route_side(dir: Direction) -> Option<Side> {
+    match dir {
+        Direction::Up => Some(Side::Top),
+        Direction::Down => Some(Side::Bottom),
+        _ => side_for(dir),
+    }
+}
+```
+2. In `crates/mapper/src/route/mod.rs`: change the working-set filter (~611) from `grid_offset(c.dir).is_some()` to `crate::direction::layout_offset(c.dir).is_some()`. Replace the exit-side lookups at ~572, 634, 672 (`side_for(c.dir)`) with `crate::router::route_side(c.dir)`.
+3. Guard reciprocal pairing so up/down never pair: in `back_edge_idx` (~527) and/or the pairing sites (~667, ~805), skip pairing when `c.dir` is `Up`/`Down` (and never treat an up/down edge as another edge's back-edge). Ensure the emitted up/down connector has `reciprocal = false`.
+4. Extend `oneway_entry_side` (~358) so `Up => Some(Side::Bottom)` (enters dest from below), `Down => Some(Side::Top)`.
+
+Keep `In`/`Out`/`Unknown` excluded (`layout_offset` returns None for them, and `route_side` delegates to `side_for` = None), so they remain stubs.
+
+- [ ] **Step 4: Run tests — verify green**
+
+Run: `cargo test -p mapper updown_is_routed_as_a_lane_connector_not_collapsed reciprocal_updown_pair_is_not_collapsed`
+Expected: PASS.
+Run: `cargo test -p mapper`
+Expected: all pass. If a routing test asserted up/down were absent from the plan, that is an intended change — update it and note it.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/mapper/src/router.rs crates/mapper/src/route/mod.rs
+git commit -m "feat(mapper): route up/down through the lane system (no reciprocal collapse)"
+```
+
+---
+
+## Task 7: Render up/down as dotted lane connectors with a border glyph; remove the portal-stub path (app)
+
+**Files:**
+- Modify: `crates/app/src/render/map.rs` — `render_lane_connectors` (~897-953) to draw up/down dotted + border glyph; delete `draw_portal_connectors` (~1134-1214) and `portal_stub` (~1219-1239) and their call in `render_map` (~524-526); make `draw_portal_icons` (~1272+) skip `Up`/`Down`.
+- Test: `crates/app/src/render/map.rs` tests
+
+**Interfaces:**
+- Consumes: Task 6's lane connectors carrying `exit_dir == Up|Down`.
+- Behavior: a Boxes-zoom up/down connector renders with a dotted body and the up/down glyph on the departure border; the old right-column portal stubs are gone; In/Out/Unknown still get in-room icons.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to the tests module in `crates/app/src/render/map.rs` (match how neighboring render tests build a `MapGraph`, render at Boxes zoom, and scan the buffer — e.g. `mapper::render::render(&g)` + `render_map(&rm, &state, area, &mut buf)`):
+
+```rust
+#[test]
+fn up_connector_draws_updown_glyph_on_border_not_arrow() {
+    // A at origin, B directly north, reached by Up. At Boxes zoom the Up connector
+    // must render the up glyph (default '↑') somewhere on the border between them,
+    // and must NOT render a filled N arrow ('▲') for that vertical link.
+    use mapper::direction::Direction;
+    use mapper::graph::MapGraph;
+
+    let mut g = MapGraph::new();
+    g.upsert_room(1, "A".into());
+    g.upsert_room(2, "B".into());
+    g.set_pos(1, (0, 0));
+    g.set_pos(2, (0, -1));
+    g.add_edge(1, Direction::Up, 2);
+
+    let state = AppState::default(); // Boxes zoom by default
+    let rm = mapper::render::render(&g);
+    let area = Rect::new(0, 0, 60, 30);
+    let mut buf = Buffer::empty(area);
+    // recenter so both rooms are on-screen if the neighboring tests do so; match their setup.
+    render_map(&rm, &state, area, &mut buf);
+
+    let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+    assert!(text.contains('↑'), "the Up connector shows the up glyph on the border");
+}
+```
+
+(If the default portal up glyph is not `↑` in `AppState::default().symbols`, assert the actual configured `state.symbols.portal.up`. Build the on-screen setup to match the neighboring `render_map` tests — recenter/scroll as they do.)
+
+- [ ] **Step 2: Run it — verify it fails**
+
+Run: `cargo test -p app up_connector_draws_updown_glyph_on_border_not_arrow`
+Expected: FAIL — up/down currently render as right-column dotted stubs (the glyph is placed via `portal_stub`, not on the lane border; and after Task 6 they may render as a solid N arrow until this task special-cases them).
+
+- [ ] **Step 3: Implement**
+
+Read `render_lane_connectors`, `arrow_for_departure`, `glyph_for`, `draw_portal_connectors`, `portal_stub`, and `draw_portal_icons` first. Then:
+1. In `render_lane_connectors`, when `matches!(conn.exit_dir, Direction::Up | Direction::Down)`: (a) draw the connector body with the dotted glyph set (the portal dotted chars `sym.portal.path`/`path_h`, or a dotted `PathGlyphs`) instead of the shared solid `path`; (b) push the up/down glyph (`sym.portal.up` for Up, `sym.portal.down` for Down) as the departure "arrowhead" instead of `arrow_for_departure(conn.exit, arrows)`. Because these connectors have `reciprocal == false`, the far-end arrow block is already skipped.
+2. Delete `draw_portal_connectors` and `portal_stub`, and remove their call from `render_map` (~524-526).
+3. In `draw_portal_icons`, skip `Direction::Up` and `Direction::Down` (they now show a border glyph); keep drawing `In`/`Out`/`Unknown` icons.
+4. Remove or update any `#[cfg(test)]` tests that asserted the old `draw_portal_connectors`/`portal_stub` right-column behavior.
+
+- [ ] **Step 4: Run tests — verify green**
+
+Run: `cargo test -p app up_connector_draws_updown_glyph_on_border_not_arrow`
+Expected: PASS.
+Run: `cargo test -p app`
+Expected: all pass. Deleted portal-stub tests are expected; do not re-add them.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/app/src/render/map.rs
+git commit -m "feat(app): render up/down as dotted lane connectors with border glyphs"
+```
+
+---
+
+## Task 8: Docs (Phase 2)
+
+**Files:**
+- Modify: `docs/features/mapping.md` (the "Vertical connections laid out like N/S" bullet added in Task 5)
+
+- [ ] **Step 1: Update the bullet**
+
+Adjust the Task 5 bullet so it states up/down connectors are **routed through the same lane system as N/S** (crossing-eliminated, anchored at the middle of the top/bottom border, pushed aside by a reciprocal N/S), with the up/down symbol drawn on the room border — rendered as dotted lines rather than arrows. Keep the surrounding style.
+
+- [ ] **Step 2: Verify**
+
+Run: `cargo test -p app` and `cargo test -p mapper`
+Expected: all pass (docs-only).
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/features/mapping.md
+git commit -m "docs(mapping): note up/down now route through the N/S lane system"
+```
+
+## Phase 2 notes for the implementer
+
+- The trickiest part of Task 7 is mixing **dotted** up/down bodies with **solid** compass bodies in `render_lane_connectors`' shared per-cell mask. Prefer selecting the glyph set per-connector (draw up/down connector segments with the dotted set) over a global change; if the shared-mask junction logic makes per-cell selection hard, draw up/down connector bodies in a small dedicated pass using their `segs`, and keep compass rendering unchanged. Whatever you choose, compass connectors must render byte-identically to before.
+- Do NOT change `side_for`, `route_all`, `planar_region`, or `mark_distorted` — Phase 2 keeps `grid_offset(Up/Down) == None`; only the lane router (`route_side` + `layout_offset` filter) sees up/down as sided.
