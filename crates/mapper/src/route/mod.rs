@@ -632,20 +632,31 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     // compass side. An exact-opposite pair is the straight-line special case. ADDITIONAL
     // edges between the same room pair (e.g. a third direction, 239→S→77 alongside
     // 77→E→239 and 239→N→77) stay separate, so every distinct direction remains visible.
-    let compass: Vec<&crate::graph::Connection> = graph
-        .connections()
-        .iter()
-        .filter(|c| layout_offset(c.dir).is_some())
-        .collect();
     // Unordered room pairs that already have a compass edge (grid_offset is Some — the true
     // 8-way compass directions, unlike layout_offset which also covers Up/Down). When the same
     // pair also has an up/down edge, the compass path is the only one drawn: the up/down edge
-    // still contributes its layout hint elsewhere, but produces no routed connector here.
+    // still contributes its layout hint elsewhere, but produces no routed connector here. Computed
+    // BEFORE the working-set slice below so the up/down edge can be excluded from the working set
+    // itself, rather than skipped mid-loop — a mid-loop skip would still leave the up/down edge in
+    // the `compass` slice fed to `direct_route_losers`, which picks the FIRST-LISTED edge per pair
+    // as that pair's representative for the longest-straight-line contest; a suppressed up/down
+    // edge listed first would steal that slot from the real compass edge, corrupting which
+    // connector wins a contested direct room-line and breaking the "compass routing stays
+    // byte-identical" invariant (SQ-0219 fix).
     let compass_pairs: std::collections::BTreeSet<(RoomId, RoomId)> = graph
         .connections()
         .iter()
         .filter(|c| grid_offset(c.dir).is_some())
         .map(|c| (c.origin.min(c.dest), c.origin.max(c.dest)))
+        .collect();
+    let compass: Vec<&crate::graph::Connection> = graph
+        .connections()
+        .iter()
+        .filter(|c| {
+            layout_offset(c.dir).is_some()
+                && !(matches!(c.dir, Direction::Up | Direction::Down)
+                    && compass_pairs.contains(&(c.origin.min(c.dest), c.origin.max(c.dest))))
+        })
         .collect();
     // Edge indices already drawn — either as their own connector or consumed as the
     // back-edge of an earlier bidirectional pairing.
@@ -664,11 +675,6 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             continue; // already drawn as an earlier pair's back-edge
         }
         let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
-        // An up/down edge whose pair already has a compass edge is suppressed entirely — no
-        // trunk, no merge stub. The compass path is the only one drawn for that pair.
-        if matches!(c.dir, Direction::Up | Direction::Down) && compass_pairs.contains(&pair) {
-            continue;
-        }
         // Extra edge between an already-connected pair → merge stub: route from this edge's exit
         // side to a junction on the trunk and end there (a T-junction). Only the box-edge
         // departure arrow is drawn; no independent line reaches the destination.
@@ -1680,19 +1686,45 @@ mod tests {
         // exact opposite up/down direction). Since SQ-0219, sharing a pair with a compass
         // edge SUPPRESSES the up/down edge entirely rather than letting it draw as a
         // non-reciprocal connector — the compass path is the only one drawn for the pair.
-        let mut g = MapGraph::new();
-        g.upsert_room(1, "A".into());
-        g.upsert_room(2, "B".into());
-        g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, -1));
-        g.add_edge(1, Direction::Up, 2);
-        g.add_edge(2, Direction::S, 1);
+        //
+        // The Up edge is listed FIRST, before the S edge — the ordering that exposed a
+        // regression where the up/down edge was skipped mid-loop (via `continue`) instead of
+        // being excluded from the working set. That mid-loop skip let the trunk-claim slot for
+        // the pair fall through to the S edge, flipping it from a merge stub (`merge == true`)
+        // to a full trunk (`merge == false`, extra points) relative to the no-Up baseline —
+        // violating the "compass routing stays byte-identical" constraint. Assert the surviving
+        // S connector is IDENTICAL (merge/points/reciprocal) to the same graph without the Up
+        // edge at all, which directly encodes that constraint.
+        let mut with_up = MapGraph::new();
+        with_up.upsert_room(1, "A".into());
+        with_up.upsert_room(2, "B".into());
+        with_up.set_pos(1, (0, 0));
+        with_up.set_pos(2, (0, -1));
+        with_up.add_edge(1, Direction::Up, 2);
+        with_up.add_edge(2, Direction::S, 1);
 
-        let plan = route_lanes(&g);
+        let plan = route_lanes(&with_up);
         let up = plan.connectors.iter().find(|c| c.exit_dir == Direction::Up);
         assert!(up.is_none(), "up/down must never pair with a compass edge — it is suppressed, not routed");
-        let compass = plan.connectors.iter().find(|c| c.exit_dir == Direction::S);
-        assert!(compass.is_some(), "the compass edge is still routed");
+        let s_with_up = plan.connectors.iter().find(|c| c.exit_dir == Direction::S)
+            .expect("the compass edge is still routed");
+
+        let mut without_up = MapGraph::new();
+        without_up.upsert_room(1, "A".into());
+        without_up.upsert_room(2, "B".into());
+        without_up.set_pos(1, (0, 0));
+        without_up.set_pos(2, (0, -1));
+        without_up.add_edge(2, Direction::S, 1);
+        let baseline = route_lanes(&without_up);
+        let s_baseline = baseline.connectors.iter().find(|c| c.exit_dir == Direction::S)
+            .expect("the compass edge is routed in the baseline graph too");
+
+        assert_eq!(s_with_up.merge, s_baseline.merge,
+            "the S connector's trunk/merge-stub role must not change when a suppressed Up edge is present");
+        assert_eq!(s_with_up.points, s_baseline.points,
+            "the S connector's polyline must be byte-identical with or without the suppressed Up edge");
+        assert_eq!(s_with_up.reciprocal, s_baseline.reciprocal,
+            "the S connector's reciprocal flag must not change when a suppressed Up edge is present");
     }
 
     #[test]
@@ -1764,6 +1796,53 @@ mod tests {
             .filter(|c| matches!(c.exit_dir, Direction::N | Direction::S))
             .collect();
         assert_eq!(compass.len(), 1, "the compass connector is still drawn");
+    }
+
+    #[test]
+    fn suppressed_updown_does_not_perturb_contested_direct_route_priority() {
+        // Regression for the SQ-0219 mid-loop-`continue` bug: `direct_route_losers` picks the
+        // FIRST-LISTED edge per room pair as that pair's "representative" candidate for the
+        // longest-straight-line contest. If a suppressed Up/Down edge is still present in the
+        // `compass` slice passed to that pre-pass (merely skipped later, inside the main loop),
+        // it steals the representative slot for its pair — so the REAL compass edge for that
+        // pair is never entered into the contest, and can wrongly win (or lose) a contested
+        // direct room-line against another edge's route. The fix must exclude the up/down edge
+        // from the working set BEFORE `direct_route_losers` runs, not just skip it later.
+        //
+        // T(1) is the contested destination. A(2, far) and B(3, near) both want a straight W
+        // line into T down its column. Per `longer_direct_route_keeps_the_contested_line`, the
+        // LONGER connector (A) must keep the straight line; the shorter (B) must weave. B also
+        // carries an Up edge to T (listed FIRST, sharing B's pair) that SQ-0219 suppresses.
+        let build = |with_up: bool| {
+            let mut g = MapGraph::new();
+            for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+            g.set_pos(1, (0, 0)); // T
+            g.set_pos(2, (3, 4)); // A (far)
+            g.set_pos(3, (1, 2)); // B (near)
+            if with_up {
+                g.add_edge(3, Direction::Up, 1); // shares B's pair; listed first; suppressed
+            }
+            g.add_edge(3, Direction::W, 1); // B -> T, short contested line
+            g.add_edge(2, Direction::W, 1); // A -> T, long contested line
+            g
+        };
+        let with_up = route_lanes(&build(true));
+        let without_up = route_lanes(&build(false));
+        let b_with = with_up.connectors.iter().find(|c| c.origin == 3 && c.dest == 1)
+            .expect("B->T connector is routed");
+        let b_without = without_up.connectors.iter().find(|c| c.origin == 3 && c.dest == 1)
+            .expect("B->T connector is routed");
+        assert_eq!(b_with.merge, b_without.merge,
+            "B->T's merge flag must not change based on a suppressed Up edge sharing its pair");
+        assert_eq!(b_with.points, b_without.points,
+            "B->T's polyline (and hence who wins the contested direct line) must be byte-identical \
+             with or without the suppressed Up edge: {:?} vs {:?}", b_with.points, b_without.points);
+        let a_with = with_up.connectors.iter().find(|c| c.origin == 2 && c.dest == 1)
+            .expect("A->T connector is routed");
+        let a_without = without_up.connectors.iter().find(|c| c.origin == 2 && c.dest == 1)
+            .expect("A->T connector is routed");
+        assert_eq!(a_with.points, a_without.points,
+            "A->T's polyline must also be unaffected by B's suppressed Up edge: {:?} vs {:?}", a_with.points, a_without.points);
     }
 
     #[test]
