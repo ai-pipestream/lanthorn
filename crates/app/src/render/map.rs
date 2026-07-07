@@ -436,6 +436,20 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     let zoom = state.zoom;
     let scroll = state.scroll;
 
+    // Build-frame manifest: when the active tidy frame carries a manifest, draw it
+    // as text in the map pane and skip room drawing. Overflow past the pane is
+    // truncated (diagnostic view).
+    if let Some(anim) = &state.tidy_anim {
+        if let Some(lines) = anim.current().manifest.as_ref() {
+            for (i, line) in lines.iter().take(area.height as usize).enumerate() {
+                let clamped: String = line.chars().take(area.width as usize).collect();
+                put_str(buf, area.x as i32, area.y as i32 + i as i32, &clamped,
+                    state.colors.transcript, area);
+            }
+            return;
+        }
+    }
+
     // Overview zoom: one glyph per room, no connectors. Uniform stride.
     if matches!(zoom, crate::state::Zoom::Overview) {
         let (step_w, step_h) = zoom_steps(zoom);
@@ -4618,5 +4632,34 @@ mod tests {
                 "show_room_numbers=true: portal glyph '↓' must be in the right interior column at row 3; got '{}'", sym(9, 3)
             );
         }
+    }
+
+    #[test]
+    fn build_frame_manifest_drawn_in_map_pane() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use crate::state::{AppState, TidyAnim, TidyFrame};
+        use mapper::graph::MapGraph;
+        use mapper::layout::TidyStats;
+
+        let mut state = AppState::default();
+        state.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {
+            label: "Build".into(),
+            graph: MapGraph::new(),
+            description: "Graph built: 2 rooms, 1 connections".into(),
+            stats: TidyStats::default(),
+            stage_start: true,
+            manifest: Some(vec!["Foyer \u{2192}N\u{2192} Hall".into()]),
+        }]));
+
+        // Empty render map, built with the same helper the neighboring tests use.
+        let rm = mapper::render::render(&MapGraph::new());
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
+        assert!(text.contains("Foyer"), "manifest line should be drawn in the map pane");
+        assert!(text.contains("Hall"));
     }
 }
