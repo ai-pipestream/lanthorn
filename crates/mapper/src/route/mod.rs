@@ -4,7 +4,7 @@
 //! lane counts that the renderer turns into gap widths.
 
 use std::collections::BTreeMap;
-use crate::direction::{layout_offset, opposite, Direction};
+use crate::direction::{grid_offset, layout_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{route_side, side_for, Side};
 
@@ -637,6 +637,16 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         .iter()
         .filter(|c| layout_offset(c.dir).is_some())
         .collect();
+    // Unordered room pairs that already have a compass edge (grid_offset is Some — the true
+    // 8-way compass directions, unlike layout_offset which also covers Up/Down). When the same
+    // pair also has an up/down edge, the compass path is the only one drawn: the up/down edge
+    // still contributes its layout hint elsewhere, but produces no routed connector here.
+    let compass_pairs: std::collections::BTreeSet<(RoomId, RoomId)> = graph
+        .connections()
+        .iter()
+        .filter(|c| grid_offset(c.dir).is_some())
+        .map(|c| (c.origin.min(c.dest), c.origin.max(c.dest)))
+        .collect();
     // Edge indices already drawn — either as their own connector or consumed as the
     // back-edge of an earlier bidirectional pairing.
     let mut consumed: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
@@ -654,6 +664,11 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             continue; // already drawn as an earlier pair's back-edge
         }
         let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
+        // An up/down edge whose pair already has a compass edge is suppressed entirely — no
+        // trunk, no merge stub. The compass path is the only one drawn for that pair.
+        if matches!(c.dir, Direction::Up | Direction::Down) && compass_pairs.contains(&pair) {
+            continue;
+        }
         // Extra edge between an already-connected pair → merge stub: route from this edge's exit
         // side to a junction on the trunk and end there (a T-junction). Only the box-edge
         // departure arrow is drawn; no independent line reaches the destination.
@@ -1662,7 +1677,9 @@ mod tests {
     fn updown_never_pairs_with_a_compass_edge() {
         // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the
         // same two rooms, but up/down must NEVER pair with a compass edge (only with the
-        // exact opposite up/down direction).
+        // exact opposite up/down direction). Since SQ-0219, sharing a pair with a compass
+        // edge SUPPRESSES the up/down edge entirely rather than letting it draw as a
+        // non-reciprocal connector — the compass path is the only one drawn for the pair.
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -1672,12 +1689,10 @@ mod tests {
         g.add_edge(2, Direction::S, 1);
 
         let plan = route_lanes(&g);
-        let up = plan
-            .connectors
-            .iter()
-            .find(|c| c.exit_dir == Direction::Up)
-            .expect("up connector must be routed");
-        assert!(!up.reciprocal, "up/down must never pair with a compass edge");
+        let up = plan.connectors.iter().find(|c| c.exit_dir == Direction::Up);
+        assert!(up.is_none(), "up/down must never pair with a compass edge — it is suppressed, not routed");
+        let compass = plan.connectors.iter().find(|c| c.exit_dir == Direction::S);
+        assert!(compass.is_some(), "the compass edge is still routed");
     }
 
     #[test]
@@ -1724,5 +1739,50 @@ mod tests {
         // Up always departs the NORTH (top) border; Down always the SOUTH (bottom).
         assert_eq!(route_side(Direction::Up), Some(Side::Top));
         assert_eq!(route_side(Direction::Down), Some(Side::Bottom));
+    }
+
+    #[test]
+    fn compass_edge_suppresses_updown_connector_on_same_pair() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+
+        // A--North-->B AND A--Up-->B on the same pair: only the compass path is drawn.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::Up, 2);
+
+        let plan = route_lanes(&g);
+        let updown: Vec<_> = plan.connectors.iter()
+            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .collect();
+        assert_eq!(updown.len(), 0, "the up/down connector is suppressed when a compass edge shares the pair");
+        let compass: Vec<_> = plan.connectors.iter()
+            .filter(|c| matches!(c.exit_dir, Direction::N | Direction::S))
+            .collect();
+        assert_eq!(compass.len(), 1, "the compass connector is still drawn");
+    }
+
+    #[test]
+    fn lone_updown_pair_is_unaffected_by_suppression() {
+        use crate::direction::Direction;
+        use crate::graph::MapGraph;
+
+        // Only an Up edge, no compass edge on this pair: the up/down connector survives.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+
+        let plan = route_lanes(&g);
+        let updown: Vec<_> = plan.connectors.iter()
+            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .collect();
+        assert_eq!(updown.len(), 1, "a pair with no compass edge keeps its up/down connector");
     }
 }
