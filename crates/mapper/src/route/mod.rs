@@ -527,10 +527,13 @@ fn total_crossings(conns: &[RoutedConnector]) -> usize {
 /// The unconsumed reverse edge (b→a) paired with edge `ci`, preferring the exact compass-opposite
 /// so the trunk keeps its natural straight / single-L shape, falling back to the first reverse edge.
 ///
-/// Up/Down edges are NEVER paired: an Up/Down `c` never has a back-edge (a reciprocal Up+Down pair
-/// must stay two separate one-way connectors, not collapse into one reciprocal connector), and an
-/// Up/Down candidate is never treated as another edge's back-edge either (the fallback would
-/// otherwise pair e.g. `1→N→2` with an unrelated `2→Down→1`, which are not geometrically opposite).
+/// Up/Down edges pair ONLY with the exact opposite Up/Down edge between the same two rooms
+/// (`Up`'s only possible back-edge is `Down`, and vice versa — there is no "first reverse edge"
+/// fallback since that single candidate IS the exact opposite). A matching pair collapses into
+/// one reciprocal connector (SQ-0216 revises Task 6's "never collapse" decision after visual
+/// testing). An Up/Down `c` never pairs with a compass edge, and a compass `c` never pairs with
+/// an Up/Down edge either (the fallback would otherwise pair e.g. `1→N→2` with an unrelated
+/// `2→Down→1`, which are not geometrically opposite) — compass pairing stays byte-identical.
 fn back_edge_idx(
     compass: &[&Connection],
     ci: usize,
@@ -538,7 +541,17 @@ fn back_edge_idx(
     consumed: &std::collections::BTreeSet<usize>,
 ) -> Option<usize> {
     if matches!(c.dir, Direction::Up | Direction::Down) {
-        return None;
+        return compass
+            .iter()
+            .enumerate()
+            .find(|&(pi, p)| {
+                pi != ci
+                    && !consumed.contains(&pi)
+                    && p.origin == c.dest
+                    && p.dest == c.origin
+                    && p.dir == opposite(c.dir)
+            })
+            .map(|(pi, _)| pi);
     }
     let is_back = |pi: usize, p: &Connection| {
         pi != ci
@@ -898,23 +911,30 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
             endpoints.push((c.dest, c.entry, false, ci));
         }
     }
-    // Group by (room, side); assign slots within each group. A connector that runs STRAIGHT
-    // through this side (a collinear polyline — its other end is axis-aligned with this room)
-    // is given slot 0 (the side centre) ahead of weaving connectors, so it stays on a clean
-    // straight line and the weaving ones take the offset cells. This keeps the renderer's
-    // perpendicular stubs from forcing a straight connector to jog across a weaving one's
-    // corner. Ties break by (connector index, is_exit) for determinism.
-    // Endpoint within a (room, side) group: (straight-through?, is_exit, connector index).
-    type Endpoint = (bool, bool, usize);
+    // Group by (room, side); assign slots within each group. A compass (N/S/E/W) connector
+    // ranks ahead of an Up/Down connector on a shared side — an Up/Down link always yields the
+    // center slot to a compass reciprocal (SQ-0216) — since a compass link is the stronger
+    // spatial hint. Within that, a connector that runs STRAIGHT through this side (a collinear
+    // polyline — its other end is axis-aligned with this room) is given the center slot ahead
+    // of weaving connectors, so it stays on a clean straight line and the weaving ones take the
+    // offset cells. This keeps the renderer's perpendicular stubs from forcing a straight
+    // connector to jog across a weaving one's corner. Ties break by (connector index, is_exit)
+    // for determinism.
+    // Endpoint within a (room, side) group: (is up/down?, straight-through?, is_exit, connector index).
+    type Endpoint = (bool, bool, bool, usize);
     let mut by_side: BTreeMap<(RoomId, Side), Vec<Endpoint>> = BTreeMap::new();
     for (room, side, is_exit, ci) in endpoints {
         let straight = is_collinear(&connectors[ci].points);
-        by_side.entry((room, side)).or_default().push((straight, is_exit, ci));
+        let is_updown = matches!(connectors[ci].exit_dir, Direction::Up | Direction::Down);
+        by_side.entry((room, side)).or_default().push((is_updown, straight, is_exit, ci));
     }
     for (_key, mut members) in by_side {
-        // `straight` first (false sorts before true, so negate via Reverse).
-        members.sort_by_key(|&(straight, is_exit, ci)| (std::cmp::Reverse(straight), ci, is_exit));
-        for (slot, (_straight, is_exit, ci)) in members.into_iter().enumerate() {
+        // Compass (false) first, then `straight` first (false sorts before true, so negate
+        // via Reverse).
+        members.sort_by_key(|&(is_updown, straight, is_exit, ci)| {
+            (is_updown, std::cmp::Reverse(straight), ci, is_exit)
+        });
+        for (slot, (_is_updown, _straight, is_exit, ci)) in members.into_iter().enumerate() {
             if is_exit {
                 connectors[ci].exit_slot = slot as u16;
             } else {
@@ -1595,8 +1615,10 @@ mod tests {
     }
 
     #[test]
-    fn reciprocal_updown_pair_is_not_collapsed() {
-        // A--Up-->B and B--Down-->A: must stay TWO connectors, never collapsed to one.
+    fn reciprocal_updown_pair_collapses_to_one() {
+        // A--Up-->B and B--Down-->A: after visual testing (SQ-0216) this REVISES Task 6's
+        // "never collapse" decision — a matching Up/Down pair now collapses to ONE
+        // reciprocal connector, same as a compass reciprocal pair.
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -1611,7 +1633,86 @@ mod tests {
             .iter()
             .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
             .collect();
-        assert_eq!(vertical.len(), 2, "the Up and Down edges are drawn separately, not collapsed");
-        assert!(vertical.iter().all(|c| !c.reciprocal));
+        assert_eq!(vertical.len(), 1, "a matching Up/Down pair collapses to one connector");
+        assert!(vertical[0].reciprocal, "the collapsed connector is reciprocal");
+        assert_eq!(vertical[0].entry_dir, Some(Direction::Down), "carries the back-edge's direction");
+    }
+
+    #[test]
+    fn unmatched_oneway_updown_stays_non_reciprocal() {
+        // A--Up-->B with no matching Down back-edge: stays one connector, non-reciprocal.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+
+        let plan = route_lanes(&g);
+        let vertical: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .collect();
+        assert_eq!(vertical.len(), 1);
+        assert!(!vertical[0].reciprocal, "an unmatched one-way up/down stays non-reciprocal");
+    }
+
+    #[test]
+    fn updown_never_pairs_with_a_compass_edge() {
+        // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the
+        // same two rooms, but up/down must NEVER pair with a compass edge (only with the
+        // exact opposite up/down direction).
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::S, 1);
+
+        let plan = route_lanes(&g);
+        let up = plan
+            .connectors
+            .iter()
+            .find(|c| c.exit_dir == Direction::Up)
+            .expect("up connector must be routed");
+        assert!(!up.reciprocal, "up/down must never pair with a compass edge");
+    }
+
+    #[test]
+    fn ns_reciprocal_outranks_updown_for_center_slot() {
+        // Room 1 has BOTH a reciprocal N/S connector (to room 2, bent — off-column) and a
+        // reciprocal Up/Down connector (to room 3, straight — due north) sharing its Top
+        // side. Even though the Up/Down connector is the STRAIGHT one (which would otherwise
+        // win the center slot on its own), the N/S reciprocal must still take the center slot
+        // (0); the Up/Down reciprocal yields to a fanned slot.
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (2, -2)); // north-east: bent reciprocal N/S pair
+        g.set_pos(3, (0, -2)); // due north: straight reciprocal Up/Down pair
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        g.add_edge(1, Direction::Up, 3);
+        g.add_edge(3, Direction::Down, 1);
+
+        let plan = route_lanes(&g);
+        let top: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| c.origin == 1 && c.exit == Side::Top)
+            .collect();
+        assert_eq!(top.len(), 2, "expected both connectors sharing room 1's Top side: {top:?}");
+        let ns = top
+            .iter()
+            .find(|c| matches!(c.exit_dir, Direction::N | Direction::S))
+            .expect("N/S connector on room 1's Top side");
+        let updown = top
+            .iter()
+            .find(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .expect("up/down connector on room 1's Top side");
+        assert_eq!(ns.exit_slot, 0, "reciprocal N/S takes the center slot");
+        assert_ne!(updown.exit_slot, 0, "up/down yields to a fanned slot");
     }
 }

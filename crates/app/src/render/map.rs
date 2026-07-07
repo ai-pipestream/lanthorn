@@ -896,8 +896,9 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
 /// their departure anchor carries the up/down glyph instead of an arrowhead. They accumulate into
 /// a SEPARATE per-cell mask (`updown_cells`) from the compass connectors' `cells` map, so compass
 /// crossings/turns are computed exactly as before — up/down never contributes to or reads a
-/// compass cell's mask. Up/down connectors are never reciprocal (enforced by the router), so the
-/// far-end arrow block below is naturally skipped for them.
+/// compass cell's mask. A matching Up/Down pair now collapses to one RECIPROCAL connector
+/// (SQ-0216): the far-end block below draws the up/down glyph (derived from `entry_dir`) at the
+/// arrival end too, instead of an arrowhead, so both ends show their own glyph.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -967,9 +968,13 @@ fn render_lane_connectors(
             arrow_for_departure(conn.exit, arrows)
         };
         arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, conn.origin));
-        // Far-end arrow only for true reciprocal connectors (collapsed opposite pairs).
+        // Far-end glyph only for true reciprocal connectors (collapsed opposite pairs). An
+        // up/down reciprocal draws its own up/down glyph (from the back-edge's direction) at
+        // the far end too, same as the departure end, rather than an arrow.
         if conn.reciprocal {
             let arr_ch = match conn.entry_dir {
+                Some(Direction::Up) if is_updown => portal.up,
+                Some(Direction::Down) if is_updown => portal.down,
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
@@ -1884,6 +1889,62 @@ mod tests {
         let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
         assert!(text.contains('↑'), "the Up connector shows the up glyph on the border");
         assert!(!text.contains('▲'), "the Up connector must NOT render a filled N arrow");
+    }
+
+    #[test]
+    fn reciprocal_updown_connector_draws_glyph_at_both_ends() {
+        // Task 9 (SQ-0216): a reciprocal up/down connector draws its glyph at BOTH ends —
+        // the up glyph on the lower room's (departure) top border, the down glyph on the
+        // upper room's (arrival) bottom border — never an arrow at the far end. Build a
+        // routed one-way Up connector via the real pipeline, then patch its metadata to
+        // simulate the router's collapse (`reciprocal = true`, `entry_dir = Some(Down)`) so
+        // this exercises `render_lane_connectors`'s far-end block directly, independent of
+        // whether the router itself pairs the edge.
+        use mapper::direction::Direction;
+        use mapper::graph::MapGraph;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into()); // lower room
+        g.upsert_room(2, "B".into()); // upper room (north of A)
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+
+        let rm = mapper::render::render(&g);
+        let mut plan = rm.plan.clone();
+        let conn = plan
+            .connectors
+            .iter_mut()
+            .find(|c| c.exit_dir == Direction::Up)
+            .expect("routed Up connector");
+        conn.reciprocal = true;
+        conn.entry_dir = Some(Direction::Down);
+
+        let (cols, rows) = boxes_axes(&plan, rm.bounds);
+        let area = Rect::new(0, 0, 60, 30);
+        let offset = (
+            area.x as i32 - cols.room_pixel(rm.bounds.0 .0),
+            area.y as i32 - rows.room_pixel(rm.bounds.0 .1),
+        );
+        let mut buf = Buffer::empty(area);
+        let state = AppState::default();
+        let arrowheads = render_lane_connectors(
+            &plan,
+            &cols,
+            &rows,
+            offset,
+            area,
+            &mut buf,
+            &state.symbols.arrows,
+            &state.symbols.path,
+            &state.symbols.portal,
+            &state.colors,
+        );
+
+        let dep = arrowheads.iter().find(|(_, _, _, room)| *room == 1).expect("A's departure glyph");
+        let arr = arrowheads.iter().find(|(_, _, _, room)| *room == 2).expect("B's arrival glyph");
+        assert_eq!(dep.1, "↑", "A (lower room) shows the up glyph on its top border");
+        assert_eq!(arr.1, "↓", "B (upper room) shows the down glyph on its bottom border, not an arrow");
     }
 
     #[test]
