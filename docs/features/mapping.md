@@ -32,6 +32,8 @@
 - **Background tidy** — the layout re-optimizes itself as you discover rooms.
   Configurable: after every room (default), only on overlap, debounced every few
   rooms, or off (`background_tidy`).
-- **Animated layout diagnostics** — step through the relayout algorithm stage by
-  stage, each move described ("moved 180 to clear overlap with 193"), to see and
-  debug exactly how the map is built.
+- **Animated layout diagnostics** — step through the whole layout build stage by
+  stage: a **Build** stop listing every connection, then **room-by-room placement**
+  as each room drops onto the grid, then the relayout/overlap-cleanup passes — each
+  move described ("moved 180 to clear overlap with 193") — to see and debug exactly
+  how the map is assembled.
