@@ -124,11 +124,19 @@ fn headless_e2e_smoke() {
     )
     .expect("current room must be on screen after recentering");
 
-    let cell = map_buf.cell((cx, cy)).expect("cell must exist");
+    // The current room reverses only its interior: the top-left border cell is NOT
+    // reversed, while an interior cell (one in, one down) IS.
+    let border = map_buf.cell((cx, cy)).expect("border cell must exist");
     assert!(
-        cell.modifier.contains(Modifier::REVERSED),
-        "current room top-left cell must have REVERSED modifier; got {:?}",
-        cell.modifier
+        !border.modifier.contains(Modifier::REVERSED),
+        "current room border cell must NOT have REVERSED modifier; got {:?}",
+        border.modifier
+    );
+    let interior = map_buf.cell((cx + 1, cy + 1)).expect("interior cell must exist");
+    assert!(
+        interior.modifier.contains(Modifier::REVERSED),
+        "current room interior cell must have REVERSED modifier; got {:?}",
+        interior.modifier
     );
 
     // ── Step 3: Render transcript into TestBackend buffer ─────────────────────

@@ -930,11 +930,11 @@ fn render_lane_connectors(
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
 ///
 /// Each arrowhead carries the `RoomId` of the room it belongs to.  The arrow sits on the
-/// room's border, so its background is painted to match that room box's VISIBLE background —
+/// room's border, so its background is painted to match that room box's border background —
 /// for normal, current, selected, and current+selected rooms alike.  This mirrors
-/// `room_style`'s precedence, and accounts for the REVERSED swap that `room_current` (and the
-/// current+selected combination) use: a reversed style's visible background is its `fg`, not
-/// its `bg`.  The arrow glyph foreground is always the connector/path color.
+/// `room_style`'s precedence.  The current room reverses only its interior, so its border
+/// (where the arrow sits) is not reverse-video and its background is the style's plain `bg`.
+/// The arrow glyph foreground is always the connector/path color.
 fn draw_connector_arrows(
     arrowheads: &[((i32, i32), String, bool, RoomId)],
     offset: (i32, i32),
@@ -956,7 +956,7 @@ fn draw_connector_arrows(
             let is_sel = selected_room == Some(*room_id);
             let is_cur = current_room == Some(*room_id);
             let base = if is_cur && is_sel {
-                colors.room_selected.add_modifier(Modifier::REVERSED)
+                colors.room_selected
             } else if is_cur {
                 colors.room_current
             } else if is_sel {
@@ -964,7 +964,9 @@ fn draw_connector_arrows(
             } else {
                 colors.room_normal
             };
-            let visible_bg = if base.add_modifier.contains(Modifier::REVERSED) { base.fg } else { base.bg };
+            // The arrow sits on the box border, which is never reverse-video, so the
+            // visible background is the style's plain `bg`.
+            let visible_bg = base.bg;
             // Start from reset so no prior highlight bleeds through, then set the matching bg
             // and the connector fg.
             let mut style = Style::reset();
@@ -1403,7 +1405,8 @@ fn draw_room(
 /// Draw a compact (10×4 step) room: 8×3 box with label row.
 ///
 /// Box is 8 cols wide × 3 rows tall (step 10×4, gutter = 2 cols right, 1 row bottom).
-/// Normal rooms use rounded corners; current room uses heavy border with REVERSED style.
+/// Normal rooms use rounded corners; current room uses a heavy border with a
+/// REVERSED interior (the border itself stays non-reversed).
 fn draw_compact_room(
     room: &RenderRoom,
     sx: i32,
@@ -1418,29 +1421,33 @@ fn draw_compact_room(
     let (bw, bh) = (bw as i32, bh as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
+    // The current room reverses only its interior; keep its border non-reversed.
+    let mut border_style = style;
+    border_style.add_modifier.remove(Modifier::REVERSED);
+
     let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
     let (tl, tr, bl, br, h, v) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
-    put_char(buf, sx, sy, tl, style, area);
+    put_char(buf, sx, sy, tl, border_style, area);
     for dx in 1..bw - 1 {
-        put_char(buf, sx + dx, sy, h, style, area);
+        put_char(buf, sx + dx, sy, h, border_style, area);
     }
-    put_char(buf, sx + bw - 1, sy, tr, style, area);
+    put_char(buf, sx + bw - 1, sy, tr, border_style, area);
 
     // Middle row: sides + label (inner width = bw - 2 = 6)
     let label_width = (bw - 2) as usize; // 6
     let label: String = room.label.chars().take(label_width).collect();
-    put_char(buf, sx, sy + 1, v, style, area);
+    put_char(buf, sx, sy + 1, v, border_style, area);
     put_str(buf, sx + 1, sy + 1, &label, style, area);
-    put_char(buf, sx + bw - 1, sy + 1, v, style, area);
+    put_char(buf, sx + bw - 1, sy + 1, v, border_style, area);
 
     // Bottom border
-    put_char(buf, sx, sy + bh - 1, bl, style, area);
+    put_char(buf, sx, sy + bh - 1, bl, border_style, area);
     for dx in 1..bw - 1 {
-        put_char(buf, sx + dx, sy + bh - 1, h, style, area);
+        put_char(buf, sx + dx, sy + bh - 1, h, border_style, area);
     }
-    put_char(buf, sx + bw - 1, sy + bh - 1, br, style, area);
+    put_char(buf, sx + bw - 1, sy + bh - 1, br, border_style, area);
 }
 
 /// Word-wrap `s` into up to two lines no wider than `width` (break on spaces; a single
@@ -1488,7 +1495,8 @@ fn center(s: &str, width: usize) -> String {
 ///   Row 4: ╰─────────╯
 ///   Gutter: cols 11-18 (right), rows 5-10 (bottom)
 ///
-/// Current room: heavy border (┏ ┓ ┗ ┛ ━ ┃) with REVERSED style.
+/// Current room: heavy border (┏ ┓ ┗ ┛ ━ ┃) with a REVERSED interior; the
+/// border glyphs themselves are drawn non-reversed.
 /// Selected room: yellow style (SELECTED_STYLE).
 /// Notes: ● marker in top-right inner corner (row 1, col bw-2).
 fn draw_box_room(
@@ -1507,25 +1515,30 @@ fn draw_box_room(
     let (w, h) = (w as i32, h as i32);
     let is_current = style.add_modifier.contains(Modifier::REVERSED);
 
+    // The current room reverses only its interior; its border keeps the plain
+    // (non-reversed) style so the heavy outline stays readable.
+    let mut border_style = style;
+    border_style.add_modifier.remove(Modifier::REVERSED);
+
     // Box outline picked by precedence: current > portal > selected > normal.
     let bs = outline_for(sym, is_current, room.has_layer_portal, selected);
     let (tl, tr, bl, br, horiz, vert) = (bs.tl, bs.tr, bs.bl, bs.br, bs.h, bs.v);
 
     // Top border
-    put_char(buf, sx, sy, tl, style, area);
+    put_char(buf, sx, sy, tl, border_style, area);
     for dx in 1..w - 1 {
-        put_char(buf, sx + dx, sy, horiz, style, area);
+        put_char(buf, sx + dx, sy, horiz, border_style, area);
     }
-    put_char(buf, sx + w - 1, sy, tr, style, area);
+    put_char(buf, sx + w - 1, sy, tr, border_style, area);
 
     // Inner rows (h=5 → rows 1, 2, 3 are interior: 1=name wrap, 2=name wrap, 3=#id + align)
     for dy in 1..h - 1 {
-        put_char(buf, sx, sy + dy, vert, style, area);
+        put_char(buf, sx, sy + dy, vert, border_style, area);
         // Fill interior with spaces (for background/style)
         for dx in 1..w - 1 {
             put_char(buf, sx + dx, sy + dy, ' ', style, area);
         }
-        put_char(buf, sx + w - 1, sy + dy, vert, style, area);
+        put_char(buf, sx + w - 1, sy + dy, vert, border_style, area);
     }
 
     // Room name word-wrapped + centered across the first two interior rows.
@@ -1551,11 +1564,11 @@ fn draw_box_room(
     }
 
     // Bottom border
-    put_char(buf, sx, sy + h - 1, bl, style, area);
+    put_char(buf, sx, sy + h - 1, bl, border_style, area);
     for dx in 1..w - 1 {
-        put_char(buf, sx + dx, sy + h - 1, horiz, style, area);
+        put_char(buf, sx + dx, sy + h - 1, horiz, border_style, area);
     }
-    put_char(buf, sx + w - 1, sy + h - 1, br, style, area);
+    put_char(buf, sx + w - 1, sy + h - 1, br, border_style, area);
 }
 
 // ── Clipped drawing helpers ───────────────────────────────────────────────────
@@ -2353,12 +2366,19 @@ mod tests {
         assert!(pos.is_some(), "current room should be on screen with scroll adjusted");
         let (cx, cy) = pos.unwrap();
 
-        // The top-left corner of the current room's box should have REVERSED modifier.
-        let cell = buf.cell((cx, cy)).expect("cell should exist");
+        // The current room reverses only its interior: the top-left corner (a border
+        // cell) is NOT reversed, while an interior cell (one in, one down) IS.
+        let border = buf.cell((cx, cy)).expect("border cell should exist");
         assert!(
-            cell.modifier.contains(Modifier::REVERSED),
-            "current room cell should have REVERSED modifier; got modifier={:?}",
-            cell.modifier
+            !border.modifier.contains(Modifier::REVERSED),
+            "current room border cell must NOT be REVERSED; got modifier={:?}",
+            border.modifier
+        );
+        let interior = buf.cell((cx + 1, cy + 1)).expect("interior cell should exist");
+        assert!(
+            interior.modifier.contains(Modifier::REVERSED),
+            "current room interior cell should have REVERSED modifier; got modifier={:?}",
+            interior.modifier
         );
     }
 
@@ -4235,9 +4255,9 @@ mod tests {
         );
     }
 
-    /// When the arrow belongs to a room that is BOTH current AND selected, the room box is
-    /// drawn REVERSED, so its visible background is room_selected.FG. The arrow background
-    /// must mirror that swap (use the fg, not the bg) so it matches the room box.
+    /// When the arrow belongs to a room that is BOTH current AND selected, the arrow sits on
+    /// the room's border. The border is not reverse-video (only the interior is), so the arrow
+    /// background matches the border's plain bg = room_selected.BG.
     #[test]
     fn arrow_style_current_and_selected_uses_reversed_bg() {
         use ratatui::buffer::Buffer;
@@ -4260,15 +4280,15 @@ mod tests {
         let cell = buf.cell((5, 5)).unwrap();
         assert_eq!(
             cell.bg,
-            Color::Magenta,
-            "current+selected arrow bg must use room_selected.fg (the reversed visible bg)"
+            Color::Cyan,
+            "current+selected arrow bg must use room_selected.bg (the non-reversed border bg)"
         );
         assert_eq!(cell.fg, Color::Green, "arrow glyph fg must still be the connector color");
     }
 
-    /// When the arrow belongs to the current room that is NOT selected, the room box is drawn
-    /// REVERSED (room_current carries REVERSED), so its visible background is room_current.FG.
-    /// The arrow background must match it.
+    /// When the arrow belongs to the current room that is NOT selected, the arrow sits on the
+    /// room's border. Only the interior is reverse-video, so the border (and thus the arrow)
+    /// keeps room_current's plain background.
     #[test]
     fn arrow_style_current_only_matches_reversed_room_current_bg() {
         use ratatui::buffer::Buffer;
@@ -4280,8 +4300,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
 
         let mut colors = ColorScheme::terminal_default();
-        // room_current is REVERSED with a distinct fg so the swapped visible bg is observable.
-        colors.room_current = Style::new().add_modifier(Modifier::REVERSED).fg(Color::Blue).bg(Color::Reset);
+        // room_current carries REVERSED, but the border it sits on is drawn non-reversed;
+        // give it a distinct plain bg so the border background is observable.
+        colors.room_current = Style::new().add_modifier(Modifier::REVERSED).fg(Color::Blue).bg(Color::Yellow);
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the current room, NOT selected.
@@ -4291,8 +4312,8 @@ mod tests {
         let cell = buf.cell((5, 5)).unwrap();
         assert_eq!(
             cell.bg,
-            Color::Blue,
-            "current-only arrow bg must use room_current.fg (the reversed visible bg)"
+            Color::Yellow,
+            "current-only arrow bg must use room_current.bg (the non-reversed border bg)"
         );
         assert_eq!(cell.fg, Color::Green, "arrow glyph fg must still be the connector color");
     }
