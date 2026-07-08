@@ -8,6 +8,65 @@ use crate::direction::{grid_offset, layout_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{route_side, Side};
 
+/// One collapsed (secondary) compass edge: its unordered pair, its origin room, and its direction.
+struct Secondary {
+    pair: (RoomId, RoomId),
+    origin: RoomId,
+    dir: Direction,
+}
+
+/// For each unordered room pair, keep the best compass edge in each direction-of-travel
+/// bucket (forward = origin is the lower id, backward = the higher id); the rest are
+/// secondaries. "Best" = geometrically satisfied first, then the exact-opposite of the
+/// other bucket's pick (straightness), then lowest connection index. Returns the set of
+/// secondary indices into `graph.connections()` and the secondary records. Up/Down and
+/// non-compass edges are excluded (only `grid_offset` 8-way edges are considered).
+fn select_shared_paths(
+    graph: &MapGraph,
+) -> (std::collections::BTreeSet<usize>, Vec<Secondary>) {
+    use std::collections::{BTreeMap, BTreeSet};
+    let conns = graph.connections();
+    let mut by_pair: BTreeMap<(RoomId, RoomId), Vec<usize>> = BTreeMap::new();
+    for (i, c) in conns.iter().enumerate() {
+        if grid_offset(c.dir).is_none() {
+            continue; // compass 8-way only; Up/Down/In/Out/Unknown excluded
+        }
+        let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
+        by_pair.entry(pair).or_default().push(i);
+    }
+    let mut secondary_idx: BTreeSet<usize> = BTreeSet::new();
+    let mut records: Vec<Secondary> = Vec::new();
+    for (pair, idxs) in by_pair {
+        let fwd: Vec<usize> = idxs.iter().copied().filter(|&i| conns[i].origin == pair.0).collect();
+        let bwd: Vec<usize> = idxs.iter().copied().filter(|&i| conns[i].origin == pair.1).collect();
+        // Collapse ONLY true bidirectional redundancy: both directions have 2+ ways, so the
+        // leftovers after one reciprocal pairing would form a SECOND crossing connector (the
+        // house-ring mess). One-sided redundancy (e.g. 1 out, 3 back — the #33/#175 shape)
+        // stays as merge stubs; it already renders cleanly and existing tests lock that in.
+        if fwd.len() < 2 || bwd.len() < 2 {
+            continue;
+        }
+        // Pick the retained edge of a bucket: satisfied first, optional opposite-direction
+        // preference (straightness), then lowest index.
+        let pick = |bucket: &[usize], prefer_opp: Option<Direction>| -> Option<usize> {
+            bucket.iter().copied().min_by_key(|&i| {
+                let sat = crate::layout::edge_is_satisfied(graph, &conns[i]);
+                let opp = prefer_opp == Some(conns[i].dir);
+                (std::cmp::Reverse(sat), std::cmp::Reverse(opp), i)
+            })
+        };
+        let ret_fwd = pick(&fwd, None);
+        let ret_bwd = pick(&bwd, ret_fwd.map(|i| opposite(conns[i].dir)));
+        for &i in fwd.iter().chain(bwd.iter()) {
+            if Some(i) != ret_fwd && Some(i) != ret_bwd {
+                secondary_idx.insert(i);
+                records.push(Secondary { pair, origin: conns[i].origin, dir: conns[i].dir });
+            }
+        }
+    }
+    (secondary_idx, records)
+}
+
 /// A routing channel: `H(r)` is the horizontal gap below room-row `r` (line y=2r+1);
 /// `V(c)` is the vertical gap right of room-column `c` (line x=2c+1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,6 +106,12 @@ pub struct RoutedConnector {
     /// polyline routes from its box-edge exit and ENDS on the trunk (a T-junction) instead of
     /// drawing its own line to the destination. The renderer draws only its departure arrow.
     pub merge: bool,
+    /// Compass directions collapsed at the EXIT end (origin room): extra same-pair
+    /// edges NOT drawn as their own line. The renderer stamps a marker for each,
+    /// beside this connector's exit arrowhead. Empty for ordinary connectors.
+    pub secondary_exit: Vec<crate::direction::Direction>,
+    /// Compass directions collapsed at the ENTRY end (dest room).
+    pub secondary_entry: Vec<crate::direction::Direction>,
 }
 
 /// The logical route plan: connectors plus per-channel lane counts.
@@ -655,12 +720,17 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         .filter(|c| grid_offset(c.dir).is_some())
         .map(|c| (c.origin.min(c.dest), c.origin.max(c.dest)))
         .collect();
-    // Working set: every edge with a layout offset (compass + Up/Down). In/Out/Unknown carry no
-    // offset and are not routed here.
+    // Pre-pass (SQ-0225): collapse redundant same-pair compass edges into one shared
+    // connector, recording the dropped edges as secondaries attached to the retained one.
+    let (secondary_idx, secondary_records) = select_shared_paths(graph);
+    // Working set: every edge with a layout offset (compass + Up/Down), minus edges collapsed
+    // into a secondary above. In/Out/Unknown carry no offset and are not routed here.
     let compass: Vec<&crate::graph::Connection> = graph
         .connections()
         .iter()
-        .filter(|c| layout_offset(c.dir).is_some())
+        .enumerate()
+        .filter(|(i, c)| layout_offset(c.dir).is_some() && !secondary_idx.contains(i))
+        .map(|(_, c)| c)
         .collect();
     // Edge indices already drawn — either as their own connector or consumed as the
     // back-edge of an earlier bidirectional pairing.
@@ -704,6 +774,8 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                         exit_dir: c.dir,
                         entry_dir: None,
                         merge: true,
+                        secondary_exit: Vec::new(),
+                        secondary_entry: Vec::new(),
                     });
                 }
             }
@@ -761,6 +833,8 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                     exit_dir: c.dir,
                     entry_dir: back.map(|bk| bk.dir),
                     merge: false,
+                    secondary_exit: Vec::new(),
+                    secondary_entry: Vec::new(),
                 });
                 trunk_points.insert(ch_key, out.last().unwrap().points.clone());
                 consumed.insert(ci);
@@ -854,11 +928,25 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             exit_dir: c.dir,
             entry_dir: back.map(|bk| bk.dir),
             merge: false,
+            secondary_exit: Vec::new(),
+            secondary_entry: Vec::new(),
         });
         trunk_points.insert(ch_key, out.last().unwrap().points.clone());
         consumed.insert(ci);
         if let Some(pi) = back_idx {
             consumed.insert(pi); // the paired back-edge is now drawn too
+        }
+    }
+    for rec in &secondary_records {
+        if let Some(conn) = out.iter_mut().find(|c| {
+            (c.origin.min(c.dest), c.origin.max(c.dest)) == rec.pair
+                && grid_offset(c.exit_dir).is_some() // the compass connector, not an Up/Down one
+        }) {
+            if rec.origin == conn.origin {
+                conn.secondary_exit.push(rec.dir);
+            } else if rec.origin == conn.dest {
+                conn.secondary_entry.push(rec.dir);
+            }
         }
     }
     out
@@ -2003,5 +2091,96 @@ mod tests {
             .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
             .collect();
         assert_eq!(updown.len(), 1, "a pair with no compass edge keeps its up/down connector");
+    }
+
+    #[test]
+    fn redundant_pair_collapses_to_one_shared_connector() {
+        use crate::graph::MapGraph;
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "West".into());
+        g.upsert_room(217, "South".into());
+        g.set_pos(68, (0, 0));
+        g.set_pos(217, (1, 1)); // 217 is SE of 68 → SE/NW satisfied, S/W not
+        g.add_edge(68, Direction::S, 217);
+        g.add_edge(68, Direction::SE, 217);
+        g.add_edge(217, Direction::W, 68);
+        g.add_edge(217, Direction::NW, 68);
+        let plan = route_lanes(&g);
+        let between: Vec<_> = plan.connectors.iter()
+            .filter(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == (68, 217))
+            .collect();
+        assert_eq!(between.len(), 1, "the pair must collapse to a single connector");
+        let c = between[0];
+        // retained = the satisfied diagonal pairing
+        assert_eq!(c.exit_dir, Direction::SE);
+        assert_eq!(c.entry_dir, Some(Direction::NW));
+        // secondaries: S at the 68 (exit/origin) end, W at the 217 (entry/dest) end
+        let (exit_dirs, entry_dirs) = if c.origin == 68 {
+            (&c.secondary_exit, &c.secondary_entry)
+        } else {
+            (&c.secondary_entry, &c.secondary_exit)
+        };
+        assert!(exit_dirs.contains(&Direction::S), "S recorded at the 68 end");
+        assert!(entry_dirs.contains(&Direction::W), "W recorded at the 217 end");
+    }
+
+    #[test]
+    fn one_sided_redundancy_is_not_collapsed() {
+        // #33/#175 shape: one way out (E), three back (W/N/S). Only the backward bucket is
+        // redundant, so this is NOT the bidirectional crossing case — it must stay as-is
+        // (merge stubs, no secondaries), matching today's clean rendering.
+        use crate::graph::MapGraph;
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(33, "F".into());
+        g.upsert_room(175, "F".into());
+        g.set_pos(33, (0, 0));
+        g.set_pos(175, (1, 0));
+        g.add_edge(33, Direction::E, 175);
+        g.add_edge(175, Direction::W, 33);
+        g.add_edge(175, Direction::N, 33);
+        g.add_edge(175, Direction::S, 33);
+        let plan = route_lanes(&g);
+        for c in plan.connectors.iter()
+            .filter(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == (33, 175)) {
+            assert!(c.secondary_exit.is_empty() && c.secondary_entry.is_empty(),
+                "one-sided redundancy must not collapse");
+        }
+    }
+
+    #[test]
+    fn ordinary_reciprocal_pair_has_no_secondaries() {
+        use crate::graph::MapGraph;
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let plan = route_lanes(&g);
+        for c in &plan.connectors {
+            assert!(c.secondary_exit.is_empty() && c.secondary_entry.is_empty());
+        }
+    }
+
+    #[test]
+    fn collapse_does_not_mutate_the_graph() {
+        use crate::graph::MapGraph;
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "W".into());
+        g.upsert_room(217, "S".into());
+        g.set_pos(68, (0, 0));
+        g.set_pos(217, (1, 1));
+        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
+                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
+            g.add_edge(o, d, dst);
+        }
+        let before = g.connections().len();
+        let _ = route_lanes(&g);
+        assert_eq!(g.connections().len(), before, "routing must not delete edges");
     }
 }
