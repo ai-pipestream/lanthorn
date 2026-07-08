@@ -2196,11 +2196,12 @@ mod tests {
         // unprotected rooms to clear what overlaps it can.
         //
         // HARD-PROTECT DECISION (SQ-0216 #3): up/down placement is inviolable. On this dense
-        // 26/27/136 cluster, protecting the correctly-placed 26↔27 up/down lane leaves the last 2
-        // illegal connector overlaps unclearable by cleanup's greedy single-room search (raising
-        // its radius/passes does not clear them — see task-3-report.md). That residual is ACCEPTED
-        // behaviour now, so we assert the residual count rather than 0. This test still fails if
-        // the residual GROWS (cleanup regressed) or the protected up/down column breaks.
+        // 26/27/136 cluster the protected 26↔27 up/down lane used to leave 2 illegal connector
+        // overlaps unclearable by cleanup's greedy single-room search. SQ-0222 removed that residual
+        // at its source: the straight up/down line now keeps its center slot instead of jogging
+        // across the weaving compass connector, so the cluster routes cleanly and cleanup reaches 0
+        // WITHOUT moving any protected up/down room. This test still fails if overlaps reappear
+        // (routing/cleanup regressed) or the protected up/down column breaks.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -2220,9 +2221,9 @@ mod tests {
         }
         mapper::layout::relayout_auto(&mut g);
         cleanup_overlaps(&mut g, 3, 40);
-        // Protection-blocked residual: exactly 2 illegal overlaps remain in the 26/27/136 cluster.
-        assert_eq!(render_overlap_stats(&g).0, 2,
-            "cleanup clears down to the up/down-protection-blocked residual (2), not 0");
+        // SQ-0222: the 26/27/136 cluster now routes cleanly, so cleanup clears every illegal overlap.
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "cleanup clears all illegal overlaps while keeping protected up/down rooms in place");
         let p = |id: u16| g.room(id).unwrap().pos.unwrap();
         // Up/down-protected column stays aligned: 27 stays directly below 26 (26→Down→27).
         assert_eq!(p(26).0, p(27).0, "26/27 up/down column must stay aligned: 26={:?} 27={:?}", p(26), p(27));
@@ -2879,7 +2880,7 @@ mod tests {
         // An earlier build lacked the reciprocal-compass lock, so cleanup's greedy search would
         // shift the then-unprotected 76 one column west to cut crossings, breaking 74<->76. With the
         // reciprocal lock, 76 is column-locked and can only slide along 74's column, so both columns
-        // now survive cleanup. We verify both, plus the accepted up/down-protection-blocked residual.
+        // now survive cleanup. We verify both, plus that all illegal overlaps clear (SQ-0222).
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -2900,8 +2901,8 @@ mod tests {
         let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
         assert_eq!(p(&g,26).0, p(&g,27).0, "precondition: relayout column-aligns the 26↔27 up/down lane");
         cleanup_overlaps(&mut g, 3, 40);
-        assert_eq!(render_overlap_stats(&g).0, 2,
-            "cleanup clears down to the up/down-protection-blocked residual (2), not 0");
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "cleanup clears all illegal overlaps (SQ-0222 clean routing) while protecting the up/down column");
         assert_eq!(p(&g,26).0, p(&g,27).0,
             "27 must stay directly below 26 after cleanup (up/down-protected): 26={:?} 27={:?}", p(&g,26), p(&g,27));
         assert!(p(&g,27).1 > p(&g,26).1, "27 stays south of 26 in the up/down lane");
@@ -2917,10 +2918,10 @@ mod tests {
         // flow as the safety net that recovers the hint on inputs where a post-solve stage
         // sacrifices it.
         //
-        // Under the SQ-0216 hard-protect decision, cleanup leaves 2 protection-blocked illegal
-        // overlaps on this dense fixture; repair must not GROW that residual. It must also leave the
-        // hard-protected columns intact: the 26↔27 up/down lane and (with the reciprocal-compass
-        // lock) the reciprocal N/S pair 74<->76, which is now column-locked through the whole flow.
+        // With SQ-0222 clean routing this dense fixture clears to zero illegal overlaps; repair must
+        // keep it at zero (introduce none). It must also leave the hard-protected columns intact:
+        // the 26↔27 up/down lane and (with the reciprocal-compass lock) the reciprocal N/S pair
+        // 74<->76, which is now column-locked through the whole flow.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -2943,8 +2944,8 @@ mod tests {
         let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
         assert!(p(&g,78).0 < p(&g,180).0,
             "retidy must place 78 west of 180: 78={:?} 180={:?}", p(&g,78), p(&g,180));
-        assert_eq!(render_overlap_stats(&g).0, 2,
-            "repair must not grow the protection-blocked overlap residual (stays at 2)");
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "repair keeps all illegal overlaps cleared (SQ-0222 clean routing)");
         assert_eq!(p(&g,26).0, p(&g,27).0,
             "repair must not knock the up/down-protected 26↔27 column off alignment: 26={:?} 27={:?}", p(&g,26), p(&g,27));
         assert_eq!(p(&g,74).0, p(&g,76).0,
@@ -3105,9 +3106,8 @@ mod tests {
         // 74<->76 (74 S->76, 76 N->74) shares a column after relayout; WITHOUT the lock, cleanup's
         // greedy search shifts the (then-unprotected) 76 one column WEST to cut crossings, breaking
         // the reciprocal (verified: 76 moves from x=-1 to x=-2). WITH the lock, 76 can only move in
-        // Y, so it stays on 74's column. The clearable overlaps still drop to the same residual (2);
-        // the 2 that remain are the accepted up/down-protection-blocked residual (see
-        // cleanup_keeps_updown_protected_column_chain_aligned), not a regression from this lock.
+        // Y, so it stays on 74's column. All illegal overlaps clear (SQ-0222 clean routing) with the
+        // reciprocal pair still column-locked — the lock constrains 76 without leaving any residual.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -3131,7 +3131,7 @@ mod tests {
         assert_eq!(p(&g,74).0, p(&g,76).0,
             "76 must stay on 74's column after cleanup (reciprocal N/S locked): 74={:?} 76={:?}", p(&g,74), p(&g,76));
         assert!(p(&g,76).1 > p(&g,74).1, "76 stays south of 74 (only slid along the shared column, if at all)");
-        assert_eq!(render_overlap_stats(&g).0, 2, "clearable overlaps drop to the protection-blocked residual (2)");
+        assert_eq!(render_overlap_stats(&g).0, 0, "all illegal overlaps clear (SQ-0222) with the reciprocal N/S pair still locked");
     }
 
     #[test]
@@ -3196,15 +3196,15 @@ mod tests {
     }
 
     #[test]
-    fn compact_preserves_directional_order_keeping_overlap_residual() {
+    fn compact_preserves_directional_order_introducing_no_overlap() {
         // Full A129 Retidy flow plus compaction: 78 stays west of 180, the hard-protected 26↔27
-        // up/down column stays aligned, the protection-blocked overlap residual (2) survives
-        // compaction unchanged, and no fully-empty interior column/row is left behind.
+        // up/down column stays aligned, compaction introduces no illegal overlap (SQ-0222 clean
+        // routing keeps the cluster clear), and no fully-empty interior column/row is left behind.
         //
         // With the SQ-0216 reciprocal-compass lock, "76 stays under 74" holds again: 76 is
         // column-locked to its reciprocal N/S partner 74 through the whole flow. We assert that,
         // the still-guaranteed directional order (78 west of 180), the hard-protected 26↔27 up/down
-        // column, and the accepted overlap residual (2) rather than 0.
+        // column, and zero illegal overlaps.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -3229,8 +3229,8 @@ mod tests {
         assert!(p(&g,78).0 < p(&g,180).0, "78 stays west of 180 through compaction");
         assert_eq!(p(&g,26).0, p(&g,27).0, "26↔27 up/down column stays aligned through compaction");
         assert_eq!(p(&g,74).0, p(&g,76).0, "reciprocal N/S pair 74<->76 stays column-locked through compaction");
-        assert_eq!(render_overlap_stats(&g).0, 2,
-            "compaction keeps the protection-blocked overlap residual at 2 (does not grow it)");
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "compaction introduces no illegal overlap (SQ-0222 clean routing keeps the cluster clear)");
         // Compaction must leave only GUTTER lines — an empty interior column/row remains only when
         // collapsing it would create an illegal overlap (e.g. the column a long direct route runs up).
         // Any empty interior line that could still collapse cleanly is a compaction miss.

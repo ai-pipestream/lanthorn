@@ -932,30 +932,51 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
             endpoints.push((c.dest, c.entry, false, ci));
         }
     }
-    // Group by (room, side); assign slots within each group. A compass (N/S/E/W) connector
-    // ranks ahead of an Up/Down connector on a shared side — an Up/Down link always yields the
-    // center slot to a compass reciprocal (SQ-0216) — since a compass link is the stronger
-    // spatial hint. Within that, a connector that runs STRAIGHT through this side (a collinear
-    // polyline — its other end is axis-aligned with this room) is given the center slot ahead
-    // of weaving connectors, so it stays on a clean straight line and the weaving ones take the
-    // offset cells. This keeps the renderer's perpendicular stubs from forcing a straight
-    // connector to jog across a weaving one's corner. Ties break by (connector index, is_exit)
-    // for determinism.
-    // Endpoint within a (room, side) group: (is up/down?, straight-through?, is_exit, connector index).
-    type Endpoint = (bool, bool, bool, usize);
+    // Group by (room, side); assign slots within each group.
+    //
+    // Compass-only sides keep the historical order: a connector that runs STRAIGHT through the
+    // side (a collinear polyline — its other end is axis-aligned with this room) takes the center
+    // slot ahead of weaving connectors, so it stays a clean straight line while the weaving ones
+    // take the offset cells; ties break by (connector index, is_exit). This is preserved
+    // byte-for-byte (compass identity).
+    //
+    // On a side that ALSO hosts an Up/Down endpoint, the priority is refined (SQ-0222):
+    //   1. an AXIS-reciprocal compass connector (reciprocal AND cardinal-opposite exit/entry:
+    //      N<->S or E<->W — the column/row-locked case) keeps the center (SQ-0216 intent); then
+    //   2. a STRAIGHT-through connector keeps the center (so a straight Up/Down line is not forced
+    //      to jog across a weaving one-way compass connector, which manufactures an overlap); then
+    //   3. compass before Up/Down, then connector index, for determinism.
+    // The blanket SQ-0216 "Up/Down always yields to compass" was too broad: it displaced a
+    // straight Up/Down line for a NON-reciprocal weaving compass connector. Gating the refined
+    // order to sides that actually host an Up/Down endpoint keeps every compass-only side
+    // byte-identical.
+    // Endpoint: (is up/down?, axis-reciprocal compass?, straight-through?, is_exit, connector index).
+    type Endpoint = (bool, bool, bool, bool, usize);
     let mut by_side: BTreeMap<(RoomId, Side), Vec<Endpoint>> = BTreeMap::new();
     for (room, side, is_exit, ci) in endpoints {
         let straight = is_collinear(&connectors[ci].points);
         let is_updown = matches!(connectors[ci].exit_dir, Direction::Up | Direction::Down);
-        by_side.entry((room, side)).or_default().push((is_updown, straight, is_exit, ci));
+        let axis_recip = connectors[ci].reciprocal
+            && matches!(
+                (connectors[ci].exit_dir, connectors[ci].entry_dir),
+                (Direction::N, Some(Direction::S))
+                    | (Direction::S, Some(Direction::N))
+                    | (Direction::E, Some(Direction::W))
+                    | (Direction::W, Some(Direction::E))
+            );
+        by_side.entry((room, side)).or_default().push((is_updown, axis_recip, straight, is_exit, ci));
     }
     for (_key, mut members) in by_side {
-        // Compass (false) first, then `straight` first (false sorts before true, so negate
-        // via Reverse).
-        members.sort_by_key(|&(is_updown, straight, is_exit, ci)| {
-            (is_updown, std::cmp::Reverse(straight), ci, is_exit)
+        let has_updown = members.iter().any(|&(is_updown, ..)| is_updown);
+        members.sort_by_key(|&(is_updown, axis_recip, straight, is_exit, ci)| {
+            // `axis_recip` only applies on sides that host an Up/Down endpoint; elsewhere it is
+            // neutralized so the key reduces to the historical `(is_updown, Reverse(straight), ci,
+            // is_exit)` — every compass-only side stays byte-identical. On a mixed side the order is
+            // axis-reciprocal-compass → straight-through → compass-before-Up/Down → index.
+            let axis_key = std::cmp::Reverse(has_updown && axis_recip);
+            (axis_key, std::cmp::Reverse(straight), is_updown, ci, is_exit)
         });
-        for (slot, (_is_updown, _straight, is_exit, ci)) in members.into_iter().enumerate() {
+        for (slot, (.., is_exit, ci)) in members.into_iter().enumerate() {
             if is_exit {
                 connectors[ci].exit_slot = slot as u16;
             } else {
@@ -1802,6 +1823,43 @@ mod tests {
             .expect("up/down connector on room 1's Top side");
         assert_eq!(ns.exit_slot, 0, "reciprocal N/S takes the center slot");
         assert_ne!(updown.exit_slot, 0, "up/down yields to a fanned slot");
+    }
+
+    #[test]
+    fn straight_updown_keeps_center_over_weaving_oneway_compass() {
+        // Room 1 has a STRAIGHT Up/Down reciprocal to room 2 (due north) and a WEAVING
+        // one-way compass edge N to room 3 (north-east; reverse edge SW, so bidirectional but
+        // NOT a cardinal N/S reciprocal). Both exits land on room 1's Top side. Unlike a
+        // reciprocal N/S (which keeps the center slot, see `ns_reciprocal_outranks_updown…`),
+        // a non-axis-reciprocal weaving compass connector must YIELD the center to the straight
+        // Up/Down line so the straight line does not jog across it (SQ-0222).
+        let mut g = MapGraph::new();
+        for id in [1, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1)); // due north: straight reciprocal Up/Down pair
+        g.set_pos(3, (1, -1)); // north-east: weaving one-way compass (N out, SW back)
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::Down, 1);
+        g.add_edge(1, Direction::N, 3);
+        g.add_edge(3, Direction::SW, 1);
+
+        let plan = route_lanes(&g);
+        let top: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| c.origin == 1 && c.exit == Side::Top)
+            .collect();
+        assert_eq!(top.len(), 2, "expected both connectors sharing room 1's Top side: {top:?}");
+        let updown = top
+            .iter()
+            .find(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .expect("up/down connector on room 1's Top side");
+        let compass = top
+            .iter()
+            .find(|c| matches!(c.exit_dir, Direction::N | Direction::S))
+            .expect("compass connector on room 1's Top side");
+        assert_eq!(updown.exit_slot, 0, "the straight up/down keeps the center slot");
+        assert_ne!(compass.exit_slot, 0, "the weaving one-way compass yields to a fanned slot");
     }
 
     #[test]
