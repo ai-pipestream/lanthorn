@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use crate::direction::{grid_offset, layout_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
-use crate::router::{route_side, side_for, Side};
+use crate::router::{route_side, Side};
 
 /// A routing channel: `H(r)` is the horizontal gap below room-row `r` (line y=2r+1);
 /// `V(c)` is the vertical gap right of room-column `c` (line x=2c+1).
@@ -598,7 +598,7 @@ fn direct_route_losers(
                                   graph.room(c.dest).and_then(|r| r.pos)) else { continue };
         let Some(exit) = route_side(c.dir) else { continue };
         let required_entry =
-            back_edge_idx(compass, ci, c, &empty).and_then(|pi| side_for(compass[pi].dir));
+            back_edge_idx(compass, ci, c, &empty).and_then(|pi| route_side(compass[pi].dir));
         if let Some((sentry, pts)) = direct_route(a, exit, b, occupied) {
             if required_entry.is_none_or(|req| req == sentry) {
                 cands.push((ci, pts));
@@ -727,10 +727,10 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // already matches the rule, and for an offset room forcing it would wrap the connector around
         // the box. The ruled side applies to the dipped channel route below. Also reject a direct run
         // that stomps an already-routed connector on a shared room line (it carries no lane).
-        let required_entry = back.and_then(|bk| side_for(bk.dir));
+        let required_entry = back.and_then(|bk| route_side(bk.dir));
         // The destination side a one-way edge prefers when it must dip into the channels.
         let ruled_entry = match back {
-            Some(bk) => side_for(bk.dir),
+            Some(bk) => route_side(bk.dir),
             None => oneway_entry_side(c.dir),
         };
         if let Some((sentry, pts)) = direct_route(a, exit, b, &occupied) {
@@ -1004,6 +1004,7 @@ mod tests {
     use super::*;
     use crate::direction::Direction;
     use crate::graph::MapGraph;
+    use crate::router::side_for;
 
     #[test]
     fn segments_sharing_a_lane_never_overlap() {
@@ -1657,6 +1658,46 @@ mod tests {
         assert_eq!(vertical.len(), 1, "a matching Up/Down pair collapses to one connector");
         assert!(vertical[0].reciprocal, "the collapsed connector is reciprocal");
         assert_eq!(vertical[0].entry_dir, Some(Direction::Down), "carries the back-edge's direction");
+        // Regression guard: for an AXIS-ALIGNED pair (B due north of A), the connector must
+        // still exit A's Top and enter B's Bottom — the axis-aligned case already worked
+        // before SQ-0216's diagonal fix and must keep working after it.
+        assert_eq!(vertical[0].exit, Side::Top, "exits A's north border");
+        assert_eq!(vertical[0].entry, Side::Bottom, "enters B's south border");
+    }
+
+    #[test]
+    fn reciprocal_updown_diagonal_enters_on_north_south_border() {
+        // SQ-0216 bug repro: a reciprocal Up/Down pair placed DIAGONALLY (room 2 is
+        // up-and-left of room 1, not sharing a row or column) must still enter the
+        // destination on a north/south border (Top/Bottom) — never a geometric Left/Right
+        // side picked by the diagonal cell offset. Before the fix, the reciprocal-collapse
+        // branch computed the forced entry side via `side_for(bk.dir)`, which returns `None`
+        // for Up/Down back-edges, so the code fell through to the generic geometric
+        // `entry_side`, which picked Left/Right for a diagonal offset.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (1, 1));
+        g.set_pos(2, (0, 0));
+        g.add_edge(2, Direction::Down, 1);
+        g.add_edge(1, Direction::Up, 2);
+
+        let plan = route_lanes(&g);
+        let vertical: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
+            .collect();
+        assert_eq!(vertical.len(), 1, "the diagonal Up/Down pair still collapses to one connector");
+        let c = vertical[0];
+        assert!(
+            matches!(c.exit, Side::Top | Side::Bottom),
+            "exit side must be a north/south border, got {:?}", c.exit
+        );
+        assert!(
+            matches!(c.entry, Side::Top | Side::Bottom),
+            "entry side must be a north/south border, not a geometric Left/Right pick, got {:?}", c.entry
+        );
     }
 
     #[test]
