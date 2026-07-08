@@ -1113,40 +1113,67 @@ fn draw_secondary_markers(
     let arrows = &state.symbols.arrows;
     let cell_of = |id: RoomId| rm.rooms.iter().find(|r| r.id == id).map(|r| r.cell);
 
-    let stamp = |dirs: &[Direction], cell: (i32, i32), side: Side, slot: u16,
-                     buf: &mut Buffer| {
-        let (ax, ay) = box_edge_anchor(cols, rows, cell, side, slot);
-        // Inward step, perpendicular to the side.
-        let (dx, dy) = match side {
-            Side::Right => (-1, 0),
-            Side::Left => (1, 0),
-            Side::Top => (0, 1),
-            Side::Bottom => (0, -1),
-        };
-        // Interior depth available before hitting the far border.
-        let depth = match side {
-            Side::Left | Side::Right => BOX_W - 2,
-            Side::Top | Side::Bottom => BOX_H - 2,
-        };
+    // The arrowhead anchor + the inward step toward the box interior, chosen the SAME way
+    // `plot_connector` places the connector's own arrowhead: a diagonal end sits on the box
+    // CORNER (`corner_anchor`) and steps diagonally inward; a cardinal end sits on the side
+    // (`box_edge_anchor` at its slot) and steps perpendicular. Using `box_edge_anchor`
+    // unconditionally would strand a diagonal connector's markers on a side midpoint while its
+    // arrow sits at the corner — i.e. adrift inside the room.
+    let anchor_inward = |cell: (i32, i32), side: Side, slot: u16, diag: Option<Direction>|
+     -> ((i32, i32), (i32, i32), i32) {
+        match diag {
+            Some(d) if mapper::direction::is_diagonal(d) => {
+                let a = corner_anchor(cols, rows, cell, d);
+                let inw = match d {
+                    Direction::NE => (-1, 1),
+                    Direction::NW => (1, 1),
+                    Direction::SE => (-1, -1),
+                    Direction::SW => (1, -1),
+                    _ => (0, 0),
+                };
+                (a, inw, (BOX_W - 2).min(BOX_H - 2))
+            }
+            _ => {
+                let a = box_edge_anchor(cols, rows, cell, side, slot);
+                let inw = match side {
+                    Side::Right => (-1, 0),
+                    Side::Left => (1, 0),
+                    Side::Top => (0, 1),
+                    Side::Bottom => (0, -1),
+                };
+                let depth = match side {
+                    Side::Left | Side::Right => BOX_W - 2,
+                    Side::Top | Side::Bottom => BOX_H - 2,
+                };
+                (a, inw, depth)
+            }
+        }
+    };
+
+    let stamp = |dirs: &[Direction], anchor: (i32, i32), inw: (i32, i32), depth: i32,
+                 buf: &mut Buffer| {
         for (k, dir) in dirs.iter().enumerate() {
             let step = k as i32 + 1;
             if step > depth {
                 break; // interior full (never happens for the realistic ≤2 case)
             }
             let ch = arrow_for_direction(*dir, arrows);
-            put_char(buf, ax + dx * step + off_x, ay + dy * step + off_y, ch, style, area);
+            put_char(buf, anchor.0 + inw.0 * step + off_x, anchor.1 + inw.1 * step + off_y,
+                ch, style, area);
         }
     };
 
     for conn in &rm.plan.connectors {
         if !conn.secondary_exit.is_empty() {
             if let Some(cell) = cell_of(conn.origin) {
-                stamp(&conn.secondary_exit, cell, conn.exit, conn.exit_slot, buf);
+                let (a, inw, depth) = anchor_inward(cell, conn.exit, conn.exit_slot, Some(conn.exit_dir));
+                stamp(&conn.secondary_exit, a, inw, depth, buf);
             }
         }
         if !conn.secondary_entry.is_empty() {
             if let Some(cell) = cell_of(conn.dest) {
-                stamp(&conn.secondary_entry, cell, conn.entry, conn.entry_slot, buf);
+                let (a, inw, depth) = anchor_inward(cell, conn.entry, conn.entry_slot, conn.entry_dir);
+                stamp(&conn.secondary_entry, a, inw, depth, buf);
             }
         }
     }
@@ -4792,6 +4819,43 @@ mod tests {
                 .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false));
         assert!(has_glyph(&south), "S secondary marker present in shared color");
         assert!(has_glyph(&west), "W secondary marker present in shared color");
+    }
+
+    #[test]
+    fn secondary_marker_sits_next_to_the_retained_arrowhead() {
+        // Regression: the marker must hug the retained connector's arrowhead. The house-ring
+        // connectors are DIAGONAL, so the arrowhead sits on a box CORNER; the marker must anchor
+        // to that corner (one cell inward), not to a side midpoint (which strands it inside the
+        // room — the bug this test guards).
+        use crate::state::AppState;
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "W".into());
+        g.upsert_room(217, "S".into());
+        g.set_pos(68, (0, 0));
+        g.set_pos(217, (1, 1));
+        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
+                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
+            g.add_edge(o, d, dst);
+        }
+        let state = AppState::default();
+        let se = state.symbols.arrows.se.to_string();       // retained SE departure arrowhead (at 68)
+        let south = state.symbols.arrows.south.to_string(); // S secondary marker (at 68)
+        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let find = |glyph: &str| (0..area.width as i32)
+            .flat_map(|x| (0..area.height as i32).map(move |y| (x, y)))
+            .find(|&(x, y)| buf.cell((x as u16, y as u16))
+                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false));
+        let arrow = find(&se).expect("SE departure arrowhead present");
+        let marker = find(&south).expect("S secondary marker present");
+        let (dx, dy) = ((arrow.0 - marker.0).abs(), (arrow.1 - marker.1).abs());
+        assert!(dx <= 1 && dy <= 1 && (dx, dy) != (0, 0),
+            "S marker must sit adjacent to the SE arrowhead, got arrow={arrow:?} marker={marker:?}");
     }
 
     #[test]
