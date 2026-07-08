@@ -48,6 +48,11 @@ real, walkable command; only the *drawn connector set* is deduped.
 room pair, split its directed **compass** edges (`grid_offset(dir).is_some()` —
 the 8-way directions; Up/Down excluded, see below) into a **forward** bucket
 (origin = the lower room id) and a **backward** bucket (origin = the higher id).
+**Collapse a pair only when BOTH buckets have ≥2 edges** — true *bidirectional*
+redundancy, where the leftovers after one reciprocal pairing would otherwise form a
+second crossing connector (the house ring). One-sided redundancy (one way out,
+several back — the `#33/#175` shape) is left untouched: it already renders cleanly as
+merge stubs, and existing route tests lock that in.
 
 - **Retained forward** = the bucket's edge that is `edge_is_satisfied` (matches
   placed geometry); ties broken by (a) direction is the exact `opposite` of the
@@ -62,9 +67,10 @@ the 8-way directions; Up/Down excluded, see below) into a **forward** bucket
   and recorded against the retained connector, attributed to the **end whose
   room is its origin**, carrying its own `Direction`.
 
-For `#68 ↔ #217`: retained `SE↔NW`; secondaries `S` at the `#68` end, `W` at
-the `#217` end. For `#33 ↔ #175`: retained `E↔W`; secondaries `N` and `S` both
-at the `#175` end (a room end may hold several).
+For `#68 ↔ #217` (both buckets = 2): retained `SE↔NW`; secondaries `S` at the `#68`
+end, `W` at the `#217` end. `#33 ↔ #175` (forward = 1) does **not** collapse. A room
+end may hold several secondaries when its bucket has 3+ edges and the pair still meets
+the both-buckets-≥2 trigger.
 
 **Why always collapse (no separate-draw fallback):** because the secondary
 marker keeps the hidden command visible, collapsing never loses information —
@@ -173,7 +179,8 @@ in that same `shared_path` color on the interior cells beside its arrowheads.
 - House-ring pair `#68/#217`: exactly **one** connector; retained is the
   satisfied diagonal `SE↔NW`; `secondary_exit`/`secondary_entry` capture `S`/`W`
   at the correct ends.
-- `#33/#175`: one `E↔W` connector; `#175` end carries secondaries `N` and `S`.
+- `#33/#175` (one-sided): NOT collapsed — no connector for the pair carries
+  secondaries; the existing merge-stub tests stay green.
 - Tie/straightness: when both buckets have a satisfied edge, the exact-opposite
   pair is chosen (straight).
 - Non-destructive: `graph.connections()` identical before/after routing.

@@ -66,27 +66,28 @@ fn redundant_pair_collapses_to_one_shared_connector() {
 }
 
 #[test]
-fn three_back_edges_collapse_keeping_the_straight_pair() {
+fn one_sided_redundancy_is_not_collapsed() {
+    // #33/#175 shape: one way out (E), three back (W/N/S). Only the backward bucket is
+    // redundant, so this is NOT the bidirectional crossing case — it must stay as-is
+    // (merge stubs, no secondaries), matching today's clean rendering.
     use crate::graph::MapGraph;
     use crate::direction::Direction;
     let mut g = MapGraph::new();
     g.upsert_room(33, "F".into());
     g.upsert_room(175, "F".into());
     g.set_pos(33, (0, 0));
-    g.set_pos(175, (1, 0)); // 175 is due E → E/W satisfied, N/S not
+    g.set_pos(175, (1, 0));
     g.add_edge(33, Direction::E, 175);
     g.add_edge(175, Direction::W, 33);
     g.add_edge(175, Direction::N, 33);
     g.add_edge(175, Direction::S, 33);
     let plan = route_lanes(&g);
-    let c = plan.connectors.iter()
-        .find(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == (33, 175))
-        .expect("one connector");
-    assert_eq!(plan.connectors.iter()
-        .filter(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == (33, 175)).count(), 1);
-    // N and S (both origin 175) become secondaries at the 175 end
-    let at_175 = if c.origin == 175 { &c.secondary_exit } else { &c.secondary_entry };
-    assert!(at_175.contains(&Direction::N) && at_175.contains(&Direction::S));
+    // No connector for this pair carries secondaries (nothing was collapsed).
+    for c in plan.connectors.iter()
+        .filter(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == (33, 175)) {
+        assert!(c.secondary_exit.is_empty() && c.secondary_entry.is_empty(),
+            "one-sided redundancy must not collapse");
+    }
 }
 
 #[test]
@@ -181,8 +182,11 @@ fn select_shared_paths(
     for (pair, idxs) in by_pair {
         let fwd: Vec<usize> = idxs.iter().copied().filter(|&i| conns[i].origin == pair.0).collect();
         let bwd: Vec<usize> = idxs.iter().copied().filter(|&i| conns[i].origin == pair.1).collect();
-        // Nothing to collapse unless at least one bucket has an extra edge.
-        if fwd.len() <= 1 && bwd.len() <= 1 {
+        // Collapse ONLY true bidirectional redundancy: both directions have 2+ ways, so the
+        // leftovers after one reciprocal pairing would form a SECOND crossing connector (the
+        // house-ring mess). One-sided redundancy (e.g. 1 out, 3 back — the #33/#175 shape)
+        // stays as merge stubs; it already renders cleanly and existing tests lock that in.
+        if fwd.len() < 2 || bwd.len() < 2 {
             continue;
         }
         // Pick the retained edge of a bucket: satisfied first, optional opposite-direction
