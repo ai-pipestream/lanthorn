@@ -43,6 +43,13 @@
   adjacencies are treated as inviolable: an up/down move yields rather than shove
   a reciprocal partner off its shared column/row, and overlap cleanup may only
   slide a reciprocal room along its own axis — never off it.
+- **Combined multi-direction paths** — when two rooms are joined by more than one
+  compass direction *each way* (e.g. Zork's around-the-house ring, where each pair
+  is reachable by both a cardinal and a diagonal), the redundant edges collapse to
+  one brighter "shared path" connector instead of a crossing tangle. Every hidden
+  command is preserved: the collapsed direction is drawn as a small arrow in the
+  border slot beside the retained connector's arrowhead (styled by `shared_path`).
+  One-sided redundancy (one way out, several back) is left as clean merge stubs.
 - **Connection routing** between rooms with overlap removal, so the map stays
   readable as it grows.
 - **Layered maps** for multi-level areas, with manual layer controls.

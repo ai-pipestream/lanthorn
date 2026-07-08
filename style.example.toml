@@ -25,6 +25,7 @@
 "connector"            = { fg = "cyan" }        # normal connector
 "connector:distorted"  = { fg = "magenta" }     # one-way / distorted
 "connector:portal"     = { fg = "cyan" }        # up/down/in/out portals
+"shared_path"          = { fg = "light-cyan" }  # collapsed multi-direction connector + its markers
 "map_border"           = { style = "picture-frame", fg = "cyan" }
 # Per-side borders: override individual sides (none/single/double/thick); a side
 # falls back to `style`. `header = false` hides the title / layer-tab strip.

@@ -1096,9 +1096,10 @@ fn arrow_for_direction(dir: Direction, arrows: &crate::symbols::Arrows) -> char 
     }
 }
 
-/// Stamp collapsed secondary directions as arrow glyphs on the box interior, one cell
-/// inward from the retained connector's arrowhead (stacking further inward for multiples).
-/// Boxes zoom only; caller passes the axis tables. Color is `shared_path`.
+/// Stamp collapsed secondary directions as arrow glyphs in the border slot beside the
+/// retained connector's arrowhead — along the corner's border edge for a diagonal end, one
+/// cell inward from the side for a cardinal end (stacking for multiples). Boxes zoom only;
+/// caller passes the axis tables. Color is `shared_path`.
 fn draw_secondary_markers(
     rm: &RenderMap,
     cols: &PosTable,
