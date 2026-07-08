@@ -2158,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_clears_overlaps_without_knocking_aligned_rooms_off_row() {
+    fn cleanup_clears_all_overlaps_keeping_updown_protected_rooms_aligned() {
         // The A129 house: relayout aligns 74→25→26 on one row, but the rendered plan has
         // illegal overlaps so cleanup_overlaps must nudge SOMETHING. A hint-aware cleanup clears
         // the overlaps by moving a low-cost room (one whose hints are already distorted) instead

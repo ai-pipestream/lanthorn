@@ -30,7 +30,17 @@
   directly north (up) / south (down) of its neighbor, shifting ordinary rooms aside
   just like a compass move, but yielding to confirmed reciprocal N/S adjacencies.
   They render as dotted connectors with up/down symbols (or a stairs glyph set),
-  never as arrows, and never as "distorted" red edges.
+  never as arrows, and never as "distorted" red edges. Up/down connections are
+  routed through the same lane system as N/S compass connectors — crossing
+  elimination and a border-centered anchor — and drawn as dotted lines with the
+  up/down symbol on the room border. A matching Up+Down pair between two rooms
+  collapses to a single dotted path with the symbol at both ends; if a reciprocal
+  N/S connection also exists, it takes the center border slot and the up/down
+  path yields to a fanned off-center slot. When a room pair is joined by both a
+  compass direction and an up/down connection, only the compass path is drawn —
+  the up/down connector is suppressed — but the room still shows its up/down
+  symbol so vertical access stays visible. The map tidy also shifts rooms apart
+  to keep up/down paths from crossing other paths where it can make room.
 - **Connection routing** between rooms with overlap removal, so the map stays
   readable as it grows.
 - **Layered maps** for multi-level areas, with manual layer controls.
