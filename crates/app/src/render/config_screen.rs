@@ -11,7 +11,6 @@ use crate::state::AppState;
 /// Row definitions: (display name, type tag).
 pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("user_dir",             ConfigRowKind::Path),
-    ("use_default_map",      ConfigRowKind::Bool),
     ("auto_load",            ConfigRowKind::Bool),
     ("auto_save",            ConfigRowKind::Bool),
     ("prompt_save_on_quit",  ConfigRowKind::Bool),
@@ -154,28 +153,27 @@ pub fn draw_config_screen(
 fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
     match i {
         0 => cfg.user_dir.to_string_lossy().to_string(),
-        1 => bool_str(cfg.use_default_map),
-        2 => bool_str(cfg.auto_load),
-        3 => bool_str(cfg.auto_save),
-        4 => bool_str(cfg.prompt_save_on_quit),
-        5 => bool_str(cfg.prompt_load_on_launch),
-        6 => bool_str(cfg.record_history),
-        7 => bool_str(cfg.show_room_numbers),
-        8 => match cfg.background_tidy {
+        1 => bool_str(cfg.auto_load),
+        2 => bool_str(cfg.auto_save),
+        3 => bool_str(cfg.prompt_save_on_quit),
+        4 => bool_str(cfg.prompt_load_on_launch),
+        5 => bool_str(cfg.record_history),
+        6 => bool_str(cfg.show_room_numbers),
+        7 => match cfg.background_tidy {
             BackgroundTidy::Off => "off".to_string(),
             BackgroundTidy::EveryRoom => "every_room".to_string(),
             BackgroundTidy::OnOverlap => "on_overlap".to_string(),
             BackgroundTidy::Debounced => "debounced".to_string(),
         },
-        9 => match cfg.aux_storage {
+        8 => match cfg.aux_storage {
             crate::config::AuxStorage::Ask => "ask".to_string(),
             crate::config::AuxStorage::Archive => "archive".to_string(),
             crate::config::AuxStorage::Global => "global".to_string(),
         },
-        10 => bool_str(cfg.honor_game_colours),
-        11 => bool_str(cfg.honor_timed_input),
-        12 => bool_str(cfg.enable_sound),
-        13 => cfg.volume.to_string(),
+        9 => bool_str(cfg.honor_game_colours),
+        10 => bool_str(cfg.honor_timed_input),
+        11 => bool_str(cfg.enable_sound),
+        12 => cfg.volume.to_string(),
         _ => String::new(),
     }
 }

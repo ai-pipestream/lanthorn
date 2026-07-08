@@ -346,11 +346,6 @@ pub struct Config {
     /// Sub-directories: maps/ — where per-story map files live.
     #[serde(default = "default_user_dir")]
     pub user_dir: PathBuf,
-    /// When false (default), a story with no .babelmap archive starts with an
-    /// empty map (fog-of-war, self-contained).  When true, fall back to the
-    /// legacy shared `<ifid>.map.json` so pre-accumulated maps are still visible.
-    #[serde(default)]
-    pub use_default_map: bool,
     /// When true (default), restore the game state from the archive on startup so
     /// play resumes where it left off. Set false to start a fresh playthrough while
     /// retaining the accumulated map.
@@ -468,7 +463,6 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             user_dir: default_user_dir(),
-            use_default_map: false,
             auto_load: true,
             auto_save: false,
             mouse_wheel_invert: false,
@@ -540,7 +534,6 @@ pub fn resolve(cli: &Cli) -> Config {
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
             cfg.user_dir = from_file.user_dir;
-            cfg.use_default_map = from_file.use_default_map;
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
             cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
@@ -600,7 +593,6 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 
     // Top-level scalar fields.
     doc["user_dir"] = toml_edit::value(cfg.user_dir.to_string_lossy().as_ref());
-    doc["use_default_map"] = toml_edit::value(cfg.use_default_map);
     doc["auto_load"] = toml_edit::value(cfg.auto_load);
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
     doc["mouse_wheel_invert"] = toml_edit::value(cfg.mouse_wheel_invert);
@@ -684,7 +676,7 @@ mod tests {
         assert!(!c.watch_style);
         assert!(config_has_style_sections("[colors]\n\"room\" = { fg = \"red\" }\n"));
         assert!(config_has_style_sections("[symbols]\nbox_style = \"thick\"\n"));
-        assert!(!config_has_style_sections("style = \"s.toml\"\nuse_default_map = true\n"));
+        assert!(!config_has_style_sections("style = \"s.toml\"\n"));
     }
 
     #[test]
@@ -808,22 +800,9 @@ mod tests {
     }
 
     #[test]
-    fn use_default_map_is_false_by_default() {
-        let cfg = Config::default();
-        assert!(!cfg.use_default_map, "use_default_map must default to false");
-    }
-
-    #[test]
-    fn use_default_map_parses_from_toml() {
-        let toml = "use_default_map = true";
-        let cfg: Config = toml::from_str(toml).unwrap();
-        assert!(cfg.use_default_map);
-    }
-
-    #[test]
-    fn use_default_map_omitted_stays_false() {
-        let cfg: Config = toml::from_str("").unwrap();
-        assert!(!cfg.use_default_map);
+    fn stale_use_default_map_key_is_ignored() {
+        let cfg: crate::config::Config = toml::from_str("use_default_map = true").unwrap();
+        let _ = cfg; // unknown key ignored, no panic
     }
 
     #[test]
@@ -915,7 +894,6 @@ use_defaults = false
 
         let cfg = Config {
             user_dir: dir.clone(),
-            use_default_map: true,
             auto_load: false,
             auto_save: true,
             mouse_wheel_invert: false,
@@ -953,7 +931,6 @@ use_defaults = false
         let doc: toml_edit::DocumentMut = content.parse().unwrap();
 
         // Scalars are set.
-        assert_eq!(doc["use_default_map"].as_bool(), Some(true));
         assert_eq!(doc["auto_load"].as_bool(), Some(false));
         assert_eq!(doc["auto_save"].as_bool(), Some(true));
         assert_eq!(doc["record_history"].as_bool(), Some(false));

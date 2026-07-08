@@ -3616,18 +3616,17 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
                 buffer: current,
             });
         }
-        1 => { if let Some(cs) = &mut state.config_screen { cs.working.use_default_map = !cs.working.use_default_map; } }
-        2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
-        3 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
-        4 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_save_on_quit = !cs.working.prompt_save_on_quit; } }
-        5 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_load_on_launch = !cs.working.prompt_load_on_launch; } }
-        6 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
-        7 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
-        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
-        9 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
-        10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
-        11 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
-        12 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
+        1 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
+        2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
+        3 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_save_on_quit = !cs.working.prompt_save_on_quit; } }
+        4 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_load_on_launch = !cs.working.prompt_load_on_launch; } }
+        5 => { if let Some(cs) = &mut state.config_screen { cs.working.record_history = !cs.working.record_history; } }
+        6 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
+        7 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
+        8 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
+        9 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
+        10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
+        11 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
         _ => {}
     }
 }
@@ -3653,19 +3652,18 @@ fn config_cycle_aux_storage(val: &mut crate::config::AuxStorage, delta: i32) {
 fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
     match row {
         0 => {} // path: no cycling
-        1 => working.use_default_map = !working.use_default_map,
-        2 => working.auto_load = !working.auto_load,
-        3 => working.auto_save = !working.auto_save,
-        4 => working.prompt_save_on_quit = !working.prompt_save_on_quit,
-        5 => working.prompt_load_on_launch = !working.prompt_load_on_launch,
-        6 => working.record_history = !working.record_history,
-        7 => working.show_room_numbers = !working.show_room_numbers,
-        8 => config_cycle_background_tidy(&mut working.background_tidy, delta),
-        9 => config_cycle_aux_storage(&mut working.aux_storage, delta),
-        10 => working.honor_game_colours = !working.honor_game_colours,
-        11 => working.honor_timed_input = !working.honor_timed_input,
-        12 => working.enable_sound = !working.enable_sound,
-        13 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
+        1 => working.auto_load = !working.auto_load,
+        2 => working.auto_save = !working.auto_save,
+        3 => working.prompt_save_on_quit = !working.prompt_save_on_quit,
+        4 => working.prompt_load_on_launch = !working.prompt_load_on_launch,
+        5 => working.record_history = !working.record_history,
+        6 => working.show_room_numbers = !working.show_room_numbers,
+        7 => config_cycle_background_tidy(&mut working.background_tidy, delta),
+        8 => config_cycle_aux_storage(&mut working.aux_storage, delta),
+        9 => working.honor_game_colours = !working.honor_game_colours,
+        10 => working.honor_timed_input = !working.honor_timed_input,
+        11 => working.enable_sound = !working.enable_sound,
+        12 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
         _ => {}
     }
 }
