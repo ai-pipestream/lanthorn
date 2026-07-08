@@ -347,3 +347,72 @@ up/down map), so a future edit cannot silently break it.
   paths where the tidy could make room; a room joined by both a compass and an up/down
   edge draws a single compass path and still shows its up/down symbol; compass-only
   regions are visually unchanged.
+
+---
+
+# Phase 4: Regression fixes after real-map testing (perf + #1/#2/#3)
+
+Testing a real 23-room Zork map (`.superpowers/perf/repro-map.json`) exposed a severe
+performance regression and three up/down layout/routing bugs. All root causes were
+verified headlessly against that map.
+
+## Revert the Phase-3 #1 tidy-shove (the perf regression)
+
+The scoped up/down-crossing shove (Phase 3 Task 13) makes the tidy grind ~1.3 s /
+~3,700 `route_lanes` calls per run on maps with **unclearable** up/down crossings —
+and it never converges (the crossings persist, so it pays the full cost and clears
+nothing). It is **reverted**: `overlap_stats` returns to `(illegal, crossings)` and the
+cleanup loop again breaks at `illegal == 0`. "Shove, not cross" is instead achieved by
+correct **routing (#1)** and **placement (#2)**, not by brute-forcing the tidy. (Up/down
+connectors still *appear* in `overlap_stats` as ordinary connectors — that is Phase-2
+routing, harmless and kept — only the active up/down-crossing *pursuit* is removed.)
+
+## #1 — an up/down reciprocal connector must enter from the N/S border
+
+`route/mod.rs` computed a reciprocal up/down connector's **entry** side via `side_for`,
+which is `None` for up/down → it fell through to a geometric heuristic that picks the
+dominant-axis side by cell offset, so for diagonally-placed rooms it chose Left/Right
+(the observed "247→5 leaves the west side"). Fix: use `route_side` (Up→Top, Down→Bottom)
+for the entry side too, so up/down connectors enter from the **north/south border**
+(slot-offset from center) even when the rooms are diagonal. The exit side already used
+`route_side`; this makes entry symmetric.
+
+## #2 — up/down incremental placement must not break a reciprocal N/S link
+
+**Reframed after real-map testing.** The user's #2 ("room 195 ends up wrong, not north of
+28") turned out to be the same defect as the 167/247 break, in the **per-turn live
+placement**, not the final layout: `place_incremental` seats an up/down room by shoving
+whatever occupies the target cell (`shift_beyond`), and the occupant is often a
+*reciprocal-N/S partner* of another room (195's target cell holds 143, which is
+247's reciprocal N/S partner). The Phase-1 shove (commit 36345c5) removed the `!updown`
+guard but never implemented the spec's "yield to reciprocal N/S," so up/down rooms
+knock reciprocal-locked rooms off their column in the live view (a full relayout later
+restores them, which is why saved files look correct).
+
+Fix: in `place_incremental`, an up/down move **yields** (nearest free cell) instead of
+`shift_beyond` when the shove would displace **any** reciprocal-N/S-locked room (detected
+via `detect_chains`' bidirectional N/S pairs, checking the whole `shift_beyond` translate
+set); ordinary occupants are still shoved; compass moves unchanged.
+
+A **soft same-column pull** to make up/down rooms *stack* in their neighbor's column was
+prototyped and **rejected**: it dragged distant up/down satellites several cells into a
+column, manufacturing long connectors that cross the map — worse than the diagonal
+placement it replaced. With the reciprocal-yield fix, up/down rooms simply yield cleanly;
+their final N/S position comes from the weight-1 `layout_offset` hint in relayout, and
+their paths leave the correct N/S border (#1).
+
+## #3 — the align stage must respect up/down vertical hints
+
+`align_free_axes` (`sort.rs`) marks a room's axis "constrained" only via `grid_offset`
+(compass-only), so a room whose only vertical hint is Up/Down is treated as axis-free and
+gets **row/column-locked onto its compass E/W neighbor**, destroying the N/S relationship
+the stress solve achieved (the observed "22 not kept south of 23"). Fix: recognize up/down
+via `layout_offset` so such a room keeps its solved N/S (or E/W) placement.
+
+## Phase 4 verification
+
+Real-map oracle (`.superpowers/perf/repro-map.json`): the tidy is back to ~instant
+(cleanup breaks at `illegal == 0`); the 247→5 connector leaves 247's **north** border
+(slot-offset from center); room 22 lands **southeast** of 23 (east *and* south); rooms 5
+and 195 **stack in their neighbor's column** instead of settling diagonally. Compass-only
+layouts remain unchanged.
