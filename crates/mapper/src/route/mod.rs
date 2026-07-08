@@ -581,6 +581,7 @@ fn path_len(pts: &[(i32, i32)]) -> i32 {
 /// long path to weave around a short one (e.g. 76↔78 weaving aside for the short 180↔78).
 fn direct_route_losers(
     compass: &[&Connection],
+    compass_pairs: &std::collections::BTreeSet<(RoomId, RoomId)>,
     graph: &MapGraph,
     occupied: &std::collections::BTreeSet<(i32, i32)>,
 ) -> std::collections::BTreeSet<usize> {
@@ -591,6 +592,13 @@ fn direct_route_losers(
     let mut cands: Vec<(usize, Vec<(i32, i32)>)> = Vec::new();
     for (ci, c) in compass.iter().enumerate() {
         let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
+        // A pair's direct room-line belongs to its COMPASS edge. When a pair has both, skip the
+        // Up/Down edge so it never becomes the pair's representative (SQ-0224) — the compass edge
+        // (listed elsewhere) takes the contest. Pure Up/Down pairs are absent from `compass_pairs`
+        // and route exactly as before.
+        if matches!(c.dir, Direction::Up | Direction::Down) && compass_pairs.contains(&pair) {
+            continue;
+        }
         if !seen_pairs.insert(pair) {
             continue;
         }
@@ -632,31 +640,27 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     // compass side. An exact-opposite pair is the straight-line special case. ADDITIONAL
     // edges between the same room pair (e.g. a third direction, 239→S→77 alongside
     // 77→E→239 and 239→N→77) stay separate, so every distinct direction remains visible.
-    // Unordered room pairs that already have a compass edge (grid_offset is Some — the true
-    // 8-way compass directions, unlike layout_offset which also covers Up/Down). When the same
-    // pair also has an up/down edge, the compass path is the only one drawn: the up/down edge
-    // still contributes its layout hint elsewhere, but produces no routed connector here. Computed
-    // BEFORE the working-set slice below so the up/down edge can be excluded from the working set
-    // itself, rather than skipped mid-loop — a mid-loop skip would still leave the up/down edge in
-    // the `compass` slice fed to `direct_route_losers`, which picks the FIRST-LISTED edge per pair
-    // as that pair's representative for the longest-straight-line contest; a suppressed up/down
-    // edge listed first would steal that slot from the real compass edge, corrupting which
-    // connector wins a contested direct room-line and breaking the "compass routing stays
-    // byte-identical" invariant (SQ-0219 fix).
+    // Up/Down edges route as their OWN connectors even when the pair also has a compass edge
+    // (SQ-0224): a vertical passage and a horizontal one between the same two rooms are distinct and
+    // both draw. Two guards keep Up/Down from disturbing compass routing: (1) an Up/Down edge and a
+    // compass edge of the same pair sit on SEPARATE trunks (`ch_key` below) so neither collapses into
+    // the other as a merge stub; (2) an Up/Down edge on a pair that ALSO has a compass edge stays out
+    // of the compass straight-line contest (`direct_route_losers`) so it cannot steal that pair's
+    // direct-room-line representative. `compass_pairs` = the unordered pairs that carry a compass
+    // (grid_offset — the true 8-way directions) edge; pure Up/Down pairs are absent from it and keep
+    // their prior routing exactly.
     let compass_pairs: std::collections::BTreeSet<(RoomId, RoomId)> = graph
         .connections()
         .iter()
         .filter(|c| grid_offset(c.dir).is_some())
         .map(|c| (c.origin.min(c.dest), c.origin.max(c.dest)))
         .collect();
+    // Working set: every edge with a layout offset (compass + Up/Down). In/Out/Unknown carry no
+    // offset and are not routed here.
     let compass: Vec<&crate::graph::Connection> = graph
         .connections()
         .iter()
-        .filter(|c| {
-            layout_offset(c.dir).is_some()
-                && !(matches!(c.dir, Direction::Up | Direction::Down)
-                    && compass_pairs.contains(&(c.origin.min(c.dest), c.origin.max(c.dest))))
-        })
+        .filter(|c| layout_offset(c.dir).is_some())
         .collect();
     // Edge indices already drawn — either as their own connector or consumed as the
     // back-edge of an earlier bidirectional pairing.
@@ -665,20 +669,23 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         graph.rooms().filter_map(|r| r.pos).collect();
     // Resolve direct-route line collisions up front so the LONGER connector keeps the straight line
     // and shorter rivals weave — independent of edge listing order.
-    let direct_losers = direct_route_losers(&compass, graph, &occupied);
+    let direct_losers = direct_route_losers(&compass, &compass_pairs, graph, &occupied);
     let mut out: Vec<RoutedConnector> = Vec::new();
-    // The trunk polyline for each unordered room pair, recorded when its connector is built.
-    // A later edge between the same pair becomes a MERGE STUB that joins this trunk.
-    let mut trunk_points: BTreeMap<(RoomId, RoomId), Vec<(i32, i32)>> = BTreeMap::new();
+    // The trunk polyline per (unordered room pair, channel), recorded when its connector is built; a
+    // later edge on the SAME pair AND channel becomes a MERGE STUB that joins this trunk. The channel
+    // bit separates the compass trunk from the Up/Down trunk (SQ-0224) so a pair's vertical and
+    // horizontal passages draw as independent connectors instead of one merging into the other.
+    let mut trunk_points: BTreeMap<(RoomId, RoomId, bool), Vec<(i32, i32)>> = BTreeMap::new();
     for (ci, c) in compass.iter().enumerate() {
         if consumed.contains(&ci) {
             continue; // already drawn as an earlier pair's back-edge
         }
         let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
-        // Extra edge between an already-connected pair → merge stub: route from this edge's exit
-        // side to a junction on the trunk and end there (a T-junction). Only the box-edge
+        let ch_key = (pair.0, pair.1, matches!(c.dir, Direction::Up | Direction::Down));
+        // Extra edge between an already-connected pair+channel → merge stub: route from this edge's
+        // exit side to a junction on the trunk and end there (a T-junction). Only the box-edge
         // departure arrow is drawn; no independent line reaches the destination.
-        if let Some(trunk) = trunk_points.get(&pair) {
+        if let Some(trunk) = trunk_points.get(&ch_key) {
             if let (Some(a), Some(exit)) =
                 (graph.room(c.origin).and_then(|r| r.pos), route_side(c.dir))
             {
@@ -755,7 +762,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                     entry_dir: back.map(|bk| bk.dir),
                     merge: false,
                 });
-                trunk_points.insert(pair, out.last().unwrap().points.clone());
+                trunk_points.insert(ch_key, out.last().unwrap().points.clone());
                 consumed.insert(ci);
                 if let Some(pi) = back_idx {
                     consumed.insert(pi);
@@ -848,7 +855,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             entry_dir: back.map(|bk| bk.dir),
             merge: false,
         });
-        trunk_points.insert(pair, out.last().unwrap().points.clone());
+        trunk_points.insert(ch_key, out.last().unwrap().points.clone());
         consumed.insert(ci);
         if let Some(pi) = back_idx {
             consumed.insert(pi); // the paired back-edge is now drawn too
@@ -921,7 +928,7 @@ fn is_collinear(points: &[(i32, i32)]) -> bool {
     points.iter().all(|p| p.0 == points[0].0) || points.iter().all(|p| p.1 == points[0].1)
 }
 
-fn assign_side_slots(connectors: &mut [RoutedConnector]) {
+fn assign_side_slots(connectors: &mut [RoutedConnector], graph: &MapGraph) {
     // Collect every endpoint as (room, side, is_exit, connector index).
     let mut endpoints: Vec<(RoomId, Side, bool, usize)> = Vec::new();
     for (ci, c) in connectors.iter().enumerate() {
@@ -966,7 +973,7 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
             );
         by_side.entry((room, side)).or_default().push((is_updown, axis_recip, straight, is_exit, ci));
     }
-    for (_key, mut members) in by_side {
+    for (key, mut members) in by_side {
         let has_updown = members.iter().any(|&(is_updown, ..)| is_updown);
         members.sort_by_key(|&(is_updown, axis_recip, straight, is_exit, ci)| {
             // `axis_recip` only applies on sides that host an Up/Down endpoint; elsewhere it is
@@ -976,11 +983,40 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
             let axis_key = std::cmp::Reverse(has_updown && axis_recip);
             (axis_key, std::cmp::Reverse(straight), is_updown, ci, is_exit)
         });
-        for (slot, (.., is_exit, ci)) in members.into_iter().enumerate() {
-            if is_exit {
-                connectors[ci].exit_slot = slot as u16;
+        // The sorted-first endpoint keeps the CENTER slot (0) — the SQ-0216/0222 winner. When the
+        // side has exactly ONE offset endpoint (the common case, incl. the 217->230 / 5->247 fixes),
+        // bias it toward its PARTNER room along this side's tangent axis: partner on the + side ->
+        // slot 1 (+offset), − side -> slot 2 (−offset), so its perpendicular stub bends toward its
+        // partner instead of running across the center connector (SQ-0224 Part B). Both are magnitude
+        // 1, always inside the border-cell clamp. With MORE than one offset, fall back to the original
+        // sequential 1,2,3,… interleave — `slot_offset` alternates sign as magnitude grows, keeping
+        // cells distinct within the side's clamped capacity; packing several same-sign offsets could
+        // exceed the clamp (±1 on a vertical side) and collide.
+        let this_room = key.0;
+        let single_offset = members.len() == 2;
+        for (idx, &(_, _, _, is_exit, ci)) in members.iter().enumerate() {
+            let slot = if idx == 0 {
+                0
+            } else if single_offset {
+                let partner = if is_exit { connectors[ci].dest } else { connectors[ci].origin };
+                let tangent = match (
+                    graph.room(this_room).and_then(|r| r.pos),
+                    graph.room(partner).and_then(|r| r.pos),
+                ) {
+                    (Some(a), Some(b)) => match key.1 {
+                        Side::Top | Side::Bottom => b.0 - a.0, // tangent axis = x
+                        Side::Left | Side::Right => b.1 - a.1, // tangent axis = y
+                    },
+                    _ => 0,
+                };
+                if tangent >= 0 { 1 } else { 2 }
             } else {
-                connectors[ci].entry_slot = slot as u16;
+                idx as u16
+            };
+            if is_exit {
+                connectors[ci].exit_slot = slot;
+            } else {
+                connectors[ci].entry_slot = slot;
             }
         }
     }
@@ -989,7 +1025,7 @@ fn assign_side_slots(connectors: &mut [RoutedConnector]) {
 /// Full logical route: topology + lane assignment.
 pub fn route_lanes(graph: &MapGraph) -> RoutePlan {
     let mut connectors = route_topology(graph);
-    assign_side_slots(&mut connectors);
+    assign_side_slots(&mut connectors, graph);
 
     // Flatten every connector's long runs into a global list with stable ids.
     let mut runs: Vec<(usize, Channel, i32, i32)> = Vec::new();
@@ -1742,51 +1778,30 @@ mod tests {
     }
 
     #[test]
-    fn updown_never_pairs_with_a_compass_edge() {
-        // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the
-        // same two rooms, but up/down must NEVER pair with a compass edge (only with the
-        // exact opposite up/down direction). Since SQ-0219, sharing a pair with a compass
-        // edge SUPPRESSES the up/down edge entirely rather than letting it draw as a
-        // non-reciprocal connector — the compass path is the only one drawn for the pair.
-        //
-        // The Up edge is listed FIRST, before the S edge — the ordering that exposed a
-        // regression where the up/down edge was skipped mid-loop (via `continue`) instead of
-        // being excluded from the working set. That mid-loop skip let the trunk-claim slot for
-        // the pair fall through to the S edge, flipping it from a merge stub (`merge == true`)
-        // to a full trunk (`merge == false`, extra points) relative to the no-Up baseline —
-        // violating the "compass routing stays byte-identical" constraint. Assert the surviving
-        // S connector is IDENTICAL (merge/points/reciprocal) to the same graph without the Up
-        // edge at all, which directly encodes that constraint.
-        let mut with_up = MapGraph::new();
-        with_up.upsert_room(1, "A".into());
-        with_up.upsert_room(2, "B".into());
-        with_up.set_pos(1, (0, 0));
-        with_up.set_pos(2, (0, -1));
-        with_up.add_edge(1, Direction::Up, 2);
-        with_up.add_edge(2, Direction::S, 1);
+    fn updown_does_not_pair_with_a_compass_edge_but_still_draws() {
+        // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the same
+        // two rooms, but up/down must NEVER PAIR (collapse into a reciprocal) with a compass edge
+        // — it pairs only with the exact opposite up/down direction. Since SQ-0224 the up/down
+        // edge still DRAWS as its own connector alongside the compass one (no longer suppressed),
+        // on a SEPARATE trunk, so it must not steal the compass edge's trunk (turning the S
+        // connector into a merge stub). The Up edge is listed FIRST to exercise that ordering.
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::Up, 2);
+        g.add_edge(2, Direction::S, 1);
 
-        let plan = route_lanes(&with_up);
-        let up = plan.connectors.iter().find(|c| c.exit_dir == Direction::Up);
-        assert!(up.is_none(), "up/down must never pair with a compass edge — it is suppressed, not routed");
-        let s_with_up = plan.connectors.iter().find(|c| c.exit_dir == Direction::S)
+        let plan = route_lanes(&g);
+        let up = plan.connectors.iter().find(|c| c.exit_dir == Direction::Up)
+            .expect("the up/down edge draws as its own connector (SQ-0224)");
+        assert_ne!(up.entry_dir, Some(Direction::S),
+            "the up/down connector did not pair with the compass S edge");
+        let s = plan.connectors.iter().find(|c| c.exit_dir == Direction::S)
             .expect("the compass edge is still routed");
-
-        let mut without_up = MapGraph::new();
-        without_up.upsert_room(1, "A".into());
-        without_up.upsert_room(2, "B".into());
-        without_up.set_pos(1, (0, 0));
-        without_up.set_pos(2, (0, -1));
-        without_up.add_edge(2, Direction::S, 1);
-        let baseline = route_lanes(&without_up);
-        let s_baseline = baseline.connectors.iter().find(|c| c.exit_dir == Direction::S)
-            .expect("the compass edge is routed in the baseline graph too");
-
-        assert_eq!(s_with_up.merge, s_baseline.merge,
-            "the S connector's trunk/merge-stub role must not change when a suppressed Up edge is present");
-        assert_eq!(s_with_up.points, s_baseline.points,
-            "the S connector's polyline must be byte-identical with or without the suppressed Up edge");
-        assert_eq!(s_with_up.reciprocal, s_baseline.reciprocal,
-            "the S connector's reciprocal flag must not change when a suppressed Up edge is present");
+        assert!(!s.merge,
+            "the S connector stays a full connector, not a merge stub of the up/down trunk");
     }
 
     #[test]
@@ -1863,6 +1878,37 @@ mod tests {
     }
 
     #[test]
+    fn single_offset_slot_fans_toward_the_partner_room() {
+        // A room whose center slot is taken by a straight N reciprocal (to room 2, due north),
+        // plus exactly ONE offset connector on its Top side. The single offset fans toward its
+        // partner: a WEST partner takes a − (even) slot, an EAST partner a + (odd) slot — so the
+        // offset stub bends toward its partner instead of across the center line (SQ-0224 Part B).
+        // Both are magnitude-1 cells, always clamp-safe. (With more than one offset the assignment
+        // falls back to the original sequential interleave, so partner-bias is a single-offset rule.)
+        use crate::direction::Direction;
+        let build = |offset_dir: Direction, partner_x: i32| {
+            let mut g = MapGraph::new();
+            for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+            g.set_pos(1, (0, 0));
+            g.set_pos(2, (0, -1)); // due north: straight N/S reciprocal → center winner
+            g.set_pos(3, (partner_x, -1)); // the single offset's partner (east or west)
+            g.add_edge(1, Direction::N, 2);
+            g.add_edge(2, Direction::S, 1);
+            g.add_edge(1, offset_dir, 3);
+            route_lanes(&g)
+        };
+        let slot = |plan: &RoutePlan, dir: Direction| {
+            plan.connectors.iter().find(|c| c.origin == 1 && c.exit_dir == dir).map(|c| c.exit_slot).unwrap()
+        };
+        let west = build(Direction::NW, -1);
+        let east = build(Direction::NE, 1);
+        assert_eq!(slot(&west, Direction::N), 0, "the straight N reciprocal keeps the center slot");
+        assert_ne!(slot(&west, Direction::NW), 0, "the offset is not the center winner");
+        assert_eq!(slot(&west, Direction::NW) % 2, 0, "west-partner offset takes a − (even) slot");
+        assert_eq!(slot(&east, Direction::NE) % 2, 1, "east-partner offset takes a + (odd) slot");
+    }
+
+    #[test]
     fn route_side_puts_up_on_top_and_down_on_bottom() {
         use crate::direction::Direction;
         use crate::router::route_side;
@@ -1873,45 +1919,46 @@ mod tests {
     }
 
     #[test]
-    fn compass_edge_suppresses_updown_connector_on_same_pair() {
+    fn compass_and_updown_on_same_pair_both_draw() {
         use crate::direction::Direction;
         use crate::graph::MapGraph;
 
-        // A--North-->B AND A--Up-->B on the same pair: only the compass path is drawn.
+        // A--East-->B AND A--Up-->B on the same pair: BOTH a compass connector and an up/down
+        // connector are drawn, on their own sides (SQ-0224 reverses SQ-0219's suppression — a
+        // horizontal and a vertical passage between the same two rooms are distinct).
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
         g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, -1));
-        g.add_edge(1, Direction::N, 2);
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
         g.add_edge(1, Direction::Up, 2);
 
         let plan = route_lanes(&g);
         let updown: Vec<_> = plan.connectors.iter()
             .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
             .collect();
-        assert_eq!(updown.len(), 0, "the up/down connector is suppressed when a compass edge shares the pair");
+        assert_eq!(updown.len(), 1, "the up/down connector is now drawn alongside the compass one");
         let compass: Vec<_> = plan.connectors.iter()
-            .filter(|c| matches!(c.exit_dir, Direction::N | Direction::S))
+            .filter(|c| matches!(c.exit_dir, Direction::E | Direction::W))
             .collect();
-        assert_eq!(compass.len(), 1, "the compass connector is still drawn");
+        assert_eq!(compass.len(), 1, "the compass connector is drawn");
+        assert_ne!(updown[0].exit, compass[0].exit,
+            "the two passages leave on different sides (Top for Up vs Right for E)");
     }
 
     #[test]
-    fn suppressed_updown_does_not_perturb_contested_direct_route_priority() {
-        // Regression for the SQ-0219 mid-loop-`continue` bug: `direct_route_losers` picks the
-        // FIRST-LISTED edge per room pair as that pair's "representative" candidate for the
-        // longest-straight-line contest. If a suppressed Up/Down edge is still present in the
-        // `compass` slice passed to that pre-pass (merely skipped later, inside the main loop),
-        // it steals the representative slot for its pair — so the REAL compass edge for that
-        // pair is never entered into the contest, and can wrongly win (or lose) a contested
-        // direct room-line against another edge's route. The fix must exclude the up/down edge
-        // from the working set BEFORE `direct_route_losers` runs, not just skip it later.
+    fn updown_stays_out_of_the_compass_direct_route_contest() {
+        // `direct_route_losers` decides which connector keeps a contested straight room-line: the
+        // LONGER one wins, the shorter weaves. An up/down edge sharing a pair with a compass edge
+        // must stay OUT of that contest (SQ-0224) so it cannot steal the pair's representative slot
+        // and flip who wins — even though, since SQ-0224, the up/down edge now DRAWS as its own
+        // connector.
         //
-        // T(1) is the contested destination. A(2, far) and B(3, near) both want a straight W
-        // line into T down its column. Per `longer_direct_route_keeps_the_contested_line`, the
-        // LONGER connector (A) must keep the straight line; the shorter (B) must weave. B also
-        // carries an Up edge to T (listed FIRST, sharing B's pair) that SQ-0219 suppresses.
+        // T(1) is the contested destination. A(2, far) and B(3, near) both want a straight W line
+        // into T. The LONGER connector (A) must keep the straight line. B also carries an Up edge
+        // to T (listed FIRST, sharing B's pair). Assert the contest WINNER A->T is byte-identical
+        // with or without B's Up edge (the guard works), and that B's Up edge now draws.
         let build = |with_up: bool| {
             let mut g = MapGraph::new();
             for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
@@ -1919,7 +1966,7 @@ mod tests {
             g.set_pos(2, (3, 4)); // A (far)
             g.set_pos(3, (1, 2)); // B (near)
             if with_up {
-                g.add_edge(3, Direction::Up, 1); // shares B's pair; listed first; suppressed
+                g.add_edge(3, Direction::Up, 1); // shares B's pair; listed first
             }
             g.add_edge(3, Direction::W, 1); // B -> T, short contested line
             g.add_edge(2, Direction::W, 1); // A -> T, long contested line
@@ -1927,21 +1974,15 @@ mod tests {
         };
         let with_up = route_lanes(&build(true));
         let without_up = route_lanes(&build(false));
-        let b_with = with_up.connectors.iter().find(|c| c.origin == 3 && c.dest == 1)
-            .expect("B->T connector is routed");
-        let b_without = without_up.connectors.iter().find(|c| c.origin == 3 && c.dest == 1)
-            .expect("B->T connector is routed");
-        assert_eq!(b_with.merge, b_without.merge,
-            "B->T's merge flag must not change based on a suppressed Up edge sharing its pair");
-        assert_eq!(b_with.points, b_without.points,
-            "B->T's polyline (and hence who wins the contested direct line) must be byte-identical \
-             with or without the suppressed Up edge: {:?} vs {:?}", b_with.points, b_without.points);
         let a_with = with_up.connectors.iter().find(|c| c.origin == 2 && c.dest == 1)
             .expect("A->T connector is routed");
         let a_without = without_up.connectors.iter().find(|c| c.origin == 2 && c.dest == 1)
             .expect("A->T connector is routed");
         assert_eq!(a_with.points, a_without.points,
-            "A->T's polyline must also be unaffected by B's suppressed Up edge: {:?} vs {:?}", a_with.points, a_without.points);
+            "the contest winner A->T's straight line must be unaffected by B's Up edge staying out \
+             of the contest: {:?} vs {:?}", a_with.points, a_without.points);
+        assert!(with_up.connectors.iter().any(|c| c.origin == 3 && c.exit_dir == Direction::Up),
+            "B's Up edge now draws as its own connector (SQ-0224)");
     }
 
     #[test]

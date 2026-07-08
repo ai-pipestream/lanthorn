@@ -1999,6 +1999,7 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+
     #[test]
     fn up_connector_draws_updown_glyph_on_border_not_arrow() {
         // A at origin, B directly north, reached by Up. At Boxes zoom the Up connector
@@ -3676,11 +3677,12 @@ mod tests {
     }
 
     #[test]
-    fn compass_covered_up_pair_suppresses_dotted_but_keeps_glyph() {
-        // Task 11 (SQ-0219): when a compass edge already joins the same room pair, the up/down
-        // connector is suppressed so only the compass path is drawn — no dotted connector body.
-        // Task 12 (SQ-0219): the room-level up glyph must still render (on the border) so the
-        // vertical access reads even though the connector no longer carries it.
+    fn compass_and_updown_on_same_pair_both_draw_without_illegal_overlap() {
+        // SQ-0224 reverses SQ-0219's suppression: when a compass edge AND an up/down edge join the
+        // same room pair, BOTH draw (the compass path plus a dotted up/down body), and the
+        // room-level up glyph still renders on the border. Even in the same-axis case here (N
+        // compass + Up, vertically adjacent — the worst case, both vertical) the two connectors
+        // share the side at distinct slots and must not form an ILLEGAL overlap.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -3688,7 +3690,9 @@ mod tests {
         g.set_pos(1, (1, 1));
         g.set_pos(2, (1, 0)); // due north of room 1
         g.add_edge(1, Direction::Up, 2);
-        g.add_edge(1, Direction::N, 2); // a compass connector already joins the pair
+        g.add_edge(1, Direction::N, 2); // a compass connector also joins the pair
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "both-drawn same-pair connectors must not form an illegal overlap");
         let rm = render(&g);
         let mut st = AppState::default();
         st.scroll = rm.bounds.0;
@@ -3696,9 +3700,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
         let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
-        assert!(!has_dotted, "the up/down connector is suppressed when a compass edge covers the pair");
+        assert!(has_dotted, "the up/down connector now draws its dotted body alongside the compass path");
         let has_up_glyph = buf.content.iter().any(|c| c.symbol() == "↑");
-        assert!(has_up_glyph, "the room still shows the up glyph on its border (Task 12)");
+        assert!(has_up_glyph, "the room still shows the up glyph on its border");
     }
 
     #[test]
