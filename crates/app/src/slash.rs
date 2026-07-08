@@ -63,6 +63,8 @@ pub enum SlashOutcome {
     /// (`Some(n)`). Handled in `main.rs::dispatch_slash_outcome` because it
     /// needs `AppState` (audio backend + sound blorb).
     PlaySound(Option<u32>),
+    /// Load a standalone map file (path argument) into the current session.
+    LoadMap(String),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -274,6 +276,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-inspector", category: Category::Map, context: Context::Map,
         usage: "toggle-inspector", description: "toggle the room-inspector overlay",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInspector) },
+    CommandSpec { name: "load-map", category: Category::Map, context: Context::Global,
+        usage: "load-map <path>", description: "load a standalone map file into the current session",
+        dispatch: |a| match a.first() {
+            Some(p) => SlashOutcome::LoadMap(p.to_string()),
+            None => SlashOutcome::Error("load-map: a file path is required".into()),
+        } },
     CommandSpec { name: "toggle-room-numbers", category: Category::Map, context: Context::Global,
         usage: "toggle-room-numbers", description: "toggle room-number labels",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomNumbers) },
@@ -553,6 +561,17 @@ mod tests {
     }
 
     #[test]
+    fn load_map_parses_path_argument() {
+        assert!(matches!(parse("load-map ~/Downloads/map.json", '/'),
+            SlashOutcome::LoadMap(p) if p == "~/Downloads/map.json"));
+    }
+
+    #[test]
+    fn load_map_without_path_is_an_error() {
+        assert!(matches!(parse("load-map", '/'), SlashOutcome::Error(_)));
+    }
+
+    #[test]
     fn slash_style_opens_editor() {
         use crate::input::Action;
         assert!(matches!(parse("open-style-editor", '/'), SlashOutcome::Action(Action::OpenStyleEditor)));
@@ -627,9 +646,9 @@ mod tests {
         assert_eq!(by("save-game").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (52 commands: Game 12, Map 20, View 4,
+        // Total count matches the spec table (53 commands: Game 12, Map 21, View 4,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 52, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 53, "registry must match the spec's Full command table");
     }
 
     #[test]

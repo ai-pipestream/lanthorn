@@ -24,7 +24,7 @@ use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid};
 use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
-use app::persist_files::{delete_save, list_saves, save_game, restore_game, save_named};
+use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::dialog::{DialogRects, DialogStyle};
@@ -3992,6 +3992,24 @@ fn dispatch_slash_outcome(
                         Err(e) => state.set_status(format!("load failed: {}", e)),
                     }
                 }
+            }
+        }
+        SlashOutcome::LoadMap(path) => {
+            let full = app::colors::expand_path(&path, &std::env::current_dir().unwrap_or_default());
+            match load_map(&full) {
+                Some(m) => {
+                    *mapper = m;
+                    state.set_viewed_layer(None);
+                    if let Some(rid) = mapper.graph.current() {
+                        state.select_room(Some(rid));
+                        if let Some(pos) = mapper.graph.room(rid).and_then(|r| r.pos) {
+                            let (pw, ph) = map_pane_dims(map_rect);
+                            state.recenter_on(pos, pw, ph);
+                        }
+                    }
+                    state.set_status(format!("loaded map: {}", full.display()));
+                }
+                None => state.set_status(format!("load-map failed: {}", full.display())),
             }
         }
         SlashOutcome::Reset { map: reset_map } => {

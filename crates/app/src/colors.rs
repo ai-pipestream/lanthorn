@@ -744,7 +744,7 @@ fn builtin_scheme_text(name: &str) -> Option<&'static str> {
 }
 
 /// Expand `~` in a path string and resolve relative paths against `base_dir`.
-pub(crate) fn expand_path(s: &str, base_dir: &Path) -> std::path::PathBuf {
+pub fn expand_path(s: &str, base_dir: &Path) -> std::path::PathBuf {
     let expanded = if s.starts_with('~') {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         std::path::PathBuf::from(home).join(s.trim_start_matches("~/").trim_start_matches('~'))
