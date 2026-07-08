@@ -38,13 +38,18 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
                 return;
             }
             // Occupied. A cardinal move (including up/down) shifts rooms beyond aside to open
-            // the ideal cell; a diagonal instead yields to the nearest free cell.
+            // the ideal cell; a diagonal instead yields to the nearest free cell. Up/down are
+            // the exception: they must yield rather than shove when the shove would displace a
+            // room that is reciprocal-N/S-locked to a neighbor (e.g. an Up room must not knock a
+            // reciprocal N/S pair off-column in the live per-turn view).
             let is_cardinal = (delta.0 == 0) ^ (delta.1 == 0);
-            if is_cardinal {
+            let is_updown = matches!(dir, Direction::Up | Direction::Down);
+            if is_cardinal && !(is_updown && would_displace_reciprocal_ns(graph, ideal, delta, layer)) {
                 shift_beyond(graph, ideal, delta, layer);
                 graph.set_pos(dest, ideal);
             } else {
-                // Diagonal fallback: nearest free cell from the ideal.
+                // Diagonal fallback, or an up/down move yielding rather than shoving a
+                // reciprocal-N/S-locked room: nearest free cell from the ideal.
                 let occ = occupied_cells_in_layer(graph, layer);
                 let cell = nearest_free_cell(&occ, ideal);
                 graph.set_pos(dest, cell);
@@ -59,6 +64,19 @@ pub fn place_incremental(graph: &mut MapGraph, prev: RoomId, dest: RoomId, dir: 
     }
 }
 
+/// Whether `pos` lies at or beyond `ideal` along the `step` axis (the direction
+/// `shift_beyond` would translate a room occupying `pos`). `step` must be a
+/// cardinal unit vector.
+fn is_beyond(pos: (i32, i32), ideal: (i32, i32), step: (i32, i32)) -> bool {
+    match step {
+        (1, 0) => pos.0 >= ideal.0,
+        (-1, 0) => pos.0 <= ideal.0,
+        (0, 1) => pos.1 >= ideal.1,
+        (0, -1) => pos.1 <= ideal.1,
+        _ => false,
+    }
+}
+
 /// Translate every placed room at or beyond `ideal` along the `step` axis by
 /// one `step`, opening `ideal`. `step` must be a cardinal unit vector.
 /// Only moves rooms in the given `layer`.
@@ -66,18 +84,29 @@ fn shift_beyond(graph: &mut MapGraph, ideal: (i32, i32), step: (i32, i32), layer
     let ids: Vec<RoomId> = graph.rooms().filter(|r| r.layer == layer).map(|r| r.id).collect();
     for id in ids {
         if let Some(pos) = graph.room(id).and_then(|r| r.pos) {
-            let beyond = match step {
-                (1, 0) => pos.0 >= ideal.0,
-                (-1, 0) => pos.0 <= ideal.0,
-                (0, 1) => pos.1 >= ideal.1,
-                (0, -1) => pos.1 <= ideal.1,
-                _ => false,
-            };
-            if beyond {
+            if is_beyond(pos, ideal, step) {
                 graph.set_pos(id, (pos.0 + step.0, pos.1 + step.1));
             }
         }
     }
+}
+
+/// Whether shoving rooms beyond `ideal` along `step` (as `shift_beyond` would) would
+/// displace a room that is reciprocal-N/S-locked: it has a bidirectional N/S edge to a
+/// neighbor (e.g. `R S->Q` and `Q N->R`). Such rooms must be yielded around, not shoved,
+/// by an up/down placement — shoving them breaks the reciprocal N/S link in the live
+/// per-turn view (a later full relayout would fix it, but the live view must not regress).
+fn would_displace_reciprocal_ns(
+    graph: &MapGraph,
+    ideal: (i32, i32),
+    step: (i32, i32),
+    layer: crate::layer::LayerId,
+) -> bool {
+    let chains = super::detect_chains(graph);
+    graph
+        .rooms()
+        .filter(|r| r.layer == layer)
+        .any(|r| r.pos.is_some_and(|pos| is_beyond(pos, ideal, step)) && chains.ns.contains_key(&r.id))
 }
 
 #[cfg(test)]
@@ -254,5 +283,27 @@ mod tests {
 
         assert_eq!(g.room(3).unwrap().pos, Some((0, -1)), "Up dest lands directly north of A");
         assert_eq!(g.room(2).unwrap().pos, Some((0, -2)), "the ordinary room was shoved aside");
+    }
+
+    #[test]
+    fn updown_yields_to_reciprocal_ns_partner_instead_of_shoving() {
+        // 247 (A) at origin; 167 (B) sits directly north of it via a RECIPROCAL N/S pair
+        // (247 N->167, 167 S->247), so B is reciprocal-N/S-locked to A.
+        let mut g = MapGraph::new();
+        g.upsert_room(247, "A".into());
+        g.upsert_room(167, "B".into());
+        g.set_pos(247, (0, 0));
+        g.set_pos(167, (0, -1));
+        g.add_edge(247, Direction::N, 167);
+        g.add_edge(167, Direction::S, 247);
+
+        // Discover C (5) by going Up from A (247). C wants the same cell as B (167), but
+        // B is reciprocal-N/S-locked, so C must yield instead of shoving B off its column.
+        g.upsert_room(5, "C".into());
+        place_incremental(&mut g, 247, 5, Direction::Up);
+
+        assert_eq!(g.room(167).unwrap().pos, Some((0, -1)), "reciprocal N/S partner must not be shoved");
+        let c_pos = g.room(5).unwrap().pos.unwrap();
+        assert_ne!(c_pos, (0, -1), "C must not land on B's cell");
     }
 }
