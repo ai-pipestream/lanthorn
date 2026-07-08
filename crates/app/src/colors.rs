@@ -221,6 +221,10 @@ pub struct ColorScheme {
     pub connector_distorted: Style,
     /// Portal (Up/Down/In/Out) connector line.
     pub portal_connector: Style,
+    /// A "shared path" connector — one that collapses several same-pair compass
+    /// directions into one line. Deliberately BRIGHTER than `connector`; its line,
+    /// arrowheads, and secondary markers all use this color.
+    pub shared_path: Style,
     /// Status bar (top of transcript pane).
     pub status_bar: Style,
     /// Transcript text (body of transcript pane).
@@ -369,6 +373,7 @@ impl ColorScheme {
             connector: Style::new().fg(Color::Cyan),
             connector_distorted: Style::new().fg(Color::Magenta),
             portal_connector: Style::new().fg(Color::Cyan),
+            shared_path: Style::new().fg(Color::LightCyan),
             status_bar: Style::new().add_modifier(Modifier::REVERSED),
             transcript: Style::new().fg(Color::White),
             suggestion: Style::new().fg(Color::DarkGray),
@@ -500,6 +505,7 @@ impl ColorScheme {
         let connector_distorted_fg =
             resolve_element("connector_distorted", scheme.palette[5]);
         let portal_connector_fg = resolve_element("portal_connector", scheme.palette[6]);
+        let shared_path_fg = resolve_element("shared_path", scheme.palette[14]); // bright cyan slot
         let transcript_fg = resolve_element("transcript", fg);
         let suggestion_fg = resolve_element("suggestion", scheme.palette[8]);
         let focused_border_fg = resolve_element("focused_border", scheme.palette[6]);
@@ -553,6 +559,7 @@ impl ColorScheme {
             connector: Style::new().fg(connector_fg),
             connector_distorted: Style::new().fg(connector_distorted_fg),
             portal_connector: Style::new().fg(portal_connector_fg),
+            shared_path: Style::new().fg(shared_path_fg),
             status_bar,
             transcript: Style::new().fg(transcript_fg),
             suggestion: Style::new().fg(suggestion_fg),

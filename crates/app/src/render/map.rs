@@ -763,10 +763,11 @@ fn lane_pixel(
 }
 
 /// A departure/arrival glyph queued by `render_lane_connectors` for `draw_connector_arrows` to
-/// paint on top of the rooms: `(virtual pixel, glyph string, distorted, is_portal, owning room)`.
-/// `is_portal` selects `colors.portal_connector` for up/down glyphs instead of
-/// `colors.connector`/`colors.connector_distorted`.
-type Arrowhead = ((i32, i32), String, bool, bool, RoomId);
+/// paint on top of the rooms: `(virtual pixel, glyph string, distorted, is_portal, owning room,
+/// shared)`. `is_portal` selects `colors.portal_connector` for up/down glyphs instead of
+/// `colors.connector`/`colors.connector_distorted`. `shared` selects `colors.shared_path` for a
+/// connector that collapsed secondary compass directions into itself.
+type Arrowhead = ((i32, i32), String, bool, bool, RoomId, bool);
 
 /// The cells (in virtual space) one connector writes, each with the direction-bit mask it
 /// contributes there, plus its departure/arrival arrowhead anchors. This is the single
@@ -951,10 +952,14 @@ fn render_lane_connectors(
     for conn in plan.connectors.iter() {
         let Some(plot) = plot_connector(conn, cols, rows) else { continue };
         let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
+        let has_secondary = !conn.secondary_exit.is_empty() || !conn.secondary_entry.is_empty();
         // Up/down connectors always use the portal selector (they're never distorted);
-        // compass connectors keep their existing connector/connector_distorted styling.
+        // a connector with collapsed secondaries uses the brighter shared_path color;
+        // compass connectors otherwise keep their existing connector/connector_distorted styling.
         let style = if is_updown {
             colors.portal_connector
+        } else if has_secondary {
+            colors.shared_path
         } else if conn.distorted {
             colors.connector_distorted
         } else {
@@ -990,7 +995,7 @@ fn render_lane_connectors(
         } else {
             arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, is_updown, conn.origin));
+        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, is_updown, conn.origin, has_secondary));
         // Far-end glyph only for true reciprocal connectors (collapsed opposite pairs). An
         // up/down reciprocal draws its own up/down glyph (from the back-edge's direction) at
         // the far end too, same as the departure end, rather than an arrow.
@@ -1001,7 +1006,7 @@ fn render_lane_connectors(
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, is_updown, conn.dest));
+            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, is_updown, conn.dest, has_secondary));
         }
     }
     arrowheads
@@ -1026,12 +1031,14 @@ fn draw_connector_arrows(
     current_room: Option<RoomId>,
 ) {
     let (off_x, off_y) = offset;
-    for (pos, glyph, distorted, is_portal, room_id) in arrowheads {
+    for (pos, glyph, distorted, is_portal, room_id, shared) in arrowheads {
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
             let connector_style = if *is_portal {
                 colors.portal_connector
+            } else if *shared {
+                colors.shared_path
             } else if *distorted {
                 colors.connector_distorted
             } else {
@@ -2102,8 +2109,8 @@ mod tests {
             &state.colors,
         );
 
-        let dep = arrowheads.iter().find(|(_, _, _, _, room)| *room == 1).expect("A's departure glyph");
-        let arr = arrowheads.iter().find(|(_, _, _, _, room)| *room == 2).expect("B's arrival glyph");
+        let dep = arrowheads.iter().find(|(_, _, _, _, room, _)| *room == 1).expect("A's departure glyph");
+        let arr = arrowheads.iter().find(|(_, _, _, _, room, _)| *room == 2).expect("B's arrival glyph");
         assert_eq!(dep.1, "↑", "A (lower room) shows the up glyph on its top border");
         assert_eq!(arr.1, "↓", "B (upper room) shows the down glyph on its bottom border, not an arrow");
     }
@@ -4171,7 +4178,7 @@ mod tests {
         assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
 
         // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 10)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 10, false)];
         let colors = ColorScheme::terminal_default();
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, None);
 
@@ -4202,7 +4209,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the selected room (not current).
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -4236,7 +4243,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is BOTH selected AND current.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), Some(7));
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -4268,7 +4275,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the current room, NOT selected.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, Some(7));
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -4297,7 +4304,7 @@ mod tests {
         colors.connector = Style::new().fg(Color::Green);
 
         // Arrow belongs to room 5; selected room is 7 — different rooms.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 5)];
+        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 5, false)];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -4649,5 +4656,34 @@ mod tests {
             assert!(!row(y).contains("Foyer"), "manifest must not be drawn in panel row {y}");
         }
         assert!(row(PANEL_H).contains("Foyer"), "manifest should start at row PANEL_H");
+    }
+
+    #[test]
+    fn shared_connector_line_uses_shared_path_color() {
+        use crate::state::AppState;
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "W".into());
+        g.upsert_room(217, "S".into());
+        g.set_pos(68, (0, 0));
+        g.set_pos(217, (1, 1));
+        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
+                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
+            g.add_edge(o, d, dst);
+        }
+        let state = AppState::default(); // Boxes zoom by default
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        // At least one cell painted with the shared_path fg color exists (the shared line/arrow).
+        // Compared via `cell.fg` (not `cell.style() ==`, which can never match a partially-set
+        // Style: ratatui's `Cell::set_style` patches rather than replaces, so `Cell::style()`
+        // always synthesizes concrete `bg`/`underline_color`, unlike `shared_path`'s bg: None).
+        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let found = (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .any(|(x, y)| buf.cell((x, y)).map(|c| c.fg == shared_fg).unwrap_or(false));
+        assert!(found, "the collapsed pair's shared path must paint with shared_path color");
     }
 }
