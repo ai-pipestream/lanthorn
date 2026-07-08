@@ -1113,67 +1113,66 @@ fn draw_secondary_markers(
     let arrows = &state.symbols.arrows;
     let cell_of = |id: RoomId| rm.rooms.iter().find(|r| r.id == id).map(|r| r.cell);
 
-    // The arrowhead anchor + the inward step toward the box interior, chosen the SAME way
-    // `plot_connector` places the connector's own arrowhead: a diagonal end sits on the box
-    // CORNER (`corner_anchor`) and steps diagonally inward; a cardinal end sits on the side
-    // (`box_edge_anchor` at its slot) and steps perpendicular. Using `box_edge_anchor`
-    // unconditionally would strand a diagonal connector's markers on a side midpoint while its
-    // arrow sits at the corner — i.e. adrift inside the room.
-    let anchor_inward = |cell: (i32, i32), side: Side, slot: u16, diag: Option<Direction>|
-     -> ((i32, i32), (i32, i32), i32) {
+    // Stamp the secondaries at one end, in the border slot right next to the retained arrowhead.
+    // DIAGONAL end: the arrowhead is on the box CORNER (`corner_anchor`); each secondary hugs a
+    // border edge one slot from the corner — a vertical secondary (N/S) slides along the corner's
+    // horizontal edge, a horizontal one (E/W) along its vertical edge, a diagonal one steps
+    // inward diagonally. CARDINAL end: the arrowhead is on a side (`box_edge_anchor` at its slot);
+    // the marker steps one cell inward, perpendicular to that side. `ix`/`iy` are the inward signs.
+    let stamp = |dirs: &[Direction], cell: (i32, i32), side: Side, slot: u16,
+                 diag: Option<Direction>, buf: &mut Buffer| {
         match diag {
             Some(d) if mapper::direction::is_diagonal(d) => {
-                let a = corner_anchor(cols, rows, cell, d);
-                let inw = match d {
+                let (cx, cy) = corner_anchor(cols, rows, cell, d);
+                let (ix, iy) = match d {
                     Direction::NE => (-1, 1),
                     Direction::NW => (1, 1),
                     Direction::SE => (-1, -1),
                     Direction::SW => (1, -1),
                     _ => (0, 0),
                 };
-                (a, inw, (BOX_W - 2).min(BOX_H - 2))
+                let (mut sx, mut sy) = (0, 0); // per-axis stack counters for multiple secondaries
+                for dir in dirs {
+                    let Some(go) = mapper::direction::grid_offset(*dir) else { continue };
+                    let (mx, my) = if go.0 != 0 && go.1 != 0 {
+                        sx += 1; sy += 1;
+                        (cx + ix * sx, cy + iy * sy) // diagonal secondary: step in diagonally
+                    } else if go.1 != 0 {
+                        sx += 1;
+                        (cx + ix * sx, cy) // vertical (N/S): slide along the horizontal edge
+                    } else {
+                        sy += 1;
+                        (cx, cy + iy * sy) // horizontal (E/W): slide along the vertical edge
+                    };
+                    put_char(buf, mx + off_x, my + off_y, arrow_for_direction(*dir, arrows), style, area);
+                }
             }
             _ => {
-                let a = box_edge_anchor(cols, rows, cell, side, slot);
-                let inw = match side {
+                let (ax, ay) = box_edge_anchor(cols, rows, cell, side, slot);
+                let (dx, dy) = match side {
                     Side::Right => (-1, 0),
                     Side::Left => (1, 0),
                     Side::Top => (0, 1),
                     Side::Bottom => (0, -1),
                 };
-                let depth = match side {
-                    Side::Left | Side::Right => BOX_W - 2,
-                    Side::Top | Side::Bottom => BOX_H - 2,
-                };
-                (a, inw, depth)
+                for (k, dir) in dirs.iter().enumerate() {
+                    let step = k as i32 + 1;
+                    put_char(buf, ax + dx * step + off_x, ay + dy * step + off_y,
+                        arrow_for_direction(*dir, arrows), style, area);
+                }
             }
-        }
-    };
-
-    let stamp = |dirs: &[Direction], anchor: (i32, i32), inw: (i32, i32), depth: i32,
-                 buf: &mut Buffer| {
-        for (k, dir) in dirs.iter().enumerate() {
-            let step = k as i32 + 1;
-            if step > depth {
-                break; // interior full (never happens for the realistic ≤2 case)
-            }
-            let ch = arrow_for_direction(*dir, arrows);
-            put_char(buf, anchor.0 + inw.0 * step + off_x, anchor.1 + inw.1 * step + off_y,
-                ch, style, area);
         }
     };
 
     for conn in &rm.plan.connectors {
         if !conn.secondary_exit.is_empty() {
             if let Some(cell) = cell_of(conn.origin) {
-                let (a, inw, depth) = anchor_inward(cell, conn.exit, conn.exit_slot, Some(conn.exit_dir));
-                stamp(&conn.secondary_exit, a, inw, depth, buf);
+                stamp(&conn.secondary_exit, cell, conn.exit, conn.exit_slot, Some(conn.exit_dir), buf);
             }
         }
         if !conn.secondary_entry.is_empty() {
             if let Some(cell) = cell_of(conn.dest) {
-                let (a, inw, depth) = anchor_inward(cell, conn.entry, conn.entry_slot, conn.entry_dir);
-                stamp(&conn.secondary_entry, a, inw, depth, buf);
+                stamp(&conn.secondary_entry, cell, conn.entry, conn.entry_slot, conn.entry_dir, buf);
             }
         }
     }
@@ -4854,8 +4853,10 @@ mod tests {
         let arrow = find(&se).expect("SE departure arrowhead present");
         let marker = find(&south).expect("S secondary marker present");
         let (dx, dy) = ((arrow.0 - marker.0).abs(), (arrow.1 - marker.1).abs());
-        assert!(dx <= 1 && dy <= 1 && (dx, dy) != (0, 0),
-            "S marker must sit adjacent to the SE arrowhead, got arrow={arrow:?} marker={marker:?}");
+        // Orthogonally adjacent (shares an edge with the arrowhead cell), i.e. in the border slot
+        // beside it — NOT one cell diagonally inward (dx+dy==2), which reads as "a space away".
+        assert_eq!(dx + dy, 1,
+            "S marker must sit in the border slot beside the SE arrowhead, got arrow={arrow:?} marker={marker:?}");
     }
 
     #[test]
