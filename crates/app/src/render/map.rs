@@ -1706,6 +1706,32 @@ fn move_keeps_updown_sides(
     true
 }
 
+/// Per-room axis lock derived from reciprocal cardinal chains, mirroring the hard equality the
+/// VPSC solver (`relayout_auto`) enforces. A room in a reciprocal N/S chain (shares a column) is
+/// COLUMN-locked — a greedy cleanup move may only change its Y, never its X; a room in a reciprocal
+/// E/W chain (shares a row) is ROW-locked — only its X, never its Y. A room in BOTH is fully pinned.
+/// The greedy stages would otherwise break a reciprocal by sliding a locked room off its shared axis
+/// to clear an overlap; this is a hard constraint (same spirit as `move_keeps_updown_sides`), so an
+/// overlap that can only be cleared by moving a reciprocal room off-axis is left as a residual.
+///
+/// Precomputed ONCE per cleanup call: chains are a pure function of the graph's connections, which
+/// the greedy passes never mutate (they only `set_pos`), so the lock never changes mid-cleanup.
+/// Returns `(x_locked, y_locked)` per room; absent rooms are unrestricted.
+fn reciprocal_axis_locks(
+    graph: &mapper::graph::MapGraph,
+) -> std::collections::HashMap<mapper::graph::RoomId, (bool, bool)> {
+    let chains = mapper::layout::detect_chains(graph);
+    let mut locks: std::collections::HashMap<mapper::graph::RoomId, (bool, bool)> =
+        std::collections::HashMap::new();
+    for &id in chains.ns.keys() {
+        locks.entry(id).or_default().0 = true; // N/S chain → column-locked (X fixed)
+    }
+    for &id in chains.ew.keys() {
+        locks.entry(id).or_default().1 = true; // E/W chain → row-locked (Y fixed)
+    }
+    locks
+}
+
 /// Nudge rooms (bounded Chebyshev `radius`, ≤ `max_passes` passes) until the rendered
 /// plan has zero illegal overlaps, secondarily fewer crossings. Deterministic, no overlap,
 /// integer cells. Existing position is restored on every rejected trial.
@@ -1736,6 +1762,7 @@ pub(crate) fn cleanup_overlaps_observed(
     };
 
     let mut stats = mapper::layout::TidyStats::default();
+    let locks = reciprocal_axis_locks(graph);
 
     for _ in 0..max_passes {
         let base = render_overlap_stats(graph);
@@ -1753,10 +1780,16 @@ pub(crate) fn cleanup_overlaps_observed(
         let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
         for &id in &room_ids {
             let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
+            // Reciprocal N/S rooms are column-locked (X fixed), E/W rooms row-locked (Y fixed).
+            let (x_locked, y_locked) = locks.get(&id).copied().unwrap_or((false, false));
             let score_orig = mapper::layout::room_side_score(graph, id);
             let align_orig = mapper::layout::room_alignment_score(graph, id);
             let degree = mapper::layout::room_compass_degree(graph, id);
             for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
+                // Skip any candidate that would slide a reciprocal-locked room off its shared axis.
+                if (x_locked && dx != 0) || (y_locked && dy != 0) {
+                    continue;
+                }
                 let trial = (orig.0 + dx, orig.1 + dy);
                 if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
                     continue;
@@ -1835,6 +1868,7 @@ pub(crate) fn repair_directional_hints_observed(
     };
 
     let mut stats = mapper::layout::TidyStats::default();
+    let locks = reciprocal_axis_locks(graph);
 
     for _ in 0..max_passes {
         let base = render_overlap_stats(graph);
@@ -1847,9 +1881,15 @@ pub(crate) fn repair_directional_hints_observed(
         let mut best: Option<(Key, mapper::graph::RoomId, (i32, i32))> = None;
         for &id in &room_ids {
             let Some(orig) = graph.room(id).and_then(|r| r.pos) else { continue };
+            // Reciprocal N/S rooms are column-locked (X fixed), E/W rooms row-locked (Y fixed).
+            let (x_locked, y_locked) = locks.get(&id).copied().unwrap_or((false, false));
             let align_orig = mapper::layout::room_alignment_score(graph, id);
             let degree = mapper::layout::room_compass_degree(graph, id);
             for (move_idx, &(dy, dx)) in moves.iter().enumerate() {
+                // Skip any candidate that would slide a reciprocal-locked room off its shared axis.
+                if (x_locked && dx != 0) || (y_locked && dy != 0) {
+                    continue;
+                }
                 let trial = (orig.0 + dx, orig.1 + dy);
                 if graph.rooms().any(|r| r.id != id && r.pos == Some(trial)) {
                     continue;
@@ -2831,17 +2871,15 @@ mod tests {
 
     #[test]
     fn cleanup_keeps_updown_protected_column_chain_aligned() {
-        // cleanup_overlaps must keep a two-room COLUMN chain aligned through overlap resolution.
+        // cleanup_overlaps must keep protected COLUMN chains aligned through overlap resolution.
         //
-        // RESCOPED (SQ-0216 #3): this test used to guard the reciprocal COMPASS N/S chain 74<->76
-        // (76 directly below 74). With correct up/down placement, the now-correctly-placed
-        // hard-protected 26↔27 up/down lane changes connector routing, and cleanup's greedy search
-        // legitimately shifts the UNPROTECTED 76 one column west to cut crossings (6→1) — a move
-        // `move_keeps_updown_sides` does not forbid (74/76 are compass, not up/down). Under the
-        // hard-protect decision that compass-column preservation is no longer guaranteed on this
-        // dense fixture. What IS guaranteed is the hard-protected up/down column: 26→Down→27 /
-        // 27→Up→26 keeps 27 directly below 26, and cleanup must not knock it off. We verify that,
-        // plus the accepted protection-blocked overlap residual.
+        // Two hard-protected columns are guarded here:
+        //  - the up/down lane 26→Down→27 / 27→Up→26 (`move_keeps_updown_sides`), and
+        //  - (SQ-0216 reciprocal-compass lock) the reciprocal N/S pair 74 S->76 / 76 N->74.
+        // An earlier build lacked the reciprocal-compass lock, so cleanup's greedy search would
+        // shift the then-unprotected 76 one column west to cut crossings, breaking 74<->76. With the
+        // reciprocal lock, 76 is column-locked and can only slide along 74's column, so both columns
+        // now survive cleanup. We verify both, plus the accepted up/down-protection-blocked residual.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -2867,6 +2905,8 @@ mod tests {
         assert_eq!(p(&g,26).0, p(&g,27).0,
             "27 must stay directly below 26 after cleanup (up/down-protected): 26={:?} 27={:?}", p(&g,26), p(&g,27));
         assert!(p(&g,27).1 > p(&g,26).1, "27 stays south of 26 in the up/down lane");
+        assert_eq!(p(&g,74).0, p(&g,76).0,
+            "76 must stay on 74's column after cleanup (reciprocal N/S locked): 74={:?} 76={:?}", p(&g,74), p(&g,76));
     }
 
     #[test]
@@ -2877,11 +2917,10 @@ mod tests {
         // flow as the safety net that recovers the hint on inputs where a post-solve stage
         // sacrifices it.
         //
-        // Under the SQ-0216 #3 hard-protect decision, cleanup leaves 2 protection-blocked illegal
-        // overlaps on this dense fixture; repair must not GROW that residual. The old "76 on 74's
-        // column" guard no longer applies here (cleanup legitimately shifts the unprotected compass
-        // room 76 off-column before repair runs — see cleanup_keeps_updown_protected_column_chain_aligned);
-        // we instead verify repair leaves the hard-protected 26↔27 up/down column intact.
+        // Under the SQ-0216 hard-protect decision, cleanup leaves 2 protection-blocked illegal
+        // overlaps on this dense fixture; repair must not GROW that residual. It must also leave the
+        // hard-protected columns intact: the 26↔27 up/down lane and (with the reciprocal-compass
+        // lock) the reciprocal N/S pair 74<->76, which is now column-locked through the whole flow.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -2908,6 +2947,8 @@ mod tests {
             "repair must not grow the protection-blocked overlap residual (stays at 2)");
         assert_eq!(p(&g,26).0, p(&g,27).0,
             "repair must not knock the up/down-protected 26↔27 column off alignment: 26={:?} 27={:?}", p(&g,26), p(&g,27));
+        assert_eq!(p(&g,74).0, p(&g,76).0,
+            "repair must keep the reciprocal N/S pair 74<->76 column-locked: 74={:?} 76={:?}", p(&g,74), p(&g,76));
     }
 
     #[test]
@@ -3025,6 +3066,114 @@ mod tests {
     }
 
     #[test]
+    fn reciprocal_axis_locks_classify_ns_ew_and_cross_rooms() {
+        // reciprocal_axis_locks encodes the VPSC hard equality the greedy cleanup must respect:
+        // a reciprocal N/S pair (share a column) → column-locked (x_locked, Y free); a reciprocal
+        // E/W pair (share a row) → row-locked (y_locked, X free); a room in BOTH → fully pinned;
+        // a non-reciprocal room → absent (unrestricted).
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4, 5] {
+            g.upsert_room(id, "r".into());
+        }
+        // 1<->2 reciprocal N/S (1 N->2, 2 S->1): column chain.
+        g.add_edge(1, N, 2);
+        g.add_edge(2, S, 1);
+        // 3<->4 reciprocal E/W (3 E->4, 4 W->3): row chain.
+        g.add_edge(3, E, 4);
+        g.add_edge(4, W, 3);
+        // 2 is ALSO reciprocal E/W with 3 (2 E->3, 3 W->2): 2 is a cross-chain (both) room.
+        g.add_edge(2, E, 3);
+        g.add_edge(3, W, 2);
+        // 5 has only a one-way edge — no reciprocal, so no lock.
+        g.add_edge(1, W, 5);
+
+        let locks = reciprocal_axis_locks(&g);
+        assert_eq!(locks.get(&1).copied(), Some((true, false)), "1 is N/S-reciprocal only → column-locked");
+        assert_eq!(locks.get(&2).copied(), Some((true, true)), "2 is in an N/S AND an E/W chain → fully pinned");
+        assert_eq!(locks.get(&3).copied(), Some((false, true)), "3 is E/W-reciprocal (with 2 and 4) only → row-locked");
+        assert_eq!(locks.get(&4).copied(), Some((false, true)), "4 is E/W-reciprocal only → row-locked");
+        assert_eq!(locks.get(&5).copied(), None, "5 has no reciprocal edge → unrestricted");
+    }
+
+    #[test]
+    fn cleanup_locks_reciprocal_ns_pair_to_its_shared_column() {
+        // SQ-0216: the greedy overlap cleanup must honor the reciprocal N/S hard equality the VPSC
+        // solver enforces — a room in a reciprocal N/S chain is COLUMN-locked and may only slide
+        // along its shared column, never off it. On this dense A129 fixture the reciprocal pair
+        // 74<->76 (74 S->76, 76 N->74) shares a column after relayout; WITHOUT the lock, cleanup's
+        // greedy search shifts the (then-unprotected) 76 one column WEST to cut crossings, breaking
+        // the reciprocal (verified: 76 moves from x=-1 to x=-2). WITH the lock, 76 can only move in
+        // Y, so it stays on 74's column. The clearable overlaps still drop to the same residual (2);
+        // the 2 that remain are the accepted up/down-protection-blocked residual (see
+        // cleanup_keeps_updown_protected_column_chain_aligned), not a regression from this lock.
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+            (239,W,77),(81,N,75),(25,Down,26),
+        ] { g.add_edge(o, d, dst); }
+        mapper::layout::relayout_auto(&mut g);
+        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        assert_eq!(p(&g,74).0, p(&g,76).0, "precondition: relayout column-aligns the 74<->76 reciprocal N/S pair");
+        cleanup_overlaps(&mut g, 3, 40);
+        assert_eq!(p(&g,74).0, p(&g,76).0,
+            "76 must stay on 74's column after cleanup (reciprocal N/S locked): 74={:?} 76={:?}", p(&g,74), p(&g,76));
+        assert!(p(&g,76).1 > p(&g,74).1, "76 stays south of 74 (only slid along the shared column, if at all)");
+        assert_eq!(render_overlap_stats(&g).0, 2, "clearable overlaps drop to the protection-blocked residual (2)");
+    }
+
+    #[test]
+    fn cleanup_keeps_reciprocal_ew_chain_on_its_row() {
+        // Row-lock analog to cleanup_locks_reciprocal_ns_pair_to_its_shared_column: a room in a
+        // reciprocal E/W chain (shares a row) is ROW-locked — cleanup may change only its X, never
+        // its Y. This asserts the symmetric guarantee on the same A129 fixture: the reciprocal E/W
+        // chain 74<->79<->203<->193 stays on one shared row through overlap cleanup. (Up/Down
+        // connectors are inherently vertical, so this dense fixture happens to apply no off-row
+        // pressure here — the guard nonetheless pins the symmetric row-lock the code applies
+        // identically to N/S; see reciprocal_axis_locks_classify_ns_ew_and_cross_rooms.)
+        use mapper::graph::MapGraph;
+        use Direction::*;
+        let mut g = MapGraph::new();
+        for id in [25u16,26,27,74,75,76,77,78,79,80,81,136,143,180,193,201,203,239] {
+            g.upsert_room(id, "r".into());
+        }
+        for (o, d, dst) in [
+            (180,N,81),(81,W,180),(180,W,78),(78,N,143),(143,E,77),(77,S,74),(74,S,76),
+            (76,W,78),(143,W,78),(78,S,76),(76,N,74),(74,E,25),(25,W,76),(74,W,79),(79,E,74),
+            (25,E,26),(26,Up,25),(78,E,75),(77,E,239),(239,N,77),(77,Unknown,180),(180,S,80),
+            (80,W,180),(80,E,79),(79,S,80),(79,N,81),(81,E,79),(80,S,76),(76,Unknown,180),
+            (79,Unknown,180),(75,S,81),(75,W,78),(75,E,77),(239,S,77),(77,W,75),(75,N,143),
+            (143,S,75),(26,Down,27),(27,N,136),(136,SW,27),(27,Up,26),(26,Unknown,180),
+            (79,W,203),(203,W,193),(193,E,203),(203,E,79),(203,Up,201),(201,Down,203),
+            (239,W,77),(81,N,75),(25,Down,26),
+        ] { g.add_edge(o, d, dst); }
+        mapper::layout::relayout_auto(&mut g);
+        let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
+        let ew_row = [74u16, 79, 203, 193];
+        let r0 = p(&g, 74).1;
+        assert!(ew_row.iter().all(|&id| p(&g, id).1 == r0),
+            "precondition: relayout row-aligns the reciprocal E/W chain");
+        cleanup_overlaps(&mut g, 3, 40);
+        let r = p(&g, 74).1;
+        for &id in &ew_row {
+            assert_eq!(p(&g, id).1, r,
+                "reciprocal E/W room {id} must stay on the shared row after cleanup: {:?}", p(&g, id));
+        }
+    }
+
+    #[test]
     fn compact_collapses_empty_interior_column_and_row() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
@@ -3052,11 +3201,10 @@ mod tests {
         // up/down column stays aligned, the protection-blocked overlap residual (2) survives
         // compaction unchanged, and no fully-empty interior column/row is left behind.
         //
-        // RESCOPED (SQ-0216 #3): "76 stays under 74" no longer holds — cleanup shifts the
-        // unprotected compass room 76 off-column earlier in the flow (see
-        // cleanup_keeps_updown_protected_column_chain_aligned). We assert the still-guaranteed
-        // directional order (78 west of 180) and the hard-protected 26↔27 column instead, and the
-        // accepted overlap residual rather than 0.
+        // With the SQ-0216 reciprocal-compass lock, "76 stays under 74" holds again: 76 is
+        // column-locked to its reciprocal N/S partner 74 through the whole flow. We assert that,
+        // the still-guaranteed directional order (78 west of 180), the hard-protected 26↔27 up/down
+        // column, and the accepted overlap residual (2) rather than 0.
         use mapper::graph::MapGraph;
         use Direction::*;
         let mut g = MapGraph::new();
@@ -3080,6 +3228,7 @@ mod tests {
         let p = |g: &MapGraph, id: u16| g.room(id).unwrap().pos.unwrap();
         assert!(p(&g,78).0 < p(&g,180).0, "78 stays west of 180 through compaction");
         assert_eq!(p(&g,26).0, p(&g,27).0, "26↔27 up/down column stays aligned through compaction");
+        assert_eq!(p(&g,74).0, p(&g,76).0, "reciprocal N/S pair 74<->76 stays column-locked through compaction");
         assert_eq!(render_overlap_stats(&g).0, 2,
             "compaction keeps the protection-blocked overlap residual at 2 (does not grow it)");
         // Compaction must leave only GUTTER lines — an empty interior column/row remains only when
