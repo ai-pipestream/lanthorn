@@ -32,9 +32,12 @@ pub fn to_json(mapper: &Mapper) -> String {
 
 pub fn from_json(s: &str) -> Result<Mapper, serde_json::Error> {
     let state: PersistState = serde_json::from_str(s)?;
-    let graph = MapGraph::from_parts(
+    let mut graph = MapGraph::from_parts(
         state.rooms, state.connections, state.current, state.layers, state.next_layer_id,
     );
+    // Collapse `?` stubs that a real directional edge already covers, so existing saved maps
+    // clean up on load. (SQ-0220)
+    graph.collapse_unknown_edges();
     Ok(Mapper { graph, mode: state.mode })
 }
 
@@ -57,6 +60,33 @@ mod tests {
         assert_eq!(m2.graph.layer_of(2), l);
         assert_eq!(m2.graph.layer_name(l), "Basement");
         assert_eq!(m2.graph.next_layer_id(), m.graph.next_layer_id());
+    }
+
+    #[test]
+    fn from_json_collapses_redundant_unknown_edges() {
+        // An existing save with a redundant `?` 1→2 (a real N 1→2 already covers it) plus a lone
+        // `?` 2→3 (no known counterpart). Loading collapses the redundant one, keeps the lone one.
+        // (SQ-0220)
+        let json = r#"{"version":1,"mode":"Auto",
+            "rooms":[
+                {"id":1,"name":"A","label_override":null,"notes":"","pos":[0,0]},
+                {"id":2,"name":"B","label_override":null,"notes":"","pos":[0,-1]},
+                {"id":3,"name":"C","label_override":null,"notes":"","pos":[1,0]}],
+            "connections":[
+                {"origin":1,"dir":"Unknown","dest":2,"distorted":false},
+                {"origin":1,"dir":"N","dest":2,"distorted":false},
+                {"origin":2,"dir":"Unknown","dest":3,"distorted":false}],
+            "current":1}"#;
+        let m = from_json(json).unwrap();
+        assert!(
+            !m.graph.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::Unknown),
+            "the redundant Unknown 1→2 collapsed on load: {:?}", m.graph.connections()
+        );
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 2 && c.dir == Direction::Unknown && c.dest == 3),
+            "the lone Unknown 2→3 (no known counterpart) survives load"
+        );
+        assert_eq!(m.graph.connections().len(), 2);
     }
 
     #[test]

@@ -25,6 +25,10 @@ impl Mapper {
                 if location != prev_id {
                     let edge_dir = via.unwrap_or(Direction::Unknown);
                     self.graph.add_edge(prev_id, edge_dir, location);
+                    // Drop a now-redundant `?` stub: fires whether the Unknown came first and a
+                    // directional move just followed, or a directional edge already existed and
+                    // this move was Unknown. Edge hygiene is independent of layout mode. (SQ-0220)
+                    self.graph.collapse_unknown_edges();
                     if self.mode == LayoutMode::Auto {
                         place_incremental(&mut self.graph, prev_id, location, edge_dir);
                     }
@@ -125,6 +129,42 @@ mod tests {
         m.observe_command(2, "Secret Grotto", "xyzzy"); // teleport
         assert!(m.graph.room(2).is_some());
         assert_eq!(m.graph.connections()[0].dir, Direction::Unknown);
+    }
+
+    #[test]
+    fn observe_collapses_unknown_when_directional_edge_appears() {
+        // Unknown arrives first (a non-directional move), then the same passage is later walked
+        // with a compass command — the redundant `?` 1→2 collapses. (SQ-0220)
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe_command(2, "B", "xyzzy"); // (1, Unknown, 2)
+        assert!(
+            m.graph.connections().iter().any(|c| c.dir == Direction::Unknown && c.origin == 1 && c.dest == 2),
+            "the Unknown 1→2 exists before a directional edge appears"
+        );
+        m.observe_command(1, "A", "south"); // walk back: (2, S, 1) — reverse, does not collapse
+        m.observe_command(2, "B", "north"); // forward directional: (1, N, 2) → Unknown collapses
+        assert!(
+            !m.graph.connections().iter().any(|c| c.dir == Direction::Unknown),
+            "the redundant Unknown 1→2 collapsed once the N edge appeared: {:?}", m.graph.connections()
+        );
+        assert!(m.graph.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::N && c.dest == 2));
+    }
+
+    #[test]
+    fn observe_unknown_does_not_persist_when_directional_edge_exists() {
+        // A directional edge 1→2 already exists; a later non-directional move over the same
+        // passage must not leave a lingering `?` stub. (SQ-0220)
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe_command(2, "B", "north"); // (1, N, 2)
+        m.observe_command(1, "A", "south"); // (2, S, 1)
+        m.observe_command(2, "B", "xyzzy"); // Unknown 1→2, immediately collapsed
+        assert!(
+            !m.graph.connections().iter().any(|c| c.dir == Direction::Unknown),
+            "an Unknown 1→2 must not persist alongside the existing N edge: {:?}", m.graph.connections()
+        );
+        assert_eq!(m.graph.current(), Some(2));
     }
 
     #[test]

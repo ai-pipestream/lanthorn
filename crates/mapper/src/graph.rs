@@ -153,6 +153,26 @@ impl MapGraph {
         }
     }
 
+    /// Drop every Unknown-direction edge whose room pair (same origin→dest) already carries a
+    /// known-direction edge; the redundant `?` stub goes, the known edge stays. Reverse
+    /// (dest→origin) edges do NOT count — a return trip is not guaranteed to be the geometric
+    /// opposite (one-way passages, mazes), so no forward direction is ever inferred from it, and
+    /// nothing is relabeled: the replacing direction already exists as its own edge. Unknown edges
+    /// with no same-direction known counterpart are left untouched. Returns the number removed.
+    /// (SQ-0220)
+    pub fn collapse_unknown_edges(&mut self) -> usize {
+        let known: std::collections::HashSet<(RoomId, RoomId)> = self
+            .conns
+            .iter()
+            .filter(|c| c.dir != Direction::Unknown)
+            .map(|c| (c.origin, c.dest))
+            .collect();
+        let before = self.conns.len();
+        self.conns
+            .retain(|c| c.dir != Direction::Unknown || !known.contains(&(c.origin, c.dest)));
+        before - self.conns.len()
+    }
+
     pub fn set_current(&mut self, id: RoomId) {
         self.current = Some(id);
     }
@@ -307,6 +327,47 @@ mod tests {
         g.add_edge(1, Direction::N, 2);
         g.add_edge(2, Direction::W, 1); // non-reciprocal back-edge
         g.add_edge(1, Direction::N, 2); // duplicate key → still one
+        assert_eq!(g.connections().len(), 2);
+    }
+
+    #[test]
+    fn collapse_unknown_drops_redundant_same_pair_edge() {
+        // A→B carries both an Unknown edge and a known N edge (same origin→dest). The Unknown
+        // is redundant and is dropped; the known edge stays. (SQ-0220)
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::Unknown, 2);
+        g.add_edge(1, Direction::N, 2);
+        let removed = g.collapse_unknown_edges();
+        assert_eq!(removed, 1, "the redundant Unknown A→B is removed");
+        assert_eq!(g.connections().len(), 1);
+        assert_eq!(g.connections()[0].dir, Direction::N, "the known edge survives");
+    }
+
+    #[test]
+    fn collapse_unknown_keeps_reverse_only_and_lone_unknowns() {
+        // A→B Unknown must survive when only the REVERSE B→A is directional (return trips are
+        // not guaranteed to be the geometric opposite), and when it has no known counterpart.
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.add_edge(1, Direction::Unknown, 2); // reverse-only pair
+        g.add_edge(2, Direction::S, 1); // return trip is directional, forward was Unknown
+        g.add_edge(3, Direction::Unknown, 4); // lone Unknown, no known counterpart
+        let removed = g.collapse_unknown_edges();
+        assert_eq!(removed, 0, "neither Unknown has a same-origin→dest known edge");
+        assert_eq!(g.connections().len(), 3);
+    }
+
+    #[test]
+    fn collapse_unknown_ignores_known_edge_to_a_different_dest() {
+        // A→B Unknown is not affected by a known A→C edge (same origin, different dest).
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
+        g.add_edge(1, Direction::Unknown, 2);
+        g.add_edge(1, Direction::N, 3);
+        let removed = g.collapse_unknown_edges();
+        assert_eq!(removed, 0);
         assert_eq!(g.connections().len(), 2);
     }
 }
