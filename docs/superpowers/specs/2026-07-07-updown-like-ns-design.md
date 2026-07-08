@@ -239,7 +239,12 @@ Visual testing of Phase 2 surfaced three refinements. Two are behavior changes
 (SQ-0219 de-dup; #1 up/down paths shove instead of cross); one is a confirmation
 that an intended property already holds and only needs a regression test (#3).
 
-## #1 — up/down paths shove rooms apart instead of crossing (scoped)
+## #1 — up/down paths shove rooms apart instead of crossing (scoped) — REVERTED in Phase 4
+
+> **Note:** this scoped up/down-crossing tidy shove was later **reverted** (Phase 4) —
+> it caused a ~1.3 s-per-tidy perf regression and never converged. "Shove, not cross" is
+> instead achieved by the routing (#1 entry-side) and placement/reciprocal fixes in Phase 4.
+> The design below is kept for the record.
 
 **Observed:** up/down connectors *cross* other connectors instead of forcing rooms
 apart to make room. **Root cause (confirmed on disk):** the tidy's cleanup loop
@@ -408,6 +413,20 @@ their paths leave the correct N/S border (#1).
 gets **row/column-locked onto its compass E/W neighbor**, destroying the N/S relationship
 the stress solve achieved (the observed "22 not kept south of 23"). Fix: recognize up/down
 via `layout_offset` so such a room keeps its solved N/S (or E/W) placement.
+
+## Reciprocals are inviolable in the greedy tidy stages (overlap-cleanup axis-lock)
+
+Surfaced last (room 230↔134): the VPSC solver enforces a reciprocal pair's shared
+column/row via a hard equality, but the **greedy** post-relayout stages
+(`cleanup_overlaps`, `repair_directional_hints`) do not honor it — to clear an overlap
+they moved a reciprocal-locked room off its shared axis, breaking the reciprocal in the
+final layout. Fix: those stages now **axis-lock** reciprocal rooms — a room in a
+reciprocal **N/S** chain may only change its Y (slide along its column, X fixed); a
+reciprocal **E/W** room may only change its X (row fixed); a room in both is fully pinned.
+Detection reuses `detect_chains` (compass `grid_offset`, up/down excluded), precomputed
+once per pass. This is a hard constraint (same spirit as the up/down `move_keeps_updown_sides`
+protection, which is left untouched and applies alongside it): an overlap clearable only by
+breaking a reciprocal is left as an accepted residual. Non-reciprocal rooms are unrestricted.
 
 ## Phase 4 verification
 
