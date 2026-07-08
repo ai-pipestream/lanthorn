@@ -1257,10 +1257,15 @@ mod tests {
     #[test]
     fn constraint_engine_aligns_cardinal_chains() {
         // The alignment pass straightens E/W chains whose ends are free on the row axis
-        // (25→E→26, 79→W→203), and the axis-preserving collision resolver keeps an aligned
-        // room on its row even when its cell is taken — so 203→W→193 stays clean (#193
-        // shifts ALONG #203's row past #180 instead of bumping off it). Total distortion
-        // falls to 26 (from 30 un-aligned).
+        // (79→W→203), and the axis-preserving collision resolver keeps an aligned room on
+        // its row even when its cell is taken — so 203→W→193 stays clean (#193 shifts ALONG
+        // #203's row past #180 instead of bumping off it). Total distortion falls to 22.
+        //
+        // #25→E→26 is now legitimately distorted: #26 also has 26→Up→25, so 26 must sit both
+        // NORTH (up) and EAST of 25. Post-fix the align stage marks 26 Y-constrained via its
+        // Up edge (layout_offset, not grid_offset), so it is NOT flattened onto 25's row —
+        // the solver places 26 southeast of 25 (p25=(0,0), p26=(1,1)), satisfying BOTH hints
+        // and correctly rendering the E edge diagonal (distorted).
         //
         // It still cannot straighten every cardinal edge: a room pulled by CONFLICTING
         // constraints (e.g. #25 wants both #74's and #76's row, but 74 S 76 forces those
@@ -1268,11 +1273,15 @@ mod tests {
         let mut g = a129_house_graph();
         relayout_auto(&mut g);
         let e = |o, d| g.connections().iter().find(|c| c.origin == o && c.dest == d).unwrap();
-        assert!(!e(25, 26).distorted, "25→E→26 aligns onto one row");
+        let p = |id: u16| g.room(id).unwrap().pos.unwrap();
+        // 26 sits southeast of 25 (both Up and E hints satisfied) → the E edge is diagonal.
+        assert!(e(25, 26).distorted, "25→E→26 is diagonal: 26 is southeast of 25 (up + east)");
+        // 26→Up→25 puts 25 NORTH of 26, so 26 sits SOUTH (and E) of 25 → southeast.
+        assert!(p(26).1 > p(25).1 && p(26).0 > p(25).0, "26 southeast of 25: p25={:?} p26={:?}", p(25), p(26));
         assert!(!e(79, 203).distorted, "79→W→203 aligns onto one row");
         assert!(!e(203, 193).distorted, "203→W→193: #193 holds #203's row (collision shifts along it)");
         let distorted = g.connections().iter().filter(|c| c.distorted).count();
-        assert!(distorted <= 26, "alignment + axis-preserving collision cut distortion to 26; got {distorted}");
+        assert!(distorted <= 22, "alignment + axis-preserving collision cut distortion to 22; got {distorted}");
     }
 
     #[test]
@@ -1298,6 +1307,25 @@ mod tests {
         let p2 = g.room(2).unwrap().pos.unwrap();
         assert_eq!(p1.1, p2.1, "reciprocal E/W pair must share a row: {p1:?} {p2:?}");
         assert!(p2.0 > p1.0, "and 2 is east of 1");
+    }
+
+    #[test]
+    fn updown_only_room_stays_southeast_of_neighbour() {
+        // Bug #3: a room whose only vertical hint is Up/Down must keep its N/S offset from
+        // that neighbour, not get flattened onto the neighbour's row by the align stage.
+        // 22 Up→23 ⇒ 23 is NORTH of 22 (22 south of 23); 23 E→22 ⇒ 22 is EAST of 23.
+        // So 22 must land SOUTHEAST of 23. Pre-fix the align stage used grid_offset (None for
+        // Up/Down) to decide axis-constrainedness, so 22 was Y-free and flattened onto 23's row.
+        let mut g = crate::graph::MapGraph::new();
+        g.upsert_room(22, "a".into());
+        g.upsert_room(23, "b".into());
+        g.add_edge(22, Direction::Up, 23); // 23 north of 22
+        g.add_edge(23, Direction::E, 22); // 22 east of 23
+        relayout_auto(&mut g);
+        let p22 = g.room(22).unwrap().pos.unwrap();
+        let p23 = g.room(23).unwrap().pos.unwrap();
+        assert!(p23.1 < p22.1, "23 must be strictly north of 22: p22={p22:?} p23={p23:?}");
+        assert!(p22.0 > p23.0, "22 must stay east of 23: p22={p22:?} p23={p23:?}");
     }
 
     #[test]
