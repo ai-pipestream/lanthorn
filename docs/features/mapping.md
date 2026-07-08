@@ -39,8 +39,10 @@
   path yields to a fanned off-center slot. When a room pair is joined by both a
   compass direction and an up/down connection, only the compass path is drawn —
   the up/down connector is suppressed — but the room still shows its up/down
-  symbol so vertical access stays visible. The map tidy also shifts rooms apart
-  to keep up/down paths from crossing other paths where it can make room.
+  symbol so vertical access stays visible. Confirmed reciprocal N/S and E/W
+  adjacencies are treated as inviolable: an up/down move yields rather than shove
+  a reciprocal partner off its shared column/row, and overlap cleanup may only
+  slide a reciprocal room along its own axis — never off it.
 - **Connection routing** between rooms with overlap removal, so the map stays
   readable as it grows.
 - **Layered maps** for multi-level areas, with manual layer controls.
