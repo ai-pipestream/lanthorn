@@ -167,6 +167,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "connector",
     "connector:distorted",
     "connector:portal",
+    "shared_path",
     "border",
     "border:focused",
     "statusbar",
@@ -222,7 +223,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
 pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Map", &[
         "room", "room:current", "room:selected",
-        "connector", "connector:distorted", "connector:portal",
+        "connector", "connector:distorted", "connector:portal", "shared_path",
         "map_border", "map_layer_tab", "map_layer_tab_active", "loc_indicator",
     ]),
     ("Transcript", &[
@@ -264,6 +265,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "connector"            => cs.connector,
         "connector:distorted"  => cs.connector_distorted,
         "connector:portal"     => cs.portal_connector,
+        "shared_path"          => cs.shared_path,
         "border:focused"       => cs.focused_border,
         "statusbar"            => cs.status_bar,
         "transcript"           => cs.transcript,
@@ -405,6 +407,7 @@ pub fn apply_color_decls(
             "connector"          => cs.connector = cs.connector.patch(style),
             "connector:distorted"=> cs.connector_distorted = cs.connector_distorted.patch(style),
             "connector:portal"   => cs.portal_connector = cs.portal_connector.patch(style),
+            "shared_path"        => cs.shared_path = cs.shared_path.patch(style),
             "border"             => {} // reserved, accepted silently
             "border:focused"     => cs.focused_border = cs.focused_border.patch(style),
             "statusbar"          => cs.status_bar = cs.status_bar.patch(style),
@@ -1263,6 +1266,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("connector".to_string(),         style_to_decl(&cs.connector));
     doc.colors.selectors.insert("connector:distorted".to_string(), style_to_decl(&cs.connector_distorted));
     doc.colors.selectors.insert("connector:portal".to_string(),  style_to_decl(&cs.portal_connector));
+    doc.colors.selectors.insert("shared_path".to_string(),       style_to_decl(&cs.shared_path));
     doc.colors.selectors.insert("border:focused".to_string(),    style_to_decl(&cs.focused_border));
     doc.colors.selectors.insert("statusbar".to_string(),         style_to_decl(&cs.status_bar));
     doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
@@ -1922,6 +1926,32 @@ fg = "green"
         assert_eq!(style_for_selector(&cs, "inline_image"), ratatui::style::Style::new().bg(Color::Rgb(1, 2, 3)));
         assert!(SELECTOR_FIELDS.contains(&"inline_image"));
         assert!(SELECTOR_GROUPS.iter().any(|(_, s)| s.contains(&"inline_image")));
+    }
+
+    #[test]
+    fn shared_path_selector_round_trips() {
+        use ratatui::style::Color;
+        // It is a recognized, grouped selector, and style_for_selector reads the right field.
+        let mut cs = colors::ColorScheme::default();
+        cs.shared_path = ratatui::style::Style::new().fg(Color::Rgb(255, 0, 255));
+        assert_eq!(style_for_selector(&cs, "shared_path"), ratatui::style::Style::new().fg(Color::Rgb(255, 0, 255)));
+        assert!(SELECTOR_FIELDS.contains(&"shared_path"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, s)| s.contains(&"shared_path")));
+
+        // Applying a style.toml `shared_path` color patches ColorScheme.shared_path.
+        let doc = parse_style_toml("[colors]\n\"shared_path\" = { fg = \"#ff00ff\" }\n").unwrap();
+        let (cs2, _set, warnings) = resolve(&doc, std::path::Path::new("."));
+        assert!(warnings.is_empty(), "known selector must not warn: {warnings:?}");
+        assert_eq!(cs2.shared_path.fg, Some(Color::Rgb(255, 0, 255)));
+
+        // Serializing back preserves the selector.
+        let dir = std::env::temp_dir().join(format!("babelmap-shared-path-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shared_path.toml");
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs2, &set).unwrap();
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("shared_path"), "selector survives round-trip");
     }
 
     #[test]
