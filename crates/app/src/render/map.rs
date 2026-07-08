@@ -4793,4 +4793,38 @@ mod tests {
         assert!(has_glyph(&south), "S secondary marker present in shared color");
         assert!(has_glyph(&west), "W secondary marker present in shared color");
     }
+
+    #[test]
+    fn house_ring_collapses_to_clean_lines_with_no_illegal_overlap() {
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        for (id, p) in [(143, (1, 2)), (89, (2, 3)), (217, (1, 4)), (68, (0, 3))] {
+            g.upsert_room(id, "r".into());
+            g.set_pos(id, p);
+        }
+        // Diamond ring: each adjacent pair reachable by a cardinal AND a diagonal, both ways.
+        let edges = [
+            (68, Direction::N, 143), (68, Direction::NE, 143),
+            (143, Direction::S, 68), (143, Direction::SW, 68),
+            (143, Direction::E, 89), (143, Direction::SE, 89),
+            (89, Direction::W, 143), (89, Direction::NW, 143),
+            (89, Direction::S, 217), (89, Direction::SW, 217),
+            (217, Direction::N, 89), (217, Direction::NE, 89),
+            (217, Direction::W, 68), (217, Direction::NW, 68),
+            (68, Direction::S, 217), (68, Direction::SE, 217),
+        ];
+        for (o, d, dst) in edges { g.add_edge(o, d, dst); }
+        let plan = mapper::route::route_lanes(&g);
+        // One compass connector per ring pair.
+        for pair in [(68, 143), (89, 143), (89, 217), (68, 217)] {
+            let n = plan.connectors.iter()
+                .filter(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == pair
+                    && mapper::direction::grid_offset(c.exit_dir).is_some())
+                .count();
+            assert_eq!(n, 1, "pair {pair:?} must collapse to one compass connector");
+        }
+        // No illegal overlaps in the rendered result.
+        assert_eq!(render_overlap_stats(&g).0, 0, "ring must render without illegal overlap");
+    }
 }
