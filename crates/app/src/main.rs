@@ -22,9 +22,9 @@ use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
-use app::ifid::{archive_path, compute_ifid, map_path};
+use app::ifid::{archive_path, compute_ifid};
 use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
-use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_map, save_named};
+use app::persist_files::{delete_save, list_saves, save_game, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::dialog::{DialogRects, DialogStyle};
@@ -1720,11 +1720,8 @@ fn main() {
     let dir = map_dir(&cfg.user_dir);
     let save_dir = saves_dir(&cfg.user_dir);
     let arc_file = archive_path(&save_dir, &ifid);
-    let map_file = map_path(&dir, &ifid);
 
     // Load mapper (and optionally restore the game save) from the archive.
-    // Migration: if no archive exists but a legacy .map.json does, load that.
-    // use_default_map = true: also fall back to legacy map when no archive.
     let mut startup_transcript: app::state::LoadedTranscript = None;
     // Rewind/replay history carried from the archive when the game is auto-restored.
     let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
@@ -1737,16 +1734,9 @@ fn main() {
         match load_archive(&arc_file) {
             Ok(ac) => {
                 // Restore the machine from the saved game state only when auto_load is enabled.
-                // When auto_load = false the accumulated map still loads, but the game starts fresh.
                 if cfg.auto_load {
-                    // Engine-neutral auto-restore (works for both Z-machine and
-                    // Glulx); the mapper below still loads either way. A
-                    // foreign-engine save is refused gracefully (start fresh).
                     match session.restore_state(&ac.engine_save()) {
                         Ok(()) => {
-                            // zvm-only: reinstate the saved screen so a once-split
-                            // game's upper window (status line) shows after auto-load.
-                            // Glulx's display lives inside the restored save.
                             if let Some(scr) = ac.screen.clone() {
                                 if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                                     zs.machine.screen = scr;
@@ -1760,27 +1750,22 @@ fn main() {
                         }
                     }
                 } else if cfg.prompt_load_on_launch && !ac.save.is_empty() {
-                    // Save present, auto_load off, prompt enabled: stash for launch dialog.
                     pending_resume_stash = Some((ac.engine_save(), ac.transcript, ac.transcript_kinds, ac.screen));
                 }
                 if cfg.aux_storage != app::config::AuxStorage::Global {
                     session.set_aux_data(ac.aux.clone());
                 }
-                // Command history is per-game and loads regardless of auto_load.
                 startup_command_history = ac.command_history;
-                ac.mapper
+                // The map is part of the game's state: it loads only when the state is
+                // auto-resumed here. When auto_load is off it either rides the launch-resume
+                // dialog (adopted on accept, see apply_launch_resume) or stays blank.
+                if cfg.auto_load { ac.mapper } else { Mapper::default() }
             }
             Err(e) => {
                 eprintln!("babelmap: warning: could not load archive {}: {}", arc_file.display(), e);
                 Mapper::default()
             }
         }
-    } else if map_file.exists() {
-        // Back-compat: migrate existing .map.json to the new archive on next save.
-        load_map(&map_file).unwrap_or_default()
-    } else if cfg.use_default_map {
-        // Fall back to legacy shared map when configured to do so.
-        load_map(&map_file).unwrap_or_default()
     } else {
         Mapper::default()
     };
@@ -2530,7 +2515,7 @@ fn main() {
                             LaunchDialogAction::Resume => {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
                                     state.launch_dialog = false;
-                                    apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes);
+                                    apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
                                 }
                             }
                             LaunchDialogAction::NewGame => {
@@ -2553,7 +2538,7 @@ fn main() {
                             if in_resume {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
                                     state.launch_dialog = false;
-                                    apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes);
+                                    apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
                                 }
                             } else if in_new_game || in_close {
                                 // [X] (close) and [New game] both discard the save.
@@ -3796,7 +3781,7 @@ fn main() {
     // saving" honest and avoids silently overwriting an explicit save point on exit.
     // Exit auto-save is engine-neutral: the save routes through Engine::save_state
     // (Quetzal for zvm, the gvm snapshot for Glulx); screen.json is written for
-    // zvm only. On failure it falls back to a legacy map-only save.
+    // zvm only.
     if state.config.auto_save {
         let exit_meta = app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
@@ -3816,10 +3801,6 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
-                // Fall back to legacy map-only save so data is not lost.
-                if let Err(map_err) = save_map(&map_file, &mapper) {
-                    eprintln!("babelmap: warning: fallback map save also failed: {}", map_err);
-                }
             }
         }
     }
@@ -4965,11 +4946,14 @@ fn apply_launch_resume(
     mapper: &mut Mapper,
     state: &mut AppState,
     last_panes: &PaneRects,
+    arc_file: &std::path::Path,
 ) {
     match session.restore_state(save) {
         Ok(()) => {
-            // mapper was already loaded from the archive at startup (ac.mapper);
-            // only the engine state needed restoring via restore_state above.
+            // The resumed game's map is part of its archive state — load it alongside.
+            if let Ok(ac) = load_archive(arc_file) {
+                *mapper = ac.mapper;
+            }
             // Reinstate the saved screen too (mirrors the auto-load path, zvm-only),
             // so a once-split game's upper window/status line shows after resuming.
             if let Some(scr) = screen {

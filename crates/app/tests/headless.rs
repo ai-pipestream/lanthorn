@@ -5,7 +5,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use app::export_svg::render_svg;
-use app::persist_files::{load_map, save_map};
+use app::persist_files::load_map;
 use app::render::map::render_map;
 use app::render::transcript::render_transcript;
 use app::session::{apply_turn, TurnResult};
@@ -68,7 +68,7 @@ fn turn(number: u16, name: &str) -> TurnResult {
 /// 1. The map buffer has the current-room REVERSED highlight.
 /// 2. The transcript buffer shows a pushed line.
 /// 3. The SVG contains all 3 room labels.
-/// 4. save_map + load_map round-trips the connections.
+/// 4. A saved map file round-trips the connections through load_map.
 #[test]
 fn headless_e2e_smoke() {
     // ── Step 1: Build state + mapper, simulate 3-room walk ────────────────────
@@ -164,13 +164,13 @@ fn headless_e2e_smoke() {
     assert!(svg.contains("East Corridor"), "SVG must contain 'East Corridor'");
     assert!(svg.contains("North Gallery"), "SVG must contain 'North Gallery'");
 
-    // ── Step 5: save_map + load_map round-trips connections ───────────────────
+    // ── Step 5: map file round-trips connections through load_map ─────────────
 
     let tmp_dir = std::env::temp_dir().join(format!("babelmap-headless-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
     let map_file = tmp_dir.join("test.map.json");
 
-    save_map(&map_file, &mapper).expect("save_map must succeed");
+    std::fs::write(&map_file, mapper::persist::to_json(&mapper)).expect("write map file must succeed");
     let loaded = load_map(&map_file).expect("load_map must return Some");
 
     // Connections round-trip.
