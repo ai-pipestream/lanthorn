@@ -1178,7 +1178,7 @@ mod tests {
         apply_turn(&mut m, "west",  &turn(4, "North Room"));
         apply_turn(&mut m, "south", &turn(1, "Start")); // back to start — closes the loop
 
-        let (illegal, _, _) = crate::render::map::render_overlap_stats(&m.graph);
+        let (illegal, _) = crate::render::map::render_overlap_stats(&m.graph);
         assert_eq!(illegal, 0, "Auto mode cleanup must leave zero illegal overlaps");
     }
 
