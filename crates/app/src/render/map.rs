@@ -547,6 +547,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         // would otherwise be the only vertical indicator, so re-stamp the glyph over it.
         if boxes {
             draw_deduped_updown_border_glyphs(rm, &placed, state, (off_x, off_y), area, buf);
+            if let Some((cols, rows)) = &axes {
+                draw_secondary_markers(rm, cols, rows, state, (off_x, off_y), area, buf);
+            }
         }
     }
 }
@@ -1077,6 +1080,77 @@ fn draw_connector_arrows(
     }
 }
 
+/// Arrow glyph for a compass Direction (used by secondary markers). Up/Down never
+/// appear here (they are not collapsed into compass secondaries).
+fn arrow_for_direction(dir: Direction, arrows: &crate::symbols::Arrows) -> char {
+    match dir {
+        Direction::N => arrows.north,
+        Direction::S => arrows.south,
+        Direction::E => arrows.east,
+        Direction::W => arrows.west,
+        Direction::NE => arrows.ne,
+        Direction::NW => arrows.nw,
+        Direction::SE => arrows.se,
+        Direction::SW => arrows.sw,
+        _ => arrows.north, // unreachable: secondaries are compass only
+    }
+}
+
+/// Stamp collapsed secondary directions as arrow glyphs on the box interior, one cell
+/// inward from the retained connector's arrowhead (stacking further inward for multiples).
+/// Boxes zoom only; caller passes the axis tables. Color is `shared_path`.
+fn draw_secondary_markers(
+    rm: &RenderMap,
+    cols: &PosTable,
+    rows: &PosTable,
+    state: &AppState,
+    offset: (i32, i32),
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let (off_x, off_y) = offset;
+    let style = state.colors.shared_path;
+    let arrows = &state.symbols.arrows;
+    let cell_of = |id: RoomId| rm.rooms.iter().find(|r| r.id == id).map(|r| r.cell);
+
+    let stamp = |dirs: &[Direction], cell: (i32, i32), side: Side, slot: u16,
+                     buf: &mut Buffer| {
+        let (ax, ay) = box_edge_anchor(cols, rows, cell, side, slot);
+        // Inward step, perpendicular to the side.
+        let (dx, dy) = match side {
+            Side::Right => (-1, 0),
+            Side::Left => (1, 0),
+            Side::Top => (0, 1),
+            Side::Bottom => (0, -1),
+        };
+        // Interior depth available before hitting the far border.
+        let depth = match side {
+            Side::Left | Side::Right => BOX_W - 2,
+            Side::Top | Side::Bottom => BOX_H - 2,
+        };
+        for (k, dir) in dirs.iter().enumerate() {
+            let step = k as i32 + 1;
+            if step > depth {
+                break; // interior full (never happens for the realistic ≤2 case)
+            }
+            let ch = arrow_for_direction(*dir, arrows);
+            put_char(buf, ax + dx * step + off_x, ay + dy * step + off_y, ch, style, area);
+        }
+    };
+
+    for conn in &rm.plan.connectors {
+        if !conn.secondary_exit.is_empty() {
+            if let Some(cell) = cell_of(conn.origin) {
+                stamp(&conn.secondary_exit, cell, conn.exit, conn.exit_slot, buf);
+            }
+        }
+        if !conn.secondary_entry.is_empty() {
+            if let Some(cell) = cell_of(conn.dest) {
+                stamp(&conn.secondary_entry, cell, conn.entry, conn.entry_slot, buf);
+            }
+        }
+    }
+}
 
 /// Map a per-(room, side) slot index to a signed offset ALONG the box edge so multiple
 /// connectors on one side anchor on distinct cells. Slot 0 stays on the side centre;
@@ -4685,5 +4759,38 @@ mod tests {
         let found = (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
             .any(|(x, y)| buf.cell((x, y)).map(|c| c.fg == shared_fg).unwrap_or(false));
         assert!(found, "the collapsed pair's shared path must paint with shared_path color");
+    }
+
+    #[test]
+    fn secondary_marker_glyph_drawn_inside_room_in_shared_color() {
+        use crate::state::AppState;
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "W".into());
+        g.upsert_room(217, "S".into());
+        g.set_pos(68, (0, 0));
+        g.set_pos(217, (1, 1));
+        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
+                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
+            g.add_edge(o, d, dst);
+        }
+        let state = AppState::default(); // Boxes zoom by default
+        let south = state.symbols.arrows.south.to_string();
+        let west = state.symbols.arrows.west.to_string();
+        // Compared via `cell.fg` (not `cell.style() ==`), matching
+        // `shared_connector_line_uses_shared_path_color` above: `Cell::set_style` patches
+        // rather than replaces, so `Cell::style()` never equals a partially-set `Style`.
+        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let has_glyph = |glyph: &str| (0..area.width)
+            .flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .any(|(x, y)| buf.cell((x, y))
+                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false));
+        assert!(has_glyph(&south), "S secondary marker present in shared color");
+        assert!(has_glyph(&west), "W secondary marker present in shared color");
     }
 }
