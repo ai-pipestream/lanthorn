@@ -48,6 +48,8 @@ pub struct Branch {
     pub on_true: bool,
     /// Signed offset. 0 = return false, 1 = return true, else PC-relative.
     pub offset: i16,
+    /// Number of bytes the branch descriptor occupies (1 for short form, 2 for long).
+    pub len: u8,
 }
 
 /// A fully decoded Z-machine instruction.
@@ -329,6 +331,26 @@ fn decode_form(
 }
 
 // ---------------------------------------------------------------------------
+// Branch decoding
+// ---------------------------------------------------------------------------
+
+/// Decode a branch descriptor at `addr`. The Z-machine short form (bit 6 set) is
+/// one byte with a 6-bit unsigned offset; the long form is two bytes with a
+/// 14-bit signed offset. `Branch::len` reports how many bytes were consumed.
+pub fn decode_branch_at(mem: &crate::memory::Memory, addr: u32) -> Branch {
+    let b0 = mem.read_byte(addr);
+    let on_true = (b0 & 0x80) != 0;
+    if (b0 & 0x40) != 0 {
+        Branch { on_true, offset: (b0 & 0x3F) as i16, len: 1 }
+    } else {
+        let b1 = mem.read_byte(addr + 1);
+        let raw = (((b0 & 0x3F) as u16) << 8) | (b1 as u16);
+        let offset = if raw & 0x2000 != 0 { (raw | 0xC000) as i16 } else { raw as i16 };
+        Branch { on_true, offset, len: 2 }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main decode entry point
 // ---------------------------------------------------------------------------
 
@@ -398,26 +420,9 @@ pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
 
     // Branch bytes (read after store)
     let branch = if branches {
-        let b0 = mem.read_byte(cursor);
-        cursor += 1;
-        let on_true = (b0 & 0x80) != 0;
-        let offset = if (b0 & 0x40) != 0 {
-            // Single-byte form: bits 5-0 are the 6-bit unsigned offset
-            (b0 & 0x3F) as i16
-        } else {
-            // Two-byte form: 14-bit signed offset
-            //   high 6 bits from b0 bits 5-0, low 8 bits from b1
-            let b1 = mem.read_byte(cursor);
-            cursor += 1;
-            let raw = (((b0 & 0x3F) as u16) << 8) | (b1 as u16);
-            // Sign-extend from 14 bits: bit 13 is the sign bit
-            if raw & 0x2000 != 0 {
-                (raw | 0xC000) as i16
-            } else {
-                raw as i16
-            }
-        };
-        Some(Branch { on_true, offset })
+        let br = decode_branch_at(mem, cursor);
+        cursor += br.len as u32;
+        Some(br)
     } else {
         None
     };
@@ -709,5 +714,24 @@ mod tests {
         assert_eq!(ins.operands[1], Operand::Var(0x02));
         assert_eq!(ins.store, Some(0x03));
         assert_eq!(ins.next_pc, 0x14);
+    }
+
+    #[test]
+    fn decode_branch_at_reports_form_and_length() {
+        let mut m = Memory::new(sample_story(3)).unwrap();
+        // Single-byte form: on_true, short-form bit, offset 5.
+        m.write_byte(0x40, 0x80 | 0x40 | 5);
+        let b1 = decode_branch_at(&m, 0x40);
+        assert!(b1.on_true);
+        assert_eq!(b1.offset, 5);
+        assert_eq!(b1.len, 1, "short-form branch is 1 byte");
+
+        // Two-byte form: on_false (bit7=0), long-form (bit6=0), 14-bit offset = -1.
+        m.write_byte(0x50, 0x3F); // high6 = 0x3F, sign bit (0x2000) set
+        m.write_byte(0x51, 0xFF); // low8 = 0xFF -> raw 0x3FFF -> -1
+        let b2 = decode_branch_at(&m, 0x50);
+        assert!(!b2.on_true);
+        assert_eq!(b2.offset, -1);
+        assert_eq!(b2.len, 2, "long-form branch is 2 bytes");
     }
 }
