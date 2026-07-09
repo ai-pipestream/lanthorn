@@ -1181,7 +1181,7 @@ pub struct AppState {
 
     // ── Quit dialog state ─────────────────────────────────────────────────────
 
-    /// When true, the "Save before quitting?" confirmation dialog is open.
+    /// When true, the "Save state before quitting?" confirmation dialog is open.
     pub quit_dialog: bool,
 
     // ── Launch dialog state ───────────────────────────────────────────────────

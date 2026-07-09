@@ -18,7 +18,7 @@ use crate::anim::Easing;
 ///   `[keymap]`
 ///   use_defaults = true
 ///   [keymap.global]
-///   "ctrl+s" = "save-game"
+///   "ctrl+s" = "save-state"
 ///   [keymap.map]
 ///   "left" = "pan-map -1 0"
 ///   [keymap.anim]
@@ -811,13 +811,13 @@ mod tests {
 [keymap]
 use_defaults = false
 [keymap.global]
-"ctrl+s" = "save-game"
+"ctrl+s" = "save-state"
 [keymap.map]
 "left" = "pan-map -1 0"
 "#;
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(!cfg.keymap.use_defaults);
-        assert_eq!(cfg.keymap.global.get("ctrl+s").map(String::as_str), Some("save-game"));
+        assert_eq!(cfg.keymap.global.get("ctrl+s").map(String::as_str), Some("save-state"));
         assert_eq!(cfg.keymap.map.get("left").map(String::as_str), Some("pan-map -1 0"));
         // Default keeps use_defaults true.
         assert!(Config::default().keymap.use_defaults);

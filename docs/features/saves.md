@@ -2,8 +2,9 @@
 
 [← back to README](../../README.md)
 
-- **`.babelmap` archives** — a single file bundling the map, the game save, and
-  metadata. By default a story starts fog-of-war (only what you've explored);
+- **`.babelmap` Save States** — the emulator's own snapshot (Ctrl+S / `/save-state`
+  and Ctrl+R / `/restore-state`), a single file bundling the map, VM state, screen,
+  and transcript. By default a story starts fog-of-war (only what you've explored);
   opt into a shared default map with `use_default_map`.
 - **Multiple named save slots** with a saves-manager modal (load / save-as /
   delete), each slot tracking name, turn count, and timestamp.
@@ -11,10 +12,11 @@
   files with other interpreters via the saves manager (a built-in file browser
   picks the file/destination). Importing keeps your accumulated map.
 - **Standard in-game save/restore, all versions** — when a story runs its own
-  `save`/`restore`, babelmap writes and reads a standard Quetzal save (the same
-  format other interpreters use), now including v3 (Zork-era) games' branch-form
-  `@save`/`@restore`. This is separate from the emulator-style host snapshot
-  (Ctrl+S/Ctrl+R and the `.babelmap` archive), which can save anywhere.
+  `save`/`restore`, babelmap writes and reads a bare standard Quetzal `.qzl` save
+  (the same format other interpreters use), now including v3 (Zork-era) games'
+  branch-form `@save`/`@restore`. This is a genuinely different file from the
+  emulator's `.babelmap` Save State: the game's `.qzl` holds VM state only, while
+  the `.babelmap` Save State also carries the map, screen, and transcript.
 - **Auto-save** (per turn) and **auto-load** (resume on launch) — both
   configurable.
 - **Rewind / replay / resume** — with `record_turn_history` on, babelmap records

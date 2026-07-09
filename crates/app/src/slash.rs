@@ -138,11 +138,11 @@ fn err(s: impl Into<String>) -> SlashOutcome { SlashOutcome::Error(s.into()) }
 /// `Category::ORDER`.
 pub static COMMANDS: &[CommandSpec] = &[
     // ── Game ──────────────────────────────────────────────────────────────
-    CommandSpec { name: "save-game", category: Category::Game, context: Context::Global,
-        usage: "save-game [name]", description: "save the game, optionally to a named slot",
+    CommandSpec { name: "save-state", category: Category::Game, context: Context::Global,
+        usage: "save-state [name]", description: "save an emulator Save State, optionally to a named slot",
         dispatch: |a| SlashOutcome::Save(a.first().map(|s| s.to_string())) },
-    CommandSpec { name: "load-game", category: Category::Game, context: Context::Global,
-        usage: "load-game [name]", description: "load a save, optionally a named slot",
+    CommandSpec { name: "restore-state", category: Category::Game, context: Context::Global,
+        usage: "restore-state [name]", description: "restore an emulator Save State, optionally a named slot",
         dispatch: |a| SlashOutcome::Load(a.first().map(|s| s.to_string())) },
     CommandSpec { name: "reset-game", category: Category::Game, context: Context::Global,
         usage: "reset-game [map]", description: "restart the game; 'reset-game map' also clears the map",
@@ -499,8 +499,8 @@ mod tests {
         assert!(matches!(parse("zoom-map reset", '/'), SlashOutcome::Action(Action::ZoomReset)));
         assert!(matches!(parse("nudge-room -1 0", '/'), SlashOutcome::Action(Action::NudgeSelected(-1, 0))));
         assert!(matches!(parse("cycle-layer next", '/'), SlashOutcome::Action(Action::CycleLayer(1))));
-        assert!(matches!(parse("save-game foo", '/'), SlashOutcome::Save(Some(_))));
-        assert!(matches!(parse("save-game", '/'), SlashOutcome::Save(None)));
+        assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));
+        assert!(matches!(parse("save-state", '/'), SlashOutcome::Save(None)));
         assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
         assert!(matches!(parse("reset-game", '/'), SlashOutcome::Reset { map: false }));
         assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
@@ -543,8 +543,8 @@ mod tests {
             "open-config should appear in /help"
         );
         assert!(
-            lines.iter().any(|l| l.contains("/save-game")),
-            "save-game should appear in /help"
+            lines.iter().any(|l| l.contains("/save-state")),
+            "save-state should appear in /help"
         );
         assert!(
             lines.iter().any(|l| l.contains("/zoom-map")),
@@ -602,7 +602,7 @@ mod tests {
         assert!(matches!(parse("pan-map -1 0", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
         assert!(matches!(parse("zoom-map in", '/'), SlashOutcome::Action(Action::ZoomIn)));
         assert!(matches!(parse("select-room next", '/'), SlashOutcome::Action(Action::SelectNext)));
-        assert!(matches!(parse("save-game foo", '/'), SlashOutcome::Save(Some(_))));
+        assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));
         assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
         assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
         // Old short names no longer resolve (clean break).
@@ -643,7 +643,7 @@ mod tests {
         }
         // Spot-check representative commands exist with the right category.
         let by = |n: &str| COMMANDS.iter().find(|c| c.name == n).expect(n);
-        assert_eq!(by("save-game").category, Category::Game);
+        assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (53 commands: Game 12, Map 21, View 4,
@@ -703,7 +703,7 @@ mod tests {
     fn help_for_command_round_trip() {
         // The run loop calls help_for_command on a HelpCommand(name); verify the
         // function exists with the expected signature and returns non-empty lines.
-        assert!(!help_for_command('/', "save-game").is_empty());
+        assert!(!help_for_command('/', "save-state").is_empty());
     }
 
     #[test]

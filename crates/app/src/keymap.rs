@@ -209,8 +209,8 @@ impl Default for KeyMap {
         // this entry lets the keymap advertise it for hints/help).
         bind!(plain(Tab), "toggle-focus", Context::Global);
 
-        bind!(ctrl(Char('s')), "save-game", Context::Global);
-        bind!(ctrl(Char('r')), "load-game", Context::Global);
+        bind!(ctrl(Char('s')), "save-state", Context::Global);
+        bind!(ctrl(Char('r')), "restore-state", Context::Global);
         bind!(ctrl(Char('e')), "export-svg", Context::Global);
         bind!(ctrl(Char('g')), "export-dot", Context::Global);
         bind!(ctrl(Char('d')), "export-dump", Context::Global);
@@ -396,8 +396,8 @@ impl KeyMap {
 /// Default full command-strings for the direct (always-available) command set.
 const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     "quit",
-    "save-game",
-    "load-game",
+    "save-state",
+    "restore-state",
     "pan-map -1 0",
     "pan-map 1 0",
     "pan-map 0 -1",
@@ -513,7 +513,7 @@ impl HotkeyLayout {
     /// Check whether a full keymap command-string resolves to a direct command.
     ///
     /// `cmd_str` is the full binding string as returned by `KeyMap::lookup`
-    /// (e.g. `"zoom-map in"`, `"save-game"`). Matched as a whole against the
+    /// (e.g. `"zoom-map in"`, `"save-state"`). Matched as a whole against the
     /// direct set, so a command with arguments is matched exactly (e.g.
     /// `"cycle-layout"` is not direct even though `"cycle-layout reverse"` is).
     pub fn is_direct_name(&self, cmd_str: &str) -> bool {
@@ -547,11 +547,11 @@ mod tests {
         let km = KeyMap::default();
         let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
         use KeyCode::*;
-        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Global), Some("save-game"));
+        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Global), Some("save-state"));
         assert_eq!(km.lookup(&g(Char('n'), false, false), Context::Map), Some("select-room next"));
         assert_eq!(km.lookup(&g(Char('h'), false, false), Context::Map), Some("pan-map -1 0"));
         // Map falls through to Global:
-        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-game"));
+        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-state"));
         // shift-arrow pan aliases were removed; plain arrow still works:
         assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some("pan-map -1 0"));
         // shift-arrow is no longer bound in map context:
@@ -580,12 +580,12 @@ mod tests {
         use crate::config::{HotkeysConfig, HotkeyGroupConfig};
         let cfg = HotkeysConfig {
             prefix: None,
-            direct: Some(vec!["save-game".into(), "quit".into(), "not-a-command".into()]),
+            direct: Some(vec!["save-state".into(), "quit".into(), "not-a-command".into()]),
             group: vec![HotkeyGroupConfig { title: "T".into(), commands: vec!["tidy-map".into()] }],
         };
         let (layout, warnings) = HotkeyLayout::resolve(&cfg);
         // Specified direct commands are direct
-        assert!(layout.is_direct_name("save-game"), "save-game should be direct");
+        assert!(layout.is_direct_name("save-state"), "save-state should be direct");
         assert!(layout.is_direct_name("quit"), "quit should be direct");
         // center-map is NOT in custom direct list
         assert!(!layout.is_direct_name("center-map"), "center-map should NOT be direct with custom list");
@@ -767,8 +767,8 @@ mod tests {
         assert!(matches!(state.zoom, Zoom::Boxes), "ZoomReset must restore Zoom::Boxes");
     }
 
-    /// Every default binding for a DIRECT command (excluding save-game and
-    /// load-game, which intentionally use Ctrl) must have ctrl=false and
+    /// Every default binding for a DIRECT command (excluding save-state and
+    /// restore-state, which intentionally use Ctrl) must have ctrl=false and
     /// shift=false. This invariant ensures that direct commands are reachable
     /// with plain (unmodified) keystrokes.
     #[test]
@@ -777,7 +777,7 @@ mod tests {
         let layout = HotkeyLayout::default();
 
         // Commands excluded from this invariant by design.
-        let excluded = ["save-game", "load-game"];
+        let excluded = ["save-state", "restore-state"];
 
         let mut violations: Vec<String> = Vec::new();
         for (spec, cmd_str, _ctx) in &km.bindings {
@@ -832,10 +832,10 @@ mod tests {
 
         // use_defaults=false → empty base; only the user binding exists.
         let mut cfg = KeymapConfig { use_defaults: false, ..Default::default() };
-        cfg.global.insert("ctrl+s".into(), "save-game".into());
+        cfg.global.insert("ctrl+s".into(), "save-state".into());
         let (km2, warns) = KeyMap::resolve(&cfg);
         let cs: KeySpec = "ctrl+s".parse().unwrap();
-        assert_eq!(km2.lookup(&cs, Context::Global), Some("save-game"));
+        assert_eq!(km2.lookup(&cs, Context::Global), Some("save-state"));
         assert!(km2.lookup(&plus, Context::Map).is_none(), "no defaults loaded");
         assert!(warns.is_empty());
 

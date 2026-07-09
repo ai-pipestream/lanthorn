@@ -40,7 +40,7 @@
 - **Reset** — restart the story from the beginning via a confirmation dialog with
   an opt-in "also clear the map" checkbox (the map is kept by default).
 - **Slash commands** — type a leading prefix (default `/`, configurable) to run
-  app commands by name: `/save-game`, `/load-game`, `/reset-game [map]`,
+  app commands by name: `/save-state`, `/restore-state`, `/reset-game [map]`,
   `/pan-map <dx> <dy>`, `/zoom-map in|out|reset`, `/center-map`, `/tidy-map`,
   `/cycle-layer next|prev`. `/help` lists all commands grouped by category;
   `/help <command>` shows one command's usage and description. Tab autocomplete

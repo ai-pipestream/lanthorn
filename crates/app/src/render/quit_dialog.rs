@@ -43,12 +43,12 @@ pub fn draw_quit_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     let st = DialogStyle::from_colors(&state.colors);
 
     let buttons = &[
-        DialogButton { id: ButtonId::Save, label: "Save & quit" },
+        DialogButton { id: ButtonId::Save, label: "Save State & quit" },
         DialogButton { id: ButtonId::Ok, label: "Quit" },
         DialogButton { id: ButtonId::Cancel, label: "Cancel" },
     ];
     let spec = DialogSpec {
-        title: "Save before quitting?",
+        title: "Save state before quitting?",
         placement: Placement::Centered { w: modal_w, h: modal_h },
         buttons,
         show_close: true,
@@ -66,7 +66,7 @@ pub fn draw_quit_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
             buf,
             content.x,
             content.y,
-            "You have unsaved progress.",
+            "You have an unsaved Save State.",
             body_style,
             content,
         );
@@ -107,9 +107,9 @@ mod tests {
         assert!(r.cancel.is_some(), "cancel button rect must be present");
         let all: String = terminal.backend().buffer().content().iter()
             .flat_map(|c| c.symbol().chars()).collect();
-        assert!(all.contains("Save before quitting?"), "title must be present");
-        assert!(all.contains("unsaved progress"), "body line must be present");
-        assert!(all.contains("Save & quit"), "save button label must be present");
+        assert!(all.contains("Save state before quitting?"), "title must be present");
+        assert!(all.contains("unsaved Save State"), "body line must be present");
+        assert!(all.contains("Save State & quit"), "save button label must be present");
         assert!(all.contains("Quit"), "quit button label must be present");
         assert!(all.contains("Cancel"), "cancel button label must be present");
     }

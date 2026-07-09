@@ -4078,8 +4078,8 @@ mod tests {
         s.toggle_focus();
         // Direct commands fire without the dialog.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
-        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-game"));
-        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "load-game"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "restore-state"));
         // Non-direct commands return None when dialog is closed.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
@@ -4857,8 +4857,8 @@ mod tests {
         // ── Game focus (default) ──────────────────────────────────────────────
         let s = AppState::default(); // focus = Game
         // Direct ctrl commands work without the dialog.
-        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-game"));
-        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "load-game"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "restore-state"));
         // Non-direct ctrl commands return None when dialog is closed.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
@@ -4925,7 +4925,7 @@ mod tests {
         // Esc → ToggleFocus (direct, always works)
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
         // Direct ctrl globals work in map focus (save/restore kept with ctrl).
-        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-game"));
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
         // Ctrl+Left no longer nudges (nudge moved to F6-F9).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         // F6-F9 nudge work in map focus via Global fallthrough.

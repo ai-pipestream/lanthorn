@@ -152,8 +152,8 @@ use app::keymap::{Context, HotkeyLayout, KeyMap};
 /// `tidy-map` is intentionally excluded from all lists.
 const GAME_HINTS: &[&str] = &[
     "toggle-focus",
-    "save-game",
-    "load-game",
+    "save-state",
+    "restore-state",
     "cycle-layout",
 ];
 
@@ -373,7 +373,7 @@ enum RestoreOutcome {
 /// Save State (`Engine::restore_state`). This is the fix for the SQ-0163
 /// regression — every host restore path used to call `restore_state`
 /// unconditionally, landing the VM on the descriptor instead of past it.
-/// Shared by every host load/restore site (saves-manager Load, `/load-game`,
+/// Shared by every host load/restore site (saves-manager Load, `/restore-state`,
 /// and a `.babelmap` picked from the in-game restore picker).
 fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Result<RestoreOutcome, String> {
     if app::persist_files::is_game_save(path) {
@@ -3845,8 +3845,9 @@ fn main() {
 
     // Save on exit ONLY when auto_save is enabled. With auto_save off (the default),
     // nothing is saved automatically — the user controls saving via the quit prompt's
-    // "Save & quit", the /save command, or named save slots. This keeps "Quit without
-    // saving" honest and avoids silently overwriting an explicit save point on exit.
+    // "Save State & quit", the /save-state command, or named save slots. This keeps
+    // "Quit without saving" honest and avoids silently overwriting an explicit save
+    // point on exit.
     // Exit auto-save is engine-neutral: the save routes through Engine::save_state
     // (Quetzal for zvm, the gvm snapshot for Glulx); screen.json is written for
     // zvm only.
@@ -4970,7 +4971,7 @@ fn open_hints(
     }
 }
 
-/// Return true when a quit attempt should show the "Save before quitting?" dialog.
+/// Return true when a quit attempt should show the "Save state before quitting?" dialog.
 ///
 /// Conditions: auto_save is off AND prompt_save_on_quit is on AND the session has
 /// at least one turn (unsaved progress exists).
@@ -4987,7 +4988,7 @@ enum QuitDialogAction {
 }
 
 /// Map a key code to a QuitDialogAction.
-/// 's' or Enter → Save & quit; 'q' → Quit without saving; Esc or 'c' → Cancel.
+/// 's' or Enter → Save State & quit; 'q' → Quit without saving; Esc or 'c' → Cancel.
 #[cfg_attr(not(test), allow(dead_code))]
 fn quit_dialog_key(code: crossterm::event::KeyCode) -> QuitDialogAction {
     use crossterm::event::KeyCode;
@@ -5331,7 +5332,7 @@ mod tests {
     // ── SQ-0227 Task 3: restore dispatch on file extension ──────────────────────
     //
     // `restore_from_file` is the dispatch shared by every host restore site
-    // (saves-manager Load, `/load-game`, and a `.babelmap` picked from the
+    // (saves-manager Load, `/restore-state`, and a `.babelmap` picked from the
     // in-game restore picker). Regression proof for SQ-0163: every host
     // restore path used to call `restore_state` (resume) unconditionally, so
     // a host restore of an in-game `@save` (`.qzl`) landed the VM on the
@@ -5592,12 +5593,12 @@ mod tests {
     }
 
     #[test]
-    fn hint_line_game_contains_save_game() {
+    fn hint_line_game_contains_save_state() {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         let line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
-        // Ctrl+S → save-game; short label is "save game".
-        assert!(line.contains("Ctrl+S: save game"), "expected 'Ctrl+S: save game' in '{line}'");
+        // Ctrl+S → save-state; short label is "save state".
+        assert!(line.contains("Ctrl+S: save state"), "expected 'Ctrl+S: save state' in '{line}'");
     }
 
     // ── Hotkey dialog tests ───────────────────────────────────────────────────
@@ -6154,7 +6155,7 @@ mod tests {
     #[test]
     fn quit_dialog_tab_then_enter_fires_focused() {
         use crossterm::event::KeyCode;
-        // buttons: [Save & quit(0), Quit(1), Cancel(2)], default focus 0.
+        // buttons: [Save State & quit(0), Quit(1), Cancel(2)], default focus 0.
         // Tab -> focus 1 (Quit); Enter on focus 1 -> Quit.
         let mut focus = 0usize;
         focus = app::input::cycle_focus(focus, 3, 1);
