@@ -1140,6 +1140,7 @@ fn run_story_picker(
                         cover_picker.as_ref(),
                         &mut cover,
                         &entry.path,
+                        slide.active(),
                         &cs,
                         buf,
                     );
@@ -1366,6 +1367,7 @@ fn draw_info_panel(
     picker: Option<&ratatui_image::picker::Picker>,
     cover: &mut app::cover::CoverState,
     entry_path: &std::path::Path,
+    animating: bool,
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
 ) -> usize {
@@ -1393,31 +1395,38 @@ fn draw_info_panel(
 
     let mut inner = frame.content;
 
-    // Cover band: top of the panel, ≤50% of the panel's inner height, only when
-    // the selected story has a decoded frontispiece and a picker exists.
+    // Cover band: top of the panel, ≤50% of the panel's inner height is the
+    // *maximum* fit box; the actual band is sized down to the image's
+    // aspect-fitted height so no dead letterbox rows push the info text down.
+    // Only drawn when the selected story has a decoded frontispiece and a
+    // picker exists.
     if let Some(picker) = picker {
         if cover.has(entry_path) {
             let cover_h = (inner.height / 2).min(inner.height.saturating_sub(1));
             if cover_h >= 1 {
                 let cover_area = Rect::new(inner.x, inner.y, inner.width, cover_h);
-                // Themed letterbox fill behind/around the fitted image.
-                for y in cover_area.top()..cover_area.bottom() {
-                    for x in cover_area.left()..cover_area.right() {
-                        if let Some(c) = buf.cell_mut((x, y)) {
-                            c.set_symbol(" ").set_style(cs.story_info_cover);
+                let mut used_h = 0u16;
+                if let Some(proto) = cover.protocol(picker, entry_path, cover_area, animating) {
+                    // Fitted (aspect-preserved) size, clamped to the max box.
+                    let sz = proto.size();
+                    let used_w = sz.width.min(inner.width);
+                    used_h = sz.height.min(cover_h);
+                    // Themed letterbox fill, sized to the actual fitted band
+                    // (not the full max box) so there's no dead space below.
+                    let fill_area = Rect::new(cover_area.x, cover_area.y, cover_area.width, used_h);
+                    for y in fill_area.top()..fill_area.bottom() {
+                        for x in fill_area.left()..fill_area.right() {
+                            if let Some(c) = buf.cell_mut((x, y)) {
+                                c.set_symbol(" ").set_style(cs.story_info_cover);
+                            }
                         }
                     }
-                }
-                if let Some(proto) = cover.protocol(picker, entry_path, cover_area) {
-                    // Center the fitted image within the letterboxed band.
-                    let sz = proto.size();
-                    let w = sz.width.min(cover_area.width);
-                    let h = sz.height.min(cover_area.height);
+                    // Top-aligned, horizontally centered within the band.
                     let dest = Rect::new(
-                        cover_area.x + (cover_area.width - w) / 2,
-                        cover_area.y + (cover_area.height - h) / 2,
-                        w,
-                        h,
+                        cover_area.x + (inner.width - used_w) / 2,
+                        cover_area.y,
+                        used_w,
+                        used_h,
                     );
                     ratatui::widgets::Widget::render(
                         ratatui_image::Image::new(proto),
@@ -1425,7 +1434,9 @@ fn draw_info_panel(
                         buf,
                     );
                 }
-                inner = Rect::new(inner.x, inner.y + cover_h, inner.width, inner.height - cover_h);
+                if used_h > 0 {
+                    inner = Rect::new(inner.x, inner.y + used_h, inner.width, inner.height - used_h);
+                }
             }
         }
     }
@@ -6412,7 +6423,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, &cs, &mut buf,
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
         );
 
         let text = buffer_to_string(&buf, area);
@@ -6461,7 +6472,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         let max_scroll = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, &cs, &mut buf,
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
         );
         let text_top = buffer_to_string(&buf, area);
         assert!(max_scroll > 0, "content should overflow a 10-row panel");
@@ -6470,7 +6481,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, &cs, &mut buf2,
+            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2,
         );
         let text_scrolled = buffer_to_string(&buf2, area);
         assert_eq!(max_scroll2, max_scroll);
@@ -6479,7 +6490,7 @@ mod tests {
         // Scrolling past max clamps to the same view as scroll == max_scroll.
         let mut buf3 = Buffer::empty(area);
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, &cs, &mut buf3,
+            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, false, &cs, &mut buf3,
         );
         let text_over = buffer_to_string(&buf3, area);
         assert_eq!(text_over, text_scrolled, "scroll past max should clamp to max_scroll view");
@@ -6522,7 +6533,7 @@ mod tests {
 
         super::draw_info_panel(
             "Cover Test", "cover-test.gblorb", &meta, None,
-            0, area, Some(&picker), &mut cover, &path, &cs, &mut buf,
+            0, area, Some(&picker), &mut cover, &path, false, &cs, &mut buf,
         );
 
         // Half-blocks emit the upper-half-block glyph in the reserved top band.
@@ -6546,6 +6557,32 @@ mod tests {
         assert!(
             max_x < area.right() - 2,
             "cover should have a right letterbox margin (rightmost col = {max_x})"
+        );
+
+        // The band is now sized to the image's aspect-fitted height (`used_h`),
+        // not a fixed half-panel box: the info text should begin immediately
+        // under the image, with no dead letterbox rows pushing it down.
+        let last_image_row = band_rows
+            .clone()
+            .filter(|&y| {
+                (area.left()..area.right())
+                    .any(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}"))
+            })
+            .max()
+            .expect("cover band should contain at least one image row");
+        let title_row = (area.top()..area.bottom())
+            .find(|&y| {
+                let row_text = (area.left()..area.right())
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>();
+                row_text.contains("Cover Test")
+            })
+            .expect("title text should appear in the panel");
+        assert_eq!(
+            title_row,
+            last_image_row + 1,
+            "title should begin immediately under the fitted image, no dead letterbox rows \
+             (last image row = {last_image_row}, title row = {title_row})"
         );
     }
 
