@@ -1103,6 +1103,14 @@ pub struct AppState {
     /// Percentage-based pane sizes, seeded from `config` at startup.
     pub pane_sizes: PaneSizes,
 
+    /// Set (by `apply_action`) whenever `config` has changed in a way that
+    /// should be persisted to `config.toml` on the next loop iteration,
+    /// regardless of which dispatch path (`KeyResolve::Action` or
+    /// `KeyResolve::Command`) handled the key. The run loop checks this after
+    /// every event and writes + clears it. See `Action::ResizeExit` /
+    /// `Action::ResizeReset`.
+    pub pending_config_write: bool,
+
     /// True while the interactive pane-resize mode is active (leader `z`).
     pub resize_mode: bool,
     /// Which visible pane resize mode is currently adjusting.
@@ -1346,6 +1354,7 @@ impl Default for AppState {
             verb_menu: None,
             config: crate::config::Config::default(),
             pane_sizes: PaneSizes { split_ratio: 50, verb_dock_pct: 32, inv_dock_pct: 33 },
+            pending_config_write: false,
             resize_mode: false,
             resize_target: ResizeTarget::StoryMap,
             config_screen: None,

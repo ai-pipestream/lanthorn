@@ -2876,6 +2876,7 @@ fn main() {
                         if close_leader {
                             state.hotkey_dialog = false;
                         }
+                        flush_pending_config_write(&mut state);
                         if should_break {
                             break;
                         }
@@ -3050,10 +3051,6 @@ fn main() {
         let style_save = matches!(action, Action::StyleSave);
         let style_save_game = matches!(action, Action::StyleSaveGame);
 
-        // Note whether this action exits or resets resize mode (persist pane sizes
-        // afterward; apply_action already mirrors state.pane_sizes into state.config).
-        let resize_persist = matches!(action, Action::ResizeExit | Action::ResizeReset);
-
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
             state.config_screen.as_ref().map(|cs| cs.working.clone())
@@ -3132,11 +3129,13 @@ fn main() {
                     // Strip the leading prefix character before parsing.
                     let body = &cmd[state.config.command_prefix.len_utf8()..];
                     let outcome = slash::parse(body, state.config.command_prefix);
-                    if dispatch_slash_outcome(
+                    let should_break = dispatch_slash_outcome(
                         outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
                         &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
                         last_panes.map, last_panes.story, false,
-                    ) {
+                    );
+                    flush_pending_config_write(&mut state);
+                    if should_break {
                         break;
                     }
                     continue;
@@ -3632,11 +3631,10 @@ fn main() {
         }
 
         // After apply_action: if resize mode was just exited or reset, persist the
-        // (possibly changed) pane sizes to config.toml.
-        if resize_persist {
-            let user_dir = state.config.user_dir.clone();
-            let _ = app::config::write_config(&user_dir, &state.config);
-        }
+        // (possibly changed) pane sizes to config.toml. Also covers the
+        // `KeyResolve::Command` dispatch path via the `flush_pending_config_write`
+        // calls placed right before its `continue`s above.
+        flush_pending_config_write(&mut state);
 
         // After apply_action: if gallery was just closed, write the resolved look to
         // the personal style file and repoint config.toml at it.
@@ -3715,6 +3713,20 @@ fn main() {
                 eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
             }
         }
+    }
+}
+
+// ── Pending config-write flush ────────────────────────────────────────────────
+
+/// Write `state.config` to `config.toml` if `pending_config_write` is set, then
+/// clear the flag. Called after both key-dispatch paths (`KeyResolve::Action`
+/// and `KeyResolve::Command`, the latter via `dispatch_slash_outcome`) so a
+/// resize-reset/exit persists regardless of which path handled the key.
+fn flush_pending_config_write(state: &mut AppState) {
+    if state.pending_config_write {
+        let user_dir = state.config.user_dir.clone();
+        let _ = app::config::write_config(&user_dir, &state.config);
+        state.pending_config_write = false;
     }
 }
 

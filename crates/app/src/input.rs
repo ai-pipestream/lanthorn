@@ -2674,10 +2674,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ResizeExit => {
             state.resize_mode = false;
+            state.pending_config_write = true;
         }
 
         Action::ResizeReset => {
             state.reset_pane_sizes();
+            state.pending_config_write = true;
         }
 
         Action::ResizeNav(ResizeNavKind::NextTarget) => state.cycle_resize_target(true),
@@ -6517,6 +6519,20 @@ mod tests {
     }
 
     #[test]
+    fn resize_reset_sets_pending_config_write() {
+        // Regression for the reset-pane-size slash command never persisting:
+        // the run loop's KeyResolve::Command dispatch path never reached the
+        // old resize_persist-guarded write, so it needs this flag to signal
+        // the pending write from apply_action instead. See flush_pending_config_write
+        // in main.rs, called from both dispatch paths.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        assert!(!s.pending_config_write);
+        apply_action(Action::ResizeReset, &mut s, &mut mapper);
+        assert!(s.pending_config_write);
+    }
+
+    #[test]
     fn resize_exit_clears_resize_mode() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
@@ -6524,6 +6540,16 @@ mod tests {
         assert!(s.resize_mode);
         apply_action(Action::ResizeExit, &mut s, &mut mapper);
         assert!(!s.resize_mode);
+    }
+
+    #[test]
+    fn resize_exit_sets_pending_config_write() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        assert!(!s.pending_config_write);
+        apply_action(Action::ResizeExit, &mut s, &mut mapper);
+        assert!(s.pending_config_write);
     }
 
     #[test]
