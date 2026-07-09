@@ -15,7 +15,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
-use crate::state::{AppState, ResizeTarget, VerbMenuPane};
+use crate::state::{AppState, VerbMenuPane};
 
 // ── Curated lists ─────────────────────────────────────────────────────────────
 
@@ -127,14 +127,10 @@ pub fn draw_verb_menu(
         }
     }
 
-    // In resize mode with this dock as the target, use the `focused_border`
-    // accent so the selected pane is visibly distinct.
-    let border_color = if state.resize_mode && state.resize_target == ResizeTarget::VerbDock {
-        state.colors.focused_border
-    } else {
-        base
-    };
-    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), border_color);
+    // The verb dock is not an interactive resize target (the verb menu is a
+    // keyboard-modal, so resize mode and the menu can never be open at once;
+    // see SQ-0238), so its border never picks up the resize highlight.
+    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), base);
 
     // Title, centered on the top border row.
     if area.height >= 2 && area.width >= 2 {

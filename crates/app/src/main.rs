@@ -723,7 +723,6 @@ fn draw_frame(
             use app::state::ResizeTarget;
             let t = match state.resize_target {
                 ResizeTarget::StoryMap => "story/map",
-                ResizeTarget::VerbDock => "verb dock",
                 ResizeTarget::InvDock => "inventory",
             };
             format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")

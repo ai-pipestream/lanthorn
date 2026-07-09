@@ -2694,11 +2694,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     Right => state.pane_sizes.split_ratio = (state.pane_sizes.split_ratio + STEP).min(80),
                     _ => {}
                 },
-                crate::state::ResizeTarget::VerbDock => match dir {
-                    Left => state.pane_sizes.verb_dock_pct = state.pane_sizes.verb_dock_pct.saturating_sub(STEP).max(10),
-                    Right => state.pane_sizes.verb_dock_pct = (state.pane_sizes.verb_dock_pct + STEP).min(60),
-                    _ => {}
-                },
                 crate::state::ResizeTarget::InvDock => match dir {
                     Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(80),
                     Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(10),
@@ -6567,47 +6562,49 @@ mod tests {
         let mut s = AppState::default();
         assert_eq!(s.resize_targets_visible(), vec![crate::state::ResizeTarget::StoryMap]);
 
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        assert_eq!(
-            s.resize_targets_visible(),
-            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::VerbDock]
-        );
-
         s.show_inventory = true;
         assert_eq!(
             s.resize_targets_visible(),
-            vec![
-                crate::state::ResizeTarget::StoryMap,
-                crate::state::ResizeTarget::VerbDock,
-                crate::state::ResizeTarget::InvDock,
-            ]
+            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::InvDock]
         );
 
         s.layout = crate::state::Layout::TranscriptFull;
-        s.verb_menu = None;
         s.show_inventory = false;
         assert!(s.resize_targets_visible().is_empty());
     }
 
     #[test]
-    fn cycle_resize_target_wraps_and_skips_non_visible() {
+    fn resize_targets_visible_excludes_verb_dock_even_when_menu_open() {
+        // SQ-0237: the verb dock is deferred to SQ-0238 as an interactive
+        // resize target (the verb menu is a keyboard-modal that swallows all
+        // keys before resize mode's intercept, so the two can never be active
+        // together). Opening the verb menu must not surface it as a target.
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
+        assert_eq!(s.resize_targets_visible(), vec![crate::state::ResizeTarget::StoryMap]);
+
+        s.show_inventory = true;
+        assert_eq!(
+            s.resize_targets_visible(),
+            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::InvDock]
+        );
+    }
+
+    #[test]
+    fn cycle_resize_target_wraps_and_skips_non_visible() {
+        let mut s = AppState::default();
         s.show_inventory = true;
         s.resize_target = crate::state::ResizeTarget::StoryMap;
 
         s.cycle_resize_target(true);
-        assert_eq!(s.resize_target, crate::state::ResizeTarget::VerbDock);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock, "wraps forward");
         s.cycle_resize_target(true);
-        assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock);
-        s.cycle_resize_target(true);
-        assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap, "wraps forward");
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap, "wraps forward again");
 
         s.cycle_resize_target(false);
         assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock, "wraps backward");
 
         // Current target not visible → snaps to the first visible one.
-        s.verb_menu = None;
         s.show_inventory = false;
         s.resize_target = crate::state::ResizeTarget::InvDock;
         s.cycle_resize_target(true);

@@ -882,8 +882,6 @@ pub enum Layout {
 pub enum ResizeTarget {
     /// The story/map split ratio (`Layout::Split` only).
     StoryMap,
-    /// The verb-menu dock width.
-    VerbDock,
     /// The inventory dock height.
     InvDock,
 }
@@ -1634,15 +1632,19 @@ impl AppState {
     }
 
     /// Which panes are currently visible and eligible for resize mode, in
-    /// Tab-cycle order: StoryMap (Split layout only), VerbDock (menu open),
-    /// InvDock (inventory shown).
+    /// Tab-cycle order: StoryMap (Split layout only), InvDock (inventory
+    /// shown).
+    ///
+    /// The verb dock is intentionally NOT an interactive resize target: the
+    /// verb menu is a keyboard-modal that routes all keys to
+    /// `verb_menu_key_to_action` before resize mode's intercept, so resize
+    /// mode and the verb menu can never be active at the same time. Its width
+    /// (`verb_dock_pct`) stays a persisted, resettable config value; see
+    /// SQ-0238 for interactive verb-dock resize.
     pub fn resize_targets_visible(&self) -> Vec<ResizeTarget> {
         let mut targets = Vec::new();
         if self.layout == Layout::Split {
             targets.push(ResizeTarget::StoryMap);
-        }
-        if self.verb_menu.is_some() {
-            targets.push(ResizeTarget::VerbDock);
         }
         if self.show_inventory {
             targets.push(ResizeTarget::InvDock);
