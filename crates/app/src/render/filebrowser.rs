@@ -1,4 +1,4 @@
-//! File-browser modal overlay for import/export of standard Quetzal saves.
+//! File-browser modal overlay for importing standard Quetzal saves.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

@@ -121,7 +121,7 @@ fn map_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Directory holding per-game save archives (`.babelmap`, default + named) and
-/// the default location for Quetzal import/export. Kept separate from the map
+/// the game's own standard `.qzl` saves. Kept separate from the map
 /// directory. Defaults to `config.user_dir/saves`.
 fn saves_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
     user_dir.join("saves")
@@ -379,11 +379,11 @@ fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Result
 }
 
 /// Whether the active engine is the Z-machine `GameSession` required by the
-/// standard `.qzl`/`.sav` Quetzal **import/export** paths.
+/// standard `.qzl`/`.sav` Quetzal **import** path.
 ///
-/// Those paths reach the concrete session via [`zvm_session`]/[`zvm_session_mut`]
-/// (which PANIC on any other engine) and trade raw Quetzal saves with other
-/// interpreters — Z-machine-only until cross-interpreter Glulx Quetzal exists.
+/// That path reaches the concrete session via [`zvm_session_mut`]/[`zvm_session_opt`]
+/// (which PANIC / return `None` on any other engine) and reads raw Quetzal saves
+/// from other interpreters — Z-machine-only until cross-interpreter Glulx Quetzal exists.
 /// They check this first and bail gracefully when it returns `false` (a Glulx
 /// game). The `.babelmap` archive save/restore/restart paths no longer need it:
 /// they route through the engine-neutral `Engine::save_state`/`restore_state`
