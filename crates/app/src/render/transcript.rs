@@ -1176,19 +1176,7 @@ fn render_middle(
             break;
         }
         // Inline-image band row: blit the strip for this row instead of text.
-        if let Some(band) = &wr.band {
-            if let Some(picker) = state.game_picker.as_ref() {
-                crate::render::inline_image::blit_band(
-                    &state.inline_image_render,
-                    picker,
-                    band,
-                    body_area.x,
-                    body_area.width,
-                    row_y,
-                    state.colors.inline_image,
-                    buf,
-                );
-            }
+        if crate::render::inline_image::try_blit_band_row(state, wr, body_area.x, body_area.width, row_y, buf) {
             continue;
         }
         // Meta/Warning reserve the 2-col gutter and draw their marker glyph;
@@ -1306,6 +1294,28 @@ mod tests {
         let narrow = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 20);
         assert_eq!(wide.len(), 20);
         assert_eq!(narrow.len(), 10);
+    }
+
+    #[test]
+    fn margin_right_band_rows_run_0_to_rows_with_pinned_x_off() {
+        // 16x24 px, cell 8x8 -> 2x3 cells (same geometry as
+        // image_unit_expands_to_band_rows); MarginRight at width 40 pins
+        // x_off = 40 - 2 = 38 on every one of the 3 band rows, with `row`
+        // running 0, 1, 2 in order.
+        let transcript = vec![String::new()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![Vec::new()];
+        let images = vec![Some(dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight))];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        assert_eq!(rows.len(), 3);
+        for (expected_row, wr) in rows.iter().enumerate() {
+            let band = wr.band.as_ref().unwrap();
+            assert_eq!(band.row, expected_row as u16);
+            assert_eq!(band.cols, 2);
+            assert_eq!(band.rows, 3);
+            assert_eq!(band.x_off, 38);
+        }
     }
 
     #[test]

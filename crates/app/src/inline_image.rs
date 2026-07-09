@@ -111,4 +111,14 @@ mod tests {
         // Tiny image never disappears to 0 cells.
         assert_eq!(img(1, 1).fitted_cells(40, (8, 8)), (1, 1));
     }
+
+    #[test]
+    fn fitted_cells_pins_known_geometry() {
+        // 100x60 px image, char_px 8x16, band width 40.
+        // max_px_w = 40 * 8 = 320; native width 100 <= 320, so no downscale:
+        // dw=100, dh=60. cols = ceil(100/8) = 13 (clamped to width 40 → 13).
+        // rows = ceil(60/16) = 4.
+        let (cols, rows) = img(100, 60).fitted_cells(40, (8, 16));
+        assert_eq!((cols, rows), (13, 4));
+    }
 }

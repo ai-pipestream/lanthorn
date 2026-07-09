@@ -351,19 +351,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         let row_y = area.y + i as u16;
         // Inline-image band row: blit the strip for this row instead of text
         // (same branch as the transcript draw loop, Task 8).
-        if let Some(band) = &wr.band {
-            if let Some(picker) = state.game_picker.as_ref() {
-                crate::render::inline_image::blit_band(
-                    &state.inline_image_render,
-                    picker,
-                    band,
-                    area.x,
-                    area.width,
-                    row_y,
-                    state.colors.inline_image,
-                    buf,
-                );
-            }
+        if crate::render::inline_image::try_blit_band_row(state, wr, area.x, area.width, row_y, buf) {
             continue;
         }
         draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, state.config.honor_game_colours.then_some(&state.colors));
