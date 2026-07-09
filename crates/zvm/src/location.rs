@@ -167,20 +167,25 @@ pub fn status_name_matches(candidate: &str, short: &str) -> bool {
     }
 }
 
-/// The current player object: the lowest-numbered object whose normalized short
-/// name is one of {yourself, you, me, myself, self}. None if not found.
+/// The current player object: among all objects whose normalized short name is
+/// a plausible avatar name (see `PLAYER_NAMES`), prefer the lowest-numbered
+/// *situated* one — i.e. one with a non-zero parent, meaning it's actually
+/// placed inside a room. Some games (e.g. Zork 1) also have a parentless
+/// decorative "you" object (never placed anywhere, no children) that isn't the
+/// real avatar; a real avatar always sits inside a room. If no candidate is
+/// situated, fall back to the lowest-numbered candidate (preserves prior
+/// behavior for games without a decorative object). None if no candidate exists.
 pub fn find_player_object(machine: &Machine) -> Option<u16> {
-    let n = max_object_number(&machine.mem);
-    (1..=n).find(|&obj| {
-        let nm = normalize_name(&short_name(&machine.mem, obj));
-        PLAYER_NAMES[..5].contains(&nm.as_str())
-    })
+    let cands = player_candidates(machine);
+    cands
+        .iter()
+        .copied()
+        .find(|&obj| get_parent(&machine.mem, obj) != 0)
+        .or_else(|| cands.first().copied())
 }
 
-/// Object short-names that plausibly denote the player avatar. Broader than
-/// `find_player_object`'s set — it adds ZIL's "cretin"/"adventurer" — because
-/// `detect_location` picks the avatar by ancestor validation, not name alone, so
-/// a wrong guess is harmless (it simply fails to validate and is skipped).
+/// Object short-names that plausibly denote the player avatar, including ZIL's
+/// "cretin"/"adventurer".
 const PLAYER_NAMES: [&str; 7] = ["yourself", "you", "me", "myself", "self", "cretin", "adventurer"];
 
 /// All objects whose short name plausibly denotes the player avatar, in ascending
@@ -705,6 +710,33 @@ mod tests {
         let loc = detect_location(&m).expect("should detect a location");
         assert_eq!(loc.method(), LocationMethod::PlayerParent, "must validate the avatar, not match by name");
         assert_eq!(loc.object().unwrap().number, 3, "true room is #3, not scenery #1");
+    }
+
+    #[test]
+    fn find_player_object_prefers_situated_avatar_over_decorative_you() {
+        // Zork1-r52 topology: #2 "you" is a decorative object with no parent,
+        // #4 "cretin" is the real avatar situated inside forest ROOM #3.
+        // Old name-only lookup grabbed #2 (empty child chain -> inventory always
+        // empty); the situated-candidate heuristic must select #4 instead.
+        let m = machine_in_forest(3);
+        assert_eq!(get_parent(&m.mem, 2), 0, "decorative \"you\" #2 is parentless");
+        assert_eq!(get_parent(&m.mem, 4), 3, "avatar \"cretin\" #4 sits in room #3");
+        assert_eq!(
+            find_player_object(&m),
+            Some(4),
+            "must pick the situated avatar #4 (cretin), not the decorative #2 (you)"
+        );
+    }
+
+    #[test]
+    fn find_player_object_falls_back_to_lowest_when_none_situated() {
+        // No candidate is situated (avatar #4 also parentless): fall back to the
+        // lowest-numbered candidate so games without a decorative object are
+        // unaffected (here that is #2 "you", the first player-named object).
+        let m = machine_in_forest(0);
+        assert_eq!(get_parent(&m.mem, 2), 0);
+        assert_eq!(get_parent(&m.mem, 4), 0);
+        assert_eq!(find_player_object(&m), Some(2), "fallback picks the lowest-numbered candidate");
     }
 
     #[test]
