@@ -261,7 +261,10 @@ fn decode_umem(umem: &[u8], orig: &[u8]) -> Result<Vec<u8>, ZError> {
 fn encode_stks(state: &State) -> Vec<u8> {
     let mut out = Vec::new();
 
-    // Dummy "main routine" frame — return PC 0, 0 locals, discard, 0 args
+    // Dummy "main routine" frame — Quetzal §4.11.1: "The dummy frame has all
+    // fields set to zero except n, the amount of evaluation stack used." So the
+    // flags byte is 0x00 (NOT 0x10 — the discard bit must be clear here even
+    // though main stores no result; dfrotz rejects the save otherwise).
     // Its eval stack words = eval_stack[0..eval_base_of_first_frame]
     let first_frame_base = state.frames.first().map(|f| f.eval_base).unwrap_or(state.eval_stack.len());
     let main_eval: &[u16] = &state.eval_stack[..first_frame_base];
@@ -269,7 +272,7 @@ fn encode_stks(state: &State) -> Vec<u8> {
     write_frame_raw(
         &mut out,
         0,         // return_pc
-        0x10,      // flags: 0 locals, result discarded (bit 4 = discard, per Quetzal §4.3)
+        0x00,      // flags: dummy frame is all-zero except n (Quetzal §4.11.1)
         0,         // result var
         0,         // arg bitmap
         main_eval,
