@@ -1729,6 +1729,11 @@ impl Machine {
         self.graphics_enabled = on;
     }
 
+    /// Whether Glk graphics windows are currently enabled.
+    pub fn graphics_enabled(&self) -> bool {
+        self.graphics_enabled
+    }
+
     /// Enable/disable Glk sound (gestalt + schannel opcodes).
     pub fn set_sound(&mut self, on: bool) {
         self.sound_enabled = on;
@@ -6488,6 +6493,14 @@ mod tests {
         assert_eq!(m.glk_gestalt(7, 3), 1, "gestalt_DrawImage(wintype_TextBuffer=3) on — inline images (Surface A)");
         assert_eq!(m.glk_gestalt(7, 4), 0, "gestalt_DrawImage(wintype_TextGrid=4) off — grids can't draw images");
         assert_eq!(m.glk_gestalt(14, 0), 1, "gestalt_GraphicsTransparency on");
+    }
+
+    #[test]
+    fn graphics_enabled_getter_reflects_set_graphics() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        assert!(!m.graphics_enabled(), "graphics off by default");
+        m.set_graphics(true);
+        assert!(m.graphics_enabled(), "getter reflects set_graphics(true)");
     }
 
     #[test]

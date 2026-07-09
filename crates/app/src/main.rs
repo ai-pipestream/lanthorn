@@ -1703,11 +1703,7 @@ fn main() {
             Box::new(s)
         }
         app::hints::LoadedStory::Glulx(bytes) => {
-            let pict_blorb = if cfg.images {
-                blorb::resolve_sound_blorb(&story_path).map(|(b, _)| b)
-            } else {
-                None
-            };
+            let pict_blorb = resolve_pict_blorb(&story_path, cfg.images);
             match GlulxSession::new(
                 bytes,
                 cfg.virtual_screen_cols as u32,
@@ -2387,7 +2383,7 @@ fn main() {
                             ResetDialogAction::Confirm => {
                                 let clear = state.reset_clear_map;
                                 state.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, clear);
                             }
                             ResetDialogAction::Cancel => {
                                 state.reset_dialog = false;
@@ -2417,7 +2413,7 @@ fn main() {
                             } else if in_reset {
                                 let clear = state.reset_clear_map;
                                 state.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, clear);
                             } else if in_checkbox {
                                 state.reset_clear_map = !state.reset_clear_map;
                             } else if !in_dialog {
@@ -3921,7 +3917,7 @@ fn dispatch_slash_outcome(
             if from_key {
                 apply_action(Action::ResetGame, state, mapper);
             } else {
-                reset_game(session, mapper, state, story_bytes, reset_map);
+                reset_game(session, mapper, state, story_bytes, story_path, reset_map);
                 let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
                 state.set_status(status_msg);
             }
@@ -4021,11 +4017,22 @@ fn dispatch_slash_outcome(
     false
 }
 
+/// Resolve the Pict/graphics blorb for a story the same way at launch and
+/// restart: path-based (self-contained blorb, same-stem sidecar, or dir scan).
+fn resolve_pict_blorb(story_path: &std::path::Path, images: bool) -> Option<blorb::Blorb> {
+    if images {
+        blorb::resolve_sound_blorb(story_path).map(|(b, _)| b)
+    } else {
+        None
+    }
+}
+
 fn reset_game(
     session: &mut dyn Engine,
     mapper: &mut Mapper,
     state: &mut AppState,
     story_bytes: &[u8],
+    story_path: &std::path::Path,
     clear_map: bool,
 ) {
     // Rebuild the engine from the original story bytes via the same factory used
@@ -4041,10 +4048,11 @@ fn reset_game(
             })
         }
         Ok(app::hints::LoadedStory::Glulx(bytes)) => {
-            // Restart re-resolves the Pict Blorb straight from the original story
-            // bytes (a .gblorb container holds its own Pict resources), and reuses
+            // Restart re-resolves the Pict Blorb the same path-based way as launch
+            // (self-contained blorb, same-stem sidecar, or dir scan), and reuses
             // the stored game Picker for char-cell size, so graphics come back
-            // enabled per config.images — matching the initial launch.
+            // enabled per config.images — matching the initial launch even for a
+            // bare .ulx with a sidecar .blorb.
             let char_px = state
                 .game_picker
                 .as_ref()
@@ -4053,11 +4061,7 @@ fn reset_game(
                     (f.width as u32, f.height as u32)
                 })
                 .unwrap_or((8, 16));
-            let pict_blorb = if state.config.images && blorb::Blorb::is_blorb(story_bytes) {
-                blorb::Blorb::parse(story_bytes.to_vec()).ok()
-            } else {
-                None
-            };
+            let pict_blorb = resolve_pict_blorb(story_path, state.config.images);
             GlulxSession::new(
                 bytes,
                 state.config.virtual_screen_cols as u32,
@@ -5350,7 +5354,7 @@ mod tests {
         let mut mapper = mapper::mapper::Mapper::default();
         let mut state = app::state::AppState::default();
         state.turns = 5;
-        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, false);
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, false);
         assert_eq!(state.turns, 0, "restart resets the turn counter");
         assert!(engine.as_any().is::<app::session::GameSession>(),
             "still a Z-machine session after restart");
@@ -5370,15 +5374,118 @@ mod tests {
         let mut mapper = mapper::mapper::Mapper::default();
         let mut state = app::state::AppState::default();
         // config.images defaults true, so restart drives the graphics-enabled
-        // rebuild branch: the non-Blorb .ulx yields no Pict source (is_blorb =
-        // false → None) and graphics_enabled = true is threaded in — the rebuild
-        // must succeed without panicking.
+        // rebuild branch: the fixture .ulx has no sidecar .blorb, so
+        // resolve_pict_blorb resolves to None and graphics_enabled = true is
+        // threaded in — the rebuild must succeed without panicking.
         assert!(state.config.images, "default config enables images");
         state.turns = 5;
-        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, false);
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, false);
         assert_eq!(state.turns, 0, "restart resets the turn counter for Glulx");
         assert!(engine.as_any().is::<app::glulx_session::GlulxSession>(),
             "still a Glulx session after restart");
+    }
+
+    #[test]
+    fn resolve_pict_blorb_finds_sidecar_for_bare_ulx() {
+        // Regression test for SQ-0173: restart's Pict-blorb resolution must find
+        // a same-stem sidecar .blorb for a bare .ulx the same path-based way as
+        // launch (blorb::resolve_sound_blorb), not the old bytes-only
+        // blorb::Blorb::parse(story_bytes), which only ever finds images inside
+        // a self-contained .gblorb.
+        fn png_bytes() -> Vec<u8> {
+            let img = image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .unwrap();
+            bytes
+        }
+
+        // Build an IFF chunk: type + BE len + data + pad-to-even.
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+
+        // Build a minimal FORM/IFRS blorb with a Pict (PNG) resource and a Snd
+        // resource. resolve_sound_blorb's same-stem sidecar step only accepts a
+        // sidecar that has_sounds(), so a Snd entry is required even though only
+        // the Pict resource matters for this test (mirrors blorb::lib's own
+        // build_blorb test helper).
+        fn build_sidecar_blorb(png: &[u8]) -> Vec<u8> {
+            let res: [(&[u8; 4], u32, &[u8; 4], &[u8]); 2] =
+                [(b"Pict", 0, b"PNG ", png), (b"Snd ", 1, b"FORM", b"xy")];
+            let ridx_data_len = 4 + 12 * res.len();
+            let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+            let mut offsets = Vec::new();
+            let mut cursor = first_res_off;
+            let mut body = Vec::new();
+            for (_u, _n, ty, data) in res.iter() {
+                offsets.push(cursor as u32);
+                let c = chunk(ty, data);
+                cursor += c.len();
+                body.extend_from_slice(&c);
+            }
+            let mut ridx = Vec::new();
+            ridx.extend_from_slice(&(res.len() as u32).to_be_bytes());
+            for (i, (usage, number, _ty, _d)) in res.iter().enumerate() {
+                ridx.extend_from_slice(*usage);
+                ridx.extend_from_slice(&number.to_be_bytes());
+                ridx.extend_from_slice(&offsets[i].to_be_bytes());
+            }
+            let ridx_chunk = chunk(b"RIdx", &ridx);
+            let mut inner = Vec::new();
+            inner.extend_from_slice(b"IFRS");
+            inner.extend_from_slice(&ridx_chunk);
+            inner.extend_from_slice(&body);
+            let mut file = Vec::new();
+            file.extend_from_slice(b"FORM");
+            file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+            file.extend_from_slice(&inner);
+            file
+        }
+
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gvm-cli/tests/fixtures/glulxercise.ulx");
+        let Ok(ulx_bytes) = std::fs::read(&fixture) else { return };
+
+        let dir = std::env::temp_dir().join(format!("bm-pictblorb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let ulx_path = dir.join("game.ulx");
+        std::fs::write(&ulx_path, &ulx_bytes).expect("write game.ulx");
+        let blorb_path = dir.join("game.blorb");
+        std::fs::write(&blorb_path, build_sidecar_blorb(&png_bytes())).expect("write sidecar");
+
+        assert!(
+            super::resolve_pict_blorb(&ulx_path, true).is_some(),
+            "sidecar .blorb next to a bare .ulx must resolve (regression: the old \
+             bytes-only logic returned None for a non-self-contained story)"
+        );
+        assert!(
+            super::resolve_pict_blorb(&ulx_path, false).is_none(),
+            "images disabled must resolve to None regardless of sidecar"
+        );
+
+        let no_sidecar_dir =
+            std::env::temp_dir().join(format!("bm-pictblorb-nosc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&no_sidecar_dir);
+        std::fs::create_dir_all(&no_sidecar_dir).expect("create temp dir");
+        let lone_ulx = no_sidecar_dir.join("lone.ulx");
+        std::fs::write(&lone_ulx, &ulx_bytes).expect("write lone.ulx");
+        assert!(
+            super::resolve_pict_blorb(&lone_ulx, true).is_none(),
+            "no sidecar present must resolve to None"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&no_sidecar_dir);
     }
 
     // ── TestBackend: map pane shows picture-frame top-left by default ──────────
