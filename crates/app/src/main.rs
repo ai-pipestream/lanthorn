@@ -469,6 +469,19 @@ fn draw_frame(
         let inv_dock_area = vert[1];
         let help_row = vert[2];
 
+        // ── Verb dock: reserve a left band (full height of main_area) that
+        // slides in when toggled, sized from a fixed target width + slide
+        // fraction (mirrors the inventory dock's bottom-slide, but on the left).
+        let verb_visible = state.verb_menu.is_some() || state.verb_dock.active();
+        let verb_target_w = app::render::verbmenu::verb_dock_target_width(verb_visible, main_area.width);
+        let verb_dock_w = app::render::verbmenu::verb_dock_width(verb_target_w, state.verb_dock.fraction());
+        let horiz = RatatuiLayout::default()
+            .direction(LayoutDir::Horizontal)
+            .constraints([Constraint::Length(verb_dock_w), Constraint::Min(0)])
+            .split(main_area);
+        let verb_dock_area = horiz[0];
+        let panes_area = horiz[1];
+
         // When a background tidy job is in flight, the map pane border pulses between
         // red and green. This overrides the normal border color (focused or unfocused).
         let map_border_override: Option<ratatui::style::Color> = state.tidy_job.as_ref().map(|job| {
@@ -504,7 +517,7 @@ fn draw_frame(
 
         match state.layout {
             Layout::TranscriptFull => {
-                let story_fp = draw_framed(buf, main_area, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, panes_area, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 story_scrollbar = m.scrollbar;
@@ -532,7 +545,7 @@ fn draw_frame(
                 };
                 let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                 let active_layer = state.active_layer(graph);
-                let map_fp = draw_framed(buf, main_area, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, panes_area, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -556,13 +569,13 @@ fn draw_frame(
                 // Apply pulsing border color overlay when a tidy job is in flight
                 if let Some(pulse_color) = map_border_override {
                     let pulse_style = Style::default().fg(pulse_color);
-                    for cy in main_area.y..main_area.bottom() {
-                        if let Some(c) = buf.cell_mut((main_area.x, cy)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((main_area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    for cy in panes_area.y..panes_area.bottom() {
+                        if let Some(c) = buf.cell_mut((panes_area.x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((panes_area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
                     }
-                    for cx in main_area.x..main_area.right() {
-                        if let Some(c) = buf.cell_mut((cx, main_area.y)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((cx, main_area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    for cx in panes_area.x..panes_area.right() {
+                        if let Some(c) = buf.cell_mut((cx, panes_area.y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, panes_area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
                     }
                 }
             }
@@ -571,7 +584,7 @@ fn draw_frame(
                 let chunks = RatatuiLayout::default()
                     .direction(LayoutDir::Horizontal)
                     .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(main_area);
+                    .split(panes_area);
 
                 let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
@@ -691,6 +704,11 @@ fn draw_frame(
             app::render::inventory_dock::draw_inventory_dock(&inv_items, inv_dock_area, &state.colors, buf);
         }
 
+        // ── Verb dock panel ────────────────────────────────────────────────────
+        if verb_dock_w > 0 {
+            draw_verb_menu(state, verb_dock_area, buf, &mut modal_list_viewport);
+        }
+
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = state.colors.help_bar;
         let help_text = if state.config_screen.is_some() {
@@ -783,11 +801,6 @@ fn draw_frame(
             dialog_rects_out = draw_file_browser(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
-        // ── Verb-menu overlay — drawn after saves ─────────────────────────────
-        if state.verb_menu.is_some() {
-            dialog_rects_out = draw_verb_menu(state, dialog_area, buf, &mut modal_list_viewport);
-        }
-
         // ── Config screen overlay — drawn after other modals ──────────────────
         if state.config_screen.is_some() {
             dialog_rects_out = draw_config_screen(state, dialog_area, buf, &mut modal_list_viewport);
@@ -855,7 +868,7 @@ fn draw_frame(
             } else if story_area.height > 0 {
                 story_area
             } else {
-                main_area
+                panes_area
             };
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
@@ -2112,6 +2125,10 @@ fn main() {
                 state.sound_pulse = None;
             }
         }
+
+        // Clear the verb-menu content once its slide-out has fully settled
+        // (drawer pattern: content persists during the close animation).
+        state.settle_verb_dock();
 
         // Draw.
         match draw_frame(&mut terminal, &*session, &mapper, &state) {

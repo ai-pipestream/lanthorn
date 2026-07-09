@@ -1,14 +1,20 @@
-//! Verb/item token-palette modal overlay.
+//! Verb/item token-palette dock: a bordered panel docked at the far left of
+//! the screen (full height of the main content area), sliding in via
+//! `state.verb_dock` (mirrors the inventory dock's bottom-slide, but on the
+//! left). Picking a token appends it (+ space) to the input line; the player
+//! submits the composed command normally.
 //!
-//! `draw_verb_menu` renders a two-pane (Verbs | Nouns) layout with a small
-//! Prepositions group at the right. Picking a token appends it (+ space) to
-//! the input line; the player submits the composed command normally.
+//! Unlike the old centered three-column modal, the dock is narrow, so the
+//! Verbs / Nouns / Preps sections are STACKED vertically instead of side by
+//! side. The caller (`main.rs`) sizes `area` from the animated `PanelSlide`
+//! fraction, so `area` may be narrower than the panel's target width while a
+//! slide is in flight — everything here clips to `area`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
+use super::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
 use crate::state::{AppState, VerbMenuPane};
 
 // ── Curated lists ─────────────────────────────────────────────────────────────
@@ -57,128 +63,137 @@ pub const VERB_MENU_PREPS: &[&str] = &[
     "with", "on", "in", "to", "under", "at", "from", "of",
 ];
 
+// ── Layout ────────────────────────────────────────────────────────────────────
+
+/// Compute the dock's fully-open target width in columns: a fixed 26 cols,
+/// capped so it never eats more than `full_width - 4` (leaving room for the
+/// story/map panes). 0 when the dock isn't visible at all.
+pub fn verb_dock_target_width(visible: bool, full_width: u16) -> u16 {
+    if visible { 26u16.min(full_width.saturating_sub(4)) } else { 0 }
+}
+
+/// Compute the reserved dock band width in columns: `target_w` scaled by the
+/// slide's current `fraction` (0.0 closed .. 1.0 fully open), rounded to the
+/// nearest column. Extracted from the layout split so the arithmetic is
+/// testable without a full terminal/main-loop harness (mirrors
+/// `inventory_dock_height`).
+pub fn verb_dock_width(target_w: u16, fraction: f64) -> u16 {
+    (target_w as f64 * fraction).round() as u16
+}
+
 // ── Drawing ───────────────────────────────────────────────────────────────────
 
-/// Draw the verb/item token-palette modal overlay.
+/// Draw the verb/item token-palette dock into `area` (the left-docked band
+/// carved out by `main.rs` from `state.verb_dock`'s slide fraction).
 ///
-/// Renders via `draw_dialog` (centered, `[X]` + `[Done]`) so the opaque fill
-/// prevents command-panel bleed. The verb|noun|prep palette is drawn into
-/// the returned content rect.
+/// Stacks three sections vertically — Verbs, Nouns, Preps — each a 1-row
+/// header plus a scrollable list, with the bottom inner row reserved for the
+/// composed-input line. Sets `*vp_out` to the ACTIVE pane's visible list
+/// height so PageUp/PageDown paging keeps working.
 ///
-/// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` when
-/// the verb menu is closed or the area is too small.
+/// No-op when `state.verb_menu` is `None` or `area` is too small to show
+/// anything meaningful (mid-slide).
 pub fn draw_verb_menu(
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
     vp_out: &mut usize,
-) -> Option<DialogRects> {
-    let Some(vm) = &state.verb_menu else { return None };
+) {
+    let Some(vm) = &state.verb_menu else { return };
 
-    // ── Modal geometry ────────────────────────────────────────────────────────
-
-    let modal_w = area.width.min(area.width); // fill the full width
-    let modal_h = area.height.min(area.height); // fill the full height
-    if modal_w < 20 || modal_h < 4 {
-        return None;
+    if area.width < 8 || area.height < 4 {
+        return;
     }
 
-    // ── Build DialogStyle from state colors ───────────────────────────────────
+    let base = state.colors.dialog;
 
-    let st = DialogStyle::from_colors(&state.colors);
+    // Fill the band's background first so panes behind it never show through
+    // while it's mid-slide (shorter than its final bordered content needs).
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(base);
+            }
+        }
+    }
 
-    let buttons = &[
-        DialogButton { id: ButtonId::Done, label: "Done" },
+    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), base);
+
+    // Title, centered on the top border row.
+    if area.height >= 2 && area.width >= 2 {
+        let title = " Verbs ";
+        let avail = area.width as usize;
+        let tw = title.chars().count();
+        let leading = avail.saturating_sub(tw) / 2;
+        let start_x = area.x + leading as u16;
+        crate::render::draw_str_clipped(buf, start_x, area.y, title, base, area);
+    }
+
+    let content = frame.content;
+    if content.height < 4 || content.width < 4 {
+        return;
+    }
+
+    // Reserve the bottom inner row for the composed-input line, then divide
+    // the remainder evenly into three vertically-stacked sections (1 header
+    // row + list rows each); any remainder rows go to the earlier sections.
+    let usable_h = content.height.saturating_sub(1);
+    let base_h = usable_h / 3;
+    let rem = usable_h % 3;
+    let sect_h = [
+        base_h + if rem > 0 { 1 } else { 0 },
+        base_h + if rem > 1 { 1 } else { 0 },
+        base_h,
     ];
 
-    let spec = DialogSpec {
-        title: "Verb Menu",
-        placement: Placement::Centered { w: modal_w, h: modal_h },
-        buttons,
-        show_close: true,
-        default: Some(ButtonId::Done),
-        focus: None,
-    };
+    let noun_strs: Vec<&str> = vm.nouns.iter().map(|s| s.as_str()).collect();
+    let sections: [(&str, VerbMenuPane); 3] = [
+        ("Verbs", VerbMenuPane::Verbs),
+        ("Nouns", VerbMenuPane::Nouns),
+        ("Preps", VerbMenuPane::Preps),
+    ];
 
-    let rects = draw_dialog(buf, area, &spec, &st);
-    let content = rects.content;
+    let mut y = content.y;
+    for (i, (label, pane)) in sections.iter().enumerate() {
+        let h = sect_h[i];
+        if h == 0 {
+            continue;
+        }
+        let active = vm.pane == *pane;
+        let header_area = Rect { x: content.x, y, width: content.width, height: 1 };
+        draw_pane_header(label, active, header_area, buf, state);
 
-    // ── Column layout within content ──────────────────────────────────────────
-
-    if content.height < 2 || content.width < 10 {
-        return Some(rects);
-    }
-
-    // Divide width: verbs (~30%), nouns (~50%), preps (~20%).
-    let total_w = content.width;
-    let verb_w = (total_w / 10 * 3).max(12).min(total_w.saturating_sub(20));
-    let prep_w = (total_w / 10 * 2).clamp(10, 16);
-    let noun_w = total_w.saturating_sub(verb_w).saturating_sub(prep_w);
-
-    let verb_x = content.x;
-    let noun_x = content.x + verb_w;
-    let prep_x = content.x + verb_w + noun_w;
-
-    // First row of content: pane headers; remaining rows: lists.
-    let header_y = content.y;
-    let list_y = content.y + 1;
-    let list_h = content.height.saturating_sub(2); // 1 header + 1 input row
-    *vp_out = list_h as usize;
-
-    let verb_header_area = Rect { x: verb_x, y: header_y, width: verb_w, height: 1 };
-    let noun_header_area = Rect { x: noun_x, y: header_y, width: noun_w, height: 1 };
-    let prep_header_area = Rect { x: prep_x, y: header_y, width: prep_w, height: 1 };
-
-    draw_pane_header("Verbs", vm.pane == VerbMenuPane::Verbs, verb_header_area, buf, state);
-    draw_pane_header("Nouns", vm.pane == VerbMenuPane::Nouns, noun_header_area, buf, state);
-    draw_pane_header("Preps", vm.pane == VerbMenuPane::Preps, prep_header_area, buf, state);
-
-    if list_h > 0 {
-        let verb_list = Rect { x: verb_x, y: list_y, width: verb_w, height: list_h };
-        let noun_list = Rect { x: noun_x, y: list_y, width: noun_w, height: list_h };
-        let prep_list = Rect { x: prep_x, y: list_y, width: prep_w, height: list_h };
-
-        draw_list(
-            VERB_MENU_VERBS,
-            &vm.verb_scroll,
-            vm.pane == VerbMenuPane::Verbs,
-            verb_list,
-            buf,
-            state,
-        );
-
-        let noun_strs: Vec<&str> = vm.nouns.iter().map(|s| s.as_str()).collect();
-        draw_list(
-            &noun_strs,
-            &vm.noun_scroll,
-            vm.pane == VerbMenuPane::Nouns,
-            noun_list,
-            buf,
-            state,
-        );
-
-        draw_list(
-            VERB_MENU_PREPS,
-            &vm.prep_scroll,
-            vm.pane == VerbMenuPane::Preps,
-            prep_list,
-            buf,
-            state,
-        );
+        let list_h = h.saturating_sub(1);
+        if list_h > 0 {
+            let list_area = Rect { x: content.x, y: y + 1, width: content.width, height: list_h };
+            let items: &[&str] = match pane {
+                VerbMenuPane::Verbs => VERB_MENU_VERBS,
+                VerbMenuPane::Nouns => noun_strs.as_slice(),
+                VerbMenuPane::Preps => VERB_MENU_PREPS,
+            };
+            let scroll = match pane {
+                VerbMenuPane::Verbs => &vm.verb_scroll,
+                VerbMenuPane::Nouns => &vm.noun_scroll,
+                VerbMenuPane::Preps => &vm.prep_scroll,
+            };
+            draw_list(items, scroll, active, list_area, buf, state);
+            if active {
+                *vp_out = list_h as usize;
+            }
+        }
+        y += h;
     }
 
     // Show current input composition in the bottom row of content.
-    if !state.input.is_empty() && content.height >= 2 {
+    if !state.input.is_empty() {
         let input_y = content.bottom() - 1;
         let input_text = format!("Input: {}_", state.input);
-        let input_style = Style::new().fg(Color::Yellow).patch(state.colors.dialog);
+        let input_style = Style::new().fg(Color::Yellow).patch(base);
         crate::render::draw_str_clipped(buf, content.x, input_y, &input_text, input_style, content);
     }
-
-    Some(rects)
 }
 
-/// Draw the column header row using dialog colors.
+/// Draw the section header row using dialog colors.
 fn draw_pane_header(title: &str, active: bool, area: Rect, buf: &mut Buffer, state: &AppState) {
     if area.height == 0 {
         return;
@@ -286,7 +301,6 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use crate::render::dialog::ButtonId;
     use crate::state::{AppState, VerbMenuState};
 
     fn make_state_with_verb_menu() -> AppState {
@@ -301,35 +315,68 @@ mod tests {
         s
     }
 
+    /// The dock is narrow (~24-26 cols) and full-height, unlike the old
+    /// centered 80x24 modal.
+    const DOCK_AREA: Rect = Rect { x: 0, y: 0, width: 26, height: 30 };
+
     #[test]
     fn verb_menu_renders_known_verb() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
+        let mut buf = Buffer::empty(DOCK_AREA);
         let state = make_state_with_verb_menu();
-        terminal.draw(|f| {
-            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut 0);
-        }).unwrap();
-        let content: String = terminal.backend().buffer().content().iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0);
+        let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
         assert!(content.contains("look"), "should show 'look' verb");
-        assert!(content.contains("Verbs"), "should show Verbs pane header");
+        assert!(content.contains("Verbs"), "should show Verbs section header");
+    }
+
+    #[test]
+    fn verb_menu_renders_room_noun() {
+        let mut buf = Buffer::empty(DOCK_AREA);
+        let state = make_state_with_verb_menu();
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0);
+        let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
+        assert!(content.contains("mailbox"), "should show room noun 'mailbox'");
+        assert!(content.contains("Nouns"), "should show Nouns section header");
+    }
+
+    #[test]
+    fn verb_menu_stacked_sections_all_present() {
+        // Narrow left-dock geometry: the three sections stack vertically
+        // rather than side by side. All three headers must be present, plus
+        // the pane border/title.
+        let mut buf = Buffer::empty(DOCK_AREA);
+        let state = make_state_with_verb_menu();
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0);
+        let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
+
+        assert!(content.contains("Verbs"), "Verbs header should be present");
+        assert!(content.contains("Nouns"), "Nouns header should be present");
+        assert!(content.contains("Preps"), "Preps header should be present");
+        assert!(content.contains('\u{250C}'), "top-left border corner should be present");
+        assert!(content.contains("with"), "should show a preposition");
+
+        // The active pane (Verbs, selected index 0 => "look") should have its
+        // row highlighted cyan-on-black. Content starts at (1,1) (border inset
+        // by 1); the Verbs header occupies content row 0, so its first list
+        // row (the selected "look") is at content row 1 => buffer (1, 2).
+        let cell = buf.cell((1, 2)).unwrap().style();
+        assert_eq!(cell.fg, Some(Color::Black), "selected row fg should be black");
+        assert_eq!(cell.bg, Some(Color::Cyan), "selected row bg should be cyan");
     }
 
     #[test]
     fn verb_menu_scrollbar_and_paging_on_overflow() {
         use crate::input::{apply_action, Action, VerbMenuNavKind};
         use mapper::mapper::Mapper;
-        // The verbs pane (35 built-ins) overflows a short modal.
-        let backend = TestBackend::new(80, 14);
-        let mut terminal = Terminal::new(backend).unwrap();
+        // The verbs pane (35 built-ins) overflows the narrow dock's per-section
+        // list rows.
+        let area = Rect { x: 0, y: 0, width: 26, height: 20 };
+        let mut buf = Buffer::empty(area);
         let mut state = make_state_with_verb_menu();
         let mut vp = 0usize;
-        terminal.draw(|f| {
-            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut vp);
-        }).unwrap();
+        draw_verb_menu(&state, area, &mut buf, &mut vp);
         assert!(vp > 0 && vp < VERB_MENU_VERBS.len(), "verbs should overflow (vp={vp})");
-        let has_thumb = terminal.backend().buffer().content().iter().any(|c| c.symbol() == "█");
+        let has_thumb = buf.content().iter().any(|c| c.symbol() == "█");
         assert!(has_thumb, "a scrollbar thumb should be drawn when the verbs pane overflows");
 
         // PageDown advances the active (Verbs) pane's selection by ~one viewport.
@@ -340,45 +387,28 @@ mod tests {
     }
 
     #[test]
-    fn verb_menu_renders_room_noun() {
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let state = make_state_with_verb_menu();
-        terminal.draw(|f| {
-            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut 0);
-        }).unwrap();
-        let content: String = terminal.backend().buffer().content().iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
-        assert!(content.contains("mailbox"), "should show room noun 'mailbox'");
-        assert!(content.contains("Nouns"), "should show Nouns pane header");
-    }
-
-    #[test]
     fn verb_menu_opaque_background_no_bleed() {
-        // Put some text in the buffer BEFORE drawing the modal, then verify
-        // those cells are covered by the dialog background (opaque fill).
+        // Put some text in the buffer BEFORE drawing the dock, then verify
+        // those cells are covered by the dock background (opaque fill).
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let state = make_state_with_verb_menu();
         terminal.draw(|f| {
-            // First write something that would bleed through without opaque bg.
             let bleed_style = ratatui::style::Style::new()
                 .fg(Color::Red)
                 .bg(Color::Green);
-            for x in 0..80u16 {
+            for x in 0..26u16 {
                 for y in 0..24u16 {
                     if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
                         cell.set_symbol("X").set_style(bleed_style);
                     }
                 }
             }
-            // Now draw the modal — it should overwrite everything.
-            draw_verb_menu(&state, f.area(), f.buffer_mut(), &mut 0);
+            let dock_area = Rect { x: 0, y: 0, width: 26, height: 24 };
+            draw_verb_menu(&state, dock_area, f.buffer_mut(), &mut 0);
         }).unwrap();
-        // Check that cell (0, 0) no longer has Green background (modal replaced it).
         let cell = terminal.backend().buffer().cell((0, 0)).unwrap();
-        assert_ne!(cell.bg, Color::Green, "modal should overwrite background (no bleed)");
+        assert_ne!(cell.bg, Color::Green, "dock should overwrite background (no bleed)");
     }
 
     #[test]
@@ -396,34 +426,51 @@ mod tests {
     }
 
     #[test]
-    fn verb_menu_shows_dialog_chrome() {
-        // Render test: verb menu shows bordered chrome + [X] + [Done].
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-        use crate::render::paneframe::BorderStyle;
-
-        let area = Rect::new(0, 0, 80, 24);
+    fn verb_menu_too_narrow_does_not_panic() {
+        let area = Rect { x: 0, y: 0, width: 4, height: 30 };
         let mut buf = Buffer::empty(area);
-        let mut state = make_state_with_verb_menu();
-        // Set Single border so the title is visible (default is BorderStyle::None).
-        state.colors.dialog_box_style = BorderStyle::Single;
+        let state = make_state_with_verb_menu();
+        draw_verb_menu(&state, area, &mut buf, &mut 0);
+        // No assertion beyond "did not panic"; too narrow to draw anything.
+    }
 
-        let rects_out = draw_verb_menu(&state, area, &mut buf, &mut 0);
+    #[test]
+    fn verb_dock_width_scales_with_fraction() {
+        assert_eq!(verb_dock_width(26, 0.0), 0);
+        assert_eq!(verb_dock_width(26, 1.0), 26);
+        assert_eq!(verb_dock_width(26, 0.5), 13);
+    }
 
-        // Collect all cell symbols into one string for content search.
-        let content: String = buf.content().iter()
-            .map(|c| c.symbol())
-            .collect::<Vec<_>>()
-            .join("");
+    #[test]
+    fn verb_dock_target_width_is_fixed_and_capped() {
+        // Plenty of room: fixed 26-col target.
+        assert_eq!(verb_dock_target_width(true, 100), 26);
+        // Narrow screen: capped at full_width - 4.
+        assert_eq!(verb_dock_target_width(true, 20), 16);
+        // Not visible: 0 regardless of width.
+        assert_eq!(verb_dock_target_width(false, 100), 0);
+    }
 
-        assert!(content.contains("Verb Menu"), "title 'Verb Menu' should be present");
-        assert!(content.contains("Done"), "[Done] button should be visible");
-        assert!(content.contains('✕'), "[X] close button should be visible");
+    #[test]
+    fn dock_band_closed_is_zero_open_reserves_target_width() {
+        // Mirrors the layout split in main.rs: closed (verb_menu is None,
+        // verb_dock inactive) reserves 0 cols; fully open reserves the target
+        // width (fraction 1.0).
+        let full_width = 100u16;
+        assert_eq!(verb_dock_width(verb_dock_target_width(false, full_width), 0.0), 0);
 
-        let rects = rects_out.expect("draw_verb_menu should return DialogRects when open");
-        assert!(rects.close.is_some(), "close rect should be present");
-        assert_eq!(rects.buttons.len(), 1, "should have 1 button");
-        let ids: Vec<ButtonId> = rects.buttons.iter().map(|(id, _)| *id).collect();
-        assert!(ids.contains(&ButtonId::Done));
+        let open_target = verb_dock_target_width(true, full_width);
+        assert_eq!(open_target, 26);
+        assert_eq!(verb_dock_width(open_target, 1.0), 26);
+    }
+
+    #[test]
+    fn verb_menu_none_is_noop() {
+        let area = Rect { x: 0, y: 0, width: 26, height: 30 };
+        let mut buf = Buffer::empty(area);
+        let state = AppState::default();
+        assert!(state.verb_menu.is_none());
+        draw_verb_menu(&state, area, &mut buf, &mut 0);
+        // No assertion beyond "did not panic"; nothing drawn since verb_menu is None.
     }
 }

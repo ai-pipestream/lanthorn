@@ -1385,6 +1385,16 @@ impl AppState {
             || self.verb_dock.active()
     }
 
+    /// Clear `verb_menu` once its slide-out has fully settled. The verb dock
+    /// is a "drawer": content persists while `verb_dock` animates closed (so
+    /// the panel visibly slides out instead of vanishing instantly), and is
+    /// only dropped once the slide is done and it's logically closed.
+    pub fn settle_verb_dock(&mut self) {
+        if self.verb_menu.is_some() && !self.verb_dock.open && !self.verb_dock.active() {
+            self.verb_menu = None;
+        }
+    }
+
     /// Play the turn's sound events through the backend (gated on config +
     /// backend availability). Bleeps (#1/#2) → tones; samples (#>=3) → Blorb
     /// resource playback, remembering the SoundId (and finish routine) per number.

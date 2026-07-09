@@ -696,34 +696,6 @@ pub fn style_dialog_action(
     None
 }
 
-/// Per-modal button-to-action mapping for the verb menu.
-fn verbmenu_dialog_action(
-    rects: &crate::render::dialog::DialogRects,
-    col: u16,
-    row: u16,
-) -> Option<Action> {
-    use crate::render::dialog::ButtonId;
-
-    // Check close [X]
-    if let Some(close_rect) = rects.close {
-        if hit(close_rect, col, row) {
-            return Some(Action::VerbMenuClose);
-        }
-    }
-
-    // Check buttons: Done → VerbMenuClose
-    for (id, rect) in &rects.buttons {
-        if hit(*rect, col, row) {
-            return Some(match id {
-                ButtonId::Done => Action::VerbMenuClose,
-                _              => Action::None,
-            });
-        }
-    }
-
-    None
-}
-
 /// Per-modal action mapping for the room-info panel ([X] → CloseRoomPanel).
 fn roominfo_dialog_action(
     rects: &crate::render::dialog::DialogRects,
@@ -944,7 +916,7 @@ pub fn mouse_to_action(
             // priority and must swallow all outside clicks.
             let centered_open = state.gallery.is_some() || state.config_screen.is_some()
                 || state.saves.is_some() || state.file_browser.is_some()
-                || state.verb_menu.is_some() || state.hotkey_dialog;
+                || state.hotkey_dialog;
             let is_corner_overlay = !centered_open
                 && (state.room_panel.is_some() || state.tidy_anim.is_some());
 
@@ -962,10 +934,6 @@ pub fn mouse_to_action(
                 }
             } else if state.file_browser.is_some() {
                 if let Some(action) = filebrowser_dialog_action(rects, col, row) {
-                    return action;
-                }
-            } else if state.verb_menu.is_some() {
-                if let Some(action) = verbmenu_dialog_action(rects, col, row) {
                     return action;
                 }
             } else if state.hotkey_dialog {
@@ -998,7 +966,7 @@ pub fn mouse_to_action(
             // is active and no centered modal is stacked on top.
             let centered_open = state.gallery.is_some() || state.config_screen.is_some()
                 || state.saves.is_some() || state.file_browser.is_some()
-                || state.verb_menu.is_some() || state.hotkey_dialog;
+                || state.hotkey_dialog;
             let is_corner_overlay = !centered_open
                 && (state.room_panel.is_some() || state.tidy_anim.is_some());
             if !is_corner_overlay {
@@ -2573,6 +2541,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 prep_scroll: Default::default(),
                 nouns,
             });
+            state.verb_dock.toggle_to(true, false);
+            state.verb_dock.arm(&state.config.animation);
         }
 
         Action::VerbMenuNav(kind) => {
@@ -2630,7 +2600,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::VerbMenuClose => {
-            state.verb_menu = None;
+            // Drawer pattern: keep `verb_menu` (content) alive so the panel
+            // visibly slides out; `settle_verb_dock` clears it once the
+            // slide-out animation finishes.
+            state.verb_dock.toggle_to(false, false);
+            state.verb_dock.arm(&state.config.animation);
         }
 
         // ── Style editor actions ──────────────────────────────────────────────
@@ -6320,8 +6294,48 @@ mod tests {
         s.input = "unlock door ".to_string();
         open_verb_menu_with_nouns(&mut s, vec![]);
         apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
-        assert!(s.verb_menu.is_none(), "menu should be closed");
         assert_eq!(s.input, "unlock door ", "input must be preserved");
+    }
+
+    #[test]
+    fn verb_menu_close_arms_dock_toward_closed_without_nulling_content() {
+        // Drawer pattern: VerbMenuClose must NOT immediately clear verb_menu —
+        // content persists so the panel visibly slides out. It arms verb_dock
+        // toward closed instead; settle_verb_dock (called once the slide
+        // finishes) is what actually clears verb_menu.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
+        assert!(s.verb_menu.is_some(), "verb_menu content should persist during slide-out");
+        assert!(!s.verb_dock.open, "verb_dock should be armed toward closed");
+    }
+
+    #[test]
+    fn open_verb_menu_arms_dock_toward_open() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
+        assert!(s.verb_dock.open, "verb_dock should be armed toward open");
+    }
+
+    #[test]
+    fn settle_verb_dock_clears_content_once_slide_out_settles() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
+        assert!(s.verb_menu.is_some());
+
+        // Mid-slide-out: still armed/active, content must persist.
+        apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
+        s.settle_verb_dock();
+        assert!(s.verb_menu.is_some(), "content should persist while the slide is (potentially) active");
+
+        // Force-settle the tween (as if the animation had completed), then
+        // settle_verb_dock should clear the content.
+        s.verb_dock.toggle_to(false, true);
+        s.settle_verb_dock();
+        assert!(s.verb_menu.is_none(), "content should be cleared once the slide-out has settled");
     }
 
     #[test]
@@ -6706,17 +6720,12 @@ mod tests {
     }
 
     #[test]
-    fn verbmenu_dialog_x_and_done_produce_verb_menu_close() {
+    fn verb_menu_dock_does_not_swallow_map_clicks() {
+        // The verb menu is now a persistent left dock (no [X]/[Done] chrome, no
+        // DialogRects), not a centered modal — a click in the map pane must
+        // route normally instead of being swallowed as "centered modal" chrome.
         use ratatui::layout::Rect;
-        use crate::render::dialog::{ButtonId, DialogRects};
         use crate::state::VerbMenuState;
-
-        let rects = DialogRects {
-            area:    Rect::new(0, 0, 80, 24),
-            content: Rect::new(1, 2, 78, 20),
-            close:   Some(Rect::new(78, 0, 1, 1)),
-            buttons: vec![(ButtonId::Done, Rect::new(70, 23, 8, 1))],
-        };
 
         let mut state = AppState::default();
         state.verb_menu = Some(VerbMenuState {
@@ -6727,18 +6736,13 @@ mod tests {
             nouns: vec![],
         });
 
-        let map   = Rect::default();
+        let map   = Rect::new(30, 0, 50, 24);
         let story = Rect::default();
         let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
-        let dialog = Some(rects);
+        let dialog = None;
 
-        // Close [X] → VerbMenuClose
-        let a = mouse_to_action(&state, mouse_left_click(78, 0), map, story, room_rects, &dialog);
-        assert!(matches!(a, Action::VerbMenuClose), "verb menu [X] click should produce VerbMenuClose, got {:?}", a);
-
-        // Done button → VerbMenuClose
-        let a = mouse_to_action(&state, mouse_left_click(72, 23), map, story, room_rects, &dialog);
-        assert!(matches!(a, Action::VerbMenuClose), "verb menu [Done] click should produce VerbMenuClose, got {:?}", a);
+        let a = mouse_to_action(&state, mouse_left_click(40, 5), map, story, room_rects, &dialog);
+        assert!(!matches!(a, Action::None), "click in map should route normally with the verb dock open, got {:?}", a);
     }
 
     #[test]
@@ -6783,7 +6787,7 @@ mod tests {
     fn esc_equals_x_click_for_every_modal() {
         use ratatui::layout::Rect;
         use crate::render::dialog::{ButtonId, DialogRects};
-        use crate::state::{GalleryState, SavesState, VerbMenuState};
+        use crate::state::{GalleryState, SavesState};
         use crate::persist_files::SaveInfo;
         use std::path::PathBuf;
 
@@ -6842,21 +6846,9 @@ mod tests {
                 "file browser [X] click should produce FbClose, got {:?}", x_action);
         }
 
-        // 4. Verb menu: ESC → VerbMenuClose, [X] → VerbMenuClose
-        {
-            let mut s = AppState::default();
-            s.verb_menu = Some(VerbMenuState {
-                pane: crate::state::VerbMenuPane::Verbs,
-                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![],
-            });
-            let esc_action = key_to_action(&s, key(KeyCode::Esc));
-            assert!(matches!(esc_action, Action::VerbMenuClose),
-                "verb menu ESC should produce VerbMenuClose, got {:?}", esc_action);
-            let dialog = Some(make_rects());
-            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
-            assert!(matches!(x_action, Action::VerbMenuClose),
-                "verb menu [X] click should produce VerbMenuClose, got {:?}", x_action);
-        }
+        // 4. Verb menu is now a left dock, not a centered modal with [X]/[Done]
+        // chrome, so it's out of scope for this ESC == [X]-click sweep. Its
+        // ESC → VerbMenuClose mapping is covered by `verb_menu_esc_closes`.
 
         // 5. Config screen: ESC → ConfigCancel, [X] → ConfigCancel
         {
