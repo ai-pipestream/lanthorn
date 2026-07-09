@@ -128,3 +128,92 @@ fn zmachine_reads_reference_save() {
         "probe output must reveal the mutated state (guards against a vacuous match)"
     );
 }
+
+// SQ-0158 — WRITE-direction save-format interop.
+//
+// Proves a save that *babelmap writes* (via the game's `@save`) is read
+// correctly by the reference interpreter `dfrotz`. Compares two dfrotz runs
+// through the identical dfrotz code path: A loads babelmap's save, B loads
+// dfrotz's own committed golden save. Both encode point P; if babelmap wrote
+// a correct, dfrotz-readable save, A and B produce byte-identical output.
+
+/// Drive minizork through PREFIX and the game's own `save` verb, capturing
+/// the descriptor-PC Quetzal bytes `save_quetzal` emits when `pending_save`
+/// is set (the same convention an in-game `@save` produces). Writes the
+/// bytes to a unique temp file and returns its path.
+fn babelmap_save_at_p() -> std::path::PathBuf {
+    let story = zvm::fixtures::load("minizork.z3").expect("required CI fixture minizork.z3 missing");
+    let mut machine = boot_to_first_read(story);
+    run_turns(&mut machine, &PREFIX);
+
+    machine.supply_line("save", 13);
+    let bytes = 'save: {
+        for _ in 0..2_000_000u64 {
+            match machine.step() {
+                StepResult::SaveRequest => break 'save machine.save_quetzal(),
+                StepResult::NeedChar => machine.supply_char(b'\n'),
+                StepResult::RestoreRequest => machine.complete_restore_failure(),
+                StepResult::Continue => {}
+                StepResult::NeedLine { .. } | StepResult::Quit | StepResult::Restart | StepResult::Fault => {
+                    panic!("babelmap_save_at_p: expected a SaveRequest from the `save` verb but the machine reached a different terminal state first");
+                }
+            }
+        }
+        panic!("babelmap_save_at_p: never reached SaveRequest within step cap");
+    };
+    machine.complete_save(true);
+
+    let path = std::env::temp_dir().join(format!("babelmap-158b-{}.qzl", std::process::id()));
+    std::fs::write(&path, &bytes).expect("write babelmap's save to a temp file");
+    path
+}
+
+/// Run dfrotz against `save_path`, piping `look`/`inventory`/`quit`/`y` and
+/// returning stdout. Uses an absolute story path (built from
+/// `CARGO_MANIFEST_DIR`) since integration tests run with CWD = the crate
+/// directory, not the repo root.
+fn dfrotz_probe(save_path: &std::path::Path) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let story = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/minizork.z3");
+    let mut child = Command::new("dfrotz")
+        .args(["-w", "80", "-L"])
+        .arg(save_path)
+        .arg(&story)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap_or_else(|e| panic!("dfrotz failed to spawn (this --ignored test requires dfrotz on PATH): {e}"));
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"look\ninventory\nquit\ny\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+#[ignore = "needs dfrotz on PATH; run with: cargo test -p zvm --test save_interop -- --ignored"]
+fn zmachine_save_read_by_dfrotz() {
+    // A: dfrotz loads babelmap's save.
+    let bab = babelmap_save_at_p();
+    let a = dfrotz_probe(&bab);
+    // B: dfrotz loads its own golden save.
+    let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/interop/minizork-at-P.qzl");
+    let b = dfrotz_probe(&golden);
+    let _ = std::fs::remove_file(&bab);
+
+    assert!(
+        a.contains("North of House") && a.contains("leaflet"),
+        "dfrotz reading babelmap's save must reveal point-P state (non-vacuous guard):\n{a}"
+    );
+    assert_eq!(
+        a.trim(),
+        b.trim(),
+        "dfrotz reading babelmap's save must match dfrotz reading its own golden save"
+    );
+}
