@@ -217,6 +217,13 @@ pub fn save_game_named(dir: &Path, ifid: &str, name: &str, machine: &zvm::cpu::e
     Ok(path)
 }
 
+/// A `.qzl` file is a game save (bare standard Quetzal, descriptor-PC
+/// convention); anything else (in practice, `.babelmap`) is a Save State
+/// (resume-PC convention). Restore/load sites dispatch on this.
+pub fn is_game_save(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "qzl")
+}
+
 pub fn restore_game(path: &Path, machine: &mut zvm::cpu::exec::Machine) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     machine.complete_restore_success(&bytes).map_err(|e| match e {

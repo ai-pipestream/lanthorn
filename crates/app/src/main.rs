@@ -358,6 +358,35 @@ fn restore_error_msg(e: app::engine::EngineError) -> String {
     }
 }
 
+/// Outcome of [`restore_from_file`]: either the pending `@save`/`@restore`
+/// descriptor was completed (`.qzl` game save — caller just re-observes the
+/// current location), or a full session was resumed from a Save State
+/// archive (`.babelmap` — caller also applies its mapper/screen/transcript/aux).
+enum RestoreOutcome {
+    DescriptorCompleted,
+    Resumed(Box<app::archive::ArchiveContents>),
+}
+
+/// Restore `path` into `session`, dispatching on its extension (SQ-0227): a
+/// `.qzl` game save completes the pending `@save` descriptor
+/// (`Engine::restore_game_save`); anything else (`.babelmap`) resumes a full
+/// Save State (`Engine::restore_state`). This is the fix for the SQ-0163
+/// regression — every host restore path used to call `restore_state`
+/// unconditionally, landing the VM on the descriptor instead of past it.
+/// Shared by every host load/restore site (saves-manager Load, `/load-game`,
+/// and a `.babelmap` picked from the in-game restore picker).
+fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Result<RestoreOutcome, String> {
+    if app::persist_files::is_game_save(path) {
+        let bytes = app::archive::read_quetzal_from_file(path).map_err(|e| e.to_string())?;
+        session.restore_game_save(&bytes).map_err(restore_error_msg)?;
+        Ok(RestoreOutcome::DescriptorCompleted)
+    } else {
+        let ac = load_archive(path).map_err(|e| e.to_string())?;
+        session.restore_state(&ac.engine_save()).map_err(restore_error_msg)?;
+        Ok(RestoreOutcome::Resumed(Box::new(ac)))
+    }
+}
+
 /// Whether the active engine is the Z-machine `GameSession` required by the
 /// standard `.qzl`/`.sav` Quetzal **import/export** paths.
 ///
@@ -3394,8 +3423,10 @@ fn main() {
             // ── Saves-manager actions ─────────────────────────────────────────
 
             Action::OpenSaves => {
-                // Populate the saves list and open the modal.
-                let entries = list_saves(&save_dir, &ifid);
+                // Populate the saves list (both .babelmap Save States and .qzl
+                // game saves — SQ-0227 Task 3) and open the modal.
+                let mut entries = list_saves(&save_dir, &ifid);
+                entries.extend(list_qzl(&save_dir));
                 state.saves = Some(SavesState { entries, scroll: Default::default() });
                 state.dialog_focus = 0;
             }
@@ -3510,25 +3541,18 @@ fn main() {
                     s.entries.get(s.scroll.selected).map(|e| (e.path.clone(), e.name.clone()))
                 });
 
-                // In-game restore: feed Quetzal bytes back into the suspended VM
-                // (mirrors the snapshot restore re-observe/recenter, swapping
-                // restore_file for resume_restore).
-                if state.ingame_io == Some(app::session::PendingIo::Restore) {
+                // In-game restore of a .qzl game save: feed Quetzal bytes back
+                // into the suspended VM, completing the @restore descriptor
+                // (unchanged). A .babelmap Save State picked here instead falls
+                // through below to a full session resume (SQ-0227 Task 3).
+                if state.ingame_io == Some(app::session::PendingIo::Restore)
+                    && load_info.as_ref().is_some_and(|(path, _)| app::persist_files::is_game_save(path))
+                {
                     let Some((path, entry_name)) = load_info else { continue };
                     state.saves = None;
                     state.ingame_io = None;
                     let result = match app::archive::read_quetzal_from_file(&path) {
                         Ok(bytes) => {
-                            // For a .babelmap, also load its map (as Ctrl+R does).
-                            if let Ok(ac) = load_archive(&path) {
-                                if state.config.aux_storage != app::config::AuxStorage::Global {
-                                    session.set_aux_data(ac.aux.clone());
-                                }
-                                mapper = ac.mapper;
-                                if !ac.command_history.is_empty() {
-                                    state.command_history = ac.command_history;
-                                }
-                            }
                             state.push_transcript(&format!("[Game restored from {}]", entry_name));
                             session.resume_restore(Some(&bytes))
                         }
@@ -3546,72 +3570,116 @@ fn main() {
                     continue;
                 }
 
+                // Host Load (also reached for a .babelmap picked while an
+                // in-game @restore is pending: that fully resumes, abandoning
+                // the pending call; on failure the pending @restore is still
+                // answered with resume_restore(None) so the VM isn't left
+                // blocked waiting for a result).
+                let ingame_restore_pending = state.ingame_io == Some(app::session::PendingIo::Restore);
                 if let Some((path, entry_name)) = load_info {
-                    match load_archive(&path) {
-                        Ok(ac) => {
-                            let restore_err = session.restore_state(&ac.engine_save()).map_err(restore_error_msg);
-                            match restore_err {
-                                Ok(()) => {
-                                    if let Some(scr) = ac.screen.clone() {
-                                        if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                    match restore_from_file(&path, &mut *session) {
+                        Ok(RestoreOutcome::DescriptorCompleted) => {
+                            state.saves = None;
+                            let loc = session.current_location();
+                            if let Some(snap) = loc {
+                                let rid = snap.number as mapper::graph::RoomId;
+                                let restore_result = TurnResult {
+                                    transcript: String::new(),
+                                    transcript_runs: Vec::new(),
+                                    location: Some(snap),
+                                    quit: false,
+                                    erase_lower: false,
+                                    info: None,
+                                    sounds: Vec::new(),
+                                    glulx_sound_ops: Vec::new(),
+                                    diagnostics: vec![],
+                                    fault: None,
+                                    location_method: None,
+                                    pending_io: None,
+                                    timed_out: false,
+                                    transcript_elems: Vec::new(),
+                                };
+                                apply_turn(&mut mapper, "", &restore_result);
+                                state.set_viewed_layer(None);
+                                state.select_room(Some(rid));
+                                if let Some(room) = mapper.graph.room(rid) {
+                                    if let Some(pos) = room.pos {
+                                        let (pw, ph) = map_pane_dims(last_panes.map);
+                                        state.recenter_on(pos, pw, ph);
                                     }
-                                    if state.config.aux_storage != app::config::AuxStorage::Global {
-                                        session.set_aux_data(ac.aux.clone());
-                                    }
-                                    mapper = ac.mapper;
-                                    state.transcript = ac.transcript;
-                                    state.clear_anchor = None;
-                                    state.transcript_kinds = ac.transcript_kinds;
-                                    state.transcript_runs = ac.transcript_runs;
-                                    state.reset_transcript_sidecars();
-                                    state.history = ac.history;
-                                    // Named-slot archives carry no command history; only
-                                    // adopt it when present so a slot load doesn't wipe it.
-                                    if !ac.command_history.is_empty() {
-                                        state.command_history = ac.command_history;
-                                    }
-                                    // Restore turn counter from the loaded archive.
-                                    state.turns = ac.meta.turns;
-                                    // Re-observe current location.
-                                    let loc = session.current_location();
-                                    if let Some(snap) = loc {
-                                        let rid = snap.number as mapper::graph::RoomId;
-                                        let restore_result = TurnResult {
-                                            transcript: String::new(),
-                                            transcript_runs: Vec::new(),
-                                            location: Some(snap),
-                                            quit: false,
-                                            erase_lower: false,
-                                            info: None,
-                                            sounds: Vec::new(),
-                                            glulx_sound_ops: Vec::new(),
-                                            diagnostics: vec![],
-                                            fault: None,
-                                            location_method: None,
-                                            pending_io: None,
-                                            timed_out: false,
-                                            transcript_elems: Vec::new(),
-                                        };
-                                        apply_turn(&mut mapper, "", &restore_result);
-                                        state.set_viewed_layer(None);
-                                        state.select_room(Some(rid));
-                                        if let Some(room) = mapper.graph.room(rid) {
-                                            if let Some(pos) = room.pos {
-                                                let (pw, ph) = map_pane_dims(last_panes.map);
-                                                state.recenter_on(pos, pw, ph);
-                                            }
-                                        }
-                                    }
-                                    state.push_transcript(&format!("[Loaded save: {}]", entry_name));
-                                    state.saves = None;
-                                }
-                                Err(e) => {
-                                    state.push_transcript(&format!("[Load failed: {}]", e));
                                 }
                             }
+                            state.push_transcript(&format!("[Game restored from {}]", entry_name));
+                        }
+                        Ok(RestoreOutcome::Resumed(ac)) => {
+                            state.ingame_io = None;
+                            if let Some(scr) = ac.screen.clone() {
+                                if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                            }
+                            if state.config.aux_storage != app::config::AuxStorage::Global {
+                                session.set_aux_data(ac.aux.clone());
+                            }
+                            mapper = ac.mapper;
+                            state.transcript = ac.transcript;
+                            state.clear_anchor = None;
+                            state.transcript_kinds = ac.transcript_kinds;
+                            state.transcript_runs = ac.transcript_runs;
+                            state.reset_transcript_sidecars();
+                            state.history = ac.history;
+                            // Named-slot archives carry no command history; only
+                            // adopt it when present so a slot load doesn't wipe it.
+                            if !ac.command_history.is_empty() {
+                                state.command_history = ac.command_history;
+                            }
+                            // Restore turn counter from the loaded archive.
+                            state.turns = ac.meta.turns;
+                            // Re-observe current location.
+                            let loc = session.current_location();
+                            if let Some(snap) = loc {
+                                let rid = snap.number as mapper::graph::RoomId;
+                                let restore_result = TurnResult {
+                                    transcript: String::new(),
+                                    transcript_runs: Vec::new(),
+                                    location: Some(snap),
+                                    quit: false,
+                                    erase_lower: false,
+                                    info: None,
+                                    sounds: Vec::new(),
+                                    glulx_sound_ops: Vec::new(),
+                                    diagnostics: vec![],
+                                    fault: None,
+                                    location_method: None,
+                                    pending_io: None,
+                                    timed_out: false,
+                                    transcript_elems: Vec::new(),
+                                };
+                                apply_turn(&mut mapper, "", &restore_result);
+                                state.set_viewed_layer(None);
+                                state.select_room(Some(rid));
+                                if let Some(room) = mapper.graph.room(rid) {
+                                    if let Some(pos) = room.pos {
+                                        let (pw, ph) = map_pane_dims(last_panes.map);
+                                        state.recenter_on(pos, pw, ph);
+                                    }
+                                }
+                            }
+                            state.push_transcript(&format!("[Loaded save: {}]", entry_name));
+                            state.saves = None;
                         }
                         Err(e) => {
                             state.push_transcript(&format!("[Load failed: {}]", e));
+                            if ingame_restore_pending {
+                                state.saves = None;
+                                state.ingame_io = None;
+                                let result = session.resume_restore(None);
+                                let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &save_dir, &ifid, last_panes.map);
+                                persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
+                                if let Some(io) = state.ingame_io {
+                                    open_ingame_saves(io, &save_dir, &ifid, &mut state);
+                                }
+                                if quit { break; }
+                                continue;
+                            }
                         }
                     }
                 }
@@ -3918,12 +3986,14 @@ fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Load(name_opt) => {
-            // Named-slot load or default archive load.
+            // Named-slot load or default archive load. Named slots may be a
+            // .babelmap Save State or a .qzl game save (SQ-0227 Task 3).
             let archive_to_load = match name_opt {
                 None => Some(arc_file.to_path_buf()),
                 Some(ref name) => {
                     // Find the first named save whose display name matches.
-                    let saves = list_saves(save_dir, ifid);
+                    let mut saves = list_saves(save_dir, ifid);
+                    saves.extend(list_qzl(save_dir));
                     saves.into_iter()
                         .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
                         .map(|e| e.path)
@@ -3934,60 +4004,86 @@ fn dispatch_slash_outcome(
                     state.set_status("load failed: no save found with that name");
                 }
                 Some(ref path) => {
-                    match load_archive(path) {
-                        Ok(ac) => {
-                            let restore_err = session.restore_state(&ac.engine_save()).map_err(restore_error_msg);
-                            match restore_err {
-                                Ok(()) => {
-                                    if let Some(scr) = ac.screen.clone() {
-                                        if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                    match restore_from_file(path, &mut *session) {
+                        Ok(RestoreOutcome::DescriptorCompleted) => {
+                            let loc = session.current_location();
+                            if let Some(snap) = loc {
+                                let rid = snap.number as mapper::graph::RoomId;
+                                let restore_result = TurnResult {
+                                    transcript: String::new(),
+                                    transcript_runs: Vec::new(),
+                                    location: Some(snap),
+                                    quit: false,
+                                    erase_lower: false,
+                                    info: None,
+                                    sounds: Vec::new(),
+                                    glulx_sound_ops: Vec::new(),
+                                    diagnostics: vec![],
+                                    fault: None,
+                                    location_method: None,
+                                    pending_io: None,
+                                    timed_out: false,
+                                    transcript_elems: Vec::new(),
+                                };
+                                apply_turn(mapper, "", &restore_result);
+                                state.set_viewed_layer(None);
+                                state.select_room(Some(rid));
+                                if let Some(room) = mapper.graph.room(rid) {
+                                    if let Some(pos) = room.pos {
+                                        let (pw, ph) = map_pane_dims(map_rect);
+                                        state.recenter_on(pos, pw, ph);
                                     }
-                                    if state.config.aux_storage != app::config::AuxStorage::Global {
-                                        session.set_aux_data(ac.aux.clone());
-                                    }
-                                    *mapper = ac.mapper;
-                                    state.transcript = ac.transcript;
-                                    state.clear_anchor = None;
-                                    state.transcript_kinds = ac.transcript_kinds;
-                                    state.transcript_runs = ac.transcript_runs;
-                                    state.reset_transcript_sidecars();
-                                    state.history = ac.history;
-                                    if !ac.command_history.is_empty() {
-                                        state.command_history = ac.command_history;
-                                    }
-                                    let loc = session.current_location();
-                                    if let Some(snap) = loc {
-                                        let rid = snap.number as mapper::graph::RoomId;
-                                        let restore_result = TurnResult {
-                                            transcript: String::new(),
-                                            transcript_runs: Vec::new(),
-                                            location: Some(snap),
-                                            quit: false,
-                                            erase_lower: false,
-                                            info: None,
-                                            sounds: Vec::new(),
-                                            glulx_sound_ops: Vec::new(),
-                                            diagnostics: vec![],
-                                            fault: None,
-                                            location_method: None,
-                                            pending_io: None,
-                                            timed_out: false,
-                                            transcript_elems: Vec::new(),
-                                        };
-                                        apply_turn(mapper, "", &restore_result);
-                                        state.set_viewed_layer(None);
-                                        state.select_room(Some(rid));
-                                        if let Some(room) = mapper.graph.room(rid) {
-                                            if let Some(pos) = room.pos {
-                                                let (pw, ph) = map_pane_dims(map_rect);
-                                                state.recenter_on(pos, pw, ph);
-                                            }
-                                        }
-                                    }
-                                    state.set_status("loaded");
                                 }
-                                Err(e) => state.set_status(format!("load failed: {}", e)),
                             }
+                            state.set_status("restored");
+                        }
+                        Ok(RestoreOutcome::Resumed(ac)) => {
+                            if let Some(scr) = ac.screen.clone() {
+                                if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                            }
+                            if state.config.aux_storage != app::config::AuxStorage::Global {
+                                session.set_aux_data(ac.aux.clone());
+                            }
+                            *mapper = ac.mapper;
+                            state.transcript = ac.transcript;
+                            state.clear_anchor = None;
+                            state.transcript_kinds = ac.transcript_kinds;
+                            state.transcript_runs = ac.transcript_runs;
+                            state.reset_transcript_sidecars();
+                            state.history = ac.history;
+                            if !ac.command_history.is_empty() {
+                                state.command_history = ac.command_history;
+                            }
+                            let loc = session.current_location();
+                            if let Some(snap) = loc {
+                                let rid = snap.number as mapper::graph::RoomId;
+                                let restore_result = TurnResult {
+                                    transcript: String::new(),
+                                    transcript_runs: Vec::new(),
+                                    location: Some(snap),
+                                    quit: false,
+                                    erase_lower: false,
+                                    info: None,
+                                    sounds: Vec::new(),
+                                    glulx_sound_ops: Vec::new(),
+                                    diagnostics: vec![],
+                                    fault: None,
+                                    location_method: None,
+                                    pending_io: None,
+                                    timed_out: false,
+                                    transcript_elems: Vec::new(),
+                                };
+                                apply_turn(mapper, "", &restore_result);
+                                state.set_viewed_layer(None);
+                                state.select_room(Some(rid));
+                                if let Some(room) = mapper.graph.room(rid) {
+                                    if let Some(pos) = room.pos {
+                                        let (pw, ph) = map_pane_dims(map_rect);
+                                        state.recenter_on(pos, pw, ph);
+                                    }
+                                }
+                            }
+                            state.set_status("loaded");
                         }
                         Err(e) => state.set_status(format!("load failed: {}", e)),
                     }
@@ -5230,6 +5326,86 @@ mod tests {
         // Re-arm after a fire (deadline cleared to None): fresh at the new `now`.
         let t_fire = t0 + Duration::from_millis(3000);
         assert_eq!(super::next_input_deadline(None, true, iv, t_fire), Some(t_fire + iv));
+    }
+
+    // ── SQ-0227 Task 3: restore dispatch on file extension ──────────────────────
+    //
+    // `restore_from_file` is the dispatch shared by every host restore site
+    // (saves-manager Load, `/load-game`, and a `.babelmap` picked from the
+    // in-game restore picker). Regression proof for SQ-0163: every host
+    // restore path used to call `restore_state` (resume) unconditionally, so
+    // a host restore of an in-game `@save` (`.qzl`) landed the VM on the
+    // descriptor instead of past it.
+
+    /// Minimal v4 story: `read_char` (store->G0) at 0x40, then `@save` (store
+    /// form, ->G0) at 0x44, then `quit` at 0x46. Mirrors session.rs's
+    /// (crate-private) `read_char_then_save_v4` fixture, duplicated here
+    /// since this test lives in the separate `app` *binary* crate.
+    fn read_char_then_save_v4_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 4; // version 4 (0OP save/restore store form lives here)
+        buf[0x04] = 0x04; buf[0x05] = 0x00; // high_mem_base = 0x0400
+        buf[0x06] = 0x00; buf[0x07] = 0x40; // initial_pc = 0x0040
+        buf[0x08] = 0x00; buf[0x09] = 0x80; // dictionary = 0x0080 (empty)
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object_table = 0x0100
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev_table = 0x0060
+        buf[0x0040] = 0xF6; // VAR read_char
+        buf[0x0041] = 0x7F; // type: small(01), omit(11), omit(11), omit(11)
+        buf[0x0042] = 1;    // operand: device=1
+        buf[0x0043] = 0x10; // store -> G0
+        buf[0x0044] = 0xB5; // 0OP:0x05 save (store form)
+        buf[0x0045] = 0x10; // store -> G0
+        buf[0x0046] = 0xBA; // quit
+        buf
+    }
+
+    #[test]
+    fn restore_from_file_completes_qzl_descriptor_and_resumes_babelmap_sq0163() {
+        use app::engine::Engine;
+        use app::session::{GameSession, InputKind, PendingIo};
+
+        // In-game @save: suspend with pending_save set (descriptor PC), and
+        // capture the .qzl bytes exactly as save_game_named does (Task 2) --
+        // while pending_save is still set, before resume_save runs.
+        let mut sess = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Save));
+        let qzl_bytes = sess.machine.save_quetzal();
+        let _ = sess.resume_save(true); // host "wrote" the .qzl; @save completes, VM runs to quit.
+
+        let qzl_path = std::env::temp_dir().join(format!("bm-t3-{}.qzl", std::process::id()));
+        std::fs::write(&qzl_path, &qzl_bytes).unwrap();
+
+        // HOST restore of that .qzl (the SQ-0163 regression scenario): must
+        // dispatch to descriptor completion, not a resume.
+        let mut fresh = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        let outcome = super::restore_from_file(&qzl_path, &mut fresh).expect("restore .qzl game save");
+        assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted));
+        assert_eq!(fresh.machine.global(0), 2, "descriptor completion stores 2 into G0 (SQ-0163 fix)");
+        assert_eq!(fresh.machine.state.pc, 0x46, "resumes PAST the @save instruction, not left on the descriptor");
+        let _ = std::fs::remove_file(&qzl_path);
+
+        // Contrast: a Save State (.babelmap) is resume-PC convention --
+        // captured at an input prompt, no pending @save. The dispatch must
+        // instead do a full session resume, landing exactly at the saved PC.
+        let sess2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        assert_eq!(sess2.pending_input(), InputKind::Char);
+        let pc_before_restore = sess2.machine.state.pc;
+        let save = sess2.save_state();
+
+        let babelmap_path = std::env::temp_dir().join(format!("bm-t3-{}.babelmap", std::process::id()));
+        app::archive::save_archive(&babelmap_path, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[]).expect("write .babelmap");
+
+        let mut fresh2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        let outcome2 = super::restore_from_file(&babelmap_path, &mut fresh2).expect("restore .babelmap Save State");
+        assert!(matches!(outcome2, super::RestoreOutcome::Resumed(_)));
+        assert_eq!(fresh2.machine.state.pc, pc_before_restore, "resume convention: lands exactly at the saved PC, not the @save descriptor");
+        assert_eq!(fresh2.machine.global(0), 0, "resume: @save never ran, G0 untouched (contrast with descriptor completion's 2 above)");
+        let _ = std::fs::remove_file(&babelmap_path);
     }
 
     // ── Graceful no-panic guards for non-Z-machine (Glulx) engines ──────────────
