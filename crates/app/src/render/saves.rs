@@ -26,8 +26,8 @@ pub fn draw_saves(
 
     // ── Modal geometry ────────────────────────────────────────────────────────
 
-    // Target: up to 62 wide, tall enough for entries + 2 header + 1 footer + chrome overhead.
-    let modal_w = 62u16.min(area.width.saturating_sub(4));
+    // Target: up to 66 wide, tall enough for entries + 2 header + 1 footer + chrome overhead.
+    let modal_w = 66u16.min(area.width.saturating_sub(4));
     let entry_rows = saves.entries.len() as u16;
     // 2 header rows + entry rows + 1 footer + border overhead (2) + button row (1) = entry_rows + 6
     let modal_h = (entry_rows + 6).min(area.height.saturating_sub(2));
@@ -58,7 +58,7 @@ pub fn draw_saves(
     // ── Column headers ────────────────────────────────────────────────────────
 
     let hdr_style = Style::new().add_modifier(Modifier::UNDERLINED).patch(state.colors.dialog);
-    let hdr = format!("{:<28}  {:>5}  {:<16}", "Name", "Turns", "Saved at");
+    let hdr = format!("{:<25}  {:<5}  {:>5}  {:<16}", "Name", "Type", "Turns", "Saved at");
     if content.height > 0 {
         crate::render::draw_str_clipped(buf, content.x, content.y, &hdr, hdr_style, content);
     }
@@ -105,13 +105,14 @@ pub fn draw_saves(
             }
         }
 
-        // Marker + name (truncated to 28 chars).
+        // Marker + name + type (game .qzl vs Save-State .babelmap) + turns + time.
         let marker = if i == saves.scroll.selected { ">" } else { " " };
-        let name_trunc: String = entry.name.chars().take(26).collect();
+        let name_trunc: String = entry.name.chars().take(23).collect();
+        let kind = save_kind_label(&entry.path);
         let short_time = format_time(&entry.saved_at);
         let line = format!(
-            "{} {:<27}  {:>5}  {:<16}",
-            marker, name_trunc, entry.turns, short_time
+            "{} {:<24}  {:<5}  {:>5}  {:<16}",
+            marker, name_trunc, kind, entry.turns, short_time
         );
         crate::render::draw_str_clipped(buf, row_area.x, row_y, &line, style, row_area);
     }
@@ -140,6 +141,16 @@ pub fn draw_saves(
     }
 
     Some(rects)
+}
+
+/// Short label for a save's kind, by file extension: a `.qzl` is a standard
+/// game save ("Game"), anything else (`.babelmap`) is an emulator Save State
+/// ("State").
+fn save_kind_label(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("qzl") => "Game",
+        _ => "State",
+    }
 }
 
 /// Format an RFC3339 timestamp for compact display (show only date + HH:MM).
@@ -178,6 +189,44 @@ mod tests {
             saved_at: "2026-06-18T10:00:00Z".to_string(),
             is_default,
         }
+    }
+
+    fn dummy_qzl(name: &str, turns: u32) -> SaveInfo {
+        SaveInfo {
+            path: PathBuf::from(format!("/tmp/{}.qzl", name)),
+            name: name.to_string(),
+            turns,
+            saved_at: "2026-06-18T10:00:00Z".to_string(),
+            is_default: false,
+        }
+    }
+
+    #[test]
+    fn save_kind_label_distinguishes_qzl_from_babelmap() {
+        assert_eq!(super::save_kind_label(std::path::Path::new("/x/a.qzl")), "Game");
+        assert_eq!(super::save_kind_label(std::path::Path::new("/x/a.babelmap")), "State");
+    }
+
+    #[test]
+    fn draw_saves_shows_type_column_for_each_kind() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = state_with_saves(
+            vec![
+                dummy_save("state-slot", 10, false),
+                dummy_qzl("game-slot", 20),
+            ],
+            0,
+        );
+        terminal.draw(|f| {
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
+        }).unwrap();
+        let content: String = terminal.backend().buffer().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("Type"), "Type column header should be present");
+        assert!(content.contains("Game"), "a .qzl row should show the 'Game' type");
+        assert!(content.contains("State"), "a .babelmap row should show the 'State' type");
     }
 
     fn state_with_saves(entries: Vec<SaveInfo>, selected: usize) -> AppState {

@@ -157,16 +157,29 @@ fn rfc3339_now() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Format as YYYY-MM-DDTHH:MM:SSZ without external crate.
-    let s = secs;
+    rfc3339_from_secs(secs)
+}
+
+/// A file's modification time as an RFC3339 string (UTC, second precision), or
+/// an empty string if it can't be read. Used to timestamp bare `.qzl` game
+/// saves, which carry no metadata of their own.
+pub fn rfc3339_mtime(path: &Path) -> String {
+    use std::time::UNIX_EPOCH;
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| rfc3339_from_secs(d.as_secs()))
+        .unwrap_or_default()
+}
+
+/// Format seconds-since-Unix-epoch as `YYYY-MM-DDTHH:MM:SSZ` (no external crate).
+fn rfc3339_from_secs(s: u64) -> String {
     let sec = s % 60;
     let min = (s / 60) % 60;
     let hour = (s / 3600) % 24;
     let days = s / 86400; // days since 1970-01-01
-
-    // Compute calendar date from days since epoch.
     let (year, month, day) = days_to_ymd(days);
-
     format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hour, min, sec)
 }
 

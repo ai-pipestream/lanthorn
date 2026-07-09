@@ -3380,8 +3380,7 @@ fn main() {
             Action::OpenSaves => {
                 // Populate the saves list (both .babelmap Save States and .qzl
                 // game saves — SQ-0227 Task 3) and open the modal.
-                let mut entries = list_saves(&save_dir, &ifid);
-                entries.extend(list_qzl(&save_dir, &ifid));
+                let entries = combined_saves(&save_dir, &ifid);
                 state.saves = Some(SavesState { entries, scroll: Default::default() });
                 state.dialog_focus = 0;
             }
@@ -3840,8 +3839,7 @@ fn dispatch_slash_outcome(
                 None => Some(arc_file.to_path_buf()),
                 Some(ref name) => {
                     // Find the first named save whose display name matches.
-                    let mut saves = list_saves(save_dir, ifid);
-                    saves.extend(list_qzl(save_dir, ifid));
+                    let saves = combined_saves(save_dir, ifid);
                     saves.into_iter()
                         .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
                         .map(|e| e.path)
@@ -4228,8 +4226,7 @@ fn open_ingame_saves(
         }
         PendingIo::Restore => {
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
-            let mut entries = list_saves(save_dir, ifid);
-            entries.extend(list_qzl(save_dir, ifid));
+            let entries = combined_saves(save_dir, ifid);
             state.saves = Some(SavesState { entries, scroll: Default::default() });
         }
     }
@@ -4241,6 +4238,17 @@ fn open_ingame_saves(
 /// `save_game_named`). Filtered to the given IFID so other stories' saves don't
 /// appear — and so a bare `<ifid>.qzl` (e.g. an old Save-State export) is
 /// excluded, since only `save_game_named` produces the `<ifid>-` prefix.
+/// The current story's saves for the saves manager: `.babelmap` Save States and
+/// `.qzl` game saves merged into one list, sorted newest-first by save time.
+/// RFC3339 timestamps sort chronologically as strings; untimestamped/legacy
+/// saves (empty timestamp) sort to the bottom.
+fn combined_saves(dir: &std::path::Path, ifid: &str) -> Vec<app::persist_files::SaveInfo> {
+    let mut entries = list_saves(dir, ifid);
+    entries.extend(list_qzl(dir, ifid));
+    entries.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    entries
+}
+
 fn list_qzl(dir: &std::path::Path, ifid: &str) -> Vec<app::persist_files::SaveInfo> {
     let named_prefix = format!("{}-", ifid);
     let mut out = Vec::new();
@@ -4249,9 +4257,17 @@ fn list_qzl(dir: &std::path::Path, ifid: &str) -> Vec<app::persist_files::SaveIn
             let p = e.path();
             let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
             if fname.starts_with(&named_prefix) && fname.ends_with(".qzl") {
+                // Display the slug only: strip the `<ifid>-` prefix (the ZCODE-*
+                // game id) and the `.qzl` suffix. `.qzl` saves carry no metadata,
+                // so timestamp them from the file's modification time.
+                let name = fname
+                    .strip_prefix(&named_prefix)
+                    .and_then(|s| s.strip_suffix(".qzl"))
+                    .unwrap_or(fname)
+                    .to_string();
+                let saved_at = app::persist_files::rfc3339_mtime(&p);
                 out.push(app::persist_files::SaveInfo {
-                    path: p.clone(), name: fname.to_string(),
-                    turns: 0, saved_at: String::new(), is_default: false,
+                    path: p, name, turns: 0, saved_at, is_default: false,
                 });
             }
         }
@@ -5105,11 +5121,43 @@ mod tests {
         fs::write(dir.join("aaa.qzl"), b"x").unwrap();
         fs::write(dir.join("aaa-slot1.babelmap"), b"x").unwrap();
 
-        let names: Vec<String> = super::list_qzl(&dir, "aaa").iter().map(|s| s.name.clone()).collect();
-        assert_eq!(names, vec!["aaa-slot1.qzl".to_string()],
-            "only the current story's <ifid>-*.qzl game saves list (no other story, no bare <ifid>.qzl export, no .babelmap)");
+        // combined_saves merges .babelmap + .qzl newest-first; here (no .babelmap,
+        // no meta needed) it should return the one game save.
+        let combined: Vec<String> = super::combined_saves(&dir, "aaa").iter().map(|s| s.name.clone()).collect();
+        assert_eq!(combined, vec!["slot1".to_string()], "combined list includes the game save");
+
+        let infos = super::list_qzl(&dir, "aaa");
+        let names: Vec<String> = infos.iter().map(|s| s.name.clone()).collect();
+        // Only the current story's <ifid>-*.qzl game saves list (no other story,
+        // no bare <ifid>.qzl export, no .babelmap), with the <ifid>- prefix and
+        // .qzl suffix stripped to the slug for display.
+        assert_eq!(names, vec!["slot1".to_string()]);
+        // And they carry a save timestamp read from the file's mtime.
+        assert!(!infos[0].saved_at.is_empty(), "game saves are timestamped from file mtime");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn combined_saves_sorts_newest_first_untimestamped_last() {
+        let mk = |name: &str, ts: &str| app::persist_files::SaveInfo {
+            path: std::path::PathBuf::from(format!("/tmp/{name}.qzl")),
+            name: name.to_string(),
+            turns: 0,
+            saved_at: ts.to_string(),
+            is_default: false,
+        };
+        let mut v = vec![
+            mk("old", "2026-06-01T10:00:00Z"),
+            mk("legacy", ""),
+            mk("new", "2026-07-09T12:00:00Z"),
+            mk("mid", "2026-06-30T08:00:00Z"),
+        ];
+        // Same comparator combined_saves uses (RFC3339 sorts chronologically).
+        v.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+        let order: Vec<&str> = v.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(order, vec!["new", "mid", "old", "legacy"],
+            "newest first; untimestamped/legacy saves sort to the bottom");
     }
 
     // ── Timed-input deadline arming (F1 regression) ─────────────────────────────
