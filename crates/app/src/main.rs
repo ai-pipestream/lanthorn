@@ -2888,12 +2888,17 @@ fn main() {
                 match key_to_command(&state, k) {
                     KeyResolve::Action(a) => a,
                     KeyResolve::Command(s, ctx) => {
+                        let close_leader = state.hotkey_dialog;
                         let outcome = slash::parse_in_context(&s, state.config.command_prefix, ctx);
-                        if dispatch_slash_outcome(
+                        let should_break = dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
                             &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
                             last_panes.map, last_panes.story, true,
-                        ) {
+                        );
+                        if close_leader {
+                            state.hotkey_dialog = false;
+                        }
+                        if should_break {
                             break;
                         }
                         continue 'event_loop;

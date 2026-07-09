@@ -1105,18 +1105,27 @@ fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> KeyResolve {
         return KeyResolve::Action(Action::CloseHotkeyDialog);
     }
 
-    // Look up the key across all contexts (Global, Map, Anim) so that commands
-    // in any context can be triggered from the dialog. Route the resolved
-    // command-string through the slash parser using its registry context.
-    if let Some(s) = state.keymap.lookup_any(&spec) {
-        let name = s.split_whitespace().next().unwrap_or("");
-        let ctx = crate::slash::find_command(name)
-            .map(|c| c.context)
-            .unwrap_or(Context::Global);
-        return KeyResolve::Command(s.to_string(), ctx);
+    // A bare character (no Ctrl/Alt; Shift allowed) is an authored leader
+    // letter: fire its bound command, or close the dialog if unbound. Any
+    // other key (Ctrl-combos, Alt-combos, function keys, arrows, etc.) also
+    // closes the dialog. This gives tmux-style one-shot semantics: exactly
+    // one keypress always resolves the dialog.
+    if let KeyCode::Char(c) = key.code {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) {
+            return match state.hotkeys.leader_command(c) {
+                Some(cmd) => {
+                    let name = cmd.split_whitespace().next().unwrap_or("");
+                    let ctx = crate::slash::find_command(name)
+                        .map(|c| c.context)
+                        .unwrap_or(Context::Global);
+                    KeyResolve::Command(cmd.to_string(), ctx)
+                }
+                None => KeyResolve::Action(Action::CloseHotkeyDialog),
+            };
+        }
     }
 
-    KeyResolve::None
+    KeyResolve::Action(Action::CloseHotkeyDialog)
 }
 
 // ── Internal: prompt key routing ──────────────────────────────────────────────
@@ -4058,9 +4067,11 @@ mod tests {
         s.focus = Focus::Map;
         // RenameLayer is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::None));
-        // Returns the action when dialog is open.
+        // Open dialog: Shift+N is not an authored leader letter, so it now closes
+        // the dialog instead; the authored leader letter 'n' fires RenameLayer.
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::RenameLayer));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
     }
 
     #[test]
@@ -4076,12 +4087,55 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
-        // Non-direct commands fire from the dialog.
+        // Ctrl-combos always close the dialog now (never fire); the underlying
+        // commands fire via their authored leader letters instead.
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::ExportSvg));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::ExportDot));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::ExportDump));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::CycleLayout));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportDump));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::CycleLayout));
+    }
+
+    #[test]
+    fn leader_letter_fires_command() {
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        match key_to_command(&s, key(KeyCode::Char('t'))) {
+            KeyResolve::Command(c, _) => assert_eq!(c, "tidy-map"),
+            other => panic!("expected Command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leader_multiword_letter_fires_full_command() {
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        match key_to_command(&s, key(KeyCode::Char('c'))) {
+            KeyResolve::Command(c, _) => assert_eq!(c, "cycle-layer next"),
+            other => panic!("expected Command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leader_unbound_letter_closes() {
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(key_to_command(&s, key(KeyCode::Char('z'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
+    }
+
+    #[test]
+    fn leader_ctrl_combo_closes_not_fires() {
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
+    }
+
+    #[test]
+    fn leader_esc_closes() {
+        let mut s = AppState::default();
+        s.hotkey_dialog = true;
+        assert!(matches!(key_to_command(&s, key(KeyCode::Esc)), KeyResolve::Action(Action::CloseHotkeyDialog)));
     }
 
     #[test]
@@ -4212,11 +4266,13 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus(); // → Map
         // Retidy and RenameRoom are dialog-only: return None when dialog is closed.
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::None));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::None));
-        // Return actions when dialog is open.
+        // Return actions when dialog is open, via their authored leader letters
+        // ('t' for tidy-map/Retidy, 'r' for rename-room); Shift+R is no longer
+        // an authored leader letter.
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
     }
 
@@ -4486,10 +4542,12 @@ mod tests {
         // CycleLayer is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::None));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::None));
-        // Returns actions when dialog is open.
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CycleLayer(1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CycleLayer(-1)));
+        // Brackets are not authored leader letters: they close the dialog now.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CloseHotkeyDialog));
+        // The authored leader letter 'c' fires cycle-layer next instead.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::CycleLayer(1)));
     }
 
     #[test]
@@ -4499,10 +4557,11 @@ mod tests {
         // PeelLayer/MergeLayer are dialog-only: return None when dialog is closed.
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::None));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::None));
-        // Return actions when dialog is open.
+        // Open dialog: authored leader letters 'p'/'m' fire the commands
+        // (Shift+P/Shift+M are no longer authored leader letters).
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
     }
 
     #[test]
@@ -4926,20 +4985,23 @@ mod tests {
 
         // ── Map focus (dialog open) ───────────────────────────────────────────
         s.hotkey_dialog = true;
-        // Dialog-only commands now work
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::RenameLayer));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::PeelLayer));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::MergeLayer));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CycleLayer(1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CycleLayer(-1)));
+        // Dialog-only commands now fire via their authored leader letters.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
+        // Unauthored keys (shift-modified letters, brackets) close the dialog
+        // instead of firing.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::EditNotes));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
-        // 'q' no longer closes the dialog (q-close removed from hotkey dialog)
-        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
+        // 'q' is authored to toggle-portal-labels; it no longer closes the dialog.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::TogglePortalLabels));
         s.hotkey_dialog = false;
 
         // ── Anim sub-mode ─────────────────────────────────────────────────────
@@ -5019,10 +5081,10 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus(); // Map
         // OpenGallery is dialog-only: returns None when dialog is closed.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::None));
-        // Returns the action when dialog is open.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('f'))), Action::None));
+        // Returns the action when dialog is open, via its authored leader letter 'f'.
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::OpenGallery));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('f'))), Action::OpenGallery));
     }
 
     // ── Saves-manager sub-mode tests ──────────────────────────────────────────
@@ -5121,9 +5183,11 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus();
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::None));
-        // It fires from the dialog.
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::OpenSaves));
+        // Ctrl-combos always close the dialog now (never fire); it fires via
+        // the authored leader letter 's' instead.
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('s'))), Action::OpenSaves));
     }
 
     #[test]
@@ -5223,11 +5287,11 @@ mod tests {
 
     #[test]
     fn dialog_open_dialog_only_cmd_fires() {
-        // When dialog is open, Shift+R in map focus fires Retidy.
+        // When dialog is open, the authored leader letter 't' in map focus fires Retidy.
         let mut s = AppState::default();
         s.focus = Focus::Map;
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::Retidy));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         // ToggleInspector fires too.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
     }
@@ -5288,11 +5352,16 @@ mod tests {
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None),
             "retidy should NOT fire directly with default layout (dialog closed)"
         );
-        // Open dialog: Ctrl+T fires Retidy.
+        // Open dialog: Ctrl+T now closes the dialog (Ctrl-combos never fire);
+        // the authored leader letter 't' fires Retidy instead.
         s.hotkey_dialog = true;
         assert!(
-            matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy),
-            "retidy should fire from the hotkey dialog"
+            matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::CloseHotkeyDialog),
+            "Ctrl-combos close the hotkey dialog rather than firing"
+        );
+        assert!(
+            matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy),
+            "retidy should fire from the hotkey dialog via leader letter 't'"
         );
     }
 
