@@ -176,6 +176,9 @@ pub struct Machine {
 struct PendingSave {
     /// v3: the branch descriptor; v4+: the store variable number.
     result_dest: SaveDest,
+    /// Address of the instruction's result descriptor (Quetzal §5.8): the store
+    /// byte (v4+) or the first branch byte (v3). Written into the save file's PC.
+    descriptor_pc: u32,
 }
 
 enum SaveDest {
@@ -787,20 +790,23 @@ impl Machine {
             // PC has already advanced past the instruction (standard step() contract),
             // so state.pc at this point is the correct resume address.
             0x05 => {
-                let dest = if self.mem.version() <= 3 {
+                let (dest, descriptor_pc) = if self.mem.version() <= 3 {
                     // v3: save is a branch instruction; branch is present
                     match branch {
-                        Some(b) => SaveDest::Branch(b),
-                        None => SaveDest::Store(0), // shouldn't happen; safe fallback
+                        Some(b) => {
+                            let dpc = self.state.pc - b.len as u32;
+                            (SaveDest::Branch(b), dpc)
+                        }
+                        None => (SaveDest::Store(0), self.state.pc.saturating_sub(1)), // shouldn't happen; safe fallback
                     }
                 } else {
                     // v4+: save is a store instruction; store is present
                     match store {
-                        Some(sv) => SaveDest::Store(sv),
-                        None => SaveDest::Store(0),
+                        Some(sv) => (SaveDest::Store(sv), self.state.pc.saturating_sub(1)),
+                        None => (SaveDest::Store(0), self.state.pc.saturating_sub(1)),
                     }
                 };
-                self.pending_save = Some(PendingSave { result_dest: dest });
+                self.pending_save = Some(PendingSave { result_dest: dest, descriptor_pc });
                 StepResult::SaveRequest
             }
             // 0x06 restore — suspend and let the host supply bytes (Task 14).
@@ -1281,7 +1287,10 @@ impl Machine {
                         Some(sv) => SaveDest::Store(sv),
                         None => SaveDest::Store(0),
                     };
-                    self.pending_save = Some(PendingSave { result_dest: dest });
+                    self.pending_save = Some(PendingSave {
+                        result_dest: dest,
+                        descriptor_pc: self.state.pc.saturating_sub(1),
+                    });
                     StepResult::SaveRequest
                 }
             }
@@ -1919,6 +1928,13 @@ impl Machine {
         crate::quetzal::save_quetzal(self)
     }
 
+    /// The program counter to record in a save file. For an in-game `@save`
+    /// (pending_save set) this is the result descriptor's address, per Quetzal
+    /// §5.8; otherwise (host Save State, undo snapshots) it is the current pc.
+    pub(crate) fn save_pc(&self) -> u32 {
+        self.pending_save.as_ref().map(|p| p.descriptor_pc).unwrap_or(self.state.pc)
+    }
+
     /// Deliver the result of a save operation back to the machine.
     ///
     /// `ok = true`  → save succeeded (v3: branch taken; v4+: store 1).
@@ -1980,22 +1996,29 @@ impl Machine {
         }
     }
 
-    /// Complete a game-initiated restore (v4+) with the supplied Quetzal bytes.
+    /// Complete a game-initiated restore with the supplied Quetzal bytes.
     ///
     /// On success the machine state (dynamic memory, frames, eval stack, PC) is
-    /// replaced with the saved state, and the ORIGINAL `@save` "returns 2": the
-    /// saved PC is post-instruction, so the v4+ `@save`'s store byte is the last
-    /// byte of that instruction, at `state.pc - 1`. We store 2 there. A restore
-    /// invalidates undo history (like `restore_file`), and the `@restore`'s own
-    /// store target is unused on success, so both are cleared.
+    /// replaced with the saved state, whose PC points at the original `@save`'s
+    /// result descriptor (Quetzal §5.8). We complete that descriptor forward as
+    /// "restore succeeded": v3 takes the `@save` branch as true; v4+ stores 2
+    /// into the `@save`'s store variable. A restore invalidates undo history, and
+    /// the `@restore`'s own store target is unused on success — both are cleared.
     ///
     /// On `Err` the machine is untouched (the `restore_quetzal` contract); the
     /// caller should then call `complete_restore_failure()`.
     pub fn complete_restore_success(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
         self.restore_quetzal(data)?;
-        if self.mem.version() >= 4 {
-            let store_var = self.mem.read_byte(self.state.pc.saturating_sub(1));
+        if self.mem.version() <= 3 {
+            // v3 @save is a branch instruction; resume as if it branched on success.
+            let br = crate::cpu::decode::decode_branch_at(&self.mem, self.state.pc);
+            self.state.pc += br.len as u32; // advance to next_pc (do_branch uses pc + off - 2)
+            self.do_branch(Some(br), true);
+        } else {
+            // v4+ @save stores its result; the game is being restored, so store 2.
+            let store_var = self.mem.read_byte(self.state.pc);
             self.do_store(Some(store_var), 2);
+            self.state.pc += 1; // advance past the store byte
         }
         self.undo_stack.clear();
         self.pending_restore_store = None;
@@ -2176,10 +2199,10 @@ pub(crate) mod tests {
 
     // ── In-game restore-success: the original @save "returns 2" on restore ─────
     //
-    // v4 story at 0x40:  save -> G0 (0xB5, store byte 0x10), then quit (0xBA).
-    // After step() the @save suspends with SaveRequest and state.pc == 0x42, so the
-    // store byte lives at mem[0x41]. complete_restore_success(blob) must restore the
-    // saved state (PC back to 0x42) and store 2 into G0.
+    // v4 story at 0x40:  save -> G0 (0xB5, store byte 0x10 at 0x41), then quit.
+    // After step() the @save suspends with SaveRequest; the saved (IFhd) PC points
+    // at the store byte 0x41 (Quetzal §5.8). complete_restore_success restores the
+    // state, reads the store byte forward, stores 2 into G0, and resumes at 0x42.
     fn save_v4_into_g0_story() -> Vec<u8> {
         let mut buf = sample_story(4);
         buf[0x40] = 0xB5; // 0OP:0x05 save (store form, v4+)
@@ -2212,6 +2235,86 @@ pub(crate) mod tests {
         m.complete_restore_success(&blob).expect("restore must succeed");
         assert_eq!(m.global(0), 2, "restore makes the original @save 'return' 2");
         assert_eq!(m.state.pc, 0x42, "PC resumed at the post-@save address");
+    }
+
+    // v3: @save is a BRANCH instruction. 0x40 save (0xB5) + 1 branch byte (0x41).
+    // Branch: on-true, short form, offset 5. next_pc after the branch byte is 0x42,
+    // so a taken branch lands at 0x42 + 5 - 2 = 0x45.
+    fn save_v3_branch_story() -> Vec<u8> {
+        let mut buf = sample_story(3);
+        buf[0x40] = 0xB5;          // 0OP:0x05 save (branch form in v3)
+        buf[0x41] = 0x80 | 0x40 | 5; // branch: on-true, short form, offset 5
+        buf[0x45] = 0xBA;          // quit at the branch-taken target
+        buf
+    }
+
+    #[test]
+    fn v3_branch_save_restore_round_trip() {
+        let mem = Memory::new(save_v3_branch_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+
+        let r = m.step();
+        assert_eq!(r, StepResult::SaveRequest, "v3 save suspends with SaveRequest");
+        assert_eq!(m.state.pc, 0x42, "PC post-instruction: opcode 0x40 + 1 branch byte");
+
+        // Standard convention: saved (IFhd) PC points AT the branch descriptor (0x41).
+        let blob = m.save_quetzal();
+        assert_eq!(crate::quetzal::saved_pc_of(&blob), 0x41, "v3 saved PC = branch byte address");
+
+        // Immediate save success takes the branch -> 0x45.
+        m.complete_save(true);
+        assert_eq!(m.state.pc, 0x45, "save success branches to 0x45");
+
+        // Move PC away; restore must make the original @save 'succeed' (branch taken).
+        m.state.pc = 0x00AB;
+        m.complete_restore_success(&blob).expect("v3 restore must succeed");
+        assert_eq!(m.state.pc, 0x45, "restore resumes as if the v3 @save branched");
+    }
+
+    // v5: @save is EXT:0x00 (0xBE 0x00), VAR types byte (0xFF = 0 operands), store byte.
+    fn save_v5_ext_into_g0_story() -> Vec<u8> {
+        let mut buf = sample_story(5);
+        buf[0x40] = 0xBE; // EXT prefix
+        buf[0x41] = 0x00; // EXT:0x00 save
+        buf[0x42] = 0xFF; // VAR types: all 4 operands omitted
+        buf[0x43] = 0x10; // store byte -> global 0
+        buf[0x44] = 0xBA; // quit
+        buf
+    }
+
+    #[test]
+    fn v5_ext_save_restore_round_trip() {
+        let mem = Memory::new(save_v5_ext_into_g0_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+
+        let r = m.step();
+        assert_eq!(r, StepResult::SaveRequest, "v5 EXT save suspends with SaveRequest");
+        assert_eq!(m.state.pc, 0x44, "PC post-instruction (store byte at 0x43)");
+
+        let blob = m.save_quetzal();
+        assert_eq!(crate::quetzal::saved_pc_of(&blob), 0x43, "v5 saved PC = store byte address");
+
+        m.complete_save(true);
+        assert_eq!(m.global(0), 1, "save success stores 1");
+
+        m.do_store(Some(0x10), 0x99);
+        m.state.pc = 0x00AB;
+        m.complete_restore_success(&blob).expect("v5 restore must succeed");
+        assert_eq!(m.global(0), 2, "restore makes the original @save 'return' 2");
+        assert_eq!(m.state.pc, 0x44, "PC resumes post-@save");
+    }
+
+    #[test]
+    fn save_state_host_path_keeps_state_pc() {
+        // No @save opcode fired (pending_save is None): save_quetzal must serialize
+        // state.pc verbatim — the host "Save State" convention is unchanged.
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x0123;
+        let blob = m.save_quetzal();
+        assert_eq!(crate::quetzal::saved_pc_of(&blob), 0x0123, "host save keeps state.pc");
     }
 
     #[test]

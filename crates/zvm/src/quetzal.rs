@@ -10,12 +10,12 @@
 // IFF structure: FORM<4> + total-length<4> + "IFZS"<4> + chunks.
 // Each chunk: type<4> + length<4> + data + optional pad byte (to make total even).
 //
-// Save PC semantics: we store state.pc as-is at the moment save_quetzal() is
-// called.  The save opcode handler advances pc past the save instruction BEFORE
-// calling save_quetzal (the standard step() pc-advance contract), so the
-// restored PC points to the instruction immediately after the save instruction,
-// which is exactly where execution should resume.  This makes save/restore true
-// inverses: restore sets pc to the stored value and execution continues from there.
+// Save PC semantics: the IFhd PC comes from Machine::save_pc(). For an in-game
+// @save/@restore opcode (pending_save set) it is the result-descriptor address —
+// the store byte (v4+) or first branch byte (v3) — per Quetzal §5.8; restore
+// reads that descriptor forward (see complete_restore_success). For a host
+// "Save State" snapshot (no pending save) it is state.pc, and restore simply
+// resumes there (see restore_file).
 
 use crate::cpu::exec::Machine;
 use crate::cpu::state::{Frame, State};
@@ -111,8 +111,10 @@ fn encode_ifhd(machine: &Machine) -> Vec<u8> {
     // Checksum (2 bytes at header 0x1C)
     out.push(mem.read_byte(0x1C));
     out.push(mem.read_byte(0x1D));
-    // PC at save time (3 bytes, big-endian)
-    let pc = machine.state.pc;
+    // PC at save time (3 bytes, big-endian). For an in-game @save this is the
+    // result-descriptor address (Quetzal §5.8); for a host Save State it is
+    // state.pc. See Machine::save_pc.
+    let pc = machine.save_pc();
     out.push(((pc >> 16) & 0xFF) as u8);
     out.push(((pc >>  8) & 0xFF) as u8);
     out.push(( pc        & 0xFF) as u8);
@@ -143,6 +145,14 @@ fn validate_ifhd(machine: &Machine, ifhd: &[u8]) -> Result<(), ZError> {
 
 fn decode_ifhd_pc(ifhd: &[u8]) -> u32 {
     ((ifhd[10] as u32) << 16) | ((ifhd[11] as u32) << 8) | (ifhd[12] as u32)
+}
+
+/// Test helper: extract the IFhd program counter from a Quetzal blob.
+#[cfg(test)]
+pub(crate) fn saved_pc_of(data: &[u8]) -> u32 {
+    let chunks = parse_iff(data).expect("valid IFF");
+    let ifhd = find_chunk(&chunks, b"IFhd").expect("IFhd present");
+    decode_ifhd_pc(ifhd)
 }
 
 // ---------------------------------------------------------------------------
