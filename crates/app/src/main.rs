@@ -24,7 +24,7 @@ use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid};
 use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
-use app::persist_files::{delete_save, list_saves, load_map, save_game, restore_game, save_named};
+use app::persist_files::{delete_save, list_saves, load_map, save_game, save_game_named, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::dialog::{DialogRects, DialogStyle};
@@ -4260,7 +4260,15 @@ fn handle_saves_prompt(
                 }
                 return;
             }
-            match save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs) {
+            let result = if ingame {
+                // Game @save -> bare standard .qzl (VM state only, descriptor PC).
+                let machine = &zvm_session_opt(&*session).expect("in-game save is Z-machine only").machine;
+                save_game_named(dir, ifid, &buf, machine).map(|_| ())
+            } else {
+                // Host "Save State" named slot -> rich .babelmap archive.
+                save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
+            };
+            match result {
                 Ok(()) => {
                     state.push_transcript(&format!("[Saved as: {}]", buf));
                     // Refresh saves list.

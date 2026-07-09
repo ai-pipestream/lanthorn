@@ -204,6 +204,19 @@ pub fn save_game(path: &Path, machine: &zvm::cpu::exec::Machine) -> std::io::Res
     std::fs::write(path, machine.save_quetzal())
 }
 
+/// Write a named in-game save: `<dir>/<ifid>-<slug>.qzl` (bare standard Quetzal).
+///
+/// `name` is sanitized into a filesystem-safe slug (lowercase alphanum + hyphens).
+pub fn save_game_named(dir: &Path, ifid: &str, name: &str, machine: &zvm::cpu::exec::Machine) -> io::Result<PathBuf> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
+    }
+    let path = dir.join(format!("{}-{}.qzl", ifid, slug));
+    save_game(&path, machine)?;
+    Ok(path)
+}
+
 pub fn restore_game(path: &Path, machine: &mut zvm::cpu::exec::Machine) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     machine.complete_restore_success(&bytes).map_err(|e| match e {
@@ -536,6 +549,25 @@ mod tests {
         assert_eq!(m.global(0), 2, "game-save restore completes the @save descriptor (store 2)");
         assert_eq!(m.state.pc, 0x42, "resumes at the post-@save address");
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn save_game_named_writes_bare_qzl() {
+        // Build a v4 machine at an @save SaveRequest (pending_save set => descriptor PC),
+        // mirroring the Task 1 fixture but without completing the save.
+        use zvm::cpu::exec::{Machine, StepResult};
+        use zvm::memory::Memory;
+        let mut buf = sample_story_v4();
+        buf[0x40] = 0xB5; buf[0x41] = 0x10; buf[0x42] = 0xBA; // save->G0 ; quit
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::SaveRequest);
+
+        let dir = std::env::temp_dir();
+        let path = super::save_game_named(&dir, "IFIDX", "slot one", &m).unwrap();
+        assert!(path.to_string_lossy().ends_with("IFIDX-slot-one.qzl"));
+        assert_eq!(std::fs::read(&path).unwrap(), m.save_quetzal(), "bare Quetzal bytes");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
