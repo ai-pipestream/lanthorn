@@ -5196,7 +5196,14 @@ mod tests {
         let outcome = super::restore_from_file(&qzl_path, &mut fresh).expect("restore .qzl game save");
         assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted));
         assert_eq!(fresh.machine.global(0), 2, "descriptor completion stores 2 into G0 (SQ-0163 fix)");
-        assert_eq!(fresh.machine.state.pc, 0x46, "resumes PAST the @save instruction, not left on the descriptor");
+        // SQ-0233: the host .qzl restore now runs FORWARD past the @save
+        // descriptor to the game's next input (like the in-game @restore),
+        // instead of parking on the save-verb tail (which dropped the first
+        // typed command). This minimal story quits right after @save, so it runs
+        // to quit; a real game lands at its next read (covered by
+        // session::tests::game_save_restore_via_manager_accepts_next_command).
+        assert_ne!(fresh.machine.state.pc, 0x46,
+            "restore runs forward past the @save descriptor, not parked on it (SQ-0233)");
         let _ = std::fs::remove_file(&qzl_path);
 
         // Contrast: a Save State (.babelmap) is resume-PC convention --

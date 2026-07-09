@@ -789,12 +789,42 @@ impl Engine for GameSession {
         }
         self.machine
             .restore_file(&save.bytes)
-            .map_err(|e| EngineError::BadSave(format!("{e:?}")))
+            .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // A Save State is snapshotted at an input prompt; its PC points AT the
+        // read/read_char instruction (save_pc rewinds it), so run forward to
+        // re-execute that read — re-arming the pending input on the freshly
+        // restored buffers. Without this the VM would be parked past the read
+        // with a stale buffer, and the next line would replay the pre-save
+        // command (mirrors `resume_restore` for the game `@restore` path).
+        let stop = run_until_input(&mut self.machine);
+        self.pending = match stop {
+            RunStop::Input(k) => k,
+            RunStop::Quit => InputKind::Line,
+            // A well-formed Save State resumes into a read; the save/restore
+            // arms are unreachable here (no @save/@restore mid-snapshot).
+            RunStop::SavePending | RunStop::RestorePending => self.pending,
+        };
+        Ok(())
     }
 
     fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
         self.machine.complete_restore_success(bytes)
-            .map_err(|e| EngineError::BadSave(format!("{e:?}")))
+            .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // complete_restore_success lands mid-way through the game's save verb
+        // (just past the @save descriptor), not at a read. Run forward to the
+        // next read so the machine is re-armed at a clean prompt — otherwise the
+        // first typed command is dropped while the save-verb tail runs (mirrors
+        // resume_restore for the in-game @restore path). The save-verb tail
+        // output (e.g. "Ok.") is redundant with the host's "[Game restored]"
+        // message, so drain and discard it.
+        let stop = run_until_input(&mut self.machine);
+        let _ = self.take_transcript();
+        match stop {
+            RunStop::Input(k) => self.pending = k,
+            RunStop::Quit => self.quit = true,
+            RunStop::SavePending | RunStop::RestorePending => {}
+        }
+        Ok(())
     }
 
     fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
@@ -1769,6 +1799,37 @@ mod tests {
         // Same probe after restore must reproduce the same transcript.
         let t2 = sess.submit("north").transcript;
         assert_eq!(t2, t1, "post-restore continuation matches the pre-restore continuation");
+    }
+
+    // SQ-0233 probe: saves-manager load of a game `.qzl` (host-initiated) goes
+    // through restore_game_save (complete_restore_success), NOT resume_restore.
+    // Verify the next typed command runs (not dropped / not the pre-save one).
+    #[test]
+    fn game_save_restore_via_manager_accepts_next_command() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture.exists() { panic!("minizork.z3 missing"); }
+        let story = std::fs::read(&fixture).expect("read minizork.z3");
+
+        // Producer: reach @save, capture the descriptor-PC game-save blob.
+        let mut prod = GameSession::new(story.clone(), true, false, None).expect("new");
+        let mut blob = None;
+        for cmd in ["open mailbox", "save"] {
+            let r = prod.submit(cmd);
+            if r.pending_io == Some(PendingIo::Save) {
+                blob = Some(prod.machine.save_quetzal());
+                let _ = prod.resume_save(true);
+                break;
+            }
+        }
+        let blob = blob.expect("reached @save");
+
+        // Consumer: fresh session, restore via the host game-save path.
+        let mut sess = GameSession::new(story, true, false, None).expect("new");
+        sess.restore_game_save(&blob).expect("restore game save");
+        let t = sess.submit("north").transcript;
+        assert!(t.contains("North of House"),
+            "after saves-manager game-save restore, typed 'north' must run (got {t:?})");
     }
 
     // Real v3 game, real `.qzl` FILE: extends the test above by exercising the

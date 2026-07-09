@@ -94,6 +94,11 @@ struct PendingInput {
     interrupt_time: u16,
     /// Packed address of the interrupt routine (0 = none).
     interrupt_routine: u16,
+    /// Start PC of the read/read_char instruction that suspended here. A host
+    /// Save State taken at this prompt records this (via `save_pc`) so restoring
+    /// it re-executes the read and re-arms the prompt — otherwise the resume
+    /// would land past the read on a stale input buffer.
+    instr_pc: u32,
 }
 
 /// One in-memory undo snapshot: the Quetzal state blob plus the `save_undo`
@@ -170,6 +175,10 @@ pub struct Machine {
     pub interpreter_number: Option<u8>,
     /// Set when `step()` returns `Fault`; the host drains it for display.
     pub fault_trace: Option<crate::cpu::trace::StackTrace>,
+    /// Start PC of the instruction currently being executed (set each `step()`).
+    /// Captured into `PendingInput.instr_pc` when a `read`/`read_char` suspends,
+    /// so `save_pc` can rewind a save-at-input-prompt to the read instruction.
+    cur_instr_pc: u32,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -223,6 +232,7 @@ impl Machine {
             sound_available: false,
             interpreter_number: None,
             fault_trace: None,
+            cur_instr_pc: 0,
         }
     }
 
@@ -282,6 +292,7 @@ impl Machine {
     pub fn step(&mut self) -> StepResult {
         let version = self.mem.version();
         let instr_start_pc = self.state.pc;
+        self.cur_instr_pc = instr_start_pc;
         let instr = decode(&self.mem, self.state.pc, version);
         let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
 
@@ -958,6 +969,7 @@ impl Machine {
                 let interrupt_routine = ops.get(3).copied().unwrap_or(0);
                 self.pending_input = Some(PendingInput {
                     store_var: store, text_buf, parse_buf, interrupt_time, interrupt_routine,
+                    instr_pc: self.cur_instr_pc,
                 });
                 StepResult::NeedLine { text_buf, parse_buf }
             }
@@ -968,6 +980,7 @@ impl Machine {
                 let interrupt_routine = ops.get(2).copied().unwrap_or(0);
                 self.pending_input = Some(PendingInput {
                     store_var: store, text_buf: 0, parse_buf: 0, interrupt_time, interrupt_routine,
+                    instr_pc: self.cur_instr_pc,
                 });
                 StepResult::NeedChar
             }
@@ -1932,7 +1945,18 @@ impl Machine {
     /// (pending_save set) this is the result descriptor's address, per Quetzal
     /// §5.8; otherwise (host Save State, undo snapshots) it is the current pc.
     pub(crate) fn save_pc(&self) -> u32 {
-        self.pending_save.as_ref().map(|p| p.descriptor_pc).unwrap_or(self.state.pc)
+        // A game `@save` records the result-descriptor PC (Quetzal §5.8).
+        if let Some(p) = self.pending_save.as_ref() {
+            return p.descriptor_pc;
+        }
+        // A host Save State taken at an input prompt is suspended just past a
+        // `read`/`read_char`; rewind to that instruction so restoring re-executes
+        // the read and re-arms the prompt (otherwise the resume lands past the
+        // read on a stale input buffer and replays the previous command).
+        if let Some(pi) = self.pending_input.as_ref() {
+            return pi.instr_pc;
+        }
+        self.state.pc
     }
 
     /// Deliver the result of a save operation back to the machine.
@@ -3746,6 +3770,39 @@ pub(crate) mod tests {
         // Machine continues normally after supply_line.
         let r2 = m.step();
         assert_eq!(r2, StepResult::Quit, "next step is quit");
+    }
+
+    // A host Save State is taken while suspended at a `read` prompt. Its saved PC
+    // must rewind to the read instruction (not the post-read address) so that
+    // restoring re-executes the read and re-arms the prompt on the restored
+    // buffers. Otherwise the resume lands past the read and the next line replays
+    // whatever command was sitting in the restored input buffer.
+    #[test]
+    fn save_at_read_prompt_rewinds_pc_so_restore_rearms_the_read() {
+        let (mut buf, _n, _o, _m) = build_input_story(3);
+        let text_buf: u16 = 0x0250; buf[text_buf as usize] = 10;
+        let parse_buf: u16 = 0x0260; buf[parse_buf as usize] = 8;
+        let read_pc: u32 = 0x0010;
+        let n = emit_read(&mut buf, read_pc as usize, text_buf, parse_buf, 3, None);
+        buf[read_pc as usize + n] = 0xBA; // quit after the read
+
+        // Drive to the read prompt, then snapshot a Save State here.
+        let mut m = Machine::new(Memory::new(buf.clone()).unwrap());
+        m.state.pc = read_pc;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }), "reached the read prompt");
+        assert_ne!(m.state.pc, read_pc, "state.pc has advanced past the read");
+        let save = m.save_quetzal();
+
+        // The saved PC rewinds to the read instruction, not the post-read PC.
+        assert_eq!(crate::quetzal::saved_pc_of(&save), read_pc,
+            "Save-State PC must be the read instruction so restore re-executes it");
+
+        // Restoring into a fresh machine lands on the read and re-arms it.
+        let mut m2 = Machine::new(Memory::new(buf).unwrap());
+        m2.restore_file(&save).expect("restore Save State");
+        assert_eq!(m2.state.pc, read_pc, "restored PC is the read instruction");
+        assert!(matches!(m2.step(), StepResult::NeedLine { .. }),
+            "restore re-executes the read → NeedLine (prompt re-armed), not a fall-through");
     }
 
     // -----------------------------------------------------------------------
