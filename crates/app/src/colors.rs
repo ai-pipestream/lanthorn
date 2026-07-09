@@ -249,6 +249,8 @@ pub struct ColorScheme {
     pub story_border: Style,
     /// Story pane title (centered in border).
     pub story_title: Style,
+    /// Inventory dock panel: border + item-list text.
+    pub inventory_dock: Style,
     /// Story-picker info panel body + border.
     pub story_info: Style,
     /// Story-picker info panel title (story name).
@@ -390,6 +392,7 @@ impl ColorScheme {
             map_border: Style::new().fg(Color::Cyan),
             story_border: Style::new().fg(Color::Cyan),
             story_title: Style::new().fg(Color::White),
+            inventory_dock: Style::new().fg(Color::Cyan),
             story_info: Style::new().fg(Color::Cyan),
             story_info_title: Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
             story_info_label: Style::new().fg(Color::DarkGray),
@@ -577,6 +580,7 @@ impl ColorScheme {
             map_border: Style::new().fg(scheme.palette[6]),
             story_border: Style::new().fg(scheme.palette[6]),
             story_title: Style::new().fg(fg),
+            inventory_dock: Style::new().fg(scheme.palette[6]),
             story_info: Style::new().fg(scheme.palette[6]),
             story_info_title: Style::new().fg(fg).add_modifier(Modifier::BOLD),
             story_info_label: Style::new().fg(fg).add_modifier(Modifier::DIM),

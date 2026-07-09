@@ -444,13 +444,30 @@ fn draw_frame(
             }
         };
 
-        // ── Change 2: reserve bottom 1 row for help bar ───────────────────────
+        // ── Inventory dock: reserve a bottom band (above the help row) that
+        // slides up when toggled, sized from the item list + slide fraction.
+        let inv_visible = state.show_inventory || state.inv_dock.active();
+        let inv_items: Vec<String> = if inv_visible {
+            app::render::transcript::inventory_items(state.player_obj, &state.inventory_fallback, engine.introspect())
+        } else {
+            Vec::new()
+        };
+        let inv_target_h = if inv_visible {
+            app::render::inventory_dock::inventory_dock_target_height(inv_items.len(), full.height)
+        } else {
+            0
+        };
+        let inv_dock_h = app::render::inventory_dock::inventory_dock_height(inv_target_h, state.inv_dock.fraction());
+
+        // ── Change 2: reserve bottom 1 row for help bar (and the inventory
+        // dock band above it) ─────────────────────────────────────────────────
         let vert = RatatuiLayout::default()
             .direction(LayoutDir::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .constraints([Constraint::Min(0), Constraint::Length(inv_dock_h), Constraint::Length(1)])
             .split(full);
         let main_area = vert[0];
-        let help_row = vert[1];
+        let inv_dock_area = vert[1];
+        let help_row = vert[2];
 
         // When a background tidy job is in flight, the map pane border pulses between
         // red and green. This overrides the normal border color (focused or unfocused).
@@ -667,6 +684,11 @@ fn draw_frame(
                     }
                 }
             }
+        }
+
+        // ── Inventory dock panel ──────────────────────────────────────────────
+        if inv_dock_h > 0 {
+            app::render::inventory_dock::draw_inventory_dock(&inv_items, inv_dock_area, &state.colors, buf);
         }
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────

@@ -188,6 +188,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "map_border",
     "story_border",
     "story_title",
+    "inventory:dock",
     "story_info",
     "story_info:title",
     "story_info:label",
@@ -236,6 +237,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Chrome", &[
         "statusbar", "helpbar", "story_border", "story_title",
         "status_header", "input_line", "border:focused", "border",
+        "inventory:dock",
     ]),
     ("Story picker", &[
         "story_info", "story_info:title", "story_info:label",
@@ -284,6 +286,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "meta_marker"          => cs.meta_marker,
         "helpbar"              => cs.help_bar,
         "story_title"          => cs.story_title,
+        "inventory:dock"       => cs.inventory_dock,
         "map_layer_tab"        => cs.map_layer_tab,
         "map_layer_tab_active" => cs.map_layer_tab_active,
         "dialog:title"         => cs.dialog_title,
@@ -446,6 +449,7 @@ pub fn apply_color_decls(
                 if let Some(h) = decl.header { cs.story_header_on = h; }
             }
             "story_title"        => cs.story_title = cs.story_title.patch(style),
+            "inventory:dock"     => cs.inventory_dock = cs.inventory_dock.patch(style),
             "story_info"        => cs.story_info = cs.story_info.patch(style),
             "story_info:title"  => cs.story_info_title = cs.story_info_title.patch(style),
             "story_info:label"  => cs.story_info_label = cs.story_info_label.patch(style),
@@ -1323,6 +1327,7 @@ pub fn write_style_full(
         doc.colors.selectors.insert("story_border".to_string(), d);
     }
     doc.colors.selectors.insert("story_title".to_string(),        style_to_decl(&cs.story_title));
+    doc.colors.selectors.insert("inventory:dock".to_string(),     style_to_decl(&cs.inventory_dock));
     doc.colors.selectors.insert("map_layer_tab".to_string(),      style_to_decl(&cs.map_layer_tab));
     doc.colors.selectors.insert("map_layer_tab_active".to_string(), style_to_decl(&cs.map_layer_tab_active));
     {
@@ -1930,6 +1935,29 @@ fg = "green"
         // It is a recognized, grouped selector.
         assert!(SELECTOR_FIELDS.contains(&"story_info:cover"));
         assert!(SELECTOR_GROUPS.iter().any(|(_, sels)| sels.contains(&"story_info:cover")));
+    }
+
+    #[test]
+    fn inventory_dock_selector_round_trips() {
+        use ratatui::style::Color;
+        // The selector maps to the inventory_dock field.
+        let mut cs = colors::ColorScheme::default();
+        cs.inventory_dock = ratatui::style::Style::new().fg(Color::Rgb(10, 20, 30));
+        assert_eq!(
+            style_for_selector(&cs, "inventory:dock"),
+            ratatui::style::Style::new().fg(Color::Rgb(10, 20, 30)),
+        );
+        // apply_color_decls patches the same field.
+        let scheme = crate::colors::GhosttyScheme::default();
+        let mut decls = std::collections::BTreeMap::new();
+        decls.insert("inventory:dock".to_string(), Decl { fg: Some("magenta".into()), ..Default::default() });
+        let mut cs2 = crate::colors::ColorScheme::terminal_default();
+        let warnings = apply_color_decls(&mut cs2, &decls, &scheme);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(cs2.inventory_dock.fg, Some(Color::Magenta));
+        // It is a recognized, grouped selector.
+        assert!(SELECTOR_FIELDS.contains(&"inventory:dock"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, sels)| sels.contains(&"inventory:dock")));
     }
 
     #[test]

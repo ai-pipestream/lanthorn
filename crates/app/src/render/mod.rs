@@ -11,6 +11,7 @@ pub mod history;
 pub mod inline_image;
 pub mod hotkeys;
 pub mod inspector;
+pub mod inventory_dock;
 pub mod launch_dialog;
 pub mod map;
 pub mod quit_dialog;

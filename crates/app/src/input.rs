@@ -2559,6 +2559,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ToggleInventory => {
             state.show_inventory = !state.show_inventory;
+            state.inv_dock.toggle_to(state.show_inventory, false);
+            state.inv_dock.arm(&state.config.animation);
         }
 
         Action::OpenVerbMenu => {
