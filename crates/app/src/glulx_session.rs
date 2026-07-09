@@ -378,6 +378,10 @@ impl Engine for GlulxSession {
         Ok(())
     }
 
+    fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), EngineError> {
+        Err(EngineError::BadSave("Glulx has no game-save (.qzl) format".into()))
+    }
+
     fn aux_data(&self) -> &BTreeMap<String, Vec<u8>> {
         &self.aux
     }

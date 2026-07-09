@@ -206,7 +206,7 @@ pub fn save_game(path: &Path, machine: &zvm::cpu::exec::Machine) -> std::io::Res
 
 pub fn restore_game(path: &Path, machine: &mut zvm::cpu::exec::Machine) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    machine.restore_quetzal(&bytes).map_err(|e| match e {
+    machine.complete_restore_success(&bytes).map_err(|e| match e {
         zvm::error::ZError::SaveMismatch => "save is for a different story".to_string(),
         other => format!("restore failed: {:?}", other),
     })
@@ -497,6 +497,44 @@ mod tests {
         assert_eq!(mapper.graph.rooms().count(), room_count_before, "mapper rooms unchanged after import");
         assert_eq!(mapper.graph.connections().len(), connections_before, "mapper connections unchanged after import");
 
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    // Minimal valid v4 story buffer, matching the layout of zvm's own
+    // (crate-private, cfg(test)-only) `header::tests_support::sample_story`.
+    fn sample_story_v4() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x400];
+        buf[0x00] = 4; // version
+        buf[0x04] = 0x04; buf[0x05] = 0x00; // high_mem_base = 0x0400
+        buf[0x06] = 0x00; buf[0x07] = 0x40; // initial_pc = 0x0040
+        buf[0x08] = 0x02; buf[0x09] = 0x00; // dictionary = 0x0200
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object_table = 0x0100
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x40; // abbrev_table = 0x0040
+        buf
+    }
+
+    #[test]
+    fn restore_game_completes_descriptor_of_a_gamesave_qzl() {
+        // Build a v4 machine that @saves G0; capture the game-save .qzl (pending_save set
+        // => descriptor PC), then restore_game() must complete it: G0==2, pc past the save.
+        use zvm::cpu::exec::{Machine, StepResult};
+        use zvm::memory::Memory;
+        let mut buf = sample_story_v4();
+        buf[0x40] = 0xB5; buf[0x41] = 0x10; buf[0x42] = 0xBA; // save->G0 ; quit
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal();               // descriptor PC (0x41), pending_save set
+        m.complete_save(true);
+        // Persist the game save and restore it via the game-save path.
+        let tmp = std::env::temp_dir().join(format!("bm-gs-{}.qzl", std::process::id()));
+        std::fs::write(&tmp, &blob).unwrap();
+        m.do_store(Some(0x10), 0x99); m.state.pc = 0x00AB;
+        super::restore_game(&tmp, &mut m).expect("restore game save");
+        assert_eq!(m.global(0), 2, "game-save restore completes the @save descriptor (store 2)");
+        assert_eq!(m.state.pc, 0x42, "resumes at the post-@save address");
         let _ = std::fs::remove_file(&tmp);
     }
 

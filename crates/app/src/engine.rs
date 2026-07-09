@@ -385,6 +385,9 @@ pub trait Engine {
     fn save_state(&self) -> EngineSave;
     /// Restore from an engine-tagged save.  Refuses a foreign-engine save.
     fn restore_state(&mut self, save: &EngineSave) -> Result<(), EngineError>;
+    /// Restore a bare standard Quetzal *game* save (`.qzl`) by completing the save
+    /// instruction's descriptor (v3 branch true / v4+ store 2). Z-machine only.
+    fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError>;
 
     // ── auxiliary persistent data (neutral byte map) ──
     /// The engine's auxiliary persistent data table.

@@ -5242,6 +5242,7 @@ mod tests {
         fn screen(&self) -> app::engine::ScreenModel { unreachable!() }
         fn save_state(&self) -> app::engine::EngineSave { unreachable!() }
         fn restore_state(&mut self, _save: &app::engine::EngineSave) -> Result<(), app::engine::EngineError> { unreachable!() }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), app::engine::EngineError> { unreachable!() }
         fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> { unreachable!() }
         fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) { unreachable!() }
         fn aux_dirty(&self) -> bool { false }

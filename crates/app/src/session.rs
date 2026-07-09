@@ -792,6 +792,11 @@ impl Engine for GameSession {
             .map_err(|e| EngineError::BadSave(format!("{e:?}")))
     }
 
+    fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
+        self.machine.complete_restore_success(bytes)
+            .map_err(|e| EngineError::BadSave(format!("{e:?}")))
+    }
+
     fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
         &self.machine.aux_data
     }
