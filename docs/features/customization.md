@@ -49,14 +49,20 @@
   **`set_text_style`** emphasis (bold / italic / reverse-video) is rendered
   per-span — a bold word inside a sentence shows just that word bold — layered
   over the category/rule colors and preserved across save/reload.
-- **Configurable keymap** via a leader-key model: a configurable prefix
-  (default `Ctrl+K`) opens a sticky **hotkey dialog** listing every command;
-  any command can be made directly available or routed through the dialog.
-  Key bindings live in `[keymap.global]`, `[keymap.map]`, and `[keymap.anim]`
-  sections of `config.toml` as `"key" = "command args"` — each value is a
-  slash command string (with any arguments) that the key will run. Set
-  `use_defaults = false` under `[keymap]` to clear all built-in bindings and
-  define your own from scratch.
+- **Tmux-style leader keymap**: a configurable prefix (default `Ctrl+K`) pops up
+  a **reference panel** listing every command with an assigned single letter;
+  pressing that letter runs the command and returns to normal — one keypress,
+  then the panel closes (any unbound key or `Esc` just closes it). A small
+  always-active set stays live outside the panel and is advertised in the bottom
+  hint bar: Tab (focus), `Ctrl+S`/`Ctrl+R` (save/restore state), quit, and — in
+  map focus — pan/zoom/select-room/center navigation. Leader letters are set per
+  group under `[[hotkeys.group]]` in `config.toml` (`commands = ["t tidy-map",
+  …]`; a bare `"tidy-map"` auto-assigns the first free letter), and the letter's
+  color is themeable via the `hotkey:key` style selector. Direct key bindings
+  still live in `[keymap.global]`, `[keymap.map]`, and `[keymap.anim]` as
+  `"key" = "command args"` (each value a slash-command string the key runs); set
+  `use_defaults = false` under `[keymap]` to clear the built-ins and define your
+  own from scratch.
 - **Shareable style files** — all visual settings (colors + symbols) live in a
   standalone `style.toml`, referenced from `config.toml` by `style = "<name or
   path>"` (the single styling source — `config.toml` no longer carries style). Colors

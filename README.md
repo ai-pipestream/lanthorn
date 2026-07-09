@@ -91,8 +91,10 @@ cargo run --release -p app -- path/to/story.z5
 ./target/release/babelmap path/to/story.z5
 ```
 
-Press the hotkey prefix (default `Ctrl+K`) in-app to see the full, grouped list
-of commands and their bindings.
+Press the leader key (default `Ctrl+K`) in-app to pop up a reference panel of
+every command; press the single letter shown beside one to run it and return to
+play (tmux-style). A few essentials (Tab, `Ctrl+S`/`Ctrl+R`, quit) and map
+navigation stay always-active and are listed in the bottom bar.
 
 ### Configuration
 
