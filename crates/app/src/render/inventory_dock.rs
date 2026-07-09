@@ -14,10 +14,12 @@ use super::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
 use crate::colors::ColorScheme;
 
 /// Compute the dock's fully-open target height in rows: one row per item
-/// (minimum 1, for the "(empty)" line) plus 2 border rows, capped at a third
-/// of the screen height so the dock never swallows the whole terminal.
-pub fn inventory_dock_target_height(item_count: usize, full_height: u16) -> u16 {
-    ((item_count.max(1) as u16) + 2).min(full_height / 3)
+/// (minimum 1, for the "(empty)" line) plus 2 border rows, capped at
+/// `cap_pct`% of the screen height so the dock never swallows the whole
+/// terminal (default 33, ≈ the old fixed 1/3 cap).
+pub fn inventory_dock_target_height(item_count: usize, full_height: u16, cap_pct: u16) -> u16 {
+    let cap = ((full_height as u32 * cap_pct as u32) / 100) as u16;
+    ((item_count.max(1) as u16) + 2).min(cap)
 }
 
 /// Compute the reserved dock band height in rows: `target_h` scaled by the
@@ -148,12 +150,26 @@ mod tests {
 
     #[test]
     fn inventory_dock_target_height_is_items_plus_borders_capped() {
-        // 2 items + 2 border rows = 4, well under a 30-row screen's 1/3 cap.
-        assert_eq!(inventory_dock_target_height(2, 30), 4);
+        // 2 items + 2 border rows = 4, well under a 30-row screen's 33% cap (9).
+        assert_eq!(inventory_dock_target_height(2, 30, 33), 4);
         // Empty list still reserves 1 row (for "(empty)") + 2 borders = 3.
-        assert_eq!(inventory_dock_target_height(0, 30), 3);
-        // Capped at full_height / 3 for a very long inventory.
-        assert_eq!(inventory_dock_target_height(100, 30), 10);
+        assert_eq!(inventory_dock_target_height(0, 30, 33), 3);
+        // Capped at 33% of full_height for a very long inventory: 30*33/100 = 9.
+        assert_eq!(inventory_dock_target_height(100, 30, 33), 9);
+    }
+
+    #[test]
+    fn inventory_dock_target_height_content_binds_when_cap_is_generous() {
+        // Cap = 90*33/100 = 29; content (10 items + 2 = 12) is smaller, so
+        // content binds.
+        assert_eq!(inventory_dock_target_height(10, 90, 33), 12);
+    }
+
+    #[test]
+    fn inventory_dock_target_height_cap_binds_when_items_overflow() {
+        // Cap = 90*33/100 = 29; content (100 items + 2 = 102) overflows, so the
+        // cap binds.
+        assert_eq!(inventory_dock_target_height(100, 90, 33), 29);
     }
 
     #[test]
@@ -165,7 +181,7 @@ mod tests {
         let closed_target = 0u16; // inv_visible == false path in main.rs
         assert_eq!(inventory_dock_height(closed_target, 0.0), 0);
 
-        let open_target = inventory_dock_target_height(2, full_height);
+        let open_target = inventory_dock_target_height(2, full_height, 33);
         assert_eq!(open_target, 4);
         assert_eq!(inventory_dock_height(open_target, 1.0), 4);
     }

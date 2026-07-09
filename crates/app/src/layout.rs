@@ -50,7 +50,7 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
     // slides up when toggled, sized from the item list + slide fraction.
     let inv_visible = state.show_inventory || state.inv_dock.active();
     let inv_target_h = if inv_visible {
-        inventory_dock_target_height(inv_item_count, area.height)
+        inventory_dock_target_height(inv_item_count, area.height, state.pane_sizes.inv_dock_pct)
     } else {
         0
     };
@@ -70,7 +70,8 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
     // slides in when toggled, sized from a fixed target width + slide
     // fraction (mirrors the inventory dock's bottom-slide, but on the left).
     let verb_visible = state.verb_menu.is_some() || state.verb_dock.active();
-    let verb_target_w = verb_dock_target_width(verb_visible, main_area.width);
+    let verb_target_w =
+        verb_dock_target_width(verb_visible, main_area.width, state.pane_sizes.verb_dock_pct);
     let verb_dock_w = verb_dock_width(verb_target_w, state.verb_dock.fraction());
     let horiz = RatatuiLayout::default()
         .direction(Direction::Horizontal)
@@ -85,7 +86,10 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
         Layout::Split => {
             let chunks = RatatuiLayout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .constraints([
+                    Constraint::Percentage(state.pane_sizes.split_ratio),
+                    Constraint::Percentage(100u16.saturating_sub(state.pane_sizes.split_ratio)),
+                ])
                 .split(panes_area);
             (chunks[0], chunks[1])
         }
@@ -201,11 +205,30 @@ mod tests {
         state.verb_dock.toggle_to(true, true); // instant open → fraction() == 1.0
         let pl = compute_pane_layout(area80x24(), &state, 0);
 
-        // target width = 26 (well under full_width - 4).
-        assert_eq!(pl.verb_dock.width, 26);
+        // target width = 32% of 80 = 25 (well under full_width - 4).
+        assert_eq!(pl.verb_dock.width, 25);
         assert_eq!(pl.verb_dock.x, 0);
         // Panes (story+map) start right after the dock.
-        assert_eq!(pl.story.x, 26);
+        assert_eq!(pl.story.x, 25);
+    }
+
+    #[test]
+    fn split_ratio_configurable_matches_manual_percentage_split() {
+        // A non-default split_ratio (70/30) must match a manual
+        // Percentage(70)/Percentage(30) split of the same panes_area exactly.
+        let area = area80x24();
+        let mut state = AppState::default();
+        state.pane_sizes.split_ratio = 70;
+        let pl = compute_pane_layout(area, &state, 0);
+
+        let panes_area = Rect::new(0, 0, 80, 23);
+        let chunks = RatatuiLayout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(panes_area);
+
+        assert_eq!(pl.story, chunks[0]);
+        assert_eq!(pl.map, chunks[1]);
     }
 
     #[test]

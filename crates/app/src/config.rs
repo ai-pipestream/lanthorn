@@ -235,6 +235,9 @@ fn default_undo_levels() -> usize { 16 }
 
 fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
+fn default_split_ratio() -> u16 { 50 }
+fn default_verb_dock_pct() -> u16 { 32 }
+fn default_inv_dock_pct() -> u16 { 33 }
 fn default_honor_game_colours() -> bool { true }
 fn default_acceleration() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
@@ -422,6 +425,17 @@ pub struct Config {
     /// Virtual screen height reported to the Z-machine (lines). Default 24.
     #[serde(default = "default_virtual_screen_rows")]
     pub virtual_screen_rows: u16,
+    /// Story pane's share of the story/map Split, as a percentage (default 50).
+    #[serde(default = "default_split_ratio")]
+    pub split_ratio: u16,
+    /// Verb dock width as a percentage of screen width (default 32, ≈ the old
+    /// fixed 26-of-80 columns).
+    #[serde(default = "default_verb_dock_pct")]
+    pub verb_dock_pct: u16,
+    /// Inventory dock height cap as a percentage of screen height (default 33,
+    /// ≈ the old fixed 1/3 cap).
+    #[serde(default = "default_inv_dock_pct")]
+    pub inv_dock_pct: u16,
     /// Animation engine settings: enable switch, easing curve, scroll duration.
     #[serde(default)]
     pub animation: AnimationConfig,
@@ -484,6 +498,9 @@ impl Default for Config {
             search: SearchConfig::default(),
             virtual_screen_cols: default_virtual_screen_cols(),
             virtual_screen_rows: default_virtual_screen_rows(),
+            split_ratio: default_split_ratio(),
+            verb_dock_pct: default_verb_dock_pct(),
+            inv_dock_pct: default_inv_dock_pct(),
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
             honor_timed_input: default_honor_timed_input(),
@@ -560,6 +577,9 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.search = from_file.search;
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
+            cfg.split_ratio = from_file.split_ratio;
+            cfg.verb_dock_pct = from_file.verb_dock_pct;
+            cfg.inv_dock_pct = from_file.inv_dock_pct;
             cfg.animation = from_file.animation;
         }
         // If the file exists but is malformed, silently keep defaults.
@@ -624,6 +644,9 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     }
     doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
     doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
+    doc["split_ratio"] = toml_edit::value(i64::from(cfg.split_ratio));
+    doc["verb_dock_pct"] = toml_edit::value(i64::from(cfg.verb_dock_pct));
+    doc["inv_dock_pct"] = toml_edit::value(i64::from(cfg.inv_dock_pct));
 
     // style pointer — the only visual key written to config.toml. The actual
     // colors/symbols live in the style file ([colors]/[symbols] are no longer
@@ -691,6 +714,19 @@ mod tests {
         let cfg: Config = toml::from_str("virtual_screen_cols = 64\nvirtual_screen_rows = 20").unwrap();
         assert_eq!(cfg.virtual_screen_cols, 64);
         assert_eq!(cfg.virtual_screen_rows, 20);
+    }
+
+    #[test]
+    fn pane_size_pcts_default_and_parse() {
+        let d = Config::default();
+        assert_eq!(d.split_ratio, 50);
+        assert_eq!(d.verb_dock_pct, 32);
+        assert_eq!(d.inv_dock_pct, 33);
+
+        let cfg: Config = toml::from_str("split_ratio = 70\nverb_dock_pct = 40\ninv_dock_pct = 25\n").unwrap();
+        assert_eq!(cfg.split_ratio, 70);
+        assert_eq!(cfg.verb_dock_pct, 40);
+        assert_eq!(cfg.inv_dock_pct, 25);
     }
 
     #[test]
@@ -920,6 +956,9 @@ use_defaults = false
             search: SearchConfig::default(),
             virtual_screen_cols: 80,
             virtual_screen_rows: 24,
+            split_ratio: 70,
+            verb_dock_pct: 40,
+            inv_dock_pct: 25,
             animation: AnimationConfig::default(),
             acceleration: true,
             image_protocol: ImageProtocol::Auto,
@@ -935,6 +974,9 @@ use_defaults = false
         assert_eq!(doc["auto_save"].as_bool(), Some(true));
         assert_eq!(doc["record_history"].as_bool(), Some(false));
         assert_eq!(doc["background_tidy"].as_str(), Some("on_overlap"));
+        assert_eq!(doc["split_ratio"].as_integer(), Some(70));
+        assert_eq!(doc["verb_dock_pct"].as_integer(), Some(40));
+        assert_eq!(doc["inv_dock_pct"].as_integer(), Some(25));
         // Style pointer is written; visual sections are NOT.
         assert_eq!(doc["style"].as_str(), Some("neon"));
         assert!(!content.contains("[colors]"));

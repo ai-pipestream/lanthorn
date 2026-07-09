@@ -877,6 +877,19 @@ pub enum Layout {
     MapFull,
 }
 
+/// Percentage-based pane sizes, seeded from `Config` at startup and mirrored
+/// here for the layout code to consume. `config` stays the persisted source
+/// of truth; this is the runtime-facing copy.
+#[derive(Debug, Clone, Copy)]
+pub struct PaneSizes {
+    /// Story's % of the story/map Split (default 50).
+    pub split_ratio: u16,
+    /// Verb dock width as % of screen width (default 32).
+    pub verb_dock_pct: u16,
+    /// Inventory dock height cap as % of screen height (default 33).
+    pub inv_dock_pct: u16,
+}
+
 /// Zoom levels for the map pane. `Boxes` is the closest/most-detailed view;
 /// `Overview` is the most zoomed-out view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1075,6 +1088,9 @@ pub struct AppState {
 
     /// The resolved runtime config. Set at startup; updated on config-screen Save.
     pub config: crate::config::Config,
+
+    /// Percentage-based pane sizes, seeded from `config` at startup.
+    pub pane_sizes: PaneSizes,
 
     /// Active config-screen modal state. `None` means the screen is closed.
     pub config_screen: Option<ConfigScreenState>,
@@ -1313,6 +1329,7 @@ impl Default for AppState {
             file_browser: None,
             verb_menu: None,
             config: crate::config::Config::default(),
+            pane_sizes: PaneSizes { split_ratio: 50, verb_dock_pct: 32, inv_dock_pct: 33 },
             config_screen: None,
             style_editor: None,
             glyph_picker: None,

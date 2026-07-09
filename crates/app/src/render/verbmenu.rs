@@ -65,11 +65,21 @@ pub const VERB_MENU_PREPS: &[&str] = &[
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
-/// Compute the dock's fully-open target width in columns: a fixed 26 cols,
-/// capped so it never eats more than `full_width - 4` (leaving room for the
-/// story/map panes). 0 when the dock isn't visible at all.
-pub fn verb_dock_target_width(visible: bool, full_width: u16) -> u16 {
-    if visible { 26u16.min(full_width.saturating_sub(4)) } else { 0 }
+/// Compute the dock's fully-open target width in columns: `pct`% of
+/// `full_width` (default 32, ≈ the old fixed 26-of-80 columns), clamped to
+/// `[12, full_width - 4]` (leaving room for the story/map panes). 0 when the
+/// dock isn't visible at all, or when the screen is too narrow to leave room
+/// for the panes.
+pub fn verb_dock_target_width(visible: bool, full_width: u16, pct: u16) -> u16 {
+    if !visible {
+        return 0;
+    }
+    let hi = full_width.saturating_sub(4);
+    if hi < 12 {
+        return hi;
+    }
+    let target = ((full_width as u32 * pct as u32) / 100) as u16;
+    target.clamp(12, hi)
 }
 
 /// Compute the reserved dock band width in columns: `target_w` scaled by the
@@ -442,13 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn verb_dock_target_width_is_fixed_and_capped() {
-        // Plenty of room: fixed 26-col target.
-        assert_eq!(verb_dock_target_width(true, 100), 26);
-        // Narrow screen: capped at full_width - 4.
-        assert_eq!(verb_dock_target_width(true, 20), 16);
+    fn verb_dock_target_width_is_pct_based_and_capped() {
+        // 32% of 80 = 25.6 -> 25 (integer division), the new default-equivalent.
+        assert_eq!(verb_dock_target_width(true, 80, 32), 25);
+        // 30% of 100 = 30, well under full_width - 4.
+        assert_eq!(verb_dock_target_width(true, 100, 30), 30);
+        // Narrow screen: pct target (20*32/100=6) is below the 12-col floor,
+        // so it clamps up to 12 (still under full_width - 4 = 16).
+        assert_eq!(verb_dock_target_width(true, 20, 32), 12);
+        // Very narrow: full_width - 4 < 12 lower bound -> just full_width - 4 (no panic).
+        assert_eq!(verb_dock_target_width(true, 10, 32), 6);
         // Not visible: 0 regardless of width.
-        assert_eq!(verb_dock_target_width(false, 100), 0);
+        assert_eq!(verb_dock_target_width(false, 100, 32), 0);
     }
 
     #[test]
@@ -457,11 +472,11 @@ mod tests {
         // verb_dock inactive) reserves 0 cols; fully open reserves the target
         // width (fraction 1.0).
         let full_width = 100u16;
-        assert_eq!(verb_dock_width(verb_dock_target_width(false, full_width), 0.0), 0);
+        assert_eq!(verb_dock_width(verb_dock_target_width(false, full_width, 32), 0.0), 0);
 
-        let open_target = verb_dock_target_width(true, full_width);
-        assert_eq!(open_target, 26);
-        assert_eq!(verb_dock_width(open_target, 1.0), 26);
+        let open_target = verb_dock_target_width(true, full_width, 32);
+        assert_eq!(open_target, 32);
+        assert_eq!(verb_dock_width(open_target, 1.0), 32);
     }
 
     #[test]

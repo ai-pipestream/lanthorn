@@ -1775,6 +1775,11 @@ fn main() {
     state.show_loc_method = cfg.show_loc_method;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
+    state.pane_sizes = app::state::PaneSizes {
+        split_ratio: cfg.split_ratio,
+        verb_dock_pct: cfg.verb_dock_pct,
+        inv_dock_pct: cfg.inv_dock_pct,
+    };
     state.config = cfg;
 
     // Resolve the sound container + construct the audio backend (silent if the
