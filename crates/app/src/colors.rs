@@ -288,6 +288,8 @@ pub struct ColorScheme {
     pub dialog: Style,
     /// Dialog title text style.
     pub dialog_title: Style,
+    /// Leader-panel hotkey letter style.
+    pub hotkey_key: Style,
     /// Dialog button (normal) style.
     pub dialog_button: Style,
     /// Dialog button (active/focused) style.
@@ -408,6 +410,7 @@ impl ColorScheme {
             input_line_style: BorderStyle::None,
             dialog: Style::new().fg(Color::White).bg(Color::Black),
             dialog_title: Style::new().fg(Color::Cyan),
+            hotkey_key: Style::new().fg(Color::Cyan),
             dialog_button: Style::new().fg(Color::White),
             dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
             dialog_shadow: Style::new().bg(Color::DarkGray),
@@ -592,6 +595,7 @@ impl ColorScheme {
             input_line_style: BorderStyle::None,
             dialog: Style::new().fg(fg).bg(bg),
             dialog_title: Style::new().fg(scheme.palette[6]),
+            hotkey_key: Style::new().fg(scheme.palette[6]),
             dialog_button: Style::new().fg(fg),
             dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),
             dialog_shadow: Style::new().bg(scheme.palette[8]),

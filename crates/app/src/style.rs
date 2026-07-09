@@ -202,6 +202,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "input_line",
     "dialog",
     "dialog:title",
+    "hotkey:key",
     "dialog:button",
     "dialog:button:active",
     "dialog:shadow",
@@ -241,7 +242,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
         "story_info:value", "story_info:cover", "story_badge",
     ]),
     ("Dialogs", &[
-        "dialog", "dialog:title", "dialog:button", "dialog:button:active", "dialog:shadow",
+        "dialog", "dialog:title", "hotkey:key", "dialog:button", "dialog:button:active", "dialog:shadow",
     ]),
     ("Upper window", &["upper_window", "upper_window_border"]),
     ("Sound", &["sound_beep_high", "sound_beep_low"]),
@@ -286,6 +287,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "map_layer_tab"        => cs.map_layer_tab,
         "map_layer_tab_active" => cs.map_layer_tab_active,
         "dialog:title"         => cs.dialog_title,
+        "hotkey:key"           => cs.hotkey_key,
         "dialog:button"        => cs.dialog_button,
         "dialog:button:active" => cs.dialog_button_active,
         "dialog:shadow"        => cs.dialog_shadow,
@@ -487,6 +489,7 @@ pub fn apply_color_decls(
                 cs.dialog_glyphs = decl_glyphs(decl);
             }
             "dialog:title"         => cs.dialog_title = cs.dialog_title.patch(style),
+            "hotkey:key"           => cs.hotkey_key = cs.hotkey_key.patch(style),
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
             "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
             "dialog:shadow"        => cs.dialog_shadow = cs.dialog_shadow.patch(style),
@@ -1356,6 +1359,7 @@ pub fn write_style_full(
         doc.colors.selectors.insert("dialog".to_string(), d);
     }
     doc.colors.selectors.insert("dialog:title".to_string(),         style_to_decl(&cs.dialog_title));
+    doc.colors.selectors.insert("hotkey:key".to_string(),           style_to_decl(&cs.hotkey_key));
     doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
     doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
     doc.colors.selectors.insert("dialog:shadow".to_string(),        style_to_decl(&cs.dialog_shadow));
@@ -1756,6 +1760,26 @@ fg = "green"
         let warns = apply_color_decls(&mut cs, &decls, &scheme);
         assert!(warns.is_empty());
         assert_eq!(style_for_selector(&cs, "transcript:crash").fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn hotkey_key_selector_round_trips() {
+        use ratatui::style::Color;
+        let scheme = crate::colors::GhosttyScheme::default();
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        // style_for_selector resolves the new selector to the hotkey_key field.
+        let _ = style_for_selector(&cs, "hotkey:key");
+        // apply_color_decls patches the hotkey_key field.
+        let mut decls = std::collections::BTreeMap::new();
+        decls.insert("hotkey:key".to_string(), Decl { fg: Some("magenta".into()), bold: Some(true), ..Default::default() });
+        let warns = apply_color_decls(&mut cs, &decls, &scheme);
+        assert!(warns.is_empty());
+        let s = style_for_selector(&cs, "hotkey:key");
+        assert_eq!(s.fg, Some(Color::Magenta));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        // It is a recognized, grouped selector.
+        assert!(SELECTOR_FIELDS.contains(&"hotkey:key"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, sels)| sels.contains(&"hotkey:key")));
     }
 
     #[test]
