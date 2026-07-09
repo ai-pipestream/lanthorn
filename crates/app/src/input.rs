@@ -490,7 +490,7 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
 
     // 8b. Shift-Tab (BackTab): mid-word with suggestions in game focus →
     //     AutocompletePrev (the reverse of step 8's Autocomplete). Otherwise fall
-    //     through so BackTab keeps its bound role (cycle-layout reverse).
+    //     through to the normal keymap lookup (BackTab has no default binding).
     if key.code == KeyCode::BackTab
         && state.focus == Focus::Game
         && !state.current_partial().is_empty()

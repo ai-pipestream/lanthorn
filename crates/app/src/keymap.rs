@@ -510,7 +510,7 @@ impl HotkeyLayout {
     /// `cmd_str` is the full binding string as returned by `KeyMap::lookup`
     /// (e.g. `"zoom-map in"`, `"save-state"`). Matched as a whole against the
     /// direct set, so a command with arguments is matched exactly (e.g.
-    /// `"cycle-layout"` is not direct even though `"cycle-layout reverse"` is).
+    /// `"zoom-map in"` is direct but `"zoom-map out"` is matched separately).
     pub fn is_direct_name(&self, cmd_str: &str) -> bool {
         self.direct.contains(cmd_str)
     }
