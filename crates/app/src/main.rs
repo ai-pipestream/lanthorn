@@ -3317,35 +3317,7 @@ fn main() {
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
-                                let loc = session.current_location();
-                                if let Some(snap) = loc {
-                                    let rid = snap.number as mapper::graph::RoomId;
-                                    let restore_result = TurnResult {
-                                        transcript: String::new(),
-                                        transcript_runs: Vec::new(),
-                                        location: Some(snap),
-                                        quit: false,
-                                        erase_lower: false,
-                                        info: None,
-                                        sounds: Vec::new(),
-                                        glulx_sound_ops: Vec::new(),
-                                        diagnostics: vec![],
-                                        fault: None,
-                                        location_method: None,
-                                        pending_io: None,
-                                        timed_out: false,
-                                        transcript_elems: Vec::new(),
-                                    };
-                                    apply_turn(&mut mapper, "", &restore_result);
-                                    state.set_viewed_layer(None);
-                                    state.select_room(Some(rid));
-                                    if let Some(room) = mapper.graph.room(rid) {
-                                        if let Some(pos) = room.pos {
-                                            let (pw, ph) = map_pane_dims(last_panes.map);
-                                            state.recenter_on(pos, pw, ph);
-                                        }
-                                    }
-                                }
+                                reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                                 state.push_transcript(&format!(
                                     "[Game restored from {}]",
                                     arc_file.display()
@@ -3453,35 +3425,7 @@ fn main() {
                         match restore_game(&path, &mut zvm_session_mut(&mut *session).machine) {
                             Ok(()) => {
                                 // Re-observe current location (same as RestoreGame/SavesLoad).
-                                let loc = session.current_location();
-                                if let Some(snap) = loc {
-                                    let rid = snap.number as mapper::graph::RoomId;
-                                    let restore_result = TurnResult {
-                                        transcript: String::new(),
-                                        transcript_runs: Vec::new(),
-                                        location: Some(snap),
-                                        quit: false,
-                                        erase_lower: false,
-                                        info: None,
-                                        sounds: Vec::new(),
-                                        glulx_sound_ops: Vec::new(),
-                                        diagnostics: vec![],
-                                        fault: None,
-                                        location_method: None,
-                                        pending_io: None,
-                                        timed_out: false,
-                                        transcript_elems: Vec::new(),
-                                    };
-                                    apply_turn(&mut mapper, "", &restore_result);
-                                    state.set_viewed_layer(None);
-                                    state.select_room(Some(rid));
-                                    if let Some(room) = mapper.graph.room(rid) {
-                                        if let Some(pos) = room.pos {
-                                            let (pw, ph) = map_pane_dims(last_panes.map);
-                                            state.recenter_on(pos, pw, ph);
-                                        }
-                                    }
-                                }
+                                reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                                 state.push_transcript(&format!("[Imported: {}]", path.display()));
                             }
                             Err(e) => {
@@ -3539,35 +3483,7 @@ fn main() {
                     match restore_from_file(&path, &mut *session) {
                         Ok(RestoreOutcome::DescriptorCompleted) => {
                             state.saves = None;
-                            let loc = session.current_location();
-                            if let Some(snap) = loc {
-                                let rid = snap.number as mapper::graph::RoomId;
-                                let restore_result = TurnResult {
-                                    transcript: String::new(),
-                                    transcript_runs: Vec::new(),
-                                    location: Some(snap),
-                                    quit: false,
-                                    erase_lower: false,
-                                    info: None,
-                                    sounds: Vec::new(),
-                                    glulx_sound_ops: Vec::new(),
-                                    diagnostics: vec![],
-                                    fault: None,
-                                    location_method: None,
-                                    pending_io: None,
-                                    timed_out: false,
-                                    transcript_elems: Vec::new(),
-                                };
-                                apply_turn(&mut mapper, "", &restore_result);
-                                state.set_viewed_layer(None);
-                                state.select_room(Some(rid));
-                                if let Some(room) = mapper.graph.room(rid) {
-                                    if let Some(pos) = room.pos {
-                                        let (pw, ph) = map_pane_dims(last_panes.map);
-                                        state.recenter_on(pos, pw, ph);
-                                    }
-                                }
-                            }
+                            reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                             state.push_transcript(&format!("[Game restored from {}]", entry_name));
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
@@ -3593,35 +3509,7 @@ fn main() {
                             // Restore turn counter from the loaded archive.
                             state.turns = ac.meta.turns;
                             // Re-observe current location.
-                            let loc = session.current_location();
-                            if let Some(snap) = loc {
-                                let rid = snap.number as mapper::graph::RoomId;
-                                let restore_result = TurnResult {
-                                    transcript: String::new(),
-                                    transcript_runs: Vec::new(),
-                                    location: Some(snap),
-                                    quit: false,
-                                    erase_lower: false,
-                                    info: None,
-                                    sounds: Vec::new(),
-                                    glulx_sound_ops: Vec::new(),
-                                    diagnostics: vec![],
-                                    fault: None,
-                                    location_method: None,
-                                    pending_io: None,
-                                    timed_out: false,
-                                    transcript_elems: Vec::new(),
-                                };
-                                apply_turn(&mut mapper, "", &restore_result);
-                                state.set_viewed_layer(None);
-                                state.select_room(Some(rid));
-                                if let Some(room) = mapper.graph.room(rid) {
-                                    if let Some(pos) = room.pos {
-                                        let (pw, ph) = map_pane_dims(last_panes.map);
-                                        state.recenter_on(pos, pw, ph);
-                                    }
-                                }
-                            }
+                            reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                             state.push_transcript(&format!("[Loaded save: {}]", entry_name));
                             state.saves = None;
                         }
@@ -3966,35 +3854,7 @@ fn dispatch_slash_outcome(
                 Some(ref path) => {
                     match restore_from_file(path, &mut *session) {
                         Ok(RestoreOutcome::DescriptorCompleted) => {
-                            let loc = session.current_location();
-                            if let Some(snap) = loc {
-                                let rid = snap.number as mapper::graph::RoomId;
-                                let restore_result = TurnResult {
-                                    transcript: String::new(),
-                                    transcript_runs: Vec::new(),
-                                    location: Some(snap),
-                                    quit: false,
-                                    erase_lower: false,
-                                    info: None,
-                                    sounds: Vec::new(),
-                                    glulx_sound_ops: Vec::new(),
-                                    diagnostics: vec![],
-                                    fault: None,
-                                    location_method: None,
-                                    pending_io: None,
-                                    timed_out: false,
-                                    transcript_elems: Vec::new(),
-                                };
-                                apply_turn(mapper, "", &restore_result);
-                                state.set_viewed_layer(None);
-                                state.select_room(Some(rid));
-                                if let Some(room) = mapper.graph.room(rid) {
-                                    if let Some(pos) = room.pos {
-                                        let (pw, ph) = map_pane_dims(map_rect);
-                                        state.recenter_on(pos, pw, ph);
-                                    }
-                                }
-                            }
+                            reobserve_location(state, mapper, &*session, map_rect);
                             state.set_status("restored");
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
@@ -4014,35 +3874,7 @@ fn dispatch_slash_outcome(
                             if !ac.command_history.is_empty() {
                                 state.command_history = ac.command_history;
                             }
-                            let loc = session.current_location();
-                            if let Some(snap) = loc {
-                                let rid = snap.number as mapper::graph::RoomId;
-                                let restore_result = TurnResult {
-                                    transcript: String::new(),
-                                    transcript_runs: Vec::new(),
-                                    location: Some(snap),
-                                    quit: false,
-                                    erase_lower: false,
-                                    info: None,
-                                    sounds: Vec::new(),
-                                    glulx_sound_ops: Vec::new(),
-                                    diagnostics: vec![],
-                                    fault: None,
-                                    location_method: None,
-                                    pending_io: None,
-                                    timed_out: false,
-                                    transcript_elems: Vec::new(),
-                                };
-                                apply_turn(mapper, "", &restore_result);
-                                state.set_viewed_layer(None);
-                                state.select_room(Some(rid));
-                                if let Some(room) = mapper.graph.room(rid) {
-                                    if let Some(pos) = room.pos {
-                                        let (pw, ph) = map_pane_dims(map_rect);
-                                        state.recenter_on(pos, pw, ph);
-                                    }
-                                }
-                            }
+                            reobserve_location(state, mapper, &*session, map_rect);
                             state.set_status("loaded");
                         }
                         Err(e) => state.set_status(format!("load failed: {}", e)),
@@ -4695,6 +4527,44 @@ fn map_pane_dims(area: Rect) -> (u16, u16) {
     (w, h)
 }
 
+/// Re-observe the VM's current location after a restore/resume: fold the room into the
+/// map, deselect the viewed layer, select the room, and recenter the map pane on it.
+/// Produces no transcript output. Shared by every host restore/resume arm.
+fn reobserve_location(
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    session: &dyn Engine,
+    map_rect: Rect,
+) {
+    let Some(snap) = session.current_location() else { return };
+    let rid = snap.number as mapper::graph::RoomId;
+    let restore_result = TurnResult {
+        transcript: String::new(),
+        transcript_runs: Vec::new(),
+        location: Some(snap),
+        quit: false,
+        erase_lower: false,
+        info: None,
+        sounds: Vec::new(),
+        glulx_sound_ops: Vec::new(),
+        diagnostics: vec![],
+        fault: None,
+        location_method: None,
+        pending_io: None,
+        timed_out: false,
+        transcript_elems: Vec::new(),
+    };
+    apply_turn(mapper, "", &restore_result);
+    state.set_viewed_layer(None);
+    state.select_room(Some(rid));
+    if let Some(room) = mapper.graph.room(rid) {
+        if let Some(pos) = room.pos {
+            let (pw, ph) = map_pane_dims(map_rect);
+            state.recenter_on(pos, pw, ph);
+        }
+    }
+}
+
 /// Build a `DialogStyle` from the current app colors.
 /// Note: `BorderStyle::None` is coerced to `Single` inside `draw_dialog`.
 fn make_dialog_style(state: &AppState) -> DialogStyle {
@@ -5035,35 +4905,7 @@ fn apply_launch_resume(
             state.transcript_runs = vec![Vec::new(); state.transcript.len()];
             state.reset_transcript_sidecars();
             // Re-observe current location (same as Action::RestoreGame).
-            let loc = session.current_location();
-            if let Some(snap) = loc {
-                let rid = snap.number as mapper::graph::RoomId;
-                let restore_result = TurnResult {
-                    transcript: String::new(),
-                    transcript_runs: Vec::new(),
-                    location: Some(snap),
-                    quit: false,
-                    erase_lower: false,
-                    info: None,
-                    sounds: Vec::new(),
-                    glulx_sound_ops: Vec::new(),
-                    diagnostics: vec![],
-                    fault: None,
-                    location_method: None,
-                    pending_io: None,
-                    timed_out: false,
-                    transcript_elems: Vec::new(),
-                };
-                apply_turn(mapper, "", &restore_result);
-                state.set_viewed_layer(None);
-                state.select_room(Some(rid));
-                if let Some(room) = mapper.graph.room(rid) {
-                    if let Some(pos) = room.pos {
-                        let (pw, ph) = map_pane_dims(last_panes.map);
-                        state.recenter_on(pos, pw, ph);
-                    }
-                }
-            }
+            reobserve_location(state, mapper, &*session, last_panes.map);
             state.push_transcript("[Game resumed from save.]");
         }
         Err(e) => {
