@@ -192,8 +192,7 @@ pub struct TurnResult {
     /// before appending this turn's output so stale text does not bleed through
     /// (matching a retained-mode interpreter like Lectrote).
     pub erase_lower: bool,
-    /// Optional informational note to surface to the player (e.g. when the
-    /// game's own save/restore is auto-failed, hint them toward Ctrl+S/Ctrl+R).
+    /// Optional one-line note to surface to the player (general-purpose; currently unused — no producer sets it).
     pub info: Option<String>,
     /// Sound events emitted this turn (drained from the VM), in order.
     pub sounds: Vec<SoundEvent>,
@@ -204,9 +203,7 @@ pub struct TurnResult {
     pub diagnostics: Vec<String>,
     /// How the current room was detected this turn (drives the map indicator).
     pub location_method: Option<LocationMethod>,
-    /// Set when the VM suspended on its own `@save`/`@restore` (v4+). The host
-    /// performs the file I/O and calls `resume_save`/`resume_restore`. `None` for
-    /// an ordinary turn (and for v3, which still auto-fails — see `info`).
+    /// Set when the game's own `@save`/`@restore` (any version) suspends the VM for host-mediated file I/O; `None` otherwise.
     pub pending_io: Option<PendingIo>,
     /// Set when this turn came from `abort_timed_input` (the pending read was
     /// completed as timed-out, either directly or because `run_timed_interrupt`'s
@@ -477,9 +474,9 @@ enum RunStop {
     Input(InputKind),
     /// VM ended (Quit/Restart).
     Quit,
-    /// VM suspended on its own `@save` (v4+) — host must `resume_save`.
+    /// VM suspended on its own `@save` — host must `resume_save`.
     SavePending,
-    /// VM suspended on its own `@restore` (v4+) — host must `resume_restore`.
+    /// VM suspended on its own `@restore` — host must `resume_restore`.
     RestorePending,
 }
 
@@ -1092,11 +1089,7 @@ mod tests {
 
     #[test]
     fn turn_result_info_defaults_none_for_normal_turn() {
-        // A TurnResult from a normal (non-save/restore) turn has info == None.
-        // The save-request note path (info == Some(...)) is exercised manually
-        // by running a game that issues its own SAVE verb and confirming the
-        // transcript line "(babelmap: this game's in-game save/restore isn't
-        // wired...)" appears.
+        // A TurnResult from a normal turn has info == None by default.
         let r = TurnResult {
             transcript: "You are in a maze.".to_string(),
             transcript_runs: Vec::new(),
