@@ -1090,6 +1090,12 @@ pub struct AppState {
     /// Written into `Meta` on every save (quick-save and named).
     pub turns: u32,
 
+    /// True when the game has advanced since the last Save State was written
+    /// (or since load/restart) — i.e. there is progress not captured in a Save
+    /// State. Drives the "unsaved Save State" quit prompt. Set on each turn,
+    /// cleared by a Save State save, a restore/load, and restart.
+    pub unsaved_progress: bool,
+
     /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
     /// is on; persisted into the `.babelmap` archive. Empty otherwise.
     pub history: Vec<crate::history::TurnRecord>,
@@ -1306,6 +1312,7 @@ impl Default for AppState {
             style_editor: None,
             glyph_picker: None,
             turns: 0,
+            unsaved_progress: false,
             history: Vec::new(),
             replay: None,
             saves_prompt_submitted: None,

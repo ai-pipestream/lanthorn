@@ -3158,8 +3158,10 @@ fn main() {
                 // Clear any transient status message on a real game turn.
                 state.status_msg = None;
 
-                // Increment the session turn counter.
+                // Increment the session turn counter. Progress now exists that
+                // isn't captured in a Save State (drives the quit prompt).
                 state.turns += 1;
+                state.unsaved_progress = true;
 
                 let result = session.submit(&cmd);
                 if result.erase_lower { state.mark_screen_clear(); }
@@ -3558,6 +3560,7 @@ fn main() {
                                 state.transcript_runs = vec![Vec::new(); state.transcript.len()];
                                 state.reset_transcript_sidecars();
                                 state.turns = plan.turn;
+                                state.unsaved_progress = false; // resumed a past (saved) turn
                                 state.graph_gen = state.graph_gen.wrapping_add(1);
                                 // Re-observe current location (mirror the restore path).
                                 if let Some(snap) = session.current_location() {
@@ -3828,7 +3831,11 @@ fn dispatch_slash_outcome(
                 }
             };
             match result {
-                Ok(msg) => state.set_status(msg),
+                Ok(msg) => {
+                    // Progress is now captured in a Save State — quitting is safe.
+                    state.unsaved_progress = false;
+                    state.set_status(msg);
+                }
                 Err(e) => state.set_status(e),
             }
         }
@@ -4066,6 +4073,7 @@ fn reset_game(
             let start_loc = session.current_location();
             state.reset_sound_sidecars();
             state.turns = 0;
+            state.unsaved_progress = false; // restart: fresh game, nothing to save
             state.vm_halted = false;
             state.input.clear();
             state.suggestions.clear();
@@ -4157,6 +4165,11 @@ fn handle_saves_prompt(
             match result {
                 Ok(()) => {
                     state.push_transcript(&format!("[Saved as: {}]", buf));
+                    // A host Save-State named slot captures the current progress
+                    // (an in-game @save writes a .qzl, a different mechanism).
+                    if !ingame {
+                        state.unsaved_progress = false;
+                    }
                     // Refresh saves list.
                     if let Some(s) = &mut state.saves {
                         s.entries = list_saves(dir, ifid);
@@ -4552,6 +4565,9 @@ fn reobserve_location(
     session: &dyn Engine,
     map_rect: Rect,
 ) {
+    // Every caller is a restore/resume/import: the live state now equals a saved
+    // one, so there is no unsaved progress to warn about on quit.
+    state.unsaved_progress = false;
     let Some(snap) = session.current_location() else { return };
     let rid = snap.number as mapper::graph::RoomId;
     let restore_result = TurnResult {
@@ -4804,10 +4820,11 @@ fn open_hints(
 
 /// Return true when a quit attempt should show the "Save state before quitting?" dialog.
 ///
-/// Conditions: auto_save is off AND prompt_save_on_quit is on AND the session has
-/// at least one turn (unsaved progress exists).
+/// Conditions: auto_save is off AND prompt_save_on_quit is on AND there is progress
+/// not yet captured in a Save State (`unsaved_progress`) — so quitting right after a
+/// Ctrl-S / save / load does not prompt.
 fn should_prompt_save_on_quit(state: &AppState) -> bool {
-    !state.config.auto_save && state.config.prompt_save_on_quit && state.turns > 0
+    !state.config.auto_save && state.config.prompt_save_on_quit && state.unsaved_progress
 }
 
 /// Action to take when a key is pressed while the quit dialog is open.
@@ -5893,14 +5910,19 @@ mod tests {
         use app::state::AppState;
 
         let mut s = AppState::default();
-        // Default: auto_save = false, prompt_save_on_quit = true, turns = 0
-        // No prompt when turns == 0 (no unsaved progress).
-        assert!(!should_prompt_save_on_quit(&s), "turns=0 => no prompt");
+        // Default: auto_save = false, prompt_save_on_quit = true, unsaved_progress = false
+        // No prompt with no unsaved progress (fresh, or just saved/loaded).
+        assert!(!should_prompt_save_on_quit(&s), "no unsaved progress => no prompt");
 
-        s.turns = 5;
-        // Now: auto_save=false, prompt_save_on_quit=true, turns=5 => prompt
-        assert!(should_prompt_save_on_quit(&s), "auto_save=false, prompt=true, turns>0 => prompt");
+        s.unsaved_progress = true;
+        // Now: auto_save=false, prompt_save_on_quit=true, unsaved_progress=true => prompt
+        assert!(should_prompt_save_on_quit(&s), "unsaved progress => prompt");
 
+        // Saving (or loading) clears the flag => no prompt right after a save.
+        s.unsaved_progress = false;
+        assert!(!should_prompt_save_on_quit(&s), "after a save/load => no prompt");
+
+        s.unsaved_progress = true;
         s.config.auto_save = true;
         // auto_save=true => no prompt (game already saves automatically)
         assert!(!should_prompt_save_on_quit(&s), "auto_save=true => no prompt");
