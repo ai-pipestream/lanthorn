@@ -194,7 +194,6 @@ impl Default for KeyMap {
         let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
         let plain = |code| g(code, false, false);
         let ctrl = |code| g(code, true, false);
-        let shift = |code| g(code, false, true);
 
         let mut b: Vec<(KeySpec, String, Context)> = Vec::new();
 
@@ -211,31 +210,8 @@ impl Default for KeyMap {
 
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
-        bind!(ctrl(Char('e')), "export-svg", Context::Global);
-        bind!(ctrl(Char('g')), "export-dot", Context::Global);
-        bind!(ctrl(Char('d')), "export-dump", Context::Global);
-        bind!(ctrl(Char('l')), "cycle-layout", Context::Global);
-        bind!(ctrl(Char('t')), "tidy-map", Context::Global);
-        bind!(ctrl(Char('y')), "animate-tidy", Context::Global);
-        bind!(ctrl(Char('a')), "toggle-alignment", Context::Global);
-        bind!(ctrl(Char('p')), "toggle-portal-labels", Context::Global);
-        // Ctrl+O → open saves manager (free key; not used by any other command).
-        bind!(ctrl(Char('o')), "open-saves", Context::Global);
-        // v → toggle inventory strip (free key; not used in any context).
-        bind!(plain(Char('v')), "toggle-inventory", Context::Global);
-        // m → open verb/item token-palette modal (free key; not used by any other command).
-        bind!(plain(Char('m')), "open-verb-menu", Context::Global);
-        // F2 → open config screen.
-        bind!(plain(F(2)), "open-config", Context::Global);
         // F3 → open style editor (F3 is unbound; F2/F4–F9 are taken).
         bind!(plain(F(3)), "open-style-editor", Context::Global);
-        // Shift+Tab (BackTab) → cycle layout in reverse (inverse of Ctrl+L forward cycle).
-        // BackTab is delivered by crossterm as KeyCode::BackTab, typically with no SHIFT modifier.
-        bind!(KeySpec { code: BackTab, ctrl: false, shift: false, alt: false }, "cycle-layout reverse", Context::Global);
-        // F5 → reset game (free key; opens a confirmation prompt before acting).
-        bind!(plain(F(5)), "reset-game", Context::Global);
-        // F4 → open rewind/replay history modal (free function key).
-        bind!(plain(F(4)), "open-history", Context::Global);
 
         // F6-F9 → Nudge (plain function keys; ctrl+arrow removed so all direct
         // bindings remain modifier-free).
@@ -268,18 +244,6 @@ impl Default for KeyMap {
         bind!(plain(Char('c')), "center-map", Context::Map);
         bind!(plain(Char('n')), "select-room next", Context::Map);
         bind!(plain(Char('p')), "select-room prev", Context::Map);
-        bind!(shift(Char('N')), "rename-layer", Context::Map);
-        bind!(shift(Char('P')), "peel-layer", Context::Map);
-        bind!(shift(Char('M')), "merge-layer", Context::Map);
-        bind!(shift(Char('R')), "tidy-map", Context::Map);
-        bind!(plain(Char(']')), "cycle-layer next", Context::Map);
-        bind!(plain(Char('[')), "cycle-layer prev", Context::Map);
-        bind!(plain(Char('r')), "rename-room", Context::Map);
-        bind!(plain(Char('o')), "edit-notes", Context::Map);
-        bind!(plain(Char('d')), "delete-connection", Context::Map);
-        bind!(plain(Char('e')), "relabel-edge", Context::Map);
-        bind!(plain(Char('i')), "toggle-inspector", Context::Map);
-        bind!(plain(Char('g')), "open-gallery", Context::Map);
         // Esc → toggle-focus (in map context)
         bind!(plain(Esc), "toggle-focus", Context::Map);
 
@@ -335,22 +299,6 @@ impl KeyMap {
         self.bindings.iter()
             .find(|(_, s, _)| s.split_whitespace().next() == Some(command_name))
             .map(|(spec, _, _)| *spec)
-    }
-
-    /// Look up a key across ALL contexts (Global → Map → Anim) and return the
-    /// first match. Used by the hotkey dialog so that commands in any context
-    /// can be triggered from the dialog.
-    pub fn lookup_any(&self, spec: &KeySpec) -> Option<&str> {
-        for ctx in [Context::Global, Context::Map, Context::Anim] {
-            // Use exact context match only (no Map→Global fallthrough here,
-            // since we already iterate Global first).
-            for (s, cmd, c) in &self.bindings {
-                if c == &ctx && s == spec {
-                    return Some(cmd.as_str());
-                }
-            }
-        }
-        None
     }
 
     /// Iterate all `(KeySpec, &str)` pairs that belong to `ctx`
@@ -409,7 +357,6 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     "select-room prev",
     "center-map",
     "toggle-focus",
-    "cycle-layout reverse",
     "nudge-room -1 0",
     "nudge-room 1 0",
     "nudge-room 0 -1",
@@ -662,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn backtab_keyevent_maps_to_cycle_layout_reverse() {
+    fn backtab_keyevent_is_unbound_by_default() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         use crate::input::{key_to_action, Action};
         use crate::state::AppState;
@@ -677,20 +624,21 @@ mod tests {
         };
 
         // With no mid-word suggestions, the BackTab autocomplete intercept does not
-        // apply, so BackTab falls through to its Global binding: cycle-layout reverse.
+        // apply. cycle-layout reverse is leader-only now (SQ-0202), so BackTab has
+        // no default Global binding to fall through to.
         state.focus = crate::state::Focus::Game;
         let action = key_to_action(&state, backtab);
         assert!(
-            matches!(action, Action::CycleLayoutReverse),
-            "BackTab in Game focus should produce CycleLayoutReverse, got {:?}",
+            matches!(action, Action::None),
+            "BackTab in Game focus should produce None, got {:?}",
             action
         );
 
         state.focus = crate::state::Focus::Map;
         let action_map = key_to_action(&state, backtab);
         assert!(
-            matches!(action_map, Action::CycleLayoutReverse),
-            "BackTab in Map focus should produce CycleLayoutReverse, got {:?}",
+            matches!(action_map, Action::None),
+            "BackTab in Map focus should produce None, got {:?}",
             action_map
         );
     }
@@ -716,20 +664,20 @@ mod tests {
     }
 
     #[test]
-    fn reset_game_default_key_is_f5() {
-        // F5 is the default key
+    fn reset_game_key_f5_unbound_by_default() {
+        // reset-game is leader-only now (SQ-0202); F5 has no default binding.
         let km = KeyMap::default();
         let f5 = KeySpec { code: KeyCode::F(5), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f5, Context::Global), Some("reset-game"));
+        assert_eq!(km.lookup(&f5, Context::Global), None);
     }
 
     #[test]
-    fn open_history_default_key_and_group() {
-        // F4 is the default key.
+    fn open_history_key_f4_unbound_but_in_group() {
+        // open-history is leader-only now (SQ-0202); F4 has no default binding.
         let km = KeyMap::default();
         let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
-        assert_eq!(km.lookup(&f4, Context::Global), Some("open-history"));
-        // It appears in the Files hotkey group.
+        assert_eq!(km.lookup(&f4, Context::Global), None);
+        // It still appears in the Files hotkey group (leader panel).
         let layout = HotkeyLayout::default();
         let files = layout.groups.iter().find(|(t, _)| t == "Files").expect("Files group");
         assert!(files.1.iter().any(|c| c.1 == "open-history"), "open-history in Files group");
@@ -745,11 +693,12 @@ mod tests {
     }
 
     #[test]
-    fn toggle_inventory_key_is_v() {
+    fn toggle_inventory_key_v_unbound_by_default() {
+        // toggle-inventory is leader-only now (SQ-0202); v has no default binding.
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::Char('v'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, Context::Global);
-        assert_eq!(cmd, Some("toggle-inventory"), "v should be bound to toggle-inventory");
+        assert_eq!(cmd, None, "v should not be bound to toggle-inventory by default");
     }
 
     #[test]
@@ -964,5 +913,19 @@ mod tests {
         let (layout, warnings) = HotkeyLayout::resolve(&cfg);
         assert!(!warnings.is_empty(), "duplicate letter should produce a warning");
         assert_eq!(layout.leader_command('t'), Some("tidy-map"), "first occurrence wins");
+    }
+
+    #[test]
+    fn cycle_layout_reverse_not_direct() {
+        // Layout is not always-active anymore (SQ-0202); leader panel only.
+        assert!(!HotkeyLayout::default().is_direct_name("cycle-layout reverse"));
+    }
+
+    #[test]
+    fn leader_commands_unbound_in_defaults() {
+        // Commands trimmed out of the always-active default keymap (SQ-0202) have
+        // no default binding at all; they're reachable only through the leader panel.
+        assert_eq!(KeyMap::default().lookup(&"ctrl+e".parse().unwrap(), Context::Global), None);
+        assert_eq!(KeyMap::default().lookup(&"r".parse().unwrap(), Context::Map), None);
     }
 }

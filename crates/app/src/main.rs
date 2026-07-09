@@ -154,17 +154,14 @@ const GAME_HINTS: &[&str] = &[
     "toggle-focus",
     "save-state",
     "restore-state",
-    "cycle-layout",
 ];
 
 const MAP_HINTS: &[&str] = &[
     "toggle-focus",
-    "cycle-layout",
+    "pan-map -1 0",
     "zoom-map in",
-    "center-map",
     "select-room next",
-    "open-gallery",
-    "toggle-inspector",
+    "center-map",
 ];
 
 const ANIM_HINTS: &[&str] = &[
@@ -710,9 +707,15 @@ fn draw_frame(
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
             let w = help_row.width as usize;
-            match state.focus {
+            let leader_hint = format!("{}: menu", state.hotkeys.prefix.label());
+            let rest = match state.focus {
                 Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
                 Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),
+            };
+            if rest.is_empty() {
+                leader_hint
+            } else {
+                format!("{} | {}", leader_hint, rest)
             }
         };
         // Fill help row with reversed style, then draw text.
@@ -5486,6 +5489,19 @@ mod tests {
         let line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
         // Ctrl+S → save-state; short label is "save state".
         assert!(line.contains("Ctrl+S: save state"), "expected 'Ctrl+S: save state' in '{line}'");
+        // cycle-layout was trimmed out of the always-active set (SQ-0202); it's
+        // leader-only now and must not appear in the Game hint bar.
+        assert!(!line.contains("cycle"), "Game hint bar must not contain 'cycle': '{line}'");
+    }
+
+    #[test]
+    fn leader_hint_advertises_ctrl_k_menu() {
+        // The bottom-bar default branch prepends "{prefix.label()}: menu" ahead
+        // of the hint_bar output (SQ-0202). Pin the exact construction here since
+        // the help-row assembly itself lives inline in the render loop.
+        let layout = HotkeyLayout::default();
+        let leader_hint = format!("{}: menu", layout.prefix.label());
+        assert_eq!(leader_hint, "Ctrl+K: menu");
     }
 
     // ── Hotkey dialog tests ───────────────────────────────────────────────────

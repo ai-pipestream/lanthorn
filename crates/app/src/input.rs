@@ -4749,27 +4749,28 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_is_cycle_layout_reverse_with_no_suggestions() {
-        // Game focus, partial typed but no suggestions → Shift-Tab falls through to
-        // its bound role (cycle the layout backward).
+    fn shift_tab_is_none_with_no_suggestions() {
+        // Game focus, partial typed but no suggestions → Shift-Tab falls through, but
+        // cycle-layout reverse no longer has a default binding (leader-only now) → None.
         let mut s = AppState::default();
         s.input = "nor".to_string();
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleLayoutReverse));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
     }
 
     #[test]
-    fn shift_tab_is_cycle_layout_reverse_with_empty_input() {
+    fn shift_tab_is_none_with_empty_input() {
         let s = AppState::default(); // Game focus, empty input, no suggestions
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleLayoutReverse));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
     }
 
     #[test]
-    fn shift_tab_is_cycle_layout_reverse_in_map_focus_even_with_suggestions() {
-        // Not in Game focus, so the autocomplete intercept does not apply → cycle layout.
+    fn shift_tab_is_none_in_map_focus_even_with_suggestions() {
+        // Not in Game focus, so the autocomplete intercept does not apply. Shift-Tab
+        // has no default binding (cycle-layout reverse is leader-only now) → None.
         let mut s = AppState::default();
         s.focus = Focus::Map;
         s.suggestions = vec!["north".to_string()];
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleLayoutReverse));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
     }
 
     #[test]
@@ -5334,6 +5335,13 @@ mod tests {
         let mut s = AppState::default();
         s.hotkeys = layout;
         s.focus = Focus::Map;
+        // tidy-map has no default keymap binding now (leader-only command), so a
+        // user promoting it to direct via config would also bind a key for it.
+        s.keymap.bindings.push((
+            crate::keymap::KeySpec { code: KeyCode::Char('t'), ctrl: true, shift: false, alt: false },
+            "tidy-map".to_string(),
+            crate::keymap::Context::Global,
+        ));
         // With dialog closed: tidy-map is now direct → fires.
         assert!(
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::Retidy),
@@ -6119,28 +6127,25 @@ mod tests {
         assert!(s.prompt.is_none(), "no text prompt should be opened");
     }
 
-    // ── Regression: F5 (key-bound reset-game) must reach the confirmation dialog ──
-    // The command-system unification routes F5 through key_to_command -> "reset-game"
-    // -> SlashOutcome::Reset. The from_key branch of dispatch_slash_outcome calls
-    // apply_action(Action::ResetGame), which opens the dialog. This test pins both
-    // halves of that link so an instant-wipe regression (F5 silently resetting with
-    // no confirmation) cannot return unnoticed.
+    // ── reset-game is now leader-only; F5 has no default binding ──────────────
+    // reset-game was demoted out of the always-active default keymap (SQ-0202):
+    // it's reached only through the Ctrl+K leader panel now. This test pins that
+    // F5 no longer resolves directly, and (still) that Action::ResetGame — however
+    // it's triggered — opens the confirmation dialog rather than instant-wiping.
     #[test]
-    fn f5_key_resolves_to_reset_game_command_and_opens_dialog() {
+    fn f5_key_no_longer_bound_and_reset_game_still_opens_dialog() {
         use crate::state::AppState;
         let s = AppState::default();
-        // (a) F5 resolves to the "reset-game" command (the key-dispatch half).
-        match key_to_command(&s, key(KeyCode::F(5))) {
-            KeyResolve::Command(cmd, _) => {
-                assert_eq!(cmd, "reset-game", "F5 must resolve to the reset-game command");
-            }
-            other => panic!("F5 must resolve to KeyResolve::Command(\"reset-game\"), got {:?}", other),
-        }
+        // (a) F5 has no default binding (reset-game is leader-only now).
+        assert!(
+            matches!(key_to_command(&s, key(KeyCode::F(5))), KeyResolve::None),
+            "F5 must not resolve to a command by default"
+        );
         // (b) The from_key Reset branch opens the dialog via Action::ResetGame.
         let mut s2 = AppState::default();
         let mut m = Mapper::default();
         apply_action(Action::ResetGame, &mut s2, &mut m);
-        assert!(s2.reset_dialog, "key-bound reset-game must open the confirmation dialog, not instant-wipe");
+        assert!(s2.reset_dialog, "reset-game must open the confirmation dialog, not instant-wipe");
     }
 
     // ── Leaf 2: minizork fixture reset test ───────────────────────────────────
@@ -6386,13 +6391,14 @@ mod tests {
     }
 
     #[test]
-    fn open_verb_menu_key_m_routes_to_open_verb_menu() {
+    fn open_verb_menu_key_m_is_unbound_by_default() {
+        // open-verb-menu is leader-only now (SQ-0202); 'm' has no default binding.
         use crate::keymap::{KeyMap, KeySpec};
         use crossterm::event::KeyCode;
         let km = KeyMap::default();
         let spec = KeySpec { code: KeyCode::Char('m'), ctrl: false, shift: false, alt: false };
         let cmd = km.lookup(&spec, crate::keymap::Context::Global);
-        assert_eq!(cmd, Some("open-verb-menu"), "m should be bound to open-verb-menu");
+        assert_eq!(cmd, None, "m should not be bound to open-verb-menu by default");
     }
 
     #[test]
