@@ -98,26 +98,18 @@ fn build_rows(state: &AppState) -> Vec<String> {
 
     for (title, cmds) in &state.hotkeys.groups {
         rows.push(format!("## {title}"));
-        for cmd in cmds {
-            // `cmd` is (leader letter, full command-string); Task 2 reworks display.
-            let cmd = &cmd.1;
-            let key_label = primary_key_label(state, cmd);
-            let label = crate::slash::find_command(cmd)
+        for (letter, cmd_str) in cmds {
+            let key_label = letter.to_string();
+            let first = cmd_str.split_whitespace().next().unwrap_or(cmd_str.as_str());
+            let label = crate::slash::find_command(first)
                 .map(|c| c.description)
-                .unwrap_or(cmd.as_str());
-            rows.push(format!("{:<12}  {}", key_label, label));
+                .unwrap_or(cmd_str.as_str());
+            rows.push(format!("{:<3} {}", key_label, label));
         }
         rows.push("---".into());
     }
 
     rows
-}
-
-/// Find the primary key label for a command name in the state's keymap.
-fn primary_key_label(state: &AppState, cmd_name: &str) -> String {
-    state.keymap.primary_key(cmd_name)
-        .map(|k| k.label())
-        .unwrap_or_else(|| "?".to_string())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -157,6 +149,50 @@ mod tests {
         assert!(text.contains("Layout"), "expected 'Layout' group heading in dialog");
         // The tidy-map command's label (registry description) appears in that group
         assert!(text.contains("tidy"), "expected 'tidy' label in dialog");
+    }
+
+    #[test]
+    fn draw_hotkey_dialog_shows_authored_letter() {
+        let mut state = AppState::default();
+        state.hotkey_dialog = true;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_hotkey_dialog(&state, area, &mut buf).expect("dialog should draw");
+        let content = rects.content;
+
+        // The tidy-map row is authored with leader letter 't'; find its row by
+        // locating the row whose content-area text contains tidy-map's unique
+        // registry description, then check the row's key column is 't'.
+        let tidy_desc = crate::slash::find_command("tidy-map")
+            .expect("tidy-map command should be registered")
+            .description;
+        let mut found_tidy_row = false;
+        for y in content.y..content.bottom() {
+            let mut line = String::new();
+            for x in content.x..content.right() {
+                if let Some(cell) = buf.cell((x, y)) {
+                    line.push_str(cell.symbol());
+                }
+            }
+            if line.contains(tidy_desc) {
+                found_tidy_row = true;
+                let key_cell = buf.cell((content.x, y)).expect("key cell");
+                assert_eq!(key_cell.symbol(), "t", "expected authored letter 't' in the key column of the tidy row");
+            }
+        }
+        assert!(found_tidy_row, "expected a row containing tidy-map's description in the dialog content");
+
+        // The old global-keymap chord label must not appear anywhere.
+        let text = buf_text(&buf);
+        assert!(!text.contains("^T"), "old chord label '^T' should not appear in the dialog");
+
+        // The Layers group's cycle-layer entry should show its real registry
+        // description, not the raw "cycle-layer next" command string.
+        let cycle_layer_desc = crate::slash::find_command("cycle-layer")
+            .expect("cycle-layer command should be registered")
+            .description;
+        assert!(text.contains(cycle_layer_desc), "expected cycle-layer's registry description in dialog");
+        assert!(!text.contains("cycle-layer next"), "raw command string should not be shown");
     }
 
     #[test]
