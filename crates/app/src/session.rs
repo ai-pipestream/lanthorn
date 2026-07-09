@@ -249,7 +249,7 @@ impl GameSession {
 
         let mut quit = false;
         let pending = loop {
-            let (stop, _v3) = run_until_input(&mut machine);
+            let stop = run_until_input(&mut machine);
             match stop {
                 RunStop::Quit => { quit = true; break InputKind::Line; }
                 RunStop::Input(k) => break k,
@@ -330,8 +330,8 @@ impl GameSession {
     /// Resume after the host performed an in-game SAVE (`wrote_ok` = file written).
     pub fn resume_save(&mut self, wrote_ok: bool) -> TurnResult {
         self.machine.complete_save(wrote_ok);
-        let (stop, v3) = run_until_input(&mut self.machine);
-        self.finish_turn(stop, v3)
+        let stop = run_until_input(&mut self.machine);
+        self.finish_turn(stop)
     }
 
     /// Resume after the host performed an in-game RESTORE. `Some(bytes)` =
@@ -346,13 +346,13 @@ impl GameSession {
             }
             None => self.machine.complete_restore_failure(),
         }
-        let (stop, v3) = run_until_input(&mut self.machine);
-        self.finish_turn(stop, v3)
+        let stop = run_until_input(&mut self.machine);
+        self.finish_turn(stop)
     }
 
-    /// Build the `TurnResult` from a `RunStop` (+ v3 auto-fail flag) and drain the
-    /// VM's per-turn buffers. Shared by submit/submit_char/resume_*.
-    fn finish_turn(&mut self, stop: RunStop, v3_failed: bool) -> TurnResult {
+    /// Build the `TurnResult` from a `RunStop` and drain the VM's per-turn
+    /// buffers. Shared by submit/submit_char/resume_*.
+    fn finish_turn(&mut self, stop: RunStop) -> TurnResult {
         let (quit, pending, pending_io) = match stop {
             RunStop::Quit => (true, InputKind::Line, None),
             RunStop::Input(k) => (false, k, None),
@@ -361,7 +361,7 @@ impl GameSession {
         };
         self.quit = quit;
         self.pending = pending;
-        self.drain_turn(quit, pending_io, v3_failed, false)
+        self.drain_turn(quit, pending_io, false)
     }
 
     /// Step the VM to the next input request (or Quit) and build the
@@ -369,8 +369,8 @@ impl GameSession {
     /// `abort_timed_input` once input has been supplied to the VM. `timed_out`
     /// is `true` only for the `abort_timed_input` caller.
     fn advance_after_input(&mut self, timed_out: bool) -> TurnResult {
-        let (stop, v3) = run_until_input(&mut self.machine);
-        let mut result = self.finish_turn(stop, v3);
+        let stop = run_until_input(&mut self.machine);
+        let mut result = self.finish_turn(stop);
         result.timed_out = timed_out;
         result
     }
@@ -380,19 +380,18 @@ impl GameSession {
     /// read is still pending, so `quit`/`pending` are left as-is and
     /// `timed_out` stays `false`.
     fn collect_turn(&mut self) -> TurnResult {
-        self.drain_turn(self.quit, None, false, false)
+        self.drain_turn(self.quit, None, false)
     }
 
     /// Drain the VM's per-turn buffers (transcript, location, diagnostics, sounds,
     /// erase_lower) into a `TurnResult`, given the already-resolved
-    /// `quit`/`pending_io`/`v3_failed`/`timed_out` state. Shared by
+    /// `quit`/`pending_io`/`timed_out` state. Shared by
     /// `finish_turn` (after stepping to the next input) and `collect_turn`
     /// (mid-read, after a timed-interrupt routine that did not abort).
     fn drain_turn(
         &mut self,
         quit: bool,
         pending_io: Option<PendingIo>,
-        v3_failed: bool,
         timed_out: bool,
     ) -> TurnResult {
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
@@ -401,12 +400,6 @@ impl GameSession {
         let detected = detect_location(&self.machine);
         let location = detected.as_ref().map(location_to_snapshot);
         let location_method = detected.as_ref().map(Location::method);
-
-        let info = if v3_failed {
-            Some("(babelmap: this game's in-game save/restore isn't wired; use Ctrl+S to save and Ctrl+R to restore instead.)".to_string())
-        } else {
-            None
-        };
 
         let diagnostics = std::mem::take(&mut self.machine.diagnostics);
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
@@ -419,7 +412,7 @@ impl GameSession {
             location,
             quit,
             erase_lower,
-            info,
+            info: None,
             sounds,
             glulx_sound_ops: Vec::new(),
             diagnostics,
@@ -490,39 +483,19 @@ enum RunStop {
     RestorePending,
 }
 
-/// Step until the machine pauses for input, quits, or (v4+) suspends on its own
-/// save/restore. Returns `(stop, v3_auto_failed)` where `v3_auto_failed` is true
-/// when a v3 game's `@save`/`@restore` was auto-rejected this run (drives the
-/// host hint). v4+ save/restore is NOT auto-failed: it bubbles up as
-/// `SavePending`/`RestorePending`.
-fn run_until_input(machine: &mut Machine) -> (RunStop, bool) {
-    let mut v3_failed = false;
+/// Step until the machine pauses for input, quits, or suspends on its own
+/// `@save`/`@restore`. In-game save/restore bubbles up as `SavePending`/
+/// `RestorePending` for the host to service (all versions, v3 included).
+fn run_until_input(machine: &mut Machine) -> RunStop {
     loop {
         match machine.step() {
-            StepResult::Quit => return (RunStop::Quit, v3_failed),
-            StepResult::Fault => return (RunStop::Quit, v3_failed),
-            StepResult::NeedLine { .. } => return (RunStop::Input(InputKind::Line), v3_failed),
-            StepResult::NeedChar => return (RunStop::Input(InputKind::Char), v3_failed),
-            StepResult::SaveRequest => {
-                if machine.mem.version() <= 3 {
-                    machine.complete_save(false);
-                    v3_failed = true;
-                } else {
-                    return (RunStop::SavePending, v3_failed);
-                }
-            }
-            StepResult::RestoreRequest => {
-                if machine.mem.version() <= 3 {
-                    machine.complete_restore_failure();
-                    v3_failed = true;
-                } else {
-                    return (RunStop::RestorePending, v3_failed);
-                }
-            }
-            StepResult::Restart => {
-                // Restart is not supported in headless mode; treat as quit.
-                return (RunStop::Quit, v3_failed);
-            }
+            StepResult::Quit => return RunStop::Quit,
+            StepResult::Fault => return RunStop::Quit,
+            StepResult::NeedLine { .. } => return RunStop::Input(InputKind::Line),
+            StepResult::NeedChar => return RunStop::Input(InputKind::Char),
+            StepResult::SaveRequest => return RunStop::SavePending,
+            StepResult::RestoreRequest => return RunStop::RestorePending,
+            StepResult::Restart => return RunStop::Quit, // not supported headless; treat as quit
             StepResult::Continue => {}
         }
     }
@@ -1655,18 +1628,31 @@ mod tests {
     }
 
     #[test]
-    fn v3_ingame_save_still_auto_fails_with_info() {
-        // v3 keeps the host-mediated message; the VM auto-fails the request.
-        // v3 save is a BRANCH instruction (0OP:0x05 short form 0xB5 + 1 branch byte).
-        let mut buf = read_char_story_v5();
-        buf[0x00] = 3;
-        buf[0x44] = 0xB5; // 0OP:0x05 save (branch form in v3)
-        buf[0x45] = 0xC0; // branch: on-true, offset that lands on quit (see note)
-        buf[0x46] = 0xBA; // quit
-        let mut sess = GameSession::new(buf, true, false, None).expect("new");
+    fn v3_ingame_save_and_restore_bubble_pending_io() {
+        // v3 @save/@restore are BRANCH instructions (0OP:0x05/0x06 = 0xB5/0xB6 +
+        // 1 branch byte). After the standard-PC fix they bubble pending_io like v4+.
+        let mut save_buf = read_char_story_v5();
+        save_buf[0x00] = 3;              // version 3 (branch form)
+        save_buf[0x44] = 0xB5;           // 0OP:0x05 save (branch form)
+        save_buf[0x45] = 0x80 | 0x40 | 2; // branch on-true, short form, offset 2 -> quit at 0x46
+        save_buf[0x46] = 0xBA;           // quit
+        let mut sess = GameSession::new(save_buf, true, false, None).expect("new");
         let r = sess.submit_char(b'x');
-        assert_eq!(r.pending_io, None, "v3 never bubbles pending_io");
-        assert!(r.info.is_some(), "v3 keeps the 'isn't wired' info line");
+        assert_eq!(r.pending_io, Some(PendingIo::Save), "v3 in-game save now bubbles pending_io");
+        assert!(r.info.is_none(), "no 'isn't wired' info line for v3 anymore");
+        let r2 = sess.resume_save(true);
+        assert!(r2.quit, "resume_save completes the branch and runs to quit");
+
+        let mut restore_buf = read_char_story_v5();
+        restore_buf[0x00] = 3;
+        restore_buf[0x44] = 0xB6;           // 0OP:0x06 restore (branch form)
+        restore_buf[0x45] = 0x80 | 0x40 | 2; // branch byte (unused on cancel)
+        restore_buf[0x46] = 0xBA;           // quit
+        let mut sess = GameSession::new(restore_buf, true, false, None).expect("new");
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Restore), "v3 in-game restore now bubbles pending_io");
+        let r2 = sess.resume_restore(None);
+        assert!(r2.quit, "cancelled v3 restore falls through to quit");
     }
 
     #[test]
