@@ -235,9 +235,9 @@ fn default_undo_levels() -> usize { 16 }
 
 fn default_virtual_screen_cols() -> u16 { 80 }
 fn default_virtual_screen_rows() -> u16 { 24 }
-fn default_split_ratio() -> u16 { 50 }
-fn default_verb_dock_pct() -> u16 { 32 }
-fn default_inv_dock_pct() -> u16 { 33 }
+pub(crate) fn default_split_ratio() -> u16 { 50 }
+pub(crate) fn default_verb_dock_pct() -> u16 { 32 }
+pub(crate) fn default_inv_dock_pct() -> u16 { 33 }
 fn default_honor_game_colours() -> bool { true }
 fn default_acceleration() -> bool { true }
 fn default_honor_timed_input() -> bool { true }

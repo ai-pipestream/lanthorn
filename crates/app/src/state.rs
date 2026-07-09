@@ -877,6 +877,17 @@ pub enum Layout {
     MapFull,
 }
 
+/// Which pane the interactive resize mode is currently adjusting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeTarget {
+    /// The story/map split ratio (`Layout::Split` only).
+    StoryMap,
+    /// The verb-menu dock width.
+    VerbDock,
+    /// The inventory dock height.
+    InvDock,
+}
+
 /// Percentage-based pane sizes, seeded from `Config` at startup and mirrored
 /// here for the layout code to consume. `config` stays the persisted source
 /// of truth; this is the runtime-facing copy.
@@ -1091,6 +1102,11 @@ pub struct AppState {
 
     /// Percentage-based pane sizes, seeded from `config` at startup.
     pub pane_sizes: PaneSizes,
+
+    /// True while the interactive pane-resize mode is active (leader `z`).
+    pub resize_mode: bool,
+    /// Which visible pane resize mode is currently adjusting.
+    pub resize_target: ResizeTarget,
 
     /// Active config-screen modal state. `None` means the screen is closed.
     pub config_screen: Option<ConfigScreenState>,
@@ -1330,6 +1346,8 @@ impl Default for AppState {
             verb_menu: None,
             config: crate::config::Config::default(),
             pane_sizes: PaneSizes { split_ratio: 50, verb_dock_pct: 32, inv_dock_pct: 33 },
+            resize_mode: false,
+            resize_target: ResizeTarget::StoryMap,
             config_screen: None,
             style_editor: None,
             glyph_picker: None,
@@ -1560,6 +1578,7 @@ impl AppState {
             || self.launch_dialog
             || self.hints.is_some()
             || self.replay.is_some()
+            || self.resize_mode
     }
 
     /// Set the explicit layer override. `None` means follow the current room's layer.
@@ -1603,6 +1622,51 @@ impl AppState {
             Layout::MapFull => Layout::TranscriptFull,
             Layout::TranscriptFull => Layout::Split,
         };
+    }
+
+    /// Which panes are currently visible and eligible for resize mode, in
+    /// Tab-cycle order: StoryMap (Split layout only), VerbDock (menu open),
+    /// InvDock (inventory shown).
+    pub fn resize_targets_visible(&self) -> Vec<ResizeTarget> {
+        let mut targets = Vec::new();
+        if self.layout == Layout::Split {
+            targets.push(ResizeTarget::StoryMap);
+        }
+        if self.verb_menu.is_some() {
+            targets.push(ResizeTarget::VerbDock);
+        }
+        if self.show_inventory {
+            targets.push(ResizeTarget::InvDock);
+        }
+        targets
+    }
+
+    /// Move `resize_target` to the next (`forward`) or previous visible target,
+    /// wrapping. Snaps to the first visible target if the current one isn't
+    /// visible; leaves it unchanged if nothing is visible.
+    pub fn cycle_resize_target(&mut self, forward: bool) {
+        let targets = self.resize_targets_visible();
+        let Some(first) = targets.first() else { return };
+        match targets.iter().position(|t| *t == self.resize_target) {
+            Some(idx) => {
+                let n = targets.len();
+                let next = if forward { (idx + 1) % n } else { (idx + n - 1) % n };
+                self.resize_target = targets[next];
+            }
+            None => self.resize_target = *first,
+        }
+    }
+
+    /// Reset all pane sizes to their config defaults and mirror into `config`.
+    pub fn reset_pane_sizes(&mut self) {
+        self.pane_sizes = PaneSizes {
+            split_ratio: crate::config::default_split_ratio(),
+            verb_dock_pct: crate::config::default_verb_dock_pct(),
+            inv_dock_pct: crate::config::default_inv_dock_pct(),
+        };
+        self.config.split_ratio = self.pane_sizes.split_ratio;
+        self.config.verb_dock_pct = self.pane_sizes.verb_dock_pct;
+        self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
     }
 
     /// Zoom in one fine step (toward Boxes). Clamps at level 8 (Boxes).

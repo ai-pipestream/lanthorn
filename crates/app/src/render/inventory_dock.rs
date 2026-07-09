@@ -35,11 +35,15 @@ pub fn inventory_dock_height(target_h: u16, fraction: f64) -> u16 {
 ///
 /// `area` is the currently-animated band height, which may be shorter than
 /// the full target while mid-slide; content simply clips to whatever fits.
-pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, buf: &mut Buffer) {
+///
+/// `highlighted` is true when interactive resize mode has this dock as its
+/// target (draws the border with the `focused_border` accent instead).
+pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, highlighted: bool, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let style = colors.inventory_dock;
+    let border_color = if highlighted { colors.focused_border } else { style };
 
     // Fill the band's background first so panes behind it never show through
     // while it's mid-slide (shorter than its final bordered content needs).
@@ -51,7 +55,7 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, b
         }
     }
 
-    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), style);
+    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), border_color);
 
     // Title, centered on the top border row (only meaningful once the band is
     // tall enough for the border to actually be drawn).
@@ -101,7 +105,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let colors = ColorScheme::default();
         let items = vec!["lamp".to_string(), "sword".to_string()];
-        draw_inventory_dock(&items, area, &colors, &mut buf);
+        draw_inventory_dock(&items, area, &colors, false, &mut buf);
 
         assert!(buf_contains(&buf, "┌"), "top-left border corner");
         assert!(buf_contains(&buf, "┐"), "top-right border corner");
@@ -117,7 +121,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 5);
         let mut buf = Buffer::empty(area);
         let colors = ColorScheme::default();
-        draw_inventory_dock(&[], area, &colors, &mut buf);
+        draw_inventory_dock(&[], area, &colors, false, &mut buf);
 
         assert!(buf_contains(&buf, "(empty)"), "empty placeholder text");
     }
@@ -127,7 +131,7 @@ mod tests {
         let area = Rect::new(0, 0, 0, 0);
         let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
         let colors = ColorScheme::default();
-        draw_inventory_dock(&["lamp".to_string()], area, &colors, &mut buf);
+        draw_inventory_dock(&["lamp".to_string()], area, &colors, false, &mut buf);
         // No assertion beyond "did not panic".
     }
 
@@ -137,7 +141,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut colors = ColorScheme::default();
         colors.inventory_dock = Style::new().fg(Color::Rgb(1, 2, 3));
-        draw_inventory_dock(&["lamp".to_string()], area, &colors, &mut buf);
+        draw_inventory_dock(&["lamp".to_string()], area, &colors, false, &mut buf);
         assert_eq!(buf.cell((0, 0)).unwrap().style().fg, Some(Color::Rgb(1, 2, 3)));
     }
 

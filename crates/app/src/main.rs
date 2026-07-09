@@ -553,7 +553,12 @@ fn draw_frame(
             }
             Layout::Split => {
                 // Split 50/50 horizontally with bordered blocks (no divider column).
-                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                // In resize mode, the StoryMap target covers this whole split, so
+                // both borders pick up the `focused_border` accent to show it's live.
+                let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
+                let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
+                let map_border_color = if resize_split_hl { state.colors.focused_border } else { state.colors.map_border };
+                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 story_scrollbar = m.scrollbar;
@@ -569,7 +574,7 @@ fn draw_frame(
                 }
                 story_area = story_fp.content;
 
-                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -668,7 +673,8 @@ fn draw_frame(
 
         // ── Inventory dock panel ──────────────────────────────────────────────
         if pane_layout.inv_dock.height > 0 {
-            app::render::inventory_dock::draw_inventory_dock(&inv_items, pane_layout.inv_dock, &state.colors, buf);
+            let inv_resize_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::InvDock;
+            app::render::inventory_dock::draw_inventory_dock(&inv_items, pane_layout.inv_dock, &state.colors, inv_resize_hl, buf);
         }
 
         // ── Verb dock panel ────────────────────────────────────────────────────
@@ -713,6 +719,14 @@ fn draw_frame(
                 PromptKind::ConfigEditPath { .. } => "Config path",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
+        } else if state.resize_mode {
+            use app::state::ResizeTarget;
+            let t = match state.resize_target {
+                ResizeTarget::StoryMap => "story/map",
+                ResizeTarget::VerbDock => "verb dock",
+                ResizeTarget::InvDock => "inventory",
+            };
+            format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")
         } else {
             let leader_hint = format!("{}: menu", state.hotkeys.prefix.label());
             // Reserve room for the leader hint + " | " separator so the composed
@@ -3036,6 +3050,10 @@ fn main() {
         let style_save = matches!(action, Action::StyleSave);
         let style_save_game = matches!(action, Action::StyleSaveGame);
 
+        // Note whether this action exits or resets resize mode (persist pane sizes
+        // afterward; apply_action already mirrors state.pane_sizes into state.config).
+        let resize_persist = matches!(action, Action::ResizeExit | Action::ResizeReset);
+
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
             state.config_screen.as_ref().map(|cs| cs.working.clone())
@@ -3611,6 +3629,13 @@ fn main() {
         persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
         if quit {
             break;
+        }
+
+        // After apply_action: if resize mode was just exited or reset, persist the
+        // (possibly changed) pane sizes to config.toml.
+        if resize_persist {
+            let user_dir = state.config.user_dir.clone();
+            let _ = app::config::write_config(&user_dir, &state.config);
         }
 
         // After apply_action: if gallery was just closed, write the resolved look to

@@ -375,7 +375,7 @@ const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
     ("View", &[
         ('i', "toggle-inspector"), ('f', "open-gallery"), ('b', "open-verb-menu"),
         ('w', "open-config"), ('y', "toggle-inventory"), ('j', "toggle-alignment"),
-        ('q', "toggle-portal-labels"),
+        ('q', "toggle-portal-labels"), ('z', "resize-panes"), ('k', "reset-pane-size"),
     ]),
 ];
 
@@ -854,7 +854,7 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<char> = letters.iter().copied().collect();
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
-        assert_eq!(letters.len(), 24, "expected 24 authored leader letters");
+        assert_eq!(letters.len(), 26, "expected 26 authored leader letters");
     }
 
     #[test]
@@ -862,7 +862,9 @@ mod tests {
         let layout = HotkeyLayout::default();
         assert_eq!(layout.leader_command('t'), Some("tidy-map"));
         assert_eq!(layout.leader_command('c'), Some("cycle-layer next"));
-        assert_eq!(layout.leader_command('z'), None);
+        assert_eq!(layout.leader_command('z'), Some("resize-panes"));
+        assert_eq!(layout.leader_command('k'), Some("reset-pane-size"));
+        assert_eq!(layout.leader_command('1'), None);
     }
 
     #[test]

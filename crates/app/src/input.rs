@@ -70,6 +70,25 @@ pub enum VerbMenuNavKind {
     End,
 }
 
+// ── ResizeNavKind ─────────────────────────────────────────────────────────────
+
+/// Navigation kind for `Action::ResizeNav`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeNavKind {
+    /// Switch to the next visible pane (Tab).
+    NextTarget,
+    /// Switch to the previous visible pane (Shift+Tab).
+    PrevTarget,
+    /// Shrink the target horizontally (or its width).
+    Left,
+    /// Grow the target horizontally (or its width).
+    Right,
+    /// Grow the target vertically (or its height).
+    Up,
+    /// Shrink the target vertically (or its height).
+    Down,
+}
+
 // ── Action enum ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -230,6 +249,14 @@ pub enum Action {
     VerbMenuPick,
     /// Close the verb menu, leaving `state.input` intact.
     VerbMenuClose,
+    /// Enter interactive pane-resize mode, selecting the first visible pane.
+    ResizePanes,
+    /// Exit resize mode without resetting sizes.
+    ResizeExit,
+    /// Reset all pane sizes to their config defaults.
+    ResizeReset,
+    /// Navigate resize mode: `Tab`/`Shift+Tab` switches the target pane; arrows adjust it.
+    ResizeNav(ResizeNavKind),
     /// Open the live style editor full-screen mode.
     OpenStyleEditor,
     /// Cancel the style editor without saving (drops the working doc).
@@ -457,6 +484,13 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
     if state.hotkey_dialog {
         return hotkey_dialog_key_to_action(state, key);
+    }
+
+    // 6.6. Resize mode: Tab cycles the target pane, arrows adjust it, 0 resets,
+    // Esc/Enter exits. Comes after the modal checks above but before the Tab
+    // intercept below so resize mode owns Tab while active.
+    if state.resize_mode {
+        return KeyResolve::Action(resize_mode_key_to_action(key));
     }
 
     // 6.5. Room panel close: Esc or Enter while a panel is open.
@@ -1220,6 +1254,26 @@ fn verb_menu_key_to_action(key: KeyEvent) -> Action {
         KeyCode::End => Action::VerbMenuNav(VerbMenuNavKind::End),
         KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
         KeyCode::Esc => Action::VerbMenuClose,
+        _ => Action::None,
+    }
+}
+
+// ── Internal: resize-mode key routing ────────────────────────────────────────
+
+/// Hardwired resize-mode sub-mode keys (not rebindable).
+///
+/// Tab / Shift+Tab → next/prev visible pane; arrows → grow/shrink the target;
+/// `0` → reset to defaults; Esc/Enter → exit.
+fn resize_mode_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Tab => Action::ResizeNav(ResizeNavKind::NextTarget),
+        KeyCode::BackTab => Action::ResizeNav(ResizeNavKind::PrevTarget),
+        KeyCode::Left => Action::ResizeNav(ResizeNavKind::Left),
+        KeyCode::Right => Action::ResizeNav(ResizeNavKind::Right),
+        KeyCode::Up => Action::ResizeNav(ResizeNavKind::Up),
+        KeyCode::Down => Action::ResizeNav(ResizeNavKind::Down),
+        KeyCode::Char('0') => Action::ResizeReset,
+        KeyCode::Esc | KeyCode::Enter => Action::ResizeExit,
         _ => Action::None,
     }
 }
@@ -2605,6 +2659,53 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // slide-out animation finishes.
             state.verb_dock.toggle_to(false, false);
             state.verb_dock.arm(&state.config.animation);
+        }
+
+        // ── Resize mode actions ───────────────────────────────────────────────
+
+        Action::ResizePanes => {
+            let visible = state.resize_targets_visible();
+            if let Some(first) = visible.first() {
+                state.hotkey_dialog = false;
+                state.resize_mode = true;
+                state.resize_target = *first;
+            }
+        }
+
+        Action::ResizeExit => {
+            state.resize_mode = false;
+        }
+
+        Action::ResizeReset => {
+            state.reset_pane_sizes();
+        }
+
+        Action::ResizeNav(ResizeNavKind::NextTarget) => state.cycle_resize_target(true),
+        Action::ResizeNav(ResizeNavKind::PrevTarget) => state.cycle_resize_target(false),
+
+        Action::ResizeNav(dir) => {
+            const STEP: u16 = 3;
+            use ResizeNavKind::*;
+            match state.resize_target {
+                crate::state::ResizeTarget::StoryMap => match dir {
+                    Left => state.pane_sizes.split_ratio = state.pane_sizes.split_ratio.saturating_sub(STEP).max(20),
+                    Right => state.pane_sizes.split_ratio = (state.pane_sizes.split_ratio + STEP).min(80),
+                    _ => {}
+                },
+                crate::state::ResizeTarget::VerbDock => match dir {
+                    Left => state.pane_sizes.verb_dock_pct = state.pane_sizes.verb_dock_pct.saturating_sub(STEP).max(10),
+                    Right => state.pane_sizes.verb_dock_pct = (state.pane_sizes.verb_dock_pct + STEP).min(60),
+                    _ => {}
+                },
+                crate::state::ResizeTarget::InvDock => match dir {
+                    Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(80),
+                    Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(10),
+                    _ => {}
+                },
+            }
+            state.config.split_ratio = state.pane_sizes.split_ratio;
+            state.config.verb_dock_pct = state.pane_sizes.verb_dock_pct;
+            state.config.inv_dock_pct = state.pane_sizes.inv_dock_pct;
         }
 
         // ── Style editor actions ──────────────────────────────────────────────
@@ -4095,9 +4196,11 @@ mod tests {
 
     #[test]
     fn leader_unbound_letter_closes() {
+        // All 26 letters are authored leader letters (SQ-0237 claimed the last
+        // two, 'z' and 'k'), so use a digit to exercise the "unbound" path.
         let mut s = AppState::default();
         s.hotkey_dialog = true;
-        assert!(matches!(key_to_command(&s, key(KeyCode::Char('z'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
+        assert!(matches!(key_to_command(&s, key(KeyCode::Char('1'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
     }
 
     #[test]
@@ -6338,6 +6441,153 @@ mod tests {
         assert!(s.verb_menu.is_none(), "content should be cleared once the slide-out has settled");
     }
 
+    // ── SQ-0237: interactive pane resize mode ─────────────────────────────────
+
+    #[test]
+    fn resize_panes_enters_mode_targeting_story_map() {
+        // Default state is Layout::Split with no verb menu/inventory, so
+        // StoryMap is the only (and first) visible target.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        assert!(s.resize_mode);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap);
+    }
+
+    #[test]
+    fn resize_nav_right_grows_split_ratio_and_clamps_at_80() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.split_ratio, 50);
+        apply_action(Action::ResizeNav(ResizeNavKind::Right), &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.split_ratio, 53);
+        assert_eq!(s.config.split_ratio, 53, "config must mirror pane_sizes after nav");
+        for _ in 0..20 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Right), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.split_ratio, 80, "clamped at 80");
+        assert_eq!(s.config.split_ratio, 80);
+    }
+
+    #[test]
+    fn resize_nav_left_shrinks_split_ratio_to_floor_20() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        for _ in 0..20 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Left), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.split_ratio, 20, "clamped at floor 20");
+        assert_eq!(s.config.split_ratio, 20);
+    }
+
+    #[test]
+    fn resize_nav_up_on_inv_dock_target_raises_inv_dock_pct_clamped_at_80() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.show_inventory = true;
+        s.resize_mode = true;
+        s.resize_target = crate::state::ResizeTarget::InvDock;
+        assert_eq!(s.pane_sizes.inv_dock_pct, 33);
+        apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.inv_dock_pct, 36);
+        assert_eq!(s.config.inv_dock_pct, 36);
+        for _ in 0..20 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.inv_dock_pct, 80, "clamped at 80");
+    }
+
+    #[test]
+    fn resize_reset_restores_defaults_and_mirrors_config() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        apply_action(Action::ResizeNav(ResizeNavKind::Right), &mut s, &mut mapper);
+        assert_ne!(s.pane_sizes.split_ratio, 50);
+
+        apply_action(Action::ResizeReset, &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.split_ratio, 50);
+        assert_eq!(s.pane_sizes.verb_dock_pct, 32);
+        assert_eq!(s.pane_sizes.inv_dock_pct, 33);
+        assert_eq!(s.config.split_ratio, 50);
+        assert_eq!(s.config.verb_dock_pct, 32);
+        assert_eq!(s.config.inv_dock_pct, 33);
+    }
+
+    #[test]
+    fn resize_exit_clears_resize_mode() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        assert!(s.resize_mode);
+        apply_action(Action::ResizeExit, &mut s, &mut mapper);
+        assert!(!s.resize_mode);
+    }
+
+    #[test]
+    fn resize_panes_is_noop_when_nothing_visible() {
+        // TranscriptFull with no verb menu/inventory → no visible targets.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.layout = crate::state::Layout::TranscriptFull;
+        apply_action(Action::ResizePanes, &mut s, &mut mapper);
+        assert!(!s.resize_mode, "no visible pane → resize mode does not open");
+    }
+
+    #[test]
+    fn resize_targets_visible_matches_spec_order() {
+        let mut s = AppState::default();
+        assert_eq!(s.resize_targets_visible(), vec![crate::state::ResizeTarget::StoryMap]);
+
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        assert_eq!(
+            s.resize_targets_visible(),
+            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::VerbDock]
+        );
+
+        s.show_inventory = true;
+        assert_eq!(
+            s.resize_targets_visible(),
+            vec![
+                crate::state::ResizeTarget::StoryMap,
+                crate::state::ResizeTarget::VerbDock,
+                crate::state::ResizeTarget::InvDock,
+            ]
+        );
+
+        s.layout = crate::state::Layout::TranscriptFull;
+        s.verb_menu = None;
+        s.show_inventory = false;
+        assert!(s.resize_targets_visible().is_empty());
+    }
+
+    #[test]
+    fn cycle_resize_target_wraps_and_skips_non_visible() {
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        s.show_inventory = true;
+        s.resize_target = crate::state::ResizeTarget::StoryMap;
+
+        s.cycle_resize_target(true);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::VerbDock);
+        s.cycle_resize_target(true);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock);
+        s.cycle_resize_target(true);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap, "wraps forward");
+
+        s.cycle_resize_target(false);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::InvDock, "wraps backward");
+
+        // Current target not visible → snaps to the first visible one.
+        s.verb_menu = None;
+        s.show_inventory = false;
+        s.resize_target = crate::state::ResizeTarget::InvDock;
+        s.cycle_resize_target(true);
+        assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap);
+    }
+
     #[test]
     fn verb_menu_nav_tab_and_arrows_switch_pane() {
         use crate::state::VerbMenuPane;
@@ -7184,6 +7434,43 @@ mod tests {
     fn verb_menu_tab_still_navigates_panes() {
         let a = verb_menu_key_to_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(matches!(a, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
+    }
+
+    // ── SQ-0237: resize-mode key routing ──────────────────────────────────────
+
+    #[test]
+    fn resize_mode_key_to_action_maps_tab_and_backtab() {
+        assert!(matches!(
+            resize_mode_key_to_action(key(KeyCode::Tab)),
+            Action::ResizeNav(ResizeNavKind::NextTarget)
+        ));
+        assert!(matches!(
+            resize_mode_key_to_action(key(KeyCode::BackTab)),
+            Action::ResizeNav(ResizeNavKind::PrevTarget)
+        ));
+    }
+
+    #[test]
+    fn resize_mode_key_to_action_maps_arrows() {
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Left)), Action::ResizeNav(ResizeNavKind::Left)));
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Right)), Action::ResizeNav(ResizeNavKind::Right)));
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Up)), Action::ResizeNav(ResizeNavKind::Up)));
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Down)), Action::ResizeNav(ResizeNavKind::Down)));
+    }
+
+    #[test]
+    fn resize_mode_key_to_action_maps_reset_and_exit() {
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Char('0'))), Action::ResizeReset));
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Esc)), Action::ResizeExit));
+        assert!(matches!(resize_mode_key_to_action(key(KeyCode::Enter)), Action::ResizeExit));
+    }
+
+    #[test]
+    fn resize_mode_intercepts_tab_before_focus_toggle() {
+        let mut s = AppState::default();
+        s.resize_mode = true;
+        let a = key_to_action(&s, key(KeyCode::Tab));
+        assert!(matches!(a, Action::ResizeNav(ResizeNavKind::NextTarget)));
     }
 
     #[test]

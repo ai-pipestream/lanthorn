@@ -318,6 +318,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-status-bar", category: Category::View, context: Context::Global,
         usage: "toggle-status-bar", description: "toggle the status/score bar",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleStatusBar) },
+    CommandSpec { name: "resize-panes", category: Category::View, context: Context::Global,
+        usage: "resize-panes", description: "enter interactive pane-resize mode",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ResizePanes) },
+    CommandSpec { name: "reset-pane-size", category: Category::View, context: Context::Global,
+        usage: "reset-pane-size", description: "reset all pane sizes to their defaults",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ResizeReset) },
 
     // ── Transcript ────────────────────────────────────────────────────────
     CommandSpec { name: "search-transcript", category: Category::Transcript, context: Context::Global,
@@ -646,9 +652,9 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (53 commands: Game 12, Map 21, View 4,
+        // Total count matches the spec table (55 commands: Game 12, Map 21, View 6,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 53, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 55, "registry must match the spec's Full command table");
     }
 
     #[test]
