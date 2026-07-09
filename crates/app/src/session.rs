@@ -1734,6 +1734,45 @@ mod tests {
         assert!(any_drawn, "after in-game RESTORE the upper-window grid must be non-empty (redraw)");
     }
 
+    // Real v3 game: an in-game @save then @restore must round-trip through the
+    // standard branch-form path. Oracle: replaying the same command after a
+    // restore reproduces the pre-restore transcript exactly.
+    #[test]
+    fn minizork_v3_ingame_save_restore_round_trips() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture.exists() {
+            panic!("minizork.z3 fixture missing at {} — this smoke test must run", fixture.display());
+        }
+        let story = std::fs::read(&fixture).expect("read minizork.z3");
+        let mut sess = GameSession::new(story, true, false, None).expect("new minizork.z3");
+
+        // Reach a stable prompt, then @save via the game's save verb.
+        let mut blob: Option<Vec<u8>> = None;
+        for cmd in ["open mailbox", "save"] {
+            let r = sess.submit(cmd);
+            if r.pending_io == Some(PendingIo::Save) {
+                blob = Some(sess.machine.save_quetzal());
+                let _ = sess.resume_save(true); // host "wrote" the file; @save returns success
+                break;
+            }
+            assert!(!r.quit, "unexpected quit before reaching @save");
+        }
+        let blob = blob.expect("minizork reached @save via 'save'");
+
+        // Probe command on the post-save branch.
+        let t1 = sess.submit("north").transcript;
+
+        // Restore via the game's @restore, supplying the captured blob.
+        let r = sess.submit("restore");
+        assert_eq!(r.pending_io, Some(PendingIo::Restore), "'restore' reaches @restore");
+        sess.resume_restore(Some(&blob));
+
+        // Same probe after restore must reproduce the same transcript.
+        let t2 = sess.submit("north").transcript;
+        assert_eq!(t2, t1, "post-restore continuation matches the pre-restore continuation");
+    }
+
     // ── czech.z5 smoke test ───────────────────────────────────────────────────
     //
     // czech.z5 is an auto-running opcode test suite: it runs to `Quit` without
