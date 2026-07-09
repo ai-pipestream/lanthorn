@@ -117,6 +117,14 @@ pub fn render_story_pane(
 
     // Generic multi-window path.
     let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi);
+
+    // Prune the graphics protocol cache to only the windows still live in the
+    // tree, so a closed window's stale cache entry can't be matched by a
+    // reopened window reusing the same id (SQ-0174).
+    let mut live = std::collections::HashSet::new();
+    collect_graphics_ids(&model.root, &mut live);
+    state.graphics_render.borrow_mut().retain_live(&live);
+
     metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height })
 }
 
@@ -209,6 +217,20 @@ fn collect_graphics_rects(node: &WinNode, colors: &ColorScheme, area: Rect, out:
         }
         WinNode::Graphics(_) => out.push(area),
         WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
+    }
+}
+
+/// Collect the window ids of all live graphics windows in the tree.
+fn collect_graphics_ids(node: &WinNode, out: &mut std::collections::HashSet<u32>) {
+    match node {
+        WinNode::Graphics(gw) => {
+            out.insert(gw.win);
+        }
+        WinNode::Pair { first, second, .. } => {
+            collect_graphics_ids(first, out);
+            collect_graphics_ids(second, out);
+        }
+        _ => {}
     }
 }
 
@@ -729,5 +751,24 @@ mod tests {
         let has_pixels = (area.top()..area.bottom()).any(|y| (area.left()..area.right())
             .any(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}")));
         assert!(has_pixels, "graphics canvas should render half-block pixels");
+    }
+
+    #[test]
+    fn collect_graphics_ids_finds_every_graphics_leaf() {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+        let other = WinNode::Graphics(crate::engine::GraphicsWindow {
+            win: 7,
+            canvas: std::sync::Arc::new(img),
+            version: 1,
+        });
+        let tree = WinNode::Pair {
+            vertical: false,
+            split: Split { fixed: 10 },
+            first: Box::new(graphics_node()), // win: 1
+            second: Box::new(other),
+        };
+        let mut ids = std::collections::HashSet::new();
+        collect_graphics_ids(&tree, &mut ids);
+        assert_eq!(ids, std::collections::HashSet::from([1, 7]));
     }
 }

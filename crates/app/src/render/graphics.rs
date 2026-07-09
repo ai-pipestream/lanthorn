@@ -52,4 +52,54 @@ impl GraphicsRender {
             Image::new(proto).render(dest, buf);
         }
     }
+
+    /// Drop cache entries for windows no longer live (evicts on close; bounds growth).
+    pub fn retain_live(&mut self, live: &std::collections::HashSet<u32>) {
+        self.cache.retain(|win, _| live.contains(win));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(win: u32) -> GraphicsWindow {
+        GraphicsWindow {
+            win,
+            canvas: std::sync::Arc::new(image::RgbaImage::new(1, 1)),
+            version: 1,
+        }
+    }
+
+    fn populate(gr: &mut GraphicsRender, picker: &Picker, wins: &[u32]) {
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        for &win in wins {
+            gr.render(picker, &window(win), area, Style::default(), &mut buf);
+        }
+    }
+
+    #[test]
+    fn retain_live_drops_closed_windows() {
+        // halfblocks() needs no terminal query — deterministic in tests.
+        let picker = Picker::halfblocks();
+        let mut gr = GraphicsRender::default();
+        populate(&mut gr, &picker, &[1, 2]);
+        assert_eq!(gr.cache.len(), 2);
+
+        gr.retain_live(&std::collections::HashSet::from([1]));
+        assert_eq!(gr.cache.len(), 1);
+        assert!(gr.cache.contains_key(&1));
+    }
+
+    #[test]
+    fn retain_live_empty_clears_all() {
+        let picker = Picker::halfblocks();
+        let mut gr = GraphicsRender::default();
+        populate(&mut gr, &picker, &[1, 2]);
+        assert_eq!(gr.cache.len(), 2);
+
+        gr.retain_live(&std::collections::HashSet::new());
+        assert_eq!(gr.cache.len(), 0);
+    }
 }
