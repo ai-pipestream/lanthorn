@@ -1771,6 +1771,72 @@ mod tests {
         assert_eq!(t2, t1, "post-restore continuation matches the pre-restore continuation");
     }
 
+    // Real v3 game, real `.qzl` FILE: extends the test above by exercising the
+    // on-disk game-save format end to end. `persist_files::save_game_named` writes
+    // the descriptor-PC blob to a real `.qzl` file; a FRESH session's machine is
+    // then restored from that file via `persist_files::restore_game` (Task 1's
+    // descriptor-completion path) — not `resume_restore` — so the actual
+    // file-format restore function is what's under test.
+    // Oracle (SQ-0158): `play(prefix).probe()` == `restore(qzl file).probe()`.
+    #[test]
+    fn minizork_v3_qzl_file_round_trips_end_to_end() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture.exists() {
+            panic!("minizork.z3 fixture missing at {} — this smoke test must run", fixture.display());
+        }
+        let story = std::fs::read(&fixture).expect("read minizork.z3");
+        let mut sess = GameSession::new(story.clone(), true, false, None).expect("new minizork.z3");
+
+        let dir = std::env::temp_dir().join(format!("babelmap-task5-qzl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        // Reach a stable prompt, then @save via the game's save verb. Capture the
+        // descriptor-PC blob AND write it to a real `.qzl` file at the same paused
+        // moment, before resume_save continues execution and mutates the machine.
+        let mut blob: Option<Vec<u8>> = None;
+        let mut qzl_path: Option<std::path::PathBuf> = None;
+        for cmd in ["open mailbox", "save"] {
+            let r = sess.submit(cmd);
+            if r.pending_io == Some(PendingIo::Save) {
+                blob = Some(sess.machine.save_quetzal());
+                qzl_path = Some(
+                    crate::persist_files::save_game_named(&dir, "MINIZORK-TEST", "task5", &sess.machine)
+                        .expect("save_game_named writes the .qzl file"),
+                );
+                let _ = sess.resume_save(true); // host "wrote" the file; @save returns success
+                break;
+            }
+            assert!(!r.quit, "unexpected quit before reaching @save");
+        }
+        let blob = blob.expect("minizork reached @save via 'save'");
+        let qzl_path = qzl_path.expect("save_game_named ran");
+        assert!(qzl_path.to_string_lossy().ends_with(".qzl"), "game save is a .qzl file");
+
+        let bytes_from_disk = std::fs::read(&qzl_path).expect("read the .qzl file back");
+        assert_eq!(bytes_from_disk, blob, ".qzl file bytes match the captured save_quetzal() blob");
+
+        // Reference leg: play(prefix).probe() — continue the SAME session past the save.
+        let t1 = sess.submit("north").transcript;
+        assert!(t1.contains("North of House"), "probe must reveal real room state, got: {t1:?}");
+
+        // Restore leg: a FRESH session's machine, restored straight from the real
+        // `.qzl` file via persist_files::restore_game.
+        let mut sess2 = GameSession::new(story, true, false, None).expect("new minizork.z3 (fresh)");
+        crate::persist_files::restore_game(&qzl_path, &mut sess2.machine)
+            .expect("restore_game completes the .qzl descriptor");
+        // Run forward to the next input request (mirrors resume_restore's own
+        // run_until_input) and sync the session's pending/quit bookkeeping.
+        let stop = run_until_input(&mut sess2.machine);
+        let _ = sess2.finish_turn(stop); // drains stray intro/restore text, not asserted
+
+        // restore(qzl file).probe() — same probe command on the restored session.
+        let t2 = sess2.submit("north").transcript;
+        assert_eq!(t2, t1, "restore(qzl file).probe() must equal play(prefix).probe()");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── czech.z5 smoke test ───────────────────────────────────────────────────
     //
     // czech.z5 is an auto-running opcode test suite: it runs to `Quit` without
