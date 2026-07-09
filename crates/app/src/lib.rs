@@ -25,6 +25,7 @@ pub mod export_svg;
 pub mod ifid;
 pub mod input;
 pub mod keymap;
+pub mod layout;
 pub mod list_scroll;
 pub mod map_dump;
 pub mod persist_files;

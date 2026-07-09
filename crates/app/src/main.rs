@@ -11,7 +11,7 @@ use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScree
 use mapper::mapper::Mapper;
 use mapper::render::{render as render_map_data, render_layer};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction as LayoutDir, Layout as RatatuiLayout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::Terminal;
 
@@ -452,35 +452,7 @@ fn draw_frame(
         } else {
             Vec::new()
         };
-        let inv_target_h = if inv_visible {
-            app::render::inventory_dock::inventory_dock_target_height(inv_items.len(), full.height)
-        } else {
-            0
-        };
-        let inv_dock_h = app::render::inventory_dock::inventory_dock_height(inv_target_h, state.inv_dock.fraction());
-
-        // ── Change 2: reserve bottom 1 row for help bar (and the inventory
-        // dock band above it) ─────────────────────────────────────────────────
-        let vert = RatatuiLayout::default()
-            .direction(LayoutDir::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(inv_dock_h), Constraint::Length(1)])
-            .split(full);
-        let main_area = vert[0];
-        let inv_dock_area = vert[1];
-        let help_row = vert[2];
-
-        // ── Verb dock: reserve a left band (full height of main_area) that
-        // slides in when toggled, sized from a fixed target width + slide
-        // fraction (mirrors the inventory dock's bottom-slide, but on the left).
-        let verb_visible = state.verb_menu.is_some() || state.verb_dock.active();
-        let verb_target_w = app::render::verbmenu::verb_dock_target_width(verb_visible, main_area.width);
-        let verb_dock_w = app::render::verbmenu::verb_dock_width(verb_target_w, state.verb_dock.fraction());
-        let horiz = RatatuiLayout::default()
-            .direction(LayoutDir::Horizontal)
-            .constraints([Constraint::Length(verb_dock_w), Constraint::Min(0)])
-            .split(main_area);
-        let verb_dock_area = horiz[0];
-        let panes_area = horiz[1];
+        let pane_layout = app::layout::compute_pane_layout(full, state, inv_items.len());
 
         // When a background tidy job is in flight, the map pane border pulses between
         // red and green. This overrides the normal border color (focused or unfocused).
@@ -517,7 +489,7 @@ fn draw_frame(
 
         match state.layout {
             Layout::TranscriptFull => {
-                let story_fp = draw_framed(buf, panes_area, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 story_scrollbar = m.scrollbar;
@@ -545,7 +517,7 @@ fn draw_frame(
                 };
                 let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                 let active_layer = state.active_layer(graph);
-                let map_fp = draw_framed(buf, panes_area, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -569,24 +541,19 @@ fn draw_frame(
                 // Apply pulsing border color overlay when a tidy job is in flight
                 if let Some(pulse_color) = map_border_override {
                     let pulse_style = Style::default().fg(pulse_color);
-                    for cy in panes_area.y..panes_area.bottom() {
-                        if let Some(c) = buf.cell_mut((panes_area.x, cy)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((panes_area.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    for cy in pane_layout.map.y..pane_layout.map.bottom() {
+                        if let Some(c) = buf.cell_mut((pane_layout.map.x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((pane_layout.map.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
                     }
-                    for cx in panes_area.x..panes_area.right() {
-                        if let Some(c) = buf.cell_mut((cx, panes_area.y)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((cx, panes_area.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    for cx in pane_layout.map.x..pane_layout.map.right() {
+                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
                     }
                 }
             }
             Layout::Split => {
                 // Split 50/50 horizontally with bordered blocks (no divider column).
-                let chunks = RatatuiLayout::default()
-                    .direction(LayoutDir::Horizontal)
-                    .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                    .split(panes_area);
-
-                let story_fp = draw_framed(buf, chunks[0], state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 story_scrollbar = m.scrollbar;
@@ -602,7 +569,7 @@ fn draw_frame(
                 }
                 story_area = story_fp.content;
 
-                let map_fp = draw_framed(buf, chunks[1], state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -637,13 +604,13 @@ fn draw_frame(
                 // Apply pulsing border color overlay when a tidy job is in flight
                 if let Some(pulse_color) = map_border_override {
                     let pulse_style = Style::default().fg(pulse_color);
-                    for cy in chunks[1].y..chunks[1].bottom() {
-                        if let Some(c) = buf.cell_mut((chunks[1].x, cy)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((chunks[1].right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                    for cy in pane_layout.map.y..pane_layout.map.bottom() {
+                        if let Some(c) = buf.cell_mut((pane_layout.map.x, cy)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((pane_layout.map.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
                     }
-                    for cx in chunks[1].x..chunks[1].right() {
-                        if let Some(c) = buf.cell_mut((cx, chunks[1].y)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((cx, chunks[1].bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    for cx in pane_layout.map.x..pane_layout.map.right() {
+                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.y)) { c.set_style(pulse_style); }
+                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
                     }
                 }
 
@@ -700,13 +667,13 @@ fn draw_frame(
         }
 
         // ── Inventory dock panel ──────────────────────────────────────────────
-        if inv_dock_h > 0 {
-            app::render::inventory_dock::draw_inventory_dock(&inv_items, inv_dock_area, &state.colors, buf);
+        if pane_layout.inv_dock.height > 0 {
+            app::render::inventory_dock::draw_inventory_dock(&inv_items, pane_layout.inv_dock, &state.colors, buf);
         }
 
         // ── Verb dock panel ────────────────────────────────────────────────────
-        if verb_dock_w > 0 {
-            draw_verb_menu(state, verb_dock_area, buf, &mut modal_list_viewport);
+        if pane_layout.verb_dock.width > 0 {
+            draw_verb_menu(state, pane_layout.verb_dock, buf, &mut modal_list_viewport);
         }
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
@@ -731,7 +698,7 @@ fn draw_frame(
                 f.label,
                 if anim.playing { " \u{25b6}" } else { "" },
             );
-            let hint_width = (help_row.width as usize).saturating_sub(prefix.chars().count() + 3);
+            let hint_width = (pane_layout.help_row.width as usize).saturating_sub(prefix.chars().count() + 3);
             let hints = hint_bar(&state.keymap, &state.hotkeys, Context::Anim, ANIM_HINTS, hint_width);
             format!("{} | {}", prefix, hints)
         } else if let Some(prompt) = &state.prompt {
@@ -750,7 +717,7 @@ fn draw_frame(
             let leader_hint = format!("{}: menu", state.hotkeys.prefix.label());
             // Reserve room for the leader hint + " | " separator so the composed
             // row doesn't overflow help_row.width (mirrors the tidy_anim branch).
-            let w = (help_row.width as usize).saturating_sub(leader_hint.chars().count() + 3);
+            let w = (pane_layout.help_row.width as usize).saturating_sub(leader_hint.chars().count() + 3);
             let rest = match state.focus {
                 Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
                 Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),
@@ -762,12 +729,12 @@ fn draw_frame(
             }
         };
         // Fill help row with reversed style, then draw text.
-        for x in help_row.x..help_row.right() {
-            if let Some(cell) = buf.cell_mut((x, help_row.y)) {
+        for x in pane_layout.help_row.x..pane_layout.help_row.right() {
+            if let Some(cell) = buf.cell_mut((x, pane_layout.help_row.y)) {
                 cell.set_symbol(" ").set_style(help_style);
             }
         }
-        draw_str_clipped(buf, help_row.x, help_row.y, &help_text, help_style, help_row);
+        draw_str_clipped(buf, pane_layout.help_row.x, pane_layout.help_row.y, &help_text, help_style, pane_layout.help_row);
 
         // Modal dialogs center within the graphics-free text region (story text +
         // map together), never over a Glulx graphics window — the terminal image
@@ -868,7 +835,7 @@ fn draw_frame(
             } else if story_area.height > 0 {
                 story_area
             } else {
-                panes_area
+                pane_layout.panes_area()
             };
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
