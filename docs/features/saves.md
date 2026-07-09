@@ -16,7 +16,11 @@
   (the same format other interpreters use), now including v3 (Zork-era) games'
   branch-form `@save`/`@restore`. This is a genuinely different file from the
   emulator's `.babelmap` Save State: the game's `.qzl` holds VM state only, while
-  the `.babelmap` Save State also carries the map, screen, and transcript.
+  the `.babelmap` Save State also carries the map, screen, and transcript. These
+  standard `.qzl` saves are interoperability-tested against `dfrotz` in both
+  directions (babelmap reads dfrotz's saves and vice-versa); run the live suite
+  with `scripts/gen-interop-goldens.sh` or `cargo test -p zvm --test save_interop
+  -- --ignored`. (Glulx save interop is tracked separately in SQ-0229.)
 - **Auto-save** (per turn) and **auto-load** (resume on launch) — both
   configurable.
 - **Rewind / replay / resume** — with `record_turn_history` on, babelmap records
