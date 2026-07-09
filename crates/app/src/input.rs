@@ -6333,7 +6333,7 @@ mod tests {
         let view_group = layout.groups.iter().find(|(title, _)| title == "View");
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
-        assert!(cmds.iter().any(|c| c == "open-verb-menu"), "open-verb-menu should be in View group");
+        assert!(cmds.iter().any(|c| c.1 == "open-verb-menu"), "open-verb-menu should be in View group");
     }
 
     #[test]

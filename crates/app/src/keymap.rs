@@ -416,13 +416,20 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     "nudge-room 0 1",
 ];
 
-/// Default groups for the hotkey dialog (title, registry command names).
-const DEFAULT_GROUPS: &[(&str, &[&str])] = &[
-    ("Layout", &["tidy-map", "animate-tidy", "cycle-layout"]),
-    ("Layers", &["peel-layer", "merge-layer", "cycle-layer", "rename-layer"]),
-    ("Edit", &["rename-room", "edit-notes", "delete-connection", "relabel-edge"]),
-    ("Files", &["open-saves", "open-history", "reset-game", "export-svg", "export-dot", "export-dump"]),
-    ("View", &["toggle-alignment", "toggle-portal-labels", "toggle-inspector", "open-gallery", "toggle-inventory", "open-verb-menu", "open-config"]),
+/// Default groups for the hotkey dialog (title, authored leader-key + full command-string).
+const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
+    ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy"), ('l', "cycle-layout")]),
+    ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next"), ('n', "rename-layer")]),
+    ("Edit", &[('r', "rename-room"), ('o', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
+    ("Files", &[
+        ('s', "open-saves"), ('h', "open-history"), ('x', "reset-game"),
+        ('v', "export-svg"), ('g', "export-dot"), ('u', "export-dump"),
+    ]),
+    ("View", &[
+        ('i', "toggle-inspector"), ('f', "open-gallery"), ('b', "open-verb-menu"),
+        ('w', "open-config"), ('y', "toggle-inventory"), ('j', "toggle-alignment"),
+        ('q', "toggle-portal-labels"),
+    ]),
 ];
 
 /// Runtime layout for the hotkey dialog.
@@ -436,8 +443,8 @@ pub struct HotkeyLayout {
     pub prefix: KeySpec,
     /// Full command-strings that are always available without opening the dialog.
     pub direct: std::collections::HashSet<String>,
-    /// Groups of commands shown in the dialog: (group title, command names).
-    pub groups: Vec<(String, Vec<String>)>,
+    /// Groups of commands shown in the dialog: (group title, [(leader letter, command-string)]).
+    pub groups: Vec<(String, Vec<(char, String)>)>,
 }
 
 impl Default for HotkeyLayout {
@@ -449,8 +456,8 @@ impl Default for HotkeyLayout {
 
         let groups = DEFAULT_GROUPS
             .iter()
-            .map(|(title, names)| {
-                (title.to_string(), names.iter().map(|s| s.to_string()).collect())
+            .map(|(title, entries)| {
+                (title.to_string(), entries.iter().map(|(letter, cmd)| (*letter, cmd.to_string())).collect())
             })
             .collect();
 
@@ -491,16 +498,49 @@ impl HotkeyLayout {
 
         // Override groups if any are specified.
         if !cfg.group.is_empty() {
-            let mut groups = Vec::new();
+            let mut groups: Vec<(String, Vec<(char, String)>)> = Vec::new();
+            let mut used_letters: std::collections::HashSet<char> = std::collections::HashSet::new();
+
             for g in &cfg.group {
-                let mut cmds = Vec::new();
-                for name in &g.commands {
-                    let first = name.split_whitespace().next().unwrap_or("");
-                    if crate::slash::find_command(first).is_some() {
-                        cmds.push(name.clone());
-                    } else {
-                        warnings.push(format!("hotkeys: group '{}': unknown command '{name}'; dropped", g.title));
+                let mut cmds: Vec<(char, String)> = Vec::new();
+                for entry in &g.commands {
+                    let tokens: Vec<&str> = entry.split_whitespace().collect();
+                    if tokens.is_empty() {
+                        continue;
                     }
+
+                    // Try letter-prefixed form, e.g. "t tidy-map".
+                    let mut parsed: Option<(char, String)> = None;
+                    if tokens[0].chars().count() == 1 && tokens.len() > 1 {
+                        let letter = tokens[0].chars().next().unwrap();
+                        if crate::slash::find_command(tokens[1]).is_some() {
+                            parsed = Some((letter, tokens[1..].join(" ")));
+                        }
+                    }
+
+                    let (letter, cmd) = if let Some(lc) = parsed {
+                        lc
+                    } else {
+                        // Whole entry is the command-string; auto-assign a free letter.
+                        if crate::slash::find_command(tokens[0]).is_none() {
+                            warnings.push(format!("hotkeys: group '{}': unknown command '{entry}'; dropped", g.title));
+                            continue;
+                        }
+                        match ('a'..='z').find(|c| !used_letters.contains(c)) {
+                            Some(letter) => (letter, entry.clone()),
+                            None => {
+                                warnings.push(format!("hotkeys: group '{}': no free letter for '{entry}'; dropped", g.title));
+                                continue;
+                            }
+                        }
+                    };
+
+                    if used_letters.contains(&letter) {
+                        warnings.push(format!("hotkeys: group '{}': letter '{}' already used; dropped '{}'", g.title, letter, cmd));
+                        continue;
+                    }
+                    used_letters.insert(letter);
+                    cmds.push((letter, cmd));
                 }
                 groups.push((g.title.clone(), cmds));
             }
@@ -508,6 +548,14 @@ impl HotkeyLayout {
         }
 
         (layout, warnings)
+    }
+
+    /// Return the command-string bound to leader letter `key`, if any.
+    pub fn leader_command(&self, key: char) -> Option<&str> {
+        self.groups.iter()
+            .flat_map(|(_, cmds)| cmds.iter())
+            .find(|(letter, _)| *letter == key)
+            .map(|(_, cmd)| cmd.as_str())
     }
 
     /// Check whether a full keymap command-string resolves to a direct command.
@@ -608,7 +656,7 @@ mod tests {
         let (layout, warnings) = HotkeyLayout::resolve(&cfg);
         assert_eq!(layout.groups.len(), 1);
         assert_eq!(layout.groups[0].1.len(), 1, "unknown command should be dropped from group");
-        assert_eq!(layout.groups[0].1[0], "tidy-map");
+        assert_eq!(layout.groups[0].1[0].1, "tidy-map");
         assert!(!warnings.is_empty(), "unknown group command should produce warning");
         assert!(warnings.iter().any(|w| w.contains("totally-fake-cmd")));
     }
@@ -684,7 +732,7 @@ mod tests {
         // It appears in the Files hotkey group.
         let layout = HotkeyLayout::default();
         let files = layout.groups.iter().find(|(t, _)| t == "Files").expect("Files group");
-        assert!(files.1.iter().any(|c| c == "open-history"), "open-history in Files group");
+        assert!(files.1.iter().any(|c| c.1 == "open-history"), "open-history in Files group");
     }
 
     #[test]
@@ -693,7 +741,7 @@ mod tests {
         let files_group = layout.groups.iter().find(|(title, _)| title == "Files");
         assert!(files_group.is_some(), "Files group should exist");
         let (_, cmds) = files_group.unwrap();
-        assert!(cmds.iter().any(|c| c == "reset-game"), "reset-game should be in Files group");
+        assert!(cmds.iter().any(|c| c.1 == "reset-game"), "reset-game should be in Files group");
     }
 
     #[test]
@@ -710,7 +758,7 @@ mod tests {
         let view_group = layout.groups.iter().find(|(title, _)| title == "View");
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
-        assert!(cmds.iter().any(|c| c == "toggle-inventory"), "toggle-inventory should be in View group");
+        assert!(cmds.iter().any(|c| c.1 == "toggle-inventory"), "toggle-inventory should be in View group");
     }
 
     #[test]
@@ -813,10 +861,11 @@ mod tests {
             let name = cmd.split_whitespace().next().unwrap_or("");
             assert!(crate::slash::find_command(name).is_some(), "direct command not in registry: {cmd}");
         }
-        // DEFAULT_GROUPS hold command names.
-        for (_title, names) in DEFAULT_GROUPS {
-            for n in *names {
-                assert!(crate::slash::find_command(n).is_some(), "group name not in registry: {n}");
+        // DEFAULT_GROUPS hold (letter, full command-string) pairs; validate the first token.
+        for (_title, entries) in DEFAULT_GROUPS {
+            for (_letter, cmd) in *entries {
+                let name = cmd.split_whitespace().next().unwrap_or("");
+                assert!(crate::slash::find_command(name).is_some(), "group command not in registry: {cmd}");
             }
         }
     }
@@ -844,5 +893,76 @@ mod tests {
         cfg3.global.insert("ctrl+z".into(), "frobnicate".into());
         let (_km3, warns3) = KeyMap::resolve(&cfg3);
         assert!(warns3.iter().any(|w| w.contains("frobnicate")));
+    }
+
+    // ── SQ-0202: authored leader letters ─────────────────────────────────────
+
+    #[test]
+    fn default_leader_letters_are_unique() {
+        let layout = HotkeyLayout::default();
+        let letters: Vec<char> = layout.groups.iter()
+            .flat_map(|(_, cmds)| cmds.iter().map(|(letter, _)| *letter))
+            .collect();
+        let unique: std::collections::HashSet<char> = letters.iter().copied().collect();
+        assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
+        assert_eq!(letters.len(), 24, "expected 24 authored leader letters");
+    }
+
+    #[test]
+    fn leader_command_resolves_authored_letter() {
+        let layout = HotkeyLayout::default();
+        assert_eq!(layout.leader_command('t'), Some("tidy-map"));
+        assert_eq!(layout.leader_command('c'), Some("cycle-layer next"));
+        assert_eq!(layout.leader_command('z'), None);
+    }
+
+    #[test]
+    fn resolve_parses_letter_prefixed_config_entry() {
+        use crate::config::{HotkeysConfig, HotkeyGroupConfig};
+        let cfg = HotkeysConfig {
+            prefix: None,
+            direct: None,
+            group: vec![HotkeyGroupConfig {
+                title: "MyGroup".into(),
+                commands: vec!["t tidy-map".into()],
+            }],
+        };
+        let (layout, _warnings) = HotkeyLayout::resolve(&cfg);
+        assert_eq!(layout.groups.len(), 1);
+        assert!(layout.groups[0].1.iter().any(|(letter, cmd)| *letter == 't' && cmd == "tidy-map"));
+    }
+
+    #[test]
+    fn resolve_autoassigns_when_letter_omitted() {
+        use crate::config::{HotkeysConfig, HotkeyGroupConfig};
+        let cfg = HotkeysConfig {
+            prefix: None,
+            direct: None,
+            group: vec![HotkeyGroupConfig {
+                title: "MyGroup".into(),
+                commands: vec!["tidy-map".into()],
+            }],
+        };
+        let (layout, warnings) = HotkeyLayout::resolve(&cfg);
+        assert!(warnings.is_empty(), "auto-assigning a free letter should not warn: {warnings:?}");
+        assert_eq!(layout.groups.len(), 1);
+        assert_eq!(layout.groups[0].1.len(), 1);
+        assert_eq!(layout.groups[0].1[0].1, "tidy-map");
+    }
+
+    #[test]
+    fn resolve_warns_on_duplicate_letter() {
+        use crate::config::{HotkeysConfig, HotkeyGroupConfig};
+        let cfg = HotkeysConfig {
+            prefix: None,
+            direct: None,
+            group: vec![HotkeyGroupConfig {
+                title: "MyGroup".into(),
+                commands: vec!["t tidy-map".into(), "t animate-tidy".into()],
+            }],
+        };
+        let (layout, warnings) = HotkeyLayout::resolve(&cfg);
+        assert!(!warnings.is_empty(), "duplicate letter should produce a warning");
+        assert_eq!(layout.leader_command('t'), Some("tidy-map"), "first occurrence wins");
     }
 }

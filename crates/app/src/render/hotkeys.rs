@@ -99,7 +99,8 @@ fn build_rows(state: &AppState) -> Vec<String> {
     for (title, cmds) in &state.hotkeys.groups {
         rows.push(format!("## {title}"));
         for cmd in cmds {
-            // `cmd` is a registry command NAME (first token).
+            // `cmd` is (leader letter, full command-string); Task 2 reworks display.
+            let cmd = &cmd.1;
             let key_label = primary_key_label(state, cmd);
             let label = crate::slash::find_command(cmd)
                 .map(|c| c.description)
