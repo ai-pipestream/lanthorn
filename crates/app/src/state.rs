@@ -662,21 +662,17 @@ pub enum PromptKind {
     SaveAs,
     /// Confirm deletion of the named save at this path.
     ConfirmDeleteSave(std::path::PathBuf),
-    /// Enter a filename for an exported Quetzal save in the given directory.
-    ExportSaveName(std::path::PathBuf),
     /// Edit a config path field (user_dir or colors.scheme) from the config screen.
     ConfigEditPath { field: ConfigPathField },
 }
 
 // ── File browser state ────────────────────────────────────────────────────────
 
-/// Mode for the file browser: picking a file to import, or a directory to export into.
+/// Mode for the file browser: picking a file to import.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FbMode {
     /// Import: browse and pick a `.qzl`/`.sav` file.
     PickFile,
-    /// Export: browse and pick a directory, then enter a filename.
-    PickDir,
 }
 
 /// One entry in the file browser listing.
@@ -696,19 +692,17 @@ pub struct FileBrowserState {
     pub entries: Vec<FbEntry>,
     /// Selection + animated scroll offset for the entry list.
     pub scroll: crate::list_scroll::ListScroll,
-    /// Whether we are picking a file (import) or a directory (export).
+    /// The file-browser mode (currently always import).
     pub mode: FbMode,
-    /// Default filename for the export prompt: `<ifid>.qzl`.
-    pub export_default_name: String,
 }
 
 impl FileBrowserState {
     /// Build a new `FileBrowserState` for `cwd`, reading the filesystem.
     /// Entries: `..` when not at root, then dirs sorted, then `.qzl`/`.sav` files sorted
     /// (PickFile only).  Entries that fail to read are silently omitted.
-    pub fn build(cwd: std::path::PathBuf, mode: FbMode, export_default_name: String) -> Self {
+    pub fn build(cwd: std::path::PathBuf, mode: FbMode) -> Self {
         let entries = Self::read_entries(&cwd, mode);
-        FileBrowserState { cwd, entries, scroll: Default::default(), mode, export_default_name }
+        FileBrowserState { cwd, entries, scroll: Default::default(), mode }
     }
 
     /// (Re)build entries for the current `cwd` and `mode`.
@@ -2485,9 +2479,7 @@ mod tests {
         // file_browser
         s.file_browser = Some(FileBrowserState::build(
             std::path::PathBuf::from("/tmp"),
-            FbMode::PickFile,
-            "x.qzl".to_string(),
-        ));
+            FbMode::PickFile));
         assert!(s.any_overlay_open(), "file_browser open => any_overlay_open true");
         s.file_browser = None;
 
@@ -2707,7 +2699,7 @@ mod tests {
     #[test]
     fn filebrowser_pickfile_shows_dirs_and_qzl_not_txt() {
         let dir = make_test_fb_dir("pickfile");
-        let fb = FileBrowserState::build(dir.clone(), FbMode::PickFile, "x.qzl".to_string());
+        let fb = FileBrowserState::build(dir.clone(), FbMode::PickFile);
         let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&".."), "should contain parent link");
         assert!(names.contains(&"subdir"), "should contain subdir");
@@ -2717,22 +2709,10 @@ mod tests {
     }
 
     #[test]
-    fn filebrowser_pickdir_shows_only_dirs() {
-        let dir = make_test_fb_dir("pickdir");
-        let fb = FileBrowserState::build(dir.clone(), FbMode::PickDir, "x.qzl".to_string());
-        let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&".."), "should contain parent link");
-        assert!(names.contains(&"subdir"), "should contain subdir");
-        assert!(!names.contains(&"save.qzl"), ".qzl file must not appear in PickDir mode");
-        assert!(!names.contains(&"notes.txt"), ".txt file must not appear in PickDir mode");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn filebrowser_dotdot_absent_at_root() {
         // Synthesize a state rooted at "/" (or the filesystem root on this OS).
         let root = std::path::Path::new("/");
-        let fb = FileBrowserState::build(root.to_path_buf(), FbMode::PickDir, "x.qzl".to_string());
+        let fb = FileBrowserState::build(root.to_path_buf(), FbMode::PickFile);
         let has_dotdot = fb.entries.iter().any(|e| e.name == "..");
         assert!(!has_dotdot, "'..' must not appear when at filesystem root");
     }
@@ -2740,7 +2720,7 @@ mod tests {
     #[test]
     fn filebrowser_cd_into_subdir_and_refresh() {
         let dir = make_test_fb_dir("cd");
-        let mut fb = FileBrowserState::build(dir.clone(), FbMode::PickFile, "x.qzl".to_string());
+        let mut fb = FileBrowserState::build(dir.clone(), FbMode::PickFile);
         let subdir = dir.join("subdir");
         fb.cd(subdir.clone());
         assert_eq!(fb.cwd, subdir, "cwd should update after cd");
@@ -2754,7 +2734,7 @@ mod tests {
     #[test]
     fn filebrowser_entries_sorted_dirs_before_files() {
         let dir = make_test_fb_dir("sorted");
-        let fb = FileBrowserState::build(dir.clone(), FbMode::PickFile, "x.qzl".to_string());
+        let fb = FileBrowserState::build(dir.clone(), FbMode::PickFile);
         // Verify: ".." first, then dirs, then files.
         let mut saw_dir = false;
         let mut saw_file = false;

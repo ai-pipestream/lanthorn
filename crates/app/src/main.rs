@@ -24,7 +24,7 @@ use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid};
 use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
-use app::persist_files::{delete_save, list_saves, load_map, save_game, save_game_named, restore_game, save_named};
+use app::persist_files::{delete_save, list_saves, load_map, save_game_named, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::dialog::{DialogRects, DialogStyle};
@@ -285,23 +285,14 @@ struct PaneRects {
 }
 
 /// Escape hatch: borrow the concrete Z-machine `GameSession` behind a
-/// `dyn Engine`.
+/// `dyn Engine`, mutably.
 ///
-/// Used ONLY by the persistence layer — archive save/restore, `.qzl`
-/// import/export, and the saved-screen snapshot — because the on-disk archive
-/// format serializes the Z-machine `ScreenState` and cannot change without
-/// breaking compatibility with existing saves (a no-behavior-change
-/// requirement). Everything else (gameplay, render, input, introspection,
-/// `save_state`/`restore_state`, `current_location`, aux) goes through the
-/// neutral `Engine` trait.
-fn zvm_session(engine: &dyn Engine) -> &GameSession {
-    engine
-        .as_any()
-        .downcast_ref::<GameSession>()
-        .expect("babelmap drives a Z-machine GameSession")
-}
-
-/// Mutable counterpart of [`zvm_session`]; same persistence-only rationale.
+/// Used ONLY by the persistence layer — archive save/restore and the
+/// saved-screen snapshot — because the on-disk archive format serializes the
+/// Z-machine `ScreenState` and cannot change without breaking compatibility
+/// with existing saves (a no-behavior-change requirement). Everything else
+/// (gameplay, render, input, introspection, `save_state`/`restore_state`,
+/// `current_location`, aux) goes through the neutral `Engine` trait.
 fn zvm_session_mut(engine: &mut dyn Engine) -> &mut GameSession {
     engine
         .as_any_mut()
@@ -688,10 +679,8 @@ fn draw_frame(
             "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc: close".to_string()
         } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
-        } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickDir).unwrap_or(false) {
-            "Export Save | \u{2191}\u{2193}: move | Enter: open dir | s: export here | Esc: cancel".to_string()
         } else if state.saves.is_some() {
-            "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | e: export | i: import | Esc: close".to_string()
+            "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | i: import | Esc: close".to_string()
         } else if state.gallery.is_some() {
             "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
         } else if let Some(anim) = &state.tidy_anim {
@@ -716,7 +705,6 @@ fn draw_frame(
                 PromptKind::RenameLayer(_) => "Layer name",
                 PromptKind::SaveAs => "Save name",
                 PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
-                PromptKind::ExportSaveName(_) => "Export filename",
                 PromptKind::ConfigEditPath { .. } => "Config path",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
@@ -827,12 +815,11 @@ fn draw_frame(
             selection_text_out = app::clipboard::highlight_and_extract(buf, sel_area, sel);
         }
 
-        // ── Prompt overlay — map-editing prompts overlay the map; save/file-name
-        // prompts (a game-driven SAVE or a .qzl export) belong with the story/game
-        // interaction, so they render over the story pane instead. ──────────────
+        // ── Prompt overlay — map-editing prompts overlay the map; the save-name
+        // prompt (a game-driven SAVE) belongs with the story/game interaction, so
+        // it renders over the story pane instead. ──────────────────────────────
         if let Some(prompt) = &state.prompt {
-            let prefer_story =
-                matches!(prompt.kind, PromptKind::SaveAs | PromptKind::ExportSaveName(_));
+            let prefer_story = matches!(prompt.kind, PromptKind::SaveAs);
             let overlay_area = if prefer_story && story_area.height > 0 {
                 story_area
             } else if map_area.height > 0 {
@@ -845,14 +832,11 @@ fn draw_frame(
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
                 if prefer_story {
-                    // Save/export name entry reuses the story input line's look —
-                    // the normal transcript style with a reversed block cursor —
+                    // Save name entry reuses the story input line's look — the
+                    // normal transcript style with a reversed block cursor —
                     // under a descriptive label, so it reads as part of the game
                     // interaction rather than a map-editor overlay bar.
-                    let label = match &prompt.kind {
-                        PromptKind::ExportSaveName(_) => "Export Filename: ",
-                        _ => "Save Filename: ",
-                    };
+                    let label = "Save Filename: ";
                     let line = format!("{}{}", label, prompt.buffer);
                     let normal_style = state.colors.transcript;
                     draw_str_clipped(buf, overlay_area.x, y, &line, normal_style, overlay_area);
@@ -871,7 +855,6 @@ fn draw_frame(
                         PromptKind::RenameLayer(_) => "Layer:  ",
                         PromptKind::SaveAs => "Name:   ",
                         PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
-                        PromptKind::ExportSaveName(_) => "Export: ",
                         PromptKind::ConfigEditPath { .. } => "Path:   ",
                     };
                     let line = format!("{}{}_", label, prompt.buffer);
@@ -3431,21 +3414,12 @@ fn main() {
                 state.dialog_focus = 0;
             }
 
-            Action::SavesExport => {
-                // Close saves modal and open file browser in PickDir mode.
-                state.saves = None;
-                let start_dir = saves_dir(&state.config.user_dir);
-                let start_dir = if start_dir.is_dir() { start_dir } else { state.config.user_dir.clone() };
-                let default_name = format!("{}.qzl", ifid);
-                state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickDir, default_name));
-            }
-
             Action::SavesImport => {
                 // Close saves modal and open file browser in PickFile mode.
                 state.saves = None;
                 let start_dir = saves_dir(&state.config.user_dir);
                 let start_dir = if start_dir.is_dir() { start_dir } else { state.config.user_dir.clone() };
-                state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile, String::new()));
+                state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile));
             }
 
             Action::FbEnter => {
@@ -3516,21 +3490,6 @@ fn main() {
                         }
                     }
                     None => {}
-                }
-            }
-
-            Action::FbChooseDir => {
-                // PickDir mode: open the ExportSaveName prompt for the current dir.
-                if let Some(fb) = &state.file_browser {
-                    if fb.mode == FbMode::PickDir {
-                        let chosen_dir = fb.cwd.clone();
-                        let default_name = fb.export_default_name.clone();
-                        state.file_browser = None;
-                        state.prompt = Some(app::state::Prompt {
-                            kind: PromptKind::ExportSaveName(chosen_dir),
-                            buffer: default_name,
-                        });
-                    }
                 }
             }
 
@@ -4408,26 +4367,6 @@ fn handle_saves_prompt(
                 }
             } else {
                 state.push_transcript("[Delete cancelled]");
-            }
-        }
-        PromptKind::ExportSaveName(export_dir) => {
-            if !engine_supports_save(&*session) {
-                state.set_status("Save is not supported for Glulx games yet");
-                return;
-            }
-            let filename = buf.trim().to_string();
-            if filename.is_empty() {
-                state.push_transcript("[Export filename cannot be empty]");
-                return;
-            }
-            let target = export_dir.join(&filename);
-            match save_game(&target, &zvm_session(&*session).machine) {
-                Ok(()) => {
-                    state.push_transcript(&format!("[Exported to {}]", target.display()));
-                }
-                Err(e) => {
-                    state.push_transcript(&format!("[Export failed: {}]", e));
-                }
             }
         }
         _ => {} // other prompt kinds are handled elsewhere

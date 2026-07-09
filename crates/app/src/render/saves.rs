@@ -135,7 +135,7 @@ pub fn draw_saves(
         let footer_style = Style::new()
             .fg(ratatui::style::Color::DarkGray)
             .patch(state.colors.dialog);
-        let footer = "Enter:load  s:save-as  d:delete  e:export  i:import  Esc:close";
+        let footer = "Enter:load  s:save-as  d:delete  i:import  Esc:close";
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }
 

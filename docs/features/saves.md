@@ -8,9 +8,10 @@
   opt into a shared default map with `use_default_map`.
 - **Multiple named save slots** with a saves-manager modal (load / save-as /
   delete), each slot tracking name, turn count, and timestamp.
-- **Import / export standard saves** — exchange standard Quetzal `.qzl`/`.sav`
-  files with other interpreters via the saves manager (a built-in file browser
-  picks the file/destination). Importing keeps your accumulated map.
+- **Import standard saves** — bring in a standard Quetzal `.qzl`/`.sav` game
+  save from another interpreter via the saves manager's built-in file browser,
+  keeping your accumulated map. Going the other way, the story's own `SAVE`
+  already writes the portable standard `.qzl` (see below).
 - **Standard in-game save/restore, all versions** — when a story runs its own
   `save`/`restore`, babelmap writes and reads a bare standard Quetzal `.qzl` save
   (the same format other interpreters use), now including v3 (Zork-era) games'

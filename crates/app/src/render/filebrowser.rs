@@ -39,7 +39,6 @@ pub fn draw_file_browser(
     use crate::state::FbMode;
     let title = match fb.mode {
         FbMode::PickFile => "Import Save (.qzl/.sav)",
-        FbMode::PickDir => "Export Save — choose directory",
     };
 
     let buttons = &[
@@ -152,7 +151,6 @@ pub fn draw_file_browser(
         let footer_style = Style::default().fg(Color::DarkGray).patch(state.colors.dialog);
         let footer = match fb.mode {
             FbMode::PickFile => "Up/Dn:move  Enter:open/import  Esc:cancel",
-            FbMode::PickDir => "Up/Dn:move  Enter:open  s:export here  Esc:cancel",
         };
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }
@@ -174,7 +172,7 @@ mod tests {
 
     fn state_with_browser(cwd: PathBuf, mode: FbMode) -> AppState {
         let mut s = AppState::default();
-        s.file_browser = Some(FileBrowserState::build(cwd, mode, "ZCODE-1-TEST-0.qzl".to_string()));
+        s.file_browser = Some(FileBrowserState::build(cwd, mode));
         s
     }
 
@@ -191,7 +189,6 @@ mod tests {
             entries,
             scroll: Default::default(),
             mode: FbMode::PickFile,
-            export_default_name: String::new(),
         });
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -243,22 +240,6 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("Import"), "should show Import title in PickFile mode");
-    }
-
-    #[test]
-    fn draw_file_browser_shows_in_pickdir_mode() {
-        let tmp = std::env::temp_dir();
-        let backend = TestBackend::new(80, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = state_with_browser(tmp, FbMode::PickDir);
-        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
-        terminal.draw(|f| {
-            draw_file_browser(&state, f.area(), f.buffer_mut(), &mut 0);
-        }).unwrap();
-        let content: String = terminal.backend().buffer().content().iter()
-            .map(|c| c.symbol().chars().next().unwrap_or(' '))
-            .collect();
-        assert!(content.contains("Export"), "should show Export title in PickDir mode");
     }
 
     #[test]

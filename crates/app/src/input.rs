@@ -311,8 +311,6 @@ pub enum Action {
     ConfigSave,
     /// Cancel the config screen without saving.
     ConfigCancel,
-    /// Open the file browser in PickDir mode to choose a directory for export.
-    SavesExport,
     /// Open the file browser in PickFile mode to import a .qzl/.sav file.
     SavesImport,
     /// Navigate the file browser by delta (-1 = up, +1 = down).
@@ -325,8 +323,6 @@ pub enum Action {
     FbEnd,
     /// Activate the selected file-browser entry (cd into dir or import file).
     FbEnter,
-    /// Choose the current directory as the export target (PickDir mode).
-    FbChooseDir,
     /// Close the file browser without acting.
     FbClose,
     /// No binding found — no-op.
@@ -1171,7 +1167,6 @@ fn saves_key_to_action(key: KeyEvent, _focus: usize) -> Action {
         KeyCode::Enter => Action::SavesLoad,
         KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::SavesSaveAs,
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => Action::SavesDelete,
-        KeyCode::Char('e') if key.modifiers == KeyModifiers::NONE => Action::SavesExport,
         KeyCode::Char('i') if key.modifiers == KeyModifiers::NONE => Action::SavesImport,
         KeyCode::Esc => Action::SavesClose,
         _ => Action::None,
@@ -1206,7 +1201,6 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Home => Action::FbHome,
         KeyCode::End => Action::FbEnd,
         KeyCode::Enter => Action::FbEnter,
-        KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::FbChooseDir,
         KeyCode::Esc => Action::FbClose,
         _ => Action::None,
     }
@@ -2361,7 +2355,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         // ── File-browser actions ──────────────────────────────────────────────
 
-        // SavesExport, SavesImport, FbEnter, FbChooseDir are caller-handled.
+        // SavesImport, FbEnter are caller-handled.
 
         Action::FbNav(delta) => {
             let vp = state.modal_list_viewport;
@@ -3152,10 +3146,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::ExportDot
         | Action::ExportDump
         | Action::SavesLoad
-        | Action::SavesExport
         | Action::SavesImport
         | Action::FbEnter
-        | Action::FbChooseDir
         | Action::GalleryExportStyle
         | Action::TranscriptScrollPage(_)
         | Action::Quit => {}
@@ -3354,10 +3346,9 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         PromptKind::RenameLayer(id) => {
             mapper.graph.set_layer_name(id, prompt.buffer);
         }
-        // Saves-manager, export, and config-path prompts: return to the caller to act on.
+        // Saves-manager and config-path prompts: return to the caller to act on.
         PromptKind::SaveAs
         | PromptKind::ConfirmDeleteSave(_)
-        | PromptKind::ExportSaveName(_)
         | PromptKind::ConfigEditPath { .. } => {
             return Some(prompt);
         }
@@ -5430,9 +5421,7 @@ mod tests {
         let mut s = AppState::default();
         s.file_browser = Some(FileBrowserState::build(
             std::env::temp_dir(),
-            FbMode::PickFile,
-            "test.qzl".to_string(),
-        ));
+            FbMode::PickFile));
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
             Action::FbNav(-1)
@@ -6387,15 +6376,8 @@ mod tests {
         use crate::state::FileBrowserState;
         let mut s = AppState::default();
         let tmp = std::env::temp_dir();
-        s.file_browser = Some(FileBrowserState::build(tmp, mode, "test.qzl".to_string()));
+        s.file_browser = Some(FileBrowserState::build(tmp, mode));
         s
-    }
-
-    #[test]
-    fn saves_e_opens_export_browser_action() {
-        let s = state_with_saves_for_fb_tests();
-        let a = key_to_action(&s, key(KeyCode::Char('e')));
-        assert!(matches!(a, Action::SavesExport), "e in saves sub-mode should produce SavesExport");
     }
 
     #[test]
@@ -6415,7 +6397,7 @@ mod tests {
     #[test]
     fn filebrowser_q_no_longer_closes() {
         // q-close removed from file browser; q now produces None in this sub-mode.
-        let s = state_with_filebrowser(crate::state::FbMode::PickDir);
+        let s = state_with_filebrowser(crate::state::FbMode::PickFile);
         let a = key_to_action(&s, key(KeyCode::Char('q')));
         assert!(matches!(a, Action::None), "q should no longer close the file browser");
     }
@@ -6432,13 +6414,6 @@ mod tests {
         let s = state_with_filebrowser(crate::state::FbMode::PickFile);
         let a = key_to_action(&s, key(KeyCode::Enter));
         assert!(matches!(a, Action::FbEnter), "Enter in file browser should produce FbEnter");
-    }
-
-    #[test]
-    fn filebrowser_s_produces_fb_choose_dir() {
-        let s = state_with_filebrowser(crate::state::FbMode::PickDir);
-        let a = key_to_action(&s, key(KeyCode::Char('s')));
-        assert!(matches!(a, Action::FbChooseDir), "s in file browser should produce FbChooseDir");
     }
 
     #[test]
@@ -6633,9 +6608,7 @@ mod tests {
         let tmp = std::env::temp_dir();
         state.file_browser = Some(crate::state::FileBrowserState::build(
             tmp,
-            crate::state::FbMode::PickFile,
-            String::new(),
-        ));
+            crate::state::FbMode::PickFile));
 
         let map   = Rect::default();
         let story = Rect::default();
@@ -6782,8 +6755,7 @@ mod tests {
         {
             let mut s = AppState::default();
             s.file_browser = Some(crate::state::FileBrowserState::build(
-                std::env::temp_dir(), crate::state::FbMode::PickFile, String::new(),
-            ));
+                std::env::temp_dir(), crate::state::FbMode::PickFile));
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::FbClose),
                 "file browser ESC should produce FbClose, got {:?}", esc_action);
@@ -6869,8 +6841,7 @@ mod tests {
         {
             let mut s = AppState::default();
             s.file_browser = Some(crate::state::FileBrowserState::build(
-                std::env::temp_dir(), crate::state::FbMode::PickFile, String::new(),
-            ));
+                std::env::temp_dir(), crate::state::FbMode::PickFile));
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::FbClose),
                 "q must not close the file browser");
