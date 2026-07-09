@@ -3426,7 +3426,7 @@ fn main() {
                 // Populate the saves list (both .babelmap Save States and .qzl
                 // game saves — SQ-0227 Task 3) and open the modal.
                 let mut entries = list_saves(&save_dir, &ifid);
-                entries.extend(list_qzl(&save_dir));
+                entries.extend(list_qzl(&save_dir, &ifid));
                 state.saves = Some(SavesState { entries, scroll: Default::default() });
                 state.dialog_focus = 0;
             }
@@ -3994,7 +3994,7 @@ fn dispatch_slash_outcome(
                 Some(ref name) => {
                     // Find the first named save whose display name matches.
                     let mut saves = list_saves(save_dir, ifid);
-                    saves.extend(list_qzl(save_dir));
+                    saves.extend(list_qzl(save_dir, ifid));
                     saves.into_iter()
                         .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
                         .map(|e| e.path)
@@ -4458,7 +4458,7 @@ fn open_ingame_saves(
         PendingIo::Restore => {
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
             let mut entries = list_saves(save_dir, ifid);
-            entries.extend(list_qzl(save_dir));
+            entries.extend(list_qzl(save_dir, ifid));
             state.saves = Some(SavesState { entries, scroll: Default::default() });
         }
     }
@@ -4466,15 +4466,21 @@ fn open_ingame_saves(
 
 /// List plain `*.qzl` Quetzal files in `dir` as SaveInfo rows (for the in-game
 /// restore picker). Mirrors the SaveInfo shape used by `list_saves`.
-fn list_qzl(dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
+/// List the current story's game saves (`<ifid>-<slug>.qzl`, written by
+/// `save_game_named`). Filtered to the given IFID so other stories' saves don't
+/// appear — and so a bare `<ifid>.qzl` (e.g. an old Save-State export) is
+/// excluded, since only `save_game_named` produces the `<ifid>-` prefix.
+fn list_qzl(dir: &std::path::Path, ifid: &str) -> Vec<app::persist_files::SaveInfo> {
+    let named_prefix = format!("{}-", ifid);
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("qzl") {
-                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("save.qzl").to_string();
+            let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
+            if fname.starts_with(&named_prefix) && fname.ends_with(".qzl") {
                 out.push(app::persist_files::SaveInfo {
-                    path: p, name, turns: 0, saved_at: String::new(), is_default: false,
+                    path: p.clone(), name: fname.to_string(),
+                    turns: 0, saved_at: String::new(), is_default: false,
                 });
             }
         }
@@ -5301,6 +5307,29 @@ mod tests {
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
+
+    // ── SQ-0230: list_qzl filters to the current story's game saves ─────────────
+
+    #[test]
+    fn list_qzl_filters_to_current_ifid_and_excludes_bare_export() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("bm-listqzl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A real game save for our story, another story's game save, a bare
+        // <ifid>.qzl (the shape an old Save-State export produced), and a
+        // .babelmap (must never be picked up by list_qzl).
+        fs::write(dir.join("aaa-slot1.qzl"), b"x").unwrap();
+        fs::write(dir.join("bbb-slot1.qzl"), b"x").unwrap();
+        fs::write(dir.join("aaa.qzl"), b"x").unwrap();
+        fs::write(dir.join("aaa-slot1.babelmap"), b"x").unwrap();
+
+        let names: Vec<String> = super::list_qzl(&dir, "aaa").iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["aaa-slot1.qzl".to_string()],
+            "only the current story's <ifid>-*.qzl game saves list (no other story, no bare <ifid>.qzl export, no .babelmap)");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // ── Timed-input deadline arming (F1 regression) ─────────────────────────────
 
