@@ -10,6 +10,11 @@
 - **Import / export standard saves** — exchange standard Quetzal `.qzl`/`.sav`
   files with other interpreters via the saves manager (a built-in file browser
   picks the file/destination). Importing keeps your accumulated map.
+- **Standard in-game save/restore, all versions** — when a story runs its own
+  `save`/`restore`, babelmap writes and reads a standard Quetzal save (the same
+  format other interpreters use), now including v3 (Zork-era) games' branch-form
+  `@save`/`@restore`. This is separate from the emulator-style host snapshot
+  (Ctrl+S/Ctrl+R and the `.babelmap` archive), which can save anywhere.
 - **Auto-save** (per turn) and **auto-load** (resume on launch) — both
   configurable.
 - **Rewind / replay / resume** — with `record_turn_history` on, babelmap records
