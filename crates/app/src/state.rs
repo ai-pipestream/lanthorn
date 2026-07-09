@@ -1252,6 +1252,11 @@ pub struct AppState {
     /// so the fault stays visible and the user can review/save before quitting
     /// deliberately. Reset to `false` on game restart.
     pub vm_halted: bool,
+
+    /// Slide-in inventory dock (bottom). Session-only; starts closed.
+    pub inv_dock: crate::anim::PanelSlide,
+    /// Slide-in verb menu dock (left). Session-only; starts closed.
+    pub verb_dock: crate::anim::PanelSlide,
 }
 
 impl Default for AppState {
@@ -1352,6 +1357,8 @@ impl Default for AppState {
             graphics_render: std::cell::RefCell::new(Default::default()),
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,
+            inv_dock: crate::anim::PanelSlide::closed(),
+            verb_dock: crate::anim::PanelSlide::closed(),
         }
     }
 }
@@ -1374,6 +1381,8 @@ impl AppState {
             })
             || self.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
             || self.hints.as_ref().is_some_and(|h| h.has_active_animation())
+            || self.inv_dock.active()
+            || self.verb_dock.active()
     }
 
     /// Play the turn's sound events through the backend (gated on config +
@@ -2375,6 +2384,21 @@ mod tests {
         assert!(s.has_active_animation(), "an open modal's list scroll anim counts as active");
         s.config_screen = None;
         assert!(!s.has_active_animation());
+    }
+
+    #[test]
+    fn has_active_animation_true_while_dock_slides() {
+        let mut s = AppState::default();
+        assert!(!s.has_active_animation(), "fresh default state has no active animation");
+
+        let cfg = crate::config::AnimationConfig {
+            enabled: true,
+            easing: crate::anim::Easing::Linear,
+            scroll_ms: 100,
+        };
+        s.inv_dock.toggle_to(true, false);
+        s.inv_dock.arm(&cfg);
+        assert!(s.has_active_animation(), "arming inv_dock open counts as active");
     }
 
     #[test]

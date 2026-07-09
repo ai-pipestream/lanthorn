@@ -21,6 +21,7 @@ use app::config::{resolve, Cli};
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
+use app::anim::PanelSlide;
 use app::archive::{load_archive, save_archive_meta};
 use app::ifid::{archive_path, compute_ifid};
 use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
@@ -934,66 +935,6 @@ fn split_picker_area(area: Rect, fraction: f64) -> (Rect, Rect) {
     let list_area = Rect::new(area.x, area.y, list_w, area.height);
     let panel_area = Rect::new(area.x + list_w, area.y, panel_w, area.height);
     (list_area, panel_area)
-}
-
-/// Session-only slide state for the info panel. Holds a target fraction and an
-/// optional tween easing the displayed fraction toward it (so a mid-slide
-/// reverse starts from the current position).
-struct PanelSlide {
-    open: bool,
-    from: f64,
-    to: f64,
-    tween: Option<app::anim::Tween>,
-}
-
-impl PanelSlide {
-    fn closed() -> Self {
-        Self { open: false, from: 0.0, to: 0.0, tween: None }
-    }
-
-    /// The displayed fraction right now (tween-eased), given a raw progress.
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn fraction_at(&self, progress: f64) -> f64 {
-        app::anim::lerp(self.from, self.to, progress)
-    }
-
-    /// Current displayed fraction from the live tween (or the settled `to`).
-    fn fraction(&self) -> f64 {
-        match &self.tween {
-            Some(t) => app::anim::lerp(self.from, self.to, t.progress()),
-            None => self.to,
-        }
-    }
-
-    fn active(&self) -> bool {
-        self.tween.as_ref().is_some_and(|t| !t.done())
-    }
-
-    /// Toggle to `open`, arming a tween unless `instant`.
-    fn toggle_to(&mut self, open: bool, instant: bool) {
-        self.open = open;
-        let target = if open { 1.0 } else { 0.0 };
-        let current = self.fraction();
-        self.from = current;
-        self.to = target;
-        self.tween = None; // set by caller with duration; see arm()
-        if instant {
-            self.from = target;
-        }
-    }
-
-    /// Arm the tween with the configured duration/easing (call after toggle_to).
-    fn arm(&mut self, cfg: &app::config::AnimationConfig) {
-        if !cfg.enabled || cfg.scroll_ms == 0 || (self.from - self.to).abs() < f64::EPSILON {
-            self.from = self.to;
-            self.tween = None;
-        } else {
-            self.tween = Some(app::anim::Tween::new(
-                std::time::Duration::from_millis(cfg.scroll_ms),
-                cfg.easing,
-            ));
-        }
-    }
 }
 
 /// Resolve and cache the aux data for `idx` if not already cached.

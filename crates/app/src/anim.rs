@@ -105,6 +105,67 @@ impl Tween {
     }
 }
 
+/// Session-only slide state for a slide-in panel/dock. Holds a target fraction
+/// and an optional tween easing the displayed fraction toward it (so a
+/// mid-slide reverse starts from the current position).
+#[derive(Debug)]
+pub struct PanelSlide {
+    pub open: bool,
+    from: f64,
+    to: f64,
+    tween: Option<Tween>,
+}
+
+impl PanelSlide {
+    pub fn closed() -> Self {
+        Self { open: false, from: 0.0, to: 0.0, tween: None }
+    }
+
+    /// The displayed fraction right now (tween-eased), given a raw progress.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn fraction_at(&self, progress: f64) -> f64 {
+        lerp(self.from, self.to, progress)
+    }
+
+    /// Current displayed fraction from the live tween (or the settled `to`).
+    pub fn fraction(&self) -> f64 {
+        match &self.tween {
+            Some(t) => lerp(self.from, self.to, t.progress()),
+            None => self.to,
+        }
+    }
+
+    pub fn active(&self) -> bool {
+        self.tween.as_ref().is_some_and(|t| !t.done())
+    }
+
+    /// Toggle to `open`, arming a tween unless `instant`.
+    pub fn toggle_to(&mut self, open: bool, instant: bool) {
+        self.open = open;
+        let target = if open { 1.0 } else { 0.0 };
+        let current = self.fraction();
+        self.from = current;
+        self.to = target;
+        self.tween = None; // set by caller with duration; see arm()
+        if instant {
+            self.from = target;
+        }
+    }
+
+    /// Arm the tween with the configured duration/easing (call after toggle_to).
+    pub fn arm(&mut self, cfg: &crate::config::AnimationConfig) {
+        if !cfg.enabled || cfg.scroll_ms == 0 || (self.from - self.to).abs() < f64::EPSILON {
+            self.from = self.to;
+            self.tween = None;
+        } else {
+            self.tween = Some(Tween::new(
+                std::time::Duration::from_millis(cfg.scroll_ms),
+                cfg.easing,
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +243,41 @@ mod tests {
         let t = Tween::new(Duration::ZERO, Easing::EaseOut);
         assert!(t.done());
         assert_eq!(t.progress(), 1.0);
+    }
+
+    #[test]
+    fn panel_slide_closed_is_inactive_at_zero() {
+        let s = PanelSlide::closed();
+        assert!(!s.active());
+        assert_eq!(s.fraction(), 0.0);
+    }
+
+    #[test]
+    fn panel_slide_arm_enabled_is_active() {
+        let cfg_enabled = crate::config::AnimationConfig {
+            enabled: true,
+            easing: Easing::Linear,
+            scroll_ms: 100,
+        };
+        let mut s = PanelSlide::closed();
+        s.toggle_to(true, false);
+        s.arm(&cfg_enabled);
+        assert!(s.active(), "tween should not be done immediately after arming");
+        let f = s.fraction();
+        assert!((0.0..1.0).contains(&f), "fraction {f} should be between from (0.0) and to (1.0)");
+    }
+
+    #[test]
+    fn panel_slide_arm_zero_ms_snaps() {
+        let cfg_instant = crate::config::AnimationConfig {
+            enabled: true,
+            easing: Easing::Linear,
+            scroll_ms: 0,
+        };
+        let mut s = PanelSlide::closed();
+        s.toggle_to(true, false);
+        s.arm(&cfg_instant);
+        assert!(!s.active());
+        assert_eq!(s.fraction(), 1.0);
     }
 }
