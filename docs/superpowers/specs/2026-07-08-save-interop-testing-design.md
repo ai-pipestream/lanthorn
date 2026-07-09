@@ -5,6 +5,14 @@
 **Quest:** SQ-0158
 **Related:** SQ-0163 (made the Z-machine in-game `@save` PC convention standard — this verifies it).
 
+> **Scope update (2026-07-08, during execution):** A Task-1 spike found Glulx interop
+> needs a disproportionate toolchain investment — homebrew `glulxe` is curses-only (not
+> headless-scriptable), `glulxercise`'s only restore-observable state is a failure counter
+> (making the cross-load oracle vacuous on a correct interpreter), and a sound counter
+> `.ulx` fixture needs Inform 6 + its library. **Glulx is therefore deferred to SQ-0229.**
+> SQ-0158 now covers the **Z-machine** direction only (`dfrotz`, fully automated). The Glulx
+> design below is retained as the starting point for SQ-0229.
+
 ## Goal
 
 Prove that babelmap's save files interoperate with other standard interpreters, in

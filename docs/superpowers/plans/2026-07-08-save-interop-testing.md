@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust integration tests (`crates/{zvm,gvm}/tests/`) using `std::process::Command` for reference binaries (test-only; library crates stay zero-dep). Reference tools: `dfrotz`, `glulxe`+`cheapglk` (homebrew). Fixture: public-domain `glulxercise.ulx`.
 
+> **Scope update (2026-07-08, during execution):** Glulx is **deferred to SQ-0229**
+> after a spike showed it needs a disproportionate toolchain (curses-only `glulxe`;
+> `glulxercise` has only a failure-counter as observable state → vacuous oracle; a sound
+> counter `.ulx` needs Inform 6 + library). **This effort implements the Z-machine half
+> only: Task 1 (Z-machine parts), Task 2, Task 3, Task 6.** Tasks 4 and 5 (Glulx) are
+> NOT implemented here — they move to SQ-0229. In Task 1, do only the `dfrotz`/`minizork`
+> steps (Steps 1, 3, 4, 7-Z, 8); skip the `glulxe`/`glulxercise` steps (2, 5, 6).
+
 ## Global Constraints
 
 - `zvm` and `gvm` **library** crates stay ZERO-dependency. Test code may use `std` (incl. `std::process::Command`); do NOT add dev-dependencies without calling it out.
