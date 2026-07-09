@@ -697,30 +697,29 @@ impl GlkBackend for AppGlk {
             .set_background(color);
     }
 
-    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) {
+    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) -> bool {
         // Buffer-window target: `x` is really the Glk imagealign flag; the image
         // flows inline with the window's text rather than onto a pixel canvas.
         if self.buffers.contains_key(&win) {
-            if let Some(src) = self.picts.image(resnum).cloned() {
-                let img = crate::inline_image::InlineImage {
-                    pixels: std::sync::Arc::new(src.to_rgba8()),
-                    align: crate::inline_image::ImageAlign::from_glk(x as u32),
-                    scaled: scale,
-                };
-                if let Some(buf) = self.buffers.get_mut(&win) {
-                    buf.log.push(BufElem::Image(img));
-                }
+            let Some(src) = self.picts.image(resnum) else { return false };
+            let img = crate::inline_image::InlineImage {
+                pixels: std::sync::Arc::new(src.to_rgba8()),
+                align: crate::inline_image::ImageAlign::from_glk(x as u32),
+                scaled: scale,
+            };
+            if let Some(buf) = self.buffers.get_mut(&win) {
+                buf.log.push(BufElem::Image(img));
             }
-            return;
+            return true;
         }
         // Graphics-window target: existing canvas path.
-        if let Some(src) = self.picts.image(resnum).cloned() {
-            let (cw, ch) = self.canvas_size(win);
-            self.graphics
-                .entry(win)
-                .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
-                .draw_image(&src, x, y, scale);
-        }
+        let Some(src) = self.picts.image(resnum) else { return false };
+        let (cw, ch) = self.canvas_size(win);
+        self.graphics
+            .entry(win)
+            .or_insert_with(|| crate::graphics::Canvas::new(cw, ch))
+            .draw_image(&src, x, y, scale);
+        true
     }
 
     fn schannel_create(&mut self, rock: u32) -> u32 {
@@ -1138,6 +1137,43 @@ mod tests {
         glk.graphics_draw_image(5, 0, 10, 10, None);
         // No primary buffer is open → elems empty.
         assert!(glk.take_transcript_elems().is_empty());
+    }
+
+    /// A valid 2x2 red PNG, encoded via the `image` crate.
+    fn png_bytes() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn graphics_draw_image_reports_false_when_pict_missing() {
+        // SQ-0175 part A: with no Blorb registered, `resnum` never resolves,
+        // so the backend must report false rather than always claiming success.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer);
+        assert!(!glk.graphics_draw_image(1, 0, 1, 0, None), "buffer window, missing image");
+
+        glk.window_open(5, WinType::Graphics);
+        assert!(!glk.graphics_draw_image(5, 0, 10, 10, None), "graphics window, missing image");
+    }
+
+    #[test]
+    fn graphics_draw_image_reports_true_when_pict_resolves() {
+        // A resnum backed by a real, decodable Pict in the Blorb must report
+        // true on both the buffer-window and graphics-window draw paths.
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes());
+        let mut glk = AppGlk::with_graphics(80, 24, (1, 1), crate::graphics::PictSource::new(Some(blorb)));
+        glk.window_open(1, WinType::TextBuffer);
+        assert!(glk.graphics_draw_image(1, /*resnum*/ 1, /*imagealign*/ 1, 0, None), "buffer window, resolvable image");
+
+        let blorb2 = crate::graphics::test_blorb_with_pict(1, &png_bytes());
+        let mut glk2 = AppGlk::with_graphics(80, 24, (1, 1), crate::graphics::PictSource::new(Some(blorb2)));
+        glk2.window_open(5, WinType::Graphics);
+        assert!(glk2.graphics_draw_image(5, /*resnum*/ 1, 10, 10, None), "graphics window, resolvable image");
     }
 
     #[test]

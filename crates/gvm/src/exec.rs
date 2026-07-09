@@ -2732,19 +2732,18 @@ impl Machine {
                 }
             }
             0x00E1 => {
-                // glk_image_draw(win, image, val1=x, val2=y)
+                // glk_image_draw(win, image, val1=x, val2=y) -> 1 if actually drawn
                 if self.graphics_enabled {
-                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, None);
-                    1
+                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, None) as u32
                 } else {
                     0
                 }
             }
             0x00E2 => {
                 // glk_image_draw_scaled(win, image, val1=x, val2=y, width, height)
+                // -> 1 if actually drawn
                 if self.graphics_enabled {
-                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some((a(4), a(5))));
-                    1
+                    self.backend.graphics_draw_image(a(0), a(1), a(2) as i32, a(3) as i32, Some((a(4), a(5)))) as u32
                 } else {
                     0
                 }
@@ -6528,12 +6527,39 @@ mod tests {
         // &[win, color, left, top, w, h].
         m.glk_dispatch(0x00EA, &[win, 0x00FF_0000, 1, 2, 3, 4]).unwrap(); // fill_rect
         m.glk_dispatch(0x00EB, &[win, 0x0000_00FF]).unwrap(); // set_background_color
-        m.glk_dispatch(0x00E1, &[win, 7, 5, 6]).unwrap(); // image_draw(win, resnum=7, x=5, y=6)
+        let drew = m.glk_dispatch(0x00E1, &[win, 7, 5, 6]).unwrap(); // image_draw(win, resnum=7, x=5, y=6)
+        assert_eq!(drew, 1, "backend resolved resnum 7 -> glk_image_draw reports success");
 
         let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
         assert_eq!(tb.fills(win), vec![(0x00FF_0000, 1, 2, 3, 4)]);
         assert_eq!(tb.background(win), Some(0x0000_00FF));
         assert_eq!(tb.draws(win), vec![(7, 5, 6, None)]);
+    }
+
+    #[test]
+    fn graphics_draw_image_reports_backend_failure() {
+        // glk_image_draw/glk_image_draw_scaled must reflect whether the
+        // backend actually resolved and drew the image, not just whether
+        // graphics is enabled (SQ-0175 part A).
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mem = Memory::new(built.image).expect("valid image");
+        let mut m = Machine::with_glk(mem, Box::new(glk::TestBackend::new().with_missing_image(99)));
+        m.set_graphics(true);
+        let win = m.glk_open_window(0, 0, 0, 5, 0);
+        assert_ne!(win, 0);
+
+        let drew = m.glk_dispatch(0x00E1, &[win, 99, 5, 6]).unwrap();
+        assert_eq!(drew, 0, "missing resnum -> glk_image_draw reports failure");
+        let drew_scaled = m.glk_dispatch(0x00E2, &[win, 99, 5, 6, 10, 20]).unwrap();
+        assert_eq!(drew_scaled, 0, "missing resnum -> glk_image_draw_scaled reports failure");
+
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        assert_eq!(tb.draws(win), Vec::new(), "nothing recorded for a failed draw");
+
+        // A resnum the backend doesn't consider missing still succeeds.
+        let drew_ok = m.glk_dispatch(0x00E1, &[win, 7, 1, 2]).unwrap();
+        assert_eq!(drew_ok, 1);
     }
 
     #[test]

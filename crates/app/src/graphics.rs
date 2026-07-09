@@ -84,7 +84,7 @@ impl Canvas {
 /// Resolves + caches decoded images by Blorb `Pict` resource number.
 pub struct PictSource {
     blorb: Option<blorb::Blorb>,
-    cache: HashMap<u32, Option<DynamicImage>>,
+    cache: HashMap<u32, Option<Arc<DynamicImage>>>,
 }
 
 impl PictSource {
@@ -92,11 +92,12 @@ impl PictSource {
         PictSource { blorb, cache: HashMap::new() }
     }
 
-    fn get(&mut self, resnum: u32) -> Option<&DynamicImage> {
+    fn get(&mut self, resnum: u32) -> Option<&Arc<DynamicImage>> {
         if !self.cache.contains_key(&resnum) {
             let decoded = self.blorb.as_ref()
                 .and_then(|b| b.resource(b"Pict", resnum))
-                .and_then(|(_ty, bytes)| crate::cover::decode(bytes));
+                .and_then(|(_ty, bytes)| crate::cover::decode(bytes))
+                .map(Arc::new);
             self.cache.insert(resnum, decoded);
         }
         self.cache.get(&resnum).and_then(|o| o.as_ref())
@@ -107,10 +108,46 @@ impl PictSource {
         self.get(resnum).map(|i| i.dimensions())
     }
 
-    /// The decoded image for a Pict, or `None`.
-    pub fn image(&mut self, resnum: u32) -> Option<&DynamicImage> {
-        self.get(resnum)
+    /// The decoded image for a Pict, or `None`. Returns a cheap `Arc` clone
+    /// of the cached decode rather than deep-copying the `DynamicImage`.
+    pub fn image(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
+        self.get(resnum).cloned()
     }
+}
+
+/// Test-only: build a minimal Blorb containing one `Pict` resource whose raw
+/// bytes are `data`, at resource number `resnum` — for tests that need a
+/// resolvable image without a full story file.
+#[cfg(test)]
+pub(crate) fn test_blorb_with_pict(resnum: u32, data: &[u8]) -> blorb::Blorb {
+    fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(ty);
+        v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        v.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            v.push(0);
+        }
+        v
+    }
+    let ridx_data_len = 4 + 12; // count + one 12-byte entry
+    let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+    let pict_chunk = chunk(b"PNG ", data);
+    let mut ridx = Vec::new();
+    ridx.extend_from_slice(&1u32.to_be_bytes());
+    ridx.extend_from_slice(b"Pict");
+    ridx.extend_from_slice(&resnum.to_be_bytes());
+    ridx.extend_from_slice(&(first_res_off as u32).to_be_bytes());
+    let ridx_chunk = chunk(b"RIdx", &ridx);
+    let mut inner = Vec::new();
+    inner.extend_from_slice(b"IFRS");
+    inner.extend_from_slice(&ridx_chunk);
+    inner.extend_from_slice(&pict_chunk);
+    let mut file = Vec::new();
+    file.extend_from_slice(b"FORM");
+    file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+    file.extend_from_slice(&inner);
+    blorb::Blorb::parse(file).expect("valid test blorb")
 }
 
 #[cfg(test)]
@@ -174,5 +211,28 @@ mod tests {
         let mut none = PictSource::new(None);
         assert!(none.info(1).is_none());
         assert!(none.image(1).is_none());
+    }
+
+    /// A valid 2x2 red PNG, encoded via the `image` crate.
+    fn png_bytes() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn image_hands_out_cheap_arc_clones_of_one_decode() {
+        // SQ-0175 part B: `PictSource::image` must not deep-clone the decoded
+        // `DynamicImage` on every draw — repeated calls for the same resnum
+        // should return `Arc` clones pointing at the same allocation.
+        let blorb = test_blorb_with_pict(1, &png_bytes());
+        let mut src = PictSource::new(Some(blorb));
+        let a = src.image(1).expect("resolves");
+        let b = src.image(1).expect("resolves");
+        assert!(Arc::ptr_eq(&a, &b), "both calls must share one cached decode");
+        assert_eq!(a.dimensions(), (2, 2));
     }
 }

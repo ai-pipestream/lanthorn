@@ -13,7 +13,7 @@
 //! `GLULX_NOTES.md` §19.
 
 use std::any::Any;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ── Window types (`wintype_*`, the `wintype` argument to glk_window_open) ──────
 
@@ -316,8 +316,11 @@ pub trait GlkBackend {
     /// Set a graphics window's background color.
     fn graphics_set_background(&mut self, _win: u32, _color: u32) {}
     /// Draw image `resnum` into a graphics window at `(x, y)`, optionally
-    /// scaled to `(width, height)`.
-    fn graphics_draw_image(&mut self, _win: u32, _resnum: u32, _x: i32, _y: i32, _scale: Option<(u32, u32)>) {}
+    /// scaled to `(width, height)`. Return whether the image actually
+    /// resolved and was drawn (false if `resnum` is missing/undecodable).
+    fn graphics_draw_image(&mut self, _win: u32, _resnum: u32, _x: i32, _y: i32, _scale: Option<(u32, u32)>) -> bool {
+        false
+    }
     /// Create a sound channel with rock `rock`; return its Glk ref (0 = failure).
     fn schannel_create(&mut self, _rock: u32) -> u32 { 0 }
     /// Destroy a sound channel.
@@ -367,6 +370,9 @@ pub struct TestBackend {
     fills: BTreeMap<u32, Vec<FillRec>>,
     /// Recorded `draw_image` calls per graphics window.
     draws: BTreeMap<u32, Vec<DrawRec>>,
+    /// Resnums that simulate a missing/undecodable image (draw reports false,
+    /// nothing recorded).
+    missing_images: BTreeSet<u32>,
     /// Last background color set per graphics window.
     backgrounds: BTreeMap<u32, u32>,
     /// Next schannel ref to hand out (pre-incremented; first create → 1).
@@ -394,6 +400,7 @@ impl TestBackend {
             dims: BTreeMap::new(),
             fills: BTreeMap::new(),
             draws: BTreeMap::new(),
+            missing_images: BTreeSet::new(),
             backgrounds: BTreeMap::new(),
             next_schannel: 0,
             schannel_rocks: BTreeMap::new(),
@@ -407,6 +414,12 @@ impl TestBackend {
     /// A backend reporting a specific character-cell pixel size.
     pub fn with_char_pixels(mut self, cw: u32, ch: u32) -> Self {
         self.char_px = (cw, ch);
+        self
+    }
+    /// Mark `resnum` as missing/undecodable: `graphics_draw_image` reports
+    /// false for it and records nothing.
+    pub fn with_missing_image(mut self, resnum: u32) -> Self {
+        self.missing_images.insert(resnum);
         self
     }
     /// Accumulated text for one text-buffer window (empty if none).
@@ -520,8 +533,12 @@ impl GlkBackend for TestBackend {
     fn graphics_set_background(&mut self, win: u32, color: u32) {
         self.backgrounds.insert(win, color);
     }
-    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) {
+    fn graphics_draw_image(&mut self, win: u32, resnum: u32, x: i32, y: i32, scale: Option<(u32, u32)>) -> bool {
+        if self.missing_images.contains(&resnum) {
+            return false;
+        }
         self.draws.entry(win).or_default().push((resnum, x, y, scale));
+        true
     }
     fn schannel_create(&mut self, rock: u32) -> u32 {
         self.next_schannel += 1;
