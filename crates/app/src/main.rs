@@ -706,8 +706,10 @@ fn draw_frame(
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else {
-            let w = help_row.width as usize;
             let leader_hint = format!("{}: menu", state.hotkeys.prefix.label());
+            // Reserve room for the leader hint + " | " separator so the composed
+            // row doesn't overflow help_row.width (mirrors the tidy_anim branch).
+            let w = (help_row.width as usize).saturating_sub(leader_hint.chars().count() + 3);
             let rest = match state.focus {
                 Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
                 Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),

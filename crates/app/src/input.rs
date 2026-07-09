@@ -1092,8 +1092,8 @@ pub fn mouse_to_action(
 /// opens (handled in apply_action).
 fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> KeyResolve {
     // ESC or Enter always closes the hotkey dialog (same as [X] / [Done]).
-    // Enter is handled before lookup_any to prevent the Anim/AnimExit binding
-    // from firing when the hotkey dialog is open.
+    // Enter is handled before the leader-letter lookup to prevent the
+    // Anim/AnimExit binding from firing when the hotkey dialog is open.
     if matches!(key.code, KeyCode::Esc | KeyCode::Enter) && key.modifiers == KeyModifiers::NONE {
         return KeyResolve::Action(Action::CloseHotkeyDialog);
     }
