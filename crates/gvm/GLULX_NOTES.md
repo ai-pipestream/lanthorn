@@ -369,8 +369,9 @@ selectors return 0. `verify S1` (0x121) — a **real image checksum check** (spe
 §1.4: sum the initial memory as big-endian 32-bit words with the 0x20 field
 zeroed, compare to the stored checksum); stores 0 if it matches, else 1.
 Selector numbers and meanings are from the spec; the **returned capability values
-reflect what this VM actually implements** (float remains deferred → 0; see §17
-for acceleration, which is implemented).
+reflect what this VM actually implements** (single-precision float is
+implemented → Float(11) = 1; double-precision is deferred → Double(12) = 0; see
+§17 for acceleration, which is implemented).
 
 | Sel | Name         | Num | Returns                                              |
 |-----|--------------|-----|------------------------------------------------------|
@@ -385,7 +386,7 @@ for acceleration, which is implemented).
 | 8   | MAllocHeap   | 8   | heap-start address (0 if the heap is inactive)      |
 | 9   | Acceleration | 9   | 1 (interception implemented for 13 well-known functions) |
 | 10  | AccelFunc    | 10  | 1 for function numbers 1–13, else 0 (0 is also the accelfunc cancel sentinel) |
-| 11  | Float        | 11  | 0 (floating point deferred)                         |
+| 11  | Float        | 11  | 1 (single-precision implemented; double-precision Sel 12 deferred → 0) |
 
 **Deviation note:** for selector 4 (IOSystem) the spec states the null (0) and
 filter (1) systems "will always succeed." This VM has not implemented the filter

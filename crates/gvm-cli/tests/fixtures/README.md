@@ -24,6 +24,10 @@ Core VM + the Glk I/O subset: `operand`, `arith`, `bitwise`, `shift`, `aload`,
   the **filter I/O system** (iosys mode 1) is deferred (see GLULX_NOTES §7).
 - `gidispa` — the **gi_dispatch introspection layer** (type-tagged string
   dispatch); not part of the IF Glk subset and not used by real games.
-- `acceleration` — accelerated functions are stored only, not intercepted.
-- `floatconv`/`floatarith`/… and `doubleconv`/… — no floating-point opcode set.
+- `acceleration` — accelerated functions ARE intercepted (on by default;
+  `--no-accel` disables); this glulxercise group is simply not in the in-scope
+  assertion list above.
+- `doubleconv`/`doublearith`/… — double-precision opcodes are deferred
+  (gestalt Double = 0). Single-precision `floatconv`/`floatarith` ARE implemented
+  (gestalt Float = 1) but are likewise not in the in-scope assertion list.
 - `restore` — file streams / Glk-stream save are not wired in this phase.
