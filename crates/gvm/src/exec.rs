@@ -2100,7 +2100,17 @@ impl Machine {
                     return;
                 }
                 self.filter_depth += 1;
-                for ch in s.chars() {
+                let mut chars = s.chars();
+                while let Some(ch) = chars.next() {
+                    if self.iosys_mode != 1 {
+                        // The filter switched the I/O system mid-string (e.g.
+                        // via @setiosys): hand the remaining characters off
+                        // under the now-current mode instead of continuing to
+                        // call the stale filter rock.
+                        self.filter_depth -= 1;
+                        let rest: String = std::iter::once(ch).chain(chars).collect();
+                        return self.emit(&rest);
+                    }
                     let _ = self.run_call_to_return(self.iosys_rock, &[ch as u32]);
                 }
                 self.filter_depth -= 1;
@@ -4535,6 +4545,48 @@ mod tests {
         // Bounded by the depth guard: the initial call plus 32 further
         // recursive calls before deeper output is discarded.
         assert_eq!(m.mem.read32(COUNTER_ADDR), Some(33));
+    }
+
+    #[test]
+    fn filter_switches_iosys_mid_string_routes_remainder() {
+        use asm::Op::{C8, C16, C32, Local32, Mem16, Zero};
+        const FILT_ADDR: u32 = 0x24;
+        const MEMBUF: u32 = 0x180;
+        const MEMBUF_LEN: i8 = 16;
+        const SID_ADDR: u16 = 0x1A0;
+        const CLOSE_ADDR: u16 = 0x1A8;
+
+        // Filter function `surroundonce`(ch): switches iosys to Glk (mode 2,
+        // rock 0) then emits '<', ch, '>'. Only the first char ('1' of "123")
+        // is meant to reach the filter; '<', ch, and '>' go out under the
+        // switched-to mode, and the remaining '2'/'3' must then also be
+        // routed under that new mode rather than dropped or fed to the
+        // now-stale filter rock.
+        let mut filt_body = asm::ins(0x149, &[C8(2), C8(0)]); // setiosys glk, rock 0
+        filt_body.extend(asm::ins(0x70, &[C8(b'<' as i8)])); // streamchar '<'
+        filt_body.extend(asm::ins(0x70, &[Local32(0)])); // streamchar ch
+        filt_body.extend(asm::ins(0x70, &[C8(b'>' as i8)])); // streamchar '>'
+        filt_body.extend(asm::ins(0x31, &[C8(0)])); // return 0
+        let filt = asm::func(0xC1, &[(4, 1)], &filt_body);
+
+        // Open a memory stream and make it current, so glk-mode output (mode
+        // 2, which the filter switches to) lands there rather than a window.
+        let mut body = glk_call(0x43, &[C16(MEMBUF as i16), C8(MEMBUF_LEN), C8(1), C8(0)], Mem16(SID_ADDR));
+        body.extend(glk_call(0x47, &[Mem16(SID_ADDR)], Zero)); // set_current(memory stream)
+        body.extend(asm::ins(0x149, &[C8(1), C32(FILT_ADDR)])); // setiosys filter, rock=filt
+        body.extend(asm::ins(0x71, &[C32(123)])); // streamnum 123 -> '1','2','3'
+        body.extend(glk_call(0x44, &[Mem16(SID_ADDR), C16(CLOSE_ADDR as i16)], Zero)); // stream_close -> counts
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, start], 1, 0x300);
+        assert_eq!(built.addrs[0], FILT_ADDR, "test assumes filt is assembled first");
+        let mut m = machine(built);
+        m.run();
+
+        let bytes: Vec<u8> = (0..5).map(|i| m.mem.read8(MEMBUF + i).unwrap() as u8).collect();
+        assert_eq!(bytes, b"<1>23", "remainder routed under the switched-to mode, not dropped");
+        assert_eq!(m.mem.read32((CLOSE_ADDR + 4) as u32), Some(5), "write count");
     }
 
     #[test]

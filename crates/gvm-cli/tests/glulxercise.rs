@@ -23,14 +23,13 @@ use std::time::{Duration, Instant};
 /// `throw`), the Glk stream/output model and the memory-stream capture path
 /// (`streamnum`/`strings`/`ramstring`), the Glk opcode surface incl. Unicode
 /// case folding and the dispatch -1/stack convention (`glk`), search/verify,
-/// and the filter I/O system (`iosys2`/`iosys3`/`filter`/`nullio`/`gestalt`;
-/// SQ-0245). Plain `iosys` is excluded: it fails on an unrelated pre-existing
-/// mid-string memory-stream redirection bug, not the filter system.
+/// and the filter I/O system (`iosys`/`iosys2`/`iosys3`/`filter`/`nullio`/
+/// `gestalt`; SQ-0245, SQ-0249).
 const IN_SCOPE: &[&str] = &[
     "arith", "bitwise", "shift", "aload", "astore", "arraybit", "call", "jump",
     "jumpform", "compare", "stack", "throw", "streamnum", "strings", "ramstring",
-    "glk", "search", "mzero", "verify", "iosys2", "iosys3", "filter", "nullio",
-    "gestalt",
+    "glk", "search", "mzero", "verify", "iosys", "iosys2", "iosys3", "filter",
+    "nullio", "gestalt",
 ];
 
 fn fixture_path() -> PathBuf {
