@@ -3701,6 +3701,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         9 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
         10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
         11 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
+        13 => { if let Some(cs) = &mut state.config_screen { cs.working.mouse = !cs.working.mouse; } }
         _ => {}
     }
 }
@@ -3738,6 +3739,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         10 => working.honor_timed_input = !working.honor_timed_input,
         11 => working.enable_sound = !working.enable_sound,
         12 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
+        13 => working.mouse = !working.mouse,
         _ => {}
     }
 }

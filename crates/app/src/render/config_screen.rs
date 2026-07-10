@@ -23,6 +23,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("honor_timed_input",    ConfigRowKind::Bool),
     ("enable_sound",         ConfigRowKind::Bool),
     ("volume",               ConfigRowKind::Num),
+    ("mouse",                ConfigRowKind::Bool),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -174,6 +175,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         10 => bool_str(cfg.honor_timed_input),
         11 => bool_str(cfg.enable_sound),
         12 => cfg.volume.to_string(),
+        13 => bool_str(cfg.mouse),
         _ => String::new(),
     }
 }
@@ -211,6 +213,7 @@ mod tests {
             .collect();
         assert!(content.contains("auto_save"), "auto_save row should be visible");
         assert!(content.contains("background_tidy"), "background_tidy row should be visible");
+        assert!(content.contains("mouse"), "mouse row should be visible");
     }
 
     #[test]

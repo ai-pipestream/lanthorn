@@ -3159,6 +3159,9 @@ fn main() {
         } else {
             None
         };
+        // Mouse capture is established once at startup; note its pre-save value so a
+        // settings-screen change can be applied to the live terminal below.
+        let mouse_before_save = state.config.mouse;
 
         match action {
             // ── Caller-handled actions ─────────────────────────────────────────
@@ -3761,6 +3764,15 @@ fn main() {
         if let Some(cfg_to_write) = config_to_save {
             let user_dir = cfg_to_write.user_dir.clone();
             save_style_and_repoint(&mut state, &user_dir);
+            // Apply a mouse-capture change live so the setting takes effect without a
+            // restart (matching how audio/colours apply live on save).
+            if cfg_to_write.mouse != mouse_before_save {
+                let _ = if cfg_to_write.mouse {
+                    execute!(stdout(), EnableMouseCapture)
+                } else {
+                    execute!(stdout(), DisableMouseCapture)
+                };
+            }
         }
 
         // After apply_action: if the style editor was just saved, write the live
