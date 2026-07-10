@@ -3062,6 +3062,49 @@ fn main() {
             }
         }
 
+        // ── Line-terminator key gate (SQ-0188) ────────────────────────────────
+        // While the Z-machine is waiting for a *line* read, a special key the game
+        // lists in its v5 terminating-characters table (arrows / function keys)
+        // submits the current input line with THAT ZSCII terminator, instead of the
+        // key's normal app behavior. Only plain (no Shift/Ctrl/Alt) arrows + F-keys
+        // are candidates; every other key — and any non-terminator arrow/F-key —
+        // falls through unchanged so it keeps its app behavior (history/scroll/pan).
+        if !state.any_overlay_open()
+            && zvm_session_opt(&*session).is_some_and(|z| z.pending_input() == app::session::InputKind::Line)
+        {
+            if let Event::Key(k) = &event {
+                if k.kind == KeyEventKind::Press {
+                    use crossterm::event::KeyModifiers;
+                    let plain = !k.modifiers.intersects(
+                        KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT,
+                    );
+                    if plain {
+                        let term = app::engine::key_event_to_input(*k)
+                            .and_then(|ki| zvm_session_opt(&*session).and_then(|z| z.line_key_terminator(&ki)));
+                        if let Some(term) = term {
+                            let cmd = state.take_input();
+                            if !cmd.is_empty() {
+                                state.record_command(&cmd);
+                            }
+                            state.status_msg = None;
+                            state.turns += 1;
+                            state.unsaved_progress = true;
+                            let result = zvm_session_opt_mut(&mut *session)
+                                .expect("z-machine line read is pending")
+                                .submit_line_with_terminator(&cmd, term);
+                            if finish_command_turn(
+                                &cmd, result, &mut state, &mut mapper, &mut *session,
+                                &save_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
+                            ) {
+                                break;
+                            }
+                            continue 'event_loop;
+                        }
+                    }
+                }
+            }
+        }
+
         // Route event to an Action.
         let action = match event {
             Event::Key(k) if k.kind == KeyEventKind::Press => {
@@ -3406,102 +3449,10 @@ fn main() {
                 state.unsaved_progress = true;
 
                 let result = session.submit(&cmd);
-                if result.erase_lower { state.mark_screen_clear(); }
-                state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
-                if result.transcript_elems.is_empty() {
-                    state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
-                } else {
-                    app::state::apply_transcript_elems(&mut state, &result.transcript_elems);
-                }
-                apply_turn_events(&mut state, &result);
-                if let Some(note) = &result.info {
-                    state.push_transcript(note);
-                }
-
-                // Capture room + connection counts before apply_turn, to detect
-                // whether THIS turn actually changed the graph (a non-mutating
-                // command like "look" leaves both unchanged).
-                let rooms_before = mapper.graph.rooms().count();
-                let conns_before = mapper.graph.connections().len();
-
-                apply_turn(&mut mapper, &cmd, &result);
-
-                // Bump the graph generation so any in-flight tidy result is detected as stale.
-                state.graph_gen = state.graph_gen.wrapping_add(1);
-
-                // Game-initiated (v4+) save/restore: open the saves dialog in
-                // in-game mode and defer auto-save/history capture until the
-                // resume completes (the turn is still in flight).
-                if let Some(io) = result.pending_io {
-                    open_ingame_saves(io, &save_dir, &ifid, &mut state);
-                    continue;
-                }
-
-                // ── Post-turn bookkeeping (history / inventory / auto-save) ──
-                post_turn_bookkeeping(
-                    &mut state, &mapper, &*session, &result, &cmd,
-                    rooms_before, conns_before, &ifid, &arc_file,
-                );
-                persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
-
-                // Background tidy: silently re-tidy the active layer when the
-                // configured mode calls for it. Only runs in Auto layout mode.
-                // Overlap signal is computed for ALL modes (not only OnOverlap).
-                if mapper.mode == mapper::layout::LayoutMode::Auto {
-                    let new_room = mapper.graph.rooms().count() > rooms_before;
-                    let active_layer = state.active_layer(&mapper.graph);
-                    // Always compute overlap so all modes can react to it.
-                    let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
-                    let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
-                    let has_overlap = cells.len() < total_rooms;
-                    let has_distorted = mapper.graph.connections().iter().any(|c| {
-                        c.distorted
-                            && mapper.graph.layer_of(c.origin) == active_layer
-                            && mapper.graph.layer_of(c.dest) == active_layer
-                    });
-                    let overlap = has_overlap || has_distorted;
-                    // Only auto-tidy on turns that actually changed the graph, so a
-                    // bare "look" (overlap persists, graph unchanged) doesn't pulse.
-                    let new_conn = mapper.graph.connections().len() > conns_before;
-                    let changed = new_room || new_conn;
-                    if should_bg_tidy(state.config.background_tidy, new_room, overlap, changed, &mut bg_tidy_counter) {
-                        // Spawn a worker thread only if no job is currently in flight (coalesce).
-                        if state.tidy_job.is_none() {
-                            let graph_clone = mapper.graph.clone();
-                            let gen = state.graph_gen;
-                            let handle = std::thread::spawn(move || {
-                                let mut g = graph_clone;
-                                tidy_layer_silent(&mut g, active_layer);
-                                g
-                            });
-                            state.tidy_job = Some(TidyJob {
-                                handle,
-                                layer: active_layer,
-                                gen,
-                                started: std::time::Instant::now(),
-                            });
-                        }
-                        // If a job is already in flight we skip spawning; the gen check after
-                        // join will detect the stale result and re-trigger as needed.
-                    }
-                }
-
-                // Clear any manual layer browse override so the view follows the player.
-                state.set_viewed_layer(None);
-
-                // Select and recenter on the current room.
-                if let Some(snap) = &result.location {
-                    let rid = snap.number as mapper::graph::RoomId;
-                    state.select_room(Some(rid));
-                    if let Some(room) = mapper.graph.room(rid) {
-                        if let Some(pos) = room.pos {
-                            let (pw, ph) = map_pane_dims(last_panes.map);
-                            state.recenter_on(pos, pw, ph);
-                        }
-                    }
-                }
-
-                if should_exit_on_turn(&result, &state) {
+                if finish_command_turn(
+                    &cmd, result, &mut state, &mut mapper, &mut *session,
+                    &save_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
+                ) {
                     break;
                 }
             }
@@ -4503,6 +4454,122 @@ fn handle_saves_prompt(
 /// Open the saves dialog in "in-game" mode for a game-initiated save/restore.
 /// SAVE: prompt for a save name (reuses the SaveAs prompt). RESTORE: open the
 /// saves list, including plain *.qzl files alongside *.babelmap saves.
+/// Apply a completed game-turn `result` from a submitted command line: echo the
+/// command, push its transcript, advance the mapper, run post-turn bookkeeping /
+/// auto-save / background tidy, and recenter on the current room. Shared by the
+/// normal `SubmitCommand` path and the terminator-key submit gate (SQ-0188).
+/// Returns `true` if the app should exit after this turn.
+#[allow(clippy::too_many_arguments)]
+fn finish_command_turn(
+    cmd: &str,
+    result: TurnResult,
+    state: &mut AppState,
+    mapper: &mut Mapper,
+    session: &mut dyn Engine,
+    save_dir: &std::path::Path,
+    ifid: &str,
+    arc_file: &std::path::Path,
+    map_area: Rect,
+    bg_tidy_counter: &mut u32,
+) -> bool {
+    if result.erase_lower { state.mark_screen_clear(); }
+    state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
+    if result.transcript_elems.is_empty() {
+        state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
+    } else {
+        app::state::apply_transcript_elems(state, &result.transcript_elems);
+    }
+    apply_turn_events(state, &result);
+    if let Some(note) = &result.info {
+        state.push_transcript(note);
+    }
+
+    // Capture room + connection counts before apply_turn, to detect
+    // whether THIS turn actually changed the graph (a non-mutating
+    // command like "look" leaves both unchanged).
+    let rooms_before = mapper.graph.rooms().count();
+    let conns_before = mapper.graph.connections().len();
+
+    apply_turn(mapper, cmd, &result);
+
+    // Bump the graph generation so any in-flight tidy result is detected as stale.
+    state.graph_gen = state.graph_gen.wrapping_add(1);
+
+    // Game-initiated (v4+) save/restore: open the saves dialog in
+    // in-game mode and defer auto-save/history capture until the
+    // resume completes (the turn is still in flight).
+    if let Some(io) = result.pending_io {
+        open_ingame_saves(io, save_dir, ifid, state);
+        return false;
+    }
+
+    // ── Post-turn bookkeeping (history / inventory / auto-save) ──
+    post_turn_bookkeeping(
+        state, mapper, &*session, &result, cmd,
+        rooms_before, conns_before, ifid, arc_file,
+    );
+    persist_aux_after_turn(session, state, save_dir, ifid);
+
+    // Background tidy: silently re-tidy the active layer when the
+    // configured mode calls for it. Only runs in Auto layout mode.
+    // Overlap signal is computed for ALL modes (not only OnOverlap).
+    if mapper.mode == mapper::layout::LayoutMode::Auto {
+        let new_room = mapper.graph.rooms().count() > rooms_before;
+        let active_layer = state.active_layer(&mapper.graph);
+        // Always compute overlap so all modes can react to it.
+        let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
+        let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
+        let has_overlap = cells.len() < total_rooms;
+        let has_distorted = mapper.graph.connections().iter().any(|c| {
+            c.distorted
+                && mapper.graph.layer_of(c.origin) == active_layer
+                && mapper.graph.layer_of(c.dest) == active_layer
+        });
+        let overlap = has_overlap || has_distorted;
+        // Only auto-tidy on turns that actually changed the graph, so a
+        // bare "look" (overlap persists, graph unchanged) doesn't pulse.
+        let new_conn = mapper.graph.connections().len() > conns_before;
+        let changed = new_room || new_conn;
+        if should_bg_tidy(state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter) {
+            // Spawn a worker thread only if no job is currently in flight (coalesce).
+            if state.tidy_job.is_none() {
+                let graph_clone = mapper.graph.clone();
+                let gen = state.graph_gen;
+                let handle = std::thread::spawn(move || {
+                    let mut g = graph_clone;
+                    tidy_layer_silent(&mut g, active_layer);
+                    g
+                });
+                state.tidy_job = Some(TidyJob {
+                    handle,
+                    layer: active_layer,
+                    gen,
+                    started: std::time::Instant::now(),
+                });
+            }
+            // If a job is already in flight we skip spawning; the gen check after
+            // join will detect the stale result and re-trigger as needed.
+        }
+    }
+
+    // Clear any manual layer browse override so the view follows the player.
+    state.set_viewed_layer(None);
+
+    // Select and recenter on the current room.
+    if let Some(snap) = &result.location {
+        let rid = snap.number as mapper::graph::RoomId;
+        state.select_room(Some(rid));
+        if let Some(room) = mapper.graph.room(rid) {
+            if let Some(pos) = room.pos {
+                let (pw, ph) = map_pane_dims(map_area);
+                state.recenter_on(pos, pw, ph);
+            }
+        }
+    }
+
+    should_exit_on_turn(&result, state)
+}
+
 fn open_ingame_saves(
     io: app::session::PendingIo,
     save_dir: &std::path::Path,

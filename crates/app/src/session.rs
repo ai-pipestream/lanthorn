@@ -276,8 +276,21 @@ impl GameSession {
     /// Supply a player command, step until the next input request or Quit,
     /// and return the turn result.
     pub fn submit(&mut self, command: &str) -> TurnResult {
-        self.machine.supply_line(command, 13);
+        self.submit_line_with_terminator(command, 13)
+    }
+
+    /// Supply a player command terminated by an explicit ZSCII terminator (v5+
+    /// terminating-characters table), step until the next input request or Quit,
+    /// and return the turn result. `submit` is this with terminator 13 (Enter).
+    pub fn submit_line_with_terminator(&mut self, command: &str, terminator: u8) -> TurnResult {
+        self.machine.supply_line(command, terminator);
         self.advance_after_input(false)
+    }
+
+    /// v5+: does `ch` terminate a line read per the game's terminating-characters
+    /// table? Thin wrapper over [`Machine::is_terminator`].
+    pub fn is_terminator(&self, ch: u16) -> bool {
+        self.machine.is_terminator(ch)
     }
 
     /// Supply a single keypress, step until the next input request or Quit,
@@ -673,6 +686,20 @@ impl GameSession {
         }
     }
 
+    /// While a Z-machine *line* read is active, decide whether a special key the
+    /// player pressed is one the game listed as a line terminator (v5+ table).
+    /// Only arrow keys and function keys are candidate terminators; Enter (13)
+    /// flows through the normal submit path, and all other keys are never
+    /// terminators. Returns the ZSCII terminator code to submit with, or `None`
+    /// to leave the key to its normal app behavior.
+    pub fn line_key_terminator(&self, ki: &KeyInput) -> Option<u8> {
+        match ki {
+            KeyInput::Up | KeyInput::Down | KeyInput::Left | KeyInput::Right | KeyInput::Func(_) => {}
+            _ => return None,
+        }
+        let z = Self::key_input_to_zscii(*ki)?;
+        self.is_terminator(z as u16).then_some(z)
+    }
 }
 
 /// Mirror a Z-machine's screen into the neutral [`ScreenModel`].
@@ -2062,5 +2089,53 @@ mod tests {
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Char('\u{00E9}')), None);
         // Tab → None (not a game key).
         assert_eq!(GameSession::key_input_to_zscii(KeyInput::Tab), None);
+    }
+
+    // ── SQ-0188: line terminator keys ─────────────────────────────────────────
+
+    /// A v5 story whose header 0x2E points at a terminating-characters table
+    /// listing ZSCII 129 (cursor-up), so `is_terminator(129)` is true. Mirrors the
+    /// zvm fixture in `terminating_chars_table_is_honoured`.
+    fn story_v5_with_up_terminator() -> Vec<u8> {
+        let mut buf = read_char_story_v5();
+        let tbl: u16 = 0x0090; // dynamic memory, below static base 0x0400
+        buf[0x2E] = (tbl >> 8) as u8;
+        buf[0x2F] = (tbl & 0xFF) as u8;
+        buf[tbl as usize] = 0x81;     // 129 = cursor up
+        buf[tbl as usize + 1] = 0x00; // table terminator
+        buf
+    }
+
+    #[test]
+    fn line_key_terminator_maps_listed_key() {
+        use crate::engine::KeyInput;
+        let s = GameSession::new(story_v5_with_up_terminator(), true, false, None)
+            .expect("GameSession::new");
+        // Up (129) is listed in the game's table → submit with that terminator.
+        assert_eq!(s.line_key_terminator(&KeyInput::Up), Some(129));
+        // Down (130) is a candidate but NOT listed → None (keeps app behavior).
+        assert_eq!(s.line_key_terminator(&KeyInput::Down), None);
+    }
+
+    #[test]
+    fn line_key_terminator_none_without_table() {
+        use crate::engine::KeyInput;
+        // No terminating-characters table → arrows/F-keys are never terminators.
+        let s = GameSession::new(read_char_story_v5(), true, false, None)
+            .expect("GameSession::new");
+        assert_eq!(s.line_key_terminator(&KeyInput::Up), None);
+        assert_eq!(s.line_key_terminator(&KeyInput::Func(1)), None);
+    }
+
+    #[test]
+    fn line_key_terminator_rejects_non_candidate_keys() {
+        use crate::engine::KeyInput;
+        // Even with a table present, only arrows + F-keys are candidates; Enter
+        // flows through the normal submit path and other keys never terminate.
+        let s = GameSession::new(story_v5_with_up_terminator(), true, false, None)
+            .expect("GameSession::new");
+        assert_eq!(s.line_key_terminator(&KeyInput::Char('x')), None);
+        assert_eq!(s.line_key_terminator(&KeyInput::Enter), None);
+        assert_eq!(s.line_key_terminator(&KeyInput::Backspace), None);
     }
 }
