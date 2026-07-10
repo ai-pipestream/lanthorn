@@ -54,7 +54,9 @@ pub fn draw_room_info(
 ) -> Option<DialogRects> {
     let room = graph.room(room_id)?;
 
-    // Compute exits for this room.
+    // Compute exits for this room. `distorted` is the layout's per-connection
+    // signal that the neighbour couldn't be placed at the expected compass offset
+    // (a constraint the tidy/cleanup pass had to drop) — surfaced in Diagnostics.
     let exits: Vec<_> = graph
         .connections()
         .iter()
@@ -62,7 +64,7 @@ pub fn draw_room_info(
         .map(|c| {
             let dest_name = graph.room(c.dest).map(|r| r.label().to_owned())
                 .unwrap_or_else(|| format!("#{}", c.dest));
-            (c.dir, dest_name)
+            (c.dir, dest_name, c.distorted)
         })
         .collect();
 
@@ -83,7 +85,10 @@ pub fn draw_room_info(
     };
     let exit_rows = exits.len() as u16;
     let obj_rows = if objects.is_empty() { 0u16 } else { objects.len() as u16 + 1 }; // +1 for header
-    let needed_h = FIXED_ROWS + notes_lines + exit_rows + obj_rows;
+    // Diagnostics: header + Pos, plus a Layer row when off the main layer.
+    let layer = graph.layer_of(room_id);
+    let diag_rows = 2 + if layer != mapper::layer::MAIN_LAYER { 1 } else { 0 };
+    let needed_h = FIXED_ROWS + notes_lines + exit_rows + obj_rows + diag_rows;
     let panel_h = needed_h.min(map_area.height);
     let panel_w = WIDTH.min(map_area.width);
 
@@ -146,14 +151,37 @@ pub fn draw_room_info(
         draw_str_clipped(buf, inner_x, row, "Exits:", section_style, clip);
         row += 1;
     }
-    for (dir, dest) in &exits {
+    for (dir, dest, distorted) in &exits {
         if row > max_y { break; }
-        let line = format!("  {} -> {}", dir_label(*dir), dest);
+        let tag = if *distorted { " (distorted)" } else { "" };
+        let line = format!("  {} -> {}{}", dir_label(*dir), dest, tag);
         draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
         row += 1;
     }
     if exits.is_empty() && row <= max_y {
         draw_str_clipped(buf, inner_x, row, "  (none)", value_style, clip);
+        row += 1;
+    }
+
+    // Diagnostics: layout placement for this room — assigned grid position, its
+    // layer (when off the main layer), and how many exits the layout had to
+    // distort (drop the compass constraint for). Uses per-room graph data only.
+    if row <= max_y {
+        draw_str_clipped(buf, inner_x, row, "Diagnostics:", section_style, clip);
+        row += 1;
+    }
+    if row <= max_y {
+        let pos = match room.pos {
+            Some((x, y)) => format!("  Pos: ({x}, {y})"),
+            None => "  Pos: (unplaced)".to_string(),
+        };
+        let distorted = exits.iter().filter(|(_, _, d)| *d).count();
+        let pos = if distorted > 0 { format!("{pos}  ({distorted} distorted)") } else { pos };
+        draw_str_clipped(buf, inner_x, row, &pos, value_style, clip);
+        row += 1;
+    }
+    if layer != mapper::layer::MAIN_LAYER && row <= max_y {
+        draw_str_clipped(buf, inner_x, row, &format!("  Layer: {layer}"), value_style, clip);
         row += 1;
     }
 
@@ -273,6 +301,39 @@ mod tests {
         assert!(buf_contains(&buf, "West of House"), "should show room name");
         assert!(buf_contains(&buf, "E"), "should show exit direction");
         assert!(buf_contains(&buf, "Forest Path"), "should show destination");
+    }
+
+    #[test]
+    fn room_info_shows_layout_diagnostics() {
+        let (g, room1, _room2) = make_graph_with_rooms();
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert!(buf_contains(&buf, "Diagnostics:"), "should show the Diagnostics section");
+        // room1 was placed at (0, 0) by make_graph_with_rooms.
+        assert!(buf_contains(&buf, "Pos: (0, 0)"), "should show the assigned grid position");
+    }
+
+    #[test]
+    fn room_info_flags_distorted_exit() {
+        let (mut g, room1, _room2) = make_graph_with_rooms();
+        // Mark the room's single connection distorted (layout dropped the compass
+        // constraint) — the exit line and the Pos summary should say so.
+        g.set_conn_distorted(0, true);
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert!(buf_contains(&buf, "distorted"), "distorted exit should be flagged");
     }
 
     #[test]
