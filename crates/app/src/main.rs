@@ -1086,12 +1086,24 @@ fn run_story_picker(
     let mut last_sel = usize::MAX;
     let mut sel_changed_at = Instant::now();
     const COVER_DEBOUNCE: Duration = Duration::from_millis(90);
-    // Wheel-driven list moves are throttled: terminals emit several wheel events
-    // per physical notch, so one move per event over-scrolls the discrete list.
-    let mut last_list_wheel: Option<Instant> = None;
-    const LIST_WHEEL_THROTTLE: Duration = Duration::from_millis(30);
+    // A physical wheel notch emits several events, all delivered to the input
+    // buffer together. Record the direction here and apply exactly one selection
+    // step once the buffer drains (at the loop top), so one notch = one story
+    // regardless of how the terminal spaces the events within a notch.
+    let mut pending_wheel: Option<isize> = None;
 
     let chosen: Option<std::path::PathBuf> = loop {
+        // Apply a coalesced wheel step once its notch's event burst has fully
+        // drained from the input buffer (poll(0) empty). Separate notches are not
+        // buffered together, so each still moves exactly one story.
+        if let Some(d) = pending_wheel {
+            if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
+                pending_wheel = None;
+                panel_scroll = 0;
+                list.move_by(d, viewport, anim);
+            }
+        }
+
         let _ = terminal.draw(|f| {
             let area = f.area();
             last_area = area;
@@ -1230,16 +1242,10 @@ fn run_story_picker(
                             panel_scroll = (panel_scroll + d as usize).min(panel_max);
                         }
                     } else {
-                        // Collapse a physical notch's burst of wheel events into a
-                        // single selection step (events within a notch arrive within
-                        // a few ms; separate notches are tens of ms apart), so the
-                        // discrete list doesn't skip several stories per notch.
-                        let now = Instant::now();
-                        if last_list_wheel.map_or(true, |t| now.duration_since(t) >= LIST_WHEEL_THROTTLE) {
-                            last_list_wheel = Some(now);
-                            panel_scroll = 0;
-                            list.move_by(d, viewport, anim);
-                        }
+                        // Record the notch's direction; the coalesced step is
+                        // applied at the loop top once this notch's event burst
+                        // drains, so one notch moves the selection one story.
+                        pending_wheel = Some(d);
                     }
                 }
             }
