@@ -69,7 +69,11 @@ type BandCacheKey = (usize, u16, u16, u16);
 
 #[derive(Default)]
 pub struct InlineImageRender {
-    cache: std::collections::HashMap<BandCacheKey, Protocol>,
+    /// Value pins the source `Arc` alongside the built protocol: holding the
+    /// `Arc` keeps its pixel-buffer address reserved while cached, so the
+    /// pointer-based key can never collide with a later image that reuses a
+    /// freed address (the ABA bug). Same shared allocation the live image holds.
+    cache: std::collections::HashMap<BandCacheKey, (std::sync::Arc<image::RgbaImage>, Protocol)>,
 }
 
 impl std::fmt::Debug for InlineImageRender {
@@ -112,12 +116,19 @@ impl InlineImageRender {
             let strip_h = fh.min(box_h - strip_y);
             let strip = full.crop_imm(0, strip_y, box_w, strip_h);
             if let Ok(proto) = picker.new_protocol(strip, Size::new(band.cols, 1), Resize::Fit(None)) {
-                e.insert(proto);
+                e.insert((band.image.pixels.clone(), proto));
             }
         }
-        if let Some(proto) = self.cache.get(&key) {
+        if let Some((_, proto)) = self.cache.get(&key) {
             Image::new(proto).render(dest, buf);
         }
+    }
+
+    /// Drop cache entries for bands no longer live, keyed by source Arc-ptr
+    /// (`live` holds the currently-visible bands' pointers). Bounds growth and,
+    /// with the pinned Arc in the value, releases addresses only once truly gone.
+    pub fn retain_live(&mut self, live: &std::collections::HashSet<usize>) {
+        self.cache.retain(|key, _| live.contains(&key.0));
     }
 }
 
@@ -170,5 +181,65 @@ mod tests {
         let band_row1 = crate::render::transcript::ImageBand { row: 1, ..band };
         r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
         assert_eq!(r.cache.len(), 2);
+    }
+
+    fn band_for(pixels: std::sync::Arc<image::RgbaImage>) -> crate::render::transcript::ImageBand {
+        let img = crate::inline_image::InlineImage {
+            pixels,
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+        };
+        crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 }
+    }
+
+    #[test]
+    fn cache_pins_source_arc_blocking_aba() {
+        // Building a protocol pins the source Arc in the cache value, so the
+        // image's pixel-buffer address cannot be freed and reused while cached.
+        // A NEW image therefore always gets a distinct pointer key — the stale
+        // protocol can never be served for the wrong picture (the ABA bug).
+        let picker = Picker::halfblocks();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let mut r = InlineImageRender::default();
+
+        let arc_a = std::sync::Arc::new(image::RgbaImage::new(16, 16));
+        let ptr_a = std::sync::Arc::as_ptr(&arc_a) as usize;
+        let band_a = band_for(arc_a.clone());
+        r.render_row(&picker, &band_a, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        assert_eq!(r.cache.len(), 1);
+        // Drop every strong reference to A that this test holds; only the cache
+        // still pins it. Its address stays reserved and un-reusable.
+        drop(band_a);
+        drop(arc_a);
+
+        let arc_b = std::sync::Arc::new(image::RgbaImage::new(16, 16));
+        let ptr_b = std::sync::Arc::as_ptr(&arc_b) as usize;
+        // The pin guarantees B cannot land on A's still-reserved address.
+        assert_ne!(ptr_b, ptr_a, "cached Arc must keep A's address reserved");
+        let band_b = band_for(arc_b);
+        r.render_row(&picker, &band_b, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        // B is a fresh, distinct entry — it never reuses A's cached protocol.
+        assert_eq!(r.cache.len(), 2);
+    }
+
+    #[test]
+    fn retain_live_evicts_absent_bands_keeps_present() {
+        let picker = Picker::halfblocks();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 4));
+        let mut r = InlineImageRender::default();
+
+        let arc1 = std::sync::Arc::new(image::RgbaImage::new(16, 16));
+        let arc2 = std::sync::Arc::new(image::RgbaImage::new(16, 16));
+        let ptr1 = std::sync::Arc::as_ptr(&arc1) as usize;
+        let ptr2 = std::sync::Arc::as_ptr(&arc2) as usize;
+        r.render_row(&picker, &band_for(arc1.clone()), Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        r.render_row(&picker, &band_for(arc2.clone()), Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
+        assert_eq!(r.cache.len(), 2);
+
+        // Only band 1 is still live: band 2's entry is evicted, band 1's kept.
+        r.retain_live(&std::collections::HashSet::from([ptr1]));
+        assert_eq!(r.cache.len(), 1);
+        assert!(r.cache.keys().any(|k| k.0 == ptr1));
+        assert!(!r.cache.keys().any(|k| k.0 == ptr2));
     }
 }

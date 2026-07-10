@@ -1094,6 +1094,15 @@ fn render_middle(
         .iter()
         .map(|&i| state.transcript_images.get(i).cloned().flatten())
         .collect();
+    // Per-frame eviction: bound the inline-image protocol cache to the images
+    // currently visible, keyed by source Arc-ptr. Combined with the pinned Arc
+    // in each cache value, this drops entries only once their image is truly gone.
+    let live_bands: std::collections::HashSet<usize> = filtered_images
+        .iter()
+        .flatten()
+        .map(|img| std::sync::Arc::as_ptr(&img.pixels) as usize)
+        .collect();
+    state.inline_image_render.borrow_mut().retain_live(&live_bands);
     let images_enabled = state.game_picker.is_some();
     let char_px = state
         .game_picker
