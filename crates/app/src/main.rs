@@ -978,19 +978,6 @@ fn ensure_aux(
     }
 }
 
-/// Decode the selected story's cover once (skipped if already decoded for it).
-fn ensure_cover(
-    cover: &mut app::cover::CoverState,
-    stories: &[app::picker::StoryEntry],
-    idx: usize,
-) {
-    if let Some(entry) = stories.get(idx) {
-        if !cover.has(&entry.path) {
-            cover.set(&entry.path, app::cover::load_cover(&entry.path));
-        }
-    }
-}
-
 /// Build the ratatui-image picker for cover art per the CLI mode. `Auto`
 /// queries the terminal (falling back to half-blocks); forced modes query for
 /// font size then pin the protocol. Returns `None` only if construction fails.
@@ -1087,6 +1074,19 @@ fn run_story_picker(
     let mut panel_scroll: usize = 0;
     let mut panel_max: usize = 0;
 
+    // Async cover decode: a background worker decodes off the main loop; results
+    // are drained into `cover` each iteration. `requested` tracks in-flight paths
+    // (so we don't re-queue), and the settle-debounce below waits until a
+    // selection has been stable before requesting — a fling costs one decode.
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+    use std::time::Instant;
+    let decoder = app::cover::CoverDecoder::new();
+    let mut requested: HashSet<PathBuf> = HashSet::new();
+    let mut last_sel = usize::MAX;
+    let mut sel_changed_at = Instant::now();
+    const COVER_DEBOUNCE: Duration = Duration::from_millis(90);
+
     let chosen: Option<std::path::PathBuf> = loop {
         let _ = terminal.draw(|f| {
             let area = f.area();
@@ -1119,9 +1119,41 @@ fn run_story_picker(
             }
         });
 
+        // Housekeeping (runs every iteration, before the poll gate below, so a
+        // timed-out tick still drains results and re-issues the debounced request).
+        // Drain finished decodes into the multi-entry cache.
+        for (path, img) in decoder.drain() {
+            cover.insert(path.clone(), img);
+            requested.remove(&path);
+        }
+        if slide.open {
+            ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+            let sel = stories[list.selected].path.clone();
+            if list.selected != last_sel {
+                last_sel = list.selected;
+                sel_changed_at = Instant::now();
+            }
+            // Settle-debounce: only request once the selection has been stable, so a
+            // fling through the list costs one decode instead of one per row.
+            if app::cover::should_request_cover(
+                cover.has(&sel),
+                requested.contains(&sel),
+                sel_changed_at.elapsed(),
+                COVER_DEBOUNCE,
+            ) {
+                decoder.request(sel.clone());
+                requested.insert(sel);
+            }
+        }
+
         // Tick while a scroll or panel-slide animation eases so the motion is
-        // visible; otherwise block until the next event.
-        if (list.has_active_animation() || slide.active())
+        // visible, or while a cover decode is in flight / still needed so results
+        // drain and the debounced request fires without a keypress; otherwise
+        // block until the next event.
+        let sel_now = stories.get(list.selected).map(|e| &e.path);
+        let cover_busy = slide.open
+            && sel_now.is_some_and(|p| !requested.is_empty() || !cover.has(p));
+        if (list.has_active_animation() || slide.active() || cover_busy)
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -1160,7 +1192,6 @@ fn run_story_picker(
                                 if target {
                                     panel_scroll = 0;
                                     ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
-                                    ensure_cover(&mut cover, &stories, list.selected);
                                 }
                             }
                         }
@@ -1196,10 +1227,6 @@ fn run_story_picker(
             Err(_) => break None,
         }
         panel_scroll = panel_scroll.min(panel_max);
-        if slide.open {
-            ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
-            ensure_cover(&mut cover, &stories, list.selected);
-        }
         list.finalize_if_done();
     };
 
@@ -6675,7 +6702,7 @@ mod tests {
 
         let path = std::path::PathBuf::from("cover-test.gblorb");
         let mut cover = app::cover::CoverState::default();
-        cover.set(&path, app::cover::decode(&png));
+        cover.insert(path.to_path_buf(), app::cover::decode(&png));
 
         // Deterministic, terminal-free protocol.
         let picker = ratatui_image::picker::Picker::halfblocks();

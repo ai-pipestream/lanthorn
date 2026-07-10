@@ -80,12 +80,6 @@ impl CoverState {
         }
     }
 
-    /// Back-compat convenience over [`insert`](Self::insert): store the decode
-    /// result for `path`.
-    pub fn set(&mut self, path: &Path, img: Option<image::DynamicImage>) {
-        self.insert(path.to_path_buf(), img);
-    }
-
     /// Build-or-reuse a protocol for `path`'s cover, fitted (aspect-preserved)
     /// into `area`. `None` when `path` has no decoded cover or the build fails.
     ///
