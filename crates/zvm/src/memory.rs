@@ -218,6 +218,18 @@ impl Memory {
         table.get(idx).copied()
     }
 
+    /// Map a Rust `char` to a ZSCII byte, consulting the story's custom Unicode
+    /// translation table first (ZMSD §3.8.5.4) and falling back to the default
+    /// table (ZMSD §3.8) — the inverse of `unicode_char`/`zscii_to_char`.
+    pub fn zscii_from_unicode(&self, ch: char) -> u8 {
+        if let Some(table) = self.unicode_table.as_ref() {
+            if let Some(i) = table.iter().position(|&c| c == ch) {
+                return 155 + i as u8;
+            }
+        }
+        crate::text::decode::char_to_zscii_default(ch)
+    }
+
     /// Unpack a packed string address (ZMSD §1.2.3).
     pub fn unpack_string(&self, packed: u16) -> u32 {
         let p = packed as u32;

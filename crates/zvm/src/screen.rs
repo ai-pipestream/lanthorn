@@ -264,10 +264,13 @@ impl StreamState {
         }
     }
 
-    /// Append text to the current stream-3 buffer (ASCII/ZSCII bytes only).
-    pub fn write_stream3(&mut self, s: &str) {
+    /// Append raw ZSCII bytes to the current stream-3 buffer (ZMSD §7.1.2.5:
+    /// each output character is stored as a single byte, not UTF-8). Callers
+    /// must convert chars to ZSCII themselves (`Memory::zscii_from_unicode`) —
+    /// `StreamState` has no access to the story's custom Unicode table.
+    pub fn write_stream3_bytes(&mut self, bytes: &[u8]) {
         if let Some(frame) = self.stream3_stack.last_mut() {
-            frame.buf.extend_from_slice(s.as_bytes());
+            frame.buf.extend_from_slice(bytes);
         }
     }
 }
@@ -796,7 +799,7 @@ mod tests {
         ss.push_stream3(table_addr);
         assert!(ss.stream3_active());
 
-        ss.write_stream3("Hello");
+        ss.write_stream3_bytes(b"Hello");
         ss.pop_stream3(&mut mem);
 
         assert!(!ss.stream3_active());
@@ -808,6 +811,24 @@ mod tests {
         assert_eq!(mem.read_byte(table_addr + 4), b'l');
         assert_eq!(mem.read_byte(table_addr + 5), b'l');
         assert_eq!(mem.read_byte(table_addr + 6), b'o');
+    }
+
+    #[test]
+    fn stream3_write_bytes_stores_single_byte_per_char() {
+        // A high ZSCII char (e.g. 195 = 'û') must be stored as ONE byte, not
+        // multi-byte UTF-8 (SQ-0240).
+        let buf = sample_story(5);
+        let table_addr: u32 = 0x0050;
+
+        let mut mem = Memory::new(buf).unwrap();
+        let mut ss = StreamState::new();
+
+        ss.push_stream3(table_addr);
+        ss.write_stream3_bytes(&[195]);
+        ss.pop_stream3(&mut mem);
+
+        assert_eq!(mem.read_word(table_addr), 1, "length word should be 1");
+        assert_eq!(mem.read_byte(table_addr + 2), 195);
     }
 
     #[test]
@@ -844,11 +865,11 @@ mod tests {
         let mut ss = StreamState::new();
 
         ss.push_stream3(table1);
-        ss.write_stream3("ab");
+        ss.write_stream3_bytes(b"ab");
         ss.push_stream3(table2);
-        ss.write_stream3("cd");
+        ss.write_stream3_bytes(b"cd");
         ss.pop_stream3(&mut mem); // finalise table2
-        ss.write_stream3("ef");
+        ss.write_stream3_bytes(b"ef");
         ss.pop_stream3(&mut mem); // finalise table1
 
         // table2: "cd" (2 bytes)

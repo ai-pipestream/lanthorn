@@ -138,14 +138,13 @@ fn praxix_reports_no_failures() {
     // command. Drive the core opcode/undo/table groups, then quit.
     //
     // The following groups are intentionally NOT asserted here:
-    //   - "streamtrip"/"streamop": output stream 3 stores high chars as
-    //     multi-byte UTF-8 instead of single-byte ZSCII (SQ-0240, pending).
     //   - "spec11"/"spec12": these are VISUAL @set_true_colour swatch prints
     //     (coloured spaces, blank in a headless text capture) — not programmatic
     //     pass/fail. True colour IS implemented; nothing to assert here.
     let groups = [
         "operand", "arith", "comarith", "bitwise", "shift", "inc", "incchk",
         "array", "undo", "multiundo", "indirect", "throwcatch", "tables",
+        "streamtrip", "streamop",
     ];
     let mut inputs = groups.to_vec();
     inputs.push("quit");

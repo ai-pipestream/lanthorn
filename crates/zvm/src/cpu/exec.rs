@@ -894,6 +894,14 @@ impl Machine {
             // 0x05 print_char — print a single ZSCII character
             0x05 => {
                 let zscii = ops.first().copied().unwrap_or(0);
+                if zscii == 0 {
+                    // ZSCII 0 has no printed form and must not be sent to any
+                    // output stream (ZMSD §3.8) — a true no-op, not a '?'
+                    // substitute. Matters for stream 3: praxix's "Memory
+                    // stream round-trip" test sends 0 through print_char and
+                    // expects it to contribute nothing to the table.
+                    return StepResult::Continue;
+                }
                 let ch = self.print_char_to_unicode(zscii);
                 let mut buf = [0u8; 4];
                 let s = ch.encode_utf8(&mut buf);
@@ -1760,7 +1768,11 @@ impl Machine {
         // any future stream-2/4 transcript sink MUST be added below this early
         // return, never above it.
         if self.streams.stream3_active() {
-            self.streams.write_stream3(s);
+            // Store one ZSCII byte per output char (ZMSD §7.1.2.5). Do the
+            // mem-based conversion BEFORE borrowing &mut self.streams to
+            // avoid a borrow conflict.
+            let bytes: Vec<u8> = s.chars().map(|c| self.mem.zscii_from_unicode(c)).collect();
+            self.streams.write_stream3_bytes(&bytes);
             return;
         }
         let font3 = self.screen.current_font == 3;
@@ -4522,6 +4534,21 @@ pub(crate) mod tests {
         assert_eq!(m.mem.read_byte(table_addr as u32 + 3), b'b', "table[1] = 'b'");
     }
 
+    #[test]
+    fn output_stream3_stores_single_zscii_byte_for_high_char() {
+        // print_char with a high ZSCII operand (195 = 'û' via the default
+        // Unicode table) must store exactly ONE byte in the stream-3 table,
+        // not the multi-byte UTF-8 encoding of 'û' (SQ-0240).
+        let table_addr: u32 = 0x0060;
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.streams.push_stream3(table_addr);
+        m.exec_var(0x05, &[195], None, None);
+        m.streams.pop_stream3(&mut m.mem);
+
+        assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1, not the UTF-8 byte count");
+        assert_eq!(m.mem.read_byte(table_addr + 2), 195);
+    }
+
     // ── (d) stream 1 off: screen receives nothing ─────────────────────────────
 
     #[test]
@@ -5771,6 +5798,17 @@ pub(crate) mod tests {
         run_print_char(&mut m, 13); // newline, NOT CP437 ♪
         run_print_char(&mut m, b'!' as u16);
         assert_eq!(buf_output(&m), "Hi\n!");
+    }
+
+    #[test]
+    fn print_char_zscii_zero_is_a_no_op() {
+        // ZSCII 0 has no printed form (ZMSD §3.8) and must contribute nothing
+        // to any output stream — not even a '?' placeholder.
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        run_print_char(&mut m, 65); // 'A'
+        run_print_char(&mut m, 0);
+        run_print_char(&mut m, 66); // 'B'
+        assert_eq!(buf_output(&m), "AB");
     }
 
     #[test]

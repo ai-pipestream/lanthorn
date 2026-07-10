@@ -154,6 +154,23 @@ pub(crate) fn zscii_to_char(zscii: u16) -> char {
     }
 }
 
+/// Map a Rust `char` to a ZSCII byte using the default translation table
+/// (ZMSD §3.8), the inverse of `zscii_to_char`.
+///
+/// `'\n'` → 13. ASCII space–`~` (0x20–0x7E) are identity. Chars in the default
+/// Unicode translation table (ZSCII 155–223) map back to their code. Anything
+/// else falls back to `'?'` (63).
+pub(crate) fn char_to_zscii_default(ch: char) -> u8 {
+    match ch {
+        '\n' => 13,
+        ' '..='~' => ch as u8,
+        _ => match UNICODE_TABLE.iter().position(|&c| c == ch) {
+            Some(i) => 155 + i as u8,
+            None => b'?',
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +342,16 @@ mod tests {
         // boundary: just outside the table
         assert_eq!(zscii_to_char(154), '?');
         assert_eq!(zscii_to_char(224), '?');
+    }
+
+    #[test]
+    fn char_to_zscii_default_inverts_default_table() {
+        // 'û' is at UNICODE_TABLE index 40 (191..199 = â,ê,î,ô,û,...) → 155+40=195.
+        assert_eq!(char_to_zscii_default('û'), 195);
+        assert_eq!(char_to_zscii_default('A'), 65);
+        assert_eq!(char_to_zscii_default('\n'), 13);
+        // '€' is not in the default table or ASCII range → fallback '?'.
+        assert_eq!(char_to_zscii_default('€'), b'?');
     }
 
     #[test]
