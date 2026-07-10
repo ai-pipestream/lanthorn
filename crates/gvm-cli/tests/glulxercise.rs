@@ -3,8 +3,8 @@
 //! Drives the vendored `glulxercise.ulx` (see `tests/fixtures/README.md`) through
 //! the real `gvm-cli` binary, headlessly, with a scripted sequence of in-scope
 //! test-group commands, and asserts every group reports `Passed.` with no
-//! failures. Out-of-scope groups (plain iosys, gi_dispatch, float/double, file
-//! save) are intentionally excluded — see the fixtures README.
+//! failures. Out-of-scope groups (float/double, file save) are intentionally
+//! excluded — see the fixtures README.
 //!
 //! glulxercise's `quit` does not exit on its own (it loops on end-of-input), so
 //! the harness keeps stdin open — the VM simply blocks awaiting the next command
@@ -24,12 +24,14 @@ use std::time::{Duration, Instant};
 /// (`streamnum`/`strings`/`ramstring`), the Glk opcode surface incl. Unicode
 /// case folding and the dispatch -1/stack convention (`glk`), search/verify,
 /// and the filter I/O system (`iosys`/`iosys2`/`iosys3`/`filter`/`nullio`/
-/// `gestalt`; SQ-0245, SQ-0249).
+/// `gestalt`; SQ-0245, SQ-0249), and the Glk dispatch layer's output-argument
+/// marshalling (`gidispa`: type-tagged Inform string objects handed to
+/// `glk_put_string`/`glk_put_string_uni`; SQ-0251).
 const IN_SCOPE: &[&str] = &[
     "arith", "bitwise", "shift", "aload", "astore", "arraybit", "call", "jump",
     "jumpform", "compare", "stack", "throw", "streamnum", "strings", "ramstring",
     "glk", "search", "mzero", "verify", "iosys", "iosys2", "iosys3", "filter",
-    "nullio", "gestalt",
+    "nullio", "gestalt", "gidispa",
 ];
 
 fn fixture_path() -> PathBuf {

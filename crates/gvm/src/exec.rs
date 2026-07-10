@@ -2346,6 +2346,35 @@ impl Machine {
         self.emit(&s);
     }
 
+    /// Decode a Glulx string OBJECT at `addr` into a String for the Glk
+    /// `put_string`/`put_string_uni` dispatch arms. The Glk string argument is a
+    /// type-tagged Inform string (the reference decodes it via `DecodeVMString`),
+    /// not a raw C array: `0xE0` unencoded Latin-1, `0xE2` unencoded Unicode.
+    /// Compressed (`0xE1`) strings are not decoded here — that means replaying the
+    /// `emit()`-based, function-node-invoking compressed path, which a direct Glk
+    /// call must not do; the Inform veneer emits E0/E2 for these selectors. An E1
+    /// (or otherwise malformed) tag records a diagnostic and yields `None` (no
+    /// output) rather than faulting the VM — a genuine memory fault from `m8`/the
+    /// readers still propagates. Returns `Ok(None)` when nothing should be emitted.
+    fn decode_glk_string(&mut self, addr: u32) -> R<Option<String>> {
+        Ok(match self.m8(addr)? {
+            0xE0 => Some(self.read_cstring(addr + 1)?),
+            0xE2 => Some(self.read_ustring(addr + 4)?),
+            0xE1 => {
+                self.diagnostics.push(format!(
+                    "glk_put_string: compressed (E1) string @{addr:#010x} unsupported; skipped"
+                ));
+                None
+            }
+            other => {
+                self.diagnostics.push(format!(
+                    "glk_put_string: bad string type {other:#x} @{addr:#010x}; skipped"
+                ));
+                None
+            }
+        })
+    }
+
     /// Read a zero-terminated Latin-1 string from main memory.
     fn read_cstring(&self, mut addr: u32) -> R<String> {
         let mut s = String::new();
@@ -2407,15 +2436,17 @@ impl Machine {
                 0
             }
             0x0082 => {
-                // glk_put_string(addr)
-                let s = self.read_cstring(a(0))?;
-                self.glk_put_current(&s);
+                // glk_put_string(addr): addr is a type-tagged Inform string object.
+                if let Some(s) = self.decode_glk_string(a(0))? {
+                    self.glk_put_current(&s);
+                }
                 0
             }
             0x0083 => {
                 // glk_put_string_stream(str, addr)
-                let s = self.read_cstring(a(1))?;
-                self.glk_stream_put(a(0), &s);
+                if let Some(s) = self.decode_glk_string(a(1))? {
+                    self.glk_stream_put(a(0), &s);
+                }
                 0
             }
             0x0084 => {
@@ -2437,9 +2468,10 @@ impl Machine {
                 0
             }
             0x0129 => {
-                // glk_put_string_uni(addr)
-                let s = self.read_ustring(a(0))?;
-                self.glk_put_current(&s);
+                // glk_put_string_uni(addr): addr is a type-tagged Inform string object.
+                if let Some(s) = self.decode_glk_string(a(0))? {
+                    self.glk_put_current(&s);
+                }
                 0
             }
             0x012A => {
@@ -5901,7 +5933,7 @@ mod tests {
         body.extend(glk_call(0x2F, &[C8(2)], Zero)); // set_window(2)
         body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
         body.extend(asm::ins(0x120, &[]));
-        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
         assert_eq!(backend_of(&m).grid_line(2, 1), "  Hi"); // cols 2,3 hold "Hi"
     }
 
@@ -5935,7 +5967,7 @@ mod tests {
         body.extend(glk_call(0x46, &[C8(2)], Mem16(0x0104))); // stream_get_position(2)
         body.extend(glk_call(0x44, &[C8(2), C16(0x0108)], Zero)); // stream_close -> result@0x108
         body.extend(asm::ins(0x120, &[]));
-        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
         assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open_memory returns stream id 2");
         assert_eq!(m.mem.read8(0x180).unwrap(), b'H' as u32);
         assert_eq!(m.mem.read8(0x181).unwrap(), b'i' as u32);
@@ -5990,8 +6022,60 @@ mod tests {
         let mut body = glk_call(0x86, &[C8(3)], Zero); // glk_set_style(Header)
         body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
         body.extend(asm::ins(0x120, &[]));
-        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, b"Hi\0"));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
         assert_eq!(backend_of(&m).runs(1), vec![(GlkStyle::Header, "Hi".to_string())]);
+    }
+
+    #[test]
+    fn glk_put_string_decodes_e0_string_object() {
+        use asm::Op::{C16, Zero};
+        // glk_put_string is handed an Inform string OBJECT (E0 type byte + text),
+        // not a raw C array. The E0 tag must be decoded away, not streamed as 'à'.
+        let mut body = glk_call(0x82, &[C16(0x0200)], Zero);
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', b'!', 0]));
+        assert_eq!(backend_of(&m).text(1), "Hi!");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_put_string_uni_decodes_e2_string_object() {
+        use asm::Op::{C16, Zero};
+        // glk_put_string_uni is handed an E2 Unicode string object (E2 + 3 pad
+        // bytes, then 32-bit code points). The tag must be decoded, not streamed
+        // as a leading U+FFFD.
+        let mut body = glk_call(0x129, &[C16(0x0200)], Zero);
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            poke(m, 0x200, &[0xE2, 0, 0, 0]);
+            poke(m, 0x204, &0x41u32.to_be_bytes()); // 'A'
+            poke(m, 0x208, &0x3BBu32.to_be_bytes()); // 'λ'
+            poke(m, 0x20C, &0u32.to_be_bytes());
+        });
+        assert_eq!(backend_of(&m).text(1), "Aλ");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_put_string_e1_skips_without_halting() {
+        use asm::Op::{C16, Zero};
+        // A compressed (E1) object is not decoded on the put_string path, but it
+        // must NOT fault the VM (regression: an early impl returned Err → Quit).
+        // It records a diagnostic, emits nothing, and execution continues.
+        let mut body = glk_call(0x82, &[C16(0x0200)], Zero);
+        body.extend(glk_call(0x82, &[C16(0x0210)], Zero)); // a following E0 call still runs
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x220, |m| {
+            poke(m, 0x200, &[0xE1, 0x02]); // compressed object (unsupported here)
+            poke(m, 0x210, &[0xE0, b'O', b'k', 0]);
+        });
+        assert!(m.fault_trace.is_none(), "E1 put_string must not fault the VM");
+        assert_eq!(backend_of(&m).text(1), "Ok", "E1 skipped, later E0 still printed");
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("compressed (E1)")),
+            "expected an E1-skipped diagnostic, got: {:?}",
+            m.diagnostics
+        );
     }
 
     #[test]

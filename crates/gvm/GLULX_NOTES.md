@@ -682,10 +682,15 @@ to the token and resumes at the catch with `value` stored to its destination).
 
 `gvm-cli/tests/glulxercise.rs` drives the vendored `glulxercise.ulx` headlessly
 and asserts the in-scope groups pass — now including `filter`/`nullio`/`iosys2`/
-`iosys3`/`gestalt` (filter I/O system implemented). Out of scope: the plain
-`iosys` group (a separate mid-string memory-stream-redirect bug), the `gidispa`
-introspection layer, and double-precision float. (`acceleration` and single-float
-are implemented; the Glulxercise groups for them just aren't in the assertion list.)
+`iosys3`/`gestalt` (filter I/O system implemented) and `gidispa` (SQ-0251: the
+Glk dispatch layer's output-argument marshalling — `glk_put_string`/
+`glk_put_string_uni` decode the type-tagged Inform string object they are handed,
+E0/E2, instead of streaming the tag byte; a compressed `E1` object on this path is
+not decoded — it records a diagnostic and emits nothing rather than faulting the
+VM, since the Inform veneer emits E0/E2 here). Out of scope: double-precision float.
+(`acceleration` and single-float are implemented; the Glulxercise groups for them
+just aren't in the assertion list. The gi_dispatch *introspection* API is
+unreachable from Glulx bytecode and unimplemented, but `gidispa` doesn't use it.)
 
 ### Deferred / out of scope
 

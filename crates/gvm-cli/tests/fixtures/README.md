@@ -23,10 +23,16 @@ in scope: `iosys`, `iosys2`, `iosys3`, `filter`, `nullio`, `gestalt` all pass
 (the plain `iosys` group's mid-string I/O-system-switch case was fixed under
 SQ-0249).
 
+The **Glk dispatch output-argument marshalling** group `gidispa` is in scope
+(SQ-0251): it hands a type-tagged Inform **string object** (E0 Latin-1, E2
+Unicode) to `glk_put_string`/`glk_put_string_uni`, which now decode the type
+byte (like `@streamstr`) instead of streaming the tag as a stray leading char.
+(The gi_dispatch *introspection* API — `gidispatch_count_classes`, prototype
+queries — is unreachable from Glulx bytecode and remains unimplemented; the
+`gidispa` group does not exercise it.)
+
 ### Out of scope (excluded; not yet implemented)
 
-- `gidispa` — the **gi_dispatch introspection layer** (type-tagged string
-  dispatch); not part of the IF Glk subset and not used by real games.
 - `acceleration` — accelerated functions ARE intercepted (on by default;
   `--no-accel` disables); this glulxercise group is simply not in the in-scope
   assertion list above.
