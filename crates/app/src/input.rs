@@ -1499,6 +1499,7 @@ fn replay_build_and_placement(
     layer: mapper::layer::LayerId,
     frames: &mut Vec<crate::state::TidyFrame>,
     max_frames: usize,
+    progress: Option<&std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 ) -> mapper::graph::MapGraph {
     use crate::state::TidyFrame;
     use mapper::graph::{MapGraph, RoomId};
@@ -1551,6 +1552,7 @@ fn replay_build_and_placement(
             stage_start: true,
             manifest: Some(manifest),
         });
+        if let Some(p) = progress { p.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
     }
 
     // ── Placement: anchor at origin, then place each room in discovery order. ──
@@ -1565,6 +1567,7 @@ fn replay_build_and_placement(
                 stage_start: *first,
                 manifest: None,
             });
+            if let Some(p) = progress { p.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
         }
         *first = false;
     };
@@ -1612,13 +1615,18 @@ fn replay_build_and_placement(
 /// sub-graph after each stage (frame 0 is the pre-tidy state). The tidied positions are written
 /// back into `graph` for every room in `layer`; all other rooms are untouched. Caller must be in
 /// Auto mode.
+///
+/// If `progress` is supplied, the counter is bumped once per emitted frame (so it ends equal to
+/// `frames.len()`); the caller uses it to drive a progress bar while the build runs off-thread.
 pub(crate) fn run_tidy_pipeline(
     graph: &mut mapper::graph::MapGraph,
     layer: mapper::layer::LayerId,
+    progress: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 ) -> Vec<crate::state::TidyFrame> {
     use crate::render::map::{cleanup_overlaps_observed, compact_empty_lines_observed, repair_directional_hints_observed};
     use crate::state::TidyFrame;
     use mapper::layout::TidyStats;
+    use std::sync::atomic::Ordering;
 
     const MAX_TIDY_FRAMES: usize = 2000;
 
@@ -1632,7 +1640,7 @@ pub(crate) fn run_tidy_pipeline(
 
     // Build + placement replay produces the front frames and the rebuilt graph
     // that the tidy stages run on.
-    let mut sub = replay_build_and_placement(&sub, layer, &mut frames, MAX_TIDY_FRAMES);
+    let mut sub = replay_build_and_placement(&sub, layer, &mut frames, MAX_TIDY_FRAMES, progress.as_ref());
 
     // Layout stages via relayout_auto_observed
     mapper::layout::relayout_auto_observed(&mut sub, Some(&mut |g: &mapper::graph::MapGraph, label: &str, desc: &str, s: &TidyStats| {
@@ -1652,6 +1660,7 @@ pub(crate) fn run_tidy_pipeline(
                 stage_start: true,
                 manifest: None,
             });
+            if let Some(p) = &progress { p.fetch_add(1, Ordering::Relaxed); }
         }
     }));
 
@@ -1674,6 +1683,7 @@ pub(crate) fn run_tidy_pipeline(
                     stage_start: first,
                     manifest: None,
                 });
+                if let Some(p) = &progress { p.fetch_add(1, Ordering::Relaxed); }
                 first = false;
             }
         }));
@@ -1698,6 +1708,7 @@ pub(crate) fn run_tidy_pipeline(
                     stage_start: first,
                     manifest: None,
                 });
+                if let Some(p) = &progress { p.fetch_add(1, Ordering::Relaxed); }
                 first = false;
             }
         }));
@@ -1722,6 +1733,7 @@ pub(crate) fn run_tidy_pipeline(
                     stage_start: first,
                     manifest: None,
                 });
+                if let Some(p) = &progress { p.fetch_add(1, Ordering::Relaxed); }
                 first = false;
             }
         }));
@@ -1745,6 +1757,7 @@ pub(crate) fn run_tidy_pipeline(
                     stage_start: first,
                     manifest: None,
                 });
+                if let Some(p) = &progress { p.fetch_add(1, Ordering::Relaxed); }
                 first = false;
             }
         }));
@@ -2116,7 +2129,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::Retidy => {
             if mapper.mode == mapper::layout::LayoutMode::Auto {
                 let layer = state.active_layer(&mapper.graph);
-                run_tidy_pipeline(&mut mapper.graph, layer);
+                run_tidy_pipeline(&mut mapper.graph, layer, None);
             }
         }
 
@@ -2152,8 +2165,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 let layer = state.active_layer(&mapper.graph);
                 let mut g = mapper.graph.clone();
                 let gen = state.graph_gen;
+                // Estimate the final frame count from the layer's room count (one placement
+                // frame per room dominates), plus headroom for the fixed layout/cleanup stages.
+                // Only an estimate — the real total isn't known until the build finishes.
+                let total = mapper.graph.rooms_in_layer(layer).len() + 8;
+                let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let progress_clone = std::sync::Arc::clone(&progress);
                 let handle = std::thread::spawn(move || {
-                    let frames = run_tidy_pipeline(&mut g, layer);
+                    let frames = run_tidy_pipeline(&mut g, layer, Some(progress_clone));
                     (frames, g)
                 });
                 state.anim_build_job = Some(crate::state::AnimBuildJob {
@@ -2161,6 +2180,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     layer,
                     gen,
                     started: std::time::Instant::now(),
+                    progress,
+                    total,
                 });
                 state.set_status("preparing tidy animation…");
             }
@@ -3856,7 +3877,7 @@ mod tests {
             g.add_edge(o, d, dst);
         }
         mapper::layer::peel_region(&mut g, 27); // the user's scenario: 27/136 in their own layer
-        run_tidy_pipeline(&mut g, 0);
+        run_tidy_pipeline(&mut g, 0, None);
         let p = |id: u16| g.room(id).unwrap().pos.unwrap();
         let (a, b, c) = (p(180), p(80), p(81));
         assert!(a.0 < b.0 && a.1 < b.1, "180 {a:?} must be NW of 80 {b:?}");
@@ -3882,7 +3903,7 @@ mod tests {
         g.add_edge(1, Direction::Up, 3);
 
         let layer = g.layer_of(1);
-        let _ = run_tidy_pipeline(&mut g, layer);
+        let _ = run_tidy_pipeline(&mut g, layer, None);
 
         // The reciprocal pair keeps its shared column; the up/down room yields off it.
         let a = g.room(1).unwrap().pos.unwrap();
@@ -3904,7 +3925,7 @@ mod tests {
         m.observe(3, "Study", Some(Direction::E));
 
         let layer = m.graph.layer_of(1);
-        let frames = run_tidy_pipeline(&mut m.graph, layer);
+        let frames = run_tidy_pipeline(&mut m.graph, layer, None);
 
         // First frame is the single Build stop, carrying a manifest and no positioned rooms.
         assert_eq!(frames[0].label, "Build");
@@ -3947,7 +3968,7 @@ mod tests {
         let mut silent = build();
         let layer = animated.graph.layer_of(1);
 
-        let _ = run_tidy_pipeline(&mut animated.graph, layer);
+        let _ = run_tidy_pipeline(&mut animated.graph, layer, None);
         tidy_layer_silent(&mut silent.graph, layer);
 
         for id in [1u16, 2, 3, 4] {
@@ -3960,12 +3981,31 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_progress_counter_counts_every_frame() {
+        use mapper::mapper::Mapper;
+        use mapper::direction::Direction;
+        let mut m = Mapper::default();
+        m.observe(1, "Foyer", None);
+        m.observe(2, "Hall", Some(Direction::N));
+        m.observe(3, "Study", Some(Direction::E));
+        m.observe(4, "Attic", Some(Direction::N));
+        let layer = m.graph.layer_of(1);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let frames = run_tidy_pipeline(&mut m.graph, layer, Some(std::sync::Arc::clone(&counter)));
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            frames.len(),
+            "progress ends equal to the number of emitted frames",
+        );
+    }
+
+    #[test]
     fn pipeline_single_room_layer() {
         use mapper::mapper::Mapper;
         let mut m = Mapper::default();
         m.observe(1, "Foyer", None);
         let layer = m.graph.layer_of(1);
-        let frames = run_tidy_pipeline(&mut m.graph, layer);
+        let frames = run_tidy_pipeline(&mut m.graph, layer, None);
         assert_eq!(frames[0].label, "Build");
         assert_eq!(frames[0].manifest.as_ref().unwrap().len(), 0, "no connections");
         assert_eq!(frames[1].label, "Placement");
@@ -3995,7 +4035,7 @@ mod tests {
         sub.add_edge(2, N, 3); // places room 3 — inserted last, disrupting order
 
         let mut frames: Vec<crate::state::TidyFrame> = Vec::new();
-        let rebuild = replay_build_and_placement(&sub, 0, &mut frames, 2000);
+        let rebuild = replay_build_and_placement(&sub, 0, &mut frames, 2000, None);
 
         // Room 4 must land at its true directional hop: 3 is at (0,-2), so 3--E-->4 is (1,-2).
         assert_eq!(rebuild.room(4).unwrap().pos, Some((1, -2)),
@@ -4500,9 +4540,16 @@ mod tests {
         // does NOT touch tidy_anim or the live graph synchronously.
         assert!(s_anim.tidy_anim.is_none(), "no synchronous animation install");
         let job = s_anim.anim_build_job.expect("build job spawned");
+        assert!(job.total > 0, "build job carries a positive progress estimate");
+        let progress = std::sync::Arc::clone(&job.progress);
         // Drive the async path by joining the worker (the run loop does this + installs).
         let (frames, tidied) = job.handle.join().expect("worker completes");
         assert!(frames.len() >= 2, "at least before + one layout stage frame");
+        assert_eq!(
+            progress.load(std::sync::atomic::Ordering::Relaxed),
+            frames.len(),
+            "progress counter is bumped once per emitted frame",
+        );
         // The worker's frames and tidied graph match the instant-tidy result room-for-room.
         for id in [1u16, 2, 3] {
             let inst = m_inst.graph.room(id).unwrap().pos;
@@ -4784,7 +4831,7 @@ mod tests {
         // Before the fix the stale true remains; after the fix it is corrected to false.
         g.set_conn_distorted(0, true);
 
-        run_tidy_pipeline(&mut g, mapper::layer::MAIN_LAYER);
+        run_tidy_pipeline(&mut g, mapper::layer::MAIN_LAYER, None);
 
         // After tidy every compass connection's distorted flag must match the geometry.
         for conn in g.connections() {
@@ -4812,7 +4859,7 @@ mod tests {
         // Layer 1: a room with a fixed position that must NOT move.
         let l = g.new_layer(Some(0), "Other".into());
         g.upsert_room(9, "X".into()); g.set_room_layer(9, l); g.set_pos(9, (3, 3));
-        let _frames = run_tidy_pipeline(&mut g, l); // tidy the OTHER layer
+        let _frames = run_tidy_pipeline(&mut g, l, None); // tidy the OTHER layer
         assert_eq!(g.room(1).unwrap().pos, Some((0, 0)), "layer-0 room 1 untouched");
         assert_eq!(g.room(2).unwrap().pos, Some((5, 5)), "layer-0 room 2 untouched");
         // Room 9 is the only room in layer l → relayout anchors it at the origin.
@@ -6233,7 +6280,7 @@ mod tests {
         };
 
         let mut g_pipeline = make_graph();
-        run_tidy_pipeline(&mut g_pipeline, 0);
+        run_tidy_pipeline(&mut g_pipeline, 0, None);
 
         let mut g_silent = make_graph();
         tidy_layer_silent(&mut g_silent, 0);

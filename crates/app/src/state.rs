@@ -607,6 +607,12 @@ pub struct AnimBuildJob {
     pub gen: u64,
     /// Instant the job was spawned.
     pub started: std::time::Instant,
+    /// Frames captured so far, bumped once per emitted frame by the worker. Read by the
+    /// renderer to drive the progress bar while the build runs.
+    pub progress: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Estimated final frame count (room count + headroom). The bar is approximate: the
+    /// real frame total isn't known until the build finishes, so this is only an estimate.
+    pub total: usize,
 }
 
 impl std::fmt::Debug for AnimBuildJob {

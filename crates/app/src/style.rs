@@ -184,6 +184,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "input:text",
     "input:prompt",
     "scrollbar",
+    "tidy_progress",
     "meta_marker",
     "helpbar",
     "map_border",
@@ -228,6 +229,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
         "room", "room:current", "room:selected",
         "connector", "connector:distorted", "connector:portal", "shared_path",
         "map_border", "map_layer_tab", "map_layer_tab_active", "loc_indicator",
+        "tidy_progress",
     ]),
     ("Transcript", &[
         "transcript", "transcript:input", "transcript:meta", "transcript:warning",
@@ -286,6 +288,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "input:text"           => cs.input_text,
         "input:prompt"         => cs.input_prompt,
         "scrollbar"            => cs.scrollbar,
+        "tidy_progress"        => cs.tidy_progress,
         "meta_marker"          => cs.meta_marker,
         "helpbar"              => cs.help_bar,
         "story_title"          => cs.story_title,
@@ -442,6 +445,7 @@ pub fn apply_color_decls(
             "input:text"         => cs.input_text = cs.input_text.patch(style),
             "input:prompt"       => cs.input_prompt = cs.input_prompt.patch(style),
             "scrollbar"          => cs.scrollbar = cs.scrollbar.patch(style),
+            "tidy_progress"      => cs.tidy_progress = cs.tidy_progress.patch(style),
             "meta_marker"        => cs.meta_marker = cs.meta_marker.patch(style),
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
             "map_border" => {
@@ -1314,6 +1318,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("input:text".to_string(),        style_to_decl(&cs.input_text));
     doc.colors.selectors.insert("input:prompt".to_string(),      style_to_decl(&cs.input_prompt));
     doc.colors.selectors.insert("scrollbar".to_string(),         style_to_decl(&cs.scrollbar));
+    doc.colors.selectors.insert("tidy_progress".to_string(),     style_to_decl(&cs.tidy_progress));
     doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
     // New pane border/title/tab/header/input selectors.
@@ -1611,6 +1616,25 @@ align = "right"
         assert!(cs2.statusbar_layout.segments[0].style.add_modifier.contains(Modifier::UNDERLINED));
         assert!(matches!(cs2.statusbar_layout.segments[1].align, Align::Center));
         assert_eq!(cs2.statusbar_layout.segments[2].style.fg, Some(Color::Yellow));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_round_trips_tidy_progress_selector() {
+        use ratatui::style::Color;
+        let dir = std::env::temp_dir().join(format!("babelmap-tp-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("tp.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.tidy_progress = Style::new().fg(Color::Magenta);
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+        assert_eq!(cs2.tidy_progress.fg, Some(Color::Magenta), "tidy_progress color round-trips");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

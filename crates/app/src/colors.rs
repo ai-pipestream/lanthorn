@@ -237,6 +237,8 @@ pub struct ColorScheme {
     pub input_prompt: Style,
     /// Transcript scrollbar (track + thumb).
     pub scrollbar: Style,
+    /// Progress bar shown in the map pane while the tidy animation builds off-thread.
+    pub tidy_progress: Style,
     /// Gutter marker drawn beside META (app/slash) transcript output.
     pub meta_marker: Style,
     /// Focused-pane border.
@@ -388,6 +390,7 @@ impl ColorScheme {
             input_text: Style::new(),
             input_prompt: Style::new(),
             scrollbar: Style::new().fg(Color::DarkGray),
+            tidy_progress: Style::new().fg(Color::Cyan),
             meta_marker: Style::new().fg(Color::DarkGray),
             focused_border: Style::new()
                 .fg(Color::Cyan)
@@ -579,6 +582,7 @@ impl ColorScheme {
             input_text: Style::new(),
             input_prompt: Style::new(),
             scrollbar: Style::new().fg(suggestion_fg),
+            tidy_progress: Style::new().fg(scheme.palette[6]),
             meta_marker: Style::new().fg(suggestion_fg),
             focused_border: Style::new()
                 .fg(focused_border_fg)

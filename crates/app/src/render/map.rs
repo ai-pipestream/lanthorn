@@ -683,6 +683,55 @@ pub fn render_map_layered(
             }
         }
     }
+
+    // Progress bar while the `animate-tidy` frames are built on a worker thread.
+    // The bar vanishes when the build completes and `anim_build_job` becomes None.
+    if let Some(job) = &state.anim_build_job {
+        draw_tidy_progress(job, state, area, buf);
+    }
+}
+
+/// Draw a centered single-row progress bar in the map pane while the tidy animation
+/// builds off-thread. Filled/empty block glyphs plus a "Tidying map… NN%" label, styled
+/// by `tidy_progress`. `job.total` is a room-count estimate, so the fraction is only
+/// approximate; it is clamped below 1.0 so the bar never reads "done" before the worker
+/// actually finishes.
+fn draw_tidy_progress(
+    job: &crate::state::AnimBuildJob,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    if area.width < 8 || area.height < 1 {
+        return;
+    }
+    let done = job.progress.load(std::sync::atomic::Ordering::Relaxed);
+    let frac = (done as f32 / job.total.max(1) as f32).min(0.99);
+    let pct = (frac * 100.0) as u16;
+    let label = format!("Tidying map… {pct}%");
+    let label_w = label.chars().count() as u16;
+    // Bar cells fill the space the label leaves (label + a space + the bar), capped.
+    let bar_cells = 24u16
+        .min(area.width.saturating_sub(label_w + 1))
+        as usize;
+    let filled = (frac * bar_cells as f32).round() as usize;
+    let bar: String = (0..bar_cells)
+        .map(|i| if i < filled { '█' } else { '░' })
+        .collect();
+    let text = if bar_cells > 0 { format!("{label} {bar}") } else { label };
+    let w = text.chars().count() as u16;
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height / 2;
+    let style = state.colors.tidy_progress;
+    for (cx, ch) in (x..).zip(text.chars()) {
+        if cx >= area.right() {
+            break;
+        }
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            let mut b = [0u8; 4];
+            cell.set_symbol(ch.encode_utf8(&mut b)).set_style(style);
+        }
+    }
 }
 
 // ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
