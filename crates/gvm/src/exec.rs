@@ -2150,7 +2150,7 @@ impl Machine {
         if sid == 0 {
             return; // no current stream → discard
         }
-        let Some((kind, style)) = self.glk.stream_kind_style(sid) else {
+        let Some((kind, style, link)) = self.glk.stream_kind_style(sid) else {
             return; // bad stream id → discard
         };
         match kind {
@@ -2158,9 +2158,9 @@ impl Machine {
                 match self.glk.window_type(win) {
                     Some(WinType::TextBuffer) => {
                         let colour = self.glk.style_colour(WinType::TextBuffer, style);
-                        self.backend.put_text_attr(win, style, colour, s);
+                        self.backend.put_text_attr(win, style, colour, link, s);
                     }
-                    Some(WinType::TextGrid) => self.grid_put_str(win, style, s),
+                    Some(WinType::TextGrid) => self.grid_put_str(win, style, link, s),
                     _ => {} // pair window or stale: nothing to display
                 }
                 self.glk.window_stream_advance(sid, s.chars().count() as u32);
@@ -2188,7 +2188,7 @@ impl Machine {
     /// Write `s` to a text-grid window starting at its cursor, advancing the
     /// cursor and wrapping at the window edge (output past the bottom is
     /// discarded). `\n` moves to the next row, column 0.
-    fn grid_put_str(&mut self, win: u32, style: GlkStyle, s: &str) {
+    fn grid_put_str(&mut self, win: u32, style: GlkStyle, link: u32, s: &str) {
         let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
         let colour = self.glk.style_colour(WinType::TextGrid, style);
         for ch in s.chars() {
@@ -2202,7 +2202,7 @@ impl Machine {
                 cy += 1;
             }
             if cy < h && cx < w {
-                self.backend.grid_put_attr(win, cx, cy, style, colour, &ch.to_string());
+                self.backend.grid_put_attr(win, cx, cy, style, colour, link, &ch.to_string());
             }
             cx += 1;
         }
@@ -2822,6 +2822,27 @@ impl Machine {
                 self.glk.take_mouse_request(a(0));
                 0
             }
+            0x0100 => {
+                // glk_set_hyperlink(linkval): set the current stream's link value.
+                let sid = self.glk.current_stream();
+                self.glk.set_stream_link(sid, a(0));
+                0
+            }
+            0x0101 => {
+                // glk_set_hyperlink_stream(str, linkval)
+                self.glk.set_stream_link(a(0), a(1));
+                0
+            }
+            0x0102 => {
+                // glk_request_hyperlink_event(win): arm a hyperlink-click watch.
+                self.glk.set_hyperlink_request(a(0));
+                0
+            }
+            0x0103 => {
+                // glk_cancel_hyperlink_event(win): disarm the watch (one-shot take).
+                self.glk.take_hyperlink_request(a(0));
+                0
+            }
             0x0150 => 0, // glk_set_echo_line_event: best-effort no-op
             0x0151 => {
                 // glk_set_terminators_line_event(win, keycodes, count)
@@ -3431,6 +3452,33 @@ impl Machine {
         self.glk.mouse_requested(win)
     }
 
+    /// Deliver a Glk `Evtype_Hyperlink` for a click on a hyperlink with value
+    /// `linkval` in `win`. **One-shot**, like [`Machine::deliver_mouse`]:
+    /// `take_hyperlink_request` both gates and clears the request, so a second
+    /// `deliver_hyperlink` with no fresh `glk_request_hyperlink_event` is a no-op.
+    /// Written directly into a suspended `glk_select`, or queued for the next
+    /// select when the VM is not blocked.
+    pub fn deliver_hyperlink(&mut self, win: u32, linkval: u32) {
+        if !self.glk.take_hyperlink_request(win) {
+            return;
+        }
+        let ev = GlkEvent { etype: glk::evtype::HYPERLINK, win, val1: linkval, val2: 0 };
+        if let Some(pi) = self.pending_input.take() {
+            if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else {
+            self.glk.push_event(ev);
+        }
+    }
+
+    /// Whether `win` currently has a pending Glk hyperlink request. The host reads
+    /// this to decide whether a click on a link inside `win` should be delivered
+    /// via [`Machine::deliver_hyperlink`].
+    pub fn hyperlink_requested(&self, win: u32) -> bool {
+        self.glk.hyperlink_requested(win)
+    }
+
     /// Recompute the window layout from the backend's (freshly updated) screen
     /// size and notify a suspended game via an Arrange event. Call after the
     /// host reports a new display size: the relayout resizes graphics canvases
@@ -3466,7 +3514,9 @@ impl Machine {
             8 => self.sound_enabled as u32,  // gestalt_Sound
             9 => self.sound_enabled as u32,  // gestalt_SoundVolume
             10 => self.sound_enabled as u32, // gestalt_SoundNotify
-            // Hyperlinks(11)/echo and the rest are not supported.
+            11 => 1,                 // gestalt_Hyperlinks → supported
+            12 => 1,                 // gestalt_HyperlinkInput(wintype) → supported
+            // echo and the rest are not supported.
             _ => 0,
         }
     }
@@ -5623,7 +5673,7 @@ mod tests {
         assert_eq!(m2.glk.stream_position(mem_stream), Some(5));
         assert_eq!(m2.glk.stream_rock(mem_stream), Some(0x5E));
         assert_eq!(m2.glk.current_stream(), grid_stream);
-        let (kind, style) = m2.glk.stream_kind_style(grid_stream).unwrap();
+        let (kind, style, _link) = m2.glk.stream_kind_style(grid_stream).unwrap();
         assert_eq!(style, GlkStyle::Header);
         assert!(matches!(kind, StreamKind::Window(w) if w == grid));
 
@@ -6782,6 +6832,107 @@ mod tests {
         m.deliver_mouse(1, 4, 8); // not suspended yet → queue (and consume the request)
         assert_eq!(step_to_event(&mut m), StepResult::Quit, "select drains the queued click and quits");
         assert_eq!(read_event(&m, 0x100), (4, 1, 4, 8), "queued click delivered by the select");
+    }
+
+    // ── Glk hyperlinks (SQ-0257) ──────────────────────────────────────────────
+
+    #[test]
+    fn glk_set_hyperlink_tags_subsequent_output() {
+        use asm::Op::{C8, Zero};
+        // glk_set_hyperlink(42) on the current stream, then print: the emitted run
+        // carries link 42 to the backend. Clearing it (0) drops the link again.
+        let mut body = glk_call(0x100, &[C8(42)], Zero); // glk_set_hyperlink(42)
+        body.extend(glk_call(0x80, &[C8(b'A' as i8)], Zero)); // put_char('A') → linked
+        body.extend(glk_call(0x100, &[C8(0)], Zero)); // glk_set_hyperlink(0) → clear
+        body.extend(glk_call(0x80, &[C8(b'B' as i8)], Zero)); // put_char('B') → unlinked
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_program(body);
+        assert_eq!(
+            backend_of(&m).linked_runs(1),
+            vec![
+                (GlkStyle::Normal, 42, "A".to_string()),
+                (GlkStyle::Normal, 0, "B".to_string()),
+            ],
+            "the link value rides each output run and clears on set_hyperlink(0)",
+        );
+    }
+
+    #[test]
+    fn deliver_hyperlink_into_suspended_select_is_one_shot() {
+        use asm::Op::{C16, C8, Zero};
+        // Arm a hyperlink watch AND a char request, then select: the select
+        // suspends on the char request; a link click is written into it WITHOUT
+        // consuming the char request, but the hyperlink request is one-shot — a
+        // second deliver_hyperlink with no fresh request is a no-op.
+        let mut body = glk_call(0x102, &[C8(1)], Zero); // request_hyperlink_event(1)
+        body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1) → select suspends on this
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select again → re-suspend @0x110
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedChar { win: 1, unicode: false },
+            "select suspends on the char request",
+        );
+        m.deliver_hyperlink(1, 99);
+        // evtype_Hyperlink = 8, win = 1, val1 = linkval (99), val2 = 0.
+        assert_eq!(read_event(&m, 0x100), (8, 1, 99, 0), "link click written to the suspended select");
+        // One-shot: the request was consumed on delivery, so a second click drops.
+        m.deliver_hyperlink(1, 7);
+        assert_eq!(read_event(&m, 0x100), (8, 1, 99, 0), "second deliver_hyperlink is a no-op (request consumed)");
+        assert!(!m.glk.hyperlink_requested(1), "hyperlink request cleared after delivery");
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedChar { win: 1, unicode: false },
+            "char request persisted across the click",
+        );
+    }
+
+    #[test]
+    fn glk_cancel_hyperlink_suppresses_delivery() {
+        use asm::Op::{C16, C8, Zero};
+        // request then cancel the hyperlink watch: with no armed request, a click
+        // is a no-op and never overwrites the suspended select's event slot.
+        let mut body = glk_call(0x102, &[C8(1)], Zero); // request_hyperlink_event(1)
+        body.extend(glk_call(0x103, &[C8(1)], Zero)); // cancel_hyperlink_event(1)
+        body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1) → suspend
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        m.mem.write32(0x0100, 0xDEAD_BEEF).unwrap();
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false });
+        m.deliver_hyperlink(1, 5); // request cancelled → dropped
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF, "cancelled hyperlink request suppresses delivery");
+    }
+
+    #[test]
+    fn deliver_hyperlink_queues_when_not_suspended() {
+        use asm::Op::{C16, Zero};
+        // With nothing waiting, a link click is queued and delivered by the NEXT select.
+        let body = {
+            let mut b = glk_call(0xC0, &[C16(0x0100)], Zero); // select → drains the queued event
+            b.extend(asm::ins(0x120, &[]));
+            b
+        };
+        let mut m = machine_ram(body, 0x200);
+        m.glk.set_hyperlink_request(1); // window 1 exists via the prelude
+        m.deliver_hyperlink(1, 77); // not suspended yet → queue (and consume the request)
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "select drains the queued click and quits");
+        assert_eq!(read_event(&m, 0x100), (8, 1, 77, 0), "queued link click delivered by the select");
+    }
+
+    #[test]
+    fn glk_gestalt_reports_hyperlink_support() {
+        use asm::Op::{C8, Mem16};
+        let mut body = glk_call(0x04, &[C8(11), C8(0)], Mem16(0x0100)); // gestalt_Hyperlinks
+        body.extend(glk_call(0x04, &[C8(12), C8(3)], Mem16(0x0104))); // gestalt_HyperlinkInput(TextBuffer)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "gestalt_Hyperlinks supported");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "gestalt_HyperlinkInput supported");
     }
 
     #[test]

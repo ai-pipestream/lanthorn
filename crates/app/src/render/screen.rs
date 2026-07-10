@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn inline_buffer_renders_styled_runs() {
         let mut b = inline_buffer("abCD");
-        b.runs = vec![vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0 }]];
+        b.runs = vec![vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0 }]];
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
         let area = Rect::new(0, 0, 10, 3);

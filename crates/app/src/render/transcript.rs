@@ -314,7 +314,7 @@ fn rebase_runs(line_runs: Option<&Vec<StyleRun>>, start: usize, end: usize) -> V
         let s = r.start.max(start);
         let e = r.end.min(end);
         if s < e {
-            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits, fg: r.fg, bg: r.bg });
+            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits, fg: r.fg, bg: r.bg, link: r.link });
         }
     }
     out
@@ -1493,7 +1493,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}};
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
-        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0 }]; // bold chars 2..4
+        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0 }]; // bold chars 2..4
         draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area, None);
         assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
@@ -1541,11 +1541,11 @@ mod tests {
         let lines = vec!["AAAAA BBBBB".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0 }]]; // bold "BBBBB"
+        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0 }]]; // bold "BBBBB"
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], (1, 1), false, 5);
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
         assert!(out[0].runs.is_empty());
-        assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0 }]);
+        assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
     }
 
     #[test]

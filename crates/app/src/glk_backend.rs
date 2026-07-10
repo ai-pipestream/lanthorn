@@ -75,8 +75,9 @@ struct GridBuf {
 
 /// One entry in a text-buffer window's ordered output log.
 enum BufElem {
-    /// A run of printed text with its style bits and packed colours.
-    Text { bits: u8, fg: u32, bg: u32, text: String },
+    /// A run of printed text with its style bits, packed colours, and Glk
+    /// hyperlink value (0 = no link).
+    Text { bits: u8, fg: u32, bg: u32, link: u32, text: String },
     /// An image drawn into this buffer window (Glk `glk_image_draw`).
     Image(crate::inline_image::InlineImage),
 }
@@ -215,7 +216,7 @@ impl AppGlk {
     /// Drain the primary window's text printed since the last drain, as
     /// `(text, (char_count, bits, fg, bg) chunks)` for `push_transcript_runs`.
     /// fg/bg carry the resolved stylehint colour (24-bit via `ZColour::True24`).
-    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)>) {
+    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)>) {
         let Some(pid) = self.primary else {
             return (String::new(), Vec::new());
         };
@@ -223,14 +224,14 @@ impl AppGlk {
             return (String::new(), Vec::new());
         };
         let mut text = String::new();
-        let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)> = Vec::new();
+        let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)> = Vec::new();
         for elem in &buf.log[buf.drained..] {
-            let BufElem::Text { bits, fg, bg, text: s } = elem else { continue };
+            let BufElem::Text { bits, fg, bg, link, text: s } = elem else { continue };
             let n = s.chars().count();
             if n == 0 {
                 continue;
             }
-            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg)));
+            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg), *link));
             text.push_str(s);
         }
         buf.drained = buf.log.len();
@@ -248,7 +249,7 @@ impl AppGlk {
         // char-count chunk shape `push_transcript_runs` expects:
         // (char_count, bits, fg, bg).
         let mut cur_text = String::new();
-        let mut cur_runs: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour)> = Vec::new();
+        let mut cur_runs: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)> = Vec::new();
         let flush = |out: &mut Vec<TranscriptElem>, text: &mut String, runs: &mut Vec<_>| {
             if !text.is_empty() {
                 out.push(TranscriptElem::Text { text: std::mem::take(text), runs: std::mem::take(runs) });
@@ -258,13 +259,13 @@ impl AppGlk {
         };
         for elem in &buf.log[buf.drained..] {
             match elem {
-                BufElem::Text { bits, fg, bg, text } => {
+                BufElem::Text { bits, fg, bg, link, text } => {
                     let n = text.chars().count();
                     if n > 0 {
                         // Convert packed u32 colours back to ZColour to match
                         // the chunk type push_transcript_runs consumes.
                         let (f, b) = (crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg));
-                        cur_runs.push((n, *bits, f, b));
+                        cur_runs.push((n, *bits, f, b, *link));
                         cur_text.push_str(text);
                     }
                 }
@@ -518,7 +519,7 @@ fn log_to_lines(
     let mut images: Vec<Option<crate::inline_image::InlineImage>> = vec![None];
     for elem in log {
         match elem {
-            BufElem::Text { bits, fg, bg, text } => {
+            BufElem::Text { bits, fg, bg, link, text } => {
                 for ch in text.chars() {
                     if ch == '\n' {
                         lines.push(String::new());
@@ -529,19 +530,21 @@ fn log_to_lines(
                     let li = lines.len() - 1;
                     let col = lines[li].chars().count();
                     lines[li].push(ch);
-                    // A run is emitted whenever any styling is active (bits or a colour).
-                    if *bits != 0 || *fg != 0 || *bg != 0 {
+                    // A run is emitted whenever any styling is active (bits, a
+                    // colour, or a hyperlink).
+                    if *bits != 0 || *fg != 0 || *bg != 0 || *link != 0 {
                         let r = &mut runs[li];
                         match r.last_mut() {
                             Some(last)
                                 if last.bits == *bits
                                     && last.fg == *fg
                                     && last.bg == *bg
+                                    && last.link == *link
                                     && last.end == col =>
                             {
                                 last.end = col + 1
                             }
-                            _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg }),
+                            _ => r.push(StyleRun { start: col, end: col + 1, bits: *bits, fg: *fg, bg: *bg, link: *link }),
                         }
                     }
                 }
@@ -620,23 +623,23 @@ impl GlkBackend for AppGlk {
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
-        self.put_text_attr(win, style, StyleColour::default(), s);
+        self.put_text_attr(win, style, StyleColour::default(), 0, s);
     }
 
-    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, link: u32, s: &str) {
         if Some(win) == self.primary {
             self.capture_heading(style, s);
         }
         let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let buf = self.buffers.entry(win).or_default();
-        buf.log.push(BufElem::Text { bits, fg, bg, text: s.to_owned() });
+        buf.log.push(BufElem::Text { bits, fg, bg, link, text: s.to_owned() });
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
-        self.grid_put_attr(win, x, y, style, StyleColour::default(), s);
+        self.grid_put_attr(win, x, y, style, StyleColour::default(), 0, s);
     }
 
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, _link: u32, s: &str) {
         let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let g = self.grids.entry(win).or_default();
         for (i, ch) in s.chars().enumerate() {
@@ -809,9 +812,9 @@ mod tests {
             scaled: None,
         };
         let log = &mut glk.buffers.get_mut(&2).unwrap().log;
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "a\n".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "a\n".into() });
         log.push(BufElem::Image(dummy));
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "b".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "b".into() });
 
         let bw = glk.buffer_node(2);
         assert_eq!(bw.lines.len(), bw.runs.len());
@@ -905,7 +908,7 @@ mod tests {
         let inline = bufs.iter().find(|b| !b.primary).expect("an inline buffer exists");
         assert_eq!(inline.lines, vec!["abCD".to_string(), "x".to_string()]);
         // "CD" (cols 2..4) is bold (Header → 0x02), merged into one run.
-        assert_eq!(inline.runs[0], vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0 }]);
+        assert_eq!(inline.runs[0], vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
         assert!(inline.runs[1].is_empty());
     }
 
@@ -919,8 +922,8 @@ mod tests {
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "You are here. Look!");
         assert_eq!(chunks, vec![
-            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default),
-            (5, 0x02u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default),
+            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32),
+            (5, 0x02u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32),
         ]);
         // A second drain returns only new text.
         glk.put_text(1, GlkStyle::Normal, " More.");
@@ -974,11 +977,11 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         let red = StyleColour { fg: Some(0x00FF_0000), bg: None, reverse: false };
-        glk.put_text_attr(1, GlkStyle::Normal, red, "hi");
+        glk.put_text_attr(1, GlkStyle::Normal, red, 0, "hi");
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "hi");
         assert_eq!(chunks.len(), 1);
-        let (n, _bits, fg, bg) = chunks[0];
+        let (n, _bits, fg, bg, _link) = chunks[0];
         assert_eq!(n, 2);
         assert_eq!(fg, ZColour::True24(0x00FF_0000), "24-bit fg carried losslessly");
         assert_eq!(bg, ZColour::Default);
@@ -991,7 +994,7 @@ mod tests {
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2))]);
         let blue_on_white = StyleColour { fg: Some(0x0000_00FF), bg: Some(0x00FF_FFFF), reverse: false };
-        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, "X");
+        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, 0, "X");
         let cell = glk.screen_model().grid().unwrap().cell(1, 1);
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
@@ -1111,10 +1114,10 @@ mod tests {
             scaled: None,
         };
         let log = &mut glk.buffers.get_mut(&pid).unwrap().log;
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "foo".into() });
-        log.push(BufElem::Text { bits: 0x02, fg: 0, bg: 0, text: "bar".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "foo".into() });
+        log.push(BufElem::Text { bits: 0x02, fg: 0, bg: 0, link: 0, text: "bar".into() });
         log.push(BufElem::Image(dummy));
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, text: "baz".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "baz".into() });
 
         let elems = glk.take_transcript_elems();
         assert_eq!(elems.len(), 3, "coalesced Text, Image, trailing Text");
@@ -1122,7 +1125,7 @@ mod tests {
             crate::session::TranscriptElem::Text { text, runs } => {
                 assert_eq!(text, "foobar", "the two leading runs coalesce into one element");
                 assert_eq!(runs.len(), 2, "each source run kept as its own chunk, in order");
-                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default));
+                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0));
                 assert_eq!(runs[1].0, 3);
                 assert_eq!(runs[1].1, 0x02, "second chunk carries the different style bits");
             }

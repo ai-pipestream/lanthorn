@@ -288,12 +288,12 @@ pub trait GlkBackend {
     /// active style hints. Defaults to the colourless [`GlkBackend::put_text`],
     /// so backends that don't render colour need no change (mirrors the
     /// Z-machine `Output::print_attr` seam).
-    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, s: &str) {
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, _link: u32, s: &str) {
         self.put_text(win, style, s);
     }
-    /// Write `s` to a text-grid window with resolved colour; defaults to the
-    /// colourless [`GlkBackend::grid_put`].
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, _colour: StyleColour, s: &str) {
+    /// Write `s` to a text-grid window with resolved colour and hyperlink value;
+    /// defaults to the colourless [`GlkBackend::grid_put`].
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, _colour: StyleColour, _link: u32, s: &str) {
         self.grid_put(win, x, y, style, s);
     }
     /// Clear a text-grid window.
@@ -362,6 +362,9 @@ pub struct TestBackend {
     pub char_px: (u32, u32),
     /// Styled output runs per text-buffer window id, in print order.
     runs: BTreeMap<u32, Vec<(GlkStyle, String)>>,
+    /// Styled output runs with their hyperlink value `(style, link, text)` per
+    /// text-buffer window id, in print order (0 link = no hyperlink).
+    linked_runs: BTreeMap<u32, Vec<(GlkStyle, u32, String)>>,
     /// Grid cells per text-grid window id, keyed `(row, col) -> char`.
     grid: BTreeMap<u32, BTreeMap<(u32, u32), char>>,
     /// Last laid-out rect per window id.
@@ -396,6 +399,7 @@ impl TestBackend {
             screen: (80, 24),
             char_px: (1, 1),
             runs: BTreeMap::new(),
+            linked_runs: BTreeMap::new(),
             grid: BTreeMap::new(),
             dims: BTreeMap::new(),
             fills: BTreeMap::new(),
@@ -432,6 +436,11 @@ impl TestBackend {
     /// The styled output runs recorded for one text-buffer window.
     pub fn runs(&self, win: u32) -> Vec<(GlkStyle, String)> {
         self.runs.get(&win).cloned().unwrap_or_default()
+    }
+    /// The styled output runs with their hyperlink value `(style, link, text)`
+    /// recorded for one text-buffer window.
+    pub fn linked_runs(&self, win: u32) -> Vec<(GlkStyle, u32, String)> {
+        self.linked_runs.get(&win).cloned().unwrap_or_default()
     }
     /// All text-buffer windows' text concatenated in window-id order — the
     /// migration replacement for `BufferOutput::buf` (there is one window in the
@@ -495,6 +504,7 @@ impl GlkBackend for TestBackend {
     }
     fn window_close(&mut self, id: u32) {
         self.runs.remove(&id);
+        self.linked_runs.remove(&id);
         self.grid.remove(&id);
         self.dims.remove(&id);
     }
@@ -505,6 +515,10 @@ impl GlkBackend for TestBackend {
     }
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
         self.runs.entry(win).or_default().push((style, s.to_string()));
+    }
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, link: u32, s: &str) {
+        self.runs.entry(win).or_default().push((style, s.to_string()));
+        self.linked_runs.entry(win).or_default().push((style, link, s.to_string()));
     }
     fn grid_put(&mut self, win: u32, x: u32, y: u32, _style: GlkStyle, s: &str) {
         let cells = self.grid.entry(win).or_default();
@@ -519,6 +533,9 @@ impl GlkBackend for TestBackend {
     }
     fn window_clear(&mut self, win: u32) {
         if let Some(rs) = self.runs.get_mut(&win) {
+            rs.clear();
+        }
+        if let Some(rs) = self.linked_runs.get_mut(&win) {
             rs.clear();
         }
     }
@@ -602,6 +619,9 @@ struct Stream {
     rock: u32,
     kind: StreamKind,
     style: GlkStyle,
+    /// The current Glk hyperlink value for text written to this stream
+    /// (`glk_set_hyperlink`); 0 = no link. Stamped onto each output run.
+    link: u32,
     read_count: u32,
     write_count: u32,
 }
@@ -655,6 +675,10 @@ struct Window {
     /// A pending mouse-input request (`glk_request_mouse_event`). Unlike a char
     /// request this is a bare flag: Glk mouse events carry no per-request option.
     mouse_req: bool,
+    /// A pending hyperlink-input request (`glk_request_hyperlink_event`). Like a
+    /// mouse request this is a bare flag: a Glk hyperlink event carries no
+    /// per-request option.
+    hyperlink_req: bool,
     /// The line-input terminator keycodes set for this window
     /// (`glk_set_terminators_line_event`); persists across line requests until
     /// reset. Empty = Enter-only (the default).
@@ -802,6 +826,7 @@ impl Model {
             line_req: None,
             char_req: None,
             mouse_req: false,
+            hyperlink_req: false,
             terminators: Vec::new(),
             child1: 0,
             child2: 0,
@@ -818,6 +843,7 @@ impl Model {
             rock,
             kind,
             style: GlkStyle::Normal,
+            link: 0,
             read_count: 0,
             write_count: 0,
         }));
@@ -1270,14 +1296,21 @@ impl Model {
         }
     }
 
-    /// The kind + current style of a stream, for output routing.
-    pub fn stream_kind_style(&self, id: u32) -> Option<(StreamKind, GlkStyle)> {
-        self.stream(id).map(|s| (s.kind, s.style))
+    /// The kind + current style + current hyperlink value of a stream, for
+    /// output routing.
+    pub fn stream_kind_style(&self, id: u32) -> Option<(StreamKind, GlkStyle, u32)> {
+        self.stream(id).map(|s| (s.kind, s.style, s.link))
     }
     /// Set a stream's current style.
     pub fn set_stream_style(&mut self, id: u32, style: GlkStyle) {
         if let Some(s) = self.stream_mut(id) {
             s.style = style;
+        }
+    }
+    /// Set a stream's current hyperlink value (`glk_set_hyperlink`); 0 clears it.
+    pub fn set_stream_link(&mut self, id: u32, link: u32) {
+        if let Some(s) = self.stream_mut(id) {
+            s.link = link;
         }
     }
     /// Return `(addr, len, pos, unicode)` for a memory stream, or `None` if `id`
@@ -1385,6 +1418,29 @@ impl Model {
     pub fn mouse_requested(&self, win: u32) -> bool {
         self.win(win).map(|w| w.mouse_req).unwrap_or(false)
     }
+    /// Arm a hyperlink-input request on `win` (`glk_request_hyperlink_event`).
+    /// A no-op on a non-existent or pair window.
+    pub fn set_hyperlink_request(&mut self, win: u32) {
+        if let Some(w) = self.win_mut(win) {
+            if w.wintype != WinType::Pair {
+                w.hyperlink_req = true;
+            }
+        }
+    }
+    /// Take (and clear) the pending hyperlink request on `win`, returning whether
+    /// one was armed. Like a mouse event a Glk hyperlink event is one-shot, so the
+    /// request clears the moment it fires.
+    pub fn take_hyperlink_request(&mut self, win: u32) -> bool {
+        match self.win_mut(win) {
+            Some(w) => std::mem::take(&mut w.hyperlink_req),
+            None => false,
+        }
+    }
+    /// Whether `win` currently has a pending hyperlink request.
+    pub fn hyperlink_requested(&self, win: u32) -> bool {
+        self.win(win).map(|w| w.hyperlink_req).unwrap_or(false)
+    }
+
     /// Every window (lowest id first) with a pending mouse request, as
     /// `(id, wintype, rect)`. The host reads this to decide whether a terminal
     /// click lands inside a mouse-watching window.
@@ -1509,6 +1565,7 @@ impl Model {
                         }
                     }
                     w(&mut out, win.mouse_req as u32);
+                    w(&mut out, win.hyperlink_req as u32);
                 }
             }
         }
@@ -1521,6 +1578,7 @@ impl Model {
                     w(&mut out, s.id);
                     w(&mut out, s.rock);
                     w(&mut out, s.style.to_num());
+                    w(&mut out, s.link);
                     w(&mut out, s.read_count);
                     w(&mut out, s.write_count);
                     match s.kind {
@@ -1581,9 +1639,10 @@ impl Model {
             };
             let char_req = if r.u32()? != 0 { Some(CharReq { unicode: r.u32()? != 0 }) } else { None };
             let mouse_req = r.u32()? != 0;
+            let hyperlink_req = r.u32()? != 0;
             windows.push(Some(Window {
                 id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
-                terminators: Vec::new(), child1, child2, key, method, size,
+                hyperlink_req, terminators: Vec::new(), child1, child2, key, method, size,
             }));
         }
 
@@ -1597,6 +1656,7 @@ impl Model {
             let id = r.u32()?;
             let rock = r.u32()?;
             let style = GlkStyle::from_num(r.u32()?);
+            let link = r.u32()?;
             let read_count = r.u32()?;
             let write_count = r.u32()?;
             let kind = match r.u32()? {
@@ -1604,7 +1664,7 @@ impl Model {
                 1 => StreamKind::Memory { addr: r.u32()?, len: r.u32()?, pos: r.u32()?, unicode: r.u32()? != 0 },
                 other => return Err(format!("Glk snapshot: bad stream kind {other}")),
             };
-            streams.push(Some(Stream { id, rock, kind, style, read_count, write_count }));
+            streams.push(Some(Stream { id, rock, kind, style, link, read_count, write_count }));
         }
 
         if !r.done() {
@@ -1623,7 +1683,7 @@ impl Model {
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
-const GLK_SNAPSHOT_VERSION: u32 = 2;
+const GLK_SNAPSHOT_VERSION: u32 = 3;
 
 /// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
 /// an error, never a panic.
@@ -1775,6 +1835,25 @@ mod layout_snap_tests {
             restored.mouse_windows(),
             vec![(grid, WinType::TextGrid, Rect::default())],
             "restored model still enumerates the watching window",
+        );
+    }
+
+    #[test]
+    fn hyperlink_request_and_stream_link_round_trip_through_serialize() {
+        let mut m = Model::new();
+        let grid = m.window_open(0, 0, 0, 4, 0).unwrap(); // TextGrid root
+        m.set_hyperlink_request(grid);
+        // Set a current link value on the window's output stream.
+        let sid = m.window_stream(grid).expect("window has a stream");
+        m.set_stream_link(sid, 0xABCD);
+        assert!(m.hyperlink_requested(grid), "armed before save");
+
+        let restored = Model::deserialize(&m.serialize()).expect("round-trip");
+        assert!(restored.hyperlink_requested(grid), "hyperlink request survived the round-trip");
+        assert_eq!(
+            restored.stream_kind_style(sid).map(|(_, _, link)| link),
+            Some(0xABCD),
+            "the stream's current link value survived the round-trip",
         );
     }
 

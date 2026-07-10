@@ -375,10 +375,10 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
-        self.put_text_attr(win, style, StyleColour::default(), s);
+        self.put_text_attr(win, style, StyleColour::default(), 0, s);
     }
 
-    fn put_text_attr(&mut self, _win: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+    fn put_text_attr(&mut self, _win: u32, style: GlkStyle, colour: StyleColour, _link: u32, s: &str) {
         // When piped (not a TTY), pass through byte-identical — no buffering, no
         // wrap. `cols == 0` is the non-TTY sentinel for the soft_wrap helper and
         // is logged below but never used in the new char-by-char path.
@@ -436,10 +436,10 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
-        self.grid_put_attr(win, x, y, style, StyleColour::default(), s);
+        self.grid_put_attr(win, x, y, style, StyleColour::default(), 0, s);
     }
 
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, s: &str) {
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, _link: u32, s: &str) {
         if self.debug {
             eprintln!("[term] grid_put: win={win} x={x} y={y} len={}", s.chars().count());
         }
