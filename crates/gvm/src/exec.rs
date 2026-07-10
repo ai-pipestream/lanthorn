@@ -123,6 +123,9 @@ pub struct Machine {
     pub(crate) iosys_mode: u32,
     /// Current I/O system rock.
     pub(crate) iosys_rock: u32,
+    /// Recursion depth of filter-iosys (mode 1) callbacks, guarding against a
+    /// filter function whose own output recurses back into `emit`.
+    filter_depth: u32,
     /// Current string-decoding-table address (0 = none). Initialized from the
     /// header's decode_table; overridable by `setstringtbl`.
     pub(crate) cur_stringtbl: u32,
@@ -280,6 +283,7 @@ impl Machine {
             pc: 0,
             iosys_mode: 0,
             iosys_rock: 0,
+            filter_depth: 0,
             cur_stringtbl: decode_table,
             heap_start: 0,
             heap_blocks: Vec::new(),
@@ -489,9 +493,6 @@ impl Machine {
                 let (l, _) = self.read_operands(2, 0)?;
                 self.iosys_mode = l[0];
                 self.iosys_rock = l[1];
-                if l[0] == 1 {
-                    self.diagnostics.push("filter iosys deferred to a later phase".to_string());
-                }
                 Ok(())
             }
             // Stream output.
@@ -1378,7 +1379,7 @@ impl Machine {
             1 => Self::TERP_VERSION,                   // TerpVersion
             2 => 1,                                    // ResizeMem
             3 => 1,                                    // Undo (saveundo/restoreundo)
-            4 => u32::from(arg == 0 || arg == 2),      // IOSystem: null + Glk
+            4 => u32::from(arg == 0 || arg == 1 || arg == 2), // IOSystem: null + filter + Glk
             5 => 1,                                    // Unicode
             6 => 1,                                    // MemCopy
             7 => 1,                                    // MAlloc
@@ -2072,12 +2073,33 @@ impl Machine {
     // ── stream output (GLULX_NOTES §7) ────────────────────────────────────────
 
     /// Route `streamchar`/`streamnum`/`streamstr` output, honoring the current
-    /// I/O system: only the Glk system (mode 2) prints (to the current Glk
-    /// stream); the null system (and the deferred filter system) discard.
+    /// I/O system: the Glk system (mode 2) prints to the current Glk stream;
+    /// the filter system (mode 1) calls `iosys_rock` once per character, with
+    /// that character's code point as the sole argument (GLULX_NOTES §7.2);
+    /// the null system (mode 0, and any unrecognized mode) discards.
     fn emit(&mut self, s: &str) {
-        if self.iosys_mode == 2 {
-            let sid = self.glk.current_stream();
-            self.glk_stream_put(sid, s);
+        match self.iosys_mode {
+            2 => {
+                let sid = self.glk.current_stream();
+                self.glk_stream_put(sid, s);
+            }
+            1 => {
+                // Guard against a filter function whose own output recurses
+                // back into `emit` (e.g. via streamchar): each nested level
+                // costs several native frames (this call chain runs a full
+                // nested opcode-dispatch loop), so the bound is much lower
+                // than the lighter-weight string-decode recursion guard.
+                const FILTER_MAX_DEPTH: u32 = 32;
+                if self.filter_depth > FILTER_MAX_DEPTH {
+                    return;
+                }
+                self.filter_depth += 1;
+                for ch in s.chars() {
+                    let _ = self.run_call_to_return(self.iosys_rock, &[ch as u32]);
+                }
+                self.filter_depth -= 1;
+            }
+            _ => {} // null system (mode 0) and unrecognized modes: discard
         }
     }
 
@@ -4333,6 +4355,76 @@ mod tests {
     }
 
     #[test]
+    fn filter_iosys_calls_function_per_char() {
+        use asm::Op::{C8, C32, Local32, Mem32};
+        const COUNTER_ADDR: u32 = 0x100;
+        const LOG_BASE: u32 = 0x110;
+        // The filter function is assembled first, so its address is always
+        // the fixed offset right after the 0x24-byte header — known up front,
+        // letting the start function's `setiosys` embed it as a constant.
+        const FILT_ADDR: u32 = 0x24;
+
+        // Filter function (rock = FILT_ADDR): records each received code
+        // point into a growing array at LOG_BASE, indexed by a counter at
+        // COUNTER_ADDR.
+        let mut filt_body = asm::ins(0x4C, &[C32(LOG_BASE), Mem32(COUNTER_ADDR), Local32(0)]); // astore
+        filt_body.extend(asm::ins(0x10, &[Mem32(COUNTER_ADDR), C8(1), Mem32(COUNTER_ADDR)])); // counter += 1
+        filt_body.extend(asm::ins(0x31, &[C8(0)])); // return 0
+        let filt = asm::func(0xC1, &[(4, 1)], &filt_body);
+
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT_ADDR)]); // setiosys filter, rock=filt
+        body.extend(asm::ins(0x70, &[C8(b'H' as i8)])); // streamchar 'H'
+        body.extend(asm::ins(0x70, &[C8(b'i' as i8)])); // streamchar 'i'
+        body.extend(asm::ins(0x71, &[C32(42)])); // streamnum 42 → chars '4','2'
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, start], 1, 0x200);
+        assert_eq!(built.addrs[0], FILT_ADDR, "test assumes filt is assembled first");
+        let mut m = machine(built);
+        m.run();
+
+        // One filter call per output character: 'H', 'i', '4', '2'.
+        assert_eq!(m.mem.read32(COUNTER_ADDR), Some(4));
+        let codes: Vec<u32> = (0..4).map(|i| m.mem.read32(LOG_BASE + i * 4).unwrap()).collect();
+        assert_eq!(codes, vec!['H' as u32, 'i' as u32, '4' as u32, '2' as u32]);
+        assert_eq!(out_str(&m), ""); // filter mode does not print to Glk
+    }
+
+    #[test]
+    fn filter_iosys_recursion_is_depth_guarded() {
+        use asm::Op::{C8, C32, Mem32};
+        const COUNTER_ADDR: u32 = 0x100;
+        const FILT_ADDR: u32 = 0x24;
+
+        // A filter function whose own output (streamchar) recurses back into
+        // `emit`/the filter. Left unguarded, this would overflow the native
+        // stack; the depth guard must bound it instead.
+        let mut filt_body = asm::ins(0x10, &[Mem32(COUNTER_ADDR), C8(1), Mem32(COUNTER_ADDR)]); // counter += 1
+        filt_body.extend(asm::ins(0x70, &[C8(b'X' as i8)])); // streamchar 'X' → recurses
+        filt_body.extend(asm::ins(0x31, &[C8(0)])); // return 0
+        let filt = asm::func(0xC1, &[], &filt_body);
+
+        let mut body = asm::ins(0x149, &[C8(1), C32(FILT_ADDR)]); // setiosys filter
+        body.extend(asm::ins(0x70, &[C8(b'X' as i8)])); // kick off the recursion
+        body.extend(asm::ins(0x120, &[])); // quit
+        let start = asm::func(0xC1, &[], &body);
+
+        let built = asm::assemble(&[filt, start], 1, 0x200);
+        assert_eq!(built.addrs[0], FILT_ADDR, "test assumes filt is assembled first");
+        let mut m = machine(built);
+        // Grow the VM's own byte stack well past what 256+ nested call frames
+        // need, so the depth guard (not a VM stack overflow) is what bounds
+        // the recursion here.
+        m.stack.resize(1 << 20, 0);
+        m.run(); // must terminate rather than stack-overflow or hang
+
+        // Bounded by the depth guard: the initial call plus 32 further
+        // recursive calls before deeper output is discarded.
+        assert_eq!(m.mem.read32(COUNTER_ADDR), Some(33));
+    }
+
+    #[test]
     fn glk_put_char_and_put_buffer() {
         // glk_put_char('B').
         let mut body = asm::ins(0x40, &[asm::Op::C8(66), asm::Op::Stack]); // push 'B'
@@ -5095,8 +5187,9 @@ mod tests {
         assert_eq!(m.gestalt(2, 0), 1); // ResizeMem
         assert_eq!(m.gestalt(3, 0), 1); // Undo (saveundo/restoreundo)
         assert_eq!(m.gestalt(4, 0), 1); // IOSystem null
+        assert_eq!(m.gestalt(4, 1), 1); // IOSystem filter
         assert_eq!(m.gestalt(4, 2), 1); // IOSystem Glk
-        assert_eq!(m.gestalt(4, 1), 0); // IOSystem filter (not implemented)
+        assert_eq!(m.gestalt(4, 3), 0); // IOSystem unrecognized
         assert_eq!(m.gestalt(5, 0), 1); // Unicode
         assert_eq!(m.gestalt(6, 0), 1); // MemCopy
         assert_eq!(m.gestalt(7, 0), 1); // MAlloc

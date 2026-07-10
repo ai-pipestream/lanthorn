@@ -18,10 +18,14 @@ Core VM + the Glk I/O subset: `operand`, `arith`, `bitwise`, `shift`, `aload`,
 `throw`, `streamnum`, `strings`, `ramstring`, `glk`, `search`, `mzero`, `mcopy`,
 `nonrandom`, `undo`, `protect`, `memsize`, `heap`, `verify`, and more — all pass.
 
+The **filter I/O system** (iosys mode 1; SQ-0245) is also implemented and
+in scope: `iosys2`, `iosys3`, `filter`, `nullio`, `gestalt` all pass.
+
 ### Out of scope (excluded; not yet implemented)
 
-- `iosys2` / `iosys3` / `filter`, and the `nullio` / `gestalt` filter sub-tests —
-  the **filter I/O system** (iosys mode 1) is deferred (see GLULX_NOTES §7).
+- `iosys` (the plain group, distinct from `iosys2`/`iosys3`) — fails on an
+  unrelated pre-existing bug: a memory stream redirected mid-string doesn't
+  pick up the change until the next string. Not a filter-iosys issue.
 - `gidispa` — the **gi_dispatch introspection layer** (type-tagged string
   dispatch); not part of the IF Glk subset and not used by real games.
 - `acceleration` — accelerated functions ARE intercepted (on by default;
