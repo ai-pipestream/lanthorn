@@ -126,6 +126,13 @@ pub struct Machine {
     /// Recursion depth of filter-iosys (mode 1) callbacks, guarding against a
     /// filter function whose own output recurses back into `emit`.
     filter_depth: u32,
+    /// When `Some`, `emit` diverts all output into this buffer instead of routing
+    /// it through the I/O system. Used to decode a compressed (E1) string object
+    /// handed to `glk_put_string` into a `String` (capturing embedded string- and
+    /// function-node output too) so it can then be written straight to the Glk
+    /// stream, bypassing the iosys — a direct Glk call must ignore it. Transient
+    /// (set and cleared within one `decode_glk_string`); never live across a save.
+    emit_capture: Option<String>,
     /// Current string-decoding-table address (0 = none). Initialized from the
     /// header's decode_table; overridable by `setstringtbl`.
     pub(crate) cur_stringtbl: u32,
@@ -289,6 +296,7 @@ impl Machine {
             iosys_mode: 0,
             iosys_rock: 0,
             filter_depth: 0,
+            emit_capture: None,
             cur_stringtbl: decode_table,
             heap_start: 0,
             heap_blocks: Vec::new(),
@@ -2084,6 +2092,12 @@ impl Machine {
     /// that character's code point as the sole argument (GLULX_NOTES §7.2);
     /// the null system (mode 0, and any unrecognized mode) discards.
     fn emit(&mut self, s: &str) {
+        // Capturing (decoding an E1 object for glk_put_string): divert output into
+        // the buffer instead of routing it through the I/O system.
+        if let Some(buf) = self.emit_capture.as_mut() {
+            buf.push_str(s);
+            return;
+        }
         match self.iosys_mode {
             2 => {
                 let sid = self.glk.current_stream();
@@ -2124,6 +2138,15 @@ impl Machine {
     /// invalid/zero stream is safely discarded (no panic). This is the single
     /// output funnel for both the `@glk` put selectors and the stream opcodes.
     fn glk_stream_put(&mut self, sid: u32, s: &str) {
+        // While capturing an E1 decode for glk_put_string, direct Glk output from
+        // an embedded function-node lands in the buffer too, in decode order,
+        // rather than escaping to a real stream mid-decode. (`emit` returns before
+        // reaching here during capture, so string-machinery output isn't
+        // double-counted — only direct Glk put selectors funnel through this.)
+        if let Some(buf) = self.emit_capture.as_mut() {
+            buf.push_str(s);
+            return;
+        }
         if sid == 0 {
             return; // no current stream → discard
         }
@@ -2349,22 +2372,40 @@ impl Machine {
     /// Decode a Glulx string OBJECT at `addr` into a String for the Glk
     /// `put_string`/`put_string_uni` dispatch arms. The Glk string argument is a
     /// type-tagged Inform string (the reference decodes it via `DecodeVMString`),
-    /// not a raw C array: `0xE0` unencoded Latin-1, `0xE2` unencoded Unicode.
-    /// Compressed (`0xE1`) strings are not decoded here — that means replaying the
-    /// `emit()`-based, function-node-invoking compressed path, which a direct Glk
-    /// call must not do; the Inform veneer emits E0/E2 for these selectors. An E1
-    /// (or otherwise malformed) tag records a diagnostic and yields `None` (no
-    /// output) rather than faulting the VM — a genuine memory fault from `m8`/the
-    /// readers still propagates. Returns `Ok(None)` when nothing should be emitted.
+    /// not a raw C array: `0xE0` unencoded Latin-1, `0xE2` unencoded Unicode, and
+    /// `0xE1` compressed. E0/E2 read directly; a compressed E1 object is decoded
+    /// through the string machinery with `emit`/`glk_stream_put` diverted into a
+    /// capture buffer (so embedded string- and function-node output is captured in
+    /// order and bypasses the VM iosys, like E0/E2), then returned for the caller
+    /// to write to the Glk stream. An E1 decode failure (no string table set, a
+    /// bad node, or a memory fault while decoding) records a diagnostic and yields
+    /// `None` rather than faulting the VM; for E0/E2, a genuine memory fault from
+    /// `m8`/the readers still propagates. A malformed tag yields `None` with a
+    /// diagnostic. Returns `Ok(None)` when nothing should be emitted.
     fn decode_glk_string(&mut self, addr: u32) -> R<Option<String>> {
         Ok(match self.m8(addr)? {
             0xE0 => Some(self.read_cstring(addr + 1)?),
             0xE2 => Some(self.read_ustring(addr + 4)?),
             0xE1 => {
-                self.diagnostics.push(format!(
-                    "glk_put_string: compressed (E1) string @{addr:#010x} unsupported; skipped"
-                ));
-                None
+                // Compressed object: decode it through the string machinery
+                // (which handles embedded string- and function-nodes), capturing
+                // all output into a buffer, then return that so the caller writes
+                // it straight to the Glk stream like E0/E2. A decode failure
+                // (e.g. no string table set, or a bad node) records a diagnostic
+                // and skips rather than faulting the VM.
+                let prev = self.emit_capture.replace(String::new());
+                let decoded = self.decode_compressed(addr + 1, 0);
+                let captured = self.emit_capture.take().unwrap_or_default();
+                self.emit_capture = prev;
+                match decoded {
+                    Ok(()) => Some(captured),
+                    Err(e) => {
+                        self.diagnostics.push(format!(
+                            "glk_put_string: compressed (E1) string @{addr:#010x} decode failed: {e}"
+                        ));
+                        None
+                    }
+                }
             }
             other => {
                 self.diagnostics.push(format!(
@@ -6086,23 +6127,41 @@ mod tests {
     #[test]
     fn glk_put_string_e1_skips_without_halting() {
         use asm::Op::{C16, Zero};
-        // A compressed (E1) object is not decoded on the put_string path, but it
-        // must NOT fault the VM (regression: an early impl returned Err → Quit).
-        // It records a diagnostic, emits nothing, and execution continues.
+        // A compressed (E1) object whose decode FAILS (here: no string table is
+        // set) must NOT fault the VM — it records a diagnostic, emits nothing, and
+        // execution continues (regression: an early impl returned Err → Quit).
         let mut body = glk_call(0x82, &[C16(0x0200)], Zero);
         body.extend(glk_call(0x82, &[C16(0x0210)], Zero)); // a following E0 call still runs
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x220, |m| {
-            poke(m, 0x200, &[0xE1, 0x02]); // compressed object (unsupported here)
+            poke(m, 0x200, &[0xE1, 0x02]); // compressed, but no string table → decode fails
             poke(m, 0x210, &[0xE0, b'O', b'k', 0]);
         });
         assert!(m.fault_trace.is_none(), "E1 put_string must not fault the VM");
-        assert_eq!(backend_of(&m).text(1), "Ok", "E1 skipped, later E0 still printed");
+        assert_eq!(backend_of(&m).text(1), "Ok", "failed E1 skipped, later E0 still printed");
         assert!(
             m.diagnostics.iter().any(|d| d.contains("compressed (E1)")),
-            "expected an E1-skipped diagnostic, got: {:?}",
+            "expected an E1 decode-failed diagnostic, got: {:?}",
             m.diagnostics
         );
+    }
+
+    #[test]
+    fn glk_put_string_decodes_e1_compressed_object() {
+        use asm::Op::{C16, Zero};
+        // glk_put_string handed a COMPRESSED (E1) Inform string object decodes it
+        // against the current string table and writes the text to the Glk stream
+        // (the string machinery's output is captured, then written straight to the
+        // stream — bypassing the iosys, like the E0/E2 paths).
+        let mut body = asm::ins(0x141, &[C16(0x0100)]); // setstringtbl 0x100
+        body.extend(glk_call(0x82, &[C16(0x0140)], Zero)); // glk_put_string(0x140)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            build_hi_table(m, 0x100);
+            poke(m, 0x140, &[0xE1, 0x18]); // compressed "Hi": bits 0,0,0,1,1
+        });
+        assert_eq!(backend_of(&m).text(1), "Hi");
+        assert!(m.diagnostics.is_empty(), "diagnostics: {:?}", m.diagnostics);
     }
 
     #[test]

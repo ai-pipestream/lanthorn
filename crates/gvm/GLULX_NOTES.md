@@ -684,10 +684,12 @@ to the token and resumes at the catch with `value` stored to its destination).
 and asserts the in-scope groups pass — now including `filter`/`nullio`/`iosys2`/
 `iosys3`/`gestalt` (filter I/O system implemented) and `gidispa` (SQ-0251: the
 Glk dispatch layer's output-argument marshalling — `glk_put_string`/
-`glk_put_string_uni` decode the type-tagged Inform string object they are handed,
-E0/E2, instead of streaming the tag byte; a compressed `E1` object on this path is
-not decoded — it records a diagnostic and emits nothing rather than faulting the
-VM, since the Inform veneer emits E0/E2 here). Out of scope: double-precision float.
+`glk_put_string_stream`/`glk_put_string_uni` decode the type-tagged Inform string
+object they are handed instead of streaming the tag byte: E0/E2 directly, and a
+compressed `E1` object via the string machinery, capturing its decoded output
+(including embedded string/function nodes) and writing it straight to the Glk
+stream (SQ-0252). A failed E1 decode (e.g. no string table set) records a
+diagnostic and skips rather than faulting the VM). Out of scope: double-precision float.
 (`acceleration` and single-float are implemented; the Glulxercise groups for them
 just aren't in the assertion list. The gi_dispatch *introspection* API is
 unreachable from Glulx bytecode and unimplemented, but `gidispa` doesn't use it.)
