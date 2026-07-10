@@ -902,6 +902,17 @@ impl Machine {
                     // expects it to contribute nothing to the table.
                     return StepResult::Continue;
                 }
+                if self.streams.stream3_active() {
+                    // Stream 3 stores the verbatim ZSCII byte given to print_char
+                    // (ZMSD §7.1.2.5), not a display-round-tripped value. Going
+                    // through print_char_to_unicode()/print_text() here would
+                    // convert e.g. ZSCII 10 to display space (32) and CP437
+                    // glyphs with no ZSCII equivalent to '?' (63) before storing —
+                    // losing the original byte (SQ-0247). Valid ZSCII output
+                    // codes are 0..=255, so the low byte is the verbatim value.
+                    self.streams.write_stream3_bytes(&[zscii as u8]);
+                    return StepResult::Continue;
+                }
                 let ch = self.print_char_to_unicode(zscii);
                 let mut buf = [0u8; 4];
                 let s = ch.encode_utf8(&mut buf);
@@ -4546,6 +4557,37 @@ pub(crate) mod tests {
         m.streams.pop_stream3(&mut m.mem);
 
         assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1, not the UTF-8 byte count");
+        assert_eq!(m.mem.read_byte(table_addr + 2), 195);
+    }
+
+    #[test]
+    fn print_char_zscii10_stored_verbatim_in_stream3() {
+        // ZSCII 10 is a DISPLAY-only hack in zscii_to_char (renders as a space,
+        // code 32). Stream 3 must store the verbatim print_char operand (10),
+        // not the round-tripped display value (SQ-0247).
+        let table_addr: u32 = 0x0060;
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.streams.push_stream3(table_addr);
+        m.exec_var(0x05, &[10], None, None);
+        m.streams.pop_stream3(&mut m.mem);
+
+        assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1");
+        assert_eq!(m.mem.read_byte(table_addr + 2), 10, "stream 3 must store verbatim ZSCII 10, not 32");
+    }
+
+    #[test]
+    fn print_char_high_zscii_verbatim_in_stream3() {
+        // Regression: the common high-ZSCII case (already covered by
+        // output_stream3_stores_single_zscii_byte_for_high_char) must still
+        // store the verbatim byte after routing print_char's stream-3 path
+        // directly through write_stream3_bytes instead of print_text.
+        let table_addr: u32 = 0x0060;
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.streams.push_stream3(table_addr);
+        m.exec_var(0x05, &[195], None, None);
+        m.streams.pop_stream3(&mut m.mem);
+
+        assert_eq!(m.mem.read_word(table_addr), 1, "length word should be 1");
         assert_eq!(m.mem.read_byte(table_addr + 2), 195);
     }
 
