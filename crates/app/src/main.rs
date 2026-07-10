@@ -1086,6 +1086,10 @@ fn run_story_picker(
     let mut last_sel = usize::MAX;
     let mut sel_changed_at = Instant::now();
     const COVER_DEBOUNCE: Duration = Duration::from_millis(90);
+    // Wheel-driven list moves are throttled: terminals emit several wheel events
+    // per physical notch, so one move per event over-scrolls the discrete list.
+    let mut last_list_wheel: Option<Instant> = None;
+    const LIST_WHEEL_THROTTLE: Duration = Duration::from_millis(30);
 
     let chosen: Option<std::path::PathBuf> = loop {
         let _ = terminal.draw(|f| {
@@ -1122,9 +1126,11 @@ fn run_story_picker(
         // Housekeeping (runs every iteration, before the poll gate below, so a
         // timed-out tick still drains results and re-issues the debounced request).
         // Drain finished decodes into the multi-entry cache.
+        let mut cover_arrived = false;
         for (path, img) in decoder.drain() {
             cover.insert(path.clone(), img);
             requested.remove(&path);
+            cover_arrived = true;
         }
         if slide.open {
             ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
@@ -1144,6 +1150,15 @@ fn run_story_picker(
                 decoder.request(sel.clone());
                 requested.insert(sel);
             }
+        }
+
+        // A decode just landed: loop back to redraw so the cover paints now. The
+        // draw is at the top of the loop, and once the result is cached
+        // `cover_busy` goes false — without this the loop would block on `read()`
+        // and the new cover wouldn't appear until the next input event.
+        if cover_arrived {
+            list.finalize_if_done();
+            continue;
         }
 
         // Tick while a scroll or panel-slide animation eases so the motion is
@@ -1215,8 +1230,16 @@ fn run_story_picker(
                             panel_scroll = (panel_scroll + d as usize).min(panel_max);
                         }
                     } else {
-                        panel_scroll = 0;
-                        list.move_by(d, viewport, anim);
+                        // Collapse a physical notch's burst of wheel events into a
+                        // single selection step (events within a notch arrive within
+                        // a few ms; separate notches are tens of ms apart), so the
+                        // discrete list doesn't skip several stories per notch.
+                        let now = Instant::now();
+                        if last_list_wheel.map_or(true, |t| now.duration_since(t) >= LIST_WHEEL_THROTTLE) {
+                            last_list_wheel = Some(now);
+                            panel_scroll = 0;
+                            list.move_by(d, viewport, anim);
+                        }
                     }
                 }
             }
