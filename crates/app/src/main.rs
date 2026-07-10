@@ -67,6 +67,50 @@ fn restore_terminal() {
     let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
 }
 
+/// Set by an external termination signal; the main loops poll
+/// [`termination_requested`] and restore the terminal + exit at a safe point.
+static TERMINATE: std::sync::OnceLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =
+    std::sync::OnceLock::new();
+
+/// Register handlers for external termination signals so a `kill` (SIGTERM), a
+/// closed controlling terminal (SIGHUP), or an out-of-band SIGINT/SIGQUIT
+/// restores the terminal instead of leaving it in raw mode + the alternate
+/// screen with mouse capture on. The handlers only set an atomic flag (an
+/// async-signal-safe operation); the actual `restore_terminal()` runs from the
+/// main loop at a safe point. No-op on non-Unix (Windows has no SIGTERM/SIGHUP,
+/// and its console resets on process exit). Idempotent.
+fn install_termination_handlers() {
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM};
+        // In raw mode ISIG is off, so interactive Ctrl-C/Ctrl-\ arrive as
+        // keystrokes, not signals; these fire only on an out-of-band kill or the
+        // controlling terminal closing.
+        for sig in [SIGTERM, SIGHUP, SIGINT, SIGQUIT] {
+            let _ = signal_hook::flag::register(sig, std::sync::Arc::clone(&flag));
+        }
+    }
+    let _ = TERMINATE.set(flag);
+}
+
+/// True once an external termination signal has been received.
+fn termination_requested() -> bool {
+    TERMINATE
+        .get()
+        .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// If an external termination signal arrived, restore the terminal and exit.
+/// Called at the top of each interactive loop so a signal never leaves the
+/// terminal wrecked.
+fn exit_if_terminated() {
+    if termination_requested() {
+        restore_terminal();
+        std::process::exit(130);
+    }
+}
+
 /// Install a panic hook that restores the terminal, writes the panic and a
 /// backtrace to a durable `crash.log`, and then prints the panic message.
 ///
@@ -1093,6 +1137,9 @@ fn run_story_picker(
     let mut pending_wheel: Option<isize> = None;
 
     let chosen: Option<std::path::PathBuf> = loop {
+        // Restore the terminal + exit if an external termination signal arrived.
+        exit_if_terminated();
+
         // Apply a coalesced wheel step once its notch's event burst has fully
         // drained from the input buffer (poll(0) empty). Separate notches are not
         // buffered together, so each still moves exactly one story.
@@ -1185,6 +1232,20 @@ fn run_story_picker(
         {
             list.finalize_if_done();
             continue;
+        }
+
+        // Wait for the next event via a bounded poll instead of a plain blocking
+        // read(): crossterm swallows the EINTR a signal delivers (and signal-hook
+        // uses SA_RESTART), so an idle blocking read() would never observe the
+        // termination flag. Re-check it each ~100ms tick (no redraw) so a
+        // kill/SIGHUP restores the terminal promptly instead of hanging.
+        loop {
+            exit_if_terminated();
+            match crossterm::event::poll(Duration::from_millis(100)) {
+                Ok(true) => break,  // an event is ready → read it below
+                Ok(false) => {}     // timeout → re-check the flag, keep waiting
+                Err(_) => break,    // let read() below surface the error
+            }
         }
 
         match read() {
@@ -1641,6 +1702,11 @@ fn loading_line(name: &str, bytes: usize, frame: char) -> String {
 fn main() {
     // ── 1. Parse args + load config ───────────────────────────────────────────
 
+    // Register termination-signal handlers before entering raw mode so an
+    // early kill/SIGHUP still restores the terminal (both interactive loops poll
+    // the flag via `exit_if_terminated`).
+    install_termination_handlers();
+
     let cli = Cli::parse();
     let cfg = resolve(&cli);
     let story_path = cli.story.clone();
@@ -2069,6 +2135,11 @@ fn main() {
     let mut skip_draw = false;
 
     'event_loop: loop {
+        // Restore the terminal + exit if an external termination signal arrived
+        // (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least every
+        // ~50ms, so this is checked promptly.
+        exit_if_terminated();
+
         // ── Style watch: drain events, debounce, then reload ──────────────────
         if let Some(w) = &style_watcher {
             let mut saw = false;

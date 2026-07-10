@@ -129,6 +129,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "signal-hook",
  "toml",
  "toml_edit 0.22.27",
  "unicode-width 0.1.14",
