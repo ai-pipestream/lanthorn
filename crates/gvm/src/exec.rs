@@ -3127,6 +3127,15 @@ impl Machine {
     /// stores 1 (failure). Glulx spec §2.9. A no-op if no `@save` is pending.
     pub fn complete_save(&mut self, ok: bool) {
         if let Some(p) = self.pending_saveload.take() {
+            if p.dest == Dest::Push {
+                // The @save handler already pushed the baked -1 sentinel onto
+                // the stack (so a restored snapshot resumes with it as the
+                // @save "result"). For a Push destination that landed on the
+                // stack rather than in memory/a local, so overwriting it in
+                // place isn't possible: pop it before pushing the current-run
+                // result, or the stack would end with a stray -1 underneath.
+                let _ = self.pop32();
+            }
             let _ = self.store(p.dest, if ok { 0 } else { 1 });
         }
     }
@@ -3704,6 +3713,80 @@ mod tests {
         m.complete_restore_failure();
         assert_eq!(m.mem.read32(0x110), Some(1), "complete_restore_failure stores 1 into S1");
         assert_eq!(m.step(), StepResult::Quit);
+    }
+
+    #[test]
+    fn save_push_dest_leaves_single_result_on_stack() {
+        // @save L1=0 S1->stack; quit. The store destination is Push (mode 0x8),
+        // not Mem/Local, so complete_save must not leave the baked -1 sentinel
+        // sitting under the current-run result.
+        let body = [
+            asm::ins(0x0123, &[asm::Op::Zero, asm::Op::Stack]),
+            asm::ins(0x120, &[]),
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        // @save's bake pushed -1 onto the stack pre-snapshot.
+        assert_eq!(m.value_count(), 1, "the baked -1 sentinel is on the stack");
+
+        m.complete_save(true);
+        assert_eq!(m.value_count(), 1, "complete_save must leave exactly one new value on the stack");
+        assert_eq!(m.pop32().unwrap(), 0, "complete_save(true) pushes the success code 0, not a stray -1 underneath");
+    }
+
+    #[test]
+    fn save_push_dest_failure() {
+        let body = [
+            asm::ins(0x0123, &[asm::Op::Zero, asm::Op::Stack]),
+            asm::ins(0x120, &[]),
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        m.complete_save(false);
+        assert_eq!(m.value_count(), 1, "complete_save must leave exactly one new value on the stack");
+        assert_eq!(m.pop32().unwrap(), 1, "complete_save(false) pushes the failure code 1, not a stray -1 underneath");
+    }
+
+    #[test]
+    fn save_push_dest_restore_resumes_with_minus_one_on_stack() {
+        // Mirrors game_save_restore_round_trips_and_stores_results but with a
+        // Push store destination: the snapshot (captured pre-complete_save) must
+        // still resume with -1 pushed as the @save "result", per the restore
+        // convention, even though complete_save's own pop-then-push doesn't
+        // affect the already-captured blob.
+        let body = [
+            asm::ins(0x0123, &[asm::Op::Zero, asm::Op::Stack]),
+            asm::ins(0x40, &[asm::Op::Stack, asm::Op::Mem32(0x110)]), // copy popped @save result -> mem[0x110]
+            asm::ins(0x0124, &[asm::Op::Zero, asm::Op::Mem32(0x118)]),
+            asm::ins(0x120, &[]),
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_state();
+
+        m.complete_save(true);
+        assert_eq!(m.value_count(), 1, "current run: exactly one value (the success code) on the stack");
+
+        // Drive the current run forward: the copy op pops the success code (0)
+        // into mem[0x110], confirming the current-run stack wasn't corrupted.
+        assert_eq!(m.step(), StepResult::Continue);
+        assert_eq!(m.mem.read32(0x110), Some(0), "current run observes its own success code 0");
+
+        // Now restore the snapshot captured at @save time (pre-complete_save):
+        // it must resume with the baked -1 still pushed on the stack.
+        assert!(m.complete_restore_success(&blob), "restore of our own blob must succeed");
+        assert_eq!(m.step(), StepResult::Continue, "resumes just after the original @save, at the copy op");
+        assert_eq!(
+            m.mem.read32(0x110),
+            Some(0xFFFF_FFFF),
+            "restored run observes the baked -1 sentinel as the @save result"
+        );
     }
 
     #[test]
