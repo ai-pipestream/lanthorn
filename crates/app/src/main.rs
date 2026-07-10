@@ -2004,6 +2004,11 @@ fn main() {
     // GlulxSession for Glulx). The Z-machine-specific setup above runs behind a
     // downcast so the Glulx path skips it.
 
+    // Input-burst coalescing: when a read event still has more events queued
+    // behind it, defer the redraw until the queue drains. A stream of mouse
+    // motion events (or a paste) then costs ONE redraw instead of one per event.
+    let mut skip_draw = false;
+
     'event_loop: loop {
         // ── Style watch: drain events, debounce, then reload ──────────────────
         if let Some(w) = &style_watcher {
@@ -2149,7 +2154,11 @@ fn main() {
         // (drawer pattern: content persists during the close animation).
         state.settle_verb_dock();
 
-        // Draw.
+        // Draw — unless we're mid-drain of an input burst (skip_draw), in which
+        // case the deferred redraw happens once the queue empties. last_panes and
+        // the panes-derived clamps below simply carry over from the last real
+        // frame during the burst (layout is stable within a burst).
+        if !std::mem::take(&mut skip_draw) {
         match draw_frame(&mut terminal, &*session, &mapper, &state) {
             Ok(panes) => {
                 // Clamp scrollback to what the frame can actually show, so an
@@ -2177,6 +2186,7 @@ fn main() {
                 eprintln!("babelmap: draw error: {}", e);
                 std::process::exit(1);
             }
+        }
         }
 
         // Poll for a key event. Use a shorter timeout while a tidy job is in flight
@@ -2324,6 +2334,11 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+        // If more input is already queued behind this event, defer the next
+        // redraw so the whole burst collapses into a single frame. Cleared at
+        // the draw gate once the queue empties (poll(ZERO) == false).
+        skip_draw = poll(Duration::ZERO).unwrap_or(false);
 
         // ── Aux-storage prompt intercept — before normal action routing ───────
         // When the first-use aux-storage prompt is open, route events here and
