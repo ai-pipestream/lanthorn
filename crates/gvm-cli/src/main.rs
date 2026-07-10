@@ -122,6 +122,7 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
 /// scripted ones.
 fn drive(
     machine: &mut Machine,
+    save_path: &std::path::Path,
     mut before_input: impl FnMut(&mut Machine),
     mut read_line: impl FnMut() -> (String, u32),
     mut read_char: impl FnMut() -> u32,
@@ -140,6 +141,27 @@ fn drive(
                 let key = read_char();
                 machine.supply_char(key);
             }
+            // Game @save: write the snapshot to a single default slot next to the
+            // story. Headless, so there is no name prompt — one slot, overwritten.
+            StepResult::SaveRequest => {
+                let ok = fs::write(save_path, machine.save_state()).is_ok();
+                if ok {
+                    eprintln!("[saved to {}]", save_path.display());
+                } else {
+                    eprintln!("[save failed]");
+                }
+                machine.complete_save(ok);
+            }
+            // Game @restore: read that same default slot back, or fail cleanly.
+            StepResult::RestoreRequest => match fs::read(save_path) {
+                Ok(bytes) if machine.complete_restore_success(&bytes) => {
+                    eprintln!("[restored from {}]", save_path.display());
+                }
+                _ => {
+                    eprintln!("[restore failed]");
+                    machine.complete_restore_failure();
+                }
+            },
         }
     }
 }
@@ -194,8 +216,13 @@ fn main() {
         None
     };
 
+    // The single default in-game save slot: the story path with a `.glksave`
+    // suffix (headless, so there is no name prompt — one slot, overwritten).
+    let save_path = std::path::PathBuf::from(format!("{path}.glksave"));
+
     drive(
         &mut machine,
+        &save_path,
         |m| {
             // Re-poll terminal size before each input (interactive TTY only).
             if both_tty {
@@ -487,7 +514,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, |_| {}, || (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glksave"), |_| {}, || (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -511,7 +538,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, |_| {}, move || (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glksave"), |_| {}, move || (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }

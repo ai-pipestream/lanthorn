@@ -69,6 +69,9 @@ fn run_to_first_prompt(image: Vec<u8>, accel: bool) -> (String, u64) {
             }
             StepResult::NeedLine { .. } | StepResult::NeedChar { .. } => break,
             StepResult::Quit => panic!("story quit before reaching an input prompt (accel={accel})"),
+            StepResult::SaveRequest | StepResult::RestoreRequest => {
+                panic!("unexpected @save/@restore before the first input prompt (accel={accel})")
+            }
         }
     }
 

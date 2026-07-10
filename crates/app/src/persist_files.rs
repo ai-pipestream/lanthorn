@@ -230,6 +230,19 @@ pub fn save_game_named(dir: &Path, ifid: &str, name: &str, machine: &zvm::cpu::e
     Ok(path)
 }
 
+/// Write a named in-game save from raw engine bytes: `<dir>/<ifid>-<slug>.qzl`.
+/// The engine-agnostic counterpart to [`save_game_named`] — the Glulx adapter has
+/// no `zvm::Machine`, so it passes its own `save_state()` snapshot bytes here.
+pub fn save_game_named_bytes(dir: &Path, ifid: &str, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
+    }
+    let path = dir.join(format!("{}-{}.qzl", ifid, slug));
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
 /// A `.qzl` file is a game save (bare standard Quetzal, descriptor-PC
 /// convention); anything else (in practice, `.babelmap`) is a Save State
 /// (resume-PC convention). Restore/load sites dispatch on this.

@@ -39,6 +39,12 @@ pub enum StepResult {
         /// Whether the request was the Unicode (`_uni`) variant.
         unicode: bool,
     },
+    /// The game executed `@save`: the host should capture [`Machine::save_state`],
+    /// write it to a file, then call [`Machine::complete_save`] with the result.
+    SaveRequest,
+    /// The game executed `@restore`: the host should read a save file and call
+    /// [`Machine::complete_restore_success`] (or [`Machine::complete_restore_failure`]).
+    RestoreRequest,
 }
 
 /// Where a produced value (a function's return value, or an opcode's store
@@ -81,6 +87,16 @@ struct PendingInput {
     unicode: bool,
 }
 
+/// A suspended game-initiated `@save`/`@restore` awaiting the host's file I/O.
+/// The store destination is the opcode's S1 operand, resolved by the host-facing
+/// completion methods once the file operation is done.
+struct PendingSaveLoad {
+    /// Where the `@save`/`@restore` result (0/1/-1) is written.
+    dest: Dest,
+    /// `false` = `@save` (SaveRequest); `true` = `@restore` (RestoreRequest).
+    restore: bool,
+}
+
 impl Dest {
     fn to_stub(self) -> (u32, u32) {
         match self {
@@ -121,6 +137,9 @@ pub struct Machine {
     /// is awaited. Set when `glk_select` finds a pending request; cleared when
     /// the host supplies the event ([`Machine::supply_line`]/[`supply_char`]).
     pending_input: Option<PendingInput>,
+    /// A suspended game `@save`/`@restore` (see [`StepResult::SaveRequest`]).
+    /// Set when the opcode fires; consumed by the host-facing `complete_*` methods.
+    pending_saveload: Option<PendingSaveLoad>,
     /// The display backend the Glk model drives.
     pub(crate) backend: Box<dyn GlkBackend>,
     /// Recorded runtime faults / deferred-feature notices.
@@ -266,6 +285,7 @@ impl Machine {
             heap_blocks: Vec::new(),
             glk: Model::new(),
             pending_input: None,
+            pending_saveload: None,
             backend,
             diagnostics: Vec::new(),
             halted: false,
@@ -663,16 +683,23 @@ impl Machine {
             }
             0x0122 => self.op_restart(),
             0x0123 => {
-                // save L1 S1 — file layer not implemented; store failure (1).
+                // save L1 S1 — suspend for the host to write a save file. The
+                // saved state must read back S1 == -1 (the "just restored"
+                // sentinel, Glulx spec §2.9), so store -1 *before* the snapshot;
+                // complete_save() then overwrites it with the current-run result
+                // (0 success / 1 failure).
                 let (_, s) = self.read_operands(1, 1)?;
-                self.diagnostics.push("@save: file layer not implemented; returning failure".to_string());
-                self.store(s[0], 1)
+                self.store(s[0], (-1i32) as u32)?;
+                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false });
+                Ok(())
             }
             0x0124 => {
-                // restore L1 S1 — file layer not implemented; store failure (1).
+                // restore L1 S1 — suspend for the host to read a save file. On
+                // success execution resumes inside the original @save (with its
+                // baked-in -1); on failure complete_restore_failure() stores 1 here.
                 let (_, s) = self.read_operands(1, 1)?;
-                self.diagnostics.push("@restore: file layer not implemented; returning failure".to_string());
-                self.store(s[0], 1)
+                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: true });
+                Ok(())
             }
             // Floating point (single-precision, GLULX_NOTES §13.1).
             0x190 => {
@@ -3056,6 +3083,56 @@ impl Machine {
         })
     }
 
+    /// The [`StepResult`] for a suspended game `@save`/`@restore`, if any. The host
+    /// resolves it via `complete_save`/`complete_restore_success`/`_failure`.
+    fn saveload_result(&self) -> Option<StepResult> {
+        self.pending_saveload.as_ref().map(|p| {
+            if p.restore {
+                StepResult::RestoreRequest
+            } else {
+                StepResult::SaveRequest
+            }
+        })
+    }
+
+    /// Deliver the result of a game-initiated `@save` back to the machine, then
+    /// resume. `ok == true` stores 0 (success) into the `@save`'s S1; `false`
+    /// stores 1 (failure). Glulx spec §2.9. A no-op if no `@save` is pending.
+    pub fn complete_save(&mut self, ok: bool) {
+        if let Some(p) = self.pending_saveload.take() {
+            let _ = self.store(p.dest, if ok { 0 } else { 1 });
+        }
+    }
+
+    /// Complete a game-initiated `@restore` with the supplied save bytes.
+    ///
+    /// On success the machine state is replaced by the snapshot, whose PC sits just
+    /// after the original `@save` and whose S1 already reads -1 (baked in when the
+    /// `@save` fired) — so execution simply resumes there and the `@restore`'s own
+    /// S1 is discarded. Returns `true` when the state was applied. On failure the
+    /// machine is left as-is and the caller should call `complete_restore_failure`.
+    pub fn complete_restore_success(&mut self, blob: &[u8]) -> bool {
+        match self.restore_state(blob) {
+            Ok(()) => {
+                self.pending_saveload = None;
+                self.undo_stack.clear();
+                true
+            }
+            Err(e) => {
+                self.diagnostics.push(format!("@restore failed: {e:?}"));
+                false
+            }
+        }
+    }
+
+    /// Signal that a game-initiated `@restore` failed (no data / invalid save):
+    /// store 1 into the `@restore`'s S1 and resume just after the opcode.
+    pub fn complete_restore_failure(&mut self) {
+        if let Some(p) = self.pending_saveload.take() {
+            let _ = self.store(p.dest, 1);
+        }
+    }
+
     /// Complete a suspended line-input `glk_select` ended by the normal Enter
     /// key (terminator `val2` = 0). See [`Machine::supply_line_terminated`].
     pub fn supply_line(&mut self, text: &str) {
@@ -3236,10 +3313,18 @@ impl Machine {
         if let Some(sr) = self.suspend_result() {
             return sr;
         }
+        // Still suspended on a prior @save/@restore: re-report until completed.
+        if let Some(sr) = self.saveload_result() {
+            return sr;
+        }
         match self.step_once() {
             Ok(()) if self.halted => StepResult::Quit,
-            // A glk_select this step may have suspended for input.
-            Ok(()) => self.suspend_result().unwrap_or(StepResult::Continue),
+            // A glk_select this step may have suspended for input, or an
+            // @save/@restore this step may have suspended for host file I/O.
+            Ok(()) => self
+                .suspend_result()
+                .or_else(|| self.saveload_result())
+                .unwrap_or(StepResult::Continue),
             Err(msg) => {
                 self.fault_trace = Some(self.build_trace(msg.clone()));
                 self.diagnostics.push(msg);
@@ -3509,6 +3594,64 @@ mod tests {
             }
         }
         assert!(m.take_fault_trace().is_none());
+    }
+
+    #[test]
+    fn game_save_restore_round_trips_and_stores_results() {
+        // @save L1=0 S1->[0x110]; @restore L1=0 S1->[0x118]; quit.
+        let body = [
+            asm::ins(0x0123, &[asm::Op::Zero, asm::Op::Mem32(0x110)]),
+            asm::ins(0x0124, &[asm::Op::Zero, asm::Op::Mem32(0x118)]),
+            asm::ins(0x120, &[]),
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+
+        // @save suspends with SaveRequest; before the snapshot S1 reads back -1
+        // (the "just restored" sentinel, Glulx spec §2.9), which the saved state
+        // therefore captures.
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        assert_eq!(m.mem.read32(0x110), Some(0xFFFF_FFFF), "@save bakes -1 into S1 pre-snapshot");
+        let blob = m.save_state();
+
+        // complete_save(true) overwrites S1 with the current-run success code (0).
+        m.complete_save(true);
+        assert_eq!(m.mem.read32(0x110), Some(0), "complete_save(true) stores 0 into S1");
+
+        // Mutate a witness RAM byte so a successful restore is observable.
+        m.mem.write_byte_raw(0x120, 0xAB);
+        assert_eq!(m.mem.read8(0x120), Some(0xAB));
+
+        // Step to @restore -> RestoreRequest, then apply the captured blob.
+        assert_eq!(m.step(), StepResult::RestoreRequest);
+        assert!(m.complete_restore_success(&blob), "restore of our own blob must succeed");
+
+        // State is back to the @save snapshot: S1 reads the -1 sentinel again, the
+        // witness byte reverted, and the pending state cleared.
+        assert_eq!(m.mem.read32(0x110), Some(0xFFFF_FFFF), "restore reverts S1 to the -1 sentinel");
+        assert_eq!(m.mem.read8(0x120), Some(0), "restore reverts the mutated witness byte");
+        assert!(m.pending_saveload.is_none(), "restore clears the pending save/restore");
+
+        // The resumed PC sits just after the original @save (i.e. at the @restore),
+        // so driving one more step re-suspends with RestoreRequest.
+        assert_eq!(m.step(), StepResult::RestoreRequest, "restore resumes just after the original @save");
+    }
+
+    #[test]
+    fn game_restore_failure_stores_one() {
+        let body = [
+            asm::ins(0x0124, &[asm::Op::Zero, asm::Op::Mem32(0x110)]), // @restore
+            asm::ins(0x120, &[]),                                      // quit
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+        assert_eq!(m.step(), StepResult::RestoreRequest);
+        // A corrupt blob leaves state untouched and reports failure.
+        assert!(!m.complete_restore_success(b"not a save"), "corrupt blob must fail");
+        // The host then reports failure: S1 gets 1 and execution resumes to quit.
+        m.complete_restore_failure();
+        assert_eq!(m.mem.read32(0x110), Some(1), "complete_restore_failure stores 1 into S1");
+        assert_eq!(m.step(), StepResult::Quit);
     }
 
     #[test]
@@ -6284,31 +6427,23 @@ mod tests {
     }
 
     #[test]
-    fn save_and_restore_stubs_return_failure_without_halting() {
+    fn save_suspends_and_failure_stores_one() {
         use asm::Op::{Mem16, Zero};
-        // @save L1 S1: store 1 (failure) into S1, continue.
+        // @save L1 S1: suspends with SaveRequest (does not halt); the host reports
+        // failure via complete_save(false), which stores 1 into S1 and resumes.
         let mut body = asm::ins(0x123, &[Zero, Mem16(0x0100)]); // @save 0, -> mem[0x100]
-        // @restore L1 S1: store 1 (failure) into S1, continue.
-        body.extend(asm::ins(0x124, &[Zero, Mem16(0x0104)])); // @restore 0, -> mem[0x104]
         body.extend(asm::ins(0x120, &[])); // quit
         let start = asm::func(0xC1, &[], &body);
         let built = asm::assemble(&[start], 0, 0x200);
         let mem = Memory::new(built.image).expect("valid image");
         let mut m = Machine::with_glk(mem, Box::new(TestBackend::new()));
+        // run() stops at the SaveRequest (not Continue) without halting or looping.
         m.run();
-        assert!(m.halted, "machine halted normally (not stuck)");
-        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "@save returns 1 (failure)");
-        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "@restore returns 1 (failure)");
-        assert!(
-            m.diagnostics.iter().any(|d| d.contains("@save")),
-            "save stub emits a diagnostic: {:?}",
-            m.diagnostics
-        );
-        assert!(
-            m.diagnostics.iter().any(|d| d.contains("@restore")),
-            "restore stub emits a diagnostic: {:?}",
-            m.diagnostics
-        );
+        assert!(!m.halted, "@save suspends rather than halting");
+        assert_eq!(m.step(), StepResult::SaveRequest, "run() left the VM at the @save request");
+        m.complete_save(false);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "@save failure stores 1 into S1");
+        assert_eq!(m.step(), StepResult::Quit, "resumes to the trailing quit");
     }
 
     #[test]

@@ -22,7 +22,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
-use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, InputKind, TranscriptElem, TurnResult};
+use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, InputKind, PendingIo, TranscriptElem, TurnResult};
 use zvm::location::LocationMethod;
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
@@ -69,6 +69,10 @@ pub struct GlulxSession {
     pending: InputKind,
     /// Whether the game has ended.
     quit: bool,
+    /// A game-initiated save/restore awaiting the host's file I/O, bubbled to the
+    /// run loop via the next `TurnResult`. Set when a turn's drive stops on an
+    /// `@save`/`@restore`; cleared by `resume_save`/`resume_restore`.
+    pending_io: Option<PendingIo>,
     /// The last screen snapshot (the backend's tree is only reachable mutably, so
     /// `screen()` returns this cache, refreshed after each turn).
     screen_cache: ScreenModel,
@@ -95,9 +99,23 @@ fn turn_budget() -> Duration {
         .unwrap_or(Duration::from_secs(10))
 }
 
-/// Step the machine until it pauses for input or quits, returning
-/// `(pending_kind, quit)`. Aborts a runaway turn via the wall-clock watchdog.
-fn drive(machine: &mut Machine) -> (InputKind, bool) {
+/// Why a [`drive`] loop stopped.
+enum DriveStop {
+    /// The VM is waiting for input of this kind.
+    Input(InputKind),
+    /// The VM quit (or the runaway watchdog aborted the turn).
+    Quit,
+    /// The game executed `@save`: the host must write a save file, then
+    /// [`GlulxSession::resume_save`].
+    Save,
+    /// The game executed `@restore`: the host must pick a save file, then
+    /// [`GlulxSession::resume_restore`].
+    Restore,
+}
+
+/// Step the machine until it pauses for input, quits, or requests an in-game
+/// save/restore. Aborts a runaway turn via the wall-clock watchdog.
+fn drive(machine: &mut Machine) -> DriveStop {
     let budget = turn_budget();
     let start = Instant::now();
     let mut steps: u64 = 0;
@@ -112,12 +130,29 @@ fn drive(machine: &mut Machine) -> (InputKind, bool) {
                          (runaway game loop); the app stays interactive",
                         start.elapsed()
                     ));
-                    return (InputKind::Line, true);
+                    return DriveStop::Quit;
                 }
             }
-            StepResult::Quit => return (InputKind::Line, true),
-            StepResult::NeedLine { .. } => return (InputKind::Line, false),
-            StepResult::NeedChar { .. } => return (InputKind::Char, false),
+            StepResult::Quit => return DriveStop::Quit,
+            StepResult::NeedLine { .. } => return DriveStop::Input(InputKind::Line),
+            StepResult::NeedChar { .. } => return DriveStop::Input(InputKind::Char),
+            StepResult::SaveRequest => return DriveStop::Save,
+            StepResult::RestoreRequest => return DriveStop::Restore,
+        }
+    }
+}
+
+/// Drive to an input request or quit, returning `(pending_kind, quit)`. Any
+/// in-game `@save`/`@restore` fired during a non-interactive drive (startup,
+/// resize, sound-notify) is auto-failed — those paths have no UI to prompt the
+/// player, and leaving the VM suspended would wedge the next turn.
+fn drive_settled(machine: &mut Machine) -> (InputKind, bool) {
+    loop {
+        match drive(machine) {
+            DriveStop::Input(k) => return (k, false),
+            DriveStop::Quit => return (InputKind::Line, true),
+            DriveStop::Save => machine.complete_save(false),
+            DriveStop::Restore => machine.complete_restore_failure(),
         }
     }
 }
@@ -145,11 +180,12 @@ impl GlulxSession {
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
         machine.set_sound(sound_enabled);
-        let (pending, quit) = drive(&mut machine);
+        let (pending, quit) = drive_settled(&mut machine);
         let mut session = GlulxSession {
             machine,
             pending,
             quit,
+            pending_io: None,
             screen_cache: blank_screen(),
             aux: BTreeMap::new(),
             aux_dirty: false,
@@ -185,10 +221,30 @@ impl GlulxSession {
         }
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
-        let (pending, quit) = drive(&mut self.machine);
+        let (pending, quit) = drive_settled(&mut self.machine);
         self.pending = pending;
         self.quit = quit;
         self.refresh_screen();
+    }
+
+    /// Drive one turn's worth of execution, updating `pending`/`quit`/`pending_io`.
+    /// On an in-game `@save`/`@restore` the drive stops with `pending_io` set (and
+    /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
+    /// performs the file I/O and calls `resume_save`/`resume_restore`.
+    fn drive_turn(&mut self) {
+        match drive(&mut self.machine) {
+            DriveStop::Input(k) => {
+                self.pending = k;
+                self.quit = false;
+                self.pending_io = None;
+            }
+            DriveStop::Quit => {
+                self.quit = true;
+                self.pending_io = None;
+            }
+            DriveStop::Save => self.pending_io = Some(PendingIo::Save),
+            DriveStop::Restore => self.pending_io = Some(PendingIo::Restore),
+        }
     }
 
     fn appglk(&mut self) -> &mut AppGlk {
@@ -251,7 +307,7 @@ impl GlulxSession {
             diagnostics,
             fault,
             location_method,
-            pending_io: None,
+            pending_io: self.pending_io.take(),
             timed_out: false,
             transcript_elems: elems,
         }
@@ -264,7 +320,7 @@ impl GlulxSession {
     pub fn sound_notify(&mut self, sound: u32, notify: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_sound_notify(sound, notify);
-            let (pending, quit) = drive(&mut self.machine);
+            let (pending, quit) = drive_settled(&mut self.machine);
             self.pending = pending;
             self.quit = quit;
         }
@@ -296,9 +352,7 @@ impl Engine for GlulxSession {
     fn submit(&mut self, command: &str) -> TurnResult {
         if !self.quit {
             self.machine.supply_line(command);
-            let (pending, quit) = drive(&mut self.machine);
-            self.pending = pending;
-            self.quit = quit;
+            self.drive_turn();
         }
         self.finish_turn()
     }
@@ -307,9 +361,7 @@ impl Engine for GlulxSession {
         let code = key_to_glk(key)?;
         if !self.quit {
             self.machine.supply_char(code);
-            let (pending, quit) = drive(&mut self.machine);
-            self.pending = pending;
-            self.quit = quit;
+            self.drive_turn();
         }
         Some(self.finish_turn())
     }
@@ -342,13 +394,24 @@ impl Engine for GlulxSession {
         self.pending
     }
 
-    fn resume_save(&mut self, _wrote_ok: bool) -> TurnResult {
-        // Glulx in-game @save via Glk file streams is a later phase; never
-        // bubbles pending_io, so this is not reached in practice.
+    fn resume_save(&mut self, wrote_ok: bool) -> TurnResult {
+        // The host wrote (or failed to write) the save file; deliver the result
+        // to the suspended @save and run to the next input request.
+        self.machine.complete_save(wrote_ok);
+        self.pending_io = None;
+        self.drive_turn();
         self.finish_turn()
     }
 
-    fn resume_restore(&mut self, _data: Option<&[u8]>) -> TurnResult {
+    fn resume_restore(&mut self, data: Option<&[u8]>) -> TurnResult {
+        // `Some(bytes)` = the player picked a save; `None` = cancelled. Corrupt
+        // bytes fall back to failure so the game sees a clean failure result.
+        match data {
+            Some(bytes) if self.machine.complete_restore_success(bytes) => {}
+            _ => self.machine.complete_restore_failure(),
+        }
+        self.pending_io = None;
+        self.drive_turn();
         self.finish_turn()
     }
 
@@ -594,6 +657,77 @@ mod tests {
             "the Header-styled 'Y' contributes a bold run: {:?}",
             r.transcript_runs
         );
+    }
+
+    /// A line-input prompt: request_line_event(LINEBUF, 20) then glk_select.
+    fn line_prompt() -> Vec<u8> {
+        use E::*;
+        let mut b = Vec::new();
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            b.extend(enc(0x40, &[v, Push]));
+        }
+        b.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        b.extend(enc(0x40, &[Imm(EVENT), Push]));
+        b.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+        b
+    }
+
+    #[test]
+    fn ingame_save_restore_round_trips_through_the_engine() {
+        use E::*;
+        // RAM scratch for the @save/@restore result descriptors (mode 7 = store to
+        // a 4-byte main-memory address; `MemLoad` reuses that mode for stores).
+        const SAVE_RES: u32 = 0x410;
+        const RESTORE_RES: u32 = 0x414;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt()); // turn 1 prompt
+        body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save -> mem[SAVE_RES]
+        body.extend(line_prompt()); // turn 2 prompt (resume point after a restore)
+        body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore -> mem[RESTORE_RES]
+        body.extend(enc(0x120, &[])); // quit
+
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
+
+        // Turn 1: the command drives into @save, which bubbles a Save request.
+        let r1 = sess.submit("save");
+        assert_eq!(r1.pending_io, Some(PendingIo::Save), "@save bubbles a Save request");
+        assert!(!r1.quit);
+
+        // The run loop captures the snapshot bytes, writes them, then reports success.
+        let blob = sess.save_state().bytes;
+        let r2 = sess.resume_save(true);
+        assert_eq!(r2.pending_io, None, "@save completes and runs on");
+        assert!(!r2.quit);
+        assert_eq!(sess.pending_input(), InputKind::Line, "reaches the turn-2 prompt");
+
+        // Turn 2: the command drives into @restore, which bubbles a Restore request.
+        let r3 = sess.submit("restore");
+        assert_eq!(r3.pending_io, Some(PendingIo::Restore), "@restore bubbles a Restore request");
+
+        // Feeding the saved bytes back restores to the save point (the turn-2
+        // prompt) rather than falling through to the trailing quit.
+        let r4 = sess.resume_restore(Some(&blob));
+        assert!(!r4.quit, "a successful restore returns to the save point, not the quit");
+        assert_eq!(r4.pending_io, None);
+        assert_eq!(sess.pending_input(), InputKind::Line, "restored back to the turn-2 prompt");
+    }
+
+    #[test]
+    fn ingame_restore_cancel_completes_as_failure() {
+        use E::*;
+        const RESTORE_RES: u32 = 0x414;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt());
+        body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore
+        body.extend(enc(0x120, &[])); // quit
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+
+        let r1 = sess.submit("restore");
+        assert_eq!(r1.pending_io, Some(PendingIo::Restore));
+        // Cancel (no bytes): @restore fails, execution falls through to quit.
+        let r2 = sess.resume_restore(None);
+        assert!(r2.quit, "a cancelled restore fails and runs to the trailing quit");
     }
 
     /// Program: open a buffer, request a char, echo it as a char, quit.
