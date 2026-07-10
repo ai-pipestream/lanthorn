@@ -184,8 +184,10 @@ unsigned: jltu/jgeu/jgtu/jleu. Shifts by ≥ 32: `shiftl`/`ushiftr` yield 0,
 
 `setiosys(mode, rock)` / `getiosys → (mode, rock)`:
 - mode `0` — null: all output discarded.
-- mode `1` — filter: rock is a function address (deferred; treat output as
-  discarded with a diagnostic in 2a — not exercised by our tests).
+- mode `1` — filter: rock is a function address; each output character is passed
+  as a single argument (its code point) to that function via a VM call
+  (`run_call_to_return`), per spec §7.2. Re-entrant filter calls are bounded by a
+  native-stack depth guard.
 - mode `2` — Glk: stream opcodes route to `Output::print`.
 
 - `streamchar L1` — emit `L1 & 0xFF` as one Latin-1 char.
@@ -379,7 +381,7 @@ implemented → Float(11) = 1; double-precision is deferred → Double(12) = 0; 
 | 1   | TerpVersion  | 1   | 0x00000100 (this terp, v0.1.0)                       |
 | 2   | ResizeMem    | 2   | 1 (setmemsize supported)                            |
 | 3   | Undo         | 3   | 1 (saveundo/restoreundo — 2c)                       |
-| 4   | IOSystem     | 4   | 1 if L2 ∈ {0 null, 2 Glk}, else 0                   |
+| 4   | IOSystem     | 4   | 1 if L2 ∈ {0 null, 1 filter, 2 Glk}, else 0         |
 | 5   | Unicode      | 5   | 1                                                    |
 | 6   | MemCopy      | 6   | 1 (mzero/mcopy)                                      |
 | 7   | MAlloc       | 7   | 1 (malloc/mfree)                                     |
@@ -388,10 +390,8 @@ implemented → Float(11) = 1; double-precision is deferred → Double(12) = 0; 
 | 10  | AccelFunc    | 10  | 1 for function numbers 1–13, else 0 (0 is also the accelfunc cancel sentinel) |
 | 11  | Float        | 11  | 1 (single-precision implemented; double-precision Sel 12 deferred → 0) |
 
-**Deviation note:** for selector 4 (IOSystem) the spec states the null (0) and
-filter (1) systems "will always succeed." This VM has not implemented the filter
-I/O system (it is stubbed with a diagnostic), so we honestly report 0 for L2=1
-and 1 only for the systems we run (null and Glk). Update this when filter lands.
+The null (0), filter (1), and Glk (2) I/O systems are all implemented and
+reported supported.
 
 ## 14. Save / restore serialization (Phase 2c, spec §1.8)
 
@@ -681,9 +681,11 @@ to the token and resumes at the catch with `value` stored to its destination).
 ### glulxercise capstone
 
 `gvm-cli/tests/glulxercise.rs` drives the vendored `glulxercise.ulx` headlessly
-and asserts the in-scope groups pass. Out of scope: filter iosys
-(`iosys2`/`iosys3`/`filter`/`nullio`/`gestalt` filter sub-tests), the
-`gidispa` introspection layer, `acceleration`, float/double, and Glk file `restore`.
+and asserts the in-scope groups pass — now including `filter`/`nullio`/`iosys2`/
+`iosys3`/`gestalt` (filter I/O system implemented). Out of scope: the plain
+`iosys` group (a separate mid-string memory-stream-redirect bug), the `gidispa`
+introspection layer, and double-precision float. (`acceleration` and single-float
+are implemented; the Glulxercise groups for them just aren't in the assertion list.)
 
 ### Deferred / out of scope
 
