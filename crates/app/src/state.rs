@@ -592,6 +592,33 @@ impl std::fmt::Debug for TidyJob {
     }
 }
 
+/// An in-flight background job that builds a tidy *animation* off the main thread.
+/// The worker runs `run_tidy_pipeline` on a clone of the graph and returns both the
+/// captured frames and the mutated (tidied) clone. The run loop polls
+/// `handle.is_finished()`, then applies the tidied graph (with a staleness check) and
+/// installs the animation. Unlike `TidyJob`, this is NOT an overlay — input keeps
+/// flowing while the frames are built.
+pub struct AnimBuildJob {
+    /// Worker thread handle. Returns the captured frames and the tidied graph clone.
+    pub handle: std::thread::JoinHandle<(Vec<TidyFrame>, mapper::graph::MapGraph)>,
+    /// The layer being tidied.
+    pub layer: mapper::layer::LayerId,
+    /// Graph generation recorded at spawn time. Used to detect stale results.
+    pub gen: u64,
+    /// Instant the job was spawned.
+    pub started: std::time::Instant,
+}
+
+impl std::fmt::Debug for AnimBuildJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnimBuildJob")
+            .field("layer", &self.layer)
+            .field("gen", &self.gen)
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
+}
+
 // ── Saves manager state ───────────────────────────────────────────────────────
 
 /// Transient state for the saves-manager modal.
@@ -1012,6 +1039,10 @@ pub struct AppState {
     /// In-flight background tidy job, if any. The worker runs the relayout on a clone
     /// of the graph and returns the tidied clone. Driven by the run loop (spawn, poll, apply).
     pub tidy_job: Option<TidyJob>,
+    /// In-flight job building a tidy *animation* off-thread, if any. The worker runs the
+    /// tidy pipeline on a clone and returns the frames + tidied graph; the run loop installs
+    /// the animation when it finishes. Not an overlay — input stays live during the build.
+    pub anim_build_job: Option<AnimBuildJob>,
     /// In-flight one-shot story-border flash, if any. Armed by a beep event; expires after SOUND_PULSE_MS.
     pub sound_pulse: Option<SoundPulse>,
     /// Host audio backend, present when audio was enabled at launch. `None` when
@@ -1332,6 +1363,7 @@ impl Default for AppState {
             show_portal_labels: false,
             tidy_anim: None,
             tidy_job: None,
+            anim_build_job: None,
             sound_pulse: None,
             audio: None,
             sound_blorb: None,
@@ -1421,6 +1453,7 @@ impl AppState {
     /// tidy border pulse, the sound-beep flash, and smooth transcript scroll.
     pub fn has_active_animation(&self) -> bool {
         self.tidy_job.is_some()
+            || self.anim_build_job.is_some()
             || self.sound_pulse.is_some()
             || self.scroll_anim.is_some()
             || self.saves.as_ref().is_some_and(|s| s.scroll.has_active_animation())

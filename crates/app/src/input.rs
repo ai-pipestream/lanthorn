@@ -2141,10 +2141,28 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleWatch => { /* handled in the run loop (owns the watcher) */ }
 
         Action::AnimateTidy => {
-            if mapper.mode == mapper::layout::LayoutMode::Auto {
+            // Build the animation frames on a worker thread so the UI stays responsive
+            // during the (potentially long) build. The run loop polls the job, applies the
+            // tidied graph, and installs the animation when it finishes. Guard against a
+            // double-spawn while one build is in flight or an animation is already showing.
+            if mapper.mode == mapper::layout::LayoutMode::Auto
+                && state.anim_build_job.is_none()
+                && state.tidy_anim.is_none()
+            {
                 let layer = state.active_layer(&mapper.graph);
-                let frames = run_tidy_pipeline(&mut mapper.graph, layer);
-                state.tidy_anim = Some(crate::state::TidyAnim::new(frames));
+                let mut g = mapper.graph.clone();
+                let gen = state.graph_gen;
+                let handle = std::thread::spawn(move || {
+                    let frames = run_tidy_pipeline(&mut g, layer);
+                    (frames, g)
+                });
+                state.anim_build_job = Some(crate::state::AnimBuildJob {
+                    handle,
+                    layer,
+                    gen,
+                    started: std::time::Instant::now(),
+                });
+                state.set_status("preparing tidy animation…");
             }
         }
 
@@ -4478,14 +4496,18 @@ mod tests {
         apply_action(Action::AnimateTidy, &mut s_anim, &mut m_anim);
         apply_action(Action::Retidy, &mut s_inst, &mut m_inst);
 
-        let anim = s_anim.tidy_anim.expect("animation populated");
-        assert!(anim.frames.len() >= 2, "at least before + one layout stage frame");
-        assert_eq!(anim.idx, 0, "starts on the first frame");
-        // Final frame and the live graph match the instant-tidy result room-for-room.
+        // The frames are now built on a worker thread: AnimateTidy spawns a build job and
+        // does NOT touch tidy_anim or the live graph synchronously.
+        assert!(s_anim.tidy_anim.is_none(), "no synchronous animation install");
+        let job = s_anim.anim_build_job.expect("build job spawned");
+        // Drive the async path by joining the worker (the run loop does this + installs).
+        let (frames, tidied) = job.handle.join().expect("worker completes");
+        assert!(frames.len() >= 2, "at least before + one layout stage frame");
+        // The worker's frames and tidied graph match the instant-tidy result room-for-room.
         for id in [1u16, 2, 3] {
             let inst = m_inst.graph.room(id).unwrap().pos;
-            assert_eq!(anim.frames.last().unwrap().graph.room(id).unwrap().pos, inst);
-            assert_eq!(m_anim.graph.room(id).unwrap().pos, inst);
+            assert_eq!(frames.last().unwrap().graph.room(id).unwrap().pos, inst);
+            assert_eq!(tidied.room(id).unwrap().pos, inst);
         }
     }
 
@@ -4498,6 +4520,43 @@ mod tests {
         m.set_mode(LayoutMode::Manual);
         apply_action(Action::AnimateTidy, &mut s, &mut m);
         assert!(s.tidy_anim.is_none(), "Manual: no animation started");
+        assert!(s.anim_build_job.is_none(), "Manual: no build job spawned");
+    }
+
+    #[test]
+    fn animate_tidy_is_noop_when_build_or_anim_already_active() {
+        use crate::state::{TidyAnim, TidyFrame};
+        // A build job already in flight: AnimateTidy does not spawn a second one.
+        {
+            let mut s = AppState::default();
+            let mut m = Mapper::default();
+            m.observe(1, "A", None);
+            apply_action(Action::AnimateTidy, &mut s, &mut m);
+            assert!(s.anim_build_job.is_some(), "first invocation spawns a build job");
+            let started = s.anim_build_job.as_ref().unwrap().started;
+            apply_action(Action::AnimateTidy, &mut s, &mut m);
+            assert_eq!(
+                s.anim_build_job.as_ref().unwrap().started,
+                started,
+                "second invocation is a no-op (same job)"
+            );
+        }
+        // An animation is already playing: AnimateTidy does not spawn a build job.
+        {
+            let mut s = AppState::default();
+            let mut m = Mapper::default();
+            m.observe(1, "A", None);
+            s.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {
+                label: "x".into(),
+                graph: m.graph.clone(),
+                description: String::new(),
+                stats: Default::default(),
+                stage_start: true,
+                manifest: None,
+            }]));
+            apply_action(Action::AnimateTidy, &mut s, &mut m);
+            assert!(s.anim_build_job.is_none(), "no build job while an animation plays");
+        }
     }
 
     #[test]

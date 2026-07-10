@@ -2237,6 +2237,37 @@ fn main() {
             }
         }
 
+        // ── Tidy-animation build job: poll and install ────────────────────────
+        // The `animate-tidy` command builds its frames off-thread. When the worker
+        // finishes, apply the tidied graph (staleness-guarded) and install the anim.
+        // Unlike the background tidy above, a stale result is simply discarded — the
+        // user asked for one animation, so we do NOT re-trigger a fresh build.
+        if state.anim_build_job.as_ref().is_some_and(|j| j.handle.is_finished()) {
+            let job = state.anim_build_job.take().unwrap();
+            let current_gen = state.graph_gen;
+            state.status_msg = None;
+            if let Ok((frames, tidied)) = job.handle.join() {
+                match apply_tidy_result(&mut mapper.graph, tidied, job.layer, job.gen, current_gen) {
+                    ApplyTidyOutcome::Applied => {
+                        state.tidy_anim = Some(app::state::TidyAnim::new(frames));
+                        // Re-center on the current room if it moved (mirrors the tidy_job path).
+                        if let Some(rid) = mapper.graph.current() {
+                            if let Some(room) = mapper.graph.room(rid) {
+                                if let Some(pos) = room.pos {
+                                    let (pw, ph) = map_pane_dims(last_panes.map);
+                                    state.recenter_on(pos, pw, ph);
+                                }
+                            }
+                        }
+                    }
+                    ApplyTidyOutcome::Stale => {
+                        // Graph changed during the build: discard the frames and the
+                        // tidied result. Do not install an animation or apply a stale graph.
+                    }
+                }
+            }
+        }
+
         // Update char_mode flag so the renderer hides the prompt during read_char.
         state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
 
