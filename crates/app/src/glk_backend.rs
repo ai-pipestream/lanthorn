@@ -205,6 +205,13 @@ impl AppGlk {
         self.primary
     }
 
+    /// The current resolved leaf-window layout `(id, type, rect)`. Rects are in
+    /// story-pane cells (the Glk screen is sized to exactly the story pane). The
+    /// host reads this to map terminal clicks to mouse-watching windows.
+    pub fn layout(&self) -> &[(u32, WinType, GlkRect)] {
+        &self.layout
+    }
+
     /// Drain the primary window's text printed since the last drain, as
     /// `(text, (char_count, bits, fg, bg) chunks)` for `push_transcript_runs`.
     /// fg/bg carry the resolved stylehint colour (24-bit via `ZColour::True24`).

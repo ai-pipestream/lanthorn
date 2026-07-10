@@ -18,6 +18,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use gvm::glk::{GlkBackend, Rect as GlkRect, WinType};
 use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
@@ -349,6 +350,78 @@ impl GlulxSession {
         }
         self.finish_turn()
     }
+
+    /// The layout rects (in story-pane cells) of every window with an active Glk
+    /// mouse request — the windows a terminal click may be diverted into. Empty
+    /// when no window is watching for clicks.
+    pub fn mouse_windows(&mut self) -> Vec<(u32, WinType, GlkRect)> {
+        let layout: Vec<(u32, WinType, GlkRect)> = self.appglk().layout().to_vec();
+        layout
+            .into_iter()
+            .filter(|&(id, _, _)| self.machine.mouse_requested(id))
+            .collect()
+    }
+
+    /// The `(width, height)` of one text-grid cell in pixels — used to convert a
+    /// click's window-relative cells into pixels for a graphics window.
+    pub fn char_pixels(&mut self) -> (u32, u32) {
+        self.appglk().char_pixels()
+    }
+
+    /// A terminal click landed inside a mouse-watching window: deliver a Glk
+    /// `Evtype_MouseInput` event at window-relative `(x, y)` and drive the game to
+    /// its next input request. A no-op turn once the game has quit. `x`/`y` are
+    /// char col/row for a grid window, pixels for a graphics window.
+    pub fn deliver_mouse(&mut self, win: u32, x: u32, y: u32) -> TurnResult {
+        if !self.quit {
+            self.machine.deliver_mouse(win, x, y);
+            let (pending, quit) = drive_settled(&mut self.machine);
+            self.pending = pending;
+            self.quit = quit;
+        }
+        self.finish_turn()
+    }
+}
+
+/// Decide whether a terminal click at absolute `(col, row)` should be diverted
+/// to the game as a Glk mouse-input event, and if so compute its coordinates.
+///
+/// Returns `(win, val1, val2)` only when no overlay is open and the click lands
+/// inside one of the mouse-watching `windows` (as reported by
+/// [`GlulxSession::mouse_windows`]). `story = (x, y, w, h)` is the story-pane
+/// rect: the Glk screen is sized to exactly the story pane, so a click cell maps
+/// to a Glk screen cell by subtracting the pane origin. `val1`/`val2` are then
+/// window-relative col/row for a grid window, or pixels (relative cells ×
+/// `char_px`) for a graphics window — cell-granular in a TUI, the best a
+/// terminal can offer.
+pub fn glk_mouse_target(
+    overlay_open: bool,
+    col: u16,
+    row: u16,
+    story: (u16, u16, u16, u16),
+    windows: &[(u32, WinType, GlkRect)],
+    char_px: (u32, u32),
+) -> Option<(u32, u32, u32)> {
+    if overlay_open {
+        return None;
+    }
+    let (sx0, sy0, sw, sh) = story;
+    if col < sx0 || col >= sx0 + sw || row < sy0 || row >= sy0 + sh {
+        return None;
+    }
+    let sx = (col - sx0) as u32;
+    let sy = (row - sy0) as u32;
+    let (win, wintype, rect) = windows
+        .iter()
+        .copied()
+        .find(|&(_, _, r)| sx >= r.left && sx < r.left + r.width && sy >= r.top && sy < r.top + r.height)?;
+    let (rel_x, rel_y) = (sx - rect.left, sy - rect.top);
+    let (vx, vy) = if wintype == WinType::Graphics {
+        (rel_x * char_px.0, rel_y * char_px.1)
+    } else {
+        (rel_x, rel_y)
+    };
+    Some((win, vx, vy))
 }
 
 /// Build a name-based room snapshot from an Inform room heading. Glulx has no
@@ -1097,5 +1170,99 @@ mod tests {
             .collect();
         assert!(dump.contains("Hello"), "banner rendered in the story pane");
         assert!(dump.contains("there"), "echoed line rendered in the story pane");
+    }
+
+    // ── Mouse input (glk_request_mouse_event) ─────────────────────────────────
+
+    /// Program: open a buffer, split a 1-row grid above, arm a mouse request AND
+    /// a char request on the grid, then glk_select (suspends on the char). The
+    /// grid is window 2 (buffer=1, pair=3).
+    fn grid_mouse_watch_image() -> Vec<u8> {
+        use E::*;
+        let mut body = open_buffer_prelude(); // buffer → local0 (window 1)
+        for v in [Imm(0), Imm(4), Imm(1), Imm(0x12), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push])); // rock, wintype=grid, size=1, method=above|fixed, split
+        }
+        body.extend(enc(0x130, &[Imm(0x23), Imm(5), LocStore(4)])); // window_open → local1 (grid = window 2)
+        body.extend(enc(0x40, &[LocLoad(4), Push]));
+        body.extend(enc(0x130, &[Imm(0xd4), Imm(1), Discard])); // request_mouse_event(grid)
+        body.extend(enc(0x40, &[LocLoad(4), Push]));
+        body.extend(enc(0x130, &[Imm(0xd2), Imm(1), Discard])); // request_char_event(grid) → select suspends
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+        body.extend(enc(0x120, &[])); // quit
+        image_for(body, 2)
+    }
+
+    #[test]
+    fn mouse_windows_lists_only_watching_windows_and_char_pixels_exposed() {
+        let mut sess =
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (9, 19), None).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
+
+        // Only the grid (window 2) watches; the buffer (window 1) does not.
+        let windows = sess.mouse_windows();
+        assert_eq!(windows.len(), 1, "only the requesting window is listed");
+        assert_eq!(windows[0].0, 2, "grid window id");
+        assert_eq!(windows[0].1, WinType::TextGrid);
+        assert_eq!(windows[0].2, GlkRect { left: 0, top: 0, width: 80, height: 1 }, "grid spans the top row");
+
+        assert_eq!(sess.char_pixels(), (9, 19), "cell pixel size exposed for graphics scaling");
+    }
+
+    #[test]
+    fn deliver_mouse_resumes_the_game_and_is_one_shot() {
+        let mut sess =
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        assert!(!sess.mouse_windows().is_empty(), "armed before the click");
+
+        // The click resumes the suspended select; the game runs to its trailing quit.
+        let r = sess.deliver_mouse(2, 5, 0);
+        assert!(r.quit, "the game consumed the click and ran to quit");
+        assert!(sess.mouse_windows().is_empty(), "mouse request consumed (one-shot)");
+    }
+
+    // ── glk_mouse_target coordinate mapping ───────────────────────────────────
+
+    #[test]
+    fn glk_mouse_target_grid_is_identity_minus_origin() {
+        // Story pane at (3, 2); a grid window filling the top row at rect(0,0,80,1).
+        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
+        // Click at absolute (10, 2) → story cell (7, 0) → grid-relative (7, 0).
+        let got = super::glk_mouse_target(false, 10, 2, (3, 2, 80, 24), &windows, (9, 19));
+        assert_eq!(got, Some((2, 7, 0)), "grid reports window-relative col/row");
+    }
+
+    #[test]
+    fn glk_mouse_target_graphics_scales_by_char_pixels() {
+        // A graphics window offset within the pane at rect(4, 1, 20, 10).
+        let windows = [(5u32, WinType::Graphics, GlkRect { left: 4, top: 1, width: 20, height: 10 })];
+        // Story pane at origin (0,0); click at (6, 3) → story cell (6,3) →
+        // window-relative (2, 2) → pixels (2×9, 2×19) = (18, 38).
+        let got = super::glk_mouse_target(false, 6, 3, (0, 0, 80, 24), &windows, (9, 19));
+        assert_eq!(got, Some((5, 18, 38)), "graphics reports pixels (rel cells × char_px)");
+    }
+
+    #[test]
+    fn glk_mouse_target_declines_outside_and_under_an_overlay() {
+        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
+        // Click below the grid (row 5) but inside the pane → misses every window.
+        assert_eq!(
+            super::glk_mouse_target(false, 10, 5, (0, 0, 80, 24), &windows, (1, 1)),
+            None,
+            "a click outside every watching window falls through",
+        );
+        // Click outside the story pane entirely.
+        assert_eq!(
+            super::glk_mouse_target(false, 90, 0, (0, 0, 80, 24), &windows, (1, 1)),
+            None,
+            "a click outside the story pane falls through",
+        );
+        // Same in-window click, but an overlay is open → declined.
+        assert_eq!(
+            super::glk_mouse_target(true, 10, 0, (0, 0, 80, 24), &windows, (1, 1)),
+            None,
+            "an open overlay keeps the click",
+        );
     }
 }

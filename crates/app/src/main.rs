@@ -2929,6 +2929,36 @@ fn main() {
                 }
             }
             Event::Mouse(m) => {
+                // Glk mouse input: a left-Down inside a mouse-watching Glulx window
+                // is delivered to the game as an Evtype_MouseInput, not a UI action.
+                // Only left-Down is diverted (Glk mouse is click-only, so the Drag/Up
+                // selection events still arrive but fire no StartSelection and are
+                // harmless no-ops); glk_mouse_target enforces no-overlay + inside a
+                // watching window and computes the window-relative coordinates.
+                if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
+                    if let Some(gs) = glulx_session_opt_mut(&mut *session) {
+                        let windows = gs.mouse_windows();
+                        if !windows.is_empty() {
+                            let s = last_panes.story;
+                            let target = app::glulx_session::glk_mouse_target(
+                                state.any_overlay_open(),
+                                m.column, m.row,
+                                (s.x, s.y, s.width, s.height),
+                                &windows,
+                                gs.char_pixels(),
+                            );
+                            if let Some((win, vx, vy)) = target {
+                                let result = gs.deliver_mouse(win, vx, vy);
+                                if apply_game_driven_result(
+                                    &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                                ) {
+                                    break 'event_loop;
+                                }
+                                continue 'event_loop;
+                            }
+                        }
+                    }
+                }
                 // Style-editor board: intercept left-clicks on sample rows and property pane.
                 if state.style_editor.is_some() {
                     // Holds a dialog-button action that must flow through the normal

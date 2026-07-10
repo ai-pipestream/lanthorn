@@ -3383,6 +3383,13 @@ impl Machine {
         }
     }
 
+    /// Whether `win` currently has a pending Glk mouse request. The host reads
+    /// this (per window in its layout) to decide whether a terminal click lands
+    /// inside a mouse-watching window before calling [`Machine::deliver_mouse`].
+    pub fn mouse_requested(&self, win: u32) -> bool {
+        self.glk.mouse_requested(win)
+    }
+
     /// Recompute the window layout from the backend's (freshly updated) screen
     /// size and notify a suspended game via an Arrange event. Call after the
     /// host reports a new display size: the relayout resizes graphics canvases
