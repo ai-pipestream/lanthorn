@@ -1020,7 +1020,26 @@ fn render_middle(
     let has_search = state.search_query.is_some();
     let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty() && !has_search;
 
-    if has_search && area.height >= 2 && suggestion_y > area.y {
+    // Optional box chrome for the auto-complete popup: mirrors the input-line
+    // boxing (base OR any per-side on, and enough room). When enabled, the popup
+    // becomes a 3-row framed mini-window; otherwise it stays the 1-row strip.
+    let sug_style_kind = state.colors.suggestion_line_style;
+    let suggestion_boxed = has_suggestions
+        && (sug_style_kind != BorderStyle::None || state.colors.suggestion_line_sides.any_on())
+        && area.height >= 5;
+    let box_top = middle_bottom.saturating_sub(3);
+
+    if suggestion_boxed {
+        // Draw a pane frame around the 3-row popup region, then render the
+        // suggestion strip into the inner content row.
+        let box_region = Rect::new(area.x, box_top, area.width, 3);
+        let frame = draw_framed(buf, box_region, sug_style_kind, state.colors.suggestion_line_sides, &state.colors.suggestion_line_glyphs, state.colors.suggestion, false);
+        let content = frame.content;
+        if content.height >= 1 && content.width >= 1 {
+            let sug_line = visible_suggestion_line(&state.suggestions, state.suggestion_idx, content.width as usize);
+            draw_str_clipped(buf, content.x, content.y, &sug_line, state.colors.suggestion, content);
+        }
+    } else if has_search && area.height >= 2 && suggestion_y > area.y {
         // Draw the search hint line.
         let q = state.search_query.as_deref().unwrap_or("");
         let match_count = state.search_matches.len();
@@ -1049,7 +1068,9 @@ fn render_middle(
     }
 
     let transcript_top = area.y;
-    let transcript_bottom = if (has_search || has_suggestions) && suggestion_y > area.y {
+    let transcript_bottom = if suggestion_boxed {
+        box_top
+    } else if (has_search || has_suggestions) && suggestion_y > area.y {
         suggestion_y
     } else {
         middle_bottom
@@ -1374,6 +1395,62 @@ mod tests {
         assert!(row.contains("[filter: story]"), "default bar must show the filter indicator: {:?}", row);
         // status row keeps the reversed-video base fill.
         assert!(buf.cell((0, 0)).unwrap().modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn suggestions_render_boxed_when_styled() {
+        // With the suggestion_line border configured, the auto-complete popup is
+        // drawn as a framed mini-window: a border glyph appears and the suggestion
+        // text renders inside it.
+        use crate::render::paneframe::PaneSides;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.suggestions = vec!["north".into(), "south".into()];
+        state.suggestion_idx = 0;
+        state.colors.suggestion_line_style = BorderStyle::Single;
+        state.colors.suggestion_line_sides = PaneSides::all(BorderStyle::Single);
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let mut has_border = false;
+        let mut has_text = false;
+        for y in 0..area.height {
+            let row: String = (0..area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            if row.contains('│') { has_border = true; }
+            if row.contains("north") { has_text = true; }
+        }
+        assert!(has_border, "boxed suggestion popup must draw a border glyph");
+        assert!(has_text, "suggestion text must render inside the box");
+    }
+
+    #[test]
+    fn suggestions_stay_inline_when_box_off() {
+        // With the default (off) suggestion_line border, the popup stays the flat
+        // one-row strip: the text renders but no box chrome is drawn.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.suggestions = vec!["north".into(), "south".into()];
+        state.suggestion_idx = 0;
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let mut has_border = false;
+        let mut has_text = false;
+        for y in 0..area.height {
+            let row: String = (0..area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            if row.contains('│') { has_border = true; }
+            if row.contains("north") { has_text = true; }
+        }
+        assert!(!has_border, "inline suggestion strip must not draw box chrome");
+        assert!(has_text, "suggestion text must still render inline");
     }
 
     #[test]

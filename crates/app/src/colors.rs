@@ -286,6 +286,8 @@ pub struct ColorScheme {
     pub status_header_style: BorderStyle,
     /// Resolved border style for the input line.
     pub input_line_style: BorderStyle,
+    /// Resolved border style for the auto-complete suggestion popup.
+    pub suggestion_line_style: BorderStyle,
     /// Dialog frame background/foreground style.
     pub dialog: Style,
     /// Dialog title text style.
@@ -317,12 +319,14 @@ pub struct ColorScheme {
     pub story_border_sides: PaneSides,
     pub status_header_sides: PaneSides,
     pub input_line_sides: PaneSides,
+    pub suggestion_line_sides: PaneSides,
     pub upper_window_border_sides: PaneSides,
     /// Per-side/corner glyph overrides for each bordered pane element.
     pub map_border_glyphs: PaneGlyphs,
     pub story_border_glyphs: PaneGlyphs,
     pub status_header_glyphs: PaneGlyphs,
     pub input_line_glyphs: PaneGlyphs,
+    pub suggestion_line_glyphs: PaneGlyphs,
     pub upper_window_border_glyphs: PaneGlyphs,
     pub dialog_glyphs: PaneGlyphs,
     /// Whether the story title / map layer-tab header strip is shown.
@@ -411,6 +415,7 @@ impl ColorScheme {
             story_border_style: BorderStyle::None,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
+            suggestion_line_style: BorderStyle::None,
             dialog: Style::new().fg(Color::White).bg(Color::Black),
             dialog_title: Style::new().fg(Color::Cyan),
             hotkey_key: Style::new().fg(Color::Cyan),
@@ -428,11 +433,13 @@ impl ColorScheme {
             story_border_sides: PaneSides::all(BorderStyle::None),
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
+            suggestion_line_sides: PaneSides::all(BorderStyle::None),
             upper_window_border_sides: PaneSides::all(BorderStyle::Single),
             map_border_glyphs: PaneGlyphs::default(),
             story_border_glyphs: PaneGlyphs::default(),
             status_header_glyphs: PaneGlyphs::default(),
             input_line_glyphs: PaneGlyphs::default(),
+            suggestion_line_glyphs: PaneGlyphs::default(),
             upper_window_border_glyphs: PaneGlyphs::default(),
             dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
@@ -597,6 +604,7 @@ impl ColorScheme {
             story_border_style: BorderStyle::None,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
+            suggestion_line_style: BorderStyle::None,
             dialog: Style::new().fg(fg).bg(bg),
             dialog_title: Style::new().fg(scheme.palette[6]),
             hotkey_key: Style::new().fg(scheme.palette[6]),
@@ -614,11 +622,13 @@ impl ColorScheme {
             story_border_sides: PaneSides::all(BorderStyle::None),
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
+            suggestion_line_sides: PaneSides::all(BorderStyle::None),
             upper_window_border_sides: PaneSides::all(BorderStyle::Single),
             map_border_glyphs: PaneGlyphs::default(),
             story_border_glyphs: PaneGlyphs::default(),
             status_header_glyphs: PaneGlyphs::default(),
             input_line_glyphs: PaneGlyphs::default(),
+            suggestion_line_glyphs: PaneGlyphs::default(),
             upper_window_border_glyphs: PaneGlyphs::default(),
             dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
@@ -882,6 +892,7 @@ mod tests {
         assert_eq!(cs.story_border_sides, PaneSides::all(cs.story_border_style));
         assert_eq!(cs.status_header_sides, PaneSides::all(cs.status_header_style));
         assert_eq!(cs.input_line_sides, PaneSides::all(cs.input_line_style));
+        assert_eq!(cs.suggestion_line_sides, PaneSides::all(cs.suggestion_line_style));
         assert_eq!(cs.upper_window_border_sides, PaneSides::all(cs.virtual_window_border));
         assert!(cs.story_header_on);
         assert!(cs.map_header_on);

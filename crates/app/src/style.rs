@@ -180,6 +180,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "transcript:system",
     "warning_marker",
     "suggestion",
+    "suggestion_line",
     "input:text",
     "input:prompt",
     "scrollbar",
@@ -231,7 +232,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Transcript", &[
         "transcript", "transcript:input", "transcript:meta", "transcript:warning",
         "transcript:crash", "transcript:location", "transcript:system",
-        "suggestion", "input:text", "input:prompt",
+        "suggestion", "suggestion_line", "input:text", "input:prompt",
         "warning_marker", "meta_marker", "scrollbar",
     ]),
     ("Chrome", &[
@@ -280,6 +281,8 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "transcript:system"    => cs.transcript_system,
         "warning_marker"       => cs.warning_marker,
         "suggestion"           => cs.suggestion,
+        // The suggestion popup box reuses the `suggestion` color for its border.
+        "suggestion_line"      => cs.suggestion,
         "input:text"           => cs.input_text,
         "input:prompt"         => cs.input_prompt,
         "scrollbar"            => cs.scrollbar,
@@ -425,6 +428,17 @@ pub fn apply_color_decls(
             "transcript:system"   => cs.transcript_system = cs.transcript_system.patch(style),
             "warning_marker"      => cs.warning_marker = cs.warning_marker.patch(style),
             "suggestion"         => cs.suggestion = cs.suggestion.patch(style),
+            "suggestion_line" => {
+                // Border-only selector: the popup reuses the `suggestion` color
+                // (set by that selector), so this one carries no fg/bg — it must
+                // not patch cs.suggestion or it would override the `suggestion`
+                // selector (which sorts before it).
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.suggestion_line_style);
+                cs.suggestion_line_style = base;
+                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                cs.suggestion_line_sides = sides;
+                cs.suggestion_line_glyphs = decl_glyphs(decl);
+            }
             "input:text"         => cs.input_text = cs.input_text.patch(style),
             "input:prompt"       => cs.input_prompt = cs.input_prompt.patch(style),
             "scrollbar"          => cs.scrollbar = cs.scrollbar.patch(style),
@@ -1285,6 +1299,18 @@ pub fn write_style_full(
     doc.colors.selectors.insert("transcript:system".to_string(),   style_to_decl(&cs.transcript_system));
     doc.colors.selectors.insert("warning_marker".to_string(),      style_to_decl(&cs.warning_marker));
     doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
+    {
+        // The suggestion popup box reuses the `suggestion` color (single source of
+        // truth); this selector carries ONLY its border style/sides/glyphs — no
+        // fg/bg — so it can't clobber a user's edit to the `suggestion` color.
+        let mut d = Decl::default();
+        if cs.suggestion_line_style != paneframe::BorderStyle::None {
+            d.style = Some(paneframe::border_style_name(cs.suggestion_line_style).to_string());
+        }
+        decorate_sides(&mut d, cs.suggestion_line_style, cs.suggestion_line_sides);
+        decorate_glyphs(&mut d, &cs.suggestion_line_glyphs);
+        doc.colors.selectors.insert("suggestion_line".to_string(), d);
+    }
     doc.colors.selectors.insert("input:text".to_string(),        style_to_decl(&cs.input_text));
     doc.colors.selectors.insert("input:prompt".to_string(),      style_to_decl(&cs.input_prompt));
     doc.colors.selectors.insert("scrollbar".to_string(),         style_to_decl(&cs.scrollbar));
@@ -2212,6 +2238,37 @@ box_style = "rounded"
             "story_border_style must survive write_style_full -> parse -> resolve; got {:?}",
             cs2.story_border_style
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn suggestion_line_selector_round_trips() {
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        let dir = std::env::temp_dir().join(format!("babelmap-sug-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sug.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.suggestion_line_style = BorderStyle::Double;
+        cs.suggestion_line_sides = PaneSides::all(BorderStyle::Double);
+
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("suggestion_line"), "suggestion_line selector must be emitted");
+
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+        assert!(
+            matches!(cs2.suggestion_line_style, BorderStyle::Double),
+            "suggestion_line_style must survive round-trip; got {:?}",
+            cs2.suggestion_line_style
+        );
+        assert_eq!(cs2.suggestion_line_sides, PaneSides::all(BorderStyle::Double));
+
+        // Convention: ColorScheme field + style.rs selector + render apply, all wired.
+        assert!(SELECTOR_FIELDS.contains(&"suggestion_line"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, s)| s.contains(&"suggestion_line")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -47,6 +47,7 @@
 "story_border"         = { style = "single", fg = "cyan" }
 "story_title"          = { fg = "white" }
 "suggestion"           = { fg = "dark-gray" }   # autocomplete line
+"suggestion_line"      = { }                    # set style = "single" to box the popup
 
 # ── Status & input chrome ────────────────────────────────────────────────────
 "statusbar"            = { reversed = true }    # status-bar base style (see [statusbar])
