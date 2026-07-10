@@ -247,6 +247,11 @@ pub enum Action {
     VerbMenuNav(VerbMenuNavKind),
     /// Pick the currently-selected token: append it (+ a space) to `state.input`.
     VerbMenuPick,
+    /// Insert the token at the given pane/index directly (mouse click), keeping
+    /// the dock open and story focus unchanged; also moves that pane's highlight.
+    VerbMenuClickToken(crate::state::VerbMenuPane, usize),
+    /// Focus the given dock pane (mouse click on its header): sets `story_focused=false`.
+    VerbMenuFocusPane(crate::state::VerbMenuPane),
     /// Close the verb menu, leaving `state.input` intact.
     VerbMenuClose,
     /// Enter interactive pane-resize mode, selecting the first visible pane.
@@ -474,7 +479,10 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return KeyResolve::Action(filebrowser_key_to_action(key));
     }
     if state.verb_menu.is_some() {
-        return KeyResolve::Action(verb_menu_key_to_action(key));
+        if let Some(a) = verb_menu_intercept(key, state) {
+            return KeyResolve::Action(a);
+        }
+        // else: fall through — the story input is live, so the key is handled normally.
     }
     if state.style_editor.is_some() {
         return KeyResolve::Action(style_editor_key_to_action(key, state));
@@ -1234,27 +1242,37 @@ fn gallery_key_to_action(key: KeyEvent) -> Action {
 
 // ── Internal: verb-menu key routing ──────────────────────────────────────────
 
-/// Hardwired verb-menu sub-mode keys (not rebindable).
-///
-/// Tab / Right  → next pane; Shift+Tab / Left → prev pane;
-/// Up / Down    → move within pane;
-/// Enter/Space  → pick selected token;
-/// Esc          → close menu (q freed).
-fn verb_menu_key_to_action(key: KeyEvent) -> Action {
+/// Focus-aware key intercept for the verb dock. Returns `Some(action)` ONLY for
+/// keys the dock consumes given the current focus, else `None` (the key falls
+/// through and is handled by the always-live story input).
+fn verb_menu_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
+    // Tab / Shift-Tab cycle focus through the ring (incl. story) and Esc closes
+    // the dock regardless of which element is focused.
     match key.code {
-        KeyCode::Tab => Action::VerbMenuNav(VerbMenuNavKind::NextPane),
-        KeyCode::BackTab => Action::VerbMenuNav(VerbMenuNavKind::PrevPane),
-        KeyCode::Right => Action::VerbMenuNav(VerbMenuNavKind::NextPane),
-        KeyCode::Left => Action::VerbMenuNav(VerbMenuNavKind::PrevPane),
-        KeyCode::Up => Action::VerbMenuNav(VerbMenuNavKind::Up),
-        KeyCode::Down => Action::VerbMenuNav(VerbMenuNavKind::Down),
-        KeyCode::PageUp => Action::VerbMenuNav(VerbMenuNavKind::PageUp),
-        KeyCode::PageDown => Action::VerbMenuNav(VerbMenuNavKind::PageDown),
-        KeyCode::Home => Action::VerbMenuNav(VerbMenuNavKind::Home),
-        KeyCode::End => Action::VerbMenuNav(VerbMenuNavKind::End),
-        KeyCode::Enter | KeyCode::Char(' ') => Action::VerbMenuPick,
-        KeyCode::Esc => Action::VerbMenuClose,
-        _ => Action::None,
+        KeyCode::Tab => return Some(Action::VerbMenuNav(VerbMenuNavKind::NextPane)),
+        KeyCode::BackTab => return Some(Action::VerbMenuNav(VerbMenuNavKind::PrevPane)),
+        KeyCode::Esc => return Some(Action::VerbMenuClose),
+        _ => {}
+    }
+
+    // The remaining keys are only consumed when a dock pane is focused; while the
+    // story is focused they belong to the game input (letters, Enter, ↑/↓ history).
+    let story_focused = state.verb_menu.as_ref().map(|vm| vm.story_focused).unwrap_or(true);
+    if story_focused {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Up => Some(Action::VerbMenuNav(VerbMenuNavKind::Up)),
+        KeyCode::Down => Some(Action::VerbMenuNav(VerbMenuNavKind::Down)),
+        KeyCode::PageUp => Some(Action::VerbMenuNav(VerbMenuNavKind::PageUp)),
+        KeyCode::PageDown => Some(Action::VerbMenuNav(VerbMenuNavKind::PageDown)),
+        KeyCode::Home => Some(Action::VerbMenuNav(VerbMenuNavKind::Home)),
+        KeyCode::End => Some(Action::VerbMenuNav(VerbMenuNavKind::End)),
+        KeyCode::Left => Some(Action::VerbMenuNav(VerbMenuNavKind::PrevPane)),
+        KeyCode::Right => Some(Action::VerbMenuNav(VerbMenuNavKind::NextPane)),
+        KeyCode::Enter | KeyCode::Char(' ') => Some(Action::VerbMenuPick),
+        _ => None,
     }
 }
 
@@ -2594,6 +2612,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 noun_scroll: Default::default(),
                 prep_scroll: Default::default(),
                 nouns,
+                story_focused: true,
             });
             state.verb_dock.toggle_to(true, false);
             state.verb_dock.arm(&state.config.animation);
@@ -2606,21 +2625,36 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let anim = state.config.animation.clone();
             if let Some(vm) = &mut state.verb_menu {
                 match kind {
+                    // Focus ring INCLUDING the story pane: Story → Verbs → Nouns
+                    // → Preps → Story.
                     VerbMenuNavKind::NextPane => {
-                        vm.pane = match vm.pane {
-                            VerbMenuPane::Verbs => VerbMenuPane::Nouns,
-                            VerbMenuPane::Nouns => VerbMenuPane::Preps,
-                            VerbMenuPane::Preps => VerbMenuPane::Verbs,
-                        };
+                        if vm.story_focused {
+                            vm.story_focused = false;
+                            vm.pane = VerbMenuPane::Verbs;
+                        } else {
+                            match vm.pane {
+                                VerbMenuPane::Verbs => vm.pane = VerbMenuPane::Nouns,
+                                VerbMenuPane::Nouns => vm.pane = VerbMenuPane::Preps,
+                                VerbMenuPane::Preps => vm.story_focused = true,
+                            }
+                        }
                     }
                     VerbMenuNavKind::PrevPane => {
-                        vm.pane = match vm.pane {
-                            VerbMenuPane::Verbs => VerbMenuPane::Preps,
-                            VerbMenuPane::Nouns => VerbMenuPane::Verbs,
-                            VerbMenuPane::Preps => VerbMenuPane::Nouns,
-                        };
+                        if vm.story_focused {
+                            vm.story_focused = false;
+                            vm.pane = VerbMenuPane::Preps;
+                        } else {
+                            match vm.pane {
+                                VerbMenuPane::Preps => vm.pane = VerbMenuPane::Nouns,
+                                VerbMenuPane::Nouns => vm.pane = VerbMenuPane::Verbs,
+                                VerbMenuPane::Verbs => vm.story_focused = true,
+                            }
+                        }
                     }
-                    // List movement within the active pane (clamped).
+                    // List movement within `vm.pane` (clamped). Reached from the
+                    // keyboard only when a pane is focused (the ↑/↓ intercept is
+                    // gated on `!story_focused`), but ALSO from the mouse wheel
+                    // regardless of focus — so it must scroll unconditionally.
                     _ => {
                         let (scroll, len) = match vm.pane {
                             VerbMenuPane::Verbs => (&mut vm.verb_scroll, VERB_MENU_VERBS.len()),
@@ -2639,6 +2673,30 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                         }
                     }
                 }
+            }
+        }
+
+        Action::VerbMenuClickToken(pane, idx) => {
+            use crate::state::VerbMenuPane;
+            use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(vm) = &mut state.verb_menu {
+                let (token, scroll, len) = match pane {
+                    VerbMenuPane::Verbs => (VERB_MENU_VERBS.get(idx).copied().map(str::to_string), &mut vm.verb_scroll, VERB_MENU_VERBS.len()),
+                    VerbMenuPane::Nouns => (vm.nouns.get(idx).cloned(), &mut vm.noun_scroll, vm.nouns.len()),
+                    VerbMenuPane::Preps => (VERB_MENU_PREPS.get(idx).copied().map(str::to_string), &mut vm.prep_scroll, VERB_MENU_PREPS.len()),
+                };
+                scroll.len(len);
+                scroll.select(idx, vp, &anim);
+                if let Some(t) = token { if !t.is_empty() { state.input.push_str(&t); state.input.push(' '); } }
+            }
+        }
+
+        Action::VerbMenuFocusPane(pane) => {
+            if let Some(vm) = &mut state.verb_menu {
+                vm.story_focused = false;
+                vm.pane = pane;
             }
         }
 
@@ -5597,6 +5655,7 @@ mod tests {
             noun_scroll: Default::default(),
             prep_scroll: Default::default(),
             nouns: Vec::new(),
+            story_focused: false,
         });
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
@@ -6335,6 +6394,9 @@ mod tests {
             noun_scroll: Default::default(),
             prep_scroll: Default::default(),
             nouns,
+            // Helper opens with a pane focused so legacy nav/pick tests keep
+            // exercising the dock; ring/focus tests flip `story_focused` as needed.
+            story_focused: false,
         });
     }
 
@@ -6640,6 +6702,88 @@ mod tests {
     }
 
     #[test]
+    fn open_verb_menu_focuses_story() {
+        // (a) The dock opens with the story input live.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
+        assert!(s.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
+    }
+
+    #[test]
+    fn verb_menu_tab_ring_includes_story() {
+        use crate::state::VerbMenuPane;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+        // Start on the story.
+        s.verb_menu.as_mut().unwrap().story_focused = true;
+
+        // (b) Tab from Story focuses Verbs.
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
+        {
+            let vm = s.verb_menu.as_ref().unwrap();
+            assert!(!vm.story_focused && vm.pane == VerbMenuPane::Verbs, "Story → Verbs");
+        }
+
+        // (c) Verbs → Nouns → Preps → Story (three more NextPane).
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
+        assert_eq!(s.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Nouns);
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
+        assert_eq!(s.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Preps);
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
+        assert!(s.verb_menu.as_ref().unwrap().story_focused, "Preps → Story (ring wraps)");
+    }
+
+    #[test]
+    fn verb_menu_intercept_respects_story_focus() {
+        // (d) When the story is focused, letters/Enter fall through (None); when
+        // a pane is focused, Enter picks.
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+
+        s.verb_menu.as_mut().unwrap().story_focused = true;
+        assert!(verb_menu_intercept(key(KeyCode::Char('x')), &s).is_none(), "letter falls through");
+        assert!(verb_menu_intercept(key(KeyCode::Enter), &s).is_none(), "Enter falls through to game");
+
+        s.verb_menu.as_mut().unwrap().story_focused = false;
+        assert!(
+            matches!(verb_menu_intercept(key(KeyCode::Enter), &s), Some(Action::VerbMenuPick)),
+            "Enter picks when a pane is focused"
+        );
+    }
+
+    #[test]
+    fn verb_menu_click_token_inserts_and_keeps_focus() {
+        // (e) Clicking a token appends it + a space and leaves story_focused as-is.
+        use crate::render::verbmenu::VERB_MENU_VERBS;
+        use crate::state::VerbMenuPane;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        s.verb_menu.as_mut().unwrap().story_focused = true;
+
+        apply_action(Action::VerbMenuClickToken(VerbMenuPane::Verbs, 2), &mut s, &mut mapper);
+        assert_eq!(s.input, format!("{} ", VERB_MENU_VERBS[2]));
+        assert!(s.verb_menu.as_ref().unwrap().story_focused, "click leaves story focus unchanged");
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 2, "click moves highlight");
+    }
+
+    #[test]
+    fn verb_menu_focus_pane_action_sets_pane() {
+        // (f) Clicking a header focuses that pane.
+        use crate::state::VerbMenuPane;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+        s.verb_menu.as_mut().unwrap().story_focused = true;
+
+        apply_action(Action::VerbMenuFocusPane(VerbMenuPane::Nouns), &mut s, &mut mapper);
+        let vm = s.verb_menu.as_ref().unwrap();
+        assert!(!vm.story_focused && vm.pane == VerbMenuPane::Nouns, "header click focuses Nouns");
+    }
+
+    #[test]
     fn verb_menu_nav_up_down_moves_index() {
         use crate::state::VerbMenuPane;
         let mut s = AppState::default();
@@ -6664,6 +6808,25 @@ mod tests {
     }
 
     #[test]
+    fn verb_menu_wheel_scrolls_while_story_focused() {
+        // Regression (SQ-0255): the dock opens story-focused, and the mouse wheel
+        // produces VerbMenuNav(Up/Down) regardless of focus. List movement must
+        // therefore scroll the active pane even while the story input is focused;
+        // gating it behind !story_focused leaves wheel-scroll dead until Tab.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
+        assert!(s.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
+        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
+
+        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
+        assert_eq!(
+            s.verb_menu.as_ref().unwrap().verb_scroll.selected, 1,
+            "wheel/Down must scroll the active pane even while story-focused"
+        );
+    }
+
+    #[test]
     fn verb_menu_esc_closes() {
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
@@ -6674,11 +6837,12 @@ mod tests {
 
     #[test]
     fn verb_menu_q_no_longer_closes() {
-        // q-close removed from verb menu; q now produces None in this sub-mode.
+        // "Story always live": with the dock open, an ordinary letter is not
+        // swallowed — it falls through to the game input line instead of closing.
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
         let a = key_to_action(&s, key(KeyCode::Char('q')));
-        assert!(matches!(a, Action::None), "q should no longer close the verb menu");
+        assert!(matches!(a, Action::InputChar('q')), "q types into the live story input, not close");
     }
 
     #[test]
@@ -7009,6 +7173,7 @@ mod tests {
             noun_scroll: Default::default(),
             prep_scroll: Default::default(),
             nouns: vec![],
+            story_focused: false,
         });
 
         let map   = Rect::new(30, 0, 50, 24);
@@ -7196,7 +7361,7 @@ mod tests {
             let mut s = AppState::default();
             s.verb_menu = Some(VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
-                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![],
+                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![], story_focused: false,
             });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::VerbMenuClose),
@@ -7457,8 +7622,10 @@ mod tests {
 
     #[test]
     fn verb_menu_tab_still_navigates_panes() {
-        let a = verb_menu_key_to_action(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert!(matches!(a, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        let a = verb_menu_intercept(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &s);
+        assert!(matches!(a, Some(Action::VerbMenuNav(VerbMenuNavKind::NextPane))));
     }
 
     // ── SQ-0237: resize-mode key routing ──────────────────────────────────────

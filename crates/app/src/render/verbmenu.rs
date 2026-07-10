@@ -63,6 +63,16 @@ pub const VERB_MENU_PREPS: &[&str] = &[
     "with", "on", "in", "to", "under", "at", "from", "of",
 ];
 
+// ── Hit rects ─────────────────────────────────────────────────────────────────
+
+/// Click targets emitted by `draw_verb_menu` for the event loop to hit-test:
+/// each token row (pane + index + its rect) and each section header (pane + rect).
+#[derive(Default, Clone)]
+pub struct VerbMenuHits {
+    pub rows: Vec<(VerbMenuPane, usize, Rect)>,
+    pub headers: Vec<(VerbMenuPane, Rect)>,
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 /// Compute the dock's fully-open target width in columns: `pct`% of
@@ -108,7 +118,10 @@ pub fn draw_verb_menu(
     area: Rect,
     buf: &mut Buffer,
     vp_out: &mut usize,
+    hits: &mut VerbMenuHits,
 ) {
+    hits.rows.clear();
+    hits.headers.clear();
     let Some(vm) = &state.verb_menu else { return };
 
     if area.width < 8 || area.height < 4 {
@@ -172,9 +185,11 @@ pub fn draw_verb_menu(
         if h == 0 {
             continue;
         }
-        let active = vm.pane == *pane;
+        // When the story is focused, NO dock pane shows the active highlight.
+        let active = !vm.story_focused && vm.pane == *pane;
         let header_area = Rect { x: content.x, y, width: content.width, height: 1 };
         draw_pane_header(label, active, header_area, buf, state);
+        hits.headers.push((*pane, header_area));
 
         let list_h = h.saturating_sub(1);
         if list_h > 0 {
@@ -189,7 +204,7 @@ pub fn draw_verb_menu(
                 VerbMenuPane::Nouns => &vm.noun_scroll,
                 VerbMenuPane::Preps => &vm.prep_scroll,
             };
-            draw_list(items, scroll, active, list_area, buf, state);
+            draw_list(items, scroll, active, list_area, buf, state, *pane, &mut hits.rows);
             if active {
                 *vp_out = list_h as usize;
             }
@@ -237,6 +252,8 @@ fn draw_list(
     area: Rect,
     buf: &mut Buffer,
     state: &AppState,
+    pane: VerbMenuPane,
+    hits: &mut Vec<(VerbMenuPane, usize, Rect)>,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -286,6 +303,7 @@ fn draw_list(
 
         // Fill the row with the style, then write text.
         let row_area = Rect::new(area.x, y, row_w, 1);
+        hits.push((pane, idx, row_area));
         for x in row_area.x..row_area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_symbol(" ").set_style(style);
@@ -324,6 +342,9 @@ mod tests {
             noun_scroll: Default::default(),
             prep_scroll: Default::default(),
             nouns: vec!["mailbox".to_string(), "door".to_string()],
+            // Tests here exercise the pane-focused render path; production opens
+            // the dock story-focused (see OpenVerbMenu). Individual tests flip this.
+            story_focused: false,
         });
         s
     }
@@ -336,7 +357,7 @@ mod tests {
     fn verb_menu_renders_known_verb() {
         let mut buf = Buffer::empty(DOCK_AREA);
         let state = make_state_with_verb_menu();
-        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0);
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
         let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
         assert!(content.contains("look"), "should show 'look' verb");
         assert!(content.contains("Verbs"), "should show Verbs section header");
@@ -346,7 +367,7 @@ mod tests {
     fn verb_menu_renders_room_noun() {
         let mut buf = Buffer::empty(DOCK_AREA);
         let state = make_state_with_verb_menu();
-        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0);
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
         let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
         assert!(content.contains("mailbox"), "should show room noun 'mailbox'");
         assert!(content.contains("Nouns"), "should show Nouns section header");
@@ -359,7 +380,7 @@ mod tests {
         // the pane border/title.
         let mut buf = Buffer::empty(DOCK_AREA);
         let state = make_state_with_verb_menu();
-        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0);
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
         let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
 
         assert!(content.contains("Verbs"), "Verbs header should be present");
@@ -378,6 +399,34 @@ mod tests {
     }
 
     #[test]
+    fn verb_menu_emits_row_and_header_hits() {
+        let mut buf = Buffer::empty(DOCK_AREA);
+        let state = make_state_with_verb_menu();
+        let mut hits = VerbMenuHits::default();
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut hits);
+
+        assert!(!hits.rows.is_empty(), "row hit-rects should be populated");
+        assert!(
+            hits.rows.iter().any(|(p, i, _)| *p == VerbMenuPane::Verbs && *i == 0),
+            "the 'look' row (Verbs, 0) should have a hit-rect"
+        );
+        assert_eq!(hits.headers.len(), 3, "all three section headers should have hit-rects");
+    }
+
+    #[test]
+    fn verb_menu_story_focused_has_no_cyan_highlight() {
+        // When the story input is focused, no dock pane shows the active cyan
+        // highlight (the selected Verbs row is NOT cyan-on-black).
+        let mut buf = Buffer::empty(DOCK_AREA);
+        let mut state = make_state_with_verb_menu();
+        state.verb_menu.as_mut().unwrap().story_focused = true;
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
+
+        let has_cyan = buf.content().iter().any(|c| c.style().bg == Some(Color::Cyan));
+        assert!(!has_cyan, "no row should be cyan-highlighted while the story is focused");
+    }
+
+    #[test]
     fn verb_menu_scrollbar_and_paging_on_overflow() {
         use crate::input::{apply_action, Action, VerbMenuNavKind};
         use mapper::mapper::Mapper;
@@ -387,7 +436,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut state = make_state_with_verb_menu();
         let mut vp = 0usize;
-        draw_verb_menu(&state, area, &mut buf, &mut vp);
+        draw_verb_menu(&state, area, &mut buf, &mut vp, &mut VerbMenuHits::default());
         assert!(vp > 0 && vp < VERB_MENU_VERBS.len(), "verbs should overflow (vp={vp})");
         let has_thumb = buf.content().iter().any(|c| c.symbol() == "█");
         assert!(has_thumb, "a scrollbar thumb should be drawn when the verbs pane overflows");
@@ -418,7 +467,7 @@ mod tests {
                 }
             }
             let dock_area = Rect { x: 0, y: 0, width: 26, height: 24 };
-            draw_verb_menu(&state, dock_area, f.buffer_mut(), &mut 0);
+            draw_verb_menu(&state, dock_area, f.buffer_mut(), &mut 0, &mut VerbMenuHits::default());
         }).unwrap();
         let cell = terminal.backend().buffer().cell((0, 0)).unwrap();
         assert_ne!(cell.bg, Color::Green, "dock should overwrite background (no bleed)");
@@ -443,7 +492,7 @@ mod tests {
         let area = Rect { x: 0, y: 0, width: 4, height: 30 };
         let mut buf = Buffer::empty(area);
         let state = make_state_with_verb_menu();
-        draw_verb_menu(&state, area, &mut buf, &mut 0);
+        draw_verb_menu(&state, area, &mut buf, &mut 0, &mut VerbMenuHits::default());
         // No assertion beyond "did not panic"; too narrow to draw anything.
     }
 
@@ -488,7 +537,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let state = AppState::default();
         assert!(state.verb_menu.is_none());
-        draw_verb_menu(&state, area, &mut buf, &mut 0);
+        draw_verb_menu(&state, area, &mut buf, &mut 0, &mut VerbMenuHits::default());
         // No assertion beyond "did not panic"; nothing drawn since verb_menu is None.
     }
 }

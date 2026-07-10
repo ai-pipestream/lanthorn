@@ -201,6 +201,7 @@ mod tests {
             noun_scroll: Default::default(),
             prep_scroll: Default::default(),
             nouns: vec![],
+            story_focused: false,
         });
         state.verb_dock.toggle_to(true, true); // instant open → fraction() == 1.0
         let pl = compute_pane_layout(area80x24(), &state, 0);

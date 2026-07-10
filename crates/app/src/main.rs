@@ -264,6 +264,8 @@ struct PaneRects {
     pub hints_panel: Option<HintsPanelRects>,
     /// Hit-rects for the style-editor board (when open).
     pub style_editor: Option<StyleEditorRects>,
+    /// Hit-rects for the verb dock's token rows and section headers (when open).
+    pub verb_menu: app::render::verbmenu::VerbMenuHits,
     /// Hit-rects for the glyph-picker modal (when open).
     pub glyph_picker: Option<app::render::glyph_picker::GlyphPickerRects>,
     /// Text under the active story-pane selection, captured from THIS frame's
@@ -416,6 +418,7 @@ fn draw_frame(
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
     let mut style_editor_rects_out: Option<StyleEditorRects> = None;
     let mut glyph_picker_rects_out: Option<app::render::glyph_picker::GlyphPickerRects> = None;
+    let mut verb_hits = app::render::verbmenu::VerbMenuHits::default();
     let mut selection_text_out: Option<String> = None;
     let mut modal_list_viewport: usize = 0;
     let mut story_scrollbar = false;
@@ -685,7 +688,7 @@ fn draw_frame(
 
         // ── Verb dock panel ────────────────────────────────────────────────────
         if pane_layout.verb_dock.width > 0 {
-            draw_verb_menu(state, pane_layout.verb_dock, buf, &mut modal_list_viewport);
+            draw_verb_menu(state, pane_layout.verb_dock, buf, &mut modal_list_viewport, &mut verb_hits);
         }
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
@@ -892,7 +895,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1966,7 +1969,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -2985,6 +2988,27 @@ fn main() {
                                 }
                                 continue 'event_loop;
                             }
+                        }
+                    }
+                }
+                // Verb dock: click a token to insert it; click a header to focus that section; click the
+                // story pane to return keyboard focus there (then fall through to normal story handling).
+                if state.verb_menu.is_some() {
+                    if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
+                        let inside = |r: &ratatui::layout::Rect| {
+                            r.width > 0 && r.height > 0 && m.column >= r.x && m.column < r.right() && m.row >= r.y && m.row < r.bottom()
+                        };
+                        if let Some((pane, idx, _)) = last_panes.verb_menu.rows.iter().find(|(_, _, r)| inside(r)).copied() {
+                            apply_action(Action::VerbMenuClickToken(pane, idx), &mut state, &mut mapper);
+                            continue 'event_loop;
+                        }
+                        if let Some((pane, _)) = last_panes.verb_menu.headers.iter().find(|(_, r)| inside(r)).copied() {
+                            apply_action(Action::VerbMenuFocusPane(pane), &mut state, &mut mapper);
+                            continue 'event_loop;
+                        }
+                        if inside(&last_panes.story) {
+                            if let Some(vm) = &mut state.verb_menu { vm.story_focused = true; }
+                            // fall through: normal story-pane click handling (selection) still runs below.
                         }
                     }
                 }

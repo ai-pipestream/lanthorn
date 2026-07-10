@@ -147,6 +147,9 @@ pub struct VerbMenuState {
     pub prep_scroll: crate::list_scroll::ListScroll,
     /// Noun list built from room words ∪ inventory at menu-open time.
     pub nouns: Vec<String>,
+    /// true = keyboard focus is on the story input (dock is passive); false =
+    /// `pane` is the focused dock pane.
+    pub story_focused: bool,
 }
 
 impl VerbMenuState {
@@ -2638,6 +2641,7 @@ mod tests {
             noun_scroll: Default::default(),
             prep_scroll: Default::default(),
             nouns: vec![],
+            story_focused: false,
         });
         assert!(s.any_overlay_open(), "verb_menu open => any_overlay_open true");
         s.verb_menu = None;
