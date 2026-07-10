@@ -362,6 +362,14 @@ pub struct Config {
     /// "natural" scrolling). Default false = conventional direction.
     #[serde(default)]
     pub mouse_wheel_invert: bool,
+    /// When true, capture the mouse (click-to-select in the story browser and
+    /// map, wheel scrolling, and Glk mouse input to games that request it).
+    /// Default false: mouse capture puts the terminal in any-motion reporting
+    /// mode, so every mouse movement floods the redraw loop and can feel
+    /// sluggish; it also disables the terminal's native text selection. Opt in
+    /// to trade those off for in-app mouse support.
+    #[serde(default)]
+    pub mouse: bool,
     /// When true (default) and auto_save is off, prompt the user to save on quit.
     #[serde(default = "default_true")]
     pub prompt_save_on_quit: bool,
@@ -480,6 +488,7 @@ impl Default for Config {
             auto_load: true,
             auto_save: false,
             mouse_wheel_invert: false,
+            mouse: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: true,
@@ -554,6 +563,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
             cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
+            cfg.mouse = from_file.mouse;
             cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_history = from_file.record_history;
@@ -616,6 +626,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["auto_load"] = toml_edit::value(cfg.auto_load);
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
     doc["mouse_wheel_invert"] = toml_edit::value(cfg.mouse_wheel_invert);
+    doc["mouse"] = toml_edit::value(cfg.mouse);
     doc["prompt_save_on_quit"] = toml_edit::value(cfg.prompt_save_on_quit);
     doc["prompt_load_on_launch"] = toml_edit::value(cfg.prompt_load_on_launch);
     doc["record_history"] = toml_edit::value(cfg.record_history);
@@ -933,6 +944,7 @@ use_defaults = false
             auto_load: false,
             auto_save: true,
             mouse_wheel_invert: false,
+            mouse: true,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: false,
@@ -977,6 +989,7 @@ use_defaults = false
         assert_eq!(doc["split_ratio"].as_integer(), Some(70));
         assert_eq!(doc["verb_dock_pct"].as_integer(), Some(40));
         assert_eq!(doc["inv_dock_pct"].as_integer(), Some(25));
+        assert_eq!(doc["mouse"].as_bool(), Some(true));
         // Style pointer is written; visual sections are NOT.
         assert_eq!(doc["style"].as_str(), Some("neon"));
         assert!(!content.contains("[colors]"));
@@ -993,6 +1006,16 @@ use_defaults = false
     fn config_reads_style_pointer() {
         let cfg: Config = toml::from_str("style = \"neon\"\n").unwrap();
         assert_eq!(cfg.style.as_deref(), Some("neon"));
+    }
+
+    #[test]
+    fn mouse_capture_defaults_off_and_opts_in_from_file() {
+        // Absent from the file → mouse capture stays off (the responsive default).
+        let default: Config = toml::from_str("").unwrap();
+        assert!(!default.mouse, "mouse capture must default off");
+        // Explicit opt-in is honored.
+        let on: Config = toml::from_str("mouse = true\n").unwrap();
+        assert!(on.mouse, "mouse = true must enable capture");
     }
 
     #[test]

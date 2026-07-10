@@ -1048,9 +1048,15 @@ fn run_story_picker(
     if enable_raw_mode().is_err() {
         return Some(stories[0].path.clone());
     }
-    if execute!(stdout(), EnterAlternateScreen, EnableMouseCapture).is_err() {
+    if execute!(stdout(), EnterAlternateScreen).is_err() {
         let _ = disable_raw_mode();
         return Some(stories[0].path.clone());
+    }
+    // Mouse capture is opt-in (config `mouse = true`): its any-motion reporting
+    // floods this loop with redraws on every mouse move. Off by default keeps the
+    // browser snappy; click-to-select and wheel scroll require enabling it.
+    if cfg.mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
     }
     let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
         Ok(t) => t,
@@ -1933,10 +1939,18 @@ fn main() {
 
     // From here on, raw mode is active — MUST restore on every exit path.
 
-    if let Err(e) = execute!(stdout(), EnterAlternateScreen, EnableMouseCapture) {
+    if let Err(e) = execute!(stdout(), EnterAlternateScreen) {
         restore_terminal();
         eprintln!("babelmap: cannot enter alternate screen: {}", e);
         std::process::exit(1);
+    }
+    // Mouse capture is opt-in (config `mouse = true`). Capture puts the terminal
+    // in any-motion reporting mode, so every mouse movement wakes the event loop
+    // and forces a full redraw; leaving it off keeps idle/scroll responsive and
+    // preserves the terminal's native text selection. restore_terminal() always
+    // issues DisableMouseCapture, which is a harmless no-op when it was never on.
+    if state.config.mouse {
+        let _ = execute!(stdout(), EnableMouseCapture);
     }
 
     let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
