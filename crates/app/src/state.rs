@@ -1278,6 +1278,12 @@ pub struct AppState {
     /// is armed (untimed read, honor disabled, or an overlay/dialog is open).
     pub input_deadline: Option<std::time::Instant>,
 
+    /// When a Glulx game has armed Glk timer events (`glk_request_timer_events`),
+    /// the wall-clock instant the next `evtype_Timer` tick is due. `None` when no
+    /// Glk timer is armed. Independent of `input_deadline` (which is the
+    /// Z-machine timed-input clock).
+    pub glulx_timer_next_fire: Option<std::time::Instant>,
+
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
     pub game_picker: Option<ratatui_image::picker::Picker>,
     /// Cached graphics-window protocols (interior-mutable for the render pass).
@@ -1395,6 +1401,7 @@ impl Default for AppState {
             dialog_focus: 0,
             char_mode: false,
             input_deadline: None,
+            glulx_timer_next_fire: None,
             game_picker: None,
             graphics_render: std::cell::RefCell::new(Default::default()),
             inline_image_render: std::cell::RefCell::new(Default::default()),

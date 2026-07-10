@@ -165,6 +165,11 @@ pub struct Machine {
     pub(crate) graphics_enabled: bool,
     /// Whether Glk sound channels are enabled (default false; hosts opt in).
     pub(crate) sound_enabled: bool,
+    /// The current Glk timer interval in milliseconds, or `None` when timer
+    /// events are off. Set by `glk_request_timer_events`; the host reads it via
+    /// [`Machine::glk_timer_interval`] to arm its clock and calls
+    /// [`Machine::deliver_timer`] on each tick.
+    timer_interval_ms: Option<u32>,
     /// Total number of opcodes dispatched since the machine was built.
     pub(crate) insn_count: u64,
     /// PRNG state (xorshift32); seeded by `setrandom`.
@@ -300,6 +305,7 @@ impl Machine {
             acceleration: true,
             graphics_enabled: false,
             sound_enabled: false,
+            timer_interval_ms: None,
             insn_count: 0,
             rng: Self::DEFAULT_SEED,
             instr_start_pc: 0,
@@ -2716,11 +2722,10 @@ impl Machine {
                 0
             }
             0x00D6 => {
-                // glk_request_timer_events(millisecs) — timers out of scope
-                if a(0) != 0 {
-                    self.diagnostics
-                        .push("glk_request_timer_events: timer events unsupported (ignored)".to_string());
-                }
+                // glk_request_timer_events(millisecs): arm a periodic timer, or
+                // cancel it when millisecs == 0. The host reads the interval via
+                // `glk_timer_interval` and calls `deliver_timer` on each tick.
+                self.timer_interval_ms = if a(0) != 0 { Some(a(0)) } else { None };
                 0
             }
             0x00D4 => {
@@ -3283,6 +3288,31 @@ impl Machine {
         }
     }
 
+    /// The currently armed Glk timer interval in milliseconds, or `None` when
+    /// timer events are off. The host reads this to arm its own clock and fires
+    /// [`Machine::deliver_timer`] once per interval. Set by
+    /// `glk_request_timer_events`.
+    pub fn glk_timer_interval(&self) -> Option<u32> {
+        self.timer_interval_ms
+    }
+
+    /// Deliver a Glk `Evtype_Timer` event (a fired timer tick). Mirrors
+    /// [`Machine::deliver_sound_notify`] — written directly into a suspended
+    /// `glk_select` (without consuming the window's input request, so the game
+    /// handles it and re-suspends), or queued for the next select when the VM is
+    /// not currently blocked. The event is `{ type: Timer, win: 0, val1: 0,
+    /// val2: 0 }` (Glk spec §4.4).
+    pub fn deliver_timer(&mut self) {
+        let ev = GlkEvent { etype: glk::evtype::TIMER, win: 0, val1: 0, val2: 0 };
+        if let Some(pi) = self.pending_input.take() {
+            if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else {
+            self.glk.push_event(ev);
+        }
+    }
+
     /// Recompute the window layout from the backend's (freshly updated) screen
     /// size and notify a suspended game via an Arrange event. Call after the
     /// host reports a new display size: the relayout resizes graphics canvases
@@ -3300,7 +3330,7 @@ impl Machine {
     /// Unicode are supported; graphics is supported conditionally (per
     /// `graphics_enabled`, see the selector 6/7/14 arms below); sound is
     /// supported conditionally (per `sound_enabled`, see the selector
-    /// 8/9/10 arms below); input/timer are not yet (0).
+    /// 8/9/10 arms below); timer is supported; mouse input is not (0).
     fn glk_gestalt(&self, sel: u32, val: u32) -> u32 {
         match sel {
             0 => Self::GLK_VERSION, // gestalt_Version
@@ -3310,14 +3340,14 @@ impl Machine {
             15 => 1,                // gestalt_Unicode
             17 => 1,                // gestalt_LineTerminators → set_terminators supported
             18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
+            5 => 1,                 // gestalt_Timer → supported
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
             7 => (self.graphics_enabled && (val == 5 || val == 3)) as u32, // gestalt_DrawImage(wintype): Graphics + TextBuffer (inline images)
             14 => self.graphics_enabled as u32,               // gestalt_GraphicsTransparency
             8 => self.sound_enabled as u32,  // gestalt_Sound
             9 => self.sound_enabled as u32,  // gestalt_SoundVolume
             10 => self.sound_enabled as u32, // gestalt_SoundNotify
-            // MouseInput(4)/Timer(5)/Hyperlinks(11)/echo and the rest
-            // are not supported.
+            // MouseInput(4)/Hyperlinks(11)/echo and the rest are not supported.
             _ => 0,
         }
     }
@@ -6191,6 +6221,68 @@ mod tests {
     }
 
     #[test]
+    fn glk_timer_interval_set_and_cancel() {
+        use asm::Op::{C16, Zero};
+        // request_timer_events(100) arms the interval; the host reads it back.
+        let mut body = glk_call(0xD6, &[C16(100)], Zero);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        assert_eq!(m.glk_timer_interval(), Some(100), "timer armed at 100ms");
+        assert!(m.diagnostics.is_empty(), "no diagnostic: {:?}", m.diagnostics);
+
+        // request_timer_events(0) cancels it.
+        let mut body = glk_call(0xD6, &[C16(100)], Zero);
+        body.extend(glk_call(0xD6, &[asm::Op::C8(0)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit);
+        assert_eq!(m.glk_timer_interval(), None, "0ms cancels the timer");
+    }
+
+    #[test]
+    fn deliver_timer_into_suspended_select() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event then select: the select suspends on the line request;
+        // a timer tick is written into it WITHOUT consuming the line request, so
+        // the next select re-suspends on the still-pending read.
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select again → re-suspend @0x110
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "first select suspends");
+        m.deliver_timer();
+        // evtype_Timer = 1, win = 0, val1 = 0, val2 = 0.
+        assert_eq!(read_event(&m, 0x100), (1, 0, 0, 0), "timer written to the suspended select");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "line request persisted across the timer");
+    }
+
+    #[test]
+    fn deliver_timer_queues_when_not_suspended() {
+        use asm::Op::{C16, Zero};
+        // With nothing waiting, a timer tick is queued and delivered by the NEXT select.
+        let body = {
+            let mut b = glk_call(0xC0, &[C16(0x0100)], Zero); // select → drains the queued event
+            b.extend(asm::ins(0x120, &[]));
+            b
+        };
+        let mut m = machine_ram(body, 0x200);
+        m.deliver_timer(); // not suspended yet → queue
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "select consumes the queued timer and runs to quit");
+        assert_eq!(read_event(&m, 0x100), (1, 0, 0, 0), "queued timer delivered by the select");
+    }
+
+    #[test]
+    fn glk_gestalt_timer_supported() {
+        use asm::Op::{C8, Mem16};
+        let body = glk_call(0x04, &[C8(5), C8(0)], Mem16(0x0100)); // gestalt_Timer
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "gestalt_Timer supported");
+    }
+
+    #[test]
     fn abort_with_fault_halts_and_records_a_recoverable_fault() {
         // The host watchdog calls this to end a runaway turn. It must halt the VM
         // (next step → Quit) and record a fault trace + diagnostic, exactly like a
@@ -6245,7 +6337,7 @@ mod tests {
         let m = run_with_ram(body, 0x200, |_| {});
         assert_eq!(m.mem.read32(0x100).unwrap(), 1, "CharInput supported");
         assert_eq!(m.mem.read32(0x104).unwrap(), 1, "LineInput supported");
-        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "Timer not supported");
+        assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Timer supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "MouseInput not supported");
     }
 
@@ -6321,19 +6413,13 @@ mod tests {
     }
 
     #[test]
-    fn glk_timer_and_mouse_are_diagnosed_noops() {
-        use asm::Op::{C16, C8, Zero};
-        let mut body = glk_call(0xD6, &[C16(100)], Zero); // request_timer_events(100)
-        body.extend(glk_call(0xD4, &[C8(1)], Zero)); // request_mouse_event(1)
+    fn glk_mouse_is_a_diagnosed_noop() {
+        use asm::Op::{C8, Zero};
+        let mut body = glk_call(0xD4, &[C8(1)], Zero); // request_mouse_event(1)
         body.extend(glk_call(0xD5, &[C8(1)], Zero)); // cancel_mouse_event(1)
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert!(m.halted);
-        assert!(
-            m.diagnostics.iter().any(|d| d.contains("timer")),
-            "timer request diagnosed: {:?}",
-            m.diagnostics
-        );
         assert!(m.diagnostics.iter().any(|d| d.contains("mouse")), "mouse diagnosed");
     }
 
@@ -6699,7 +6785,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "LineInput supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "CharOutput = ExactPrint");
         assert_eq!(m.mem.read32(0x110).unwrap(), 0, "MouseInput not supported");
-        assert_eq!(m.mem.read32(0x114).unwrap(), 0, "Timer not supported");
+        assert_eq!(m.mem.read32(0x114).unwrap(), 1, "Timer supported");
         assert_eq!(m.mem.read32(0x118).unwrap(), 0, "Graphics not supported");
         assert_eq!(m.mem.read32(0x11C).unwrap(), 0, "DrawImage not supported");
         assert_eq!(m.mem.read32(0x120).unwrap(), 0, "Sound not supported");

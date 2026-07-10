@@ -314,6 +314,12 @@ fn zvm_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GameSession> {
     engine.as_any_mut().downcast_mut::<GameSession>()
 }
 
+/// Non-panicking downcast to the Glulx session: `Some` for a Glulx game, `None`
+/// for Z-code. Used to read the armed Glk timer interval.
+fn glulx_session_opt(engine: &dyn Engine) -> Option<&GlulxSession> {
+    engine.as_any().downcast_ref::<GlulxSession>()
+}
+
 /// Mutable non-panicking downcast to the Glulx session: `Some` for a Glulx
 /// game, `None` for Z-code. Used to deliver Glk sound-notify events.
 fn glulx_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GlulxSession> {
@@ -2104,6 +2110,20 @@ fn main() {
             std::time::Instant::now(),
         );
 
+        // Re-arm the Glulx Glk timer-events clock (glk_request_timer_events) — the
+        // Glulx analogue of `input_deadline`, and independent of it. Armed only
+        // when a Glulx game has requested a timer interval and no overlay covers
+        // the pane; uses the same arm-once semantics (`next_input_deadline`) so the
+        // deadline holds steady until it fires (the fire path below re-arms fresh).
+        let glk_timer_interval = glulx_session_opt(&*session).and_then(|s| s.timer_interval());
+        let should_arm_glk_timer = !state.any_overlay_open() && glk_timer_interval.is_some();
+        state.glulx_timer_next_fire = next_input_deadline(
+            state.glulx_timer_next_fire,
+            should_arm_glk_timer,
+            glk_timer_interval.unwrap_or(Duration::ZERO),
+            std::time::Instant::now(),
+        );
+
         // Expire a finished sound pulse so the story border returns to normal.
         if let Some(p) = &state.sound_pulse {
             if p.started.elapsed().as_millis() as u64 >= SOUND_PULSE_MS {
@@ -2151,8 +2171,15 @@ fn main() {
         // time to fire the interrupt — the normal cadence stays the ceiling, so
         // this is a no-op when no timer is running (regression guard).
         let sound_active = !state.sound_routines.is_empty() || !state.glulx_sound_notify.is_empty();
-        let base_poll_ms = if state.has_active_animation() || sound_active { TIDY_POLL_MS } else { 50 };
-        let poll_ms = match state.input_deadline {
+        let timer_active = state.glulx_timer_next_fire.is_some();
+        let base_poll_ms = if state.has_active_animation() || sound_active || timer_active { TIDY_POLL_MS } else { 50 };
+        // Clamp to whichever clock is due first: the Z-machine timed-input deadline
+        // or the Glulx Glk-timer deadline (either may be `None`).
+        let next_deadline = [state.input_deadline, state.glulx_timer_next_fire]
+            .into_iter()
+            .flatten()
+            .min();
+        let poll_ms = match next_deadline {
             Some(dl) => {
                 let remaining = dl.saturating_duration_since(std::time::Instant::now()).as_millis() as u64;
                 remaining.min(base_poll_ms).max(1)
@@ -2184,6 +2211,23 @@ fn main() {
                         // now + interval (otherwise the elapsed deadline would refire
                         // immediately every iteration).
                         state.input_deadline = None;
+                        if apply_game_driven_result(
+                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                        ) {
+                            break;
+                        }
+                    }
+                }
+            }
+            // Glulx Glk timer tick: the interval elapsed with no key pressed.
+            // Deliver an evtype_Timer to the game and apply its output; disarm so
+            // the next armed iteration re-arms fresh at now + interval (mirroring
+            // the input-deadline refire guard above).
+            if let Some(dl) = state.glulx_timer_next_fire {
+                if std::time::Instant::now() >= dl {
+                    state.glulx_timer_next_fire = None;
+                    if let Some(gs) = glulx_session_opt_mut(&mut *session) {
+                        let result = gs.deliver_timer();
                         if apply_game_driven_result(
                             &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
                         ) {
@@ -5220,6 +5264,30 @@ mod tests {
         // Re-arm after a fire (deadline cleared to None): fresh at the new `now`.
         let t_fire = t0 + Duration::from_millis(3000);
         assert_eq!(super::next_input_deadline(None, true, iv, t_fire), Some(t_fire + iv));
+    }
+
+    #[test]
+    fn glulx_glk_timer_arms_once_and_refires_each_interval() {
+        use std::time::{Duration, Instant};
+        // The Glulx Glk timer-events clock reuses `next_input_deadline`, so it has
+        // the same arm-once/hold/re-arm-after-fire behavior as timed input. A 100ms
+        // timer arms once and holds until it elapses, then re-arms fresh after the
+        // fire path clears `glulx_timer_next_fire` to None.
+        let t0 = Instant::now();
+        let iv = Duration::from_millis(100);
+
+        let d1 = super::next_input_deadline(None, true, iv, t0);
+        assert_eq!(d1, Some(t0 + iv), "armed once at t0 + interval");
+        let d2 = super::next_input_deadline(d1, true, iv, t0 + Duration::from_millis(30));
+        assert_eq!(d2, d1, "holds steady across iterations until it fires");
+
+        // Fire path sets glulx_timer_next_fire = None; next armed iteration re-arms
+        // fresh at the fire instant + interval (periodic ticking).
+        let t_fire = t0 + iv;
+        assert_eq!(super::next_input_deadline(None, true, iv, t_fire), Some(t_fire + iv));
+
+        // Timer canceled (interval None → should_arm false): disarm.
+        assert_eq!(super::next_input_deadline(d2, false, iv, t0 + Duration::from_millis(30)), None);
     }
 
     // ── SQ-0227 Task 3: restore dispatch on file extension ──────────────────────

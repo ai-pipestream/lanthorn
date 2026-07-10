@@ -313,6 +313,29 @@ impl GlulxSession {
         }
     }
 
+    /// The Glk timer interval the game has requested (via
+    /// `glk_request_timer_events`), or `None` when timer events are off. The host
+    /// reads this to arm its own clock and calls [`Self::deliver_timer`] once per
+    /// interval.
+    pub fn timer_interval(&self) -> Option<std::time::Duration> {
+        self.machine
+            .glk_timer_interval()
+            .map(|ms| std::time::Duration::from_millis(ms as u64))
+    }
+
+    /// A timer interval elapsed: deliver a Glk `Evtype_Timer` event to the game
+    /// and drive it to its next input request, returning the resulting turn. A
+    /// no-op turn once the game has quit.
+    pub fn deliver_timer(&mut self) -> TurnResult {
+        if !self.quit {
+            self.machine.deliver_timer();
+            let (pending, quit) = drive_settled(&mut self.machine);
+            self.pending = pending;
+            self.quit = quit;
+        }
+        self.finish_turn()
+    }
+
     /// A sound finished: deliver a Glk `Evtype_SoundNotify` to the game and drive
     /// it to its next input request, returning the resulting turn (which carries
     /// any sound ops the game buffered while handling the notify — sound
