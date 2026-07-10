@@ -682,6 +682,16 @@ pub(crate) fn draw_str_runs(
                     s = s.bg(crate::render::resolve_zcolour(bg, scheme));
                 }
             }
+            // Glk hyperlink affordance: layer the themeable `hyperlink` colour
+            // and an underline ON TOP of the game's own styling. The underline
+            // is applied here (not via `bits`) because `apply_text_style` has no
+            // underline bit. Colour comes from the scheme when available.
+            if run.map(|r| r.link).unwrap_or(0) != 0 {
+                if let Some(scheme) = colours {
+                    s = s.patch(scheme.hyperlink);
+                }
+                s = s.add_modifier(ratatui::style::Modifier::UNDERLINED);
+            }
             s
         };
         crate::render::draw_char_clipped(buf, col, y, ch, style, area);
@@ -801,9 +811,9 @@ pub fn render_transcript(
     area: Rect,
     buf: &mut Buffer,
     game_input: Option<Style>,
-) -> (bool, u16) {
+) -> (bool, u16, Vec<((u16, u16), u32)>) {
     if area.height == 0 || area.width == 0 {
-        return (false, 0);
+        return (false, 0, Vec::new());
     }
 
     let normal_style = state.colors.transcript;
@@ -842,7 +852,7 @@ pub fn render_transcript(
     }
 
     if area.height < status_rows + 1 {
-        return (false, 0);
+        return (false, 0, Vec::new());
     }
 
     // ── Bottom row(s): input line ─────────────────────────────────────────────
@@ -862,7 +872,7 @@ pub fn render_transcript(
     let middle_top = area.y + status_rows;
     let middle_bottom = input_region_top;
     if middle_top >= middle_bottom {
-        return (false, 0);
+        return (false, 0, Vec::new());
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
     render_middle(state, buf, middle_area, normal_style)
@@ -996,17 +1006,18 @@ fn render_input_content(
 }
 
 /// Render the middle section: suggestion line (or search hint), transcript body.
-/// Returns `(scrollbar_drawn, max_scroll)` — whether a scrollbar gutter was
-/// drawn in the rightmost column, and the largest meaningful `transcript_scroll`
-/// value (total wrapped rows minus the viewport) so the caller can clamp it.
+/// Returns `(scrollbar_drawn, max_scroll, links)` — whether a scrollbar gutter
+/// was drawn in the rightmost column, the largest meaningful `transcript_scroll`
+/// value (total wrapped rows minus the viewport) so the caller can clamp it, and
+/// a per-frame map from rendered cell `(col, row)` → Glk hyperlink value.
 fn render_middle(
     state: &AppState,
     buf: &mut Buffer,
     area: Rect,
     _normal_style: Style,
-) -> (bool, u16) {
+) -> (bool, u16, Vec<((u16, u16), u32)>) {
     if area.height == 0 || area.width == 0 {
-        return (false, 0);
+        return (false, 0, Vec::new());
     }
     let w = area.width as usize;
 
@@ -1064,7 +1075,7 @@ fn render_middle(
     // ── Transcript body ───────────────────────────────────────────────────────
     if area.height < 2 {
         // Not enough room for transcript when there's a suggestion row.
-        return (false, 0);
+        return (false, 0, Vec::new());
     }
 
     let transcript_top = area.y;
@@ -1077,7 +1088,7 @@ fn render_middle(
     };
 
     if transcript_top >= transcript_bottom {
-        return (false, 0);
+        return (false, 0, Vec::new());
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
@@ -1165,6 +1176,12 @@ fn render_middle(
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
 
+    // Per-frame map from rendered cell (col, row) → Glk hyperlink value, so a
+    // mouse click can be hit-tested to its link (consumed downstream in the
+    // click gate). Cells are in the story-pane frame, which equals the Glk
+    // screen frame.
+    let mut links: Vec<((u16, u16), u32)> = Vec::new();
+
     for (i, wr) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
         if row_y >= transcript_bottom {
@@ -1190,6 +1207,23 @@ fn render_middle(
         };
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
         draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, state.config.honor_game_colours.then_some(&state.colors));
+
+        // Record cell→link for every linked span on this row. `run.start/end`
+        // are char offsets within `wr.text` (re-based by `rebase_runs`), and
+        // `draw_str_runs` draws char index `j` at column `text_x + j`, so the
+        // rendered cell for a char is exactly that column. Clip to the body.
+        for run in &wr.runs {
+            if run.link == 0 {
+                continue;
+            }
+            for j in run.start..run.end {
+                let col = text_x.saturating_add(j as u16);
+                if col >= body_area.right() {
+                    break;
+                }
+                links.push(((col, row_y), run.link));
+            }
+        }
     }
 
     // ── Scrollbar (only when the content overflows the viewport) ──────────────
@@ -1214,7 +1248,7 @@ fn render_middle(
         );
     }
     let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
-    (drew_scrollbar, max_scroll)
+    (drew_scrollbar, max_scroll, links)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1499,6 +1533,57 @@ mod tests {
         assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(3, 0)].modifier.contains(Modifier::BOLD));
         assert!(!buf[(4, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn draw_str_runs_hyperlink_underlines_and_colors() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Modifier, Style}};
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.hyperlink = Style::new().fg(Color::Magenta);
+        // chars 2..5 carry link 7 (bold too, to prove the link layers on top).
+        let runs = vec![StyleRun { start: 2, end: 5, bits: 0x02, fg: 0, bg: 0, link: 7 }];
+        draw_str_runs(&mut buf, 0, 0, "abcdefgh", Style::default(), &runs, None, area, Some(&cs));
+        for x in 2..5u16 {
+            assert!(buf[(x, 0)].modifier.contains(Modifier::UNDERLINED), "linked cell {x} underlined");
+            assert_eq!(buf[(x, 0)].fg, Color::Magenta, "linked cell {x} uses hyperlink fg");
+            assert!(buf[(x, 0)].modifier.contains(Modifier::BOLD), "linked cell {x} keeps its bold");
+        }
+        // Unlinked neighbours: no underline, no hyperlink colour.
+        assert!(!buf[(1, 0)].modifier.contains(Modifier::UNDERLINED));
+        assert_ne!(buf[(1, 0)].fg, Color::Magenta);
+        assert!(!buf[(5, 0)].modifier.contains(Modifier::UNDERLINED));
+        assert_ne!(buf[(5, 0)].fg, Color::Magenta);
+    }
+
+    #[test]
+    fn render_transcript_builds_cell_link_map() {
+        use zvm::screen::ZColour;
+        use ratatui::style::Modifier;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        // A linked line ("northgate" → link 42) followed by a plain line.
+        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42)]);
+        state.push_transcript("plain text");
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        let (_sb, _ms, links) = render_transcript(
+            &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
+        );
+
+        // Exactly the 9 linked chars map to 42; the plain line contributes none.
+        assert_eq!(links.len(), 9, "one entry per linked char, none from plain text");
+        assert!(links.iter().all(|(_, v)| *v == 42), "all entries carry the link value");
+        // Every recorded cell is where a linked glyph actually rendered — proves
+        // the map coordinates line up with the rendered cells.
+        for &((cx, cy), _) in &links {
+            let cell = buf.cell((cx, cy)).unwrap();
+            assert_ne!(cell.symbol(), " ", "linked cell holds a glyph");
+            assert!(cell.modifier.contains(Modifier::UNDERLINED), "linked cell underlined");
+        }
     }
 
     #[test]

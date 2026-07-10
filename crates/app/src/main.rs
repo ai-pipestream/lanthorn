@@ -315,6 +315,12 @@ struct PaneRects {
     /// Text under the active story-pane selection, captured from THIS frame's
     /// buffer (clamped to story columns). Read on mouse-release to copy.
     pub selection_text: Option<String>,
+    /// Per-frame map from rendered story-pane cell `(col, row)` → Glk hyperlink
+    /// value. Built during transcript render; hit-tested on click (Task 3).
+    /// Empty when nothing on screen is linked. Story-pane cells share the Glk
+    /// screen frame, so these coords are directly click-comparable.
+    #[allow(dead_code)]
+    pub transcript_links: Vec<((u16, u16), u32)>,
     /// Largest meaningful `transcript_scroll` this frame (total wrapped rows −
     /// viewport). The loop clamps `state.transcript_scroll` to this so the view
     /// can't over-scroll past the top.
@@ -468,6 +474,7 @@ fn draw_frame(
     let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
+    let mut transcript_links_out: Vec<((u16, u16), u32)> = Vec::new();
 
     terminal.draw(|f| {
         let full = f.area();
@@ -548,6 +555,7 @@ fn draw_frame(
                 story_scrollbar = m.scrollbar;
                 transcript_max_scroll = m.max_scroll;
                 transcript_viewport_rows = m.viewport_rows;
+                transcript_links_out = m.links;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -617,6 +625,7 @@ fn draw_frame(
                 story_scrollbar = m.scrollbar;
                 transcript_max_scroll = m.max_scroll;
                 transcript_viewport_rows = m.viewport_rows;
+                transcript_links_out = m.links;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
                     if story_fp.header_bordered {
@@ -939,7 +948,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -2091,7 +2100,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, selection_text: None, transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, selection_text: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;

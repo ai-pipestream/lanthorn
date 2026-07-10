@@ -186,6 +186,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "scrollbar",
     "tidy_progress",
     "meta_marker",
+    "hyperlink",
     "helpbar",
     "map_border",
     "story_border",
@@ -235,7 +236,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
         "transcript", "transcript:input", "transcript:meta", "transcript:warning",
         "transcript:crash", "transcript:location", "transcript:system",
         "suggestion", "suggestion_line", "input:text", "input:prompt",
-        "warning_marker", "meta_marker", "scrollbar",
+        "warning_marker", "meta_marker", "scrollbar", "hyperlink",
     ]),
     ("Chrome", &[
         "statusbar", "helpbar", "story_border", "story_title",
@@ -290,6 +291,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "scrollbar"            => cs.scrollbar,
         "tidy_progress"        => cs.tidy_progress,
         "meta_marker"          => cs.meta_marker,
+        "hyperlink"            => cs.hyperlink,
         "helpbar"              => cs.help_bar,
         "story_title"          => cs.story_title,
         "inventory:dock"       => cs.inventory_dock,
@@ -447,6 +449,7 @@ pub fn apply_color_decls(
             "scrollbar"          => cs.scrollbar = cs.scrollbar.patch(style),
             "tidy_progress"      => cs.tidy_progress = cs.tidy_progress.patch(style),
             "meta_marker"        => cs.meta_marker = cs.meta_marker.patch(style),
+            "hyperlink"          => cs.hyperlink = cs.hyperlink.patch(style),
             "helpbar"            => cs.help_bar = cs.help_bar.patch(style),
             "map_border" => {
                 cs.map_border = cs.map_border.patch(style);
@@ -1320,6 +1323,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("scrollbar".to_string(),         style_to_decl(&cs.scrollbar));
     doc.colors.selectors.insert("tidy_progress".to_string(),     style_to_decl(&cs.tidy_progress));
     doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
+    doc.colors.selectors.insert("hyperlink".to_string(),         style_to_decl(&cs.hyperlink));
     doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
     // New pane border/title/tab/header/input selectors.
     // Helper: set style_<side> on a Decl for any side that differs from `base`.
@@ -1635,6 +1639,27 @@ align = "right"
         let doc = parse_style_toml(&text).unwrap();
         let (cs2, _set2, _w) = resolve(&doc, &dir);
         assert_eq!(cs2.tidy_progress.fg, Some(Color::Magenta), "tidy_progress color round-trips");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_style_full_round_trips_hyperlink_selector() {
+        use ratatui::style::Color;
+        let dir = std::env::temp_dir().join(format!("babelmap-hl-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hl.toml");
+
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.hyperlink = Style::new().fg(Color::Magenta);
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, _w) = resolve(&doc, &dir);
+        assert_eq!(cs2.hyperlink.fg, Some(Color::Magenta), "hyperlink color round-trips");
+        assert!(SELECTOR_FIELDS.contains(&"hyperlink"));
+        assert!(SELECTOR_GROUPS.iter().any(|(_, s)| s.contains(&"hyperlink")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

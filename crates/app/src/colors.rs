@@ -241,6 +241,8 @@ pub struct ColorScheme {
     pub tidy_progress: Style,
     /// Gutter marker drawn beside META (app/slash) transcript output.
     pub meta_marker: Style,
+    /// Glk hyperlink text (fg colour; an underline is layered on at render time).
+    pub hyperlink: Style,
     /// Focused-pane border.
     pub focused_border: Style,
     /// Help bar (bottom row).
@@ -392,6 +394,7 @@ impl ColorScheme {
             scrollbar: Style::new().fg(Color::DarkGray),
             tidy_progress: Style::new().fg(Color::Cyan),
             meta_marker: Style::new().fg(Color::DarkGray),
+            hyperlink: Style::new().fg(Color::Cyan),
             focused_border: Style::new()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -584,6 +587,7 @@ impl ColorScheme {
             scrollbar: Style::new().fg(suggestion_fg),
             tidy_progress: Style::new().fg(scheme.palette[6]),
             meta_marker: Style::new().fg(suggestion_fg),
+            hyperlink: Style::new().fg(scheme.palette[6]),
             focused_border: Style::new()
                 .fg(focused_border_fg)
                 .add_modifier(Modifier::BOLD),
