@@ -5,8 +5,9 @@
 // Z-chars are packed three per 16-bit word, big-endian, with the terminator
 // high bit (0x8000) set on the final word only.
 //
-// Scope: letters (A0) + A2 characters (shift-5 then A2 position).
-// 10-bit ZSCII escapes are not implemented (real dictionary words are letters).
+// Scope: letters (A0) + A2 characters (shift-5 then A2 position), plus a
+// 10-bit ZSCII escape (shift-5, Z-char 6, hi/lo halves) for characters outside
+// A0/A2 (e.g. accented letters), mirroring the decode side.
 
 use super::{A0, A2};
 use crate::memory::Memory;
@@ -88,7 +89,18 @@ fn encode_word_impl(text: &str, version: u8, custom: Option<&[u8; 78]>) -> Vec<u
             }
         }
 
-        // Character not encodable — skip (matches real-world dictionary scope).
+        // Not representable in A0/A2 — emit the 10-bit ZSCII escape (shift-5,
+        // Z-char 6, then the high/low 5-bit halves of the ZSCII code), mirroring
+        // the decode side (decode.rs ~88-95). Only emit if all 4 Z-chars fit in
+        // the remaining budget; otherwise stop (word truncates, no partial escape).
+        if zchars.len() + 4 > zchar_limit {
+            break 'outer;
+        }
+        let z = crate::text::decode::char_to_zscii_default(ch);
+        zchars.push(5); // shift to A2
+        zchars.push(6); // A2 Z-char 6 = 10-bit ZSCII escape
+        zchars.push((z >> 5) & 0x1F); // high 5 bits
+        zchars.push(z & 0x1F); // low 5 bits
     }
 
     // Pad to zchar_limit with Z-char 5.
@@ -217,6 +229,62 @@ mod tests {
         let m = Memory::new(sample_story(5)).unwrap();
         assert_eq!(m.read_word(0x34), 0, "fixture has no custom alphabet table");
         assert_eq!(encode_word_mem("north", &m), encode_word("north", 5));
+    }
+
+    #[test]
+    fn encodes_accented_char_as_10bit_escape() {
+        // 'é' is not in A0/A2, so it must be emitted as a 10-bit ZSCII escape
+        // (shift-5, Z-char 6, hi/lo halves) and round-trip back through decode.
+        let enc = encode_word("é", 3);
+        assert_eq!(enc.len(), 4);
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        m.write_word(0x100, ((enc[0] as u16) << 8) | enc[1] as u16);
+        m.write_word(0x102, ((enc[2] as u16) << 8) | enc[3] as u16);
+        let (decoded, _) = decode_string(&m, 0x100);
+        assert_eq!(decoded, "é", "decoded: {:?}", decoded);
+    }
+
+    #[test]
+    fn encodes_umlaut_round_trips() {
+        // Same escape path for 'ü'.
+        let enc = encode_word("ü", 3);
+        assert_eq!(enc.len(), 4);
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        m.write_word(0x100, ((enc[0] as u16) << 8) | enc[1] as u16);
+        m.write_word(0x102, ((enc[2] as u16) << 8) | enc[3] as u16);
+        let (decoded, _) = decode_string(&m, 0x100);
+        assert_eq!(decoded, "ü", "decoded: {:?}", decoded);
+    }
+
+    #[test]
+    fn ascii_word_encoding_unchanged() {
+        // Plain ASCII words never hit the escape path — encoding is unaffected
+        // by this change; round-trips exactly as before.
+        let enc = encode_word("sword", 3);
+        assert_eq!(enc.len(), 4);
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        m.write_word(0x100, ((enc[0] as u16) << 8) | enc[1] as u16);
+        m.write_word(0x102, ((enc[2] as u16) << 8) | enc[3] as u16);
+        let (decoded, _) = decode_string(&m, 0x100);
+        assert_eq!(decoded, "sword");
+    }
+
+    #[test]
+    fn escape_truncates_when_budget_exhausted() {
+        // v3 zchar_limit is 6. "aaa" consumes 3 Z-chars, leaving only 3 — not
+        // enough for the 4-Z-char escape needed for 'é'. The word must
+        // truncate cleanly (no partial escape, no panic), decoding to "aaa".
+        let enc = encode_word("aaaé", 3);
+        assert_eq!(enc.len(), 4);
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        m.write_word(0x100, ((enc[0] as u16) << 8) | enc[1] as u16);
+        m.write_word(0x102, ((enc[2] as u16) << 8) | enc[3] as u16);
+        let (decoded, _) = decode_string(&m, 0x100);
+        assert_eq!(decoded, "aaa", "decoded: {:?}", decoded);
     }
 
     #[test]
