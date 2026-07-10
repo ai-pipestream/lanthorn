@@ -465,16 +465,21 @@ impl Machine {
                 objects::insert_obj(&mut self.mem, a, b);
                 StepResult::Continue
             }
-            // 0x0F loadw — load word from array: result = mem[a + 2*b]
+            // 0x0F loadw — load word from array: result = mem[a + 2*b].
+            // The address is computed in 16-bit space and wraps at 0xFFFF (as the
+            // reference interpreter does), so a negative word-index (e.g. b=0xFFFF
+            // meaning -1) reads the word *before* the array rather than a huge OOB
+            // address. Regression-guarded by praxix's "Array loads and stores"
+            // group (crates/zvm/tests/regression.rs).
             0x0F => {
-                let addr = (a as u32).wrapping_add(2u32.wrapping_mul(b as u32));
+                let addr = a.wrapping_add(2u16.wrapping_mul(b)) as u32;
                 let result = self.mem.read_word(addr);
                 self.do_store(store, result);
                 StepResult::Continue
             }
-            // 0x10 loadb — load byte from array: result = mem[a + b]
+            // 0x10 loadb — load byte from array: result = mem[a + b] (16-bit wrap).
             0x10 => {
-                let addr = (a as u32).wrapping_add(b as u32);
+                let addr = a.wrapping_add(b) as u32;
                 let result = self.mem.read_byte(addr) as u16;
                 self.do_store(store, result);
                 StepResult::Continue
@@ -860,20 +865,22 @@ impl Machine {
                 call_routine(&mut self.state, &mut self.mem, packed, args, store);
                 StepResult::Continue
             }
-            // 0x01 storew — store word: mem[ops[0] + 2*ops[1]] = ops[2]
+            // 0x01 storew — store word: mem[ops[0] + 2*ops[1]] = ops[2].
+            // Address computed in 16-bit space (wraps at 0xFFFF), matching the
+            // reference interpreter, so negative indices address within memory.
             0x01 => {
-                let array = ops.first().copied().unwrap_or(0) as u32;
-                let index = ops.get(1).copied().unwrap_or(0) as u32;
+                let array = ops.first().copied().unwrap_or(0);
+                let index = ops.get(1).copied().unwrap_or(0);
                 let val   = ops.get(2).copied().unwrap_or(0);
-                self.mem.write_word(array.wrapping_add(2u32.wrapping_mul(index)), val);
+                self.mem.write_word(array.wrapping_add(2u16.wrapping_mul(index)) as u32, val);
                 StepResult::Continue
             }
-            // 0x02 storeb — store byte: mem[ops[0] + ops[1]] = ops[2] & 0xFF
+            // 0x02 storeb — store byte: mem[ops[0] + ops[1]] = ops[2] & 0xFF (16-bit wrap)
             0x02 => {
-                let array = ops.first().copied().unwrap_or(0) as u32;
-                let index = ops.get(1).copied().unwrap_or(0) as u32;
+                let array = ops.first().copied().unwrap_or(0);
+                let index = ops.get(1).copied().unwrap_or(0);
                 let val   = (ops.get(2).copied().unwrap_or(0) & 0xFF) as u8;
-                self.mem.write_byte(array.wrapping_add(index), val);
+                self.mem.write_byte(array.wrapping_add(index) as u32, val);
                 StepResult::Continue
             }
             // 0x03 put_prop — set property ops[1] of object ops[0] to value ops[2]

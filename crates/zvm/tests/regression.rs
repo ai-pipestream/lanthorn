@@ -12,19 +12,33 @@ use zvm::memory::Memory;
 /// CZECH/Praxix auto-run with no input, but we handle `NeedLine`/`NeedChar`
 /// defensively (supply empty input) so the runner can't hang.
 fn run_to_quit(story: Vec<u8>) -> String {
+    run_with_input(story, &[])
+}
+
+/// Like `run_to_quit`, but feeds `inputs` in sequence on successive `NeedLine`
+/// prompts (empty once exhausted). CZECH auto-runs with no input; Praxix needs
+/// an explicit command ("all") before it runs anything.
+fn run_with_input(story: Vec<u8>, inputs: &[&str]) -> String {
     let mem = Memory::new(story).expect("Memory::new failed");
     let mut machine = Machine::new(mem);
     machine.init_caps();
 
-    const MAX_STEPS: u64 = 10_000_000;
+    let mut next = inputs.iter();
+    const MAX_STEPS: u64 = 20_000_000;
+    let mut fault: Option<String> = None;
     for _ in 0..MAX_STEPS {
         match machine.step() {
             StepResult::Quit => break,
             StepResult::Continue => {}
             StepResult::Restart => break, // shouldn't happen in CZECH
-            StepResult::Fault => break,   // shouldn't happen in CZECH
+            StepResult::Fault => {
+                // Record the fault so callers can assert the machine didn't halt.
+                let t = machine.take_fault_trace();
+                fault = Some(t.map(|t| t.fault).unwrap_or_else(|| "fault".into()));
+                break;
+            }
             StepResult::NeedLine { .. } => {
-                machine.supply_line("", 13);
+                machine.supply_line(next.next().copied().unwrap_or(""), 13);
             }
             StepResult::NeedChar => {
                 machine.supply_char(b'\n');
@@ -39,10 +53,14 @@ fn run_to_quit(story: Vec<u8>) -> String {
     }
 
     // Extract captured output from the buffer sink.
-    machine
+    let mut out = machine
         .buffer_output()
         .map(|b| b.buf.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(f) = fault {
+        out.push_str(&format!("\n[MACHINE-FAULT: {f}]\n"));
+    }
+    out
 }
 
 #[test]
@@ -116,10 +134,49 @@ fn praxix_reports_no_failures() {
     let Some(story) = zvm::fixtures::load("praxix.z5") else {
         return; // skip if absent
     };
-    let out = run_to_quit(story);
+    // Praxix does NOT auto-run: it waits for a command and runs one group per
+    // command. Drive the core opcode/undo/table groups, then quit.
+    //
+    // The following groups are intentionally NOT asserted here (each is a
+    // separately-tracked gap that would make this gate red):
+    //   - "streamtrip"/"streamop": output stream 3 stores high chars as
+    //     multi-byte UTF-8 instead of single-byte ZSCII (SQ-0240).
+    //   - "tables": @scan_table branch is wrong ("Bad @scan_table branch", SQ-0241).
+    //   - "spec11"/"spec12": exercise @set_true_colour recommended colours,
+    //     which we don't implement (true-colour gap, SQ-0242).
+    // Add them back to this list as those quests land.
+    let groups = [
+        "operand", "arith", "comarith", "bitwise", "shift", "inc", "incchk",
+        "array", "undo", "multiundo", "indirect", "throwcatch",
+    ];
+    let mut inputs = groups.to_vec();
+    inputs.push("quit");
+    let out = run_with_input(story, &inputs);
     println!("Praxix output:\n{out}");
+
+    // 1. The machine must not have halted with a fault (guards the loadw/storew
+    //    16-bit array-address wrapping — a regression there faults the "array"
+    //    group at a huge out-of-bounds address).
     assert!(
-        !out.to_lowercase().contains("fail"),
-        "Praxix reported failures:\n{out}"
+        !out.contains("[MACHINE-FAULT"),
+        "Praxix halted the interpreter with a fault:\n{out}"
+    );
+    // 2. Every driven group must run and report success — no failures/mismatches.
+    for group_header in ["Basic operand values", "Array loads and stores",
+                         "Undo", "Indirect opcodes"] {
+        assert!(
+            out.contains(group_header),
+            "Praxix did not run the {group_header:?} group:\n{out}"
+        );
+    }
+    let passed = out.lines().filter(|l| l.trim() == "Passed.").count();
+    assert!(
+        passed >= groups.len(),
+        "Praxix: only {passed} groups reported Passed (expected >= {}):\n{out}",
+        groups.len()
+    );
+    assert!(
+        !out.to_lowercase().contains("fail") && !out.to_lowercase().contains("mismatch"),
+        "Praxix reported a failure/mismatch in a core group:\n{out}"
     );
 }
