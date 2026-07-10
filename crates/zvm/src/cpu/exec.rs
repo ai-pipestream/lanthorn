@@ -1137,9 +1137,13 @@ impl Machine {
                 let mut found: u16 = 0;
                 for i in 0..len as u32 {
                     let addr = table + i * step;
+                    // Compare against the FULL 16-bit search value in both modes: a
+                    // byte read is already 0..=255, so a byte-mode search for a value
+                    // > 255 correctly never matches (matching the reference terp).
+                    // Masking x to its low byte here spuriously matched (praxix
+                    // "Bad @scan_table branch").
                     let val = if is_word { self.mem.read_word(addr) } else { self.mem.read_byte(addr) as u16 };
-                    let target = if is_word { x } else { x & 0xFF };
-                    if val == target {
+                    if val == x {
                         found = addr as u16;
                         break;
                     }
@@ -4949,13 +4953,28 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn scan_table_byte_form_compares_low_byte() {
+    fn scan_table_byte_form_matches_full_byte_value() {
         let mut m = build_test_machine(&[]);
         m.mem.write_byte(0x0200, 0x05);
         m.mem.write_byte(0x0201, 0x07);
-        // form=0x01 -> byte entries, step 1
+        // form=0x01 -> byte entries, step 1. Search value 7 (<= 255) matches.
         m.exec_var(0x17, &[0x0007, 0x0200, 2, 0x01], Some(16), None);
-        assert_eq!(m.global(0), 0x0201, "byte form matches low byte at the second entry");
+        assert_eq!(m.global(0), 0x0201, "byte form matches the byte value at the second entry");
+    }
+
+    #[test]
+    fn scan_table_byte_form_search_value_over_255_never_matches() {
+        // Regression (SQ-0241): a byte-mode search for a value > 255 must NOT match
+        // any byte. The old code masked x to its low byte (0x0100 -> 0x00) and
+        // spuriously matched a zero byte, storing a nonzero address and taking the
+        // branch (praxix "Bad @scan_table branch"). Since found == 0 here, the
+        // branch (cond = found != 0) is correctly NOT taken.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x0200, 0x00); // a zero byte the old low-byte mask would hit
+        m.mem.write_byte(0x0201, 0x07);
+        m.do_store(Some(16), 0xBEEF); // pre-seed to prove the opcode actively writes 0
+        m.exec_var(0x17, &[0x0100, 0x0200, 2, 0x01], Some(16), None);
+        assert_eq!(m.global(0), 0, "byte-mode search for a value > 255 never matches");
     }
 
     // -----------------------------------------------------------------------

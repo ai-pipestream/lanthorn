@@ -137,17 +137,15 @@ fn praxix_reports_no_failures() {
     // Praxix does NOT auto-run: it waits for a command and runs one group per
     // command. Drive the core opcode/undo/table groups, then quit.
     //
-    // The following groups are intentionally NOT asserted here (each is a
-    // separately-tracked gap that would make this gate red):
+    // The following groups are intentionally NOT asserted here:
     //   - "streamtrip"/"streamop": output stream 3 stores high chars as
-    //     multi-byte UTF-8 instead of single-byte ZSCII (SQ-0240).
-    //   - "tables": @scan_table branch is wrong ("Bad @scan_table branch", SQ-0241).
-    //   - "spec11"/"spec12": exercise @set_true_colour recommended colours,
-    //     which we don't implement (true-colour gap, SQ-0242).
-    // Add them back to this list as those quests land.
+    //     multi-byte UTF-8 instead of single-byte ZSCII (SQ-0240, pending).
+    //   - "spec11"/"spec12": these are VISUAL @set_true_colour swatch prints
+    //     (coloured spaces, blank in a headless text capture) — not programmatic
+    //     pass/fail. True colour IS implemented; nothing to assert here.
     let groups = [
         "operand", "arith", "comarith", "bitwise", "shift", "inc", "incchk",
-        "array", "undo", "multiundo", "indirect", "throwcatch",
+        "array", "undo", "multiundo", "indirect", "throwcatch", "tables",
     ];
     let mut inputs = groups.to_vec();
     inputs.push("quit");
@@ -175,8 +173,11 @@ fn praxix_reports_no_failures() {
         "Praxix: only {passed} groups reported Passed (expected >= {}):\n{out}",
         groups.len()
     );
+    // Praxix marks a real failure with the uppercase token "FAIL" (e.g.
+    // "should be 195 FAIL") or "Mismatch". (Its benign summary line
+    // "failures are not counted twice" must NOT trip this.)
     assert!(
-        !out.to_lowercase().contains("fail") && !out.to_lowercase().contains("mismatch"),
+        !out.contains("FAIL") && !out.contains("Mismatch"),
         "Praxix reported a failure/mismatch in a core group:\n{out}"
     );
 }
