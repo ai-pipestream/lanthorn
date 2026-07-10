@@ -652,6 +652,9 @@ struct Window {
     line_req: Option<LineReq>,
     /// A pending char-input request (None when not awaiting a key).
     char_req: Option<CharReq>,
+    /// A pending mouse-input request (`glk_request_mouse_event`). Unlike a char
+    /// request this is a bare flag: Glk mouse events carry no per-request option.
+    mouse_req: bool,
     /// The line-input terminator keycodes set for this window
     /// (`glk_set_terminators_line_event`); persists across line requests until
     /// reset. Empty = Enter-only (the default).
@@ -798,6 +801,7 @@ impl Model {
             grid: Grid::default(),
             line_req: None,
             char_req: None,
+            mouse_req: false,
             terminators: Vec::new(),
             child1: 0,
             child2: 0,
@@ -1359,6 +1363,40 @@ impl Model {
         self.win_mut(win).and_then(|w| w.char_req.take())
     }
 
+    /// Arm a mouse-input request on `win` (`glk_request_mouse_event`). A no-op
+    /// on a non-existent or pair window.
+    pub fn set_mouse_request(&mut self, win: u32) {
+        if let Some(w) = self.win_mut(win) {
+            if w.wintype != WinType::Pair {
+                w.mouse_req = true;
+            }
+        }
+    }
+    /// Take (and clear) the pending mouse request on `win`, returning whether one
+    /// was armed. Used both to gate and to consume delivery — a Glk mouse event
+    /// is one-shot, so the request clears the moment it fires.
+    pub fn take_mouse_request(&mut self, win: u32) -> bool {
+        match self.win_mut(win) {
+            Some(w) => std::mem::take(&mut w.mouse_req),
+            None => false,
+        }
+    }
+    /// Whether `win` currently has a pending mouse request.
+    pub fn mouse_requested(&self, win: u32) -> bool {
+        self.win(win).map(|w| w.mouse_req).unwrap_or(false)
+    }
+    /// Every window (lowest id first) with a pending mouse request, as
+    /// `(id, wintype, rect)`. The host reads this to decide whether a terminal
+    /// click lands inside a mouse-watching window.
+    pub fn mouse_windows(&self) -> Vec<(u32, WinType, Rect)> {
+        self.windows
+            .iter()
+            .flatten()
+            .filter(|w| w.mouse_req)
+            .map(|w| (w.id, w.wintype, w.rect))
+            .collect()
+    }
+
     /// Record the line-input terminator keys for `win`
     /// (`glk_set_terminators_line_event`). Invalid keycodes are silently dropped
     /// (see [`keycode::is_terminator`]); an empty set restores Enter-only. The
@@ -1470,6 +1508,7 @@ impl Model {
                             w(&mut out, cr.unicode as u32);
                         }
                     }
+                    w(&mut out, win.mouse_req as u32);
                 }
             }
         }
@@ -1541,8 +1580,9 @@ impl Model {
                 None
             };
             let char_req = if r.u32()? != 0 { Some(CharReq { unicode: r.u32()? != 0 }) } else { None };
+            let mouse_req = r.u32()? != 0;
             windows.push(Some(Window {
-                id, wintype, rock, parent, stream, rect, grid, line_req, char_req,
+                id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
                 terminators: Vec::new(), child1, child2, key, method, size,
             }));
         }
@@ -1583,7 +1623,7 @@ impl Model {
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
-const GLK_SNAPSHOT_VERSION: u32 = 1;
+const GLK_SNAPSHOT_VERSION: u32 = 2;
 
 /// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
 /// an error, never a panic.
@@ -1718,6 +1758,39 @@ mod layout_snap_tests {
         let bottom = leaves.iter().map(|(_, _, r)| r.top + r.height).max().unwrap();
         assert_eq!(right, 81, "no proportional split → full width used");
         assert_eq!(bottom, 41, "no proportional split → full height used");
+    }
+
+    // A live mouse request must survive a Glk-chunk save/restore, exactly like a
+    // char request.
+    #[test]
+    fn mouse_request_round_trips_through_serialize() {
+        let mut m = Model::new();
+        let grid = m.window_open(0, 0, 0, 4, 0).unwrap(); // TextGrid root
+        m.set_mouse_request(grid);
+        assert!(m.mouse_requested(grid), "armed before save");
+
+        let restored = Model::deserialize(&m.serialize()).expect("round-trip");
+        assert!(restored.mouse_requested(grid), "mouse request survived the round-trip");
+        assert_eq!(
+            restored.mouse_windows(),
+            vec![(grid, WinType::TextGrid, Rect::default())],
+            "restored model still enumerates the watching window",
+        );
+    }
+
+    // mouse_windows enumerates only windows with an armed request.
+    #[test]
+    fn mouse_windows_filters_to_armed_requests() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
+        let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
+        m.relayout(80, 40, (9, 19));
+        assert!(m.mouse_windows().is_empty(), "nothing armed → empty");
+        m.set_mouse_request(grid);
+        let armed = m.mouse_windows();
+        assert_eq!(armed.len(), 1, "only the grid is armed");
+        assert_eq!(armed[0].0, grid);
+        assert_eq!(armed[0].1, WinType::TextGrid);
     }
 }
 

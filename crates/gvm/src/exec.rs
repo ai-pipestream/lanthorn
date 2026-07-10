@@ -2771,15 +2771,14 @@ impl Machine {
                 0
             }
             0x00D4 => {
-                // glk_request_mouse_event(win) — mouse out of scope
-                self.diagnostics
-                    .push("glk_request_mouse_event: mouse input unsupported (ignored)".to_string());
+                // glk_request_mouse_event(win): arm a mouse-click watch. The host
+                // reads mouse_windows() and calls deliver_mouse on a real click.
+                self.glk.set_mouse_request(a(0));
                 0
             }
             0x00D5 => {
-                // glk_cancel_mouse_event(win) — mouse out of scope
-                self.diagnostics
-                    .push("glk_cancel_mouse_event: mouse input unsupported (ignored)".to_string());
+                // glk_cancel_mouse_event(win): disarm the watch (one-shot take).
+                self.glk.take_mouse_request(a(0));
                 0
             }
             0x0150 => 0, // glk_set_echo_line_event: best-effort no-op
@@ -3364,6 +3363,26 @@ impl Machine {
         }
     }
 
+    /// Deliver a Glk `Evtype_MouseInput` for a terminal click at window-relative
+    /// `(x, y)` (char col/row for a grid window, pixels for a graphics window).
+    /// **One-shot**, unlike timer/sound/arrange: `take_mouse_request` both gates
+    /// and clears the request, so a second `deliver_mouse` with no fresh
+    /// `glk_request_mouse_event` is a no-op. Written directly into a suspended
+    /// `glk_select`, or queued for the next select when the VM is not blocked.
+    pub fn deliver_mouse(&mut self, win: u32, x: u32, y: u32) {
+        if !self.glk.take_mouse_request(win) {
+            return;
+        }
+        let ev = GlkEvent { etype: glk::evtype::MOUSE_INPUT, win, val1: x, val2: y };
+        if let Some(pi) = self.pending_input.take() {
+            if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else {
+            self.glk.push_event(ev);
+        }
+    }
+
     /// Recompute the window layout from the backend's (freshly updated) screen
     /// size and notify a suspended game via an Arrange event. Call after the
     /// host reports a new display size: the relayout resizes graphics canvases
@@ -3381,7 +3400,7 @@ impl Machine {
     /// Unicode are supported; graphics is supported conditionally (per
     /// `graphics_enabled`, see the selector 6/7/14 arms below); sound is
     /// supported conditionally (per `sound_enabled`, see the selector
-    /// 8/9/10 arms below); timer is supported; mouse input is not (0).
+    /// 8/9/10 arms below); timer and mouse input are supported.
     fn glk_gestalt(&self, sel: u32, val: u32) -> u32 {
         match sel {
             0 => Self::GLK_VERSION, // gestalt_Version
@@ -3391,6 +3410,7 @@ impl Machine {
             15 => 1,                // gestalt_Unicode
             17 => 1,                // gestalt_LineTerminators → set_terminators supported
             18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
+            4 => 1,                 // gestalt_MouseInput → supported (grid + graphics)
             5 => 1,                 // gestalt_Timer → supported
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
             7 => (self.graphics_enabled && (val == 5 || val == 3)) as u32, // gestalt_DrawImage(wintype): Graphics + TextBuffer (inline images)
@@ -3398,7 +3418,7 @@ impl Machine {
             8 => self.sound_enabled as u32,  // gestalt_Sound
             9 => self.sound_enabled as u32,  // gestalt_SoundVolume
             10 => self.sound_enabled as u32, // gestalt_SoundNotify
-            // MouseInput(4)/Hyperlinks(11)/echo and the rest are not supported.
+            // Hyperlinks(11)/echo and the rest are not supported.
             _ => 0,
         }
     }
@@ -6557,7 +6577,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 1, "CharInput supported");
         assert_eq!(m.mem.read32(0x104).unwrap(), 1, "LineInput supported");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Timer supported");
-        assert_eq!(m.mem.read32(0x10C).unwrap(), 0, "MouseInput not supported");
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 1, "MouseInput supported");
     }
 
     #[test]
@@ -6632,14 +6652,70 @@ mod tests {
     }
 
     #[test]
-    fn glk_mouse_is_a_diagnosed_noop() {
-        use asm::Op::{C8, Zero};
+    fn deliver_mouse_into_suspended_select_is_one_shot() {
+        use asm::Op::{C16, C8, Zero};
+        // Arm a mouse watch AND a char request, then select: the select suspends
+        // on the char request; a click is written into it WITHOUT consuming the
+        // char request, but the mouse request itself is one-shot — a second
+        // deliver_mouse with no fresh request is a no-op.
+        let mut body = glk_call(0xD4, &[C8(1)], Zero); // request_mouse_event(1)
+        body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1) → select suspends on this
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select again → re-suspend @0x110
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedChar { win: 1, unicode: false },
+            "select suspends on the char request",
+        );
+        m.deliver_mouse(1, 7, 3);
+        // evtype_MouseInput = 4, win = 1, val1 = col (7), val2 = row (3).
+        assert_eq!(read_event(&m, 0x100), (4, 1, 7, 3), "click written to the suspended select");
+        // One-shot: the request was consumed on delivery, so a second click is dropped.
+        m.deliver_mouse(1, 99, 99);
+        assert_eq!(read_event(&m, 0x100), (4, 1, 7, 3), "second deliver_mouse is a no-op (request consumed)");
+        assert!(!m.glk.mouse_requested(1), "mouse request cleared after delivery");
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedChar { win: 1, unicode: false },
+            "char request persisted across the click",
+        );
+    }
+
+    #[test]
+    fn glk_cancel_mouse_suppresses_delivery() {
+        use asm::Op::{C16, C8, Zero};
+        // request then cancel the mouse watch: with no armed request, a click is a
+        // no-op and never overwrites the suspended select's event slot.
         let mut body = glk_call(0xD4, &[C8(1)], Zero); // request_mouse_event(1)
         body.extend(glk_call(0xD5, &[C8(1)], Zero)); // cancel_mouse_event(1)
+        body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1) → suspend
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
         body.extend(asm::ins(0x120, &[]));
-        let m = run_program(body);
-        assert!(m.halted);
-        assert!(m.diagnostics.iter().any(|d| d.contains("mouse")), "mouse diagnosed");
+        let mut m = machine_ram(body, 0x200);
+        m.mem.write32(0x0100, 0xDEAD_BEEF).unwrap();
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false });
+        m.deliver_mouse(1, 5, 5); // request cancelled → dropped
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0xDEAD_BEEF, "cancelled mouse request suppresses delivery");
+    }
+
+    #[test]
+    fn deliver_mouse_queues_when_not_suspended() {
+        use asm::Op::{C16, Zero};
+        // With nothing waiting, a click is queued and delivered by the NEXT select.
+        let body = {
+            let mut b = glk_call(0xC0, &[C16(0x0100)], Zero); // select → drains the queued event
+            b.extend(asm::ins(0x120, &[]));
+            b
+        };
+        let mut m = machine_ram(body, 0x200);
+        m.glk.set_mouse_request(1); // window 1 exists via the prelude
+        m.deliver_mouse(1, 4, 8); // not suspended yet → queue (and consume the request)
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "select drains the queued click and quits");
+        assert_eq!(read_event(&m, 0x100), (4, 1, 4, 8), "queued click delivered by the select");
     }
 
     #[test]
@@ -7003,7 +7079,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x104).unwrap(), 1, "CharInput supported");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "LineInput supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "CharOutput = ExactPrint");
-        assert_eq!(m.mem.read32(0x110).unwrap(), 0, "MouseInput not supported");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 1, "MouseInput supported");
         assert_eq!(m.mem.read32(0x114).unwrap(), 1, "Timer supported");
         assert_eq!(m.mem.read32(0x118).unwrap(), 0, "Graphics not supported");
         assert_eq!(m.mem.read32(0x11C).unwrap(), 0, "DrawImage not supported");
