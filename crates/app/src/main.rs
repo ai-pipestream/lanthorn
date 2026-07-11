@@ -5475,6 +5475,10 @@ fn apply_launch_resume(
             // The resumed game's map is part of its archive state — load it alongside.
             if let Ok(ac) = load_archive(arc_file) {
                 *mapper = ac.mapper;
+                // Restore the turn counter from the same archive the map came from.
+                // The launch-resume stash omits it, so without this the count would
+                // reset to 0 on resume (SQ-0260) — mirrors the interactive restore.
+                state.turns = ac.meta.turns;
             }
             // Reinstate the saved screen too (mirrors the auto-load path, zvm-only),
             // so a once-split game's upper window/status line shows after resuming.
@@ -5864,6 +5868,53 @@ mod tests {
         assert_eq!(fresh2.machine.state.pc, pc_before_restore, "resume convention: lands exactly at the saved PC, not the @save descriptor");
         assert_eq!(fresh2.machine.global(0), 0, "resume: @save never ran, G0 untouched (contrast with descriptor completion's 2 above)");
         let _ = std::fs::remove_file(&babelmap_path);
+    }
+
+    // SQ-0260: the launch-dialog auto-resume must restore the saved turn counter.
+    // The stash it works from carries no turn count, so apply_launch_resume reads
+    // it from the archive (like the interactive restore) instead of leaving it 0.
+    #[test]
+    fn launch_resume_restores_the_turn_counter_sq0260() {
+        use app::engine::Engine;
+        use app::session::GameSession;
+
+        // A Save State (.babelmap) written with a non-zero turn count.
+        let sess = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        let save = sess.save_state();
+        let arc = std::env::temp_dir().join(format!("bm-sq260-{}.babelmap", std::process::id()));
+        let meta = app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: None,
+            name: None,
+            turns: 42,
+            saved_at: String::new(),
+        };
+        app::archive::save_archive_meta(
+            &arc, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), meta, &[], &[], &[], &[], &[],
+        ).expect("write .babelmap with turns=42");
+
+        // Fresh session + default state (turns start at 0), then launch-resume.
+        let mut fresh = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        let mut state = app::state::AppState::default();
+        let mut mapper = mapper::mapper::Mapper::default();
+        let panes = super::PaneRects {
+            map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
+            room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None,
+            reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
+            style_editor: None, verb_menu: Default::default(), glyph_picker: None,
+            transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,
+            modal_list_viewport: 0,
+        };
+        assert_eq!(state.turns, 0, "a fresh AppState starts at turn 0");
+
+        super::apply_launch_resume(
+            &save, Vec::new(), Vec::new(), None,
+            &mut fresh, &mut mapper, &mut state, &panes, &arc,
+        );
+
+        assert_eq!(state.turns, 42, "launch resume restores the saved turn count (SQ-0260)");
+        let _ = std::fs::remove_file(&arc);
     }
 
     // ── Graceful no-panic guards for non-Z-machine (Glulx) engines ──────────────
