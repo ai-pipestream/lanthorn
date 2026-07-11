@@ -3239,6 +3239,21 @@ fn main() {
                         }
                     }
                 }
+                // Map layer tab: a left-click on a layer tab selects that layer as the
+                // viewed one (hit-rects captured per frame in last_panes.layer_tabs).
+                if !state.any_overlay_open() {
+                    if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
+                        let hit = last_panes.layer_tabs.iter().find(|(_, r)| {
+                            r.width > 0 && r.height > 0
+                                && m.column >= r.x && m.column < r.right()
+                                && m.row >= r.y && m.row < r.bottom()
+                        });
+                        if let Some(&(layer, _)) = hit {
+                            apply_action(Action::SetViewedLayer(layer), &mut state, &mut mapper);
+                            continue 'event_loop;
+                        }
+                    }
+                }
                 // Verb dock: click a token to insert it; click a header to focus that section; click the
                 // story pane to return keyboard focus there (then fall through to normal story handling).
                 if state.verb_menu.is_some() {

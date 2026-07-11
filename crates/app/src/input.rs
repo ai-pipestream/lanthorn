@@ -178,6 +178,8 @@ pub enum Action {
     Quit,
     /// Cycle the viewed layer by `delta` steps over the sorted non-empty layer list (clamped at ends).
     CycleLayer(i32),
+    /// Select a specific layer as the viewed one (a click on its map layer tab).
+    SetViewedLayer(mapper::layer::LayerId),
     /// Peel the selected (or current) room's region into a new child layer.
     PeelLayer,
     /// Merge the active layer into its parent layer.
@@ -2230,6 +2232,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 let j = (i + delta).clamp(0, ids.len() as i32 - 1) as usize;
                 state.set_viewed_layer(Some(ids[j]));
             }
+        }
+
+        Action::SetViewedLayer(layer) => {
+            // A click on a map layer tab selects that layer as the viewed one.
+            // set_viewed_layer + active_layer tolerate a stale id (falls back).
+            state.set_viewed_layer(Some(layer));
         }
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
@@ -4790,6 +4798,17 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CloseHotkeyDialog));
         // The authored leader letter 'c' fires cycle-layer next instead.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::CycleLayer(1)));
+    }
+
+    #[test]
+    fn set_viewed_layer_action_selects_that_layer() {
+        // A layer-tab click dispatches Action::SetViewedLayer(id); the handler
+        // makes it the viewed layer.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        assert_eq!(s.viewed_layer, None);
+        apply_action(Action::SetViewedLayer(2), &mut s, &mut mapper);
+        assert_eq!(s.viewed_layer, Some(2), "SetViewedLayer selects the clicked layer");
     }
 
     #[test]
