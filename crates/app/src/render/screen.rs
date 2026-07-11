@@ -102,6 +102,18 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
         base = base.bg(crate::render::resolve_zcolour(bg, &state.colors));
     }
     c.upper_window = base;
+    // The border chrome is entirely our own presentation — Glk provides no border
+    // styling — so paint the frame in the same page colours as the content, making
+    // the whole status area (content + border) one coloured block on the recoloured
+    // page rather than a themed frame around a game-coloured interior. (SQ-0267)
+    let mut border = c.upper_window_border;
+    if !matches!(fg, ZColour::Default) {
+        border = border.fg(crate::render::resolve_zcolour(fg, &state.colors));
+    }
+    if !matches!(bg, ZColour::Default) {
+        border = border.bg(crate::render::resolve_zcolour(bg, &state.colors));
+    }
+    c.upper_window_border = border;
     std::borrow::Cow::Owned(c)
 }
 
@@ -453,6 +465,23 @@ mod tests {
         assert!(matches!(gc, std::borrow::Cow::Owned(_)), "override clone when the game set a scheme");
         assert_eq!(gc.upper_window.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)));
         assert_eq!(gc.upper_window.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
+    }
+
+    #[test]
+    fn grid_scheme_also_paints_the_border_in_the_game_page_colours() {
+        // SQ-0267: the status border is our own chrome (Glk sends no border style),
+        // so it must adopt the game's page colours too — the whole status block
+        // (content + frame) reads as one coloured unit on the recoloured page.
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
+        let gc = grid_scheme(&state, &model);
+        assert_eq!(gc.upper_window_border.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)),
+            "border background matches the game page background");
+        assert_eq!(gc.upper_window_border.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)),
+            "border line drawn in the game page foreground ink");
     }
 
     #[test]
