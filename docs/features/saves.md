@@ -24,6 +24,13 @@
   -- --ignored`. (Glulx save interop is tracked separately in SQ-0229.)
 - **Auto-save** (per turn) and **auto-load** (resume on launch) — both
   configurable.
+- **Glulx external file storage** — a Glulx game's own Glk files (its
+  transcripts, command recordings, and data files) are kept in an in-memory VFS
+  that auto-persists per story across sessions, so those files survive a plain
+  quit with no explicit save. When a game asks where to write
+  (`create_by_prompt`), babelmap prompts for a name; when it asks which file to
+  read, it shows a picker of the story's existing files. These files ride inside
+  `.babelmap` Save States too. → [persistence model](../persistence.md)
 - **Rewind / replay / resume** — with `record_turn_history` on, babelmap records
   a per-turn history (the game save plus a map snapshot and the transcript) into
   the `.babelmap` archive. Press **F4** (or `/open-history`) to open the replay
