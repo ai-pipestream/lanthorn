@@ -1984,17 +1984,54 @@ impl Model {
                             w(&mut out, unicode as u32);
                         }
                         StreamKind::File { unicode } => {
-                            // TODO(Task 3): fully persist file streams — the `files`
-                            // map, `filerefs` table, and the `file_streams` cursor
-                            // side table — under a bumped snapshot version. For now
-                            // emit only the tag + encoding so the match is
-                            // exhaustive; a restored file stream has no VFS state.
+                            // The mutable cursor (name/mode/pos/usage) is persisted
+                            // out of band below, keyed by stream id, in the
+                            // `file_streams` table; here we only tag the kind and
+                            // its encoding so the stream slot reconstructs.
                             w(&mut out, 2);
                             w(&mut out, unicode as u32);
                         }
                     }
                 }
             }
+        }
+        // Snapshot version 4: persist the in-memory VFS so file streams and
+        // filerefs round-trip. Names and byte blobs are length-prefixed (u32 len
+        // then the raw bytes).
+        let wb = |out: &mut Vec<u8>, b: &[u8]| {
+            out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+            out.extend_from_slice(b);
+        };
+        // (a) files: name → contents.
+        w(&mut out, self.files.len() as u32);
+        for (name, blob) in &self.files {
+            wb(&mut out, name.as_bytes());
+            wb(&mut out, blob);
+        }
+        // (b) filerefs table: presence-flagged per slot so ids stay stable across
+        // freed (None) slots, mirroring the window/stream loops above.
+        w(&mut out, self.filerefs.len() as u32);
+        for slot in &self.filerefs {
+            match slot {
+                None => w(&mut out, 0),
+                Some(fr) => {
+                    w(&mut out, 1);
+                    w(&mut out, fr.id);
+                    w(&mut out, fr.rock);
+                    w(&mut out, fr.usage);
+                    wb(&mut out, fr.name.as_bytes());
+                }
+            }
+        }
+        // (c) file_streams cursor side table, keyed by stream id.
+        w(&mut out, self.file_streams.len() as u32);
+        for (sid, fs) in &self.file_streams {
+            w(&mut out, *sid);
+            wb(&mut out, fs.name.as_bytes());
+            w(&mut out, fs.mode);
+            w(&mut out, fs.pos as u32);
+            w(&mut out, fs.unicode as u32);
+            w(&mut out, fs.usage);
         }
         out
     }
@@ -2061,7 +2098,8 @@ impl Model {
             let kind = match r.u32()? {
                 0 => StreamKind::Window(r.u32()?),
                 1 => StreamKind::Memory { addr: r.u32()?, len: r.u32()?, pos: r.u32()?, unicode: r.u32()? != 0 },
-                // TODO(Task 3): restore the file_streams cursor state alongside.
+                // The cursor (name/mode/pos/usage) is restored from the
+                // `file_streams` table below, keyed by this stream's id.
                 2 => StreamKind::File { unicode: r.u32()? != 0 },
                 other => return Err(format!("Glk snapshot: bad stream kind {other}")),
             };
@@ -2079,15 +2117,48 @@ impl Model {
             }));
         }
 
+        // Version 4: the in-memory VFS — files, filerefs, and the file-stream cursors.
+        let mut files = std::collections::BTreeMap::new();
+        let nfiles = r.u32()?;
+        for _ in 0..nfiles {
+            let name = r.string()?;
+            let blob = r.bytes()?;
+            files.insert(name, blob);
+        }
+        let mut filerefs = Vec::new();
+        let nfref = r.u32()?;
+        for _ in 0..nfref {
+            if r.u32()? == 0 {
+                filerefs.push(None);
+                continue;
+            }
+            let id = r.u32()?;
+            let rock = r.u32()?;
+            let usage = r.u32()?;
+            let name = r.string()?;
+            filerefs.push(Some(FileRef { id, rock, name, usage }));
+        }
+        let mut file_streams = std::collections::BTreeMap::new();
+        let nfs = r.u32()?;
+        for _ in 0..nfs {
+            let sid = r.u32()?;
+            let name = r.string()?;
+            let mode = r.u32()?;
+            let pos = r.u32()? as usize;
+            let unicode = r.u32()? != 0;
+            let usage = r.u32()?;
+            file_streams.insert(sid, FileStream { name, mode, pos, unicode, usage });
+        }
+
         if !r.done() {
             return Err("Glk snapshot: trailing bytes".to_string());
         }
         Ok(Model {
             windows,
             streams,
-            files: std::collections::BTreeMap::new(),
-            filerefs: Vec::new(),
-            file_streams: std::collections::BTreeMap::new(),
+            files,
+            filerefs,
+            file_streams,
             root,
             cur_stream,
             events: std::collections::VecDeque::new(),
@@ -2098,7 +2169,7 @@ impl Model {
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
-const GLK_SNAPSHOT_VERSION: u32 = 3;
+const GLK_SNAPSHOT_VERSION: u32 = 4;
 
 /// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
 /// an error, never a panic.
@@ -2118,6 +2189,21 @@ impl<'a> SnapReader<'a> {
         let b = &self.data[self.pos..self.pos + 4];
         self.pos += 4;
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+    /// Read a `u32` length prefix then that many raw bytes. Underflow (a length
+    /// exceeding the remaining input) is an error, never a panic.
+    fn bytes(&mut self) -> Result<Vec<u8>, String> {
+        let len = self.u32()? as usize;
+        if self.pos + len > self.data.len() {
+            return Err("Glk snapshot: truncated blob".to_string());
+        }
+        let b = self.data[self.pos..self.pos + len].to_vec();
+        self.pos += len;
+        Ok(b)
+    }
+    /// Read a length-prefixed UTF-8 string (a fileref/file name).
+    fn string(&mut self) -> Result<String, String> {
+        String::from_utf8(self.bytes()?).map_err(|_| "Glk snapshot: invalid UTF-8 name".to_string())
     }
     fn done(&self) -> bool {
         self.pos == self.data.len()
@@ -2577,5 +2663,55 @@ mod style_hint_tests {
         assert_eq!(m.files["f"], b"Hi", "bytes persist after close");
         assert_eq!(m.stream_position(sid), None, "stream slot is freed");
         assert!(m.file_streams.is_empty(), "cursor side-table entry dropped");
+    }
+
+    // The whole VFS — file bytes, the fileref table, and an OPEN file stream's
+    // cursor — must survive a Glk snapshot round-trip (version 4).
+    #[test]
+    fn vfs_and_file_stream_survive_snapshot_round_trip() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "save".to_string(), 0x42);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        assert_ne!(sid, 0);
+        m.file_stream_write(sid, "HELLO");
+        // Seek to a known position and leave the stream OPEN.
+        m.stream_set_position(sid, 1, 0); // Start + 1
+        assert_eq!(m.stream_position(sid), Some(1));
+
+        let mut restored = Model::deserialize(&m.serialize()).expect("round-trip");
+        // File bytes are intact in the restored VFS.
+        assert_eq!(restored.files["save"], b"HELLO");
+        // The fileref still exists and iteration yields it (id + rock preserved).
+        assert!(restored.fileref_exists(f));
+        assert_eq!(restored.fileref_iterate(0), (f, 0x42));
+        // The still-open file stream reports the same cursor ...
+        assert_eq!(restored.stream_position(sid), Some(1));
+        // ... and reads the expected next byte ('E' at pos 1 of "HELLO").
+        assert_eq!(restored.file_stream_read_char(sid), Some(b'E' as u32));
+    }
+
+    // A file stream must coexist with the other stream kinds across a snapshot:
+    // a Window stream (tag 0) and a Memory stream (tag 1) still round-trip
+    // alongside the new File stream (tag 2) and the VFS payload.
+    #[test]
+    fn file_memory_and_window_streams_coexist_through_snapshot() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root (+ window stream)
+        let mem = m.stream_open_memory(0x1000, 64, false, 0x7);
+        let f = m.fileref_create(0x00, "d".to_string(), 0);
+        let fsid = m.stream_open_file(f, FM_WRITE, false, 0);
+        m.file_stream_write(fsid, "Z");
+
+        let restored = Model::deserialize(&m.serialize()).expect("round-trip");
+        // The window's output stream survived.
+        assert!(restored.window_stream(buf).is_some());
+        // The memory stream survived with its addr/len.
+        assert!(matches!(
+            restored.stream_kind_style(mem).map(|(k, _, _)| k),
+            Some(StreamKind::Memory { addr: 0x1000, len: 64, .. }),
+        ));
+        // The file stream + its bytes survived.
+        assert_eq!(restored.files["d"], b"Z");
+        assert_eq!(restored.stream_position(fsid), Some(1));
     }
 }
