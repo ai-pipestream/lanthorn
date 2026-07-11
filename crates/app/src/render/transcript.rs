@@ -836,7 +836,10 @@ pub fn render_transcript(
     let status_boxed = status_visible && (status_style_kind != BorderStyle::None || state.colors.status_header_sides.any_on()) && area.height >= 5;
     let input_boxed  = (input_style_kind  != BorderStyle::None || state.colors.input_line_sides.any_on()) && area.height >= 5;
     let status_rows: u16 = if !status_visible { 0 } else if status_boxed { 3 } else { 1 };
-    let input_rows:  u16 = if input_boxed  { 3 } else { 1 };
+    // Inline-prompt mode (`command_bar` off): no dedicated bottom bar — the live
+    // input is drawn flush after the game's kept `>` in the transcript body, so
+    // the whole bottom flows into the middle area (`input_rows == 0`).
+    let input_rows:  u16 = if !state.config.command_bar { 0 } else if input_boxed { 3 } else { 1 };
 
     // ── Top row(s): status line ──────────────────────────────────────────────
 
@@ -860,11 +863,16 @@ pub fn render_transcript(
     let input_region_top = area.bottom().saturating_sub(input_rows);
     let input_region = Rect::new(area.x, input_region_top, area.width, input_rows.min(area.height));
 
-    if input_boxed {
-        let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
-        render_input_content(state, buf, frame.content, normal_style, game_input);
-    } else {
-        render_input_content(state, buf, input_region, normal_style, game_input);
+    // Only the command-bar mode draws the dedicated bottom input bar. In inline
+    // mode (`input_rows == 0`) the live input is drawn by `render_middle` flush
+    // after the last transcript row (the game's kept `>` prompt).
+    if state.config.command_bar {
+        if input_boxed {
+            let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
+            render_input_content(state, buf, frame.content, normal_style, game_input);
+        } else {
+            render_input_content(state, buf, input_region, normal_style, game_input);
+        }
     }
 
     // ── Middle area: transcript + inventory + suggestion ─────────────────────
@@ -875,7 +883,7 @@ pub fn render_transcript(
         return (false, 0, Vec::new());
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
-    render_middle(state, buf, middle_area, normal_style)
+    render_middle(state, buf, middle_area, normal_style, game_input)
 }
 
 /// Draw the status bar into `region`.
@@ -1014,7 +1022,8 @@ fn render_middle(
     state: &AppState,
     buf: &mut Buffer,
     area: Rect,
-    _normal_style: Style,
+    normal_style: Style,
+    game_input: Option<Style>,
 ) -> (bool, u16, Vec<((u16, u16), u32)>) {
     if area.height == 0 || area.width == 0 {
         return (false, 0, Vec::new());
@@ -1265,6 +1274,48 @@ fn render_middle(
             } else {
                 // A non-blank Default row closes the band.
                 band_bg = None;
+            }
+        }
+    }
+
+    // ── Inline live input (command_bar off) ──────────────────────────────────
+    // Draw the typed command + block cursor flush after the last transcript row
+    // (the game's kept `>` prompt), so scrollback and the live line read as one
+    // continuous prompt. Only when the bottom of the transcript is on screen
+    // (effective_scroll == 0) so scrolled-up history is never overwritten.
+    if !state.config.command_bar
+        && !state.char_mode
+        && state.focus == Focus::Game
+        && !state.any_overlay_open()
+        && effective_scroll == 0
+        && !lines.is_empty()
+    {
+        let last_i = lines.len().min(transcript_rows) - 1;
+        let row_y = transcript_top + last_i as u16;
+        let last = &lines[last_i];
+        // Only draw when the true last wrapped row is the one visible at the
+        // bottom, it fits inside the transcript region, and it is a text row
+        // (never an inline-image band).
+        if row_y < transcript_bottom
+            && first_abs_row + last_i == total_rows.saturating_sub(1)
+            && last.band.is_none()
+        {
+            // Flush after the last line's text — Story/Input rows draw at
+            // body_area.x (no gutter), matching Task 3's flush command echo.
+            let base_text = normal_style.patch(state.colors.input_text);
+            let text_style = match game_input {
+                Some(gs) => base_text.patch(gs),
+                None => base_text,
+            };
+            let start_col = body_area.x + last.text.chars().count() as u16;
+            let avail = body_area.right().saturating_sub(start_col) as usize;
+            let input_trunc = truncate_line(&state.input, avail);
+            draw_str_clipped(buf, start_col, row_y, input_trunc, text_style, body_area);
+            let cursor_x = start_col + input_trunc.chars().count() as u16;
+            if cursor_x < body_area.right() {
+                if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
+                    cell.set_symbol("_").set_style(CURSOR_STYLE);
+                }
             }
         }
     }
@@ -2291,6 +2342,7 @@ mod tests {
     fn render_transcript_input_and_transcript_lines() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.transcript = vec![
             "You are in a hall.".to_string(),
             "It is dark.".to_string(),
@@ -2341,6 +2393,7 @@ mod tests {
     fn render_transcript_cursor_shown_when_focused() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.input = "hi".to_string();
         state.focus = Focus::Game;
 
@@ -2361,6 +2414,7 @@ mod tests {
     fn render_transcript_no_cursor_when_not_focused() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.input = "hi".to_string();
         state.focus = Focus::Map; // not focused on game
 
@@ -2377,6 +2431,7 @@ mod tests {
     fn render_transcript_no_cursor_when_overlay_open() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.input = "hi".to_string();
         state.focus = Focus::Game; // focused on game, but overlay is open
 
@@ -2421,6 +2476,7 @@ mod tests {
     fn render_transcript_applies_input_text_and_prompt_styles() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.focus = Focus::Game;
         state.input = "zq".to_string();
         state.colors.input_prompt = Style::new().fg(Color::Green);
@@ -2446,6 +2502,95 @@ mod tests {
         }
         assert_eq!(prompt_fg, Some(Color::Green), "'>' uses input_prompt style");
         assert_eq!(text_fg, Some(Color::Red), "typed text uses input_text style");
+    }
+
+    // ── Inline-prompt mode (command_bar off) ──────────────────────────────────
+
+    #[test]
+    fn inline_draws_flush_prompt_and_cursor_no_bar() {
+        // command_bar off: the live input is drawn flush after the game's kept `>`
+        // on the last transcript row (">look", no space), with a block cursor
+        // right after it, and the dedicated bottom bar is gone.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = false;
+        state.transcript = vec![
+            "You are in a hall.".to_string(),
+            ">".to_string(),
+        ];
+        state.input = "look".to_string();
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        // Locate the row that renders the flush prompt+input.
+        let mut hit = None;
+        for y in 0..area.height {
+            let row: String = (0..area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            if row.contains(">look") {
+                hit = Some((y, row));
+                break;
+            }
+        }
+        let (y, row) = hit.expect("inline prompt row with '>look' must render");
+        // Flush: '>' at col 0, "look" at cols 1..5, block cursor '_' at col 5.
+        assert!(row.starts_with(">look"), "prompt+input must be flush: {:?}", row);
+        assert_eq!(buf.cell((5, y)).unwrap().symbol(), "_", "cursor sits right after '>look'");
+        assert!(buf.cell((5, y)).unwrap().modifier.contains(Modifier::REVERSED));
+        // The old dedicated bottom bar is dropped: the bottom row is blank.
+        let bottom: String = (0..area.width)
+            .map(|x| buf.cell((x, 9)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(!bottom.contains('>'), "no dedicated bottom input bar in inline mode: {:?}", bottom);
+    }
+
+    #[test]
+    fn command_bar_mode_still_draws_bottom_bar() {
+        // command_bar on: the dedicated bottom bar renders "> look" as before,
+        // unaffected by the inline path.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = true;
+        state.input = "look".to_string();
+        state.focus = Focus::Game;
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let bottom: String = (0..area.width)
+            .map(|x| buf.cell((x, 9)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(bottom.contains("> look"), "command-bar bottom row shows '> look': {:?}", bottom);
+    }
+
+    #[test]
+    fn inline_input_suppressed_when_scrolled_up() {
+        // command_bar off but scrolled up (effective_transcript_scroll > 0): the
+        // live input must NOT be drawn, so scrolled-up history is never clobbered.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = false;
+        state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
+        state.input = "SECRETCMD".to_string();
+        state.focus = Focus::Game;
+        state.transcript_scroll = 5; // scrolled up from the bottom
+        assert!(state.effective_transcript_scroll() > 0, "test must actually be scrolled up");
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        for y in 0..area.height {
+            let row: String = (0..area.width)
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect();
+            assert!(!row.contains("SECRETCMD"), "scrolled-up must not draw the live input: {:?}", row);
+        }
     }
 
     #[test]
@@ -2597,6 +2742,7 @@ mod tests {
     fn render_transcript_shows_suggestion_line_above_input() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.focus = Focus::Game;
         state.input = "nor".to_string();
         state.suggestions = vec!["north".to_string()];
@@ -2811,6 +2957,7 @@ mod tests {
     fn input_line_plain_by_default() {
         let machine = minimal_machine();
         let mut state = AppState::default();
+        state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.input = "go north".to_string();
         state.focus = Focus::Game;
 
