@@ -1993,6 +1993,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                                     }
                                 }
                             }
+                            crate::state::PromptKind::CreateFile => {
+                                state.filename_submitted = Some(Some(returned.buffer));
+                            }
                             _ => {
                                 // Saves-manager prompt submitted: store for the caller to act on.
                                 state.saves_prompt_submitted =
@@ -3609,6 +3612,7 @@ fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
         }
         // Saves-manager and config-path prompts: return to the caller to act on.
         PromptKind::SaveAs
+        | PromptKind::CreateFile
         | PromptKind::ConfirmDeleteSave(_)
         | PromptKind::ConfigEditPath { .. } => {
             return Some(prompt);

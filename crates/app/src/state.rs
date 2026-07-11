@@ -707,6 +707,31 @@ pub enum PromptKind {
     ConfirmDeleteSave(std::path::PathBuf),
     /// Edit a config path field (user_dir or colors.scheme) from the config screen.
     ConfigEditPath { field: ConfigPathField },
+    /// Enter a filename for a game `create_by_prompt` (write modes). The pending
+    /// request lives on `AppState.pending_filename`.
+    CreateFile,
+}
+
+/// Which modal the run loop opens for a `create_by_prompt` filename request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilenameModal {
+    /// Read mode with existing files: let the player pick one (Task 5).
+    Picker,
+    /// Write / WriteAppend / ReadWrite: prompt for a new name.
+    NamePrompt,
+    /// Read mode with no existing files: nothing to pick — cancel immediately.
+    AutoCancel,
+}
+
+/// Decide the modal for a filename request. Read mode (`fmode == 0x02`) picks from
+/// existing VFS files (or auto-cancels when there are none); every other mode
+/// prompts for a name.
+pub fn filename_modal_for(req: crate::session::FilenameReq, existing_files: usize) -> FilenameModal {
+    if req.fmode == 0x02 {
+        if existing_files == 0 { FilenameModal::AutoCancel } else { FilenameModal::Picker }
+    } else {
+        FilenameModal::NamePrompt
+    }
 }
 
 // ── File browser state ────────────────────────────────────────────────────────
@@ -1200,6 +1225,13 @@ pub struct AppState {
     /// then clears it. The tuple is (kind, user_input_buffer).
     pub saves_prompt_submitted: Option<(PromptKind, String)>,
 
+    /// A game `create_by_prompt` awaiting a host filename (its modal is open).
+    pub pending_filename: Option<crate::session::FilenameReq>,
+    /// Flag-hop: the chosen filename (`Some(name)`) or cancel (`None`) from the
+    /// CreateFile prompt / file picker, drained by the run loop to call
+    /// `resume_filename`. Outer `Some` = a decision is ready.
+    pub filename_submitted: Option<Option<String>>,
+
     // ── Autocomplete state ────────────────────────────────────────────────────
 
     /// Cached parser-vocabulary words from the Z-machine dictionary.
@@ -1427,6 +1459,8 @@ impl Default for AppState {
             history: Vec::new(),
             replay: None,
             saves_prompt_submitted: None,
+            pending_filename: None,
+            filename_submitted: None,
             dict_words: Vec::new(),
             suggestions: Vec::new(),
             suggestion_idx: 0,
@@ -2358,6 +2392,17 @@ mod tests {
     fn appstate_history_defaults_empty() {
         let s = AppState::default();
         assert!(s.history.is_empty(), "history starts empty");
+    }
+
+    #[test]
+    fn filename_modal_for_picks_prompt_picker_or_autocancel() {
+        use super::{filename_modal_for, FilenameModal};
+        use crate::session::FilenameReq;
+        assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x01 }, 3), FilenameModal::NamePrompt);
+        assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x05 }, 0), FilenameModal::NamePrompt);
+        assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x03 }, 0), FilenameModal::NamePrompt);
+        assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x02 }, 2), FilenameModal::Picker);
+        assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x02 }, 0), FilenameModal::AutoCancel);
     }
 
     #[test]

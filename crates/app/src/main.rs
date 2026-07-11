@@ -774,6 +774,7 @@ fn draw_frame(
                 PromptKind::SaveAs => "Save name",
                 PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
                 PromptKind::ConfigEditPath { .. } => "Config path",
+                PromptKind::CreateFile => "Filename",
             };
             format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else if state.resize_mode {
@@ -923,6 +924,7 @@ fn draw_frame(
                         PromptKind::SaveAs => "Name:   ",
                         PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
                         PromptKind::ConfigEditPath { .. } => "Path:   ",
+                        PromptKind::CreateFile => "File:   ",
                     };
                     let line = format!("{}{}_", label, prompt.buffer);
                     let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
@@ -3515,7 +3517,8 @@ fn main() {
                         );
                     }
                     // Resume an in-game save/restore if this prompt resolved it.
-                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
+                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map)
+                        || resolve_filename_request(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
                     persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
                     persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
                     if quit { break; }
@@ -3950,7 +3953,8 @@ fn main() {
 
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was
         // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
-        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
+        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map)
+            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
         persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
         persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
         if quit {
@@ -4687,6 +4691,13 @@ fn finish_command_turn(
         return false;
     }
 
+    // Game create_by_prompt: open the filename modal and defer bookkeeping until the
+    // resume completes (the turn is still in flight, like the save/restore path).
+    if let Some(req) = session.pending_filename() {
+        open_filename_modal(req, &*session, state);
+        return false;
+    }
+
     // ── Post-turn bookkeeping (history / inventory / auto-save) ──
     post_turn_bookkeeping(
         state, mapper, &*session, &result, cmd,
@@ -5010,6 +5021,9 @@ fn finish_resumed_turn(
     // run bookkeeping only when this turn finished without chaining.
     if let Some(io) = result.pending_io {
         state.ingame_io = Some(io);
+    } else if let Some(req) = session.pending_filename() {
+        // The resumed turn chained straight into a create_by_prompt.
+        open_filename_modal(req, session, state);
     } else {
         let arc_file = archive_path(save_dir, ifid);
         post_turn_bookkeeping(state, mapper, session, &result, "", rooms_before, conns_before, ifid, &arc_file);
@@ -5063,6 +5077,63 @@ fn resolve_ingame_dialog(
         }
     }
 
+    false
+}
+
+/// Open the right modal for a game `create_by_prompt` filename request: a name-entry
+/// prompt (write / append / read-write), a file picker (read with existing files —
+/// Task 5), or an immediate cancel (read with no files). Sets AppState; the resolver
+/// later calls `resume_filename`.
+fn open_filename_modal(req: app::session::FilenameReq, session: &dyn Engine, state: &mut AppState) {
+    state.pending_filename = Some(req);
+    match app::state::filename_modal_for(req, session.file_names().len()) {
+        app::state::FilenameModal::NamePrompt => {
+            state.prompt = Some(app::state::Prompt {
+                kind: app::state::PromptKind::CreateFile,
+                buffer: String::new(),
+            });
+        }
+        app::state::FilenameModal::Picker => {
+            // TODO(Task 5): replace with the file picker over session.file_names().
+            state.prompt = Some(app::state::Prompt {
+                kind: app::state::PromptKind::CreateFile,
+                buffer: String::new(),
+            });
+        }
+        app::state::FilenameModal::AutoCancel => {
+            state.pending_filename = None;
+            state.filename_submitted = Some(None);
+        }
+    }
+}
+
+/// Resume a suspended `create_by_prompt` once the player entered a name / cancelled
+/// via the flag-hop (`state.filename_submitted`), or cancelled by closing the modal
+/// (Esc leaves `pending_filename` set with no CreateFile prompt open). Mirrors
+/// `resolve_ingame_dialog`. Returns true if the app should quit.
+fn resolve_filename_request(
+    session: &mut dyn Engine,
+    mapper: &mut Mapper,
+    state: &mut AppState,
+    save_dir: &std::path::Path,
+    ifid: &str,
+    map_area: Rect,
+) -> bool {
+    if let Some(choice) = state.filename_submitted.take() {
+        state.pending_filename = None;
+        let result = session.resume_filename(choice);
+        return finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+    }
+    // Modal closed without a submit (Esc) while a request is still pending -> cancel.
+    if state.pending_filename.is_some()
+        && !matches!(&state.prompt, Some(p) if p.kind == app::state::PromptKind::CreateFile)
+    // Task 5 adds: && state.file_picker.is_none()
+    {
+        state.pending_filename = None;
+        let result = session.resume_filename(None);
+        state.push_notice("[create_by_prompt cancelled]");
+        return finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+    }
     false
 }
 
