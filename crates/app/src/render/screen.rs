@@ -77,6 +77,34 @@ fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::st
     Some(s)
 }
 
+/// The colour scheme to draw the grid (upper/status) window with. When the game
+/// has set a page colour scheme (so the story pane is painted with it), the grid's
+/// base `upper_window` colour is overridden to those page colours, so a reverse-video
+/// status line reverses the GAME's page (e.g. black-on-white → a white-on-black
+/// status bar) instead of the app theme — keeping the status bar consistent with the
+/// recoloured pane. Borrows the theme unchanged when no game scheme is set. (SQ-0262)
+fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow<'a, ColorScheme> {
+    use zvm::screen::ZColour;
+    if !state.config.honor_game_colours {
+        return std::borrow::Cow::Borrowed(&state.colors);
+    }
+    let fg = crate::state::unpack_zcolour(model.fg);
+    let bg = crate::state::unpack_zcolour(model.bg);
+    if matches!(fg, ZColour::Default) && matches!(bg, ZColour::Default) {
+        return std::borrow::Cow::Borrowed(&state.colors);
+    }
+    let mut c = state.colors.clone();
+    let mut base = c.upper_window;
+    if !matches!(fg, ZColour::Default) {
+        base = base.fg(crate::render::resolve_zcolour(fg, &state.colors));
+    }
+    if !matches!(bg, ZColour::Default) {
+        base = base.bg(crate::render::resolve_zcolour(bg, &state.colors));
+    }
+    c.upper_window = base;
+    std::borrow::Cow::Owned(c)
+}
+
 /// Render the engine's screen into the story-pane `area`, returning scrollbar /
 /// scroll metrics for the (primary) transcript.
 pub fn render_story_pane(
@@ -110,8 +138,9 @@ pub fn render_story_pane(
         // Byte-identical Z-machine path: the upper grid (if any) over the
         // transcript.
         let mut links: Vec<((u16, u16), u32)> = Vec::new();
+        let gc = grid_scheme(state, model);
         let used = match model.grid() {
-            Some(grid) => draw_upper_window(grid, char_mode, &state.colors, area, buf, state.config.honor_game_colours, &mut links),
+            Some(grid) => draw_upper_window(grid, char_mode, &gc, area, buf, state.config.honor_game_colours, &mut links),
             None => 0,
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
@@ -123,7 +152,8 @@ pub fn render_story_pane(
     // Generic multi-window path. Grid windows push their hyperlink cells into
     // `grid_links`; the primary buffer's own links ride on its metrics. (SQ-0258)
     let mut grid_links: Vec<((u16, u16), u32)> = Vec::new();
-    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi, &mut grid_links);
+    let gc = grid_scheme(state, model);
+    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi, &mut grid_links, &gc);
 
     // Prune the graphics protocol cache to only the windows still live in the
     // tree, so a closed window's stale cache entry can't be matched by a
@@ -150,6 +180,7 @@ fn render_node(
     buf: &mut Buffer,
     game_input: Option<ratatui::style::Style>,
     links: &mut Vec<((u16, u16), u32)>,
+    grid_colors: &ColorScheme,
 ) -> Option<StoryPaneMetrics> {
     if area.width == 0 || area.height == 0 {
         return None;
@@ -157,13 +188,13 @@ fn render_node(
     match node {
         WinNode::Pair { vertical, split, first, second } => {
             let (a1, a2) = pair_areas(*vertical, split.fixed, first, second, &state.colors, area);
-            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links);
-            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links);
+            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
+            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
             m1.or(m2)
         }
         WinNode::Grid(g) => {
             let show_cursor = char_mode && g.cursor_active;
-            draw_grid(g, g.active_rows, g.cursor, show_cursor, &state.colors, area, buf, state.config.honor_game_colours, links);
+            draw_grid(g, g.active_rows, g.cursor, show_cursor, grid_colors, area, buf, state.config.honor_game_colours, links);
             None
         }
         WinNode::Buffer(b) => {
@@ -397,6 +428,51 @@ mod tests {
         }
         g.active_rows = 1;
         g
+    }
+
+    fn model_with_page(bg: zvm::screen::ZColour, fg: zvm::screen::ZColour) -> ScreenModel {
+        ScreenModel {
+            root: WinNode::Blank,
+            status: StatusModel::HostManaged,
+            bg: crate::state::pack_zcolour(bg),
+            fg: crate::state::pack_zcolour(fg),
+        }
+    }
+
+    #[test]
+    fn grid_scheme_overrides_upper_window_with_game_page_colours() {
+        // A game that set a black-on-white page (CounterfeitMonkey) → the grid base
+        // becomes that page, so a reverse-video status line reverses to white-on-black
+        // instead of reversing the app theme. (SQ-0262)
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
+        let gc = grid_scheme(&state, &model);
+        assert!(matches!(gc, std::borrow::Cow::Owned(_)), "override clone when the game set a scheme");
+        assert_eq!(gc.upper_window.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)));
+        assert_eq!(gc.upper_window.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
+    }
+
+    #[test]
+    fn grid_scheme_borrows_theme_when_game_set_no_page() {
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        let gc = grid_scheme(&state, &model_with_page(ZColour::Default, ZColour::Default));
+        assert!(matches!(gc, std::borrow::Cow::Borrowed(_)), "theme unchanged when no game page colours");
+    }
+
+    #[test]
+    fn grid_scheme_borrows_theme_when_colours_disabled() {
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = false;
+        let gc = grid_scheme(&state, &model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0)));
+        assert!(matches!(gc, std::borrow::Cow::Borrowed(_)), "game colours off → theme borrowed, override inert");
     }
 
     fn inline_buffer(line: &str) -> BufferWindow {
