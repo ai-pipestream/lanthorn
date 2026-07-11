@@ -123,11 +123,19 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
 fn drive(
     machine: &mut Machine,
     save_path: &std::path::Path,
+    vfs_path: &std::path::Path,
     mut before_input: impl FnMut(&mut Machine),
     mut read_line: impl FnMut() -> (String, u32),
     mut read_char: impl FnMut() -> u32,
 ) {
     loop {
+        // Flush the Glk file VFS to its sidecar whenever a game mutation dirtied
+        // it, each iteration, so a game's files survive even if the process is
+        // killed mid-session. Silently tolerate a write failure.
+        if machine.vfs_dirty() {
+            let _ = fs::write(vfs_path, machine.vfs_bytes());
+            machine.clear_vfs_dirty();
+        }
         match machine.step() {
             StepResult::Continue => {}
             StepResult::Quit => break,
@@ -220,9 +228,22 @@ fn main() {
     // suffix (headless, so there is no name prompt — one slot, overwritten).
     let save_path = std::path::PathBuf::from(format!("{path}.glksave"));
 
+    // The Glk file VFS sidecar: `<story>.glkvfs`, next to the story. Loaded here
+    // before the run, flushed dirty-gated inside `drive`, so a game's external
+    // files (scores, preferences) survive a plain quit-and-relaunch.
+    let vfs_path = std::path::PathBuf::from(format!("{path}.glkvfs"));
+    if vfs_path.exists() {
+        // Tolerate a missing/unreadable sidecar silently — it just means empty.
+        if let Ok(bytes) = fs::read(&vfs_path) {
+            machine.load_vfs(&bytes);
+        }
+        machine.clear_vfs_dirty(); // loading is not a game mutation
+    }
+
     drive(
         &mut machine,
         &save_path,
+        &vfs_path,
         |m| {
             // Re-poll terminal size before each input (interactive TTY only).
             if both_tty {
@@ -514,7 +535,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), |_| {}, || (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), |_| {}, || (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -538,8 +559,126 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), |_| {}, move || (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), |_| {}, move || (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
+    }
+
+    // ── .glkvfs sidecar persistence ───────────────────────────────────────────
+
+    /// Wrap `body` as a start function with `nlocals` 4-byte locals, and place the
+    /// NUL-terminated fileref name `"gvfstest"` in ROM at 0x1C0. RAMSTART is 0x200
+    /// (Glulx requires the memory-map bounds to be 256-aligned) so the file
+    /// programs' code has room below the name string.
+    fn vfs_image(body: Vec<u8>, nlocals: u8) -> Vec<u8> {
+        let mut func = vec![0xC1u8, 0x04, nlocals, 0x00, 0x00];
+        func.extend(body);
+        let (ramstart, endmem) = (0x200u32, 0x300u32);
+        let mut img = vec![0u8; ramstart as usize];
+        img[0..4].copy_from_slice(b"Glul");
+        img[0x04..0x08].copy_from_slice(&0x0003_0102u32.to_be_bytes());
+        img[0x08..0x0C].copy_from_slice(&ramstart.to_be_bytes());
+        img[0x0C..0x10].copy_from_slice(&ramstart.to_be_bytes());
+        img[0x10..0x14].copy_from_slice(&endmem.to_be_bytes());
+        img[0x14..0x18].copy_from_slice(&0x1000u32.to_be_bytes());
+        img[0x18..0x1C].copy_from_slice(&0x24u32.to_be_bytes());
+        assert!(0x24 + func.len() <= 0x1C0, "program code overruns the name string");
+        img[0x24..0x24 + func.len()].copy_from_slice(&func);
+        let name = b"gvfstest\0";
+        img[0x1C0..0x1C0 + name.len()].copy_from_slice(name);
+        img
+    }
+
+    const NAME_ADDR: u32 = 0x1C0;
+
+    /// A program: open a Data fileref by name, open it for Write, put "Hi", close,
+    /// quit. Locals: local0=fref (off 0), local1=stream (off 4).
+    fn write_hi_program() -> Vec<u8> {
+        use E::*;
+        let mut b = enc(0x149, &[Imm(2), Imm(0)]); // setiosys glk
+        // fileref_create_by_name(usage=0, nameptr, rock=0) -> local0
+        for v in [Imm(0), Imm(NAME_ADDR), Imm(0)] {
+            b.extend(enc(0x40, &[v, Push])); // reverse arg order: rock, nameptr, usage
+        }
+        b.extend(enc(0x130, &[Imm(0x61), Imm(3), LocStore(0)]));
+        // stream_open_file(fref=local0, fmode=1 Write, rock=0) -> local1
+        b.extend(enc(0x40, &[Imm(0), Push])); // rock
+        b.extend(enc(0x40, &[Imm(0x01), Push])); // fmode = Write
+        b.extend(enc(0x40, &[LocLoad(0), Push])); // fref
+        b.extend(enc(0x130, &[Imm(0x42), Imm(3), LocStore(4)]));
+        // put_char_stream(str=local1, ch): reverse order push ch, str
+        for ch in [b'H', b'i'] {
+            b.extend(enc(0x40, &[Imm(ch as u32), Push]));
+            b.extend(enc(0x40, &[LocLoad(4), Push]));
+            b.extend(enc(0x130, &[Imm(0x81), Imm(2), Discard]));
+        }
+        // stream_close(str=local1, resultptr=0)
+        b.extend(enc(0x40, &[Imm(0), Push]));
+        b.extend(enc(0x40, &[LocLoad(4), Push]));
+        b.extend(enc(0x130, &[Imm(0x44), Imm(2), Discard]));
+        b.extend(enc(0x120, &[])); // quit
+        b
+    }
+
+    /// A program: open the same fileref by name, open it for Read, echo its two
+    /// bytes to a TextBuffer window, quit. Locals: window(0), fref(4), stream(8),
+    /// char(12).
+    fn read_hi_program() -> Vec<u8> {
+        use E::*;
+        let mut b = open_buffer_prelude(); // window -> local0, made current
+        // fileref_create_by_name -> local1
+        for v in [Imm(0), Imm(NAME_ADDR), Imm(0)] {
+            b.extend(enc(0x40, &[v, Push]));
+        }
+        b.extend(enc(0x130, &[Imm(0x61), Imm(3), LocStore(4)]));
+        // stream_open_file(fref=local1, fmode=2 Read, rock=0) -> local2
+        b.extend(enc(0x40, &[Imm(0), Push]));
+        b.extend(enc(0x40, &[Imm(0x02), Push])); // Read
+        b.extend(enc(0x40, &[LocLoad(4), Push]));
+        b.extend(enc(0x130, &[Imm(0x42), Imm(3), LocStore(8)]));
+        // read two bytes, echo each to the current (window) stream
+        for _ in 0..2 {
+            b.extend(enc(0x40, &[LocLoad(8), Push])); // str
+            b.extend(enc(0x130, &[Imm(0x90), Imm(1), LocStore(12)])); // get_char_stream -> local3
+            b.extend(enc(0x40, &[LocLoad(12), Push])); // ch
+            b.extend(enc(0x130, &[Imm(0x80), Imm(1), Discard])); // put_char(ch)
+        }
+        b.extend(enc(0x120, &[])); // quit
+        b
+    }
+
+    #[test]
+    fn drive_persists_and_reloads_the_vfs_sidecar() {
+        // A private temp dir so we never write sidecars next to real files.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gvmcli-vfs-{}-{}", std::process::id(), stamp));
+        fs::create_dir_all(&dir).unwrap();
+        let save_path = dir.join("story.glksave");
+        let vfs_path = dir.join("story.glkvfs");
+
+        // Run 1: a game writes "Hi" into a Glk file, then quits. drive's in-loop,
+        // dirty-gated flush should persist the VFS to the sidecar.
+        let mut m = build_machine(vfs_image(write_hi_program(), 2), Box::new(TestBackend::new())).unwrap();
+        drive(&mut m, &save_path, &vfs_path, |_| {}, || (String::new(), 0), || keycode::RETURN);
+
+        assert!(vfs_path.exists(), "the .glkvfs sidecar is written to disk");
+        let blob = fs::read(&vfs_path).unwrap();
+        let files = gvm::glk::decode_files(&blob);
+        let stored = files.values().next().expect("exactly one file persisted");
+        assert_eq!(stored.as_slice(), b"Hi", "the written bytes are in the sidecar");
+
+        // Run 2: a fresh machine loads the sidecar (as main() does before drive),
+        // then a game reads the file back and echoes it.
+        let mut m2 = build_machine(vfs_image(read_hi_program(), 4), Box::new(TestBackend::new())).unwrap();
+        m2.load_vfs(&fs::read(&vfs_path).unwrap());
+        m2.clear_vfs_dirty();
+        drive(&mut m2, &save_path, &vfs_path, |_| {}, || (String::new(), 0), || keycode::RETURN);
+        let text = m2.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
+        assert_eq!(text, "Hi", "the persisted bytes are readable after load_vfs");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
