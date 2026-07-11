@@ -1181,6 +1181,9 @@ fn render_middle(
     // click gate). Cells are in the story-pane frame, which equals the Glk
     // screen frame.
     let mut links: Vec<((u16, u16), u32)> = Vec::new();
+    // The current game-set background band, carried across blank rows so the gaps
+    // between a game's coloured paragraphs fill too (SQ-0263).
+    let mut band_bg: Option<ratatui::style::Color> = None;
 
     for (i, wr) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
@@ -1222,6 +1225,46 @@ fn render_middle(
                     break;
                 }
                 links.push(((col, row_y), run.link));
+            }
+        }
+
+        // Extend a game-set background so a coloured paragraph reads as a solid
+        // band, not a ragged block that stops at the text (when the pane's own
+        // background differs from the row's). A row whose trailing run set a
+        // background fills its trailing space with it and opens/continues a band;
+        // a BLANK row inside that band fills fully (so the gaps between a game's
+        // black-on-white paragraphs are white too); a non-blank Default row closes
+        // the band (its own theme-coloured text must stay legible, so it is left
+        // untouched). Only when honouring game colours. (SQ-0263)
+        if state.config.honor_game_colours {
+            let row_bg = wr.runs.last().and_then(|last| {
+                let rbg = crate::state::unpack_zcolour(last.bg);
+                (!matches!(rbg, zvm::screen::ZColour::Default))
+                    .then(|| crate::render::resolve_zcolour(rbg, &state.colors))
+            });
+            if let Some(bg) = row_bg {
+                // A coloured row: fill trailing space and (re)open the band.
+                let fill = Style::default().bg(bg);
+                let start = text_x.saturating_add(wr.text.chars().count() as u16);
+                for x in start..body_area.right() {
+                    if let Some(cell) = buf.cell_mut((x, row_y)) {
+                        cell.set_symbol(" ").set_style(fill);
+                    }
+                }
+                band_bg = Some(bg);
+            } else if wr.text.trim().is_empty() {
+                // A blank row inside a coloured band: fill it whole with the band bg.
+                if let Some(bg) = band_bg {
+                    let fill = Style::default().bg(bg);
+                    for x in body_area.x..body_area.right() {
+                        if let Some(cell) = buf.cell_mut((x, row_y)) {
+                            cell.set_symbol(" ").set_style(fill);
+                        }
+                    }
+                }
+            } else {
+                // A non-blank Default row closes the band.
+                band_bg = None;
             }
         }
     }
@@ -1617,6 +1660,88 @@ mod tests {
             let cell = buf.cell((cx, cy)).unwrap();
             assert_ne!(cell.symbol(), " ", "linked cell holds a glyph");
             assert!(cell.modifier.contains(Modifier::UNDERLINED), "linked cell underlined");
+        }
+    }
+
+    #[test]
+    fn game_background_fills_to_row_end() {
+        // A short line with a game-set white background (like CM's black-on-white)
+        // must paint the whole row width, not just behind the glyphs. (SQ-0263)
+        use zvm::screen::ZColour;
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.honor_game_colours = true;
+        state.push_transcript_runs(
+            "hi", TranscriptKind::Story,
+            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0)],
+        );
+        state.focus = Focus::Game;
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let white = ratatui::style::Color::Rgb(255, 255, 255);
+        let mut found = false;
+        for y in 0..10u16 {
+            if buf.cell((0, y)).unwrap().symbol() == "h" {
+                found = true;
+                assert_eq!(buf.cell((20, y)).unwrap().bg, white, "trailing space fills with the game bg");
+                assert_eq!(buf.cell((37, y)).unwrap().bg, white, "fill reaches the body's right edge");
+            }
+        }
+        assert!(found, "rendered the coloured line");
+    }
+
+    #[test]
+    fn game_background_fills_blank_rows_within_a_band() {
+        // Two black-on-white paragraphs separated by a blank line: the blank line
+        // between them must also fill white, so the band is contiguous. (SQ-0263)
+        use zvm::screen::ZColour;
+        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32);
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.honor_game_colours = true;
+        state.push_transcript_runs(
+            "para1\n\npara2", TranscriptKind::Story,
+            &[white_run(5), white_run(2), white_run(5)],
+        );
+        state.focus = Focus::Game;
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let white = ratatui::style::Color::Rgb(255, 255, 255);
+        let mut blank_white = false;
+        for y in 0..10u16 {
+            let text: String = (0..30).map(|x| buf.cell((x, y)).unwrap().symbol().to_owned()).collect();
+            if text.trim().is_empty()
+                && buf.cell((5, y)).unwrap().bg == white
+                && buf.cell((20, y)).unwrap().bg == white
+            {
+                blank_white = true;
+            }
+        }
+        assert!(blank_white, "the blank line inside the white band is filled white");
+    }
+
+    #[test]
+    fn default_background_line_leaves_trailing_untouched() {
+        // A normal (Default-bg) line must NOT get a trailing fill — the feature is
+        // scoped to game-set backgrounds so ordinary games are unaffected. (SQ-0263)
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.honor_game_colours = true;
+        state.push_transcript("hi");
+        state.focus = Focus::Game;
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let white = ratatui::style::Color::Rgb(255, 255, 255);
+        for y in 0..10u16 {
+            if buf.cell((0, y)).unwrap().symbol() == "h" {
+                assert_ne!(buf.cell((37, y)).unwrap().bg, white, "no game bg → no trailing fill");
+            }
         }
     }
 
