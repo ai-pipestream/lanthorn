@@ -312,9 +312,6 @@ struct PaneRects {
     pub verb_menu: app::render::verbmenu::VerbMenuHits,
     /// Hit-rects for the glyph-picker modal (when open).
     pub glyph_picker: Option<app::render::glyph_picker::GlyphPickerRects>,
-    /// Text under the active story-pane selection, captured from THIS frame's
-    /// buffer (clamped to story columns). Read on mouse-release to copy.
-    pub selection_text: Option<String>,
     /// Per-frame map from rendered story-pane cell `(col, row)` → Glk hyperlink
     /// value. Built during transcript render; hit-tested on click (Task 3).
     /// Empty when nothing on screen is linked. Story-pane cells share the Glk
@@ -469,9 +466,7 @@ fn draw_frame(
     let mut style_editor_rects_out: Option<StyleEditorRects> = None;
     let mut glyph_picker_rects_out: Option<app::render::glyph_picker::GlyphPickerRects> = None;
     let mut verb_hits = app::render::verbmenu::VerbMenuHits::default();
-    let mut selection_text_out: Option<String> = None;
     let mut modal_list_viewport: usize = 0;
-    let mut story_scrollbar = false;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
     let mut transcript_links_out: Vec<((u16, u16), u32)> = Vec::new();
@@ -552,7 +547,6 @@ fn draw_frame(
                 let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
-                story_scrollbar = m.scrollbar;
                 transcript_max_scroll = m.max_scroll;
                 transcript_viewport_rows = m.viewport_rows;
                 transcript_links_out = m.links;
@@ -623,7 +617,6 @@ fn draw_frame(
                 let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
-                story_scrollbar = m.scrollbar;
                 transcript_max_scroll = m.max_scroll;
                 transcript_viewport_rows = m.viewport_rows;
                 transcript_links_out = m.links;
@@ -885,20 +878,9 @@ fn draw_frame(
             hints_panel_rects_out = draw_hints_panel(state, dialog_area, buf);
         }
 
-        // ── Story-pane text-selection highlight (during a left-drag) ──────────
-        // Capture the selected text from THIS frame's buffer too, so the
-        // mouse-release copy reads the displayed text (the terminal's own
-        // back-buffer is reset after draw and can't be read post-hoc).
-        if let Some(sel) = state.selection {
-            // Exclude the scrollbar gutter column (rightmost) from selection so
-            // it isn't highlighted or copied when the transcript overflows.
-            let sel_area = if story_scrollbar && story_area.width > 0 {
-                Rect { width: story_area.width - 1, ..story_area }
-            } else {
-                story_area
-            };
-            selection_text_out = app::clipboard::highlight_and_extract(buf, sel_area, sel);
-        }
+        // Story-pane text-selection highlight + copy extraction now happen inside
+        // render_middle (render/transcript.rs), which has the full wrapped-row set
+        // and can select text beyond the visible viewport. (SQ-0197)
 
         // ── Prompt overlay — map-editing prompts overlay the map; the save-name
         // prompt (a game-driven SAVE) belongs with the story/game interaction, so
@@ -950,7 +932,7 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, selection_text: selection_text_out, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -2102,7 +2084,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, selection_text: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -2374,7 +2356,18 @@ fn main() {
         // this is a no-op when no timer is running (regression guard).
         let sound_active = !state.sound_routines.is_empty() || !state.glulx_sound_notify.is_empty();
         let timer_active = state.glulx_timer_next_fire.is_some();
-        let base_poll_ms = if state.has_active_animation() || sound_active || timer_active { TIDY_POLL_MS } else { 50 };
+        // Continuous story-pane selection auto-scroll: while a drag is held at an
+        // edge and that direction can still scroll, keep the loop live so it steps
+        // one wrapped row per frame even without new mouse events. Goes quiet once
+        // the scroll hits its limit (so we don't busy-spin) or the drag releases. (SQ-0197)
+        let selecting_at_edge = state.selection.is_some() && state.selection_edge != 0 && {
+            if let Some(g) = state.transcript_geom.get() {
+                let max_scroll = g.total_rows.saturating_sub(g.area.height as usize) as u16;
+                if state.selection_edge < 0 { state.transcript_scroll < max_scroll }
+                else { state.transcript_scroll > 0 }
+            } else { false }
+        };
+        let base_poll_ms = if state.has_active_animation() || sound_active || timer_active || selecting_at_edge { TIDY_POLL_MS } else { 50 };
         // Clamp to whichever clock is due first: the Z-machine timed-input deadline
         // or the Glulx Glk-timer deadline (either may be `None`).
         let next_deadline = [state.input_deadline, state.glulx_timer_next_fire]
@@ -2398,6 +2391,11 @@ fn main() {
         };
 
         if !event_ready {
+            // Story-pane selection held at an edge with no new mouse event: step the
+            // auto-scroll one wrapped row and let the next iteration redraw. (SQ-0197)
+            if selecting_at_edge {
+                app::input::apply_selection_autoscroll(&mut state);
+            }
             // Timed-input interrupt: the deadline elapsed with no key pressed. Run
             // the game's interrupt routine and apply its output through the same
             // path a char-mode keypress uses; the next loop iteration redraws
@@ -3468,11 +3466,13 @@ fn main() {
                 }
             }
 
-            // Story-pane selection released: copy the text captured from the last
-            // rendered frame (clamped to story columns) via OSC 52.
+            // Story-pane selection released: copy the text extracted by render from
+            // the full wrapped transcript (off-screen rows included) via OSC 52.
             Action::EndSelection => {
                 state.selection = None;
-                if let Some(text) = last_panes.selection_text.take() {
+                state.selection_edge = 0;
+                let copied = state.selection_text.borrow_mut().take();
+                if let Some(text) = copied {
                     if !text.trim().is_empty() {
                         use std::io::Write;
                         let seq = app::clipboard::osc52_copy_sequence(&text);
