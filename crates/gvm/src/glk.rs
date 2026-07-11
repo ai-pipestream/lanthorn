@@ -624,6 +624,10 @@ pub enum StreamKind {
     /// A Glulx-memory stream: bytes/words land in main memory `[addr, addr+len)`.
     /// `unicode` selects 32-bit elements; `pos` is the element cursor.
     Memory { addr: u32, len: u32, pos: u32, unicode: bool },
+    /// A file stream over the in-memory VFS. `unicode` selects the on-file
+    /// encoding (4-byte-BE / UTF-8 vs 1 byte per char); the mutable name/mode/pos
+    /// state lives in [`Model::file_streams`] keyed by stream id so this stays `Copy`.
+    File { unicode: bool },
 }
 
 /// A Glk stream.
@@ -722,13 +726,20 @@ struct FileRef {
     usage: u32,
 }
 
+/// Glk `fileusage_TextMode` bit (garglk `glk.h`): when set on a fileref's usage,
+/// a file stream over it uses the text encoding (UTF-8 for unicode streams);
+/// clear = binary (4-byte big-endian for unicode streams).
+#[allow(non_upper_case_globals)]
+const fileusage_TextMode: u32 = 0x100;
+
 /// The mutable read/write state of an open file stream, kept in a side table
 /// (`Model::file_streams`) keyed by stream id so `StreamKind` stays `Copy`.
-/// Declared here for Task 1; populated by the file-stream ops in Task 2.
-#[allow(dead_code)] // fields are read by the file-stream ops added in Task 2
 #[derive(Clone, Debug)]
 struct FileStream {
     name: String,
+    /// The open filemode; retained for the snapshot round-trip (Task 3). Encoding
+    /// is derived from `unicode` + `usage`, so read/write don't consult it.
+    #[allow(dead_code)]
     mode: u32,
     pos: usize,
     unicode: bool,
@@ -746,8 +757,8 @@ pub struct Model {
     files: std::collections::BTreeMap<String, Vec<u8>>,
     /// File references indexed by `id - 1` (None = a freed slot).
     filerefs: Vec<Option<FileRef>>,
-    /// Open file streams keyed by stream id (Task 2 populates this).
-    #[allow(dead_code)] // read by the file-stream ops added in Task 2
+    /// Open file streams keyed by stream id (the mutable read/write cursor state
+    /// for each [`StreamKind::File`] stream).
     file_streams: std::collections::BTreeMap<u32, FileStream>,
     /// Root window id (0 = no windows open).
     root: u32,
@@ -1455,14 +1466,51 @@ impl Model {
     pub fn stream_open_memory(&mut self, addr: u32, len: u32, unicode: bool, rock: u32) -> u32 {
         self.alloc_stream(StreamKind::Memory { addr, len, pos: 0, unicode }, rock)
     }
+
+    /// `glk_stream_open_file[_uni]`: open a file stream over the VFS blob named by
+    /// `fref`. Applies the Glk open-mode rules — `Write` (0x01) truncates,
+    /// `Read` (0x02) fails (returns 0, no stream) if the file is absent,
+    /// `ReadWrite` (0x03) creates-if-absent at pos 0, `WriteAppend` (0x05)
+    /// creates-if-absent and seeks to the end. `unicode` picks the on-file
+    /// encoding. Returns the new stream id, or 0 on failure.
+    pub fn stream_open_file(&mut self, fref: u32, fmode: u32, unicode: bool, rock: u32) -> u32 {
+        let Some((name, usage)) = self.fileref_name(fref) else {
+            return 0;
+        };
+        let pos = match fmode {
+            0x01 => {
+                self.files.insert(name.clone(), Vec::new());
+                0
+            }
+            0x02 => {
+                if !self.files.contains_key(&name) {
+                    return 0;
+                }
+                0
+            }
+            0x03 => {
+                self.files.entry(name.clone()).or_default();
+                0
+            }
+            0x05 => self.files.entry(name.clone()).or_default().len(),
+            _ => return 0,
+        };
+        let sid = self.alloc_stream(StreamKind::File { unicode }, rock);
+        self.file_streams.insert(sid, FileStream { name, mode: fmode, pos, unicode, usage });
+        sid
+    }
     /// Close a stream, returning its `(read_count, write_count)`. The current
     /// stream is cleared if it was this one.
     pub fn stream_close(&mut self, id: u32) -> Option<(u32, u32)> {
         let counts = self.stream(id).map(|s| (s.read_count, s.write_count))?;
-        // Window streams are owned by their window; only free memory streams here.
-        if let Some(s) = self.stream(id) {
-            if matches!(s.kind, StreamKind::Memory { .. }) {
+        // Window streams are owned by their window; only free memory/file streams
+        // here. A file stream also drops its side-table cursor state.
+        if let Some(kind) = self.stream(id).map(|s| s.kind) {
+            if matches!(kind, StreamKind::Memory { .. } | StreamKind::File { .. }) {
                 self.streams[(id - 1) as usize] = None;
+            }
+            if matches!(kind, StreamKind::File { .. }) {
+                self.file_streams.remove(&id);
             }
         }
         if self.cur_stream == id {
@@ -1493,22 +1541,40 @@ impl Model {
     pub fn stream_position(&self, id: u32) -> Option<u32> {
         match self.stream(id)?.kind {
             StreamKind::Memory { pos, .. } => Some(pos),
+            StreamKind::File { .. } => Some(self.file_streams.get(&id).map_or(0, |f| f.pos as u32)),
             StreamKind::Window(_) => Some(self.stream(id)?.write_count),
         }
     }
     /// Seek a memory stream. `seekmode`: 0 = from start, 1 = from current,
     /// 2 = from end; clamped to `[0, len]`.
     pub fn stream_set_position(&mut self, id: u32, pos: i32, seekmode: u32) {
-        if let Some(s) = self.stream_mut(id) {
-            if let StreamKind::Memory { len, pos: ref mut p, .. } = s.kind {
-                let base = match seekmode {
-                    1 => *p as i64,
-                    2 => len as i64,
-                    _ => 0,
-                };
-                let np = (base + pos as i64).clamp(0, len as i64);
-                *p = np as u32;
+        match self.stream(id).map(|s| s.kind) {
+            Some(StreamKind::Memory { .. }) => {
+                if let Some(s) = self.stream_mut(id) {
+                    if let StreamKind::Memory { len, pos: ref mut p, .. } = s.kind {
+                        let base = match seekmode {
+                            1 => *p as i64,
+                            2 => len as i64,
+                            _ => 0,
+                        };
+                        let np = (base + pos as i64).clamp(0, len as i64);
+                        *p = np as u32;
+                    }
+                }
             }
+            Some(StreamKind::File { .. }) => {
+                if let Some(fs) = self.file_streams.get(&id) {
+                    let len = self.files.get(&fs.name).map_or(0, |b| b.len()) as i64;
+                    let base = match seekmode {
+                        1 => fs.pos as i64,
+                        2 => len,
+                        _ => 0,
+                    };
+                    let np = (base + pos as i64).clamp(0, len) as usize;
+                    self.file_streams.get_mut(&id).unwrap().pos = np;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1547,6 +1613,114 @@ impl Model {
             }
             s.read_count = s.read_count.saturating_add(n);
         }
+    }
+
+    /// `Some(unicode)` if `id` is a file stream (the on-file encoding flag), else
+    /// `None`. Lets the stream-read selectors branch onto the VFS path.
+    pub fn file_stream_is_unicode(&self, id: u32) -> Option<bool> {
+        match self.stream(id)?.kind {
+            StreamKind::File { unicode } => Some(unicode),
+            _ => None,
+        }
+    }
+
+    /// Write `s` to a file stream, appending/overwriting bytes at its cursor in
+    /// the VFS blob per the stream's encoding (byte = `ch & 0xFF`; unicode binary
+    /// = 4-byte big-endian; unicode text = UTF-8), advancing `pos` and the write
+    /// count. A no-op for a non-file / stale stream.
+    pub fn file_stream_write(&mut self, id: u32, s: &str) {
+        let Some(fs) = self.file_streams.get(&id) else {
+            return;
+        };
+        let text = fs.usage & fileusage_TextMode != 0;
+        let unicode = fs.unicode;
+        let name = fs.name.clone();
+        let mut pos = fs.pos;
+        let Some(data) = self.files.get_mut(&name) else {
+            return;
+        };
+        let mut nchars = 0u32;
+        for ch in s.chars() {
+            if !unicode {
+                Self::vfs_write_byte(data, &mut pos, (ch as u32 & 0xFF) as u8);
+            } else if !text {
+                for b in (ch as u32).to_be_bytes() {
+                    Self::vfs_write_byte(data, &mut pos, b);
+                }
+            } else {
+                let mut buf = [0u8; 4];
+                for &b in ch.encode_utf8(&mut buf).as_bytes() {
+                    Self::vfs_write_byte(data, &mut pos, b);
+                }
+            }
+            nchars += 1;
+        }
+        self.file_streams.get_mut(&id).unwrap().pos = pos;
+        if let Some(st) = self.stream_mut(id) {
+            st.write_count = st.write_count.saturating_add(nchars);
+        }
+    }
+
+    /// Overwrite the byte at `*pos` (or push when at the end), then advance `*pos`.
+    /// `*pos` is always `<= data.len()` (positions are clamped on seek), so a push
+    /// never leaves a gap.
+    fn vfs_write_byte(data: &mut Vec<u8>, pos: &mut usize, b: u8) {
+        if *pos < data.len() {
+            data[*pos] = b;
+        } else {
+            data.push(b);
+        }
+        *pos += 1;
+    }
+
+    /// Read one character from a file stream at its cursor, decoding per the
+    /// stream's encoding (byte / 4-byte-BE / UTF-8), advancing `pos` past the
+    /// consumed bytes and bumping the read count. `None` at end-of-file.
+    pub fn file_stream_read_char(&mut self, id: u32) -> Option<u32> {
+        let fs = self.file_streams.get(&id)?;
+        let text = fs.usage & fileusage_TextMode != 0;
+        let unicode = fs.unicode;
+        let pos = fs.pos;
+        let name = fs.name.clone();
+        let data = self.files.get(&name)?;
+        let (val, adv) = if !unicode {
+            (*data.get(pos)? as u32, 1)
+        } else if !text {
+            if pos + 4 > data.len() {
+                return None;
+            }
+            let b = &data[pos..pos + 4];
+            (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 4)
+        } else {
+            Self::vfs_decode_utf8(data, pos)?
+        };
+        self.file_streams.get_mut(&id).unwrap().pos = pos + adv;
+        if let Some(st) = self.stream_mut(id) {
+            st.read_count = st.read_count.saturating_add(1);
+        }
+        Some(val)
+    }
+
+    /// Decode one UTF-8 code point from `data` at `pos`, returning `(codepoint,
+    /// byte_len)`. `None` at EOF or on a truncated/invalid sequence.
+    fn vfs_decode_utf8(data: &[u8], pos: usize) -> Option<(u32, usize)> {
+        let b0 = *data.get(pos)?;
+        let len = if b0 < 0x80 {
+            1
+        } else if b0 >> 5 == 0b110 {
+            2
+        } else if b0 >> 4 == 0b1110 {
+            3
+        } else if b0 >> 3 == 0b11110 {
+            4
+        } else {
+            return None;
+        };
+        if pos + len > data.len() {
+            return None;
+        }
+        let ch = std::str::from_utf8(&data[pos..pos + len]).ok()?.chars().next()?;
+        Some((ch as u32, len))
     }
 
     /// Advance a memory stream's position by `n` elements (after the engine has
@@ -1809,6 +1983,15 @@ impl Model {
                             w(&mut out, pos);
                             w(&mut out, unicode as u32);
                         }
+                        StreamKind::File { unicode } => {
+                            // TODO(Task 3): fully persist file streams — the `files`
+                            // map, `filerefs` table, and the `file_streams` cursor
+                            // side table — under a bumped snapshot version. For now
+                            // emit only the tag + encoding so the match is
+                            // exhaustive; a restored file stream has no VFS state.
+                            w(&mut out, 2);
+                            w(&mut out, unicode as u32);
+                        }
                     }
                 }
             }
@@ -1878,6 +2061,8 @@ impl Model {
             let kind = match r.u32()? {
                 0 => StreamKind::Window(r.u32()?),
                 1 => StreamKind::Memory { addr: r.u32()?, len: r.u32()?, pos: r.u32()?, unicode: r.u32()? != 0 },
+                // TODO(Task 3): restore the file_streams cursor state alongside.
+                2 => StreamKind::File { unicode: r.u32()? != 0 },
                 other => return Err(format!("Glk snapshot: bad stream kind {other}")),
             };
             streams.push(Some(Stream {
@@ -2311,5 +2496,86 @@ mod style_hint_tests {
         assert_eq!(Model::sanitize_fileref_name(""), "file");
         assert_eq!(Model::sanitize_fileref_name("///"), "___");
         assert_eq!(Model::sanitize_fileref_name("Ok-Name_1.dat"), "Ok-Name_1.dat");
+    }
+
+    // Glk filemode constants (garglk glk.h).
+    const FM_WRITE: u32 = 0x01;
+    const FM_READ: u32 = 0x02;
+    const FM_READWRITE: u32 = 0x03;
+    const FM_WRITEAPPEND: u32 = 0x05;
+
+    #[test]
+    fn file_stream_write_truncates_existing() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        m.files.insert("f".to_string(), vec![b'O', b'L', b'D']);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        assert_ne!(sid, 0);
+        assert_eq!(m.files["f"], Vec::<u8>::new(), "Write truncates on open");
+        m.file_stream_write(sid, "Hi");
+        assert_eq!(m.files["f"], b"Hi");
+    }
+
+    #[test]
+    fn file_stream_write_append_preserves_and_seeks_end() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        m.files.insert("f".to_string(), b"AB".to_vec());
+        let sid = m.stream_open_file(f, FM_WRITEAPPEND, false, 0);
+        assert_eq!(m.stream_position(sid), Some(2), "append seeks to end");
+        m.file_stream_write(sid, "CD");
+        assert_eq!(m.files["f"], b"ABCD");
+    }
+
+    #[test]
+    fn file_stream_read_missing_returns_zero_and_allocates_nothing() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_READ, false, 0);
+        assert_eq!(sid, 0, "Read of a missing file fails");
+        assert_eq!(m.stream_iterate(0), (0, 0), "no stream was allocated");
+    }
+
+    #[test]
+    fn file_stream_seek_modes_clamp() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        m.files.insert("f".to_string(), b"ABCDE".to_vec()); // len 5
+        let sid = m.stream_open_file(f, FM_READWRITE, false, 0);
+        m.stream_set_position(sid, 2, 0); // Start + 2
+        assert_eq!(m.stream_position(sid), Some(2));
+        m.stream_set_position(sid, 1, 1); // Current + 1
+        assert_eq!(m.stream_position(sid), Some(3));
+        m.stream_set_position(sid, 0, 2); // End
+        assert_eq!(m.stream_position(sid), Some(5));
+        m.stream_set_position(sid, -10, 1); // clamp low
+        assert_eq!(m.stream_position(sid), Some(0));
+        m.stream_set_position(sid, 100, 0); // clamp high
+        assert_eq!(m.stream_position(sid), Some(5));
+    }
+
+    #[test]
+    fn file_stream_uni_binary_roundtrips_big_endian() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "u".to_string(), 0); // binary usage (no TextMode)
+        let sid = m.stream_open_file(f, FM_WRITE, true, 0);
+        m.file_stream_write(sid, "\u{1F600}"); // one astral code point
+        assert_eq!(m.files["u"], vec![0x00, 0x01, 0xF6, 0x00], "4-byte big-endian");
+        m.stream_close(sid);
+        let sid2 = m.stream_open_file(f, FM_READ, true, 0);
+        assert_eq!(m.file_stream_read_char(sid2), Some(0x1F600));
+        assert_eq!(m.file_stream_read_char(sid2), None, "EOF");
+    }
+
+    #[test]
+    fn file_stream_close_syncs_counts_and_frees_slot() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        m.file_stream_write(sid, "Hi");
+        assert_eq!(m.stream_close(sid), Some((0, 2)), "read_count 0, write_count 2");
+        assert_eq!(m.files["f"], b"Hi", "bytes persist after close");
+        assert_eq!(m.stream_position(sid), None, "stream slot is freed");
+        assert!(m.file_streams.is_empty(), "cursor side-table entry dropped");
     }
 }

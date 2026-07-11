@@ -2190,6 +2190,7 @@ impl Machine {
                 }
                 self.glk.memory_stream_advance(sid, s.chars().count() as u32);
             }
+            StreamKind::File { .. } => self.glk.file_stream_write(sid, s),
         }
     }
 
@@ -2624,6 +2625,8 @@ impl Machine {
             0x0041 => self.glk.stream_rock(a(0)).unwrap_or(0), // glk_stream_get_rock
             0x0043 => self.glk.stream_open_memory(a(0), a(1), false, a(3)), // open_memory(addr,len,fmode,rock)
             0x0139 => self.glk.stream_open_memory(a(0), a(1), true, a(3)),  // open_memory_uni
+            0x0042 => self.glk.stream_open_file(a(0), a(1), false, a(2)),   // open_file(fref,fmode,rock)
+            0x0138 => self.glk.stream_open_file(a(0), a(1), true, a(2)),    // open_file_uni
             0x0044 => {
                 // glk_stream_close(str, resultptr{readcount, writecount})
                 match self.glk.stream_close(a(0)) {
@@ -2654,7 +2657,10 @@ impl Machine {
                         self.glk.memory_stream_read_advance(sid, 1);
                         v
                     }
-                    _ => 0xFFFF_FFFF, // EOF or not a byte memory stream
+                    _ if self.glk.file_stream_is_unicode(sid) == Some(false) => {
+                        self.glk.file_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
+                    }
+                    _ => 0xFFFF_FFFF, // EOF or not a byte stream
                 }
             }
             0x0091 => {
@@ -2673,6 +2679,19 @@ impl Machine {
                         }
                     }
                     self.glk.memory_stream_read_advance(sid, count);
+                } else if self.glk.file_stream_is_unicode(sid) == Some(false) {
+                    while count + 1 < maxlen {
+                        match self.glk.file_stream_read_char(sid) {
+                            Some(byte) => {
+                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                                count += 1;
+                                if byte == b'\n' as u32 {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
                 // always NUL-terminate if room
                 if maxlen > 0 {
@@ -2692,6 +2711,16 @@ impl Machine {
                     }
                     count = available;
                     self.glk.memory_stream_read_advance(sid, count);
+                } else if self.glk.file_stream_is_unicode(sid) == Some(false) {
+                    while count < maxlen {
+                        match self.glk.file_stream_read_char(sid) {
+                            Some(byte) => {
+                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                                count += 1;
+                            }
+                            None => break,
+                        }
+                    }
                 }
                 count
             }
@@ -2703,6 +2732,9 @@ impl Machine {
                         let v = if unicode { self.m32(addr + pos * 4)? } else { self.m8(addr + pos)? };
                         self.glk.memory_stream_read_advance(sid, 1);
                         v
+                    }
+                    _ if self.glk.file_stream_is_unicode(sid).is_some() => {
+                        self.glk.file_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
                     }
                     _ => 0xFFFF_FFFF,
                 }
@@ -2723,6 +2755,16 @@ impl Machine {
                     }
                     count = available;
                     self.glk.memory_stream_read_advance(sid, count);
+                } else if self.glk.file_stream_is_unicode(sid).is_some() {
+                    while count < maxlen {
+                        match self.glk.file_stream_read_char(sid) {
+                            Some(cp) => {
+                                self.store_mem_sized(buf + count * 4, cp, 4)?;
+                                count += 1;
+                            }
+                            None => break,
+                        }
+                    }
                 }
                 count
             }
@@ -2746,6 +2788,19 @@ impl Machine {
                         }
                     }
                     self.glk.memory_stream_read_advance(sid, count);
+                } else if self.glk.file_stream_is_unicode(sid).is_some() {
+                    while count + 1 < maxlen {
+                        match self.glk.file_stream_read_char(sid) {
+                            Some(cp) => {
+                                self.store_mem_sized(buf + count * 4, cp, 4)?;
+                                count += 1;
+                                if cp == b'\n' as u32 {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
                 // always NUL-terminate if room
                 if maxlen > 0 {
@@ -7378,6 +7433,44 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 2, "count = 2");
         assert_eq!(m.mem.read32(0x1C0).unwrap(), b'A' as u32, "cp[0]");
         assert_eq!(m.mem.read32(0x1C4).unwrap(), b'B' as u32, "cp[1]");
+    }
+
+    // ── Glk file streams (glk_stream_open_file over the VFS) ─────────────────
+
+    #[test]
+    fn glk_file_stream_write_then_read_roundtrips() {
+        use asm::Op::{C8, C16, Mem16, Zero};
+        // create_by_name("save") -> fref@0x100; open it Write -> sid@0x104; write
+        // "Hi" via put_char_stream and "!!" via put_buffer_stream; close; confirm
+        // does_file_exist==1; reopen Read -> sid2@0x10C; read back "Hi!!" then EOF.
+        let mut body = glk_call(0x61, &[C8(0), C16(0x0220), C8(0)], Mem16(0x0300)); // create_by_name
+        body.extend(glk_call(0x42, &[Mem16(0x0300), C8(1), C8(0)], Mem16(0x0304))); // open_file(Write)
+        body.extend(glk_call(0x81, &[Mem16(0x0304), C8(b'H' as i8)], Zero)); // put_char_stream 'H'
+        body.extend(glk_call(0x81, &[Mem16(0x0304), C8(b'i' as i8)], Zero)); // put_char_stream 'i'
+        body.extend(glk_call(0x85, &[Mem16(0x0304), C16(0x0280), C8(2)], Zero)); // put_buffer_stream "!!"
+        body.extend(glk_call(0x44, &[Mem16(0x0304), C16(0x0330)], Zero)); // stream_close
+        body.extend(glk_call(0x67, &[Mem16(0x0300)], Mem16(0x0308))); // does_file_exist -> 1
+        body.extend(glk_call(0x42, &[Mem16(0x0300), C8(2), C8(0)], Mem16(0x030C))); // open_file(Read)
+        body.extend(glk_call(0x90, &[Mem16(0x030C)], Mem16(0x0340))); // get_char 'H'
+        body.extend(glk_call(0x90, &[Mem16(0x030C)], Mem16(0x0344))); // 'i'
+        body.extend(glk_call(0x90, &[Mem16(0x030C)], Mem16(0x0348))); // '!'
+        body.extend(glk_call(0x90, &[Mem16(0x030C)], Mem16(0x034C))); // '!'
+        body.extend(glk_call(0x90, &[Mem16(0x030C)], Mem16(0x0350))); // EOF
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x400, |m| {
+            poke(m, 0x0220, b"save\0");
+            poke(m, 0x0280, b"!!");
+        });
+        assert_ne!(m.mem.read32(0x300).unwrap(), 0, "create_by_name -> live fileref");
+        assert_ne!(m.mem.read32(0x304).unwrap(), 0, "open_file(Write) -> live stream");
+        assert_eq!(m.mem.read32(0x308).unwrap(), 1, "file exists after write+close");
+        assert_ne!(m.mem.read32(0x30C).unwrap(), 0, "open_file(Read) -> live stream");
+        assert_eq!(m.mem.read32(0x340).unwrap(), b'H' as u32, "byte 0");
+        assert_eq!(m.mem.read32(0x344).unwrap(), b'i' as u32, "byte 1");
+        assert_eq!(m.mem.read32(0x348).unwrap(), b'!' as u32, "byte 2");
+        assert_eq!(m.mem.read32(0x34C).unwrap(), b'!' as u32, "byte 3");
+        assert_eq!(m.mem.read32(0x350).unwrap(), 0xFFFF_FFFF, "EOF");
+        assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
     }
 
     // ── gestalt truthfulness ─────────────────────────────────────────────────
