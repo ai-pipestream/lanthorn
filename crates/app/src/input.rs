@@ -2644,20 +2644,33 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::StartSelection(col, row) => {
             // Left-down in the story also activates the game pane.
-            state.focus = crate::state::Focus::Game;
-            state.selection = Some(crate::clipboard::Selection::new((col, row)));
-        }
-
-        Action::ExtendSelection(col, row) => {
-            if let Some(sel) = &mut state.selection {
-                sel.head = (col, row);
+            state.focus = Focus::Game;
+            if let Some(g) = state.transcript_geom.get() {
+                if let Some(p) = screen_to_point(g, col, row) {
+                    state.selection = Some(crate::clipboard::Selection::new(p));
+                    state.selection_edge = 0;
+                }
             }
         }
 
-        // The copy is performed by the run loop (it needs the rendered buffer);
-        // if this reaches apply_action directly, just drop the selection.
+        Action::ExtendSelection(col, row) => {
+            if let Some(g) = state.transcript_geom.get() {
+                if let Some(sel) = &mut state.selection {
+                    if let Some(p) = screen_to_point(g, col, row) { sel.head = p; }
+                }
+                // Edge detection for auto-scroll: pointer at/above top → -1; at/below bottom → +1.
+                state.selection_edge = if row <= g.area.y { -1 }
+                    else if row >= g.area.bottom().saturating_sub(1) { 1 }
+                    else { 0 };
+                // Step once now so a drag that reaches the edge scrolls even without a tick.
+                apply_selection_autoscroll(state);
+            }
+        }
+
+        // Copy is emitted by the run loop from state.selection_text; just clear here.
         Action::EndSelection => {
             state.selection = None;
+            state.selection_edge = 0;
         }
 
         // ── Transcript scroll ─────────────────────────────────────────────────
@@ -3411,6 +3424,39 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::None => {}
         // Note: OpenHotkeyDialog and CloseHotkeyDialog are handled above.
+    }
+}
+
+// ── Story-pane selection helpers (SQ-0197) ────────────────────────────────────
+
+/// Map a story-pane screen cell to an absolute wrapped-transcript Point, clamped to
+/// the visible rows and the story band. `None` if geometry is degenerate. (SQ-0197)
+pub(crate) fn screen_to_point(g: crate::clipboard::TranscriptGeom, col: u16, row: u16)
+    -> Option<crate::clipboard::Point> {
+    if g.area.width == 0 || g.area.height == 0 { return None; }
+    let dy = row.saturating_sub(g.area.y).min(g.area.height.saturating_sub(1));
+    let abs = (g.first_abs_row + dy as usize).min(g.total_rows.saturating_sub(1));
+    let c = col.saturating_sub(g.area.x).min(g.area.width.saturating_sub(1));
+    Some(crate::clipboard::Point { row: abs, col: c })
+}
+
+/// While a selection drag sits at an edge, scroll one wrapped row toward it and
+/// advance the head in lockstep so the selection keeps growing. No-op at scroll
+/// limits or when not selecting. (SQ-0197)
+pub fn apply_selection_autoscroll(state: &mut AppState) {
+    if state.selection_edge == 0 { return; }
+    let Some(g) = state.transcript_geom.get() else { return };
+    let max_scroll = g.total_rows.saturating_sub(g.area.height as usize) as u16;
+    let cur = state.transcript_scroll;
+    let next = if state.selection_edge < 0 { cur.saturating_add(1).min(max_scroll) }
+               else { cur.saturating_sub(1) };
+    if next == cur { return; } // at a limit
+    state.scroll_transcript_to(next);
+    if let Some(sel) = &mut state.selection {
+        // Top edge reveals an older row above → head.row moves up by 1; bottom edge
+        // reveals a newer row below → head.row moves down by 1.
+        if state.selection_edge < 0 { sel.head.row = sel.head.row.saturating_sub(1); }
+        else { sel.head.row = (sel.head.row + 1).min(g.total_rows.saturating_sub(1)); }
     }
 }
 
@@ -6041,28 +6087,116 @@ mod tests {
             "left-down in story pane should start a selection, got {:?}", action
         );
         // Applying it activates the game pane and sets the selection anchor.
+        // Publish geometry so screen cells map to absolute wrapped-row Points.
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: story_rect(), first_abs_row: 0, total_rows: 100,
+        }));
         apply_action(action, &mut s, &mut Mapper::default());
         assert_eq!(s.focus, Focus::Game);
-        assert_eq!(s.selection.map(|sel| sel.anchor), Some((85, 5)));
+        // col 85 → col 5 within the story band (x=80); row 5 → abs row 5.
+        assert_eq!(s.selection.map(|sel| sel.anchor), Some(crate::clipboard::Point { row: 5, col: 5 }));
     }
 
     #[test]
     fn left_drag_then_up_extends_and_ends_selection() {
         use crossterm::event::MouseEventKind;
         let mut s = AppState::default();
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: story_rect(), first_abs_row: 0, total_rows: 100,
+        }));
         apply_action(Action::StartSelection(85, 5), &mut s, &mut Mapper::default());
 
         let drag = mouse_event(MouseEventKind::Drag(MouseButton::Left), 90, 7, KeyModifiers::NONE);
         let a = mouse_to_action(&s, drag, map_rect(), story_rect(), &[], &None);
         assert!(matches!(a, Action::ExtendSelection(90, 7)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.selection.map(|sel| sel.head), Some((90, 7)));
+        // col 90 → col 10; row 7 (interior) → abs row 7.
+        assert_eq!(s.selection.map(|sel| sel.head), Some(crate::clipboard::Point { row: 7, col: 10 }));
 
         let up = mouse_event(MouseEventKind::Up(MouseButton::Left), 90, 7, KeyModifiers::NONE);
         assert!(matches!(
             mouse_to_action(&s, up, map_rect(), story_rect(), &[], &None),
             Action::EndSelection
         ));
+    }
+
+    #[test]
+    fn screen_to_point_maps_row_and_col() {
+        let g = crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(0, 0, 20, 10), first_abs_row: 5, total_rows: 100,
+        };
+        assert_eq!(screen_to_point(g, 3, 2), Some(crate::clipboard::Point { row: 7, col: 3 }));
+        // row past the bottom clamps to first_abs_row + height - 1.
+        assert_eq!(screen_to_point(g, 3, 99), Some(crate::clipboard::Point { row: 14, col: 3 }));
+        // col past the right clamps to width - 1.
+        assert_eq!(screen_to_point(g, 99, 2), Some(crate::clipboard::Point { row: 7, col: 19 }));
+    }
+
+    #[test]
+    fn screen_to_point_clamps_to_total_rows() {
+        // total_rows smaller than first_abs_row + dy: clamp to total_rows - 1.
+        let g = crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(0, 0, 20, 10), first_abs_row: 5, total_rows: 8,
+        };
+        assert_eq!(screen_to_point(g, 0, 9), Some(crate::clipboard::Point { row: 7, col: 0 }));
+    }
+
+    #[test]
+    fn start_selection_sets_anchor_from_geom() {
+        let mut s = AppState::default();
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(80, 0, 40, 40), first_abs_row: 10, total_rows: 100,
+        }));
+        apply_action(Action::StartSelection(85, 5), &mut s, &mut Mapper::default());
+        let sel = s.selection.expect("selection set");
+        let expected = crate::clipboard::Point { row: 15, col: 5 };
+        assert_eq!(sel.anchor, expected);
+        assert_eq!(sel.head, expected);
+    }
+
+    #[test]
+    fn extend_selection_at_bottom_edge_autoscrolls_and_grows_head() {
+        let mut s = AppState::default();
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(80, 0, 40, 20), first_abs_row: 30, total_rows: 100,
+        }));
+        s.transcript_scroll = 10; // mid-range (max = 100 - 20 = 80)
+        apply_action(Action::StartSelection(85, 5), &mut s, &mut Mapper::default());
+        // Bottom edge row: area.bottom() - 1 = 19 → maps to abs row 30 + 19 = 49;
+        // autoscroll then grows the head one more row → 50.
+        apply_action(Action::ExtendSelection(90, 19), &mut s, &mut Mapper::default());
+        assert_eq!(s.selection_edge, 1);
+        assert_eq!(s.transcript_scroll, 9, "bottom edge scrolls toward newer (scroll -1)");
+        assert_eq!(s.selection.unwrap().head.row, 50, "head grows downward past the edge row");
+    }
+
+    #[test]
+    fn extend_selection_at_top_edge_autoscrolls_and_grows_head() {
+        let mut s = AppState::default();
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(80, 0, 40, 20), first_abs_row: 30, total_rows: 100,
+        }));
+        s.transcript_scroll = 10;
+        apply_action(Action::StartSelection(85, 5), &mut s, &mut Mapper::default());
+        // Top edge row: area.y = 0 → maps to abs row 30; autoscroll grows the head
+        // one row upward → 29.
+        apply_action(Action::ExtendSelection(90, 0), &mut s, &mut Mapper::default());
+        assert_eq!(s.selection_edge, -1);
+        assert_eq!(s.transcript_scroll, 11, "top edge scrolls toward older (scroll +1)");
+        assert_eq!(s.selection.unwrap().head.row, 29, "head grows upward past the edge row");
+    }
+
+    #[test]
+    fn extend_selection_interior_sets_edge_zero_no_scroll() {
+        let mut s = AppState::default();
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(80, 0, 40, 20), first_abs_row: 30, total_rows: 100,
+        }));
+        s.transcript_scroll = 10;
+        apply_action(Action::StartSelection(85, 5), &mut s, &mut Mapper::default());
+        apply_action(Action::ExtendSelection(90, 10), &mut s, &mut Mapper::default());
+        assert_eq!(s.selection_edge, 0);
+        assert_eq!(s.transcript_scroll, 10, "interior drag does not scroll");
     }
 
     #[test]
