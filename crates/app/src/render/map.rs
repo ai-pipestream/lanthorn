@@ -4977,6 +4977,7 @@ mod tests {
             started: std::time::Instant::now(),
             progress: Arc::new(AtomicUsize::new(5)),
             total: 10,
+            animate: true,
         });
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);

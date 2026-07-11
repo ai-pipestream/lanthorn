@@ -615,6 +615,11 @@ pub struct AnimBuildJob {
     /// Estimated final frame count (room count + headroom). The bar is approximate: the
     /// real frame total isn't known until the build finishes, so this is only an estimate.
     pub total: usize,
+    /// Whether to install the tidy animation when the build finishes. `animate-tidy`
+    /// sets this `true` (play the frames); the instant `tidy-map`/`Retidy` re-tidy sets
+    /// it `false` — it reuses the same off-thread build purely to surface the progress
+    /// bar, then applies the tidied graph without an animation. (SQ-0261)
+    pub animate: bool,
 }
 
 impl std::fmt::Debug for AnimBuildJob {

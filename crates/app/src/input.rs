@@ -2129,9 +2129,35 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // router has no illegal overlaps. Honours compass ordering the greedy per-turn
         // placement can't. No-op in Manual mode — those positions are user-owned.
         Action::Retidy => {
-            if mapper.mode == mapper::layout::LayoutMode::Auto {
+            // Re-tidy off the main thread so the progress bar shows and the UI stays
+            // live during a long tidy on a large map — same machinery as `animate-tidy`,
+            // but `animate: false` so the run loop applies the tidied graph instantly
+            // (no animation playback). Guard against a double-spawn while a build is in
+            // flight or an animation is showing. (SQ-0261)
+            if mapper.mode == mapper::layout::LayoutMode::Auto
+                && state.anim_build_job.is_none()
+                && state.tidy_anim.is_none()
+            {
                 let layer = state.active_layer(&mapper.graph);
-                run_tidy_pipeline(&mut mapper.graph, layer, None);
+                let mut g = mapper.graph.clone();
+                let gen = state.graph_gen;
+                let total = mapper.graph.rooms_in_layer(layer).len() + 8;
+                let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let progress_clone = std::sync::Arc::clone(&progress);
+                let handle = std::thread::spawn(move || {
+                    let frames = run_tidy_pipeline(&mut g, layer, Some(progress_clone));
+                    (frames, g)
+                });
+                state.anim_build_job = Some(crate::state::AnimBuildJob {
+                    handle,
+                    layer,
+                    gen,
+                    started: std::time::Instant::now(),
+                    progress,
+                    total,
+                    animate: false,
+                });
+                state.set_status("tidying map…");
             }
         }
 
@@ -2184,6 +2210,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     started: std::time::Instant::now(),
                     progress,
                     total,
+                    animate: true,
                 });
                 state.set_status("preparing tidy animation…");
             }
@@ -4488,9 +4515,24 @@ mod tests {
         m.graph.set_pos(1, (5, 5));
         m.graph.set_pos(2, (0, 0));
         apply_action(Action::Retidy, &mut s, &mut m);
+        // Retidy now builds off-thread (for the progress bar); drive the worker and
+        // apply its tidied graph as the run loop would. (SQ-0261)
+        drive_retidy(&mut s, &mut m);
         let p1 = m.graph.room(1).unwrap().pos.unwrap();
         let p2 = m.graph.room(2).unwrap().pos.unwrap();
         assert!(p2.0 > p1.0, "after retidy room 2 must be east of room 1: {p2:?} vs {p1:?}");
+    }
+
+    /// Test helper: `Retidy` spawns an off-thread build (SQ-0261). Join it and write
+    /// the tidied graph back into `m`, mirroring the run loop's apply step, so tests
+    /// can assert on the final layout synchronously. A no-op if no job was spawned
+    /// (e.g. Manual mode, where Retidy is a no-op).
+    fn drive_retidy(s: &mut AppState, m: &mut Mapper) {
+        if let Some(job) = s.anim_build_job.take() {
+            assert!(!job.animate, "Retidy must build with animate=false");
+            let (_frames, tidied) = job.handle.join().expect("retidy worker completes");
+            m.graph = tidied;
+        }
     }
 
     #[test]
@@ -4543,6 +4585,9 @@ mod tests {
         let (mut s_inst, mut m_inst) = (AppState::default(), build());
         apply_action(Action::AnimateTidy, &mut s_anim, &mut m_anim);
         apply_action(Action::Retidy, &mut s_inst, &mut m_inst);
+        // The instant re-tidy also builds off-thread now (progress bar); drive it to
+        // completion so m_inst holds the tidied graph as the oracle. (SQ-0261)
+        drive_retidy(&mut s_inst, &mut m_inst);
 
         // The frames are now built on a worker thread: AnimateTidy spawns a build job and
         // does NOT touch tidy_anim or the live graph synchronously.

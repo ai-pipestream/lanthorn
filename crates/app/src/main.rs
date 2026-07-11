@@ -2260,7 +2260,13 @@ fn main() {
             if let Ok((frames, tidied)) = job.handle.join() {
                 match apply_tidy_result(&mut mapper.graph, tidied, job.layer, job.gen, current_gen) {
                     ApplyTidyOutcome::Applied => {
-                        state.tidy_anim = Some(app::state::TidyAnim::new(frames));
+                        // `animate-tidy` plays the captured frames; the instant `tidy-map`
+                        // re-tidy (animate=false) applies the tidied graph without an
+                        // animation — it only used the off-thread build for the progress
+                        // bar. (SQ-0261)
+                        if job.animate {
+                            state.tidy_anim = Some(app::state::TidyAnim::new(frames));
+                        }
                         // Re-center on the current room if it moved (mirrors the tidy_job path).
                         if let Some(rid) = mapper.graph.current() {
                             if let Some(room) = mapper.graph.room(rid) {
