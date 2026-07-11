@@ -2884,23 +2884,34 @@ impl Machine {
                 self.halted = true;
                 0
             }
-            0x0064 => {
-                // glk_fileref_iterate(fref, rockptr) -> next fileref id. No
-                // filerefs are tracked yet, so iteration is always empty: return
-                // NULL and clear the rock — the correct end-of-iteration result.
-                self.glk_store_ptr(a(1), 0)?;
+            // ── filerefs (in-memory VFS) ────────────────────────────────────────
+            0x0060 => self.glk.fileref_create_temp(a(0), a(1)), // glk_fileref_create_temp(usage, rock)
+            0x0061 => {
+                // glk_fileref_create_by_name(usage, nameptr, rock): nameptr is a
+                // NUL-terminated byte string in Glulx memory.
+                let name = self.read_cstring(a(1))?;
+                self.glk.fileref_create(a(0), name, a(2))
+            }
+            0x0062 => self.glk.fileref_create_by_prompt(a(0), a(1), a(2)), // glk_fileref_create_by_prompt(usage, fmode, rock)
+            0x0063 => {
+                // glk_fileref_destroy(fref)
+                self.glk.fileref_destroy(a(0));
                 0
             }
-            // The rest of the fileref group: filerefs and file streams are not yet
-            // implemented (deferred with @save/@restore). Games probe these at
-            // startup (create-by-name + does-file-exist + destroy) to look for save
-            // data; the safe degraded answer is "no filerefs, no files". Return NULL
-            // for create_* and get_rock, false for does_file_exist, and a no-op (0)
-            // for destroy/delete — silently, so the transcript is not spammed.
-            //   0x0060 create_temp     0x0061 create_by_name   0x0062 create_by_prompt
-            //   0x0063 destroy         0x0065 get_rock         0x0066 delete_file
-            //   0x0067 does_file_exist 0x0068 create_from_fileref
-            0x0060 | 0x0061 | 0x0062 | 0x0063 | 0x0065 | 0x0066 | 0x0067 | 0x0068 => 0,
+            0x0064 => {
+                // glk_fileref_iterate(fref, rockptr) -> next fileref id
+                let (next, rock) = self.glk.fileref_iterate(a(0));
+                self.glk_store_ptr(a(1), rock)?;
+                next
+            }
+            0x0065 => self.glk.fileref_rock(a(0)), // glk_fileref_get_rock(fref)
+            0x0066 => {
+                // glk_fileref_delete_file(fref)
+                self.glk.fileref_delete(a(0));
+                0
+            }
+            0x0067 => self.glk.fileref_exists(a(0)) as u32, // glk_fileref_does_file_exist(fref)
+            0x0068 => self.glk.fileref_create_from(a(0), a(1), a(2)), // glk_fileref_create_from_fileref(usage, oldfref, rock)
             // ── graphics (GLULX_NOTES §21) ──────────────────────────────────────
             0x00E0 => {
                 // glk_image_get_info(image, widthptr, heightptr) -> 1 if it exists
@@ -6000,35 +6011,56 @@ mod tests {
     }
 
     #[test]
-    fn glk_fileref_iterate_is_empty_and_silent() {
+    fn glk_fileref_iterate_walks_live_filerefs() {
         use asm::Op::{C16, C8, Mem16};
-        // glk_fileref_iterate(fref=0, rockptr=0x0108). With no filerefs tracked,
-        // iteration is empty: NULL result, the rock cleared, and -- crucially --
-        // no "unhandled selector" diagnostic (it must not hit the fallthrough arm).
-        let mut body = glk_call(0x64, &[C8(0), C16(0x0108)], Mem16(0x0100));
+        // Create one fileref by name, then iterate. Iteration now yields the live
+        // fileref (with its rock) and then NULL -- and, crucially, emits no
+        // "unhandled selector" diagnostic.
+        // Name string "s" at 0x0120 (NUL-terminated).
+        let mut body = glk_call(0x61, &[C8(0x00), C16(0x0120), C8(0x07)], Mem16(0x0100)); // create_by_name(usage, name, rock=7)
+        body.extend(glk_call(0x64, &[C8(0), C16(0x0114)], Mem16(0x0104))); // iterate(0) -> first
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |m| {
-            m.mem.write32(0x0108, 0x9999).unwrap(); // sentinel: prove the rock is cleared
+            poke(m, 0x0120, b"s\0");
         });
-        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "no filerefs -> iterate returns NULL");
-        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "rock cleared on empty iteration");
+        let fref = m.mem.read32(0x100).unwrap();
+        assert_ne!(fref, 0, "create_by_name -> live fileref");
+        assert_eq!(m.mem.read32(0x104).unwrap(), fref, "iterate(0) yields the created fileref");
+        assert_eq!(m.mem.read32(0x114).unwrap(), 7, "iterate reports the fileref's rock");
         assert!(m.diagnostics.is_empty(), "fileref_iterate must be a handled selector");
     }
 
     #[test]
-    fn glk_fileref_group_degrades_silently() {
-        use asm::Op::{C8, Mem16};
-        // The startup probe games run: create a fileref by name, check existence,
-        // destroy it. With no fileref/file-stream support, all degrade to "nothing":
-        // NULL fref, false existence, no-op destroy -- and crucially no diagnostics
-        // (the spam reported on CounterfeitMonkey's start).
-        let mut body = glk_call(0x61, &[C8(0x02), C8(0x00), C8(0x00)], Mem16(0x0100)); // create_by_name
-        body.extend(glk_call(0x67, &[C8(0x00)], Mem16(0x0104))); // does_file_exist(NULL)
-        body.extend(glk_call(0x63, &[C8(0x00)], Mem16(0x0108))); // destroy(NULL)
+    fn glk_fileref_create_by_name_returns_live_ref() {
+        use asm::Op::{C16, C8, Mem16};
+        // create_by_name returns a NON-zero fileref; does_file_exist on a
+        // never-written fileref is still false; destroy is a silent no-op.
+        let mut body = glk_call(0x61, &[C8(0x00), C16(0x0120), C8(0x00)], Mem16(0x0100)); // create_by_name
         body.extend(asm::ins(0x120, &[]));
-        let m = run_with_ram(body, 0x200, |_| {});
-        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "create_by_name -> NULL fileref");
-        assert_eq!(m.mem.read32(0x104).unwrap(), 0, "does_file_exist -> false");
+        let m = run_with_ram(body, 0x200, |m| {
+            poke(m, 0x0120, b"save\0");
+        });
+        let fref = m.mem.read32(0x100).unwrap();
+        assert_ne!(fref, 0, "create_by_name -> live fileref id");
+        assert!(m.diagnostics.is_empty(), "the fileref group must not emit diagnostics");
+    }
+
+    #[test]
+    fn glk_fileref_group_is_silent() {
+        use asm::Op::{C16, C8, Mem16};
+        // The startup probe games run: create a fileref by name, check existence,
+        // destroy it. does_file_exist on a never-written fileref is false, destroy
+        // is a no-op -- and crucially no diagnostics (the spam reported on
+        // CounterfeitMonkey's start).
+        let mut body = glk_call(0x61, &[C8(0x02), C16(0x0120), C8(0x00)], Mem16(0x0100)); // create_by_name
+        body.extend(glk_call(0x67, &[Mem16(0x0100)], Mem16(0x0104))); // does_file_exist(fref)
+        body.extend(glk_call(0x63, &[Mem16(0x0100)], Mem16(0x0108))); // destroy(fref)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            poke(m, 0x0120, b"save\0");
+        });
+        assert_ne!(m.mem.read32(0x100).unwrap(), 0, "create_by_name -> live fileref");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0, "does_file_exist -> false (never written)");
         assert!(m.diagnostics.is_empty(), "the fileref group must not emit diagnostics");
     }
 

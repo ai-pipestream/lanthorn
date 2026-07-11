@@ -712,12 +712,43 @@ struct Window {
     size: u32,
 }
 
+/// A Glk file reference: a named handle into the in-memory VFS (`Model::files`).
+/// Filerefs are indexed by `id - 1` in `Model::filerefs` (None = a freed slot).
+#[derive(Clone, Debug)]
+struct FileRef {
+    id: u32,
+    rock: u32,
+    name: String,
+    usage: u32,
+}
+
+/// The mutable read/write state of an open file stream, kept in a side table
+/// (`Model::file_streams`) keyed by stream id so `StreamKind` stays `Copy`.
+/// Declared here for Task 1; populated by the file-stream ops in Task 2.
+#[allow(dead_code)] // fields are read by the file-stream ops added in Task 2
+#[derive(Clone, Debug)]
+struct FileStream {
+    name: String,
+    mode: u32,
+    pos: usize,
+    unicode: bool,
+    usage: u32,
+}
+
 /// The Glk window/stream model.
 pub struct Model {
     /// Windows indexed by `id - 1` (None = a freed slot).
     windows: Vec<Option<Window>>,
     /// Streams indexed by `id - 1`.
     streams: Vec<Option<Stream>>,
+    /// The in-memory virtual filesystem: file name → contents. Filerefs and file
+    /// streams read and write these blobs; no real disk I/O occurs.
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    /// File references indexed by `id - 1` (None = a freed slot).
+    filerefs: Vec<Option<FileRef>>,
+    /// Open file streams keyed by stream id (Task 2 populates this).
+    #[allow(dead_code)] // read by the file-stream ops added in Task 2
+    file_streams: std::collections::BTreeMap<u32, FileStream>,
     /// Root window id (0 = no windows open).
     root: u32,
     /// Current output stream id (0 = none).
@@ -744,6 +775,9 @@ impl Model {
         Model {
             windows: Vec::new(),
             streams: Vec::new(),
+            files: std::collections::BTreeMap::new(),
+            filerefs: Vec::new(),
+            file_streams: std::collections::BTreeMap::new(),
             root: 0,
             cur_stream: 0,
             events: std::collections::VecDeque::new(),
@@ -927,6 +961,109 @@ impl Model {
             write_count: 0,
         }));
         id
+    }
+
+    fn fileref(&self, id: u32) -> Option<&FileRef> {
+        if id == 0 {
+            return None;
+        }
+        self.filerefs.get((id - 1) as usize).and_then(|f| f.as_ref())
+    }
+
+    // ── filerefs (in-memory VFS) ────────────────────────────────────────────────
+
+    /// Keep the characters Glk libraries safely allow in a base filename (ASCII
+    /// alphanumerics plus `-`, `_`, `.`); everything else becomes `_`. An empty
+    /// result falls back to `"file"` so a name is never blank.
+    pub fn sanitize_fileref_name(raw: &str) -> String {
+        let cleaned: String = raw
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+            .collect();
+        if cleaned.is_empty() {
+            "file".to_string()
+        } else {
+            cleaned
+        }
+    }
+
+    /// Allocate a fileref slot for a (already-chosen) name; returns its id.
+    fn alloc_fileref(&mut self, usage: u32, name: String, rock: u32) -> u32 {
+        let id = (self.filerefs.len() + 1) as u32;
+        self.filerefs.push(Some(FileRef { id, rock, name, usage }));
+        id
+    }
+
+    /// `glk_fileref_create_by_name`: sanitize `name`, allocate a fileref, return id.
+    pub fn fileref_create(&mut self, usage: u32, name: String, rock: u32) -> u32 {
+        let name = Self::sanitize_fileref_name(&name);
+        self.alloc_fileref(usage, name, rock)
+    }
+
+    /// `glk_fileref_create_temp`: synthesize a unique name and allocate a fileref.
+    pub fn fileref_create_temp(&mut self, usage: u32, rock: u32) -> u32 {
+        let name = format!("__temp_{}__", self.filerefs.len());
+        self.alloc_fileref(usage, name, rock)
+    }
+
+    /// `glk_fileref_create_by_prompt`: no TUI picker is available, so degrade to a
+    /// fixed per-usage default name. (Known limitation.)
+    pub fn fileref_create_by_prompt(&mut self, usage: u32, _fmode: u32, rock: u32) -> u32 {
+        let name = format!("__prompt_{}__", usage & 0x0f);
+        self.alloc_fileref(usage, name, rock)
+    }
+
+    /// `glk_fileref_create_from_fileref`: clone `oldfref`'s name with a new
+    /// usage/rock. Returns 0 if `oldfref` is invalid.
+    pub fn fileref_create_from(&mut self, usage: u32, oldfref: u32, rock: u32) -> u32 {
+        match self.fileref(oldfref).map(|f| f.name.clone()) {
+            Some(name) => self.alloc_fileref(usage, name, rock),
+            None => 0,
+        }
+    }
+
+    /// `glk_fileref_destroy`: free the fileref slot. Does NOT delete the file.
+    pub fn fileref_destroy(&mut self, fref: u32) {
+        if fref != 0 {
+            if let Some(slot) = self.filerefs.get_mut((fref - 1) as usize) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// A fileref's rock (0 if invalid).
+    pub fn fileref_rock(&self, fref: u32) -> u32 {
+        self.fileref(fref).map(|f| f.rock).unwrap_or(0)
+    }
+
+    /// Iterate filerefs: the smallest existing id greater than `fref` (`fref == 0`
+    /// → the first), or `(0, 0)` when exhausted. Returns `(id, rock)`.
+    pub fn fileref_iterate(&self, fref: u32) -> (u32, u32) {
+        if let Some(f) = self.filerefs.iter().skip(fref as usize).flatten().next() {
+            return (f.id, f.rock);
+        }
+        (0, 0)
+    }
+
+    /// `glk_fileref_does_file_exist`: the fileref is live AND its file has been
+    /// written to the VFS.
+    pub fn fileref_exists(&self, fref: u32) -> bool {
+        match self.fileref(fref) {
+            Some(f) => self.files.contains_key(&f.name),
+            None => false,
+        }
+    }
+
+    /// `glk_fileref_delete_file`: remove the fileref's file from the VFS.
+    pub fn fileref_delete(&mut self, fref: u32) {
+        if let Some(name) = self.fileref(fref).map(|f| f.name.clone()) {
+            self.files.remove(&name);
+        }
+    }
+
+    /// The `(name, usage)` a fileref points at, for opening a file stream (Task 2).
+    pub fn fileref_name(&self, fref: u32) -> Option<(String, u32)> {
+        self.fileref(fref).map(|f| (f.name.clone(), f.usage))
     }
 
     // ── windows ───────────────────────────────────────────────────────────────
@@ -1763,6 +1900,9 @@ impl Model {
         Ok(Model {
             windows,
             streams,
+            files: std::collections::BTreeMap::new(),
+            filerefs: Vec::new(),
+            file_streams: std::collections::BTreeMap::new(),
             root,
             cur_stream,
             events: std::collections::VecDeque::new(),
@@ -2126,5 +2266,50 @@ mod style_hint_tests {
         // A fresh memory stream carries no override.
         let other = m.stream_open_memory(0, 0, false, 0);
         assert_eq!(m.stream_style_colour(other, WinType::TextBuffer, GlkStyle::Normal), StyleColour::default());
+    }
+
+    #[test]
+    fn fileref_iterate_rock_and_destroy() {
+        let mut m = Model::new();
+        let a = m.fileref_create(0x00, "save".to_string(), 0x11);
+        let b = m.fileref_create(0x00, "auto".to_string(), 0x22);
+        assert_ne!(a, 0);
+        assert_ne!(b, 0);
+        assert_ne!(a, b);
+        // Rocks round-trip.
+        assert_eq!(m.fileref_rock(a), 0x11);
+        assert_eq!(m.fileref_rock(b), 0x22);
+        // Iterate walks both live filerefs then returns (0, 0).
+        let (first, first_rock) = m.fileref_iterate(0);
+        assert_eq!(first, a);
+        assert_eq!(first_rock, 0x11);
+        let (second, second_rock) = m.fileref_iterate(first);
+        assert_eq!(second, b);
+        assert_eq!(second_rock, 0x22);
+        assert_eq!(m.fileref_iterate(second), (0, 0));
+        // After destroying the first, it drops out of iteration.
+        m.fileref_destroy(a);
+        assert_eq!(m.fileref_iterate(0), (b, 0x22));
+    }
+
+    #[test]
+    fn fileref_exists_and_delete_track_the_vfs() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "data".to_string(), 0);
+        // A never-written fileref does not exist.
+        assert!(!m.fileref_exists(f));
+        // Once its file has bytes it exists; delete removes it.
+        m.files.insert("data".to_string(), vec![1, 2, 3]);
+        assert!(m.fileref_exists(f));
+        m.fileref_delete(f);
+        assert!(!m.fileref_exists(f));
+    }
+
+    #[test]
+    fn fileref_sanitizes_names() {
+        assert_eq!(Model::sanitize_fileref_name("a/b*c.sav"), "a_b_c.sav");
+        assert_eq!(Model::sanitize_fileref_name(""), "file");
+        assert_eq!(Model::sanitize_fileref_name("///"), "___");
+        assert_eq!(Model::sanitize_fileref_name("Ok-Name_1.dat"), "Ok-Name_1.dat");
     }
 }
