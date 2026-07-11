@@ -774,14 +774,18 @@ impl LayerSegment {
 }
 
 /// Build one `LayerSegment` per entry in `layers`, marking the one matching
-/// `active_layer` as active.  The `text` field is the layer id as a decimal string.
+/// `active_layer` as active.  The `text` field comes from `label(id)` — callers
+/// pass a closure so the tab shows the layer's display name (see
+/// `MapGraph::layer_name`) rather than a bare id, matching the in-content
+/// layer strip.
 pub fn build_layer_segments(
     layers: &[mapper::layer::LayerId],
     active_layer: mapper::layer::LayerId,
+    label: impl Fn(mapper::layer::LayerId) -> String,
 ) -> Vec<LayerSegment> {
     layers
         .iter()
-        .map(|&id| LayerSegment { text: id.to_string(), active: id == active_layer })
+        .map(|&id| LayerSegment { text: label(id), active: id == active_layer })
         .collect()
 }
 
@@ -871,12 +875,16 @@ mod tests {
 
     #[test]
     fn layer_tab_segments_mark_active() {
-        // build_layer_segments(layers, active) -> Vec<LayerSegment>
-        let segs = build_layer_segments(&[0,1,2], 1);
+        // build_layer_segments(layers, active, label) -> Vec<LayerSegment>.
+        // The label closure supplies the tab text (real callers pass the layer
+        // name); here we map id -> a fake name to prove the text comes from it.
+        let names = ["Main", "Cellar", "Attic"];
+        let segs = build_layer_segments(&[0, 1, 2], 1, |id| names[id as usize].to_string());
         assert_eq!(segs.len(), 3);
         assert!(segs[1].active);
         assert!(!segs[0].active && !segs[2].active);
-        assert_eq!(segs[0].text, "0");
+        assert_eq!(segs[0].text, "Main", "tab text comes from the label closure, not the id");
+        assert_eq!(segs[1].text, "Cellar");
     }
 
     #[test]

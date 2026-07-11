@@ -589,7 +589,8 @@ fn draw_frame(
                 map_area = map_fp.content;
                 story_area = Rect::default();
                 // Overlay layer tabs
-                let owned_segs = build_layer_segments(&layer_ids, active_layer);
+                let owned_segs = build_layer_segments(&layer_ids, active_layer,
+                    |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
                 let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
                 if let Some(hrect) = map_fp.header {
                     let tab_rects = if map_fp.header_bordered {
@@ -657,7 +658,8 @@ fn draw_frame(
                     };
                     let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                     let active_layer = state.active_layer(graph);
-                    let owned_segs = build_layer_segments(&layer_ids, active_layer);
+                    let owned_segs = build_layer_segments(&layer_ids, active_layer,
+                    |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
                     let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
                     if let Some(hrect) = map_fp.header {
                         let tab_rects = if map_fp.header_bordered {
