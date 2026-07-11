@@ -370,6 +370,10 @@ pub struct Config {
     /// to trade those off for in-app mouse support.
     #[serde(default)]
     pub mouse: bool,
+    /// When true, edit story commands in a persistent command bar instead of
+    /// the inline story-text prompt. Default false: the inline prompt.
+    #[serde(default)]
+    pub command_bar: bool,
     /// When true (default) and auto_save is off, prompt the user to save on quit.
     #[serde(default = "default_true")]
     pub prompt_save_on_quit: bool,
@@ -489,6 +493,7 @@ impl Default for Config {
             auto_save: false,
             mouse_wheel_invert: false,
             mouse: false,
+            command_bar: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: true,
@@ -564,6 +569,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.auto_save = from_file.auto_save;
             cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
             cfg.mouse = from_file.mouse;
+            cfg.command_bar = from_file.command_bar;
             cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_history = from_file.record_history;
@@ -627,6 +633,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
     doc["mouse_wheel_invert"] = toml_edit::value(cfg.mouse_wheel_invert);
     doc["mouse"] = toml_edit::value(cfg.mouse);
+    doc["command_bar"] = toml_edit::value(cfg.command_bar);
     doc["prompt_save_on_quit"] = toml_edit::value(cfg.prompt_save_on_quit);
     doc["prompt_load_on_launch"] = toml_edit::value(cfg.prompt_load_on_launch);
     doc["record_history"] = toml_edit::value(cfg.record_history);
@@ -945,6 +952,7 @@ use_defaults = false
             auto_save: true,
             mouse_wheel_invert: false,
             mouse: true,
+            command_bar: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_history: false,
@@ -1016,6 +1024,36 @@ use_defaults = false
         // Explicit opt-in is honored.
         let on: Config = toml::from_str("mouse = true\n").unwrap();
         assert!(on.mouse, "mouse = true must enable capture");
+    }
+
+    #[test]
+    fn command_bar_defaults_off_and_opts_in_from_file() {
+        // Absent from the file → command bar stays off (inline prompt is the default).
+        let default: Config = toml::from_str("").unwrap();
+        assert!(!default.command_bar, "command_bar must default off");
+        // Explicit opt-in is honored.
+        let on: Config = toml::from_str("command_bar = true\n").unwrap();
+        assert!(on.command_bar, "command_bar = true must enable the command bar");
+    }
+
+    #[test]
+    fn command_bar_round_trips_through_toml() {
+        let dir = std::env::temp_dir().join(format!("babelmap_command_bar_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.user_dir = dir.clone();
+        cfg.command_bar = true;
+        write_config(&dir, &cfg).unwrap();
+
+        let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = content.parse().unwrap();
+        assert_eq!(doc["command_bar"].as_bool(), Some(true));
+
+        let reparsed: Config = toml::from_str(&content).unwrap();
+        assert!(reparsed.command_bar, "command_bar = true must round-trip");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

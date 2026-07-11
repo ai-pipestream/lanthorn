@@ -3880,6 +3880,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         10 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
         11 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
         13 => { if let Some(cs) = &mut state.config_screen { cs.working.mouse = !cs.working.mouse; } }
+        14 => { if let Some(cs) = &mut state.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
         _ => {}
     }
 }
@@ -3918,6 +3919,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         11 => working.enable_sound = !working.enable_sound,
         12 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
         13 => working.mouse = !working.mouse,
+        14 => working.command_bar = !working.command_bar,
         _ => {}
     }
 }

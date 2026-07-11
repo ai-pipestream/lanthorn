@@ -24,6 +24,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("enable_sound",         ConfigRowKind::Bool),
     ("volume",               ConfigRowKind::Num),
     ("mouse",                ConfigRowKind::Bool),
+    ("command_bar",          ConfigRowKind::Bool),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -176,6 +177,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         11 => bool_str(cfg.enable_sound),
         12 => cfg.volume.to_string(),
         13 => bool_str(cfg.mouse),
+        14 => bool_str(cfg.command_bar),
         _ => String::new(),
     }
 }
