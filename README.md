@@ -91,6 +91,11 @@ cargo run --release -p app -- path/to/story.z5
 ./target/release/babelmap path/to/story.z5
 ```
 
+You type commands at the story's own inline `>` prompt in the transcript, the
+way a classic terminal interpreter works. Prefer a dedicated input line pinned
+to the bottom instead? Set `command_bar = true` in the config (or toggle it on
+the Settings screen).
+
 Press the leader key (default `Ctrl+K`) in-app to pop up a reference panel of
 every command; press the single letter shown beside one to run it and return to
 play (tmux-style). A few essentials (Tab, `Ctrl+S`/`Ctrl+R`, quit) and map
