@@ -1668,6 +1668,10 @@ impl Model {
         if *pos < data.len() {
             data[*pos] = b;
         } else {
+            // `pos` can exceed `len` if another stream truncated this file while
+            // this one held a cursor past the new end; zero-fill the gap so the
+            // byte lands at the right offset (Glk leaves gap bytes undefined).
+            data.resize(*pos, 0);
             data.push(b);
         }
         *pos += 1;
@@ -2663,6 +2667,18 @@ mod style_hint_tests {
         assert_eq!(m.files["f"], b"Hi", "bytes persist after close");
         assert_eq!(m.stream_position(sid), None, "stream slot is freed");
         assert!(m.file_streams.is_empty(), "cursor side-table entry dropped");
+    }
+
+    // A write whose cursor sits past the current end (only reachable when a
+    // second stream truncated the file) zero-fills the gap instead of misplacing
+    // the byte — the write lands at its true offset.
+    #[test]
+    fn vfs_write_byte_zero_fills_a_gap_past_end() {
+        let mut data = Vec::new();
+        let mut pos = 3usize;
+        Model::vfs_write_byte(&mut data, &mut pos, b'X');
+        assert_eq!(data, vec![0, 0, 0, b'X']);
+        assert_eq!(pos, 4);
     }
 
     // The whole VFS — file bytes, the fileref table, and an OPEN file stream's
