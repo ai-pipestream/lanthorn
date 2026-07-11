@@ -1853,6 +1853,14 @@ impl AppState {
         }
     }
 
+    /// Whether the last transcript line is game (Story) output — i.e. the game's
+    /// inline `>` prompt is the last line, so the typed command can be appended to
+    /// it. False when a non-game line (e.g. a `/help` Meta dump) is last, in which
+    /// case the inline echo must go on its own line rather than corrupt that text.
+    pub fn last_transcript_line_is_story(&self) -> bool {
+        matches!(self.transcript_kinds.last(), Some(TranscriptKind::Story))
+    }
+
     /// Append lines with the given kind and an explicit per-line render style.
     pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
@@ -2358,6 +2366,17 @@ mod tests {
         assert_eq!(s.transcript.len(), s.transcript_styles.len());
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
         assert_eq!(s.transcript.len(), s.transcript_images.len());
+    }
+
+    #[test]
+    fn last_transcript_line_is_story_distinguishes_game_output_from_meta() {
+        let mut s = AppState::default();
+        assert!(!s.last_transcript_line_is_story(), "empty transcript is not a story prompt");
+        s.push_transcript_kind(">", TranscriptKind::Story);
+        assert!(s.last_transcript_line_is_story(), "game `>` prompt is a story line");
+        // A /help-style meta dump lands after the prompt: no longer a story last line.
+        s.push_transcript_kind("help: available commands", TranscriptKind::Meta);
+        assert!(!s.last_transcript_line_is_story(), "meta dump is not the game prompt");
     }
 
     #[test]

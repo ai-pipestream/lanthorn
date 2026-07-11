@@ -3456,6 +3456,10 @@ fn main() {
         // Mouse capture is established once at startup; note its pre-save value so a
         // settings-screen change can be applied to the live terminal below.
         let mouse_before_save = state.config.mouse;
+        // Likewise note command_bar so a settings-screen toggle re-applies the
+        // session's prompt-stripping live (else render mode and strip_prompt desync
+        // until the next @restart).
+        let command_bar_before_save = state.config.command_bar;
 
         match action {
             // ── Caller-handled actions ─────────────────────────────────────────
@@ -3976,6 +3980,12 @@ fn main() {
                 } else {
                     execute!(stdout(), DisableMouseCapture)
                 };
+            }
+            // Re-apply prompt stripping live so toggling the command bar on/off in
+            // Settings takes effect on the next turn without a restart (inline mode
+            // keeps the game's `>`, command-bar mode strips it).
+            if cfg_to_write.command_bar != command_bar_before_save {
+                session.set_strip_prompt(cfg_to_write.command_bar);
             }
         }
 
@@ -4578,7 +4588,10 @@ fn finish_command_turn(
     bg_tidy_counter: &mut u32,
 ) -> bool {
     if result.erase_lower { state.mark_screen_clear(); }
-    if state.config.command_bar {
+    if state.config.command_bar || !state.last_transcript_line_is_story() {
+        // Command-bar mode, or inline mode where the game's `>` is NOT the last
+        // line (e.g. a `/help` Meta dump intervened): echo on its own line so we
+        // never corrupt non-prompt scrollback.
         state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
     } else {
         // Inline mode: the game's own `>` is already the last transcript line;
