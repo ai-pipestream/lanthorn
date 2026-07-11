@@ -772,6 +772,10 @@ pub struct Model {
     /// Pixel size of one character cell (w, h), set by `relayout` for graphics
     /// fixed-split conversion. (1,1) until the backend reports otherwise.
     char_px: (u32, u32),
+    /// Set whenever the file VFS is mutated (a file is created/truncated,
+    /// written, or deleted), so hosts can flush the sidecar only when it
+    /// changed. Mirrors the Z-machine's `aux_dirty`. Not serialized.
+    vfs_dirty: bool,
 }
 
 impl Default for Model {
@@ -794,6 +798,7 @@ impl Model {
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
             char_px: (1, 1),
+            vfs_dirty: false,
         }
     }
 
@@ -1069,7 +1074,32 @@ impl Model {
     pub fn fileref_delete(&mut self, fref: u32) {
         if let Some(name) = self.fileref(fref).map(|f| f.name.clone()) {
             self.files.remove(&name);
+            self.vfs_dirty = true;
         }
+    }
+
+    /// The file VFS encoded as a standalone, self-describing sidecar blob (see
+    /// [`encode_files`]) for on-disk persistence between sessions.
+    pub fn vfs_bytes(&self) -> Vec<u8> {
+        encode_files(&self.files)
+    }
+
+    /// Replace the file VFS from a sidecar blob (see [`decode_files`]). Called
+    /// once at story-open before the game runs, so a full replace is correct; a
+    /// corrupt/foreign blob decodes to an empty VFS.
+    pub fn load_vfs(&mut self, bytes: &[u8]) {
+        self.files = decode_files(bytes);
+    }
+
+    /// Whether the file VFS has been mutated since the last [`clear_vfs_dirty`].
+    pub fn vfs_dirty(&self) -> bool {
+        self.vfs_dirty
+    }
+
+    /// Clear the VFS-dirty flag (after a host flushes the sidecar, or after the
+    /// initial load — loading is not a game mutation).
+    pub fn clear_vfs_dirty(&mut self) {
+        self.vfs_dirty = false;
     }
 
     /// The `(name, usage)` a fileref points at, for opening a file stream (Task 2).
@@ -1480,6 +1510,7 @@ impl Model {
         let pos = match fmode {
             0x01 => {
                 self.files.insert(name.clone(), Vec::new());
+                self.vfs_dirty = true;
                 0
             }
             0x02 => {
@@ -1490,9 +1521,14 @@ impl Model {
             }
             0x03 => {
                 self.files.entry(name.clone()).or_default();
+                self.vfs_dirty = true;
                 0
             }
-            0x05 => self.files.entry(name.clone()).or_default().len(),
+            0x05 => {
+                let len = self.files.entry(name.clone()).or_default().len();
+                self.vfs_dirty = true;
+                len
+            }
             _ => return 0,
         };
         let sid = self.alloc_stream(StreamKind::File { unicode }, rock);
@@ -1659,6 +1695,7 @@ impl Model {
         if let Some(st) = self.stream_mut(id) {
             st.write_count = st.write_count.saturating_add(nchars);
         }
+        self.vfs_dirty = true;
     }
 
     /// Overwrite the byte at `*pos` (or push when at the end), then advance `*pos`.
@@ -2168,8 +2205,79 @@ impl Model {
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
             char_px: (1, 1),
+            vfs_dirty: false,
         })
     }
+}
+
+/// Serialize the file VFS (name → bytes) as a standalone sidecar blob for
+/// on-disk persistence: magic `GVFS` + `u32` version (1) + `u32` count, then
+/// per entry a length-prefixed name and a length-prefixed blob (all lengths
+/// big-endian `u32`). Keys beginning with `__temp_` are session-scoped Glk temp
+/// files and are skipped. This is a superset (magic+version header) of the
+/// files block inside the Glk save snapshot; the two are deliberately kept
+/// separate so the snapshot wire format never depends on this header.
+pub fn encode_files(files: &std::collections::BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"GVFS");
+    out.extend_from_slice(&1u32.to_be_bytes());
+    let entries: Vec<(&String, &Vec<u8>)> =
+        files.iter().filter(|(name, _)| !name.starts_with("__temp_")).collect();
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    let wb = |out: &mut Vec<u8>, b: &[u8]| {
+        out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        out.extend_from_slice(b);
+    };
+    for (name, blob) in entries {
+        wb(&mut out, name.as_bytes());
+        wb(&mut out, blob);
+    }
+    out
+}
+
+/// Inverse of [`encode_files`], fully tolerant of corruption: a wrong magic,
+/// unknown version, invalid UTF-8 name, or any truncation yields an empty map
+/// (never a panic or error), so a foreign or damaged sidecar simply starts the
+/// game from an empty VFS.
+pub fn decode_files(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
+    decode_files_inner(bytes).unwrap_or_default()
+}
+
+fn decode_files_inner(bytes: &[u8]) -> Option<std::collections::BTreeMap<String, Vec<u8>>> {
+    let mut p = 0usize;
+    if bytes.get(0..4)? != b"GVFS" {
+        return None;
+    }
+    p += 4;
+    if read_u32(bytes, &mut p)? != 1 {
+        return None; // unknown version
+    }
+    let count = read_u32(bytes, &mut p)?;
+    let mut map = std::collections::BTreeMap::new();
+    for _ in 0..count {
+        let name = String::from_utf8(read_blob(bytes, &mut p)?).ok()?;
+        let blob = read_blob(bytes, &mut p)?;
+        map.insert(name, blob);
+    }
+    Some(map)
+}
+
+/// Read a big-endian `u32` at `*p`, advancing it; `None` on underflow.
+fn read_u32(bytes: &[u8], p: &mut usize) -> Option<u32> {
+    let end = p.checked_add(4)?;
+    let s = bytes.get(*p..end)?;
+    *p = end;
+    Some(u32::from_be_bytes([s[0], s[1], s[2], s[3]]))
+}
+
+/// Read a `u32`-length-prefixed byte blob at `*p`, advancing it; `None` on
+/// underflow.
+fn read_blob(bytes: &[u8], p: &mut usize) -> Option<Vec<u8>> {
+    let len = read_u32(bytes, p)? as usize;
+    let end = p.checked_add(len)?;
+    let s = bytes.get(*p..end)?;
+    *p = end;
+    Some(s.to_vec())
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
@@ -2578,6 +2686,55 @@ mod style_hint_tests {
         assert!(m.fileref_exists(f));
         m.fileref_delete(f);
         assert!(!m.fileref_exists(f));
+    }
+
+    #[test]
+    fn encode_files_roundtrips_and_skips_temp() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("save".to_string(), vec![1, 2, 3]);
+        m.insert("data".to_string(), b"hello".to_vec());
+        m.insert("__temp_0__".to_string(), vec![9, 9, 9]);
+        let decoded = decode_files(&encode_files(&m));
+        // The __temp_ key is dropped; the rest round-trips exactly.
+        let mut expected = m.clone();
+        expected.remove("__temp_0__");
+        assert_eq!(decoded, expected);
+
+        // Tolerant decode: garbage, too-short, and wrong-magic bytes → empty map.
+        assert!(decode_files(&[]).is_empty());
+        assert!(decode_files(&[0xDE, 0xAD]).is_empty());
+        assert!(decode_files(b"XXXX\x00\x00\x00\x01\x00\x00\x00\x00").is_empty());
+        // Right magic + version but a count that overruns the buffer → empty.
+        assert!(decode_files(b"GVFS\x00\x00\x00\x01\x00\x00\x00\x09").is_empty());
+        // An empty (count 0) but otherwise valid blob decodes to an empty map.
+        assert!(decode_files(&encode_files(&std::collections::BTreeMap::new())).is_empty());
+    }
+
+    #[test]
+    fn vfs_dirty_tracks_mutations() {
+        let mut m = Model::new();
+        assert!(!m.vfs_dirty(), "a fresh model is not dirty");
+
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        assert!(m.vfs_dirty(), "opening for Write truncates/creates → dirty");
+
+        m.clear_vfs_dirty();
+        assert!(!m.vfs_dirty(), "clear resets the flag");
+
+        m.file_stream_write(sid, "Hi");
+        assert!(m.vfs_dirty(), "writing bytes re-dirties");
+
+        m.clear_vfs_dirty();
+        m.fileref_delete(f);
+        assert!(m.vfs_dirty(), "deleting a file dirties");
+
+        // A read-only open does not dirty.
+        m.files.insert("r".to_string(), vec![1]);
+        let rf = m.fileref_create(0x00, "r".to_string(), 0);
+        m.clear_vfs_dirty();
+        m.stream_open_file(rf, FM_READ, false, 0);
+        assert!(!m.vfs_dirty(), "a Read-mode open is not a mutation");
     }
 
     #[test]

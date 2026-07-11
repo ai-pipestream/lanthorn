@@ -1789,6 +1789,29 @@ impl Machine {
         self.glk.style_colour(wintype, style)
     }
 
+    /// The Glk file VFS as a standalone sidecar blob, for the host to persist
+    /// to disk between sessions (mirrors the Z-machine's aux store). (SQ-0278)
+    pub fn vfs_bytes(&self) -> Vec<u8> {
+        self.glk.vfs_bytes()
+    }
+
+    /// Replace the Glk file VFS from a sidecar blob loaded at story-open; a
+    /// corrupt/foreign blob yields an empty VFS. (SQ-0278)
+    pub fn load_vfs(&mut self, bytes: &[u8]) {
+        self.glk.load_vfs(bytes);
+    }
+
+    /// Whether the Glk file VFS changed since the last [`Machine::clear_vfs_dirty`],
+    /// so the host can flush the sidecar only when it changed. (SQ-0278)
+    pub fn vfs_dirty(&self) -> bool {
+        self.glk.vfs_dirty()
+    }
+
+    /// Clear the VFS-dirty flag after a host flush or the initial load. (SQ-0278)
+    pub fn clear_vfs_dirty(&mut self) {
+        self.glk.clear_vfs_dirty();
+    }
+
     /// Total number of opcodes dispatched since the machine was built.
     /// Accelerated calls bypass the opcode dispatcher, so this undercounts
     /// work done by intercepted functions when acceleration is enabled.
@@ -7471,6 +7494,32 @@ mod tests {
         assert_eq!(m.mem.read32(0x34C).unwrap(), b'!' as u32, "byte 3");
         assert_eq!(m.mem.read32(0x350).unwrap(), 0xFFFF_FFFF, "EOF");
         assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn machine_vfs_roundtrip() {
+        // Write a file into one machine's VFS, snapshot it with the Machine
+        // sidecar accessor, then load it into a fresh machine and read it back.
+        let mut m = machine_with_glk(&[]);
+        assert!(!m.vfs_dirty(), "a fresh machine's VFS is not dirty");
+        let f = m.glk.fileref_create(0x00, "greeting".to_string(), 0);
+        let sid = m.glk.stream_open_file(f, 0x01, false, 0); // Write
+        m.glk.file_stream_write(sid, "Hi");
+        m.glk.stream_close(sid);
+        assert!(m.vfs_dirty(), "writing the VFS marks the machine dirty");
+        let blob = m.vfs_bytes();
+
+        let mut m2 = machine_with_glk(&[]);
+        m2.load_vfs(&blob);
+        let rf = m2.glk.fileref_create(0x00, "greeting".to_string(), 0);
+        assert!(m2.glk.fileref_exists(rf), "the loaded file is present");
+        let rsid = m2.glk.stream_open_file(rf, 0x02, false, 0); // Read
+        assert_ne!(rsid, 0, "the loaded file opens for reading");
+        let mut got = String::new();
+        while let Some(c) = m2.glk.file_stream_read_char(rsid) {
+            got.push(c as u8 as char);
+        }
+        assert_eq!(got, "Hi", "the bytes survive the sidecar round-trip");
     }
 
     // ── gestalt truthfulness ─────────────────────────────────────────────────
