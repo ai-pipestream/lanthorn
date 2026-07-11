@@ -1913,6 +1913,61 @@ impl AppState {
         }
     }
 
+    /// The fg/bg of the most recent coloured style run in transcript lines before
+    /// `upto` (scanning lines then runs from the end), or `None` if none is set.
+    /// Approximates the game's "current" colour state at that point so a Default
+    /// (unset) colour can be resolved to it rather than reset to the theme.
+    pub fn prevailing_run_colour_before(&self, upto: usize) -> Option<(u32, u32)> {
+        let end = upto.min(self.transcript_runs.len());
+        for runs in self.transcript_runs[..end].iter().rev() {
+            if let Some(r) = runs.iter().rev().find(|r| r.fg != 0 || r.bg != 0) {
+                return Some((r.fg, r.bg));
+            }
+        }
+        None
+    }
+
+    /// For transcript line `idx`, resolve every Default (0) fg/bg channel — in
+    /// existing runs and on chars that carry no run — to `fg`/`bg`, preserving
+    /// style bits, links, and any colour the game DID set. Used so a folded
+    /// self-echo (which a game like CounterfeitMonkey prints in the default
+    /// colour) keeps the game's current page colours instead of resetting to the
+    /// theme (SQ-0274). No-op when both `fg` and `bg` are Default.
+    pub fn fill_line_default_colours(&mut self, idx: usize, fg: u32, bg: u32) {
+        if (fg == 0 && bg == 0) || idx >= self.transcript.len() {
+            return;
+        }
+        let len = self.transcript[idx].chars().count();
+        if len == 0 {
+            return;
+        }
+        // Resolve per char: (bits, fg, bg, link). Unstyled chars take the fill.
+        let mut per: Vec<(u8, u32, u32, u32)> = vec![(0, fg, bg, 0); len];
+        for r in self.transcript_runs.get(idx).cloned().unwrap_or_default() {
+            for c in r.start..r.end.min(len) {
+                per[c] = (
+                    r.bits,
+                    if r.fg != 0 { r.fg } else { fg },
+                    if r.bg != 0 { r.bg } else { bg },
+                    r.link,
+                );
+            }
+        }
+        // Coalesce adjacent identical cells back into runs.
+        let mut runs: Vec<StyleRun> = Vec::new();
+        for (c, &(bits, cf, cb, link)) in per.iter().enumerate() {
+            match runs.last_mut() {
+                Some(last) if last.end == c && last.bits == bits && last.fg == cf && last.bg == cb && last.link == link => {
+                    last.end = c + 1;
+                }
+                _ => runs.push(StyleRun { start: c, end: c + 1, bits, fg: cf, bg: cb, link }),
+            }
+        }
+        if idx < self.transcript_runs.len() {
+            self.transcript_runs[idx] = runs;
+        }
+    }
+
     /// Whether the last transcript line is game (Story) output — i.e. the game's
     /// inline `>` prompt is the last line, so the typed command can be appended to
     /// it. False when a non-game line (e.g. a `/help` Meta dump) is last, in which
@@ -2476,6 +2531,36 @@ mod tests {
         assert_eq!(s.transcript.len(), s.transcript_images.len());
         let run = s.transcript_runs[0].iter().find(|r| r.bits == 2).expect("bold run kept");
         assert_eq!((run.start, run.end), (1, 5), "bold echo run shifted past the `>`");
+    }
+
+    #[test]
+    fn fill_line_default_colours_preserves_current_colour_and_keeps_game_overrides() {
+        use zvm::screen::ZColour;
+        let mut s = AppState::default();
+        let white = pack_zcolour(ZColour::True24(0x00FF_FFFF));
+        let black = pack_zcolour(ZColour::True24(0));
+        let red = pack_zcolour(ZColour::True24(0x00FF_0000));
+        // A `>look` line where `>` has no run and "look" is bold with DEFAULT colour,
+        // except a single char CM coloured red explicitly.
+        s.push_transcript_runs(">look", TranscriptKind::Story, &[
+            (1, 0, ZColour::Default, ZColour::Default, 0),       // '>' — unstyled
+            (1, 2, ZColour::Default, ZColour::Default, 0),       // 'l' — bold, default colour
+            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0), // 'o' — bold + explicit red fg
+            (2, 2, ZColour::Default, ZColour::Default, 0),       // 'ok' — bold, default colour
+        ]);
+        s.fill_line_default_colours(0, black, white);
+        // Every char now has fg/bg resolved; the '>' and default chars take black/white,
+        // the explicit red fg is kept, bold bits preserved.
+        let runs = &s.transcript_runs[0];
+        // Char 0 ('>'): no bits, black on white.
+        let r0 = runs.iter().find(|r| r.start == 0).unwrap();
+        assert_eq!((r0.bits, r0.fg, r0.bg), (0, black, white), "bare '>' gets current colours");
+        // The explicit-red char keeps red fg but gains the current white bg.
+        let red_run = runs.iter().find(|r| r.fg == red).expect("explicit red preserved");
+        assert_eq!((red_run.bits, red_run.bg), (2, white), "override kept, default bg filled, bold kept");
+        // A default bold char: bold + black on white.
+        assert!(runs.iter().any(|r| r.bits == 2 && r.fg == black && r.bg == white),
+            "default bold echo chars take the current black-on-white");
     }
 
     #[test]

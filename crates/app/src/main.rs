@@ -4641,7 +4641,13 @@ fn finish_command_turn(
     }
     if merge_echo && state.transcript.len() > before_push {
         // Fold the game's own echo (its first output line) onto the `>` prompt.
+        // The game printed the echo in the default colour; preserve the current
+        // page colours on the folded line rather than resetting it to the theme.
+        let prevailing = state.prevailing_run_colour_before(before_push);
         state.merge_line_into_previous(before_push);
+        if let Some((fg, bg)) = prevailing {
+            state.fill_line_default_colours(before_push - 1, fg, bg);
+        }
     }
     apply_turn_events(state, &result);
     if let Some(note) = &result.info {
