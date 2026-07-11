@@ -257,7 +257,21 @@ impl GlulxSession {
     }
 
     fn refresh_screen(&mut self) {
-        self.screen_cache = self.appglk().screen_model();
+        let mut model = self.appglk().screen_model();
+        // Honor the game's Normal buffer-window colours as the pane background/
+        // foreground, so a game that styles its text for a light interpreter
+        // (e.g. CounterfeitMonkey's black-on-white intro) paints a matching pane
+        // instead of leaving white text-islands on the dark theme. Only overrides
+        // a channel the game actually set (via glk_stylehint_set); an unset
+        // channel stays Default and the theme wins. (SQ-0196)
+        let normal = self.machine.style_colour(WinType::TextBuffer, gvm::glk::GlkStyle::Normal);
+        if let Some(rgb) = normal.bg {
+            model.bg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(rgb));
+        }
+        if let Some(rgb) = normal.fg {
+            model.fg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(rgb));
+        }
+        self.screen_cache = model;
     }
 
     /// Drain the primary window output + refresh the screen, building the turn

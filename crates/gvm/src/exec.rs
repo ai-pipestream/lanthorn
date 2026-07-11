@@ -1781,6 +1781,14 @@ impl Machine {
         self.sound_enabled = on;
     }
 
+    /// The resolved colour a `style` renders in for a `wintype` window, from the
+    /// game's `glk_stylehint_set` table. Lets the host paint a window background
+    /// that matches a game's own scheme (e.g. a game that styles Normal text
+    /// black-on-white for a light interpreter). (SQ-0196)
+    pub fn style_colour(&self, wintype: WinType, style: GlkStyle) -> glk::StyleColour {
+        self.glk.style_colour(wintype, style)
+    }
+
     /// Total number of opcodes dispatched since the machine was built.
     /// Accelerated calls bypass the opcode dispatcher, so this undercounts
     /// work done by intercepted functions when acceleration is enabled.
