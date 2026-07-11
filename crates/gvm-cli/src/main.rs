@@ -149,6 +149,16 @@ fn drive(
                 let key = read_char();
                 machine.supply_char(key);
             }
+            // Game create_by_prompt: ask the user for a filename (blank = cancel).
+            // `read_line`/`before_input` are this fn's params; stderr is unbuffered
+            // so eprint! needs no flush.
+            StepResult::NeedFilename { .. } => {
+                before_input(machine);
+                eprint!("Filename (blank to cancel): ");
+                let (line, _) = read_line();
+                let name = line.trim_end_matches(['\n', '\r']);
+                machine.supply_filename(if name.is_empty() { None } else { Some(name.to_string()) });
+            }
             // Game @save: write the snapshot to a single default slot next to the
             // story. Headless, so there is no name prompt — one slot, overwritten.
             StepResult::SaveRequest => {
