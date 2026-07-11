@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use crate::direction::{Direction, parse_direction};
 use crate::graph::{MapGraph, RoomId};
-use crate::layout::{occupied_cells, place_incremental, LayoutMode};
+use crate::layout::{nearest_free_cell, occupied_cells, place_incremental, LayoutMode};
 use crate::layout::mark_distorted;
 
 #[derive(Debug, Default)]
@@ -44,6 +44,36 @@ impl Mapper {
 
     pub fn observe_command(&mut self, location: RoomId, name: &str, command: &str) {
         self.observe(location, name, parse_direction(command));
+    }
+
+    /// Record an *involuntary* relocation — the current room changed, but NOT via a
+    /// real passage the player walked (e.g. death + resurrection, or a teleport that
+    /// drops the player somewhere unrelated to the command they typed). Move the
+    /// current pointer to `location` without minting any edge, so a typed "north"
+    /// that got the player killed never mints a false N-edge to the resurrection
+    /// room. A previously-unseen resurrection room is added and placed at a free
+    /// cell (so it is visible but disconnected); an already-known room keeps its
+    /// position. (SQ-0259)
+    pub fn observe_relocation(&mut self, location: RoomId, name: &str) {
+        self.graph.upsert_room(location, name.to_string());
+        let prev = self.graph.current();
+        if self.graph.room(location).and_then(|r| r.pos).is_none() {
+            match prev {
+                // First room ever seen (defensive): anchor at the origin.
+                None => self.graph.set_pos(location, (0, 0)),
+                // New resurrection room: drop it at a free cell near the room we
+                // died in, visible but with no edge asserting a connection.
+                Some(prev_id) => {
+                    let from = self.graph.room(prev_id).and_then(|r| r.pos).unwrap_or((0, 0));
+                    let cell = nearest_free_cell(&occupied_cells(&self.graph), from);
+                    self.graph.set_pos(location, cell);
+                }
+            }
+        }
+        self.graph.set_current(location);
+        if self.mode == LayoutMode::Auto {
+            mark_distorted(&mut self.graph, &BTreeSet::new());
+        }
     }
 
     /// Switch layout mode.
@@ -165,6 +195,46 @@ mod tests {
             "an Unknown 1→2 must not persist alongside the existing N edge: {:?}", m.graph.connections()
         );
         assert_eq!(m.graph.current(), Some(2));
+    }
+
+    #[test]
+    fn relocation_updates_current_without_minting_edge() {
+        // Grue death: walk A→(down)→Cellar, then a typed move kills the player and
+        // resurrects them in a brand-new Forest. The relocation must move current to
+        // Forest but create NO edge (no false passage Cellar→Forest). (SQ-0259)
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let edges_before = m.graph.connections().len();
+        m.observe_relocation(3, "Forest");
+        assert_eq!(m.graph.current(), Some(3), "current follows the player to the resurrection room");
+        assert_eq!(m.graph.connections().len(), edges_before, "an involuntary relocation mints no edge");
+        assert!(m.graph.room(3).is_some(), "resurrection room is added to the map");
+        assert!(m.graph.room(3).unwrap().pos.is_some(), "resurrection room is placed so it renders");
+    }
+
+    #[test]
+    fn relocation_to_known_room_keeps_position_and_mints_no_edge() {
+        // Resurrecting into an already-mapped room must not move it or connect it.
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "Forest", Some(Direction::N)); // Forest already known & placed
+        let forest_pos = m.graph.room(2).unwrap().pos;
+        m.observe(1, "A", Some(Direction::S)); // back to A; current = 1
+        let edges_before = m.graph.connections().len();
+        m.observe_relocation(2, "Forest"); // die in A, resurrect in the known Forest
+        assert_eq!(m.graph.current(), Some(2));
+        assert_eq!(m.graph.room(2).unwrap().pos, forest_pos, "a known resurrection room does not move");
+        assert_eq!(m.graph.connections().len(), edges_before, "no false edge to the known room");
+    }
+
+    #[test]
+    fn relocation_as_first_observation_anchors_origin() {
+        let mut m = Mapper::default();
+        m.observe_relocation(1, "Forest");
+        assert_eq!(m.graph.current(), Some(1));
+        assert_eq!(m.graph.room(1).unwrap().pos, Some((0, 0)));
+        assert_eq!(m.graph.connections().len(), 0);
     }
 
     #[test]

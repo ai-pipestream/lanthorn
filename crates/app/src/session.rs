@@ -472,11 +472,41 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         {
             return;
         }
-        mapper.observe(snap.number, &snap.name, parse_direction(command));
+        if is_death_relocation(&result.transcript) {
+            // The game printed a death banner this turn and resurrected the player
+            // into a room that is NOT reachable by the command they typed (e.g. a
+            // grue kills you in the dark and drops you in the Forest). Record it as
+            // an involuntary relocation so no false directional edge is minted from
+            // the room you died in to the resurrection room. (SQ-0259)
+            mapper.observe_relocation(snap.number, &snap.name);
+        } else {
+            mapper.observe(snap.number, &snap.name, parse_direction(command));
+        }
         if mapper.mode == mapper::layout::LayoutMode::Auto {
             crate::render::map::cleanup_overlaps(&mut mapper.graph, 2, 20);
         }
     }
+}
+
+/// True when this turn's output carries a death/end banner — the interpreter
+/// convention of a `*** … ***` line (Inform's `*** You have died ***`, Infocom's
+/// spaced `****  You have died  ****`). On such a turn a game may resurrect the
+/// player into a room unrelated to the typed command, so the resulting room change
+/// must be recorded as an involuntary relocation rather than a walked passage.
+///
+/// Kept deliberately tight — an asterisk-delimited banner line containing a death
+/// word — so it never fires on ordinary room text that merely mentions the dead
+/// (and it ignores the winning banner `*** You have won ***`, which changes no
+/// room). Custom death banners without "died"/"dead" are a known gap. (SQ-0259)
+fn is_death_relocation(transcript: &str) -> bool {
+    transcript.lines().any(|line| {
+        let t = line.trim();
+        if t.len() < 4 || !t.starts_with("**") || !t.ends_with("**") {
+            return false;
+        }
+        let lower = t.to_ascii_lowercase();
+        lower.contains("died") || lower.contains("dead")
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1078,6 +1108,62 @@ mod tests {
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
+    }
+
+    #[test]
+    fn is_death_relocation_matches_infocom_and_inform_banners_only() {
+        // Infocom's spaced banner (verified against a real Zork I grue death).
+        assert!(is_death_relocation(
+            "Oh, no! A lurking grue slithered into the room and devoured you!\n \n   ****  You have died  **** \n\nForest\n"
+        ));
+        // Inform's tight banner.
+        assert!(is_death_relocation("*** You have died ***"));
+        // The winning banner changes no room — must NOT be treated as a relocation.
+        assert!(!is_death_relocation("*** You have won ***"));
+        // The pitch-black warning (a legit move) has no banner — must NOT match.
+        assert!(!is_death_relocation(
+            "It is pitch black. You are likely to be eaten by a grue."
+        ));
+        // Ordinary room prose mentioning the dead must NOT match.
+        assert!(!is_death_relocation("A dead body lies in the corner of the crypt."));
+    }
+
+    #[test]
+    fn apply_turn_death_records_relocation_not_a_directional_edge() {
+        // A typed "north" that triggers a grue death + resurrection into Forest must
+        // NOT mint a false N-edge Cellar→Forest. (SQ-0259)
+        let mk = |num: u16, name: &str, transcript: &str| TurnResult {
+            transcript: transcript.into(),
+            transcript_runs: Vec::new(),
+            location: Some(ObjectSnapshot { number: num, parent: 0, name: name.into() }),
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            transcript_elems: Vec::new(),
+        };
+        let mut m = Mapper::default();
+        apply_turn(&mut m, "", &mk(1, "Living Room", "Living Room\n"));
+        apply_turn(&mut m, "down", &mk(2, "Cellar", "You have moved into a dark place.\n"));
+        let edges_before = m.graph.connections().len();
+        // The fatal move: resurrection room arrives on the same turn as the banner.
+        apply_turn(&mut m, "north", &mk(3, "Forest", "   ****  You have died  **** \n\nForest\n"));
+        assert_eq!(m.graph.current(), Some(3), "player is now in the resurrection room");
+        assert_eq!(
+            m.graph.connections().len(),
+            edges_before,
+            "the death move must not add any edge (no false Cellar→Forest passage)"
+        );
+        assert!(
+            !m.graph.connections().iter().any(|c| c.origin == 2 && c.dest == 3),
+            "no edge from the room we died in to the resurrection room"
+        );
     }
 
     #[test]
