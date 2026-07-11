@@ -1890,6 +1890,12 @@ fn main() {
         session.set_aux_data(app::aux_store::read_global_aux(&save_dir, &ifid));
     }
 
+    // Startup: pre-load the per-story Glk file VFS sidecar (Glulx only; the
+    // Z-machine session's no-op default ignores it, and an absent sidecar
+    // yields empty bytes). Loading isn't a game mutation, so clear the flag.
+    session.load_vfs(&app::vfs_store::read_vfs(&save_dir, &ifid));
+    session.clear_vfs_dirty();
+
     // Export paths (fixed per IFID).
     let svg_path = dir.join(format!("{}.svg", ifid));
     let dot_path = dir.join(format!("{}.dot", ifid));
@@ -3511,6 +3517,7 @@ fn main() {
                     // Resume an in-game save/restore if this prompt resolved it.
                     let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
                     persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
+                    persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
                     if quit { break; }
                     continue;
                 }
@@ -3770,6 +3777,7 @@ fn main() {
                     };
                     let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &save_dir, &ifid, last_panes.map);
                     persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
+                    persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &save_dir, &ifid, &mut state);
                     }
@@ -3825,6 +3833,7 @@ fn main() {
                                 let result = session.resume_restore(None);
                                 let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &save_dir, &ifid, last_panes.map);
                                 persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
+                                persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
                                 if let Some(io) = state.ingame_io {
                                     open_ingame_saves(io, &save_dir, &ifid, &mut state);
                                 }
@@ -3943,6 +3952,7 @@ fn main() {
         // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
         let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
         persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
+        persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
         if quit {
             break;
         }
@@ -4683,6 +4693,7 @@ fn finish_command_turn(
         rooms_before, conns_before, ifid, arc_file,
     );
     persist_aux_after_turn(session, state, save_dir, ifid);
+    persist_vfs_after_turn(session, save_dir, ifid);
 
     // Background tidy: silently re-tidy the active layer when the
     // configured mode calls for it. Only runs in Auto layout mode.
@@ -4939,6 +4950,21 @@ fn persist_aux_after_turn(
             state.dialog_focus = 0;
         }
     }
+}
+
+/// Flush the Glulx Glk file VFS to its per-story sidecar when it changed this
+/// turn. Dirty-gated; a no-op for the Z-machine (whose `vfs_dirty` default is
+/// always false). Mirrors `persist_aux_after_turn`.
+fn persist_vfs_after_turn(
+    session: &mut dyn Engine,
+    save_dir: &std::path::Path,
+    ifid: &str,
+) {
+    if !session.vfs_dirty() {
+        return;
+    }
+    let _ = app::vfs_store::write_vfs(save_dir, ifid, &session.vfs_bytes());
+    session.clear_vfs_dirty();
 }
 
 /// Post-process a TurnResult produced by `session.resume_*`: render output,

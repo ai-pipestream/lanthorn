@@ -405,6 +405,17 @@ pub trait Engine {
     /// Clear the auxiliary-data dirty flag.
     fn clear_aux_dirty(&mut self);
 
+    // ── Glk file VFS (Glulx only; default no-ops for the Z-machine) ──
+    /// Encode the Glk file VFS as a disk sidecar blob (empty for engines
+    /// without a Glk VFS).
+    fn vfs_bytes(&self) -> Vec<u8> { Vec::new() }
+    /// Replace the Glk file VFS from a disk sidecar blob (no-op if unsupported).
+    fn load_vfs(&mut self, _bytes: &[u8]) {}
+    /// Whether the Glk file VFS changed since the last clear.
+    fn vfs_dirty(&self) -> bool { false }
+    /// Clear the Glk file VFS dirty flag.
+    fn clear_vfs_dirty(&mut self) {}
+
     // ── mapping ──
     /// The player's current location, for the mapper.
     fn current_location(&self) -> Option<LocationInfo>;

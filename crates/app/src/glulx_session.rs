@@ -638,6 +638,22 @@ impl Engine for GlulxSession {
         self.aux_dirty = false;
     }
 
+    fn vfs_bytes(&self) -> Vec<u8> {
+        self.machine.vfs_bytes()
+    }
+
+    fn load_vfs(&mut self, bytes: &[u8]) {
+        self.machine.load_vfs(bytes);
+    }
+
+    fn vfs_dirty(&self) -> bool {
+        self.machine.vfs_dirty()
+    }
+
+    fn clear_vfs_dirty(&mut self) {
+        self.machine.clear_vfs_dirty();
+    }
+
     fn current_location(&self) -> Option<LocationInfo> {
         self.last_room.clone()
     }
@@ -754,6 +770,38 @@ mod tests {
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn vfs_delegation_load_and_bytes_roundtrip_through_the_machine() {
+        // A trivial quit program yields a valid (settled) session; the VFS
+        // methods operate on the machine, not on running game code. `machine.glk`
+        // is pub(crate) to gvm, so a session-level test cannot originate a file
+        // write from the app crate — the dirty-on-write path is covered at the
+        // gvm layer (`vfs_dirty_tracks_mutations`, `machine_vfs_roundtrip`). Here
+        // we assert the app-side delegation: `load_vfs` populates the machine VFS
+        // and `vfs_bytes` re-encodes it, using gvm's public sidecar codec.
+        let mut sess =
+            GlulxSession::new(image_for(enc(0x120, &[]), 1), 80, 24, true, false, false, (1, 1), None)
+                .expect("new");
+        assert!(!sess.vfs_dirty(), "a fresh session's VFS is not dirty");
+        assert!(
+            gvm::glk::decode_files(&sess.vfs_bytes()).is_empty(),
+            "a fresh session has no persisted files"
+        );
+
+        let mut files = std::collections::BTreeMap::new();
+        files.insert("scores".to_string(), b"42".to_vec());
+        sess.load_vfs(&gvm::glk::encode_files(&files));
+        // Loading a sidecar is not a game mutation.
+        assert!(!sess.vfs_dirty(), "loading the sidecar does not dirty the VFS");
+
+        let out = gvm::glk::decode_files(&sess.vfs_bytes());
+        assert_eq!(
+            out.get("scores").map(Vec::as_slice),
+            Some(b"42".as_slice()),
+            "the loaded file survives a vfs_bytes round-trip through the session"
+        );
+    }
 
     #[test]
     fn key_to_glk_maps_special_keys_and_chars() {
