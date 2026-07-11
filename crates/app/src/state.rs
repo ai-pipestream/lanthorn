@@ -1096,6 +1096,13 @@ pub struct AppState {
     /// Story-pane text selection (left-drag). `Some` while selecting; the
     /// highlight is shown during the drag and copied on release.
     pub selection: Option<crate::clipboard::Selection>,
+    /// Auto-scroll direction while a story-pane selection drag sits at an edge:
+    /// -1 = top edge (reveal older), +1 = bottom edge (reveal newer), 0 = interior. (SQ-0197)
+    pub selection_edge: i32,
+    /// This frame's transcript geometry, published by render for the mouse/copy paths. (SQ-0197)
+    pub transcript_geom: std::cell::Cell<Option<crate::clipboard::TranscriptGeom>>,
+    /// The selection's extracted copy text, published by render, read on mouse-release. (SQ-0197)
+    pub selection_text: std::cell::RefCell<Option<String>>,
     /// Sub-character pan offset in terminal columns/rows, applied on top of `scroll`.
     /// Allows 1-character precision drag panning without changing the cell-unit scroll.
     /// Cleared by `recenter_on`.
@@ -1392,6 +1399,9 @@ impl Default for AppState {
             room_panel: None,
             drag: None,
             selection: None,
+            selection_edge: 0,
+            transcript_geom: std::cell::Cell::new(None),
+            selection_text: std::cell::RefCell::new(None),
             char_pan: (0, 0),
             hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
