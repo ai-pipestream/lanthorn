@@ -4616,8 +4616,13 @@ fn finish_command_turn(
     // output (e.g. CounterfeitMonkey prints it back in bold). Adding our own echo
     // on top would show the command twice, so detect that and skip ours. Most
     // games don't self-echo, so they still get our echo below.
-    if game_echoes_command(&result.transcript, cmd) {
-        // Game provides the echo; add nothing.
+    let self_echo = game_echoes_command(&result.transcript, cmd);
+    // When the game self-echoes AND we're inline with the `>` as the last line,
+    // fold the game's echo onto that prompt line (below) so it reads `>look` at
+    // the prompt, with the game's own styling — instead of a detached line.
+    let merge_echo = self_echo && !state.config.command_bar && state.last_transcript_line_is_story();
+    if self_echo {
+        // Game provides the echo; add nothing of our own.
     } else if state.config.command_bar || !state.last_transcript_line_is_story() {
         // Command-bar mode, or inline mode where the game's `>` is NOT the last
         // line (e.g. a `/help` Meta dump intervened): echo on its own line so we
@@ -4628,10 +4633,15 @@ fn finish_command_turn(
         // append the typed command so `>look` persists in scrollback.
         state.append_to_last_transcript_line(cmd);
     }
+    let before_push = state.transcript.len();
     if result.transcript_elems.is_empty() {
         state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
     } else {
         app::state::apply_transcript_elems(state, &result.transcript_elems);
+    }
+    if merge_echo && state.transcript.len() > before_push {
+        // Fold the game's own echo (its first output line) onto the `>` prompt.
+        state.merge_line_into_previous(before_push);
     }
     apply_turn_events(state, &result);
     if let Some(note) = &result.info {

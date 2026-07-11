@@ -1868,6 +1868,51 @@ impl AppState {
         }
     }
 
+    /// Merge transcript line `idx` into line `idx - 1`, concatenating the text and
+    /// appending `idx`'s style runs shifted by the previous line's length, then
+    /// removing line `idx`. Used to fold a game's own command echo (the first line
+    /// of its turn output) onto the `>` prompt line, preserving the game's styling
+    /// (e.g. CounterfeitMonkey's bold echo) so it reads as `>look` at the prompt
+    /// rather than on a detached line below (SQ-0274). A no-op for `idx == 0` or
+    /// out of range. Assumes the parallel arrays are length-aligned (the push
+    /// methods maintain this).
+    pub fn merge_line_into_previous(&mut self, idx: usize) {
+        if idx == 0 || idx >= self.transcript.len() {
+            return;
+        }
+        let base = self.transcript[idx - 1].chars().count();
+        let moved = std::mem::take(&mut self.transcript[idx]);
+        self.transcript[idx - 1].push_str(&moved);
+        let shifted: Vec<StyleRun> = self
+            .transcript_runs
+            .get(idx)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut r| {
+                r.start += base;
+                r.end += base;
+                r
+            })
+            .collect();
+        if let Some(prev) = self.transcript_runs.get_mut(idx - 1) {
+            prev.extend(shifted);
+        }
+        self.transcript.remove(idx);
+        if idx < self.transcript_kinds.len() {
+            self.transcript_kinds.remove(idx);
+        }
+        if idx < self.transcript_styles.len() {
+            self.transcript_styles.remove(idx);
+        }
+        if idx < self.transcript_runs.len() {
+            self.transcript_runs.remove(idx);
+        }
+        if idx < self.transcript_images.len() {
+            self.transcript_images.remove(idx);
+        }
+    }
+
     /// Whether the last transcript line is game (Story) output — i.e. the game's
     /// inline `>` prompt is the last line, so the typed command can be appended to
     /// it. False when a non-game line (e.g. a `/help` Meta dump) is last, in which
@@ -2411,6 +2456,35 @@ mod tests {
         assert_eq!(s.transcript.last().unwrap(), ">look");
         let after = s.transcript_runs.last().map(|r| r.len()).unwrap_or(0);
         assert_eq!(before, after, "no coloured trailing run → plain append (theme case unchanged)");
+    }
+
+    #[test]
+    fn merge_line_into_previous_folds_game_echo_onto_the_prompt() {
+        use zvm::screen::ZColour;
+        let mut s = AppState::default();
+        // The `>` prompt line (bare, no runs), then the game's own bold echo "look"
+        // as a separate pushed line — CounterfeitMonkey's shape.
+        s.push_transcript_kind(">", TranscriptKind::Story);
+        s.push_transcript_runs("look", TranscriptKind::Story,
+            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0)]);
+        assert_eq!(s.transcript.len(), 2);
+        s.merge_line_into_previous(1);
+        // One line now: ">look", and the bold run is shifted past the ">".
+        assert_eq!(s.transcript, vec![">look".to_string()]);
+        assert_eq!(s.transcript.len(), s.transcript_kinds.len());
+        assert_eq!(s.transcript.len(), s.transcript_runs.len());
+        assert_eq!(s.transcript.len(), s.transcript_images.len());
+        let run = s.transcript_runs[0].iter().find(|r| r.bits == 2).expect("bold run kept");
+        assert_eq!((run.start, run.end), (1, 5), "bold echo run shifted past the `>`");
+    }
+
+    #[test]
+    fn merge_line_into_previous_is_a_noop_at_zero_or_out_of_range() {
+        let mut s = AppState::default();
+        s.push_transcript_kind("only", TranscriptKind::Story);
+        s.merge_line_into_previous(0);
+        s.merge_line_into_previous(5);
+        assert_eq!(s.transcript, vec!["only".to_string()]);
     }
 
     #[test]
