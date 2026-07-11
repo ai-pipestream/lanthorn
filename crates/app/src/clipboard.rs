@@ -1,117 +1,85 @@
 //! Text selection + clipboard copy for the story pane (no dependencies).
 //!
-//! Selection is a linear (browser-style) range from an anchor to a head, but
-//! every row is clamped to the story pane's column band — so a wrapped/middle
-//! row never pulls in text from a side-by-side map pane. Copy is delivered via
-//! the OSC 52 terminal escape, which works over SSH and needs no clipboard lib.
+//! Selection is a linear (browser-style) range from an anchor to a head, stored
+//! in **stable absolute wrapped-row coordinates** (a row index into the full
+//! wrapped transcript plus a 0-based column within the story band). Because the
+//! coordinates are anchored to transcript content rather than screen cells, a
+//! selection stays correct across scrolling and can cover text beyond the
+//! visible viewport. Copy is delivered via the OSC 52 terminal escape, which
+//! works over SSH and needs no clipboard lib.
 
-use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 
-/// A text selection in absolute screen coordinates (x, y).
+/// A point in the wrapped transcript: absolute wrapped-row index + 0-based column
+/// within the story band. Stable across scrolling (unlike screen cells).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Point {
+    pub row: usize,
+    pub col: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-    pub anchor: (u16, u16),
-    pub head: (u16, u16),
+    pub anchor: Point,
+    pub head: Point,
+}
+
+/// Per-frame transcript geometry stashed by render so the mouse handlers and the
+/// copy path can map screen cells ↔ absolute wrapped rows. `area` is the body text
+/// region (scrollbar gutter already excluded); `first_abs_row` is the absolute
+/// wrapped-row index drawn at `area.y`.
+#[derive(Debug, Clone, Copy)]
+pub struct TranscriptGeom {
+    pub area: Rect,
+    pub first_abs_row: usize,
+    pub total_rows: usize,
 }
 
 impl Selection {
-    pub fn new(at: (u16, u16)) -> Self {
+    pub fn new(at: Point) -> Self {
         Selection { anchor: at, head: at }
     }
-    /// True when the selection covers more than a single cell.
     pub fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
 }
 
-/// Order two points in reading order (top-to-bottom, then left-to-right).
-fn ordered(a: (u16, u16), b: (u16, u16)) -> ((u16, u16), (u16, u16)) {
-    if (a.1, a.0) <= (b.1, b.0) { (a, b) } else { (b, a) }
+fn ordered(a: Point, b: Point) -> (Point, Point) {
+    if (a.row, a.col) <= (b.row, b.col) { (a, b) } else { (b, a) }
 }
 
-/// The inclusive column span selected on row `y`, clamped to `area`'s columns.
-/// Returns `None` if `y` is outside the selection or the area.
-fn row_span(area: Rect, a: (u16, u16), b: (u16, u16), y: u16) -> Option<(u16, u16)> {
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-    if y < area.y || y >= area.bottom() {
-        return None;
-    }
-    let ((sx, sy), (ex, ey)) = ordered(a, b);
-    if y < sy || y > ey {
-        return None;
-    }
-    let right = area.right() - 1;
-    let c0 = if y == sy { sx.max(area.x) } else { area.x };
-    let c1 = if y == ey { ex.min(right) } else { right };
-    if c0 > c1 || c0 > right || c1 < area.x {
-        return None;
-    }
-    Some((c0.max(area.x), c1.min(right)))
+/// Inclusive column span [c0,c1] selected on absolute wrapped `row`, within a story
+/// band `width` cells wide (0-based). `None` if `row` is outside the selection.
+pub fn row_span(width: u16, sel: Selection, row: usize) -> Option<(u16, u16)> {
+    if width == 0 { return None; }
+    let (s, e) = ordered(sel.anchor, sel.head);
+    if row < s.row || row > e.row { return None; }
+    let last = width - 1;
+    let c0 = if row == s.row { s.col.min(last) } else { 0 };
+    let c1 = if row == e.row { e.col.min(last) } else { last };
+    if c0 > c1 { return None; }
+    Some((c0, c1))
 }
 
-/// True if cell `(x, y)` falls within the selection, clamped to `area`.
-pub fn contains(area: Rect, sel: Selection, x: u16, y: u16) -> bool {
-    match row_span(area, sel.anchor, sel.head, y) {
-        Some((c0, c1)) => x >= c0 && x <= c1,
-        None => false,
-    }
+/// True if absolute cell (row, col) is inside the selection.
+pub fn contains(width: u16, sel: Selection, row: usize, col: u16) -> bool {
+    match row_span(width, sel, row) { Some((c0, c1)) => col >= c0 && col <= c1, None => false }
 }
 
-/// Extract the selected text from `buf`, clamped to `area`'s columns. Rows are
-/// joined with `\n`; trailing whitespace on each row is trimmed.
-pub fn extract(buf: &Buffer, area: Rect, sel: Selection) -> String {
-    let ((_, sy), (_, ey)) = ordered(sel.anchor, sel.head);
-    let y0 = sy.max(area.y);
-    let y1 = ey.min(area.bottom().saturating_sub(1));
-    let mut rows: Vec<String> = Vec::new();
-    let mut y = y0;
-    while y <= y1 {
-        if let Some((c0, c1)) = row_span(area, sel.anchor, sel.head, y) {
+/// Extract the selected text from the full set of wrapped-row texts. `rows[i]` is the
+/// plain text of absolute wrapped row `i`. Rows joined with `\n`, trailing ws trimmed.
+pub fn extract(rows: &[&str], width: u16, sel: Selection) -> String {
+    let (s, e) = ordered(sel.anchor, sel.head);
+    let mut out: Vec<String> = Vec::new();
+    for row in s.row..=e.row {
+        if let Some((c0, c1)) = row_span(width, sel, row) {
+            let chars: Vec<char> = rows.get(row).copied().unwrap_or("").chars().collect();
             let mut line = String::new();
-            let mut x = c0;
-            while x <= c1 {
-                if let Some(cell) = buf.cell((x, y)) {
-                    line.push_str(cell.symbol());
-                }
-                x += 1;
-            }
-            rows.push(line.trim_end().to_string());
-        }
-        if y == u16::MAX {
-            break;
-        }
-        y += 1;
-    }
-    rows.join("\n")
-}
-
-/// Highlight the selection in `buf` (reversed video) and return the selected
-/// text, clamped to `area`. Returns `None` for an empty (single-cell)
-/// selection. Used during render so the copy reads THIS frame's buffer (the
-/// terminal's back-buffer is reset after draw and can't be read afterwards).
-pub fn highlight_and_extract(buf: &mut Buffer, area: Rect, sel: Selection) -> Option<String> {
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-    for y in area.y..area.bottom() {
-        for x in area.x..area.right() {
-            if contains(area, sel, x, y) {
-                if let Some(cell) = buf.cell_mut((x, y)) {
-                    let s = cell.style();
-                    cell.set_style(s.add_modifier(Modifier::REVERSED));
-                }
-            }
+            for c in c0..=c1 { if let Some(ch) = chars.get(c as usize) { line.push(*ch); } }
+            out.push(line.trim_end().to_string());
         }
     }
-    if sel.is_empty() {
-        None
-    } else {
-        Some(extract(buf, area, sel))
-    }
+    out.join("\n")
 }
 
 /// Standard base64 (RFC 4648) with padding.
@@ -141,6 +109,10 @@ pub fn osc52_copy_sequence(text: &str) -> String {
 mod tests {
     use super::*;
 
+    fn p(row: usize, col: u16) -> Point {
+        Point { row, col }
+    }
+
     #[test]
     fn base64_known_vectors() {
         assert_eq!(base64_encode(b""), "");
@@ -155,78 +127,113 @@ mod tests {
         assert_eq!(osc52_copy_sequence("Man"), "\x1b]52;c;TWFu\x07");
     }
 
-    fn buf_with(rows: &[&str], area: Rect) -> Buffer {
-        let mut buf = Buffer::empty(area);
-        for (r, line) in rows.iter().enumerate() {
-            for (c, ch) in line.chars().enumerate() {
-                let x = area.x + c as u16;
-                let y = area.y + r as u16;
-                if x < area.right() && y < area.bottom() {
-                    if let Some(cell) = buf.cell_mut((x, y)) {
-                        cell.set_symbol(&ch.to_string());
-                    }
-                }
-            }
-        }
-        buf
+    #[test]
+    fn ordered_normalizes_reversed_points() {
+        let a = p(5, 3);
+        let b = p(2, 7);
+        assert_eq!(ordered(a, b), (b, a));
+        assert_eq!(ordered(b, a), (b, a));
+        // Same row: order by column.
+        let c = p(4, 8);
+        let d = p(4, 2);
+        assert_eq!(ordered(c, d), (d, c));
+    }
+
+    #[test]
+    fn row_span_first_last_middle() {
+        // Selection from (row 1, col 3) to (row 3, col 6), width 10.
+        let sel = Selection { anchor: p(1, 3), head: p(3, 6) };
+        assert_eq!(row_span(10, sel, 1), Some((3, 9)), "first row from col to right edge");
+        assert_eq!(row_span(10, sel, 2), Some((0, 9)), "middle row is full width");
+        assert_eq!(row_span(10, sel, 3), Some((0, 6)), "last row from left edge to head col");
+    }
+
+    #[test]
+    fn row_span_single_row() {
+        let sel = Selection { anchor: p(2, 2), head: p(2, 5) };
+        assert_eq!(row_span(10, sel, 2), Some((2, 5)));
+    }
+
+    #[test]
+    fn row_span_out_of_range_is_none() {
+        let sel = Selection { anchor: p(1, 0), head: p(3, 0) };
+        assert_eq!(row_span(10, sel, 0), None);
+        assert_eq!(row_span(10, sel, 4), None);
+    }
+
+    #[test]
+    fn row_span_clamps_to_width() {
+        // Head col 50 but width only 10 → clamp to last col 9.
+        let sel = Selection { anchor: p(1, 3), head: p(1, 50) };
+        assert_eq!(row_span(10, sel, 1), Some((3, 9)));
+        // Width 0 yields None.
+        assert_eq!(row_span(0, sel, 1), None);
+    }
+
+    #[test]
+    fn contains_inside_and_outside() {
+        let sel = Selection { anchor: p(1, 3), head: p(3, 6) };
+        // Middle row: full width is contained.
+        assert!(contains(10, sel, 2, 0));
+        assert!(contains(10, sel, 2, 9));
+        // First row: before c0 not contained.
+        assert!(!contains(10, sel, 1, 2));
+        assert!(contains(10, sel, 1, 3));
+        // Last row: after head col not contained.
+        assert!(!contains(10, sel, 3, 7));
+        assert!(contains(10, sel, 3, 6));
+        // Row beyond selection not contained.
+        assert!(!contains(10, sel, 4, 0));
     }
 
     #[test]
     fn extract_single_row_substring() {
-        // Story pane occupies columns 10..20.
-        let area = Rect::new(10, 0, 10, 3);
-        let buf = buf_with(&["HELLOWORLD"], area);
-        // Select columns 12..=15 on row 0 → "LLOW".
-        let sel = Selection { anchor: (12, 0), head: (15, 0) };
-        assert_eq!(extract(&buf, area, sel), "LLOW");
+        let rows = ["HELLOWORLD"];
+        // Select columns 2..=5 → "LLOW".
+        let sel = Selection { anchor: p(0, 2), head: p(0, 5) };
+        let refs: Vec<&str> = rows.iter().copied().collect();
+        assert_eq!(extract(&refs, 10, sel), "LLOW");
     }
 
     #[test]
-    fn extract_multi_row_is_clamped_to_story_columns() {
-        // Story pane is columns 10..20; a map would live in columns 0..10.
-        let area = Rect::new(10, 0, 10, 3);
-        let buf = buf_with(&["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"], area);
-        // Selection from (13,0) to (14,2) — middle row spans the full story band,
-        // never columns < 10 (the map).
-        let sel = Selection { anchor: (13, 0), head: (14, 2) };
-        let out = extract(&buf, area, sel);
+    fn extract_multi_row() {
+        let rows = ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"];
+        // From (row 0, col 3) to (row 2, col 4).
+        let sel = Selection { anchor: p(0, 3), head: p(2, 4) };
+        let refs: Vec<&str> = rows.iter().copied().collect();
+        let out = extract(&refs, 10, sel);
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines[0], "aaaaaaa", "first row from col 13 to story right edge");
-        assert_eq!(lines[1], "bbbbbbbbbb", "middle row is full story width");
-        assert_eq!(lines[2], "ccccc", "last row from story left to col 14");
+        assert_eq!(lines[0], "aaaaaaa", "first row from col 3 to right edge");
+        assert_eq!(lines[1], "bbbbbbbbbb", "middle row is full width");
+        assert_eq!(lines[2], "ccccc", "last row from left edge to col 4");
     }
 
     #[test]
-    fn highlight_and_extract_returns_text_and_marks_cells() {
-        let area = Rect::new(10, 0, 10, 2);
-        let mut buf = buf_with(&["HELLOWORLD", "secondrowX"], area);
-        let sel = Selection { anchor: (12, 0), head: (15, 0) }; // "LLOW"
-        let text = highlight_and_extract(&mut buf, area, sel);
-        assert_eq!(text.as_deref(), Some("LLOW"));
-        // Selected cells are reversed; an in-area but unselected cell is not.
-        assert!(buf.cell((12, 0)).unwrap().modifier.contains(Modifier::REVERSED));
-        assert!(!buf.cell((16, 0)).unwrap().modifier.contains(Modifier::REVERSED));
+    fn extract_trims_trailing_whitespace() {
+        let rows = ["hi        "];
+        let sel = Selection { anchor: p(0, 0), head: p(0, 9) };
+        let refs: Vec<&str> = rows.iter().copied().collect();
+        assert_eq!(extract(&refs, 10, sel), "hi");
     }
 
     #[test]
-    fn highlight_and_extract_empty_selection_is_none() {
-        let area = Rect::new(10, 0, 10, 2);
-        let mut buf = buf_with(&["HELLOWORLD"], area);
-        let sel = Selection::new((12, 0)); // anchor == head
-        assert_eq!(highlight_and_extract(&mut buf, area, sel), None);
+    fn extract_row_past_end_is_empty() {
+        // Selection spans rows 0..=2 but only one row exists.
+        let rows = ["hello"];
+        let sel = Selection { anchor: p(0, 0), head: p(2, 4) };
+        let refs: Vec<&str> = rows.iter().copied().collect();
+        let out = extract(&refs, 10, sel);
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines[0], "hello");
+        assert_eq!(lines[1], "", "missing row yields empty line");
+        assert_eq!(lines[2], "", "missing row yields empty line");
     }
 
     #[test]
-    fn contains_excludes_columns_outside_story() {
-        let area = Rect::new(10, 0, 10, 3);
-        let sel = Selection { anchor: (13, 0), head: (14, 2) };
-        // A middle-row cell at column 5 (in the map band) is never contained.
-        assert!(!contains(area, sel, 5, 1));
-        // A middle-row cell inside the story band is contained.
-        assert!(contains(area, sel, 12, 1));
-        // Last row (==ey): columns up to the head (14) are contained.
-        assert!(contains(area, sel, 12, 2));
-        // A row beyond the selection is not contained.
-        assert!(!contains(area, sel, 12, 3));
+    fn is_empty_when_anchor_equals_head() {
+        let sel = Selection::new(p(3, 4));
+        assert!(sel.is_empty());
+        let sel2 = Selection { anchor: p(3, 4), head: p(3, 5) };
+        assert!(!sel2.is_empty());
     }
 }
