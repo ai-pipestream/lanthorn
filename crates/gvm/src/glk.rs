@@ -365,6 +365,9 @@ pub struct TestBackend {
     /// Styled output runs with their hyperlink value `(style, link, text)` per
     /// text-buffer window id, in print order (0 link = no hyperlink).
     linked_runs: BTreeMap<u32, Vec<(GlkStyle, u32, String)>>,
+    /// Styled output runs with their resolved colour `(style, colour, text)` per
+    /// text-buffer window id, in print order (records the garglk override result).
+    colour_runs: BTreeMap<u32, Vec<(GlkStyle, StyleColour, String)>>,
     /// Grid cells per text-grid window id, keyed `(row, col) -> char`.
     grid: BTreeMap<u32, BTreeMap<(u32, u32), char>>,
     /// Last laid-out rect per window id.
@@ -400,6 +403,7 @@ impl TestBackend {
             char_px: (1, 1),
             runs: BTreeMap::new(),
             linked_runs: BTreeMap::new(),
+            colour_runs: BTreeMap::new(),
             grid: BTreeMap::new(),
             dims: BTreeMap::new(),
             fills: BTreeMap::new(),
@@ -441,6 +445,11 @@ impl TestBackend {
     /// recorded for one text-buffer window.
     pub fn linked_runs(&self, win: u32) -> Vec<(GlkStyle, u32, String)> {
         self.linked_runs.get(&win).cloned().unwrap_or_default()
+    }
+    /// The styled output runs with their resolved colour `(style, colour, text)`
+    /// recorded for one text-buffer window (reflects any garglk override).
+    pub fn colour_runs(&self, win: u32) -> Vec<(GlkStyle, StyleColour, String)> {
+        self.colour_runs.get(&win).cloned().unwrap_or_default()
     }
     /// All text-buffer windows' text concatenated in window-id order — the
     /// migration replacement for `BufferOutput::buf` (there is one window in the
@@ -505,6 +514,7 @@ impl GlkBackend for TestBackend {
     fn window_close(&mut self, id: u32) {
         self.runs.remove(&id);
         self.linked_runs.remove(&id);
+        self.colour_runs.remove(&id);
         self.grid.remove(&id);
         self.dims.remove(&id);
     }
@@ -516,9 +526,10 @@ impl GlkBackend for TestBackend {
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
         self.runs.entry(win).or_default().push((style, s.to_string()));
     }
-    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, link: u32, s: &str) {
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, link: u32, s: &str) {
         self.runs.entry(win).or_default().push((style, s.to_string()));
         self.linked_runs.entry(win).or_default().push((style, link, s.to_string()));
+        self.colour_runs.entry(win).or_default().push((style, colour, s.to_string()));
     }
     fn grid_put(&mut self, win: u32, x: u32, y: u32, _style: GlkStyle, s: &str) {
         let cells = self.grid.entry(win).or_default();
@@ -536,6 +547,9 @@ impl GlkBackend for TestBackend {
             rs.clear();
         }
         if let Some(rs) = self.linked_runs.get_mut(&win) {
+            rs.clear();
+        }
+        if let Some(rs) = self.colour_runs.get_mut(&win) {
             rs.clear();
         }
     }
@@ -622,6 +636,13 @@ struct Stream {
     /// The current Glk hyperlink value for text written to this stream
     /// (`glk_set_hyperlink`); 0 = no link. Stamped onto each output run.
     link: u32,
+    /// Gargoyle `garglk_set_zcolors` / `garglk_set_reversevideo` overrides for
+    /// text written to this stream. `None` = no override (use the style hint's
+    /// colour); `Some` forces this fg/bg/reverse. Not persisted in the snapshot
+    /// (mirrors `style_hints`, which also reset to defaults on restore).
+    zfg: Option<u32>,
+    zbg: Option<u32>,
+    zrev: Option<bool>,
     read_count: u32,
     write_count: u32,
 }
@@ -786,6 +807,61 @@ impl Model {
         self.style_hints[row][style as usize]
     }
 
+    // ── Gargoyle garglk_* colour overrides ──────────────────────────────────────
+    //
+    // `garglk_set_zcolors` fg/bg sentinels (glk.h `zcolor_*`): Transparent /
+    // Cursor / Current leave the channel unchanged, Default clears the override,
+    // and any other value is a low-24-bit RGB colour.
+    const ZCOLOR_TRANSPARENT: u32 = 0xffff_fffc;
+    const ZCOLOR_CURSOR: u32 = 0xffff_fffd;
+    const ZCOLOR_CURRENT: u32 = 0xffff_fffe;
+    const ZCOLOR_DEFAULT: u32 = 0xffff_ffff;
+
+    /// Apply one `garglk_set_zcolors` channel value to an override slot.
+    fn apply_zcolor(slot: &mut Option<u32>, val: u32) {
+        match val {
+            Self::ZCOLOR_TRANSPARENT | Self::ZCOLOR_CURSOR | Self::ZCOLOR_CURRENT => {}
+            Self::ZCOLOR_DEFAULT => *slot = None,
+            rgb => *slot = Some(rgb & 0x00FF_FFFF),
+        }
+    }
+
+    /// `garglk_set_zcolors[_stream]`: set the fg/bg colour override that applies
+    /// to subsequent text written to `strid` (invalid id is ignored).
+    pub fn set_stream_zcolors(&mut self, strid: u32, fg: u32, bg: u32) {
+        if let Some(s) = self.stream_mut(strid) {
+            Self::apply_zcolor(&mut s.zfg, fg);
+            Self::apply_zcolor(&mut s.zbg, bg);
+        }
+    }
+
+    /// `garglk_set_reversevideo[_stream]`: force reverse-video on/off for
+    /// subsequent text written to `strid` (invalid id is ignored).
+    pub fn set_stream_reversevideo(&mut self, strid: u32, reverse: u32) {
+        if let Some(s) = self.stream_mut(strid) {
+            s.zrev = Some(reverse != 0);
+        }
+    }
+
+    /// Resolve the effective colour for text written to `strid` in a `wintype`
+    /// window with the given `style`, layering any `garglk_*` override on top of
+    /// the style-hint colour (an unset override channel falls through to the hint).
+    pub fn stream_style_colour(&self, strid: u32, wintype: WinType, style: GlkStyle) -> StyleColour {
+        let mut sc = self.style_colour(wintype, style);
+        if let Some(s) = self.stream(strid) {
+            if s.zfg.is_some() {
+                sc.fg = s.zfg;
+            }
+            if s.zbg.is_some() {
+                sc.bg = s.zbg;
+            }
+            if let Some(r) = s.zrev {
+                sc.reverse = r;
+            }
+        }
+        sc
+    }
+
     // ── slot accessors ────────────────────────────────────────────────────────
 
     fn win(&self, id: u32) -> Option<&Window> {
@@ -844,6 +920,9 @@ impl Model {
             kind,
             style: GlkStyle::Normal,
             link: 0,
+            zfg: None,
+            zbg: None,
+            zrev: None,
             read_count: 0,
             write_count: 0,
         }));
@@ -1664,7 +1743,18 @@ impl Model {
                 1 => StreamKind::Memory { addr: r.u32()?, len: r.u32()?, pos: r.u32()?, unicode: r.u32()? != 0 },
                 other => return Err(format!("Glk snapshot: bad stream kind {other}")),
             };
-            streams.push(Some(Stream { id, rock, kind, style, link, read_count, write_count }));
+            streams.push(Some(Stream {
+                id,
+                rock,
+                kind,
+                style,
+                link,
+                zfg: None,
+                zbg: None,
+                zrev: None,
+                read_count,
+                write_count,
+            }));
         }
 
         if !r.done() {
@@ -1957,5 +2047,84 @@ mod style_hint_tests {
         let mut m = Model::new();
         m.set_style_hint(0, 0, 7, 0x00FFFFFF);
         assert_eq!(m.style_colour(WinType::Pair, GlkStyle::Normal), StyleColour::default());
+    }
+
+    // garglk_set_zcolors overrides the style-hint colour for text on that stream,
+    // and an unset channel falls through to the hint.
+    #[test]
+    fn garglk_zcolors_override_layers_over_style_hint() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
+        let sid = m.window_stream(buf).expect("window has a stream");
+        m.set_style_hint(3, 0, 7, 0x00111111); // Normal fg hint
+        m.set_style_hint(3, 0, 8, 0x00222222); // Normal bg hint
+        // Override fg only; bg falls through to the hint.
+        m.set_stream_zcolors(sid, 0x00AABBCC, Model::ZCOLOR_CURRENT);
+        let sc = m.stream_style_colour(sid, WinType::TextBuffer, GlkStyle::Normal);
+        assert_eq!(sc.fg, Some(0x00AABBCC), "fg overridden");
+        assert_eq!(sc.bg, Some(0x00222222), "bg keeps the style hint (Current)");
+    }
+
+    // High bits of a garglk RGB value are masked to 24 bits (as with style hints).
+    #[test]
+    fn garglk_zcolors_masks_to_24_bits() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let sid = m.window_stream(buf).unwrap();
+        m.set_stream_zcolors(sid, 0x00FF_FFFB, Model::ZCOLOR_CURRENT); // 0x00FFFFFB: not a sentinel
+        assert_eq!(m.stream_style_colour(sid, WinType::TextBuffer, GlkStyle::Normal).fg, Some(0x00FF_FFFB));
+    }
+
+    // zcolor_Default clears a previously set override, falling back to the hint.
+    #[test]
+    fn garglk_zcolors_default_clears_override() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let sid = m.window_stream(buf).unwrap();
+        m.set_style_hint(3, 0, 7, 0x00111111);
+        m.set_stream_zcolors(sid, 0x00AABBCC, Model::ZCOLOR_CURRENT);
+        m.set_stream_zcolors(sid, Model::ZCOLOR_DEFAULT, Model::ZCOLOR_CURRENT); // reset fg
+        assert_eq!(
+            m.stream_style_colour(sid, WinType::TextBuffer, GlkStyle::Normal).fg,
+            Some(0x00111111),
+            "fg back to the style hint after Default",
+        );
+    }
+
+    // Transparent and Cursor sentinels leave the channel unchanged.
+    #[test]
+    fn garglk_zcolors_transparent_and_cursor_are_noops() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let sid = m.window_stream(buf).unwrap();
+        m.set_stream_zcolors(sid, 0x00AABBCC, 0x00445566);
+        m.set_stream_zcolors(sid, Model::ZCOLOR_TRANSPARENT, Model::ZCOLOR_CURSOR);
+        let sc = m.stream_style_colour(sid, WinType::TextBuffer, GlkStyle::Normal);
+        assert_eq!(sc.fg, Some(0x00AABBCC), "Transparent leaves fg unchanged");
+        assert_eq!(sc.bg, Some(0x00445566), "Cursor leaves bg unchanged");
+    }
+
+    // garglk_set_reversevideo forces the reverse flag on/off, overriding the hint.
+    #[test]
+    fn garglk_reversevideo_forces_reverse() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let sid = m.window_stream(buf).unwrap();
+        m.set_stream_reversevideo(sid, 1);
+        assert!(m.stream_style_colour(sid, WinType::TextBuffer, GlkStyle::Normal).reverse);
+        m.set_stream_reversevideo(sid, 0);
+        assert!(!m.stream_style_colour(sid, WinType::TextBuffer, GlkStyle::Normal).reverse);
+    }
+
+    // The override is per-stream: colours set on one stream don't affect another.
+    #[test]
+    fn garglk_override_is_per_stream() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let sid = m.window_stream(buf).unwrap();
+        m.set_stream_zcolors(sid, 0x00AABBCC, Model::ZCOLOR_CURRENT);
+        // A fresh memory stream carries no override.
+        let other = m.stream_open_memory(0, 0, false, 0);
+        assert_eq!(m.stream_style_colour(other, WinType::TextBuffer, GlkStyle::Normal), StyleColour::default());
     }
 }

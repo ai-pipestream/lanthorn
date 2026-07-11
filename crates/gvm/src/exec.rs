@@ -2165,10 +2165,10 @@ impl Machine {
             StreamKind::Window(win) => {
                 match self.glk.window_type(win) {
                     Some(WinType::TextBuffer) => {
-                        let colour = self.glk.style_colour(WinType::TextBuffer, style);
+                        let colour = self.glk.stream_style_colour(sid, WinType::TextBuffer, style);
                         self.backend.put_text_attr(win, style, colour, link, s);
                     }
-                    Some(WinType::TextGrid) => self.grid_put_str(win, style, link, s),
+                    Some(WinType::TextGrid) => self.grid_put_str(sid, win, style, link, s),
                     _ => {} // pair window or stale: nothing to display
                 }
                 self.glk.window_stream_advance(sid, s.chars().count() as u32);
@@ -2196,9 +2196,9 @@ impl Machine {
     /// Write `s` to a text-grid window starting at its cursor, advancing the
     /// cursor and wrapping at the window edge (output past the bottom is
     /// discarded). `\n` moves to the next row, column 0.
-    fn grid_put_str(&mut self, win: u32, style: GlkStyle, link: u32, s: &str) {
+    fn grid_put_str(&mut self, sid: u32, win: u32, style: GlkStyle, link: u32, s: &str) {
         let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
-        let colour = self.glk.style_colour(WinType::TextGrid, style);
+        let colour = self.glk.stream_style_colour(sid, WinType::TextGrid, style);
         for ch in s.chars() {
             if ch == '\n' {
                 cx = 0;
@@ -2774,6 +2774,21 @@ impl Machine {
             0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
             0x00B2 => 0,           // glk_style_distinguish — styles not distinguishable
             0x00B3 => 0,           // glk_style_measure — measurement unsupported
+            // Gargoyle garglk_* colour extensions (gestalt_GarglkText, selector 0x1100).
+            0x1100 => {
+                // garglk_set_zcolors(fg, bg) — on the current stream
+                let sid = self.glk.current_stream();
+                self.glk.set_stream_zcolors(sid, a(0), a(1));
+                0
+            }
+            0x1101 => { self.glk.set_stream_zcolors(a(0), a(1), a(2)); 0 } // garglk_set_zcolors_stream(str, fg, bg)
+            0x1102 => {
+                // garglk_set_reversevideo(reverse) — on the current stream
+                let sid = self.glk.current_stream();
+                self.glk.set_stream_reversevideo(sid, a(0));
+                0
+            }
+            0x1103 => { self.glk.set_stream_reversevideo(a(0), a(1)); 0 } // garglk_set_reversevideo_stream(str, reverse)
             // ── input requests + select (3a-2) ────────────────────────────────
             0x00D0 => {
                 // glk_request_line_event(win, buf, maxlen, initlen)
@@ -3529,6 +3544,7 @@ impl Machine {
             10 => self.sound_enabled as u32, // gestalt_SoundNotify
             11 => 1,                 // gestalt_Hyperlinks → supported
             12 => 1,                 // gestalt_HyperlinkInput(wintype) → supported
+            0x1100 => 1,             // gestalt_GarglkText → garglk_set_zcolors/reversevideo supported
             // echo and the rest are not supported.
             _ => 0,
         }
@@ -6263,6 +6279,50 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert!(m.diagnostics.is_empty(), "stylehints accepted: {:?}", m.diagnostics);
+    }
+
+    // glk_gestalt(gestalt_GarglkText=0x1100) reports the garglk_* colour
+    // extensions as supported, so games that gate on it actually call them.
+    #[test]
+    fn glk_garglk_text_gestalt_reports_supported() {
+        use asm::Op::{C32, C8, Mem16};
+        let mut body = glk_call(0x0004, &[C32(0x1100), C8(0)], Mem16(0x0100)); // glk_gestalt(0x1100, 0)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "gestalt_GarglkText -> supported");
+    }
+
+    // garglk_set_zcolors(fg, bg) on the current stream colours subsequent output.
+    #[test]
+    fn glk_garglk_set_zcolors_colours_subsequent_output() {
+        use asm::Op::{C16, C32, Zero};
+        let mut body = glk_call(0x1100, &[C32(0x00AA_BBCC), C32(0x0011_2233)], Zero); // garglk_set_zcolors
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
+        assert!(m.diagnostics.is_empty(), "garglk_set_zcolors handled: {:?}", m.diagnostics);
+        assert_eq!(
+            backend_of(&m).colour_runs(1),
+            vec![(
+                GlkStyle::Normal,
+                crate::glk::StyleColour { fg: Some(0x00AA_BBCC), bg: Some(0x0011_2233), reverse: false },
+                "Hi".to_string(),
+            )],
+        );
+    }
+
+    // garglk_set_reversevideo(1) on the current stream reverse-flags output.
+    #[test]
+    fn glk_garglk_set_reversevideo_marks_output_reverse() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0x1102, &[C8(1)], Zero); // garglk_set_reversevideo(1)
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi")
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
+        assert!(m.diagnostics.is_empty(), "garglk_set_reversevideo handled: {:?}", m.diagnostics);
+        let runs = backend_of(&m).colour_runs(1);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].1.reverse, "output run is reverse-video");
     }
 
     #[test]
