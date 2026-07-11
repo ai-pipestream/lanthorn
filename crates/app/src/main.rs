@@ -4578,7 +4578,13 @@ fn finish_command_turn(
     bg_tidy_counter: &mut u32,
 ) -> bool {
     if result.erase_lower { state.mark_screen_clear(); }
-    state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
+    if state.config.command_bar {
+        state.push_transcript_kind(&format!("> {}", cmd), TranscriptKind::Input);
+    } else {
+        // Inline mode: the game's own `>` is already the last transcript line;
+        // append the typed command so `>look` persists in scrollback.
+        state.append_to_last_transcript_line(cmd);
+    }
     if result.transcript_elems.is_empty() {
         state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
     } else {

@@ -1841,6 +1841,18 @@ impl AppState {
         }
     }
 
+    /// Append `text` to the last transcript line in place (used in inline-prompt
+    /// mode so the typed command joins the game's `>` line). If the transcript is
+    /// empty, push `text` as a new line instead. Only the last line's String is
+    /// edited; its parallel runs/kinds/images/styles are left as-is (the appended
+    /// chars carry no style runs and render in the input style).
+    pub fn append_to_last_transcript_line(&mut self, text: &str) {
+        match self.transcript.last_mut() {
+            Some(last) => last.push_str(text),
+            None => self.push_transcript_kind(text, TranscriptKind::Input),
+        }
+    }
+
     /// Append lines with the given kind and an explicit per-line render style.
     pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
@@ -2325,6 +2337,27 @@ mod tests {
         assert_eq!(s.transcript_kinds.len(), 2);
         assert!(matches!(s.transcript_kinds[0], TranscriptKind::Story));
         assert!(matches!(s.transcript_kinds[1], TranscriptKind::Meta));
+    }
+
+    #[test]
+    fn append_to_last_transcript_line_appends_to_existing_last_line() {
+        let mut s = AppState::default();
+        s.push_transcript_kind(">", TranscriptKind::Story);
+        s.append_to_last_transcript_line("look");
+        assert_eq!(s.transcript.len(), 1);
+        assert_eq!(s.transcript[0], ">look");
+    }
+
+    #[test]
+    fn append_to_last_transcript_line_pushes_new_line_when_empty_and_keeps_arrays_aligned() {
+        let mut s = AppState::default();
+        assert!(s.transcript.is_empty());
+        s.append_to_last_transcript_line("hi");
+        assert_eq!(s.transcript, vec!["hi".to_string()]);
+        assert_eq!(s.transcript.len(), s.transcript_kinds.len());
+        assert_eq!(s.transcript.len(), s.transcript_styles.len());
+        assert_eq!(s.transcript.len(), s.transcript_runs.len());
+        assert_eq!(s.transcript.len(), s.transcript_images.len());
     }
 
     #[test]
