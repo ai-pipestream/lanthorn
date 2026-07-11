@@ -268,6 +268,11 @@ impl GameSession {
         if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
     }
 
+    /// Whether the game's trailing `>` read prompt is stripped from transcripts.
+    pub fn strip_prompt(&self) -> bool {
+        self.strip_prompt
+    }
+
     /// Which kind of input the VM is currently waiting for.
     pub fn pending_input(&self) -> InputKind {
         self.pending

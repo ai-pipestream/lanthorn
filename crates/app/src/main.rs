@@ -4402,6 +4402,9 @@ fn reset_game(
     };
     match rebuilt {
         Ok(()) => {
+            // The rebuilt session defaults strip_prompt=true; re-apply the config
+            // choice so an in-game restart keeps the inline prompt in inline mode.
+            session.set_strip_prompt(state.config.command_bar);
             let start_loc = session.current_location();
             state.reset_sound_sidecars();
             state.turns = 0;
@@ -5816,11 +5819,18 @@ mod tests {
             Box::new(app::session::GameSession::new(bytes.clone(), true, false, None).expect("zcode session"));
         let mut mapper = mapper::mapper::Mapper::default();
         let mut state = app::state::AppState::default();
+        // Inline-prompt mode (command_bar off): the rebuilt session must inherit
+        // strip_prompt=false so @restart doesn't revert to stripping the game's `>`.
+        state.config.command_bar = false;
         state.turns = 5;
         super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, false);
         assert_eq!(state.turns, 0, "restart resets the turn counter");
         assert!(engine.as_any().is::<app::session::GameSession>(),
             "still a Z-machine session after restart");
+        assert!(
+            !engine.as_any().downcast_ref::<app::session::GameSession>().unwrap().strip_prompt(),
+            "restart re-applies inline-prompt mode (strip_prompt stays false)"
+        );
     }
 
     #[test]
