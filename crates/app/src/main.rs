@@ -3177,6 +3177,42 @@ fn main() {
                 // selection events still arrive but fire no StartSelection and are
                 // harmless no-ops); glk_mouse_target enforces no-overlay + inside a
                 // watching window and computes the window-relative coordinates.
+                // Glk hyperlink input: a left-Down on a linked transcript cell whose
+                // owning window has an active hyperlink request is delivered to the
+                // game as an Evtype_Hyperlink carrying the cell's link value. A link
+                // cell is a more specific target than a general mouse-window click, so
+                // this runs first; a non-link click (or no watching window) falls
+                // through to the mouse path, then to the app's own handling.
+                if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
+                    if let Some(gs) = glulx_session_opt_mut(&mut *session) {
+                        if let Some(&(_, link)) = last_panes
+                            .transcript_links
+                            .iter()
+                            .find(|((cx, cy), _)| *cx == m.column && *cy == m.row)
+                        {
+                            if link != 0 {
+                                let windows = gs.hyperlink_windows();
+                                if !windows.is_empty() {
+                                    let s = last_panes.story;
+                                    if let Some(win) = app::glulx_session::glk_hyperlink_window(
+                                        state.any_overlay_open(),
+                                        m.column, m.row,
+                                        (s.x, s.y, s.width, s.height),
+                                        &windows,
+                                    ) {
+                                        let result = gs.deliver_hyperlink(win, link);
+                                        if apply_game_driven_result(
+                                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                                        ) {
+                                            break 'event_loop;
+                                        }
+                                        continue 'event_loop;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let windows = gs.mouse_windows();

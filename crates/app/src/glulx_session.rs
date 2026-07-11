@@ -362,6 +362,17 @@ impl GlulxSession {
             .collect()
     }
 
+    /// The layout rects (in story-pane cells) of every window with an active Glk
+    /// hyperlink request — the windows a click on a linked transcript cell may be
+    /// diverted into. Empty when no window is watching for hyperlink clicks.
+    pub fn hyperlink_windows(&mut self) -> Vec<(u32, WinType, GlkRect)> {
+        let layout: Vec<(u32, WinType, GlkRect)> = self.appglk().layout().to_vec();
+        layout
+            .into_iter()
+            .filter(|&(id, _, _)| self.machine.hyperlink_requested(id))
+            .collect()
+    }
+
     /// The `(width, height)` of one text-grid cell in pixels — used to convert a
     /// click's window-relative cells into pixels for a graphics window.
     pub fn char_pixels(&mut self) -> (u32, u32) {
@@ -375,6 +386,21 @@ impl GlulxSession {
     pub fn deliver_mouse(&mut self, win: u32, x: u32, y: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_mouse(win, x, y);
+            let (pending, quit) = drive_settled(&mut self.machine);
+            self.pending = pending;
+            self.quit = quit;
+        }
+        self.finish_turn()
+    }
+
+    /// A click landed on a linked transcript cell inside a hyperlink-watching
+    /// window: deliver a Glk `Evtype_Hyperlink` event carrying `link` (the link
+    /// value from the cell→link map) and drive the game to its next input
+    /// request. A no-op turn once the game has quit. One-shot — the gvm
+    /// `deliver_hyperlink` consumes the request, so the game must re-arm.
+    pub fn deliver_hyperlink(&mut self, win: u32, link: u32) -> TurnResult {
+        if !self.quit {
+            self.machine.deliver_hyperlink(win, link);
             let (pending, quit) = drive_settled(&mut self.machine);
             self.pending = pending;
             self.quit = quit;
@@ -422,6 +448,36 @@ pub fn glk_mouse_target(
         (rel_x, rel_y)
     };
     Some((win, vx, vy))
+}
+
+/// Decide which hyperlink-watching window owns a click on a linked transcript
+/// cell at absolute `(col, row)`, if any.
+///
+/// Returns the window id only when no overlay is open and the click lands inside
+/// one of the hyperlink-watching `windows` (as reported by
+/// [`GlulxSession::hyperlink_windows`]). Same overlay/bounds/origin logic as
+/// [`glk_mouse_target`], but a hyperlink event carries the link value from the
+/// cell→link map rather than coordinates, so only the window id is returned.
+pub fn glk_hyperlink_window(
+    overlay_open: bool,
+    col: u16,
+    row: u16,
+    story: (u16, u16, u16, u16),
+    windows: &[(u32, WinType, GlkRect)],
+) -> Option<u32> {
+    if overlay_open {
+        return None;
+    }
+    let (sx0, sy0, sw, sh) = story;
+    if col < sx0 || col >= sx0 + sw || row < sy0 || row >= sy0 + sh {
+        return None;
+    }
+    let sx = (col - sx0) as u32;
+    let sy = (row - sy0) as u32;
+    windows
+        .iter()
+        .find(|&&(_, _, r)| sx >= r.left && sx < r.left + r.width && sy >= r.top && sy < r.top + r.height)
+        .map(|&(win, _, _)| win)
 }
 
 /// Build a name-based room snapshot from an Inform room heading. Glulx has no
@@ -1263,6 +1319,95 @@ mod tests {
             super::glk_mouse_target(true, 10, 0, (0, 0, 80, 24), &windows, (1, 1)),
             None,
             "an open overlay keeps the click",
+        );
+    }
+
+    // ── Hyperlink input (glk_request_hyperlink_event) ─────────────────────────
+
+    /// Program: open a buffer, split a 1-row grid above, arm a hyperlink request
+    /// AND a char request on the grid, then glk_select (suspends on the char).
+    /// The grid is window 2 (buffer=1, pair=3). Mirrors `grid_mouse_watch_image`
+    /// with `request_hyperlink_event` (0x102) in place of `request_mouse_event`.
+    fn grid_hyperlink_watch_image() -> Vec<u8> {
+        use E::*;
+        let mut body = open_buffer_prelude(); // buffer → local0 (window 1)
+        for v in [Imm(0), Imm(4), Imm(1), Imm(0x12), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push])); // rock, wintype=grid, size=1, method=above|fixed, split
+        }
+        body.extend(enc(0x130, &[Imm(0x23), Imm(5), LocStore(4)])); // window_open → local1 (grid = window 2)
+        body.extend(enc(0x40, &[LocLoad(4), Push]));
+        body.extend(enc(0x130, &[Imm(0x102), Imm(1), Discard])); // request_hyperlink_event(grid)
+        body.extend(enc(0x40, &[LocLoad(4), Push]));
+        body.extend(enc(0x130, &[Imm(0xd2), Imm(1), Discard])); // request_char_event(grid) → select suspends
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+        body.extend(enc(0x120, &[])); // quit
+        image_for(body, 2)
+    }
+
+    #[test]
+    fn hyperlink_windows_lists_only_watching_windows() {
+        let mut sess =
+            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (9, 19), None).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
+
+        // Only the grid (window 2) watches; the buffer (window 1) does not.
+        let windows = sess.hyperlink_windows();
+        assert_eq!(windows.len(), 1, "only the requesting window is listed");
+        assert_eq!(windows[0].0, 2, "grid window id");
+        assert_eq!(windows[0].1, WinType::TextGrid);
+        assert_eq!(windows[0].2, GlkRect { left: 0, top: 0, width: 80, height: 1 }, "grid spans the top row");
+    }
+
+    #[test]
+    fn deliver_hyperlink_resumes_the_game_and_is_one_shot() {
+        let mut sess =
+            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        assert!(!sess.hyperlink_windows().is_empty(), "armed before the click");
+
+        // The click resumes the suspended select; the game runs to its trailing quit.
+        let r = sess.deliver_hyperlink(2, 42);
+        assert!(r.quit, "the game consumed the link and ran to quit");
+        assert!(sess.hyperlink_windows().is_empty(), "hyperlink request consumed (one-shot)");
+    }
+
+    // ── glk_hyperlink_window hit test ─────────────────────────────────────────
+
+    #[test]
+    fn glk_hyperlink_window_returns_the_owning_window_id() {
+        // Story pane at (3, 2); a grid window filling the top row at rect(0,0,80,1).
+        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
+        // Click at absolute (10, 2) → story cell (7, 0) → inside the grid.
+        let got = super::glk_hyperlink_window(false, 10, 2, (3, 2, 80, 24), &windows);
+        assert_eq!(got, Some(2), "returns the window whose rect contains the cell");
+    }
+
+    #[test]
+    fn glk_hyperlink_window_declines_outside_overlay_and_empty() {
+        let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
+        // Click below the grid (row 5) but inside the pane → misses every window.
+        assert_eq!(
+            super::glk_hyperlink_window(false, 10, 5, (0, 0, 80, 24), &windows),
+            None,
+            "a click outside every watching window falls through",
+        );
+        // Click outside the story pane entirely.
+        assert_eq!(
+            super::glk_hyperlink_window(false, 90, 0, (0, 0, 80, 24), &windows),
+            None,
+            "a click outside the story pane falls through",
+        );
+        // Same in-window click, but an overlay is open → declined.
+        assert_eq!(
+            super::glk_hyperlink_window(true, 10, 0, (0, 0, 80, 24), &windows),
+            None,
+            "an open overlay keeps the click",
+        );
+        // No hyperlink-watching windows at all.
+        assert_eq!(
+            super::glk_hyperlink_window(false, 10, 0, (0, 0, 80, 24), &[]),
+            None,
+            "no watching windows → nothing to divert to",
         );
     }
 }
