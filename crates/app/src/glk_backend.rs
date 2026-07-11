@@ -69,8 +69,9 @@ fn resolve_glk_colour(style: GlkStyle, colour: StyleColour) -> (u8, u32, u32) {
 struct GridBuf {
     width: u32,
     height: u32,
-    /// `(row, col) -> (char, style-bits, packed-fg, packed-bg)`.
-    cells: BTreeMap<(u32, u32), (char, u8, u32, u32)>,
+    /// `(row, col) -> (char, style-bits, packed-fg, packed-bg, link)`. `link` is
+    /// the Glk hyperlink value stamped on the cell (0 = not a link). (SQ-0258)
+    cells: BTreeMap<(u32, u32), (char, u8, u32, u32, u32)>,
 }
 
 /// One entry in a text-buffer window's ordered output log.
@@ -399,9 +400,9 @@ impl AppGlk {
         let rows = g.map(|g| g.height).unwrap_or(rect.height).max(rect.height) as u16;
         let mut cells = vec![GridCell::default(); cols as usize * rows as usize];
         if let Some(g) = g {
-            for (&(r, c), &(ch, bits, fg, bg)) in &g.cells {
+            for (&(r, c), &(ch, bits, fg, bg, link)) in &g.cells {
                 if r < rows as u32 && c < cols as u32 {
-                    cells[r as usize * cols as usize + c as usize] = GridCell { ch, style: bits, fg, bg };
+                    cells[r as usize * cols as usize + c as usize] = GridCell { ch, style: bits, fg, bg, link };
                 }
             }
         }
@@ -639,11 +640,11 @@ impl GlkBackend for AppGlk {
         self.grid_put_attr(win, x, y, style, StyleColour::default(), 0, s);
     }
 
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, _link: u32, s: &str) {
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, link: u32, s: &str) {
         let (bits, fg, bg) = resolve_glk_colour(style, colour);
         let g = self.grids.entry(win).or_default();
         for (i, ch) in s.chars().enumerate() {
-            g.cells.insert((y, x + i as u32), (ch, bits, fg, bg));
+            g.cells.insert((y, x + i as u32), (ch, bits, fg, bg, link));
         }
     }
 
@@ -999,6 +1000,19 @@ mod tests {
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
         assert_eq!(cell.bg, crate::state::pack_zcolour(ZColour::True24(0x00FF_FFFF)));
+    }
+
+    #[test]
+    fn grid_link_flows_to_cells() {
+        // A Glk hyperlink value stamped via grid_put_attr must survive onto the
+        // neutral GridCell the renderer consumes. (SQ-0258)
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextGrid);
+        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2))]);
+        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, StyleColour::default(), 42, "L");
+        glk.grid_put_attr(1, 1, 0, GlkStyle::Normal, StyleColour::default(), 0, "x");
+        assert_eq!(glk.screen_model().grid().unwrap().cell(1, 1).link, 42, "linked cell carries its link value");
+        assert_eq!(glk.screen_model().grid().unwrap().cell(1, 2).link, 0, "an unlinked cell has link 0");
     }
 
     #[test]

@@ -2988,7 +2988,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 9, 3);
         let mut buf = Buffer::empty(area);
-        let used = crate::render::upper_window::draw_upper_window(grid, false, &colors, area, &mut buf, true);
+        let used = crate::render::upper_window::draw_upper_window(grid, false, &colors, area, &mut buf, true, &mut Vec::new());
         assert_eq!(used, 1, "one active upper row consumed");
         // cols=3 centered in 9 → x_off = 3.
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "A");

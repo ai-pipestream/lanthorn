@@ -86,11 +86,13 @@ pub struct GridCell {
     pub fg: u32,
     /// Packed background colour; 0 = Default.
     pub bg: u32,
+    /// Glk hyperlink value stamped on this cell (0 = not a link). (SQ-0258)
+    pub link: u32,
 }
 
 impl Default for GridCell {
     fn default() -> Self {
-        GridCell { ch: ' ', style: 0, fg: 0, bg: 0 }
+        GridCell { ch: ' ', style: 0, fg: 0, bg: 0, link: 0 }
     }
 }
 
@@ -139,7 +141,7 @@ impl GridWindow {
         }
         let idx = ((row - 1) as usize) * self.cols as usize + (col - 1) as usize;
         if let Some(c) = self.cells.get_mut(idx) {
-            *c = GridCell { ch, style, fg: 0, bg: 0 };
+            *c = GridCell { ch, style, fg: 0, bg: 0, link: 0 };
         }
     }
 }

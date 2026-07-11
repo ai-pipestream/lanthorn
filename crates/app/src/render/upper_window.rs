@@ -82,6 +82,7 @@ pub fn draw_grid(
     area: Rect,
     buf: &mut Buffer,
     honor_game_colours: bool,
+    links: &mut Vec<((u16, u16), u32)>,
 ) -> u16 {
     if upper_rows == 0 || area.height == 0 || area.width == 0 {
         return 0;
@@ -169,7 +170,17 @@ pub fn draw_grid(
             let bx = content.x + dx;
             let by = content.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
-                let style = cell_style(grid_cell_to_zvm(cell), colors, honor_game_colours);
+                let mut style = cell_style(grid_cell_to_zvm(cell), colors, honor_game_colours);
+                // Glk hyperlink affordance: layer the themeable `hyperlink` colour
+                // and an underline on top, and record the cell for click hit-testing.
+                // Mirrors the transcript path in `draw_str_runs`. (SQ-0258)
+                if cell.link != 0 {
+                    if honor_game_colours {
+                        style = style.patch(colors.hyperlink);
+                    }
+                    style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+                    links.push(((bx, by), cell.link));
+                }
                 let mut ch_buf = [0u8; 4];
                 buf_cell.set_symbol(cell.ch.encode_utf8(&mut ch_buf)).set_style(style);
             }
@@ -221,6 +232,7 @@ pub fn draw_upper_window(
     area: Rect,
     buf: &mut Buffer,
     honor_game_colours: bool,
+    links: &mut Vec<((u16, u16), u32)>,
 ) -> u16 {
     let show_cursor = char_mode && grid.cursor_active;
     draw_grid(
@@ -232,6 +244,7 @@ pub fn draw_upper_window(
         area,
         buf,
         honor_game_colours,
+        links,
     )
 }
 
@@ -304,13 +317,40 @@ mod tests {
         // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; col 2 -> buf x=4.
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
 
         let c = buf.cell((4, 0)).unwrap();
         assert!(
             c.modifier.contains(Modifier::REVERSED),
             "draw_grid: reverse cell with default colours must carry REVERSED in the buffer"
         );
+    }
+
+    /// A grid cell carrying a Glk hyperlink must render underlined AND be recorded
+    /// in the cell→link map so a click can be hit-tested to it. (SQ-0258)
+    #[test]
+    fn draw_grid_hyperlinked_cell_underlines_and_maps_to_link() {
+        let mut upper = GridWindow::default();
+        upper.resize(1, 3);
+        // Put a plain char, then stamp a link on cell (1,2) directly.
+        upper.put(1, 2, 'L', 0);
+        upper.cells[1].link = 77;
+
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+
+        // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; col 2 -> buf x=4.
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        let mut links: Vec<((u16, u16), u32)> = Vec::new();
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true, &mut links);
+
+        assert!(
+            buf.cell((4, 0)).unwrap().modifier.contains(Modifier::UNDERLINED),
+            "a linked grid cell must render underlined"
+        );
+        assert_eq!(links, vec![((4, 0), 77)], "the linked cell is recorded at its buffer position");
     }
 
     fn make_colors() -> ColorScheme {
@@ -339,7 +379,7 @@ mod tests {
         colors_no_border.virtual_window_border = BorderStyle::None;
         colors_no_border.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
 
-        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors_no_border, area, &mut buf, true);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors_no_border, area, &mut buf, true, &mut Vec::new());
 
         // Should consume exactly 2 rows (grid height, no border).
         assert_eq!(consumed, 2, "consumed rows should equal upper_window_rows");
@@ -366,7 +406,7 @@ mod tests {
         // Pane is 30 wide; the 10-col upper window should center: x_off=(30-10)/2=10.
         let area = Rect::new(0, 0, 30, 5);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
         assert_eq!(buf.cell((10, 0)).unwrap().symbol(), "A", "left edge of the game screen at x=10");
         assert_eq!(buf.cell((19, 0)).unwrap().symbol(), "Z", "right edge at x=19 (10..19)");
         // Nothing drawn outside the centered 10-col region.
@@ -380,7 +420,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         // upper_rows = 0 means inactive.
-        let consumed = draw_grid(&upper, 0, (1, 1), false, &colors, area, &mut buf, true);
+        let consumed = draw_grid(&upper, 0, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
         assert_eq!(consumed, 0);
     }
 
@@ -392,7 +432,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
 
-        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf, true);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
 
         // 2 grid rows + 2 border rows = 4 total.
         assert_eq!(consumed, 4);
@@ -417,7 +457,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
 
-        let consumed = draw_grid(&upper, 5, (5, 1), false, &colors, area, &mut buf, true);
+        let consumed = draw_grid(&upper, 5, (5, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
         assert_eq!(consumed, 3);
 
         // Row offset = cursor_row-1 - (height-1) = 4 - 2 = 2.
@@ -446,7 +486,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
 
         // cols=3 centered in 10 (no border): x_off=(10-3)/2=3.
         let x_cell = buf.cell((3, 0)).unwrap();
@@ -489,14 +529,14 @@ mod tests {
         // content (1,2) → buffer (4,1).
         // With show_cursor=false the cursor cell shows its logical fg/bg order.
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf, true);
+        draw_grid(&upper, 2, (2, 3), false, &colors, area, &mut buf, true, &mut Vec::new());
         let c = buf.cell((4, 1)).unwrap();
         assert_eq!(c.fg, Color::Rgb(200, 0, 0), "no cursor: fg is logical");
         assert_eq!(c.bg, Color::Rgb(0, 0, 200), "no cursor: bg is logical");
 
         // With show_cursor=true: XOR 0^1=1 → REVERSED modifier, fg/bg remain logical.
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf, true);
+        draw_grid(&upper, 2, (2, 3), true, &colors, area, &mut buf, true, &mut Vec::new());
         let c = buf.cell((4, 1)).unwrap();
         assert!(c.modifier.contains(Modifier::REVERSED), "cursor on normal cell adds REVERSED modifier");
         assert_eq!(c.fg, Color::Rgb(200, 0, 0), "cursor fg stays logical (terminal swaps via REVERSED)");
@@ -519,7 +559,7 @@ mod tests {
         // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; col 2 -> buf x=4.
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf, true);
+        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf, true, &mut Vec::new());
 
         let c = buf.cell((4, 0)).unwrap();
         assert!(
@@ -545,7 +585,7 @@ mod tests {
         // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; col 2 -> buf x=4.
         let area = Rect::new(0, 0, 10, 2);
         let mut buf = Buffer::empty(area);
-        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf, true);
+        draw_grid(&upper, 1, (1, 2), true, &colors, area, &mut buf, true, &mut Vec::new());
 
         let c = buf.cell((4, 0)).unwrap();
         assert!(

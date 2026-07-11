@@ -753,6 +753,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
                 style: c.style,
                 fg: crate::state::pack_zcolour(c.fg),
                 bg: crate::state::pack_zcolour(c.bg),
+                link: 0, // Z-machine grid cells carry no Glk hyperlink
             })
             .collect(),
         // `upper.rows` equals `upper_window_rows` normally, but grows when a game

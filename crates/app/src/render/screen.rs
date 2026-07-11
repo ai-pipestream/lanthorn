@@ -109,17 +109,21 @@ pub fn render_story_pane(
     if is_simple(model) {
         // Byte-identical Z-machine path: the upper grid (if any) over the
         // transcript.
+        let mut links: Vec<((u16, u16), u32)> = Vec::new();
         let used = match model.grid() {
-            Some(grid) => draw_upper_window(grid, char_mode, &state.colors, area, buf, state.config.honor_game_colours),
+            Some(grid) => draw_upper_window(grid, char_mode, &state.colors, area, buf, state.config.honor_game_colours, &mut links),
             None => 0,
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
-        let (scrollbar, max_scroll, links) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
+        let (scrollbar, max_scroll, mut tlinks) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
+        links.append(&mut tlinks);
         return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, links };
     }
 
-    // Generic multi-window path.
-    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi);
+    // Generic multi-window path. Grid windows push their hyperlink cells into
+    // `grid_links`; the primary buffer's own links ride on its metrics. (SQ-0258)
+    let mut grid_links: Vec<((u16, u16), u32)> = Vec::new();
+    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi, &mut grid_links);
 
     // Prune the graphics protocol cache to only the windows still live in the
     // tree, so a closed window's stale cache entry can't be matched by a
@@ -128,11 +132,14 @@ pub fn render_story_pane(
     collect_graphics_ids(&model.root, &mut live);
     state.graphics_render.borrow_mut().retain_live(&live);
 
-    metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height, links: Vec::new() })
+    let mut m = metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height, links: Vec::new() });
+    m.links.extend(grid_links);
+    m
 }
 
 /// Recursively render a tree node into `area`. Returns the primary buffer's
-/// metrics when this subtree contains it.
+/// metrics when this subtree contains it. Grid-window hyperlink cells are pushed
+/// into `links` (the primary buffer's own links ride on its returned metrics).
 fn render_node(
     node: &WinNode,
     status: &StatusModel,
@@ -142,6 +149,7 @@ fn render_node(
     area: Rect,
     buf: &mut Buffer,
     game_input: Option<ratatui::style::Style>,
+    links: &mut Vec<((u16, u16), u32)>,
 ) -> Option<StoryPaneMetrics> {
     if area.width == 0 || area.height == 0 {
         return None;
@@ -149,13 +157,13 @@ fn render_node(
     match node {
         WinNode::Pair { vertical, split, first, second } => {
             let (a1, a2) = pair_areas(*vertical, split.fixed, first, second, &state.colors, area);
-            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input);
-            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input);
+            let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links);
+            let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links);
             m1.or(m2)
         }
         WinNode::Grid(g) => {
             let show_cursor = char_mode && g.cursor_active;
-            draw_grid(g, g.active_rows, g.cursor, show_cursor, &state.colors, area, buf, state.config.honor_game_colours);
+            draw_grid(g, g.active_rows, g.cursor, show_cursor, &state.colors, area, buf, state.config.honor_game_colours, links);
             None
         }
         WinNode::Buffer(b) => {
@@ -651,7 +659,7 @@ mod tests {
 
         // Path B: the exact code render_story_pane replaced.
         let mut buf_b = Buffer::empty(area);
-        let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b, state.config.honor_game_colours);
+        let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b, state.config.honor_game_colours, &mut Vec::new());
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
         let (sb, ms, _) = render_transcript(&model.status, None, &state, tarea, &mut buf_b, None);
 
