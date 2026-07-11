@@ -62,7 +62,9 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   autocomplete, inventory strip, command history, in-game Invisiclues hints, and
   transcript search / filter / export. → [interface](docs/features/interface.md)
 - **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
-  state + metadata), named slots, Quetzal import/export, auto-save/auto-load. → [saves](docs/features/saves.md)
+  state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
+  Glulx games' external file storage (Glk file streams) auto-persisting across
+  sessions. → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
 - **Deeply themeable** — a live click-to-edit style editor, symbol gallery,
   shareable `style.toml` files, per-game looks, a templated status bar, and a
   fully configurable keymap. → [customization](docs/features/customization.md)
