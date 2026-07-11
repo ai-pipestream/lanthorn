@@ -224,6 +224,10 @@ pub struct GameSession {
     pub quit: bool,
     /// Which kind of input the VM is currently waiting for.
     pending: InputKind,
+    /// When false, the game's own trailing `>` read prompt is kept in the
+    /// transcript instead of being stripped. Default true. See
+    /// [`Engine::set_strip_prompt`].
+    strip_prompt: bool,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -255,12 +259,13 @@ impl GameSession {
             }
         };
 
-        Ok(GameSession { machine, quit, pending })
+        Ok(GameSession { machine, quit, pending, strip_prompt: true })
     }
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).
     pub fn take_transcript(&mut self) -> String {
-        strip_read_prompt(&sink_mut(&mut self.machine).take_text()).to_owned()
+        let raw = sink_mut(&mut self.machine).take_text();
+        if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
     }
 
     /// Which kind of input the VM is currently waiting for.
@@ -405,7 +410,7 @@ impl GameSession {
         timed_out: bool,
     ) -> TurnResult {
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
-        let transcript = strip_read_prompt(&raw).to_owned();
+        let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         let detected = detect_location(&self.machine);
         let location = detected.as_ref().map(location_to_snapshot);
@@ -812,6 +817,10 @@ impl Engine for GameSession {
 
     fn take_transcript(&mut self) -> String {
         self.take_transcript()
+    }
+
+    fn set_strip_prompt(&mut self, on: bool) {
+        self.strip_prompt = on;
     }
 
     fn pending_input(&self) -> InputKind {
@@ -1625,6 +1634,30 @@ mod tests {
             sess.take_transcript(),
             fresh.take_transcript(),
             "take_transcript_elems must not consume the banner for the Z-machine",
+        );
+    }
+
+    #[test]
+    fn take_transcript_respects_strip_prompt_flag() {
+        // strip_prompt gates whether the game's trailing "> " read prompt is
+        // removed from the transcript (SQ-0264: inline-prompt mode keeps it).
+        let mut sess = GameSession::new(read_char_story_v5(), true, false, None).expect("new");
+        let _ = sess.take_transcript(); // drain the banner
+
+        sess.strip_prompt = false;
+        sink_mut(&mut sess.machine).print("You are in a room.\n>");
+        assert_eq!(
+            sess.take_transcript(),
+            "You are in a room.\n>",
+            "strip_prompt=false keeps the game's trailing '>'"
+        );
+
+        sess.strip_prompt = true;
+        sink_mut(&mut sess.machine).print("You are in a room.\n>");
+        assert_eq!(
+            sess.take_transcript(),
+            "You are in a room.",
+            "strip_prompt=true (default) strips the trailing '>'"
         );
     }
 

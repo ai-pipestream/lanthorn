@@ -369,6 +369,10 @@ pub trait Engine {
     fn take_transcript_elems(&mut self) -> Vec<crate::session::TranscriptElem> {
         Vec::new()
     }
+    /// When false, the game's own trailing `>` read prompt is preserved in the
+    /// transcript (inline-prompt mode) instead of being stripped for the app's
+    /// dedicated input bar. Default true.
+    fn set_strip_prompt(&mut self, _on: bool) {}
     /// Which kind of input the VM is currently waiting for.
     fn pending_input(&self) -> InputKind;
     /// Resume after the host performed an in-game SAVE.

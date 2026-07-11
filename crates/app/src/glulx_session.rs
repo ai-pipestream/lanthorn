@@ -83,6 +83,10 @@ pub struct GlulxSession {
     /// The current room, derived from the last Inform `Subheader` heading and
     /// held sticky across heading-less turns (examine/talk/failed-move).
     last_room: Option<LocationInfo>,
+    /// When false, the game's own trailing `>` read prompt is kept in the
+    /// transcript instead of being stripped. Default true. See
+    /// [`Engine::set_strip_prompt`].
+    strip_prompt: bool,
 }
 
 /// Wall-clock budget for a single drive (one turn's worth of execution). A
@@ -191,6 +195,7 @@ impl GlulxSession {
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
+            strip_prompt: true,
         };
         session.refresh_screen();
         session.last_room =
@@ -297,7 +302,7 @@ impl GlulxSession {
         // path. clamp_runs keeps the style chunks aligned with the shortened text,
         // and trim_elems_to_len applies the same shortening to the element list so
         // the ordered elems stay consistent with the flat `transcript`.
-        let transcript = strip_read_prompt(&raw).to_owned();
+        let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
         let kept = transcript.chars().count();
         let transcript_runs = clamp_runs(raw_runs, kept);
         trim_elems_to_len(&mut elems, kept);
@@ -534,7 +539,8 @@ impl Engine for GlulxSession {
 
     fn take_transcript(&mut self) -> String {
         self.machine.flush();
-        strip_read_prompt(&self.appglk().take_transcript().0).to_owned()
+        let raw = self.appglk().take_transcript().0;
+        if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
     }
 
     fn take_transcript_elems(&mut self) -> Vec<TranscriptElem> {
@@ -542,7 +548,8 @@ impl Engine for GlulxSession {
         // drew before the first turn (title/cover art). Mirrors `finish_turn`'s
         // trailing-read-prompt handling so the returned elements stay consistent
         // with the flat `take_transcript()` string: the concatenation of the
-        // returned `Text` equals `strip_read_prompt(raw)`.
+        // returned `Text` equals `strip_read_prompt(raw)` (or `raw` unchanged
+        // when `strip_prompt` is false) — same gating as `take_transcript`.
         self.machine.flush();
         let mut elems = self.appglk().take_transcript_elems();
         let mut raw = String::new();
@@ -551,9 +558,13 @@ impl Engine for GlulxSession {
                 raw.push_str(text);
             }
         }
-        let kept = strip_read_prompt(&raw).chars().count();
+        let kept = if self.strip_prompt { strip_read_prompt(&raw).chars().count() } else { raw.chars().count() };
         trim_elems_to_len(&mut elems, kept);
         elems
+    }
+
+    fn set_strip_prompt(&mut self, on: bool) {
+        self.strip_prompt = on;
     }
 
     fn pending_input(&self) -> InputKind {
@@ -1065,6 +1076,41 @@ mod tests {
         assert_eq!(sess.take_transcript(), "Hi", "banner drops the trailing prompt");
         let r = sess.submit("x");
         assert_eq!(r.transcript, "done", "turn output drops the trailing prompt");
+    }
+
+    #[test]
+    fn trailing_read_prompt_kept_when_strip_prompt_is_false() {
+        use E::*;
+        // strip_prompt gates whether the trailing "> " read prompt is removed
+        // (SQ-0264: inline-prompt mode keeps it). With strip_prompt = false both
+        // the banner and turn transcripts must retain the game's own ">".
+        let mut body = open_buffer_prelude();
+        for c in b"Hi\n> " {
+            body.extend(streamchar(*c));
+        }
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (banner)
+        for c in b"done\n> " {
+            body.extend(streamchar(*c));
+        }
+        for v in [Imm(0), Imm(20), Imm(LINEBUF), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0xd0), Imm(4), Discard])); // request_line_event
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (turn)
+        body.extend(enc(0x120, &[])); // quit
+        let image = image_for(body, 1);
+
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None).expect("new");
+        sess.strip_prompt = false;
+        assert_eq!(sess.take_transcript(), "Hi\n> ", "banner keeps the trailing prompt");
+        let r = sess.submit("x");
+        assert_eq!(r.transcript, "done\n> ", "turn output keeps the trailing prompt");
     }
 
     #[test]

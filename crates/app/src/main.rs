@@ -1819,6 +1819,9 @@ fn main() {
             }
         }
     };
+    // Strip the game's own inline read prompt only when the dedicated command
+    // bar is on (SQ-0264); otherwise inline-prompt mode keeps the game's ">".
+    session.set_strip_prompt(cfg.command_bar);
 
     // Engine is up — stop the loading spinner and let it erase its line.
     loading_done.store(true, std::sync::atomic::Ordering::Relaxed);
