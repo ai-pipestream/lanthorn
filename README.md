@@ -42,7 +42,8 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
 
 - **Two engines** — full Z-machine (v3/v4/v5/v7/v8) *and* Glulx (Inform 7) play,
   including the v4+ cursor-addressed upper-window screen model, timed/interrupt
-  input, and per-title header tuning. → [interpreter](docs/features/interpreter.md)
+  input, per-title header tuning, and Glk file streams so Glulx games that need
+  external file storage run. → [interpreter](docs/features/interpreter.md)
 - **Live automapping** — rooms and connections placed, routed, and de-overlapped
   automatically as you explore, across layered multi-level areas, and continuously
   re-tidied. Works for Z-machine *and* Glulx/Inform 7 games. → [mapping](docs/features/mapping.md)
