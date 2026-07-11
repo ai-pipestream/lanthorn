@@ -3518,32 +3518,36 @@ fn main() {
                 // Normal game-focus command submission.
                 // Clear input line and echo command.
                 let cmd = state.take_input();
-                if cmd.is_empty() {
-                    continue;
-                }
 
-                // Record into the shell-style command history (game + slash alike),
-                // deduping consecutive repeats and capping the list.
-                state.record_command(&cmd);
+                // An empty cmd (Enter on a blank line) is still submitted to the
+                // game, which decides what a blank line means (re-prompt / "I beg
+                // your pardon?"), matching other interpreters (SQ-0265). Only skip
+                // history recording and slash routing for it — an empty line is
+                // neither worth a history entry nor a slash command.
+                if !cmd.is_empty() {
+                    // Record into the shell-style command history (game + slash
+                    // alike), deduping consecutive repeats and capping the list.
+                    state.record_command(&cmd);
 
-                // ── Slash-command interception ────────────────────────────────
-                // If the input starts with the configured prefix, route it as an
-                // app command; do NOT call session.submit, increment turns, or
-                // push a "> cmd" story line.
-                if is_slash(&cmd, state.config.command_prefix) {
-                    // Strip the leading prefix character before parsing.
-                    let body = &cmd[state.config.command_prefix.len_utf8()..];
-                    let outcome = slash::parse(body, state.config.command_prefix);
-                    let should_break = dispatch_slash_outcome(
-                        outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
-                        &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
-                        last_panes.map, last_panes.story, false,
-                    );
-                    flush_pending_config_write(&mut state);
-                    if should_break {
-                        break;
+                    // ── Slash-command interception ────────────────────────────
+                    // If the input starts with the configured prefix, route it as
+                    // an app command; do NOT call session.submit, increment turns,
+                    // or push a "> cmd" story line.
+                    if is_slash(&cmd, state.config.command_prefix) {
+                        // Strip the leading prefix character before parsing.
+                        let body = &cmd[state.config.command_prefix.len_utf8()..];
+                        let outcome = slash::parse(body, state.config.command_prefix);
+                        let should_break = dispatch_slash_outcome(
+                            outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
+                            &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                            last_panes.map, last_panes.story, false,
+                        );
+                        flush_pending_config_write(&mut state);
+                        if should_break {
+                            break;
+                        }
+                        continue;
                     }
-                    continue;
                 }
 
                 // Clear any transient status message on a real game turn.
