@@ -1847,9 +1847,24 @@ impl AppState {
     /// edited; its parallel runs/kinds/images/styles are left as-is (the appended
     /// chars carry no style runs and render in the input style).
     pub fn append_to_last_transcript_line(&mut self, text: &str) {
-        match self.transcript.last_mut() {
-            Some(last) => last.push_str(text),
-            None => self.push_transcript_kind(text, TranscriptKind::Input),
+        if self.transcript.is_empty() {
+            self.push_transcript_kind(text, TranscriptKind::Input);
+            return;
+        }
+        let start = self.transcript.last().unwrap().chars().count();
+        self.transcript.last_mut().unwrap().push_str(text);
+        let end = start + text.chars().count();
+        // Inherit the colour of the line's trailing style run so the echoed command
+        // is drawn in the game's prompt colours instead of the uncoloured theme base,
+        // and the SQ-0263 background band stays continuous across it. Only fg/bg are
+        // carried (not reverse/bold bits or a hyperlink). No coloured run → plain
+        // append (the theme case), unchanged. (SQ-0269)
+        if let Some(runs) = self.transcript_runs.last_mut() {
+            if let Some(&StyleRun { fg, bg, .. }) = runs.last() {
+                if fg != 0 || bg != 0 {
+                    runs.push(StyleRun { start, end, bits: 0, fg, bg, link: 0 });
+                }
+            }
         }
     }
 
@@ -2366,6 +2381,36 @@ mod tests {
         assert_eq!(s.transcript.len(), s.transcript_styles.len());
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
         assert_eq!(s.transcript.len(), s.transcript_images.len());
+    }
+
+    #[test]
+    fn append_to_last_transcript_line_inherits_trailing_run_colour() {
+        use zvm::screen::ZColour;
+        let mut s = AppState::default();
+        // A coloured game prompt line: ">" drawn on a white page background.
+        s.push_transcript_runs(
+            ">",
+            TranscriptKind::Story,
+            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0)],
+        );
+        s.append_to_last_transcript_line("look");
+        assert_eq!(s.transcript.last().unwrap(), ">look");
+        let tail = s.transcript_runs.last().unwrap().last().unwrap();
+        assert_eq!((tail.start, tail.end), (1, 5), "run covers the appended 'look'");
+        assert_eq!(tail.bg, pack_zcolour(ZColour::True24(0x00FF_FFFF)),
+            "echo inherits the prompt's white background (keeps the SQ-0263 band)");
+        assert_eq!(tail.bits, 0, "reverse/bold bits are not carried onto the echo");
+    }
+
+    #[test]
+    fn append_to_last_transcript_line_adds_no_run_when_prompt_is_uncoloured() {
+        let mut s = AppState::default();
+        s.push_transcript_kind(">", TranscriptKind::Story); // no coloured runs
+        let before = s.transcript_runs.last().map(|r| r.len()).unwrap_or(0);
+        s.append_to_last_transcript_line("look");
+        assert_eq!(s.transcript.last().unwrap(), ">look");
+        let after = s.transcript_runs.last().map(|r| r.len()).unwrap_or(0);
+        assert_eq!(before, after, "no coloured trailing run → plain append (theme case unchanged)");
     }
 
     #[test]
