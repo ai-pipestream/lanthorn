@@ -52,6 +52,19 @@ pub(crate) struct ImageBand {
 pub const CURSOR_STYLE: Style = Style::new()
     .add_modifier(Modifier::REVERSED);
 
+/// The block-cursor style for the input caret. A cursor is reverse-video of the
+/// text it sits on, so when the game has set page colours (`game_input` is
+/// `Some`) reverse the resolved input `text_style` — otherwise a bare REVERSED
+/// cursor reverses the *theme*, which can render near-invisible on a recoloured
+/// page (e.g. a white game background). With no game colour it stays the
+/// structural theme cursor. (SQ-0268)
+pub(crate) fn cursor_style(text_style: Style, game_input: Option<Style>) -> Style {
+    match game_input {
+        Some(_) => text_style.add_modifier(Modifier::REVERSED),
+        None => CURSOR_STYLE,
+    }
+}
+
 // ── Pure helpers (testable without Machine) ────────────────────────────────────
 
 /// The field values available to status-bar segment templates for one turn.
@@ -1007,7 +1020,7 @@ fn render_input_content(
         let cursor_x = text_x + input_trunc.chars().count() as u16;
         if cursor_x < region.right() {
             if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
-                cell.set_symbol("_").set_style(CURSOR_STYLE);
+                cell.set_symbol("_").set_style(cursor_style(text_style, game_input));
             }
         }
     }
@@ -1319,7 +1332,7 @@ fn render_middle(
             let cursor_x = start_col + input_trunc.chars().count() as u16;
             if cursor_x < body_area.right() {
                 if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
-                    cell.set_symbol("_").set_style(CURSOR_STYLE);
+                    cell.set_symbol("_").set_style(cursor_style(text_style, game_input));
                 }
             }
         }
@@ -2392,6 +2405,22 @@ mod tests {
         // The "> " prompt occupies cols 0-1; the typed 'x' is at col 2.
         assert_eq!(buf.cell((2, 0)).unwrap().style().fg, Some(Color::Cyan),
             "typed input uses the game colour");
+    }
+
+    #[test]
+    fn cursor_style_reverses_game_ink_but_falls_back_to_theme() {
+        use ratatui::style::Color;
+        // No game colour → the structural theme cursor (bare REVERSED), unchanged.
+        assert_eq!(cursor_style(Style::new().fg(Color::Green), None), CURSOR_STYLE);
+        // Game page set → reverse-video of the resolved input text so the caret is
+        // visible on the recoloured page (SQ-0268). It carries the input fg/bg and
+        // adds REVERSED (the terminal performs the swap).
+        let text = Style::new().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(255, 255, 255));
+        let game = Some(Style::new().bg(Color::Rgb(255, 255, 255)));
+        let cs = cursor_style(text, game);
+        assert!(cs.add_modifier.contains(Modifier::REVERSED), "reversed block");
+        assert_eq!(cs.fg, Some(Color::Rgb(0, 0, 0)), "keeps game fg (swapped by terminal)");
+        assert_eq!(cs.bg, Some(Color::Rgb(255, 255, 255)), "keeps game bg (swapped by terminal)");
     }
 
     #[test]
