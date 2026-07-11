@@ -220,6 +220,12 @@ pub enum Action {
     SavesDelete,
     /// Close the saves-manager modal without acting.
     SavesClose,
+    /// Navigate the VFS file-picker list by delta (-1 = up, +1 = down).
+    FilePickerNav(i32),
+    /// Pick the selected VFS filename (caller-handled).
+    FilePickerPick,
+    /// Close the VFS file-picker modal without picking.
+    FilePickerClose,
     /// Open the symbol gallery modal.
     OpenGallery,
     /// Move to next preset in the current gallery category.
@@ -473,6 +479,9 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
     if state.saves.is_some() {
         return KeyResolve::Action(saves_key_to_action(key, state.dialog_focus));
+    }
+    if state.file_picker.is_some() {
+        return KeyResolve::Action(file_picker_key_to_action(key));
     }
     if state.replay.is_some() {
         return KeyResolve::Action(history_key_to_action(key));
@@ -1190,6 +1199,17 @@ fn saves_key_to_action(key: KeyEvent, _focus: usize) -> Action {
         KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => Action::SavesDelete,
         KeyCode::Char('i') if key.modifiers == KeyModifiers::NONE => Action::SavesImport,
         KeyCode::Esc => Action::SavesClose,
+        _ => Action::None,
+    }
+}
+
+/// Hardwired VFS file-picker sub-mode keys (not rebindable, like saves/anim).
+fn file_picker_key_to_action(key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Up => Action::FilePickerNav(-1),
+        KeyCode::Down => Action::FilePickerNav(1),
+        KeyCode::Enter => Action::FilePickerPick,
+        KeyCode::Esc => Action::FilePickerClose,
         _ => Action::None,
     }
 }
@@ -2478,6 +2498,27 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         // SavesLoad is caller-handled.
+
+        // ── VFS file-picker actions ─────────────────────────────────────────────
+
+        Action::FilePickerNav(delta) => {
+            if let Some(fp) = &mut state.file_picker {
+                if delta < 0 { fp.move_up() } else { fp.move_down() }
+            }
+        }
+        Action::FilePickerPick => {
+            if let Some(fp) = &state.file_picker {
+                if let Some(name) = fp.selected() {
+                    state.filename_submitted = Some(Some(name.to_string()));
+                }
+            }
+            state.file_picker = None;
+        }
+        Action::FilePickerClose => {
+            // Leave pending_filename set: the run loop's resolver treats a closed
+            // picker with a still-pending request as a cancel (NULL fileref).
+            state.file_picker = None;
+        }
 
         // ── File-browser actions ──────────────────────────────────────────────
 

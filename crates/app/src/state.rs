@@ -644,6 +644,34 @@ pub struct SavesState {
     pub scroll: crate::list_scroll::ListScroll,
 }
 
+// ── File picker state (read-mode create_by_prompt) ─────────────────────────────
+
+/// A minimal list picker over existing VFS filenames, for a read-mode
+/// `create_by_prompt`. Rendered with the shared dialog chrome. `None` in
+/// `AppState.file_picker` = closed.
+#[derive(Debug, Clone)]
+pub struct FilePickerState {
+    pub names: Vec<String>,
+    pub scroll: crate::list_scroll::ListScroll,
+}
+
+impl FilePickerState {
+    pub fn new(names: Vec<String>) -> Self {
+        FilePickerState { names, scroll: Default::default() }
+    }
+    pub fn selected(&self) -> Option<&str> {
+        self.names.get(self.scroll.selected).map(|s| s.as_str())
+    }
+    pub fn move_up(&mut self) {
+        self.scroll.selected = self.scroll.selected.saturating_sub(1);
+    }
+    pub fn move_down(&mut self) {
+        if self.scroll.selected + 1 < self.names.len() {
+            self.scroll.selected += 1;
+        }
+    }
+}
+
 // ── Gallery state ─────────────────────────────────────────────────────────────
 
 /// Transient state for the symbol gallery modal.
@@ -1171,6 +1199,10 @@ pub struct AppState {
     /// Active file-browser modal state. `None` means the browser is closed.
     pub file_browser: Option<FileBrowserState>,
 
+    /// Active VFS file-picker modal state (read-mode `create_by_prompt`).
+    /// `None` means the picker is closed.
+    pub file_picker: Option<FilePickerState>,
+
     /// Active verb/item token-palette modal state. `None` means the modal is closed.
     pub verb_menu: Option<VerbMenuState>,
 
@@ -1445,6 +1477,7 @@ impl Default for AppState {
             ingame_io: None,
             ingame_resume_save: None,
             file_browser: None,
+            file_picker: None,
             verb_menu: None,
             config: crate::config::Config::default(),
             pane_sizes: PaneSizes { split_ratio: 50, verb_dock_pct: 32, inv_dock_pct: 33 },
@@ -1671,6 +1704,7 @@ impl AppState {
         self.gallery.is_some()
             || self.saves.is_some()
             || self.file_browser.is_some()
+            || self.file_picker.is_some()
             || self.config_screen.is_some()
             || self.style_editor.is_some()
             || self.glyph_picker.is_some()
@@ -2403,6 +2437,20 @@ mod tests {
         assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x03 }, 0), FilenameModal::NamePrompt);
         assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x02 }, 2), FilenameModal::Picker);
         assert_eq!(filename_modal_for(FilenameReq { usage: 0, fmode: 0x02 }, 0), FilenameModal::AutoCancel);
+    }
+
+    #[test]
+    fn file_picker_navigation_clamps_and_selects() {
+        use super::FilePickerState;
+        let mut p = FilePickerState::new(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(p.selected(), Some("a"));
+        p.move_up(); // clamps at top
+        assert_eq!(p.selected(), Some("a"));
+        p.move_down();
+        p.move_down();
+        assert_eq!(p.selected(), Some("c"));
+        p.move_down(); // clamps at bottom
+        assert_eq!(p.selected(), Some("c"));
     }
 
     #[test]

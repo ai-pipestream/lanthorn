@@ -46,6 +46,7 @@ use mapper::graph::RoomId;
 use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
 use app::render::saves::draw_saves;
+use app::render::file_picker::draw_file_picker;
 use app::render::history::draw_history;
 use app::render::screen::render_story_pane;
 use app::render::draw_str_clipped;
@@ -837,6 +838,11 @@ fn draw_frame(
         // ── File-browser overlay — drawn after saves ──────────────────────────
         if state.file_browser.is_some() {
             dialog_rects_out = draw_file_browser(state, dialog_area, buf, &mut modal_list_viewport);
+        }
+
+        // ── VFS file picker overlay (read-mode create_by_prompt) ──────────────
+        if state.file_picker.is_some() {
+            dialog_rects_out = draw_file_picker(state, dialog_area, buf, &mut modal_list_viewport);
         }
 
         // ── Config screen overlay — drawn after other modals ──────────────────
@@ -5094,11 +5100,7 @@ fn open_filename_modal(req: app::session::FilenameReq, session: &dyn Engine, sta
             });
         }
         app::state::FilenameModal::Picker => {
-            // TODO(Task 5): replace with the file picker over session.file_names().
-            state.prompt = Some(app::state::Prompt {
-                kind: app::state::PromptKind::CreateFile,
-                buffer: String::new(),
-            });
+            state.file_picker = Some(app::state::FilePickerState::new(session.file_names()));
         }
         app::state::FilenameModal::AutoCancel => {
             state.pending_filename = None;
@@ -5127,7 +5129,7 @@ fn resolve_filename_request(
     // Modal closed without a submit (Esc) while a request is still pending -> cancel.
     if state.pending_filename.is_some()
         && !matches!(&state.prompt, Some(p) if p.kind == app::state::PromptKind::CreateFile)
-    // Task 5 adds: && state.file_picker.is_none()
+        && state.file_picker.is_none()
     {
         state.pending_filename = None;
         let result = session.resume_filename(None);

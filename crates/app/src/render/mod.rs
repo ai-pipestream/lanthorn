@@ -20,6 +20,7 @@ pub mod reset_dialog;
 pub mod style_editor;
 pub mod room_info;
 pub mod saves;
+pub mod file_picker;
 pub mod screen;
 pub mod scroll;
 pub mod tidy_panel;
