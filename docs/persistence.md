@@ -99,12 +99,22 @@ engines. The CLIs have no IFID and key on the story path instead.
 | 3 — auto per-story (Glk VFS) | Glulx | app | `<save_dir>/<ifid>.gvfs` (`GVFS`) |
 | 3 — auto per-story (Glk VFS) | Glulx | `gvm-cli` | `<story>.glkvfs` (`GVFS`) |
 
+## `create_by_prompt` naming (SQ-0279)
+
+`glk_fileref_create_by_prompt` suspends the VM for a host-chosen name rather than
+resolving to a fixed per-usage slot. Write / append / read-write modes open a
+name-entry prompt; read mode opens a picker over the story's existing Glk files.
+The named file lives in the VFS like any other Glk file, so it auto-persists
+per-story through the Layer 3 sidecar (`.gvfs` / `.glkvfs`) and is embedded in
+Layer 2 Save States — there is no separate on-disk file. `gvm-cli` prompts for the
+name on stdin (blank cancels). This matches the layering above: a game reaching for
+`create_by_prompt` is writing an *external named file*, which by the game's own
+choice belongs in the automatic per-story (global) layer, not a save slot.
+
 ## Known limitations (Glk file VFS)
 
-Two SQ-0277 limitations remain in effect and apply to the VFS at every layer:
-
-- **`create_by_prompt` uses a fixed per-usage name** — there is no interactive
-  file picker yet, so "save to a file" prompts resolve to a single fixed name per
-  usage class rather than a player-chosen filename (tracked as SQ-0279).
+- **The read picker is not usage-filtered** — it lists *all* of the story's VFS
+  files, not only those matching the requested Glk usage class, because the `GVFS`
+  codec does not record a per-file usage tag.
 - **Text-mode newline translation is omitted** — Glk text-mode file streams are
   stored verbatim, with no platform newline translation.
