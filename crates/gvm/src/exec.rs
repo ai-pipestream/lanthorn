@@ -2566,10 +2566,15 @@ impl Machine {
                 // glk_window_set_arrangement(win, method, size, keywin)
                 self.glk.window_set_arrangement(a(0), a(1), a(2), a(3));
                 self.relayout_glk();
-                // A program-driven rearrangement generates an arrange event, plus
-                // a redraw when a graphics window is in play (arrangement can
-                // resize it); text-only trees don't need one.
-                self.glk.push_event(GlkEvent { etype: glk::evtype::ARRANGE, win: 0, val1: 0, val2: 0 });
+                // A program-driven rearrangement must NOT synthesize an
+                // evtype_Arrange event: per the Glk spec, Arrange notifies the game
+                // of EXTERNAL display-size changes (the player resizing), not the
+                // game's own set_arrangement. Emitting one made any game whose
+                // arrange handler re-arranges its windows spin forever — it re-lays
+                // out, we queue another Arrange, glk_select returns it, repeat (The
+                // Wizard Sniffer's status-window auto-sizer, SQ-0272). A Redraw is
+                // still warranted for a graphics window whose pixels the rearrange
+                // may have resized.
                 if self.glk.has_graphics_window() {
                     self.glk.push_event(GlkEvent { etype: glk::evtype::REDRAW, win: 0, val1: 0, val2: 0 });
                 }
@@ -6505,15 +6510,16 @@ mod tests {
     #[test]
     fn glk_arrange_event_delivered_before_input() {
         use asm::Op::{C16, C8, Zero};
-        // Open a TextGrid split (grid=2, pair=3), rearrange it (queues Arrange),
-        // request a char, then select twice: arrange first, then suspend.
+        // Open a TextGrid split (grid=2, pair=3), request a char, then select
+        // twice. A host-queued Arrange (a real terminal resize via notify_resize)
+        // is delivered first, then the select suspends on the char.
         let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Zero);
-        body.extend(glk_call(0x26, &[C8(3), C8(0x12), C8(5), C8(0)], Zero)); // set_arrangement
         body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1)
         body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → Arrange
         body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select → suspend (char)
         body.extend(asm::ins(0x120, &[]));
         let mut m = machine_ram(body, 0x200);
+        m.notify_resize(); // a real terminal resize queues an Arrange event
         assert_eq!(step_to_event(&mut m), StepResult::NeedChar { win: 1, unicode: false });
         assert_eq!(read_event(&m, 0x100), (5, 0, 0, 0), "evtype_Arrange delivered first");
         m.supply_char(b'q' as u32);
@@ -6675,15 +6681,15 @@ mod tests {
     #[test]
     fn glk_select_poll_returns_internal_events_not_input() {
         use asm::Op::{C16, C8, Zero};
-        // Arrange queued + a char requested. poll returns arrange, then None —
-        // never the char, and never suspends.
+        // Arrange queued (a real resize) + a char requested. poll returns arrange,
+        // then None — never the char, and never suspends.
         let mut body = glk_call(0x23, &[C8(1), C8(0x12), C8(3), C8(4), C8(0)], Zero);
-        body.extend(glk_call(0x26, &[C8(3), C8(0x12), C8(5), C8(0)], Zero)); // queue Arrange
         body.extend(glk_call(0xD2, &[C8(1)], Zero)); // request_char_event(1)
         body.extend(glk_call(0xC1, &[C16(0x0100)], Zero)); // select_poll → Arrange
         body.extend(glk_call(0xC1, &[C16(0x0110)], Zero)); // select_poll → None
         body.extend(asm::ins(0x120, &[]));
         let mut m = machine_ram(body, 0x200);
+        m.notify_resize(); // a real terminal resize queues an Arrange event
         assert_eq!(step_to_event(&mut m), StepResult::Quit, "poll never suspends");
         assert_eq!(read_event(&m, 0x100).0, 5, "poll returns the Arrange event");
         assert_eq!(read_event(&m, 0x110).0, 0, "poll never returns input → None");
@@ -7518,26 +7524,31 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_pushes_redraw_only_when_graphics_window_present() {
-        // A pair of text windows only: rearranging never needs a redraw.
+    fn arrangement_never_pushes_arrange_and_redraws_only_with_graphics() {
+        // A program-driven set_arrangement must NEVER synthesize an evtype_Arrange
+        // (that would spin a game whose arrange handler re-arranges — SQ-0272). A
+        // pair of text windows only also needs no redraw.
         let mut m = super::tests::machine_with_glk_charpx(80, 24, 8, 16);
         let buf = m.glk_open_window(0, 0, 0, 3, 0); // text buffer root
         let grid = m.glk_open_window(buf, 0x12, 3, 4, 0); // grid above, fixed 3
         m.glk_dispatch(0x0026, &[m.glk.window_parent(grid).unwrap(), 0x12, 5, grid]).unwrap(); // set_arrangement
         let evs = m.glk.take_pending_events();
-        assert!(evs.iter().any(|e| e.etype == glk::evtype::ARRANGE));
+        assert!(!evs.iter().any(|e| e.etype == glk::evtype::ARRANGE),
+            "program-driven rearrangement must not queue an Arrange event");
         assert!(
             !evs.iter().any(|e| e.etype == glk::evtype::REDRAW),
             "no graphics window in the tree — no redraw needed"
         );
 
-        // Add a graphics window to the tree: now rearranging queues a redraw too.
+        // Add a graphics window to the tree: now rearranging queues a redraw (but
+        // still no Arrange) so the game repaints the resized graphics.
         m.set_graphics(true);
         let gfx = m.glk_open_window(buf, 0x13, 150, 5, 0); // graphics below, fixed 150px
         m.glk.take_pending_events(); // drain the open-triggered redraw
         m.glk_dispatch(0x0026, &[m.glk.window_parent(gfx).unwrap(), 0x13, 100, gfx]).unwrap(); // set_arrangement
         let evs = m.glk.take_pending_events();
-        assert!(evs.iter().any(|e| e.etype == glk::evtype::ARRANGE));
+        assert!(!evs.iter().any(|e| e.etype == glk::evtype::ARRANGE),
+            "still no Arrange even with a graphics window");
         assert!(
             evs.iter().any(|e| e.etype == glk::evtype::REDRAW),
             "a graphics window is in the tree — arrangement queues a redraw"
