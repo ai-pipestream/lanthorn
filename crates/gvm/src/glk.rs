@@ -1029,6 +1029,17 @@ impl Model {
         self.alloc_fileref(usage, name, rock)
     }
 
+    /// The user-visible filenames in the VFS: every written file except the internal
+    /// temp (`__temp_`) and legacy prompt (`__prompt_`) keys. BTreeMap order (sorted).
+    /// Feeds the host's `create_by_prompt` read picker.
+    pub fn file_names(&self) -> Vec<String> {
+        self.files
+            .keys()
+            .filter(|k| !k.starts_with("__temp_") && !k.starts_with("__prompt_"))
+            .cloned()
+            .collect()
+    }
+
     /// `glk_fileref_create_from_fileref`: clone `oldfref`'s name with a new
     /// usage/rock. Returns 0 if `oldfref` is invalid.
     pub fn fileref_create_from(&mut self, usage: u32, oldfref: u32, rock: u32) -> u32 {
@@ -2743,6 +2754,16 @@ mod style_hint_tests {
         assert_eq!(Model::sanitize_fileref_name(""), "file");
         assert_eq!(Model::sanitize_fileref_name("///"), "___");
         assert_eq!(Model::sanitize_fileref_name("Ok-Name_1.dat"), "Ok-Name_1.dat");
+    }
+
+    #[test]
+    fn file_names_lists_user_files_hiding_internal_keys() {
+        let mut m = Model::new();
+        m.files.insert("story-notes".to_string(), vec![1, 2, 3]);
+        m.files.insert("__temp_0__".to_string(), vec![4]);
+        m.files.insert("__prompt_2__".to_string(), vec![5]);
+        let names = m.file_names();
+        assert_eq!(names, vec!["story-notes".to_string()], "temp/legacy-prompt keys are hidden");
     }
 
     // Glk filemode constants (garglk glk.h).

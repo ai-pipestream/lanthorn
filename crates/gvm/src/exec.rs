@@ -45,6 +45,16 @@ pub enum StepResult {
     /// The game executed `@restore`: the host should read a save file and call
     /// [`Machine::complete_restore_success`] (or [`Machine::complete_restore_failure`]).
     RestoreRequest,
+    /// The game executed `glk_fileref_create_by_prompt`: the host should prompt for
+    /// a filename (write modes) or let the player pick an existing VFS file (read
+    /// mode), then call [`Machine::supply_filename`]. `usage` is the Glk fileusage,
+    /// `fmode` the Glk filemode.
+    NeedFilename {
+        /// The Glk fileusage (Data / SavedGame / Transcript / InputRecord + flags).
+        usage: u32,
+        /// The Glk filemode (Read `0x02`, Write `0x01`, ReadWrite `0x03`, WriteAppend `0x05`).
+        fmode: u32,
+    },
 }
 
 /// Where a produced value (a function's return value, or an opcode's store
@@ -95,6 +105,16 @@ struct PendingSaveLoad {
     dest: Dest,
     /// `false` = `@save` (SaveRequest); `true` = `@restore` (RestoreRequest).
     restore: bool,
+}
+
+/// A suspended `glk_fileref_create_by_prompt` awaiting the host's chosen filename.
+/// `dest` (the `@glk` store operand) is filled by `op_glk` right after the arm sets
+/// this; `supply_filename` binds the fileref and stores its id there.
+struct PendingFileref {
+    dest: Dest,
+    usage: u32,
+    fmode: u32,
+    rock: u32,
 }
 
 impl Dest {
@@ -150,6 +170,9 @@ pub struct Machine {
     /// A suspended game `@save`/`@restore` (see [`StepResult::SaveRequest`]).
     /// Set when the opcode fires; consumed by the host-facing `complete_*` methods.
     pending_saveload: Option<PendingSaveLoad>,
+    /// A suspended `glk_fileref_create_by_prompt` (see [`StepResult::NeedFilename`]).
+    /// Set by the `0x0062` @glk arm; consumed by [`Machine::supply_filename`].
+    pending_fileref: Option<PendingFileref>,
     /// The display backend the Glk model drives.
     pub(crate) backend: Box<dyn GlkBackend>,
     /// Recorded runtime faults / deferred-feature notices.
@@ -303,6 +326,7 @@ impl Machine {
             glk: Model::new(),
             pending_input: None,
             pending_saveload: None,
+            pending_fileref: None,
             backend,
             diagnostics: Vec::new(),
             halted: false,
@@ -2486,6 +2510,13 @@ impl Machine {
             args.push(self.pop32()?); // first @glk arg is topmost
         }
         let result = self.glk_dispatch(selector, &args)?;
+        // glk_fileref_create_by_prompt suspends: the real fileref id is produced
+        // later by supply_filename, which stores it into this @glk's S1. Capture the
+        // destination and do not store the placeholder result now.
+        if let Some(pf) = self.pending_fileref.as_mut() {
+            pf.dest = s[0];
+            return Ok(());
+        }
         self.store(s[0], result)
     }
 
@@ -2970,7 +3001,15 @@ impl Machine {
                 let name = self.read_cstring(a(1))?;
                 self.glk.fileref_create(a(0), name, a(2))
             }
-            0x0062 => self.glk.fileref_create_by_prompt(a(0), a(1), a(2)), // glk_fileref_create_by_prompt(usage, fmode, rock)
+            0x0062 => {
+                // glk_fileref_create_by_prompt(usage, fmode, rock): no synchronous
+                // name. Suspend so the host can prompt (write) or pick (read);
+                // supply_filename() resumes with the choice. op_glk fills in `dest`
+                // (this @glk's S1) and returns the suspend instead of storing.
+                self.pending_fileref =
+                    Some(PendingFileref { dest: Dest::Discard, usage: a(0), fmode: a(1), rock: a(2) });
+                0 // placeholder; not stored (op_glk suspends instead)
+            }
             0x0063 => {
                 // glk_fileref_destroy(fref)
                 self.glk.fileref_destroy(a(0));
@@ -3342,6 +3381,14 @@ impl Machine {
         })
     }
 
+    /// The [`StepResult`] for a suspended `glk_fileref_create_by_prompt`, if any.
+    /// The host resolves it via [`Machine::supply_filename`].
+    fn fileref_prompt_result(&self) -> Option<StepResult> {
+        self.pending_fileref
+            .as_ref()
+            .map(|p| StepResult::NeedFilename { usage: p.usage, fmode: p.fmode })
+    }
+
     /// Deliver the result of a game-initiated `@save` back to the machine, then
     /// resume. `ok == true` stores 0 (success) into the `@save`'s S1; `false`
     /// stores 1 (failure). Glulx spec §2.9. A no-op if no `@save` is pending.
@@ -3387,6 +3434,25 @@ impl Machine {
         if let Some(p) = self.pending_saveload.take() {
             let _ = self.store(p.dest, 1);
         }
+    }
+
+    /// Complete a suspended `glk_fileref_create_by_prompt`. `Some(name)` binds a
+    /// fileref to that (sanitized) name and stores its id into the `@glk`'s S1;
+    /// `None` (the player cancelled) stores 0 (the Glk NULL fileref). No-op if none
+    /// pending.
+    pub fn supply_filename(&mut self, name: Option<String>) {
+        if let Some(p) = self.pending_fileref.take() {
+            let id = match name {
+                Some(n) => self.glk.fileref_create(p.usage, n, p.rock),
+                None => 0,
+            };
+            let _ = self.store(p.dest, id);
+        }
+    }
+
+    /// The user-visible VFS filenames (for a host `create_by_prompt` read picker).
+    pub fn file_names(&self) -> Vec<String> {
+        self.glk.file_names()
     }
 
     /// Complete a suspended line-input `glk_select` ended by the normal Enter
@@ -3656,6 +3722,10 @@ impl Machine {
         if let Some(sr) = self.saveload_result() {
             return sr;
         }
+        // Still suspended on a prior create_by_prompt: re-report until supplied.
+        if let Some(sr) = self.fileref_prompt_result() {
+            return sr;
+        }
         match self.step_once() {
             Ok(()) if self.halted => StepResult::Quit,
             // A glk_select this step may have suspended for input, or an
@@ -3663,6 +3733,7 @@ impl Machine {
             Ok(()) => self
                 .suspend_result()
                 .or_else(|| self.saveload_result())
+                .or_else(|| self.fileref_prompt_result())
                 .unwrap_or(StepResult::Continue),
             Err(msg) => {
                 self.fault_trace = Some(self.build_trace(msg.clone()));
@@ -6140,6 +6211,55 @@ mod tests {
         assert_ne!(m.mem.read32(0x100).unwrap(), 0, "create_by_name -> live fileref");
         assert_eq!(m.mem.read32(0x104).unwrap(), 0, "does_file_exist -> false (never written)");
         assert!(m.diagnostics.is_empty(), "the fileref group must not emit diagnostics");
+    }
+
+    #[test]
+    fn glk_fileref_create_by_prompt_suspends_then_supply_binds_name() {
+        use asm::Op::{C8, Mem16};
+        // create_by_prompt(usage=0x00, fmode=0x01 Write, rock=0) -> store fileref id @ 0x0100.
+        let mut body = glk_call(0x62, &[C8(0x00), C8(0x01), C8(0x00)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[])); // quit (runs only after the prompt resumes)
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mut m = machine(built);
+        // Drive to the suspension.
+        let mut sr = m.step();
+        while sr == StepResult::Continue {
+            sr = m.step();
+        }
+        assert_eq!(sr, StepResult::NeedFilename { usage: 0x00, fmode: 0x01 });
+        // Re-reported while pending (idempotent, like @save/@restore).
+        assert_eq!(m.step(), StepResult::NeedFilename { usage: 0x00, fmode: 0x01 });
+        // Player names it; execution resumes and runs to quit.
+        m.supply_filename(Some("mydata".to_string()));
+        let mut sr = m.step();
+        while sr == StepResult::Continue {
+            sr = m.step();
+        }
+        assert_eq!(sr, StepResult::Quit);
+        assert_ne!(m.mem.read32(0x100).unwrap(), 0, "supply_filename bound a live (non-NULL) fileref");
+    }
+
+    #[test]
+    fn glk_fileref_create_by_prompt_cancel_stores_null() {
+        use asm::Op::{C8, Mem16};
+        let mut body = glk_call(0x62, &[C8(0x00), C8(0x01), C8(0x00)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let start = asm::func(0xC1, &[], &body);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mut m = machine(built);
+        let mut sr = m.step();
+        while sr == StepResult::Continue {
+            sr = m.step();
+        }
+        assert_eq!(sr, StepResult::NeedFilename { usage: 0x00, fmode: 0x01 });
+        m.supply_filename(None); // player cancelled
+        let mut sr = m.step();
+        while sr == StepResult::Continue {
+            sr = m.step();
+        }
+        assert_eq!(sr, StepResult::Quit);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "cancel -> NULL fileref (0)");
     }
 
     #[test]
