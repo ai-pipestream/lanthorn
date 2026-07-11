@@ -1904,18 +1904,18 @@ fn main() {
     state.colors = cs;
     state.symbols = set;
     for w in w1.into_iter().chain(w2) {
-        state.push_transcript(&format!("[{}]", w));
+        state.push_notice(&format!("[{}]", w));
     }
     let (keymap, keymap_warnings) = app::keymap::KeyMap::resolve(&cfg.keymap);
     state.keymap = keymap;
     // Surface any keymap conflict warnings once in the transcript.
     for w in keymap_warnings {
-        state.push_transcript(&format!("[{}]", w));
+        state.push_notice(&format!("[{}]", w));
     }
     let (hotkeys, hotkey_warnings) = app::keymap::HotkeyLayout::resolve(&cfg.hotkeys);
     state.hotkeys = hotkeys;
     for w in hotkey_warnings {
-        state.push_transcript(&format!("[{}]", w));
+        state.push_notice(&format!("[{}]", w));
     }
     state.show_room_numbers = cfg.show_room_numbers;
     state.show_loc_method = cfg.show_loc_method;
@@ -1977,7 +1977,7 @@ fn main() {
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
     if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(&cli)) {
         if app::config::config_has_style_sections(&raw_cfg) {
-            state.push_transcript_kind(
+            state.push_transcript_internal(
                 "config.toml [colors]/[symbols] are no longer used — move them into style.toml",
                 app::state::TranscriptKind::Warning,
             );
@@ -2150,12 +2150,12 @@ fn main() {
             match app::reload::reload_style(&mut state) {
                 app::reload::ReloadOutcome::Reloaded { warnings } => {
                     for wn in &warnings {
-                        state.push_transcript_kind(wn, TranscriptKind::Warning);
+                        state.push_transcript_internal(wn, TranscriptKind::Warning);
                     }
                     state.set_status("style reloaded (watch)");
                 }
                 app::reload::ReloadOutcome::Failed { msg } => {
-                    state.push_transcript_kind(
+                    state.push_transcript_internal(
                         &format!("style reload failed: {}", msg),
                         TranscriptKind::Warning,
                     );
@@ -3488,7 +3488,7 @@ fn main() {
                         let _ = out.flush();
                         // Report the copy as a meta line in the story output rather
                         // than a status-bar message (which has no natural dismissal).
-                        state.push_transcript_kind(
+                        state.push_transcript_internal(
                             &format!("Copied {} chars to clipboard", text.chars().count()),
                             app::state::TranscriptKind::Meta,
                         );
@@ -3588,13 +3588,13 @@ fn main() {
                 };
                 match save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
                     Ok(()) => {
-                        state.push_transcript(&format!(
+                        state.push_notice(&format!(
                             "[Game saved to {}]",
                             arc_file.display()
                         ));
                     }
                     Err(e) => {
-                        state.push_transcript(&format!("[Save failed: {}]", e));
+                        state.push_notice(&format!("[Save failed: {}]", e));
                     }
                 }
             }
@@ -3623,18 +3623,18 @@ fn main() {
                                 state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
                                 reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
-                                state.push_transcript(&format!(
+                                state.push_notice(&format!(
                                     "[Game restored from {}]",
                                     arc_file.display()
                                 ));
                             }
                             Err(e) => {
-                                state.push_transcript(&format!("[Restore failed: {}]", e));
+                                state.push_notice(&format!("[Restore failed: {}]", e));
                             }
                         }
                     }
                     Err(e) => {
-                        state.push_transcript(&format!("[Restore failed: {}]", e));
+                        state.push_notice(&format!("[Restore failed: {}]", e));
                     }
                 }
             }
@@ -3643,13 +3643,13 @@ fn main() {
                 let rm = render_map_data(&mapper.graph);
                 match export_svg(&svg_path, &rm) {
                     Ok(()) => {
-                        state.push_transcript(&format!(
+                        state.push_notice(&format!(
                             "[SVG exported to {}]",
                             svg_path.display()
                         ));
                     }
                     Err(e) => {
-                        state.push_transcript(&format!("[SVG export failed: {}]", e));
+                        state.push_notice(&format!("[SVG export failed: {}]", e));
                     }
                 }
             }
@@ -3657,14 +3657,14 @@ fn main() {
             Action::ExportDot => {
                 match export_dot(&dot_path, &mapper.graph) {
                     Ok(()) => {
-                        state.push_transcript(&format!(
+                        state.push_notice(&format!(
                             "[DOT exported to {} — render with: dot -Tsvg {} -o map.svg]",
                             dot_path.display(),
                             dot_path.display()
                         ));
                     }
                     Err(e) => {
-                        state.push_transcript(&format!("[DOT export failed: {}]", e));
+                        state.push_notice(&format!("[DOT export failed: {}]", e));
                     }
                 }
             }
@@ -3672,10 +3672,10 @@ fn main() {
             Action::ExportDump => {
                 match std::fs::write(&dump_path, render_dump(&mapper.graph)) {
                     Ok(()) => {
-                        state.push_transcript(&format!("[map dump written to {}]", dump_path.display()));
+                        state.push_notice(&format!("[map dump written to {}]", dump_path.display()));
                     }
                     Err(e) => {
-                        state.push_transcript(&format!("[map dump failed: {}]", e));
+                        state.push_notice(&format!("[map dump failed: {}]", e));
                     }
                 }
             }
@@ -3730,10 +3730,10 @@ fn main() {
                             Ok(()) => {
                                 // Re-observe current location (same as RestoreGame/SavesLoad).
                                 reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
-                                state.push_transcript(&format!("[Imported: {}]", path.display()));
+                                state.push_notice(&format!("[Imported: {}]", path.display()));
                             }
                             Err(e) => {
-                                state.push_transcript(&format!("[Import failed: {}]", e));
+                                state.push_notice(&format!("[Import failed: {}]", e));
                             }
                         }
                     }
@@ -3760,11 +3760,11 @@ fn main() {
                     state.ingame_io = None;
                     let result = match app::archive::read_quetzal_from_file(&path) {
                         Ok(bytes) => {
-                            state.push_transcript(&format!("[Game restored from {}]", entry_name));
+                            state.push_notice(&format!("[Game restored from {}]", entry_name));
                             session.resume_restore(Some(&bytes))
                         }
                         Err(e) => {
-                            state.push_transcript(&format!("[Restore failed: {}]", e));
+                            state.push_notice(&format!("[Restore failed: {}]", e));
                             session.resume_restore(None)
                         }
                     };
@@ -3788,7 +3788,7 @@ fn main() {
                         Ok(RestoreOutcome::DescriptorCompleted) => {
                             state.saves = None;
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
-                            state.push_transcript(&format!("[Game restored from {}]", entry_name));
+                            state.push_notice(&format!("[Game restored from {}]", entry_name));
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
                             state.ingame_io = None;
@@ -3814,11 +3814,11 @@ fn main() {
                             state.turns = ac.meta.turns;
                             // Re-observe current location.
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
-                            state.push_transcript(&format!("[Loaded save: {}]", entry_name));
+                            state.push_notice(&format!("[Loaded save: {}]", entry_name));
                             state.saves = None;
                         }
                         Err(e) => {
-                            state.push_transcript(&format!("[Load failed: {}]", e));
+                            state.push_notice(&format!("[Load failed: {}]", e));
                             if ingame_restore_pending {
                                 state.saves = None;
                                 state.ingame_io = None;
@@ -3888,10 +3888,10 @@ fn main() {
                                     state.set_viewed_layer(None);
                                     state.select_room(Some(rid));
                                 }
-                                state.push_transcript(&format!("[Resumed from turn {}]", plan.turn));
+                                state.push_notice(&format!("[Resumed from turn {}]", plan.turn));
                             }
                             Err(e) => {
-                                state.push_transcript(&format!("[Resume failed: {}]", restore_error_msg(e)));
+                                state.push_notice(&format!("[Resume failed: {}]", restore_error_msg(e)));
                             }
                         }
                     }
@@ -4103,20 +4103,20 @@ fn dispatch_slash_outcome(
         }
         SlashOutcome::Help => {
             for line in slash::help_text(state.config.command_prefix) {
-                state.push_transcript_kind(&line, TranscriptKind::Meta);
+                state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
         SlashOutcome::PrintColors { actual } => {
             for (line, style_opt) in app::style::describe_scheme(&state.colors) {
                 match (actual, style_opt) {
-                    (true, Some(style)) => state.push_transcript_styled(&line, TranscriptKind::Meta, style),
-                    _ => state.push_transcript_kind(&line, TranscriptKind::Meta),
+                    (true, Some(style)) => state.push_transcript_internal_styled(&line, TranscriptKind::Meta, style),
+                    _ => state.push_transcript_internal(&line, TranscriptKind::Meta),
                 }
             }
         }
         SlashOutcome::PlaySound(None) => {
             for line in app::state::format_sound_resource_list(state.sound_blorb.as_ref()) {
-                state.push_transcript_kind(&line, TranscriptKind::Meta);
+                state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
         SlashOutcome::PlaySound(Some(n)) => {
@@ -4139,7 +4139,7 @@ fn dispatch_slash_outcome(
                 }
             }
             for line in app::state::format_play_sound_report(&report) {
-                state.push_transcript_kind(&line, TranscriptKind::Meta);
+                state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
         SlashOutcome::Save(name_opt) => {
@@ -4342,7 +4342,7 @@ fn dispatch_slash_outcome(
         }
         SlashOutcome::HelpCommand(name) => {
             for line in slash::help_for_command(state.config.command_prefix, &name) {
-                state.push_transcript_kind(&line, TranscriptKind::Meta);
+                state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
     }
@@ -4467,10 +4467,10 @@ fn reset_game(
                 let rid = snap_number as mapper::graph::RoomId;
                 state.select_room(Some(rid));
             }
-            state.push_transcript("[Game reset]");
+            state.push_notice("[Game reset]");
         }
         Err(e) => {
-            state.push_transcript(&format!("[Reset failed: {e}]"));
+            state.push_notice(&format!("[Reset failed: {e}]"));
         }
     }
 }
@@ -4493,7 +4493,7 @@ fn handle_saves_prompt(
         PromptKind::SaveAs => {
             let ingame = state.ingame_io == Some(app::session::PendingIo::Save);
             if buf.is_empty() {
-                state.push_transcript("[Save name cannot be empty]".to_string().as_str());
+                state.push_notice("[Save name cannot be empty]".to_string().as_str());
                 // In-game: stay pending — re-open the prompt so the user can retry.
                 if ingame {
                     state.prompt = Some(app::state::Prompt {
@@ -4518,7 +4518,7 @@ fn handle_saves_prompt(
             };
             match result {
                 Ok(()) => {
-                    state.push_transcript(&format!("[Saved as: {}]", buf));
+                    state.push_notice(&format!("[Saved as: {}]", buf));
                     // A host Save-State named slot captures the current progress
                     // (an in-game @save writes a .qzl, a different mechanism).
                     if !ingame {
@@ -4535,7 +4535,7 @@ fn handle_saves_prompt(
                     }
                 }
                 Err(e) => {
-                    state.push_transcript(&format!("[Save failed: {}]", e));
+                    state.push_notice(&format!("[Save failed: {}]", e));
                     // In-game: stay pending — re-open the prompt so the user can retry.
                     if ingame {
                         state.prompt = Some(app::state::Prompt {
@@ -4551,7 +4551,7 @@ fn handle_saves_prompt(
             if confirmed {
                 match delete_save(&path) {
                     Ok(()) => {
-                        state.push_transcript("[Save deleted]");
+                        state.push_notice("[Save deleted]");
                         if let Some(s) = &mut state.saves {
                             s.entries = list_saves(dir, ifid);
                             // Re-clamp the selection/offset to the new entry count.
@@ -4559,11 +4559,11 @@ fn handle_saves_prompt(
                         }
                     }
                     Err(e) => {
-                        state.push_transcript(&format!("[Delete failed: {}]", e));
+                        state.push_notice(&format!("[Delete failed: {}]", e));
                     }
                 }
             } else {
-                state.push_transcript("[Delete cancelled]");
+                state.push_notice("[Delete cancelled]");
             }
         }
         _ => {} // other prompt kinds are handled elsewhere
@@ -4908,7 +4908,7 @@ fn post_turn_bookkeeping(
             ),
         };
         if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
-            state.push_transcript(&format!("[Auto-save failed: {}]", e));
+            state.push_notice(&format!("[Auto-save failed: {}]", e));
         }
     }
 }
@@ -5028,7 +5028,7 @@ fn resolve_ingame_dialog(
                 PendingIo::Save => session.resume_save(false),
                 PendingIo::Restore => session.resume_restore(None),
             };
-            state.push_transcript("[In-game save/restore cancelled]");
+            state.push_notice("[In-game save/restore cancelled]");
             let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
             if let Some(io) = state.ingame_io {
                 open_ingame_saves(io, save_dir, ifid, state);
@@ -5464,10 +5464,10 @@ fn apply_launch_resume(
             state.reset_transcript_sidecars();
             // Re-observe current location (same as Action::RestoreGame).
             reobserve_location(state, mapper, &*session, last_panes.map);
-            state.push_transcript("[Game resumed from save.]");
+            state.push_notice("[Game resumed from save.]");
         }
         Err(e) => {
-            state.push_transcript(&format!("[Resume failed: {}]", restore_error_msg(e)));
+            state.push_notice(&format!("[Resume failed: {}]", restore_error_msg(e)));
         }
     }
 }

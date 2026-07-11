@@ -1827,6 +1827,18 @@ impl AppState {
         self.push_transcript_kind(text, TranscriptKind::Story);
     }
 
+    /// Whether app-internal transcript output (status/slash/save-restore messages,
+    /// pushed via [`push_transcript_kind`](Self::push_transcript_kind) /
+    /// [`push_transcript_styled`](Self::push_transcript_styled)) should be inserted
+    /// just ABOVE a trailing game `>` prompt rather than appended after it. True in
+    /// inline-prompt mode when the game's prompt is the last line, so these messages
+    /// don't bury the prompt the caret sits at (SQ-0270). Game turn output goes
+    /// through `push_transcript_runs`/`apply_transcript_elems` and is unaffected.
+    fn insert_above_prompt_at(&self) -> Option<usize> {
+        (!self.config.command_bar && self.last_transcript_line_is_story())
+            .then(|| self.transcript.len().saturating_sub(1))
+    }
+
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
@@ -1839,6 +1851,42 @@ impl AppState {
             self.transcript_runs.push(Vec::new());
             self.transcript_images.push(None);
         }
+    }
+
+    /// Add app-internal output (a `[…]` status line, a slash-command dump, a
+    /// save/restore/copy banner) to the transcript. Like [`push_transcript_kind`],
+    /// but in inline-prompt mode it inserts the line(s) ABOVE a trailing game `>`
+    /// prompt so the prompt the caret sits at is never buried (SQ-0270).
+    pub fn push_transcript_internal(&mut self, text: &str, kind: TranscriptKind) {
+        self.transcript_styles.resize(self.transcript.len(), None);
+        self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_images.resize(self.transcript.len(), None);
+        let base = self.insert_above_prompt_at();
+        for (k, line) in text.split('\n').enumerate() {
+            match base {
+                Some(b) => {
+                    let idx = b + k;
+                    self.transcript.insert(idx, line.to_owned());
+                    self.transcript_kinds.insert(idx, kind);
+                    self.transcript_styles.insert(idx, None);
+                    self.transcript_runs.insert(idx, Vec::new());
+                    self.transcript_images.insert(idx, None);
+                }
+                None => {
+                    self.transcript.push(line.to_owned());
+                    self.transcript_kinds.push(kind);
+                    self.transcript_styles.push(None);
+                    self.transcript_runs.push(Vec::new());
+                    self.transcript_images.push(None);
+                }
+            }
+        }
+    }
+
+    /// A convenience for a plain app-internal `Story`-kind notice (the `[…]`
+    /// bracketed messages), routed through [`push_transcript_internal`].
+    pub fn push_notice(&mut self, text: &str) {
+        self.push_transcript_internal(text, TranscriptKind::Story);
     }
 
     /// Append `text` to the last transcript line in place (used in inline-prompt
@@ -1987,6 +2035,34 @@ impl AppState {
             self.transcript_styles.push(Some(style));
             self.transcript_runs.push(Vec::new());
             self.transcript_images.push(None);
+        }
+    }
+
+    /// Like [`push_transcript_styled`], but inserts app-internal styled output
+    /// above a trailing game prompt in inline-prompt mode (SQ-0270).
+    pub fn push_transcript_internal_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
+        self.transcript_styles.resize(self.transcript.len(), None);
+        self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_images.resize(self.transcript.len(), None);
+        let base = self.insert_above_prompt_at();
+        for (k, line) in text.split('\n').enumerate() {
+            match base {
+                Some(b) => {
+                    let idx = b + k;
+                    self.transcript.insert(idx, line.to_owned());
+                    self.transcript_kinds.insert(idx, kind);
+                    self.transcript_styles.insert(idx, Some(style));
+                    self.transcript_runs.insert(idx, Vec::new());
+                    self.transcript_images.insert(idx, None);
+                }
+                None => {
+                    self.transcript.push(line.to_owned());
+                    self.transcript_kinds.push(kind);
+                    self.transcript_styles.push(Some(style));
+                    self.transcript_runs.push(Vec::new());
+                    self.transcript_images.push(None);
+                }
+            }
         }
     }
 
@@ -2570,6 +2646,49 @@ mod tests {
         s.merge_line_into_previous(0);
         s.merge_line_into_previous(5);
         assert_eq!(s.transcript, vec!["only".to_string()]);
+    }
+
+    #[test]
+    fn internal_messages_insert_above_the_inline_prompt() {
+        let mut s = AppState::default();
+        s.config.command_bar = false; // inline-prompt mode
+        // Game output goes through push_transcript_runs (appends); it ends with the
+        // kept `>` prompt.
+        s.push_transcript_runs("You are in a hall.", TranscriptKind::Story, &[]);
+        s.push_transcript_runs(">", TranscriptKind::Story, &[]);
+        // A /help-style internal dump must land ABOVE the `>`, keeping it last.
+        s.push_transcript_internal("help: N, S, LOOK, X", TranscriptKind::Meta);
+        assert_eq!(
+            s.transcript,
+            vec!["You are in a hall.".to_string(), "help: N, S, LOOK, X".to_string(), ">".to_string()],
+        );
+        assert!(s.last_transcript_line_is_story(), "the `>` prompt stays the last line");
+        assert_eq!(s.transcript.len(), s.transcript_kinds.len());
+        assert_eq!(s.transcript.len(), s.transcript_styles.len());
+        assert_eq!(s.transcript.len(), s.transcript_runs.len());
+        assert_eq!(s.transcript.len(), s.transcript_images.len());
+        assert!(matches!(s.transcript_kinds[1], TranscriptKind::Meta), "inserted line keeps its kind");
+
+        // Multi-line internal output preserves order above the prompt.
+        s.push_transcript_internal("a\nb", TranscriptKind::Meta);
+        assert_eq!(s.transcript.last().unwrap(), ">");
+        assert_eq!(&s.transcript[s.transcript.len() - 3..], &["a".to_string(), "b".to_string(), ">".to_string()]);
+    }
+
+    #[test]
+    fn internal_messages_append_in_command_bar_mode_or_without_a_prompt() {
+        // Command-bar mode: the `>` isn't in the transcript, so append normally.
+        let mut s = AppState::default();
+        s.config.command_bar = true;
+        s.push_transcript_runs(">", TranscriptKind::Story, &[]);
+        s.push_transcript_internal("help", TranscriptKind::Meta);
+        assert_eq!(s.transcript, vec![">".to_string(), "help".to_string()]);
+        // Inline mode but the last line isn't a game prompt (Meta) → append.
+        let mut s2 = AppState::default();
+        s2.config.command_bar = false;
+        s2.push_transcript_internal("note", TranscriptKind::Meta);
+        s2.push_transcript_internal("more", TranscriptKind::Meta);
+        assert_eq!(s2.transcript, vec!["note".to_string(), "more".to_string()]);
     }
 
     #[test]
