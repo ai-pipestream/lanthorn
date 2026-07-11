@@ -691,18 +691,21 @@ pub fn render_map_layered(
     }
 }
 
-/// Draw a centered single-row progress bar in the map pane while the tidy animation
-/// builds off-thread. Filled/empty block glyphs plus a "Tidying map… NN%" label, styled
-/// by `tidy_progress`. `job.total` is a room-count estimate, so the fraction is only
-/// approximate; it is clamped below 1.0 so the bar never reads "done" before the worker
-/// actually finishes.
+/// Draw a centered, bordered progress box in the map pane while the tidy animation
+/// builds off-thread. A single-line box (top/bottom border + one content row) holds
+/// a "Tidying map… NN%" label plus filled/empty block glyphs, all styled by
+/// `tidy_progress`. `job.total` is a room-count estimate, so the fraction is only
+/// approximate; it is clamped below 1.0 so the bar never reads "done" before the
+/// worker actually finishes.
 fn draw_tidy_progress(
     job: &crate::state::AnimBuildJob,
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
 ) {
-    if area.width < 8 || area.height < 1 {
+    use crate::render::draw_str_clipped;
+    // Need at least a 3-row box (border + content + border) and some width.
+    if area.width < 12 || area.height < 3 {
         return;
     }
     let done = job.progress.load(std::sync::atomic::Ordering::Relaxed);
@@ -710,28 +713,45 @@ fn draw_tidy_progress(
     let pct = (frac * 100.0) as u16;
     let label = format!("Tidying map… {pct}%");
     let label_w = label.chars().count() as u16;
-    // Bar cells fill the space the label leaves (label + a space + the bar), capped.
-    let bar_cells = 24u16
-        .min(area.width.saturating_sub(label_w + 1))
-        as usize;
+    // Bar cells fit inside the box (label + a space + bar + 2 border columns), capped.
+    let bar_cells = 24u16.min(area.width.saturating_sub(label_w + 3)) as usize;
     let filled = (frac * bar_cells as f32).round() as usize;
     let bar: String = (0..bar_cells)
         .map(|i| if i < filled { '█' } else { '░' })
         .collect();
     let text = if bar_cells > 0 { format!("{label} {bar}") } else { label };
-    let w = text.chars().count() as u16;
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height / 2;
+    let inner_w = text.chars().count() as u16;
+
+    // Box: content width + 2 border columns, 3 rows tall, centered in the pane.
+    let box_w = (inner_w + 2).min(area.width);
+    let box_h = 3u16;
+    let bx = area.x + area.width.saturating_sub(box_w) / 2;
+    let by = area.y + area.height.saturating_sub(box_h) / 2;
     let style = state.colors.tidy_progress;
-    for (cx, ch) in (x..).zip(text.chars()) {
-        if cx >= area.right() {
-            break;
-        }
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            let mut b = [0u8; 4];
-            cell.set_symbol(ch.encode_utf8(&mut b)).set_style(style);
+    let right = bx + box_w - 1;
+    let bottom = by + box_h - 1;
+
+    // Border + opaque fill (so the map doesn't show through the box).
+    for yy in by..=bottom {
+        for xx in bx..=right {
+            let ch = match (xx == bx, xx == right, yy == by, yy == bottom) {
+                (true, _, true, _) => '┌',
+                (_, true, true, _) => '┐',
+                (true, _, _, true) => '└',
+                (_, true, _, true) => '┘',
+                (_, _, true, _) | (_, _, _, true) => '─',
+                (true, _, _, _) | (_, true, _, _) => '│',
+                _ => ' ',
+            };
+            if let Some(cell) = buf.cell_mut((xx, yy)) {
+                let mut b = [0u8; 4];
+                cell.set_symbol(ch.encode_utf8(&mut b)).set_style(style);
+            }
         }
     }
+    // Content row.
+    let content = Rect::new(bx + 1, by + 1, box_w.saturating_sub(2), 1);
+    draw_str_clipped(buf, content.x, content.y, &text, style, content);
 }
 
 // ── Line-art connector rendering (Boxes zoom) ─────────────────────────────────
@@ -4941,5 +4961,29 @@ mod tests {
         }
         // No illegal overlaps in the rendered result.
         assert_eq!(render_overlap_stats(&g).0, 0, "ring must render without illegal overlap");
+    }
+
+    #[test]
+    fn tidy_progress_draws_bordered_box() {
+        use crate::state::AnimBuildJob;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        let mut state = AppState::default();
+        let handle = std::thread::spawn(|| (Vec::new(), mapper::graph::MapGraph::new()));
+        state.anim_build_job = Some(AnimBuildJob {
+            handle,
+            layer: 0,
+            gen: 0,
+            started: std::time::Instant::now(),
+            progress: Arc::new(AtomicUsize::new(5)),
+            total: 10,
+        });
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        draw_tidy_progress(state.anim_build_job.as_ref().unwrap(), &state, area, &mut buf);
+        let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
+        assert!(content.contains("Tidying"), "shows the Tidying label");
+        assert!(content.contains('┌'), "has a top-left border corner");
+        assert!(content.contains('│'), "has vertical border sides");
     }
 }
