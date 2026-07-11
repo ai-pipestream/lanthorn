@@ -1300,14 +1300,19 @@ fn render_middle(
             && first_abs_row + last_i == total_rows.saturating_sub(1)
             && last.band.is_none()
         {
-            // Flush after the last line's text — Story/Input rows draw at
-            // body_area.x (no gutter), matching Task 3's flush command echo.
+            // Flush after the last line's text — matching Task 3's flush command
+            // echo. Use the SAME text_x the draw loop used for this row's kind:
+            // Story/Input draw at body_area.x; Meta/Warning reserve the gutter.
             let base_text = normal_style.patch(state.colors.input_text);
             let text_style = match game_input {
                 Some(gs) => base_text.patch(gs),
                 None => base_text,
             };
-            let start_col = body_area.x + last.text.chars().count() as u16;
+            let row_text_x = match last.kind {
+                TranscriptKind::Meta | TranscriptKind::Warning => body_area.x + META_GUTTER,
+                TranscriptKind::Story | TranscriptKind::Input => body_area.x,
+            };
+            let start_col = row_text_x + last.text.chars().count() as u16;
             let avail = body_area.right().saturating_sub(start_col) as usize;
             let input_trunc = truncate_line(&state.input, avail);
             draw_str_clipped(buf, start_col, row_y, input_trunc, text_style, body_area);
