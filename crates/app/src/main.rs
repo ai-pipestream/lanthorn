@@ -4569,6 +4569,30 @@ fn handle_saves_prompt(
 /// Open the saves dialog in "in-game" mode for a game-initiated save/restore.
 /// SAVE: prompt for a save name (reuses the SaveAs prompt). RESTORE: open the
 /// saves list, including plain *.qzl files alongside *.babelmap saves.
+/// Whether the game echoed the just-submitted command itself at the start of its
+/// turn output (e.g. CounterfeitMonkey prints the command back in bold). Compared
+/// case-insensitively against the leading non-whitespace text, and only when the
+/// echo ends at a boundary (so `go` doesn't match a response starting `gospel`),
+/// so we don't add a second, redundant echo. An empty command never matches.
+fn game_echoes_command(transcript: &str, cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() {
+        return false;
+    }
+    let mut head = transcript.trim_start().chars();
+    for cc in cmd.chars() {
+        match head.next() {
+            Some(hc) if hc.eq_ignore_ascii_case(&cc) => {}
+            _ => return false,
+        }
+    }
+    // The command must be followed by a boundary, not more word characters.
+    match head.next() {
+        None => true,
+        Some(c) => !c.is_alphanumeric(),
+    }
+}
+
 /// Apply a completed game-turn `result` from a submitted command line: echo the
 /// command, push its transcript, advance the mapper, run post-turn bookkeeping /
 /// auto-save / background tidy, and recenter on the current room. Shared by the
@@ -4588,7 +4612,13 @@ fn finish_command_turn(
     bg_tidy_counter: &mut u32,
 ) -> bool {
     if result.erase_lower { state.mark_screen_clear(); }
-    if state.config.command_bar || !state.last_transcript_line_is_story() {
+    // Some games echo the typed command themselves at the start of their turn
+    // output (e.g. CounterfeitMonkey prints it back in bold). Adding our own echo
+    // on top would show the command twice, so detect that and skip ours. Most
+    // games don't self-echo, so they still get our echo below.
+    if game_echoes_command(&result.transcript, cmd) {
+        // Game provides the echo; add nothing.
+    } else if state.config.command_bar || !state.last_transcript_line_is_story() {
         // Command-bar mode, or inline mode where the game's `>` is NOT the last
         // line (e.g. a `/help` Meta dump intervened): echo on its own line so we
         // never corrupt non-prompt scrollback.
@@ -5825,6 +5855,23 @@ mod tests {
             !super::engine_supports_save(&*engine),
             "a non-Z-machine engine must report no save support so guards short-circuit"
         );
+    }
+
+    #[test]
+    fn game_echoes_command_detects_self_echo() {
+        use super::game_echoes_command;
+        // CounterfeitMonkey shape: the turn output starts with the command (bold),
+        // then the response — case-insensitive, boundary-terminated.
+        assert!(game_echoes_command("yes\n\nGood, you're conscious.", "yes"));
+        assert!(game_echoes_command("YES\n\n...", "yes"), "case-insensitive");
+        assert!(game_echoes_command("examine me\n\nYou see nothing special.", "examine me"));
+        assert!(game_echoes_command("  look\nA room.", "look"), "leading whitespace ok");
+        // Most games: the response does not start with the command → keep our echo.
+        assert!(!game_echoes_command("You can't go that way.\n>", "north"));
+        assert!(!game_echoes_command("", "look"), "empty output");
+        assert!(!game_echoes_command("anything", ""), "empty command never matches");
+        // Boundary: a command must not match a longer word it is a prefix of.
+        assert!(!game_echoes_command("gospel music plays.", "go"));
     }
 
     #[test]
