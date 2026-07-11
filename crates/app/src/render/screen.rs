@@ -337,7 +337,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
             (f.width, f.height)
         })
         .unwrap_or((1, 1));
-    let (rows, _total) = visible_wrapped_lines_kinded(
+    let (rows, _total, _first) = visible_wrapped_lines_kinded(
         &b.lines,
         &kinds,
         &styles,

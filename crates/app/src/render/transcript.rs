@@ -450,9 +450,9 @@ pub(crate) fn visible_wrapped_lines_kinded(
     scroll: u16,
     width: u16,
     clear_anchor: Option<usize>,
-) -> (Vec<WrappedRow>, usize) {
+) -> (Vec<WrappedRow>, usize, usize) {
     if rows == 0 || transcript.is_empty() {
-        return (Vec::new(), 0);
+        return (Vec::new(), 0, 0);
     }
     let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, images, char_px, images_enabled, width);
     let n = display_rows.len();
@@ -480,7 +480,7 @@ pub(crate) fn visible_wrapped_lines_kinded(
                 )
                 .len();
                 if n.saturating_sub(anchor_row) <= rows {
-                    return (display_rows[anchor_row..n].to_vec(), n);
+                    return (display_rows[anchor_row..n].to_vec(), n, anchor_row);
                 }
             }
         }
@@ -491,7 +491,7 @@ pub(crate) fn visible_wrapped_lines_kinded(
     let scroll = (scroll as usize).min(max_scroll);
     let end = n.saturating_sub(scroll);
     let start = end.saturating_sub(rows);
-    (display_rows[start..end].to_vec(), n)
+    (display_rows[start..end].to_vec(), n, start)
 }
 
 /// Draw `text` at `(x, y)` into `buf`, using `base_style` for normal characters
@@ -1159,7 +1159,7 @@ fn render_middle(
     let clear_anchor_filtered = state
         .clear_anchor
         .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
-    let (lines, total_rows) = visible_wrapped_lines_kinded(
+    let (lines, total_rows, first_abs_row) = visible_wrapped_lines_kinded(
         &filtered_lines,
         &filtered_kinds,
         &filtered_styles,
@@ -1223,6 +1223,40 @@ fn render_middle(
                 }
                 links.push(((col, row_y), run.link));
             }
+        }
+    }
+
+    // Publish this frame's transcript geometry so the mouse handlers and the copy
+    // path can map screen cells ↔ absolute wrapped rows. (SQ-0197)
+    state.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+        area: body_area,
+        first_abs_row,
+        total_rows,
+    }));
+    if let Some(sel) = state.selection {
+        let width = body_area.width;
+        // Highlight the visible portion (reverse video) by absolute row.
+        for (i, _wr) in lines.iter().enumerate() {
+            let row_y = transcript_top + i as u16;
+            if row_y >= transcript_bottom { break; }
+            let abs = first_abs_row + i;
+            for col in 0..width {
+                if crate::clipboard::contains(width, sel, abs, col) {
+                    if let Some(cell) = buf.cell_mut((body_area.x + col, row_y)) {
+                        let s = cell.style();
+                        cell.set_style(s.add_modifier(ratatui::style::Modifier::REVERSED));
+                    }
+                }
+            }
+        }
+        // Extract the copy from the FULL wrapped set (off-screen rows included).
+        if sel.is_empty() {
+            *state.selection_text.borrow_mut() = None;
+        } else {
+            let all = wrap_lines_kinded(&filtered_lines, &filtered_kinds, &filtered_styles,
+                &filtered_runs, &filtered_images, char_px, images_enabled, body_area.width);
+            let texts: Vec<&str> = all.iter().map(|r| r.text.as_str()).collect();
+            *state.selection_text.borrow_mut() = Some(crate::clipboard::extract(&texts, width, sel));
         }
     }
 
@@ -1712,9 +1746,10 @@ mod tests {
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
         let styles = vec![Style::default(); 3];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
+        let (vis, total, first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
         assert_eq!(vis.len(), 3);
         assert_eq!(total, 3, "total wrapped rows reported");
+        assert_eq!(first, 0, "top visible row is absolute row 0");
         assert_eq!(vis[2].text, "ghi");
     }
 
@@ -1725,12 +1760,14 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 1, 5, None);
+        let (vis, total, first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 1, 5, None);
         assert_eq!(vis[0].text, "hello");
         assert_eq!(total, 2, "both wrapped rows counted");
+        assert_eq!(first, 0, "scroll=1 window starts at row 0");
         // scroll=0: end=2, start=1 → ["world"]
-        let (vis2, _) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 0, 5, None);
+        let (vis2, _, first2) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 0, 5, None);
         assert_eq!(vis2[0].text, "world");
+        assert_eq!(first2, 1, "scroll=0 window starts at row 1");
     }
 
     #[test]
@@ -1740,7 +1777,7 @@ mod tests {
         let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
-        let (vis, total) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 999, 10, None);
+        let (vis, total, _first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 999, 10, None);
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 3, "over-scroll still fills the viewport");
         assert_eq!(vis[0].text, "L0", "top line stays at the top");
@@ -1761,25 +1798,25 @@ mod tests {
         let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
-        let (vis, total) =
+        let (vis, total, _first) =
             visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, Some(3));
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 2, "only post-clear lines returned (top-anchored)");
         assert_eq!(vis[0].text, "L3");
         assert_eq!(vis[1].text, "L4");
         // No anchor → full viewport, bottom-stick (history stays in view).
-        let (vis2, _) =
+        let (vis2, _, _) =
             visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
         assert_eq!(vis2.len(), 3);
         assert_eq!(vis2[0].text, "L2", "bottom-stick pulls in the pre-clear line");
         // Scrolled up (scroll>0): anchor ignored so history is reachable.
-        let (vis3, _) =
+        let (vis3, _, _) =
             visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 1, 10, Some(3));
         assert_eq!(vis3.len(), 3, "scrolled up ignores the clear anchor");
         assert_eq!(vis3[2].text, "L3");
         // Once post-clear content overflows the viewport, top-anchor stops
         // triggering and normal bottom-stick resumes (anchor at 0, 5 lines > 3).
-        let (vis4, _) =
+        let (vis4, _, _) =
             visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, Some(0));
         assert_eq!(vis4.len(), 3);
         assert_eq!(vis4[2].text, "L4", "overflow → bottom-stick");
