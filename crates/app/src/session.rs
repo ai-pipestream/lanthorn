@@ -39,6 +39,15 @@ pub enum PendingIo {
     Restore,
 }
 
+/// A game-initiated Glk `create_by_prompt` awaiting a host-supplied filename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilenameReq {
+    /// Glk fileusage.
+    pub usage: u32,
+    /// Glk filemode (Read `0x02`, Write `0x01`, ReadWrite `0x03`, WriteAppend `0x05`).
+    pub fmode: u32,
+}
+
 // ── CaptureSink ───────────────────────────────────────────────────────────────
 
 /// An output sink that accumulates printed text and lets the caller drain it.

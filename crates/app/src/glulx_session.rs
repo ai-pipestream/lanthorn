@@ -23,7 +23,7 @@ use gvm::{GError, Machine, Memory, StepResult};
 
 use crate::engine::{Engine, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel, StatusModel, WinNode};
 use crate::glk_backend::AppGlk;
-use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, InputKind, PendingIo, TranscriptElem, TurnResult};
+use crate::session::{clamp_runs, strip_read_prompt, trim_elems_to_len, FilenameReq, InputKind, PendingIo, TranscriptElem, TurnResult};
 use zvm::location::LocationMethod;
 
 /// The engine tag recorded in an `EngineSave` produced by the Glulx adapter.
@@ -74,6 +74,9 @@ pub struct GlulxSession {
     /// run loop via the next `TurnResult`. Set when a turn's drive stops on an
     /// `@save`/`@restore`; cleared by `resume_save`/`resume_restore`.
     pending_io: Option<PendingIo>,
+    /// A game-initiated create_by_prompt awaiting a host filename, bubbled to the
+    /// run loop. Set when a turn's drive stops on one; cleared by resume_filename.
+    pending_filename: Option<FilenameReq>,
     /// The last screen snapshot (the backend's tree is only reachable mutably, so
     /// `screen()` returns this cache, refreshed after each turn).
     screen_cache: ScreenModel,
@@ -116,6 +119,9 @@ enum DriveStop {
     /// The game executed `@restore`: the host must pick a save file, then
     /// [`GlulxSession::resume_restore`].
     Restore,
+    /// The game executed `create_by_prompt`: the host must supply a filename, then
+    /// [`GlulxSession::resume_filename`].
+    Filename { usage: u32, fmode: u32 },
 }
 
 /// Step the machine until it pauses for input, quits, or requests an in-game
@@ -143,6 +149,7 @@ fn drive(machine: &mut Machine) -> DriveStop {
             StepResult::NeedChar { .. } => return DriveStop::Input(InputKind::Char),
             StepResult::SaveRequest => return DriveStop::Save,
             StepResult::RestoreRequest => return DriveStop::Restore,
+            StepResult::NeedFilename { usage, fmode } => return DriveStop::Filename { usage, fmode },
         }
     }
 }
@@ -158,6 +165,7 @@ fn drive_settled(machine: &mut Machine) -> (InputKind, bool) {
             DriveStop::Quit => return (InputKind::Line, true),
             DriveStop::Save => machine.complete_save(false),
             DriveStop::Restore => machine.complete_restore_failure(),
+            DriveStop::Filename { .. } => machine.supply_filename(None),
         }
     }
 }
@@ -191,6 +199,7 @@ impl GlulxSession {
             pending,
             quit,
             pending_io: None,
+            pending_filename: None,
             screen_cache: blank_screen(),
             aux: BTreeMap::new(),
             aux_dirty: false,
@@ -243,13 +252,18 @@ impl GlulxSession {
                 self.pending = k;
                 self.quit = false;
                 self.pending_io = None;
+                self.pending_filename = None;
             }
             DriveStop::Quit => {
                 self.quit = true;
                 self.pending_io = None;
+                self.pending_filename = None;
             }
             DriveStop::Save => self.pending_io = Some(PendingIo::Save),
             DriveStop::Restore => self.pending_io = Some(PendingIo::Restore),
+            DriveStop::Filename { usage, fmode } => {
+                self.pending_filename = Some(FilenameReq { usage, fmode })
+            }
         }
     }
 
@@ -588,6 +602,22 @@ impl Engine for GlulxSession {
             _ => self.machine.complete_restore_failure(),
         }
         self.pending_io = None;
+        self.drive_turn();
+        self.finish_turn()
+    }
+
+    fn pending_filename(&self) -> Option<FilenameReq> {
+        self.pending_filename
+    }
+
+    fn file_names(&self) -> Vec<String> {
+        self.machine.file_names()
+    }
+
+    fn resume_filename(&mut self, name: Option<String>) -> TurnResult {
+        // `Some` = the player chose/entered a name; `None` = cancelled (NULL fileref).
+        self.machine.supply_filename(name);
+        self.pending_filename = None;
         self.drive_turn();
         self.finish_turn()
     }
@@ -936,6 +966,37 @@ mod tests {
         assert!(!r4.quit, "a successful restore returns to the save point, not the quit");
         assert_eq!(r4.pending_io, None);
         assert_eq!(sess.pending_input(), InputKind::Line, "restored back to the turn-2 prompt");
+    }
+
+    #[test]
+    fn ingame_create_by_prompt_bubbles_filename_request_and_resume_continues() {
+        use E::*;
+        const FREF_RES: u32 = 0x410;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt()); // turn 1 prompt
+        // glk_fileref_create_by_prompt(usage=0, fmode=1 Write, rock=0) -> mem[FREF_RES].
+        // @glk pops args with arg[0] topmost, so push rock, then fmode, then usage.
+        body.extend(enc(0x40, &[Imm(0), Push])); // rock
+        body.extend(enc(0x40, &[Imm(1), Push])); // fmode = Write
+        body.extend(enc(0x40, &[Imm(0), Push])); // usage (topmost = arg[0])
+        body.extend(enc(0x130, &[Imm(0x62), Imm(3), MemLoad(FREF_RES)]));
+        body.extend(line_prompt()); // resume point after supply_filename
+        body.extend(enc(0x120, &[])); // quit
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
+
+        // The command drives into create_by_prompt, which bubbles a filename request.
+        let r1 = sess.submit("script");
+        assert_eq!(sess.pending_filename(), Some(FilenameReq { usage: 0, fmode: 1 }));
+        assert!(r1.pending_io.is_none(), "a filename request is not a save/restore");
+        assert!(!r1.quit);
+
+        // The host supplies a name; execution resumes to the next prompt (proving the
+        // @glk stored a value and did not fault or wedge).
+        let r2 = sess.resume_filename(Some("transcript".to_string()));
+        assert_eq!(sess.pending_filename(), None, "request cleared after supply");
+        assert!(!r2.quit);
+        assert_eq!(sess.pending_input(), InputKind::Line, "resumes at the turn-2 prompt");
     }
 
     #[test]

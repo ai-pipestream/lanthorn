@@ -14,7 +14,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 
-use crate::session::{InputKind, TurnResult};
+use crate::session::{FilenameReq, InputKind, TurnResult};
 
 // ── Neutral key input ───────────────────────────────────────────────────────
 
@@ -379,6 +379,23 @@ pub trait Engine {
     fn resume_save(&mut self, wrote_ok: bool) -> TurnResult;
     /// Resume after the host performed an in-game RESTORE.
     fn resume_restore(&mut self, data: Option<&[u8]>) -> TurnResult;
+    /// The pending `create_by_prompt` filename request, if the VM suspended on one
+    /// this turn. Default `None` (only the Glulx engine issues these).
+    fn pending_filename(&self) -> Option<FilenameReq> {
+        None
+    }
+    /// The user-visible VFS filenames, for a `create_by_prompt` read picker.
+    /// Default empty (engines without a Glk VFS).
+    fn file_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Resume after the host chose a filename (or cancelled with `None`) for a
+    /// `create_by_prompt`. Only valid for engines that produce filename requests;
+    /// the default panics because the run loop only calls this when
+    /// [`Engine::pending_filename`] returned `Some`.
+    fn resume_filename(&mut self, _name: Option<String>) -> TurnResult {
+        unreachable!("resume_filename is only valid for engines that issue filename requests (Glulx)")
+    }
     /// Whether the game has ended.
     fn has_quit(&self) -> bool;
 
