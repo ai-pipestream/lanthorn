@@ -36,7 +36,7 @@ Three problems:
 - **Blorb IFmd / content-hash key** — dropped in the simplified design.
 - **Per-file suffix-override flag** — moot now that inner names are fixed.
 - **Moving map exports** (`user_dir/maps/<ifid>.svg`) — not among the four file types; stays IFID-keyed under `user_dir/maps`.
-- **The explicit-path *export* escape hatch** — when a user types a `@save`/`@restore` value that contains a path separator, it is honored verbatim (out to any path). This spec only wires the *bare-name → per-game dir* resolution; the broader "export to a chosen destination" UX (for saves, Save States, and maps) is deferred to **SQ-0288**.
+- **A dedicated `/export` command surface** — SQ-0288 covers `/export` slash commands for artifacts (map `.svg`/`.dot`/`.map.txt`, transcript, etc.). That is separate from this spec. The `@save`/`@restore` explicit-path escape hatch below *is* part of SQ-0284 (a path-bearing value is honored verbatim); it is not the SQ-0288 export surface.
 
 ## Design
 
@@ -95,7 +95,7 @@ The user owns collisions: two identically-named stories sharing one `--data-dir`
 
 The `@save`/`@restore` prompt value is interpreted:
 - **bare name** (no path separator, e.g. `quicksave`) → `<base>/<story_key>/<name>.qzl` inside the managed per-game dir. `.qzl` is appended if absent. This is now the default, so CLI in-game saves populate the same per-game dir the app uses.
-- **explicit path** (contains a separator or is absolute, e.g. `/tmp/foo.qzl`) → honored verbatim (escape hatch; the fuller export UX is SQ-0288).
+- **explicit path** (contains a separator or is absolute, e.g. `/tmp/foo.qzl`) → honored verbatim (escape hatch, part of this spec).
 
 `--restore`/restore listing resolves the same way. This makes the four file types uniform across all three hosts.
 
