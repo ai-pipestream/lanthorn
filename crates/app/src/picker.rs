@@ -148,6 +148,12 @@ pub struct StoryAux {
     pub assoc_blorb: Option<(PathBuf, Vec<ChunkInfo>)>,
     pub saves: Vec<crate::persist_files::SaveInfo>,
     pub hints_available: bool,
+    /// The story's per-game dir (SQ-0284), for the info panel's Saves header.
+    pub game_dir: PathBuf,
+    /// `.qzl` in-game saves in `game_dir` (SQ-0285).
+    pub qzl_saves: Vec<crate::persist_files::SaveInfo>,
+    /// Sidecar filenames present in `game_dir` (`default.aux`/`default.glkvfs`).
+    pub sidecars: Vec<&'static str>,
 }
 
 /// Resolve the lazy aux for one story. `data_base` is the storage base
@@ -168,7 +174,11 @@ pub fn resolve_aux(
     let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&entry.path));
     let saves = crate::persist_files::list_saves(&game_dir);
     let hints_available = hint_index.get(&entry.meta.ifid).is_some();
-    StoryAux { assoc_blorb, saves, hints_available }
+    let qzl_saves = crate::persist_files::list_qzl(&game_dir);
+    let mut sidecars = Vec::new();
+    if game_dir.join("default.aux").exists() { sidecars.push("default.aux"); }
+    if game_dir.join("default.glkvfs").exists() { sidecars.push("default.glkvfs"); }
+    StoryAux { assoc_blorb, saves, hints_available, game_dir, qzl_saves, sidecars }
 }
 
 /// Convert a parsed blorb's resource index into displayable `ChunkInfo`.
@@ -825,6 +835,33 @@ mod tests {
         assert!(chunks.iter().any(|c| c.usage == "Snd "));
         assert!(aux.saves.is_empty());
         assert!(!aux.hints_available);
+    }
+
+    #[test]
+    fn resolve_aux_reports_game_dir_qzl_saves_and_sidecars() {
+        let dir = temp_dir("aux-qzl");
+        std::fs::write(dir.join("g.z5"), minimal_v3_story()).unwrap();
+        let entry = entry_with("IFID-G", dir.join("g.z5"), None);
+
+        // A separate data base so the per-game dir doesn't collide with the
+        // story file itself (SQ-0284 keys by filename).
+        let base = dir.join("data");
+        let game_dir = crate::storage::game_dir(&base, &crate::storage::story_key(&entry.path));
+        std::fs::create_dir_all(&game_dir).unwrap();
+        std::fs::write(game_dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(game_dir.join("quick.qzl"), b"x").unwrap();
+        std::fs::write(game_dir.join("default.aux"), b"x").unwrap();
+
+        let hi = hints::load_hint_index(&dir);
+        let aux = resolve_aux(&entry, &base, &hi);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(aux.game_dir, game_dir);
+        // default.babelmap has no valid archive, so list_saves skips it here.
+        assert_eq!(aux.saves.len(), 0, "notanarchive default.babelmap is skipped by list_saves");
+        assert_eq!(aux.qzl_saves.len(), 1);
+        assert_eq!(aux.qzl_saves[0].name, "quick");
+        assert_eq!(aux.sidecars, vec!["default.aux"]);
     }
 
     // ── Resource format-detail parsing ──────────────────────────────────

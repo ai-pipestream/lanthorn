@@ -200,6 +200,30 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
+/// List `*.qzl` game saves in `game_dir` as SaveInfo rows (for the in-game
+/// restore picker). All `.qzl` files in the per-game dir belong to this story
+/// (SQ-0284); there is no default `.qzl`, so none is skipped in practice. `.qzl`
+/// saves carry no metadata, so they're timestamped from the file's mtime and the
+/// slug (filename stem) is the display name.
+pub fn list_qzl(game_dir: &Path) -> Vec<SaveInfo> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(game_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
+            if let Some(slug) = fname.strip_suffix(".qzl") {
+                let name = slug.to_string();
+                let saved_at = rfc3339_mtime(&p);
+                out.push(SaveInfo {
+                    path: p, name, turns: 0, saved_at, is_default: false,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    out
+}
+
 pub fn load_map(path: &Path) -> Option<Mapper> {
     let contents = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -484,6 +508,21 @@ mod tests {
 
         let saves = super::list_saves(&dir);
         assert!(saves.is_empty(), "garbage file should be skipped");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_qzl_lists_qzl_by_stem_newest_first_and_skips_babelmap() {
+        let dir = make_temp_dir("list-qzl");
+        std::fs::write(dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(dir.join("quick.qzl"), b"x").unwrap();
+        std::fs::write(dir.join("older.qzl"), b"x").unwrap();
+        let out = super::list_qzl(&dir);
+        assert_eq!(out.len(), 2); // .babelmap excluded
+        assert!(out.iter().all(|q| q.path.extension().unwrap() == "qzl"));
+        assert!(out.iter().all(|q| !q.is_default && q.turns == 0));
+        assert!(out.iter().any(|q| q.name == "quick")); // name = stem
 
         let _ = std::fs::remove_dir_all(&dir);
     }

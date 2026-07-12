@@ -1588,14 +1588,26 @@ fn draw_info_panel(
         }
     }
 
-    // Saves.
-    if let Some(saves) = aux.map(|a| &a.saves) {
-        if !saves.is_empty() {
+    // Saves + sidecars (SQ-0285).
+    if let Some(a) = aux {
+        let has_any = !a.saves.is_empty() || !a.qzl_saves.is_empty() || !a.sidecars.is_empty();
+        if has_any {
             lines.push((String::new(), cs.story_info_value));
-            lines.push((format!("Saves ({})", saves.len()), cs.story_info_label));
-            for s in saves {
+            // Header: "Saves · <dir>" with $HOME abbreviated to ~.
+            let dir = abbreviate_home(&a.game_dir);
+            lines.push((format!("Saves · {dir}"), cs.story_info_label));
+            for s in &a.saves {
                 let when = s.saved_at.get(0..10).unwrap_or(&s.saved_at);
-                lines.push((format!(" {}  turn {} · {}", s.name, s.turns, when), cs.story_info_value));
+                let fname = s.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                lines.push((format!(" {}  turn {} · {}  {}", s.name, s.turns, when, fname), cs.story_info_value));
+            }
+            for q in &a.qzl_saves {
+                let when = q.saved_at.get(0..10).unwrap_or(&q.saved_at);
+                let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                lines.push((format!(" {}  {}  {}", q.name, when, fname), cs.story_info_value));
+            }
+            if !a.sidecars.is_empty() {
+                lines.push((format!("Sidecars: {}", a.sidecars.join(" · ")), cs.story_info_value));
             }
         }
     }
@@ -1657,6 +1669,17 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Abbreviate a leading $HOME in a path to `~` for display.
+fn abbreviate_home(p: &std::path::Path) -> String {
+    let s = p.display().to_string();
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            if let Some(rest) = s.strip_prefix(&home) { return format!("~{rest}"); }
+        }
+    }
+    s
 }
 
 /// Present-only feature badge words, folding in aux-derived signals (an
@@ -4837,32 +4860,9 @@ fn open_ingame_saves(
 /// legacy saves (empty timestamp) sort to the bottom.
 fn combined_saves(game_dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
     let mut entries = list_saves(game_dir);
-    entries.extend(list_qzl(game_dir));
+    entries.extend(app::persist_files::list_qzl(game_dir));
     entries.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
     entries
-}
-
-/// List `*.qzl` game saves in `game_dir` as SaveInfo rows (for the in-game
-/// restore picker). All `.qzl` files in the per-game dir belong to this story
-/// (SQ-0284); there is no default `.qzl`, so none is skipped in practice. `.qzl`
-/// saves carry no metadata, so they're timestamped from the file's mtime and the
-/// slug (filename stem) is the display name.
-fn list_qzl(game_dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(game_dir) {
-        for e in rd.flatten() {
-            let p = e.path();
-            let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
-            if let Some(slug) = fname.strip_suffix(".qzl") {
-                let name = slug.to_string();
-                let saved_at = app::persist_files::rfc3339_mtime(&p);
-                out.push(app::persist_files::SaveInfo {
-                    path: p, name, turns: 0, saved_at, is_default: false,
-                });
-            }
-        }
-    }
-    out
 }
 
 /// Post-turn bookkeeping shared by the normal `submit` path and the resumed
@@ -5797,7 +5797,7 @@ mod tests {
         let combined: Vec<String> = super::combined_saves(&dir).iter().map(|s| s.name.clone()).collect();
         assert_eq!(combined, vec!["slot1".to_string()], "combined list includes the game save");
 
-        let infos = super::list_qzl(&dir);
+        let infos = app::persist_files::list_qzl(&dir);
         let names: Vec<String> = infos.iter().map(|s| s.name.clone()).collect();
         // The `.qzl` suffix is stripped to the slug for display; the `.babelmap`
         // is excluded from list_qzl.
@@ -7196,7 +7196,7 @@ mod tests {
     }
 
     #[test]
-    fn info_panel_renders_metadata_features_and_resources() {
+    fn info_panel_renders_metadata_features_resources_and_saves() {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let meta = app::picker::StoryMeta {
@@ -7217,13 +7217,34 @@ mod tests {
                 },
             ]),
         };
+        let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
+        let aux = app::picker::StoryAux {
+            assoc_blorb: None,
+            saves: vec![app::persist_files::SaveInfo {
+                path: game_dir.join("before-troll.babelmap"),
+                name: "before-troll".into(),
+                turns: 42,
+                saved_at: "2026-06-30T00:00:00Z".into(),
+                is_default: false,
+            }],
+            hints_available: false,
+            game_dir: game_dir.clone(),
+            qzl_saves: vec![app::persist_files::SaveInfo {
+                path: game_dir.join("quick.qzl"),
+                name: "quick".into(),
+                turns: 0,
+                saved_at: "2026-06-29T00:00:00Z".into(),
+                is_default: false,
+            }],
+            sidecars: vec!["default.aux"],
+        };
         // Wide enough that the resource detail suffix isn't clipped.
-        let area = Rect::new(0, 0, 70, 20);
+        let area = Rect::new(0, 0, 70, 25);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
         );
 
         let text = buffer_to_string(&buf, area);
@@ -7240,6 +7261,11 @@ mod tests {
         assert!(text.contains("Sound"));
         assert!(text.contains("AIFF"));
         assert!(text.contains("15.4 kHz · 8-bit · mono · 2.2s"), "parsed detail: {text:?}");
+        assert!(text.contains("Saves ·"), "saves dir header: {text:?}");
+        assert!(text.contains("before-troll.babelmap"), "babelmap filename: {text:?}");
+        assert!(text.contains("quick.qzl"), "qzl filename: {text:?}");
+        assert!(text.contains("Sidecars:"), "sidecars line: {text:?}");
+        assert!(text.contains("default.aux"), "sidecar filename: {text:?}");
     }
 
     #[test]
