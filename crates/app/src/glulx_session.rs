@@ -452,6 +452,14 @@ impl GlulxSession {
         }
         self.finish_turn()
     }
+
+    /// The bare, standard Glulx-Quetzal bytes for the game's own in-game
+    /// `@save` (VM state only — no `GReg`/`Glk ` chunks; resumed via a call
+    /// stub). Distinct from [`Engine::save_state`], which is the full host
+    /// snapshot behind Save State (`.babelmap`).
+    pub fn save_quetzal(&self) -> Vec<u8> {
+        self.machine.save_quetzal()
+    }
 }
 
 /// Decide whether a terminal click at absolute `(col, row)` should be diverted
@@ -609,8 +617,12 @@ impl Engine for GlulxSession {
     fn resume_restore(&mut self, data: Option<&[u8]>) -> TurnResult {
         // `Some(bytes)` = the player picked a save; `None` = cancelled. Corrupt
         // bytes fall back to failure so the game sees a clean failure result.
+        // Uses `complete_restore_quetzal` (stub-based, live-state-preserving),
+        // matching the bare standard `.qzl` that `@save` now writes — NOT
+        // `complete_restore_success`, which expects the full host-snapshot
+        // format (Save State only).
         match data {
-            Some(bytes) if self.machine.complete_restore_success(bytes) => {}
+            Some(bytes) if self.machine.complete_restore_quetzal(bytes) => {}
             _ => self.machine.complete_restore_failure(),
         }
         self.pending_io = None;
@@ -978,6 +990,62 @@ mod tests {
         assert!(!r4.quit, "a successful restore returns to the save point, not the quit");
         assert_eq!(r4.pending_io, None);
         assert_eq!(sess.pending_input(), InputKind::Line, "restored back to the turn-2 prompt");
+    }
+
+    /// SQ-0283 Task 6: the Glulx in-game save/restore round-trip through the
+    /// bare standard `save_quetzal()` bytes (what `save_game_named_bytes` now
+    /// writes), NOT the full `save_state()` host snapshot. Also checks that the
+    /// live Glk window survives the restore (unlike `restore_state`, which
+    /// would replace it from a `Glk ` chunk, `restore_quetzal` never touches
+    /// `self.glk` — §1.8.5).
+    #[test]
+    fn ingame_save_restore_round_trips_via_save_quetzal_and_keeps_the_live_window() {
+        use E::*;
+        const SAVE_RES: u32 = 0x410;
+        const RESTORE_RES: u32 = 0x414;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt()); // turn 1 prompt
+        body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save -> mem[SAVE_RES]
+        body.extend(line_prompt()); // turn 2 prompt (resume point after a restore)
+        body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore -> mem[RESTORE_RES]
+        body.extend(enc(0x120, &[])); // quit
+
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
+
+        // A window is open (from open_buffer_prelude) before the save.
+        assert!(!matches!(sess.screen().root, WinNode::Blank), "a window is open before @save");
+
+        // Turn 1: the command drives into @save, which bubbles a Save request.
+        let r1 = sess.submit("save");
+        assert_eq!(r1.pending_io, Some(PendingIo::Save), "@save bubbles a Save request");
+        assert!(!r1.quit);
+
+        // The host would write these bytes to a .qzl file (save_game_named_bytes).
+        let blob = sess.save_quetzal();
+        assert!(!blob.is_empty(), "save_quetzal produces bytes");
+
+        let r2 = sess.resume_save(true);
+        assert_eq!(r2.pending_io, None, "@save completes and runs on");
+        assert!(!r2.quit);
+        assert_eq!(sess.pending_input(), InputKind::Line, "reaches the turn-2 prompt");
+
+        // Turn 2: the command drives into @restore, which bubbles a Restore request.
+        let r3 = sess.submit("restore");
+        assert_eq!(r3.pending_io, Some(PendingIo::Restore), "@restore bubbles a Restore request");
+
+        // Feeding the save_quetzal bytes back (via resume_restore ->
+        // complete_restore_quetzal) restores VM state to the save point (the
+        // turn-2 prompt) rather than falling through to the trailing quit.
+        let r4 = sess.resume_restore(Some(&blob));
+        assert!(!r4.quit, "a successful restore returns to the save point, not the quit");
+        assert_eq!(r4.pending_io, None);
+        assert_eq!(sess.pending_input(), InputKind::Line, "restored back to the turn-2 prompt");
+
+        // The live Glk window survives the restore (restore_quetzal never
+        // touches self.glk) -- the screen tree still has an open window, and
+        // the session can keep driving turns through it.
+        assert!(!matches!(sess.screen().root, WinNode::Blank), "the live window survives restore_quetzal");
     }
 
     #[test]

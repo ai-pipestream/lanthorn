@@ -4524,13 +4524,16 @@ fn handle_saves_prompt(
                 return;
             }
             let result = if ingame {
-                // Game @save -> bare in-game save file (VM state only). The
-                // Z-machine writes standard descriptor-PC Quetzal; Glulx writes its
-                // own `save_state()` snapshot bytes (both land as `<ifid>-<slug>.qzl`
-                // so the in-game restore picker lists them).
+                // Game @save -> bare standard in-game save file (VM state only,
+                // call-stub resume). The Z-machine writes standard descriptor-PC
+                // Quetzal; Glulx writes `save_quetzal()` bytes (both land as
+                // `<ifid>-<slug>.qzl` so the in-game restore picker lists them).
                 match zvm_session_opt(&*session) {
                     Some(z) => save_game_named(dir, ifid, &buf, &z.machine).map(|_| ()),
-                    None => app::persist_files::save_game_named_bytes(dir, ifid, &buf, &session.save_state().bytes).map(|_| ()),
+                    None => {
+                        let bytes = glulx_session_opt(&*session).map(|g| g.save_quetzal()).unwrap_or_default();
+                        app::persist_files::save_game_named_bytes(dir, ifid, &buf, &bytes).map(|_| ())
+                    }
                 }
             } else {
                 // Host "Save State" named slot -> rich .babelmap archive.
