@@ -178,6 +178,25 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
 
 // ── drive loop ────────────────────────────────────────────────────────────────
 
+/// Emit an OSC 11 page-background update if the game's Normal-style background
+/// changed since `last` (honor-gated, TTY-only). Called just before blocking for
+/// input, so the per-instruction step loop never pays for the lookup.
+fn emit_page_bg(machine: &Machine, honor: bool, stdout_is_tty: bool, last: &mut Option<(u8, u8, u8)>) {
+    let cur = if honor && stdout_is_tty {
+        machine
+            .style_colour(gvm::WinType::TextBuffer, gvm::glk::GlkStyle::Normal)
+            .bg
+            .map(glk_term::rgb24)
+    } else {
+        None
+    };
+    if let Some(esc) = glk_term::page_bg_escape(cur, *last) {
+        print!("{esc}");
+        let _ = io::Write::flush(&mut io::stdout());
+        *last = cur;
+    }
+}
+
 /// Drive `machine` to completion through the Glk step loop, pulling input from
 /// the supplied readers. `before_input` runs just before each blocking read (the
 /// CLI uses it to flush output so the prompt is visible). This is the shared,
@@ -194,9 +213,10 @@ fn drive(
     mut read_char: impl FnMut() -> u32,
 ) {
     // Page background: reflect the game's Normal-style bg onto the terminal's
-    // default background (OSC 11), honor-gated and TTY-only. Emits only on
-    // change; reset (OSC 111) happens once at the single teardown point in
-    // `main`, after `drive` returns.
+    // default background (OSC 11), honor-gated and TTY-only. Checked only when
+    // about to block for input (the screen is settled then), which keeps the
+    // per-instruction step loop free of the lookup. Emits only on change; reset
+    // (OSC 111) happens once at the single teardown point in `main`.
     let mut last_page_bg: Option<(u8, u8, u8)> = None;
     loop {
         // Flush the Glk file VFS to its sidecar whenever a game mutation dirtied
@@ -206,23 +226,11 @@ fn drive(
             let _ = fs::write(vfs_path, machine.vfs_bytes());
             machine.clear_vfs_dirty();
         }
-        let cur_bg = if honor && stdout_is_tty {
-            machine
-                .style_colour(gvm::WinType::TextBuffer, gvm::glk::GlkStyle::Normal)
-                .bg
-                .map(glk_term::rgb24)
-        } else {
-            None
-        };
-        if let Some(esc) = glk_term::page_bg_escape(cur_bg, last_page_bg) {
-            print!("{esc}");
-            let _ = io::Write::flush(&mut io::stdout());
-            last_page_bg = cur_bg;
-        }
         match machine.step() {
             StepResult::Continue => {}
             StepResult::Quit => break,
             StepResult::NeedLine { win } => {
+                emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
                 // Echo typed input ourselves (raw mode), UNLESS the game disabled
                 // Glk line echo — then it echoes its own command and we must not,
@@ -240,6 +248,7 @@ fn drive(
                 machine.supply_line_terminated(line.trim_end_matches(['\n', '\r']), terminator);
             }
             StepResult::NeedChar { .. } => {
+                emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
                 let key = read_char();
                 machine.supply_char(key);
