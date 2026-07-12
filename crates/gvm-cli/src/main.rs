@@ -244,11 +244,16 @@ fn drive(
     // per-instruction step loop free of the lookup. Emits only on change; reset
     // (OSC 111) happens once at the single teardown point in `main`.
     let mut last_page_bg: Option<(u8, u8, u8)> = None;
+    // The per-game directory: `vfs_path` is always `game_dir/default.glkvfs`
+    // (constructed that way in `main`, and by the tests below), so its parent
+    // is the game dir — no need to thread a second path through.
+    let game_dir = vfs_path.parent().unwrap_or(std::path::Path::new("."));
     loop {
         // Flush the Glk file VFS to its sidecar whenever a game mutation dirtied
         // it, each iteration, so a game's files survive even if the process is
         // killed mid-session. Silently tolerate a write failure.
         if machine.vfs_dirty() {
+            std::fs::create_dir_all(vfs_path.parent().unwrap_or(std::path::Path::new("."))).ok();
             let _ = fs::write(vfs_path, machine.vfs_bytes());
             machine.clear_vfs_dirty();
         }
@@ -305,9 +310,11 @@ fn drive(
                 if name.is_empty() {
                     machine.complete_save(false);
                 } else {
-                    let ok = fs::write(name, machine.save_quetzal()).is_ok();
+                    let path = resolve_save_input(name, game_dir);
+                    std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))).ok();
+                    let ok = fs::write(&path, machine.save_quetzal()).is_ok();
                     if ok {
-                        eprintln!("[saved to {name}]");
+                        eprintln!("[saved to {}]", path.display());
                     } else {
                         eprintln!("[save failed]");
                     }
@@ -325,9 +332,10 @@ fn drive(
                 if name.is_empty() {
                     machine.complete_restore_failure();
                 } else {
-                    match fs::read(name) {
+                    let path = resolve_save_input(name, game_dir);
+                    match fs::read(&path) {
                         Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {
-                            eprintln!("[restored from {name}]");
+                            eprintln!("[restored from {}]", path.display());
                         }
                         _ => {
                             eprintln!("[restore failed]");
@@ -340,6 +348,31 @@ fn drive(
     }
 }
 
+// ── story-key / per-game save resolution ────────────────────────────────────
+
+/// Per-game directory name: the story file's basename (incl. extension),
+/// sanitized to a filesystem-safe token. Empty -> "game".
+fn story_key(story_path: &std::path::Path) -> String {
+    let name = story_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let s: String = name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    if s.is_empty() { "game".to_string() } else { s }
+}
+
+/// Resolve an interactive `@save`/`@restore` filename prompt: a bare name
+/// (no path separator) lands in `game_dir` with a `.qzl` extension; a
+/// path-bearing value is honored verbatim.
+fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::PathBuf {
+    let t = input.trim();
+    if t.contains('/') || t.contains('\\') {
+        std::path::PathBuf::from(t)
+    } else {
+        let name = if t.ends_with(".qzl") { t.to_string() } else { format!("{t}.qzl") };
+        game_dir.join(name)
+    }
+}
+
 // ── main ──────────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -349,9 +382,24 @@ fn main() {
     let honor = !argv.iter().any(|a| a == "--no-game-colours");
     // Acceleration (Glulx accelfunc interception) is on by default; --no-accel opts out.
     let accel = !argv.iter().any(|a| a == "--no-accel");
-    let Some(path) = argv.iter().skip(1).find(|a| !a.starts_with("--")) else {
+    // --data-dir takes a value, so it (and its value) must be consumed before
+    // scanning for the positional story path — otherwise the path scan would
+    // mistake the --data-dir value for the story argument.
+    let mut data_dir: Option<String> = None;
+    let mut path: Option<&String> = None;
+    {
+        let mut it = argv.iter().skip(1);
+        while let Some(a) = it.next() {
+            if a == "--data-dir" {
+                data_dir = it.next().cloned();
+            } else if !a.starts_with("--") && path.is_none() {
+                path = Some(a);
+            }
+        }
+    }
+    let Some(path) = path else {
         eprintln!(
-            "Usage: {} [--no-game-colours] [--no-accel] <story.ulx | story.gblorb>",
+            "Usage: {} [--no-game-colours] [--no-accel] [--data-dir <path>] <story.ulx | story.gblorb>",
             argv[0]
         );
         process::exit(1);
@@ -396,10 +444,18 @@ fn main() {
         None
     };
 
-    // The Glk file VFS sidecar: `<story>.glkvfs`, next to the story. Loaded here
-    // before the run, flushed dirty-gated inside `drive`, so a game's external
-    // files (scores, preferences) survive a plain quit-and-relaunch.
-    let vfs_path = std::path::PathBuf::from(format!("{path}.glkvfs"));
+    // Per-game directory: base (--data-dir override, else the story's own
+    // directory) joined with the sanitized story filename.
+    let story_path = std::path::PathBuf::from(path);
+    let base = data_dir.map(std::path::PathBuf::from)
+        .unwrap_or_else(|| story_path.parent().filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")));
+    let game_dir = base.join(story_key(&story_path));
+
+    // The Glk file VFS sidecar: `<game_dir>/default.glkvfs`. Loaded here before
+    // the run, flushed dirty-gated inside `drive`, so a game's external files
+    // (scores, preferences) survive a plain quit-and-relaunch.
+    let vfs_path = game_dir.join("default.glkvfs");
     if vfs_path.exists() {
         // Tolerate a missing/unreadable sidecar silently — it just means empty.
         if let Ok(bytes) = fs::read(&vfs_path) {
@@ -598,6 +654,33 @@ mod tests {
     }
 
     // ── key decoding tests ────────────────────────────────────────────────────
+
+    // ── story-key / per-game save resolution ──────────────────────────────────
+
+    #[test]
+    fn story_key_keeps_extension_and_sanitizes() {
+        use std::path::Path;
+        assert_eq!(story_key(Path::new("/g/Zork1.z5")), "Zork1.z5");
+        assert_ne!(story_key(Path::new("/g/Zork1.z5")), story_key(Path::new("/g/Zork1.gblorb")));
+        assert_eq!(story_key(Path::new("/g/a b?.z5")), "a_b_.z5");
+        assert_eq!(story_key(Path::new("")), "game");
+    }
+
+    #[test]
+    fn resolve_save_input_bare_vs_path() {
+        use std::path::{Path, PathBuf};
+        let gd = Path::new("/data/Zork1.z5");
+        assert_eq!(resolve_save_input("quick", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
+        assert_eq!(resolve_save_input("quick.qzl", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
+        assert_eq!(resolve_save_input("/tmp/foo.qzl", gd), PathBuf::from("/tmp/foo.qzl"));
+    }
+
+    #[test]
+    fn vfs_path_is_default_glkvfs_in_game_dir() {
+        use std::path::{Path, PathBuf};
+        let gd = Path::new("/data/Advent.gblorb");
+        assert_eq!(gd.join("default.glkvfs"), PathBuf::from("/data/Advent.gblorb/default.glkvfs"));
+    }
 
     #[test]
     fn decode_glk_keycode_maps_crossterm_keys() {
