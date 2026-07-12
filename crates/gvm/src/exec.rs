@@ -1644,6 +1644,19 @@ impl Machine {
     /// State restore into a fresh machine).
     pub fn restore_quetzal(&mut self, blob: &[u8]) -> Result<(), GError> {
         let chunks = parse_ifzs(blob)?;
+
+        // Identity check (Glulx spec §1.8.4): IFhd is the first 128 bytes of
+        // memory as of the save, invariant ROM that names the story. Reject a
+        // save from a different story before any state mutation.
+        let ifhd = chunks
+            .iter()
+            .find(|(cid, _)| cid == b"IFhd")
+            .map(|(_, d)| *d)
+            .ok_or_else(|| GError::BadSave("missing IFhd chunk".into()))?;
+        if ifhd.len() != 128 || (0..128).any(|a| ifhd[a] != self.mem.read8(a as u32).unwrap_or(0) as u8) {
+            return Err(GError::BadSave("save is for a different story".into()));
+        }
+
         self.restore_vm_core(&chunks, None)?;
         self.pop_save_stub_and_store((-1i32) as u32).map_err(GError::BadSave)
     }
@@ -6071,8 +6084,12 @@ mod tests {
         let idx = 4 + (0x190 - ramstart) as usize;
         umem_body[idx..idx + 4].copy_from_slice(&0xAAAA_BBBBu32.to_be_bytes());
 
+        let mut ifhd = Vec::with_capacity(128);
+        for a in 0..128 {
+            ifhd.push(m.mem.read8(a).unwrap_or(0) as u8);
+        }
         let mut body_chunks = Vec::new();
-        push_chunk(&mut body_chunks, b"IFhd", &[0u8; 128]);
+        push_chunk(&mut body_chunks, b"IFhd", &ifhd);
         push_chunk(&mut body_chunks, b"UMem", &umem_body);
         push_chunk(&mut body_chunks, b"Stks", &m.stack[..m.sp].to_vec());
         push_chunk(&mut body_chunks, b"MAll", &[]);
@@ -6084,6 +6101,35 @@ mod tests {
 
         m.restore_quetzal(&blob).unwrap();
         assert_eq!(m.mem.read32(0x190).unwrap(), 0xAAAA_BBBB, "UMem chunk applied literally");
+    }
+
+    /// `restore_quetzal` must reject a save whose `IFhd` chunk (the first 128
+    /// bytes of memory, captured at save time — spec §1.8.4) doesn't match the
+    /// running story's current header, and must leave VM state untouched
+    /// (no partial mutation) rather than applying it anyway.
+    #[test]
+    fn restore_quetzal_rejects_a_save_from_a_different_story() {
+        use asm::Op::{Mem32, Zero};
+        let mut body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x190, 0xCAFE_BABE).unwrap();
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let mut blob = m.save_quetzal();
+
+        // Corrupt a byte inside the blob's IFhd chunk payload. Layout:
+        // FORM(4) + size(4) + "IFZS"(4) + chunk-id(4) + chunk-len(4) = 20
+        // bytes before the 128-byte IFhd data begins.
+        blob[20] ^= 0xFF;
+
+        // Witness: mutate RAM after taking the blob. A wrongly-applied
+        // restore would revert this to the saved 0xCAFE_BABE; a correctly
+        // rejected restore must leave it at the post-save value.
+        m.mem.write32(0x190, 0).unwrap();
+
+        let err = m.restore_quetzal(&blob).unwrap_err();
+        assert!(matches!(err, GError::BadSave(_)), "mismatched IFhd is rejected: {err:?}");
+        assert_eq!(m.mem.read32(0x190).unwrap(), 0, "rejected restore leaves VM state untouched");
     }
 
     /// The live protect range (not part of the bare-save format) is honored
