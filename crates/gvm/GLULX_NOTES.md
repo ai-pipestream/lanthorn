@@ -497,8 +497,8 @@ These use the §14 core, entirely in memory (no Glk streams). The
 - With no snapshot, `restoreundo` stores **1** (failure) and leaves state intact.
 
 The undo stack is bounded to `UNDO_CAP` (16) snapshots; the oldest is dropped
-when full. (`@save`/`@restore` to a real file/stream, `hasundo`, and
-`discardundo` are deferred to sub-project 3.)
+when full. (`@save`/`@restore` to a real file are now implemented — see §14's
+`save_quetzal`/`restore_quetzal` — and `hasundo`/`discardundo` are implemented too.)
 
 ## 16. protect (Phase 2c, spec §2.11)
 
