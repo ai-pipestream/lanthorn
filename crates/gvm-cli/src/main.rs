@@ -231,7 +231,6 @@ fn emit_page_bg(machine: &Machine, honor: bool, stdout_is_tty: bool, last: &mut 
 /// scripted ones.
 fn drive(
     machine: &mut Machine,
-    save_path: &std::path::Path,
     vfs_path: &std::path::Path,
     honor: bool,
     stdout_is_tty: bool,
@@ -296,27 +295,47 @@ fn drive(
                     machine.supply_filename(if name.is_empty() { None } else { Some(name.to_string()) });
                 }
             }
-            // Game @save: write the snapshot to a single default slot next to the
-            // story. Headless, so there is no name prompt — one slot, overwritten.
+            // Game @save: prompt for a filename (mirrors zvm-cli) and write a
+            // standard, bare Glulx-Quetzal save. Blank cancels.
             StepResult::SaveRequest => {
-                let ok = fs::write(save_path, machine.save_state()).is_ok();
-                if ok {
-                    eprintln!("[saved to {}]", save_path.display());
+                before_input(machine);
+                eprint!("Save to file: ");
+                let (line, _) = read_line(LineEcho::Shown(String::new()));
+                let name = line.trim_end_matches(['\n', '\r']);
+                if name.is_empty() {
+                    machine.complete_save(false);
                 } else {
-                    eprintln!("[save failed]");
+                    let ok = fs::write(name, machine.save_quetzal()).is_ok();
+                    if ok {
+                        eprintln!("[saved to {name}]");
+                    } else {
+                        eprintln!("[save failed]");
+                    }
+                    machine.complete_save(ok);
                 }
-                machine.complete_save(ok);
             }
-            // Game @restore: read that same default slot back, or fail cleanly.
-            StepResult::RestoreRequest => match fs::read(save_path) {
-                Ok(bytes) if machine.complete_restore_success(&bytes) => {
-                    eprintln!("[restored from {}]", save_path.display());
-                }
-                _ => {
-                    eprintln!("[restore failed]");
+            // Game @restore: prompt for a filename and restore via the
+            // live-state-preserving standard path. Blank or a read/parse
+            // failure fails cleanly.
+            StepResult::RestoreRequest => {
+                before_input(machine);
+                eprint!("Restore from file: ");
+                let (line, _) = read_line(LineEcho::Shown(String::new()));
+                let name = line.trim_end_matches(['\n', '\r']);
+                if name.is_empty() {
                     machine.complete_restore_failure();
+                } else {
+                    match fs::read(name) {
+                        Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {
+                            eprintln!("[restored from {name}]");
+                        }
+                        _ => {
+                            eprintln!("[restore failed]");
+                            machine.complete_restore_failure();
+                        }
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -377,10 +396,6 @@ fn main() {
         None
     };
 
-    // The single default in-game save slot: the story path with a `.glksave`
-    // suffix (headless, so there is no name prompt — one slot, overwritten).
-    let save_path = std::path::PathBuf::from(format!("{path}.glksave"));
-
     // The Glk file VFS sidecar: `<story>.glkvfs`, next to the story. Loaded here
     // before the run, flushed dirty-gated inside `drive`, so a game's external
     // files (scores, preferences) survive a plain quit-and-relaunch.
@@ -395,7 +410,6 @@ fn main() {
 
     drive(
         &mut machine,
-        &save_path,
         &vfs_path,
         honor,
         stdout_is_tty,
@@ -703,7 +717,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, false, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -727,7 +741,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }
@@ -824,13 +838,12 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("gvmcli-vfs-{}-{}", std::process::id(), stamp));
         fs::create_dir_all(&dir).unwrap();
-        let save_path = dir.join("story.glksave");
         let vfs_path = dir.join("story.glkvfs");
 
         // Run 1: a game writes "Hi" into a Glk file, then quits. drive's in-loop,
         // dirty-gated flush should persist the VFS to the sidecar.
         let mut m = build_machine(vfs_image(write_hi_program(), 2), Box::new(TestBackend::new())).unwrap();
-        drive(&mut m, &save_path, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
 
         assert!(vfs_path.exists(), "the .glkvfs sidecar is written to disk");
         let blob = fs::read(&vfs_path).unwrap();
@@ -843,9 +856,104 @@ mod tests {
         let mut m2 = build_machine(vfs_image(read_hi_program(), 4), Box::new(TestBackend::new())).unwrap();
         m2.load_vfs(&fs::read(&vfs_path).unwrap());
         m2.clear_vfs_dirty();
-        drive(&mut m2, &save_path, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m2, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
         let text = m2.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Hi", "the persisted bytes are readable after load_vfs");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── in-game @save/@restore via a prompted filename (SQ-0283 Task 5) ──────
+
+    /// A program that exercises the full in-game save/restore prompt path:
+    /// creates a SavedGame fileref by prompt (host-intercepted usage `0x01`,
+    /// auto-resolved without a `read_line` call), opens it for writing, issues
+    /// `@save`, then — only on the fresh (not-yet-restored) run — creates a
+    /// second SavedGame fileref for reading, opens it, and issues `@restore`.
+    /// The `jeq` guards against re-running that block on the resumed
+    /// (post-restore) run: `@save`'s S1 then reads back `-1` (the "just
+    /// restored" sentinel), and execution always resumes just after the
+    /// original `@save`, so without the guard the read+`@restore` block would
+    /// run again forever. Locals: fref-w(0), stream-w(4), fref-r(8), stream-r(12).
+    fn save_restore_by_prompt_program() -> Vec<u8> {
+        use E::*;
+        let mut b = enc(0x149, &[Imm(2), Imm(0)]); // setiosys glk
+
+        // fileref_create_by_prompt(usage=1 SavedGame, fmode=1 Write, rock=0) -> local0
+        b.extend(enc(0x40, &[Imm(0), Push])); // rock
+        b.extend(enc(0x40, &[Imm(0x01), Push])); // fmode = Write
+        b.extend(enc(0x40, &[Imm(0x01), Push])); // usage = SavedGame (topmost -> args[0])
+        b.extend(enc(0x130, &[Imm(0x62), Imm(3), LocStore(0)]));
+        // stream_open_file(fref=local0, fmode=1 Write, rock=0) -> local1
+        b.extend(enc(0x40, &[Imm(0), Push])); // rock
+        b.extend(enc(0x40, &[Imm(0x01), Push])); // fmode = Write
+        b.extend(enc(0x40, &[LocLoad(0), Push])); // fref
+        b.extend(enc(0x130, &[Imm(0x42), Imm(3), LocStore(4)]));
+
+        // @save L1=local1, S1 -> mem[0x280]
+        b.extend(enc(0x123, &[LocLoad(4), MemLoad(0x280)]));
+
+        // The read-back + @restore block, skipped on the resumed run.
+        let mut skip = Vec::new();
+        // fileref_create_by_prompt(usage=1 SavedGame, fmode=2 Read, rock=0) -> local2
+        skip.extend(enc(0x40, &[Imm(0), Push])); // rock
+        skip.extend(enc(0x40, &[Imm(0x02), Push])); // fmode = Read
+        skip.extend(enc(0x40, &[Imm(0x01), Push])); // usage = SavedGame
+        skip.extend(enc(0x130, &[Imm(0x62), Imm(3), LocStore(8)]));
+        // stream_open_file(fref=local2, fmode=2 Read, rock=0) -> local3
+        skip.extend(enc(0x40, &[Imm(0), Push])); // rock
+        skip.extend(enc(0x40, &[Imm(0x02), Push])); // fmode = Read
+        skip.extend(enc(0x40, &[LocLoad(8), Push])); // fref
+        skip.extend(enc(0x130, &[Imm(0x42), Imm(3), LocStore(12)]));
+        // @restore L1=local3, S1 -> mem[0x288]
+        skip.extend(enc(0x124, &[LocLoad(12), MemLoad(0x288)]));
+
+        let skip_len = skip.len() as u32;
+        // jeq mem[0x280], -1, +skip_len -> skip the read-back+@restore block once
+        // S1 reads the "just restored" sentinel.
+        b.extend(enc(0x24, &[MemLoad(0x280), Imm(0xFFFF_FFFF), Imm(skip_len + 2)]));
+        b.extend(skip);
+        b.extend(enc(0x120, &[])); // quit
+        b
+    }
+
+    #[test]
+    fn drive_ingame_save_restore_round_trips_via_prompted_filename() {
+        // A private temp dir so we never write next to real files.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("gvmcli-qzl-{}-{}", std::process::id(), stamp));
+        fs::create_dir_all(&dir).unwrap();
+        let save_path = dir.join("story.qzl");
+        let vfs_path = dir.join("story.glkvfs");
+
+        // SavedGame create_by_prompt auto-resolves (no read_line call); the only
+        // prompts driven through `read_line` are the SaveRequest/RestoreRequest
+        // filename prompts, both answered with the same fixed path so the
+        // restore reads back exactly what the save wrote.
+        let save_path_str = save_path.to_str().unwrap().to_string();
+        let mut m =
+            build_machine(vfs_image(save_restore_by_prompt_program(), 4), Box::new(TestBackend::new())).unwrap();
+        drive(&mut m, &vfs_path, true, false, |_| {}, move |_echo| (save_path_str.clone(), 0), || {
+            keycode::RETURN
+        });
+
+        let bytes = fs::read(&save_path).expect("the prompted filename was written by SaveRequest");
+        fn has_chunk(save: &[u8], id: &[u8; 4]) -> bool {
+            save.windows(4).any(|w| w == id)
+        }
+        assert!(has_chunk(&bytes, b"IFhd"), "the .qzl carries IFhd");
+        assert!(has_chunk(&bytes, b"CMem"), "the .qzl carries CMem");
+        assert!(has_chunk(&bytes, b"Stks"), "the .qzl carries Stks");
+        assert!(!has_chunk(&bytes, b"GReg"), "the .qzl is bare, not a full save_state snapshot");
+        assert!(!has_chunk(&bytes, b"Glk "), "the .qzl is bare, not a full save_state snapshot");
+
+        // The drive loop's own RestoreRequest arm already read this file back
+        // mid-game (via complete_restore_quetzal, reaching Quit); confirm the
+        // written bytes are independently a valid, self-contained save too.
+        assert!(m.restore_quetzal(&bytes).is_ok(), "the written .qzl round-trips via restore_quetzal");
 
         let _ = fs::remove_dir_all(&dir);
     }
