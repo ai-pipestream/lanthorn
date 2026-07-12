@@ -98,6 +98,12 @@ fn sgr_open(style: GlkStyle, colour: StyleColour, honor: bool) -> String {
     s
 }
 
+/// Opening SGR for the Input style + resolved colour, for a host echoing typed
+/// input (mirrors zvm-cli drawing its echo in the game's input style/colour).
+pub fn sgr_input(colour: StyleColour, honor: bool) -> String {
+    sgr_open(GlkStyle::Input, colour, honor)
+}
+
 /// Wrap `s` in SGR for `style` + `colour` when on a TTY and something is set.
 fn style_wrap(s: &str, style: GlkStyle, colour: StyleColour, honor: bool, tty: bool) -> String {
     let open = sgr_open(style, colour, honor);

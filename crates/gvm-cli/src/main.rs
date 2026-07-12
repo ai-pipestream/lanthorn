@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::process;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 
 use gvm::glk::keycode;
@@ -84,6 +84,65 @@ fn read_line_stdin() -> (String, u32) {
     (line, 0)
 }
 
+/// Read a line of input in RAW mode, echoing typed characters manually. `echo`
+/// is `Some(sgr)` to echo (the SGR prefix colours it; empty string = plain echo)
+/// or `None` to read WITHOUT echoing — used when the game has disabled Glk line
+/// echo (`glk_set_echo_line_event(win, 0)`), so a self-echoing game is not shown
+/// twice on a scrolling terminal. Falls back to cooked line input on non-TTY
+/// stdin (piped input has no terminal echo, so it is already correct).
+/// The terminator is always 0 (normal Enter), matching the prior cooked path.
+fn read_line_raw(is_tty: bool, echo: Option<&str>) -> (String, u32) {
+    if !is_tty {
+        return read_line_stdin(); // (String, 0)
+    }
+    let echoing = echo.is_some();
+    let sgr = echo.unwrap_or("");
+    let _ = terminal::enable_raw_mode();
+    let mut buf = String::new();
+    if echoing && !sgr.is_empty() {
+        print!("{sgr}");
+        let _ = io::Write::flush(&mut io::stdout());
+    }
+    loop {
+        match event::read() {
+            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
+                KeyCode::Enter => break,
+                // Raw mode swallows signals; exit cleanly on Ctrl-C / Ctrl-D.
+                KeyCode::Char('c') | KeyCode::Char('d')
+                    if modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if echoing && !sgr.is_empty() { print!("\x1b[0m"); }
+                    print!("\r\n");
+                    let _ = io::Write::flush(&mut io::stdout());
+                    let _ = terminal::disable_raw_mode();
+                    std::process::exit(0);
+                }
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    if echoing {
+                        print!("{c}");
+                        let _ = io::Write::flush(&mut io::stdout());
+                    }
+                }
+                KeyCode::Backspace => {
+                    if buf.pop().is_some() && echoing {
+                        print!("\x08 \x08");
+                        let _ = io::Write::flush(&mut io::stdout());
+                    }
+                }
+                _ => {} // other special keys consumed (no on-screen garbage)
+            },
+            Ok(Event::Resize(..)) => {} // caught by next before_input size poll
+            _ => {}
+        }
+    }
+    if echoing && !sgr.is_empty() { print!("\x1b[0m"); }
+    let _ = terminal::disable_raw_mode();
+    print!("\r\n"); // raw mode does not translate Enter to CRLF
+    let _ = io::Write::flush(&mut io::stdout());
+    (buf, 0)
+}
+
 /// Read one keypress. On a TTY: enter raw mode, read a crossterm `Event::Key`,
 /// then restore cooked mode. Resize events during the wait are silently
 /// discarded (they will be caught by the next `before_input` poll). Piped
@@ -124,8 +183,9 @@ fn drive(
     machine: &mut Machine,
     save_path: &std::path::Path,
     vfs_path: &std::path::Path,
+    honor: bool,
     mut before_input: impl FnMut(&mut Machine),
-    mut read_line: impl FnMut() -> (String, u32),
+    mut read_line: impl FnMut(Option<&str>) -> (String, u32),
     mut read_char: impl FnMut() -> u32,
 ) {
     loop {
@@ -139,9 +199,21 @@ fn drive(
         match machine.step() {
             StepResult::Continue => {}
             StepResult::Quit => break,
-            StepResult::NeedLine { .. } => {
+            StepResult::NeedLine { win } => {
                 before_input(machine);
-                let (line, terminator) = read_line();
+                // Echo typed input ourselves (raw mode), UNLESS the game disabled
+                // Glk line echo — then it echoes its own command and we must not,
+                // or a scrolling terminal shows it twice (SQ-0275).
+                let echo: Option<String> = if machine.window_line_echo(win) {
+                    Some(if honor {
+                        glk_term::sgr_input(machine.window_input_colour(win), true)
+                    } else {
+                        String::new()
+                    })
+                } else {
+                    None
+                };
+                let (line, terminator) = read_line(echo.as_deref());
                 machine.supply_line_terminated(line.trim_end_matches(['\n', '\r']), terminator);
             }
             StepResult::NeedChar { .. } => {
@@ -160,7 +232,7 @@ fn drive(
                 } else {
                     before_input(machine);
                     eprint!("Filename (blank to cancel): ");
-                    let (line, _) = read_line();
+                    let (line, _) = read_line(Some(""));
                     let name = line.trim_end_matches(['\n', '\r']);
                     machine.supply_filename(if name.is_empty() { None } else { Some(name.to_string()) });
                 }
@@ -260,6 +332,7 @@ fn main() {
         &mut machine,
         &save_path,
         &vfs_path,
+        honor,
         |m| {
             // Re-poll terminal size before each input (interactive TTY only).
             if both_tty {
@@ -285,7 +358,7 @@ fn main() {
                 t.flush_out();
             }
         },
-        read_line_stdin,
+        move |echo| read_line_raw(stdin_is_tty, echo),
         move || read_char_input(stdin_is_tty),
     );
 
@@ -551,7 +624,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), |_| {}, || (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -575,7 +648,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), |_| {}, move || (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }
@@ -678,7 +751,7 @@ mod tests {
         // Run 1: a game writes "Hi" into a Glk file, then quits. drive's in-loop,
         // dirty-gated flush should persist the VFS to the sidecar.
         let mut m = build_machine(vfs_image(write_hi_program(), 2), Box::new(TestBackend::new())).unwrap();
-        drive(&mut m, &save_path, &vfs_path, |_| {}, || (String::new(), 0), || keycode::RETURN);
+        drive(&mut m, &save_path, &vfs_path, true, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
 
         assert!(vfs_path.exists(), "the .glkvfs sidecar is written to disk");
         let blob = fs::read(&vfs_path).unwrap();
@@ -691,7 +764,7 @@ mod tests {
         let mut m2 = build_machine(vfs_image(read_hi_program(), 4), Box::new(TestBackend::new())).unwrap();
         m2.load_vfs(&fs::read(&vfs_path).unwrap());
         m2.clear_vfs_dirty();
-        drive(&mut m2, &save_path, &vfs_path, |_| {}, || (String::new(), 0), || keycode::RETURN);
+        drive(&mut m2, &save_path, &vfs_path, true, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
         let text = m2.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Hi", "the persisted bytes are readable after load_vfs");
 
