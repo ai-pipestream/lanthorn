@@ -36,7 +36,7 @@ Three problems:
 - **Blorb IFmd / content-hash key** — dropped in the simplified design.
 - **Per-file suffix-override flag** — moot now that inner names are fixed.
 - **Moving map exports** (`user_dir/maps/<ifid>.svg`) — not among the four file types; stays IFID-keyed under `user_dir/maps`.
-- **Relocating CLI *interactive* `@save`/`@restore` filenames** — those stay user-typed cwd-relative paths (unchanged). `--data-dir` on a CLI relocates only the auto-managed sidecar (`.aux` / `.glkvfs`).
+- **The explicit-path *export* escape hatch** — when a user types a `@save`/`@restore` value that contains a path separator, it is honored verbatim (out to any path). This spec only wires the *bare-name → per-game dir* resolution; the broader "export to a chosen destination" UX (for saves, Save States, and maps) is deferred to **SQ-0288**.
 
 ## Design
 
@@ -57,14 +57,14 @@ The user owns collisions: two identically-named stories sharing one `--data-dir`
 
 ```
 <base>/<story-filename>/
-    save.aux        # Z-machine aux sidecar   (singleton; was <ifid>.aux)
-    save.glkvfs     # Glulx VFS sidecar        (singleton; was app <ifid>.gvfs / gvm-cli <story>.glkvfs)
-    save.babelmap   # default Save State slot  (auto per-turn + Ctrl+S default; was <ifid>.babelmap)
-    <slug>.babelmap # named Save States        (was <ifid>-<slug>.babelmap)
-    <slug>.qzl      # named in-game @save files (was <ifid>-<slug>.qzl)
+    default.aux        # Z-machine aux sidecar    (singleton; was <ifid>.aux)
+    default.glkvfs     # Glulx VFS sidecar         (singleton; was app <ifid>.gvfs / gvm-cli <story>.glkvfs)
+    default.babelmap   # default Save State slot   (auto per-turn + Ctrl+S default; was <ifid>.babelmap)
+    <slug>.babelmap    # named Save States         (was <ifid>-<slug>.babelmap)
+    <slug>.qzl         # in-game @save files        (app named slugs + CLI interactive bare names; was <ifid>-<slug>.qzl)
 ```
 
-- The three auto/singleton files share the fixed stem **`save`**. `save` is a **reserved slug** — the app rejects/suffixes a user-named save called `save` so it can't clobber the auto slot or a sidecar. (Extensions already separate `.aux`/`.glkvfs`/`.babelmap`, so `save.aux`, `save.glkvfs`, and `save.babelmap` coexist; only a user *Save State* named `save` would collide with the auto `save.babelmap`.)
+- The three auto/singleton files share the fixed stem **`default`**. `default` is a **reserved slug** — the app rejects/suffixes a user-named save called `default` so it can't clobber the auto slot or a sidecar. (Extensions already separate `.aux`/`.glkvfs`/`.babelmap`, so `default.aux`, `default.glkvfs`, and `default.babelmap` coexist; only a user *Save State* named `default` would collide with the auto `default.babelmap`.)
 - `.glkvfs` is now the single canonical Glulx-VFS extension everywhere — the app's `.gvfs` is renamed to `.glkvfs` (same bytes; `vfs_bytes()`/`load_vfs` format unchanged).
 - Per-base default: `<base>` = `~/.babelmap/saves` (app) or the story dir (CLIs), overridable by `--data-dir`.
 
@@ -78,25 +78,36 @@ The user owns collisions: two identically-named stories sharing one `--data-dir`
 **app** (largest surface):
 - New `story_key(&Path) -> String` (sanitized basename) — replaces IFID as the *storage* key. Keep `compute_ifid` and `state.ifid` for titles/hints/display.
 - Save base: `saves_dir(user_dir)` → `<user_dir>/saves` stays the *root*; the per-game dir is `<base>/<story_key>/`. Add `game_dir(base, key)` = `base.join(key)`; `create_dir_all` on first write.
-- Rewrite the `<ifid>.*` path builders to `<game_dir>/save.*` and `<ifid>-<slug>.*` to `<game_dir>/<slug>.*`:
+- Rewrite the `<ifid>.*` path builders to `<game_dir>/default.*` and `<ifid>-<slug>.*` to `<game_dir>/<slug>.*`:
   `ifid::archive_path`, `aux_store::aux_path`, `vfs_store::vfs_path` (+ `.gvfs`→`.glkvfs`), `persist_files::{list_saves, save_named, save_game_named, save_game_named_bytes, list_qzl}` and the `main.rs` call sites threading `&ifid` for storage (§C.3 of the map).
 - Picker badge (`compute_row_badges` / `resolve_aux`): switch save-presence detection from `save_names.starts_with(ifid)` to "does `<base>/<story_key>/` exist and contain a `.babelmap`/`.qzl`". Title/hint lookups still key off `entry.meta.ifid`.
 - `--data-dir` threaded from `Cli` into the picker (`main.rs:1066`) and the game session (`main.rs:1842`) base.
 
 **zvm-cli:**
-- `aux::aux_path`: from `<story-dir>/<sanitized-ifid>.aux` to `<base>/<story_key>/save.aux`. `base` = `--data-dir` or story dir. `create_dir_all` on write. (Interactive `@save`/`@restore` filenames unchanged.)
+- `aux::aux_path`: from `<story-dir>/<sanitized-ifid>.aux` to `<base>/<story_key>/default.aux`. `base` = `--data-dir` or story dir. `create_dir_all` on write.
+- Interactive `@save`/`@restore` (see *Interactive save-name resolution* below).
 
 **gvm-cli:**
-- VFS path: from `<story>.glkvfs` to `<base>/<story_key>/save.glkvfs`. `base` = `--data-dir` or story dir. `create_dir_all` on write. (Interactive `.qzl` `@save`/`@restore` filenames unchanged.)
+- VFS path: from `<story>.glkvfs` to `<base>/<story_key>/default.glkvfs`. `base` = `--data-dir` or story dir. `create_dir_all` on write.
+- Interactive `@save`/`@restore` (see *Interactive save-name resolution* below).
+
+### Interactive save-name resolution (both CLIs)
+
+The `@save`/`@restore` prompt value is interpreted:
+- **bare name** (no path separator, e.g. `quicksave`) → `<base>/<story_key>/<name>.qzl` inside the managed per-game dir. `.qzl` is appended if absent. This is now the default, so CLI in-game saves populate the same per-game dir the app uses.
+- **explicit path** (contains a separator or is absolute, e.g. `/tmp/foo.qzl`) → honored verbatim (escape hatch; the fuller export UX is SQ-0288).
+
+`--restore`/restore listing resolves the same way. This makes the four file types uniform across all three hosts.
 
 ## Testing
 
 - Unit: `story_key` sanitization + extension-preservation (`Zork1.z5` ≠ `Zork1.gblorb`, weird chars → `_`, empty → `game`).
-- Unit: `game_dir` / each rewritten path builder returns `<base>/<key>/save.<ext>` and `<base>/<key>/<slug>.<ext>`; reserved-slug `save` rejected/suffixed.
+- Unit: `game_dir` / each rewritten path builder returns `<base>/<key>/default.<ext>` and `<base>/<key>/<slug>.<ext>`; reserved-slug `default` rejected/suffixed.
+- Unit: interactive save-name resolution — bare name → `<base>/<key>/<name>.qzl` (`.qzl` appended); value with a separator → verbatim.
 - Unit (app): `list_saves`/`list_qzl` enumerate a per-game dir correctly (named slots, default slot, none).
 - Unit (app): picker badge true iff a per-game dir has a save; false for an empty/absent dir; hint/title still keyed by IFID.
 - Round-trip (app): write aux/vfs/Save State into `<tmp>/<key>/`, read back.
-- CLI: `--data-dir <tmp>` redirects the sidecar; default (no flag) writes the per-game dir next to the story.
+- CLI: `--data-dir <tmp>` redirects the sidecar + bare-name saves; default (no flag) writes the per-game dir next to the story.
 - Regression: `compute_ifid`, `known_title`, and hint lookups unchanged.
 
 ## Rollout
