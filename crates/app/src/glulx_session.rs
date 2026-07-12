@@ -676,6 +676,10 @@ impl Engine for GlulxSession {
         Err(EngineError::BadSave("Glulx has no game-save (.qzl) format".into()))
     }
 
+    fn is_saveload_pending(&self) -> bool {
+        self.machine.is_saveload_pending()
+    }
+
     fn aux_data(&self) -> &BTreeMap<String, Vec<u8>> {
         &self.aux
     }

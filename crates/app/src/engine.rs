@@ -411,6 +411,16 @@ pub trait Engine {
     /// Restore a bare standard Quetzal *game* save (`.qzl`) by completing the save
     /// instruction's descriptor (v3 branch true / v4+ store 2). Z-machine only.
     fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError>;
+    /// Whether a game-initiated `@save`/`@restore` is currently suspended,
+    /// awaiting host file I/O. Hosts must skip any unconditional host-snapshot
+    /// trigger (e.g. exit auto-save) while this is true — snapshotting mid-
+    /// suspension would capture an un-popped Glulx `@save` call stub, corrupting
+    /// the stack on a later Save State restore. Default `false` (only Glulx's
+    /// stub-based `@save` has this hazard; the Z-machine's descriptor-based
+    /// `@save` does not).
+    fn is_saveload_pending(&self) -> bool {
+        false
+    }
 
     // ── auxiliary persistent data (neutral byte map) ──
     /// The engine's auxiliary persistent data table.
