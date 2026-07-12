@@ -1576,6 +1576,7 @@ impl Machine {
         self.iosys_rock = iosys_rock;
         self.cur_stringtbl = stringtbl;
         self.protect = (paddr, plen);
+        self.pending_fileref = None;
 
         // Heap: rebuild from MAll (absent/empty → inactive).
         self.heap_start = 0;
@@ -1748,6 +1749,7 @@ impl Machine {
         self.heap_blocks.clear();
         self.glk = Model::new();
         self.pending_input = None;
+        self.pending_fileref = None;
         self.halted = false;
         self.protect = (0, 0);
         self.undo_stack.clear();

@@ -149,7 +149,19 @@ fn drive(machine: &mut Machine) -> DriveStop {
             StepResult::NeedChar { .. } => return DriveStop::Input(InputKind::Char),
             StepResult::SaveRequest => return DriveStop::Save,
             StepResult::RestoreRequest => return DriveStop::Restore,
-            StepResult::NeedFilename { usage, fmode } => return DriveStop::Filename { usage, fmode },
+            StepResult::NeedFilename { usage, fmode } => {
+                // SavedGame usage: @save/@restore are host-intercepted (they become
+                // Save/Restore requests served by babelmap's own Save State dialogs),
+                // so a save-file prompt here is redundant AND would split the turn
+                // before @save. Auto-name it and keep driving to the opcode; the
+                // synthesized VFS file is unused (the snapshot is host-side). Only the
+                // real consumers (Transcript / InputRecord / Data) surface a request.
+                if usage & 0x0f == 0x01 {
+                    machine.supply_filename(Some(format!("__prompt_{}__", usage & 0x0f)));
+                } else {
+                    return DriveStop::Filename { usage, fmode };
+                }
+            }
         }
     }
 }
@@ -997,6 +1009,29 @@ mod tests {
         assert_eq!(sess.pending_filename(), None, "request cleared after supply");
         assert!(!r2.quit);
         assert_eq!(sess.pending_input(), InputKind::Line, "resumes at the turn-2 prompt");
+    }
+
+    #[test]
+    fn create_by_prompt_savedgame_auto_resolves_into_save_without_a_filename_modal() {
+        use E::*;
+        const FREF: u32 = 0x410;
+        const SAVE_RES: u32 = 0x414;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt()); // turn 1 prompt
+        // create_by_prompt(usage=SavedGame(1), fmode=Write(1), rock=0) -> mem[FREF].
+        body.extend(enc(0x40, &[Imm(0), Push])); // rock
+        body.extend(enc(0x40, &[Imm(1), Push])); // fmode = Write
+        body.extend(enc(0x40, &[Imm(1), Push])); // usage = SavedGame (topmost)
+        body.extend(enc(0x130, &[Imm(0x62), Imm(3), MemLoad(FREF)]));
+        body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save (host-intercepted)
+        body.extend(line_prompt());
+        body.extend(enc(0x120, &[])); // quit
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let r1 = sess.submit("save");
+        // SavedGame create_by_prompt must NOT surface a filename request; it auto-resolves
+        // in-session so the turn reaches @save and bubbles a Save request in ONE turn.
+        assert_eq!(sess.pending_filename(), None, "SavedGame create_by_prompt does not prompt");
+        assert_eq!(r1.pending_io, Some(PendingIo::Save), "the same turn reaches @save");
     }
 
     #[test]

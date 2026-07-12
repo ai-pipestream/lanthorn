@@ -5124,7 +5124,11 @@ fn resolve_filename_request(
     if let Some(choice) = state.filename_submitted.take() {
         state.pending_filename = None;
         let result = session.resume_filename(choice);
-        return finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        if let Some(io) = state.ingame_io {
+            open_ingame_saves(io, save_dir, ifid, state);
+        }
+        return quit;
     }
     // Modal closed without a submit (Esc) while a request is still pending -> cancel.
     if state.pending_filename.is_some()
@@ -5134,7 +5138,11 @@ fn resolve_filename_request(
         state.pending_filename = None;
         let result = session.resume_filename(None);
         state.push_notice("[create_by_prompt cancelled]");
-        return finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        if let Some(io) = state.ingame_io {
+            open_ingame_saves(io, save_dir, ifid, state);
+        }
+        return quit;
     }
     false
 }

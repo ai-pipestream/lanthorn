@@ -2014,7 +2014,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                                 }
                             }
                             crate::state::PromptKind::CreateFile => {
-                                state.filename_submitted = Some(Some(returned.buffer));
+                                state.filename_submitted = Some(
+                                    if returned.buffer.trim().is_empty() { None } else { Some(returned.buffer) }
+                                );
                             }
                             _ => {
                                 // Saves-manager prompt submitted: store for the caller to act on.
