@@ -722,20 +722,29 @@ impl Machine {
             }
             0x0122 => self.op_restart(),
             0x0123 => {
-                // save L1 S1 — suspend for the host to write a save file. The
-                // saved state must read back S1 == -1 (the "just restored"
-                // sentinel, Glulx spec §2.9), so store -1 *before* the snapshot;
-                // complete_save() then overwrites it with the current-run result
-                // (0 success / 1 failure).
-                let (_, s) = self.read_operands(1, 1)?;
-                self.store(s[0], (-1i32) as u32)?;
+                // save L1 S1 — suspend for the host to write a standard
+                // Glulx-Quetzal save (spec §1.3.2, §1.8.2). Push a call stub for
+                // S1 so PC/FramePtr self-describe the resume point instead of
+                // baking a value in now; complete_save() pops the stub and
+                // stores the current-run result (0 success / 1 failure). A
+                // restore of the saved blob instead pops the stub storing -1
+                // (the "just restored" sentinel, spec §2.9) — see restore_quetzal.
+                let (_l, s) = self.read_operands(1, 1)?; // _l (the stream): Task 3's write-count shim.
+                let (dtype, daddr) = s[0].to_stub();
+                let ret_pc = self.pc;
+                let cur_fp = self.fp as u32;
+                self.push32(dtype)?;
+                self.push32(daddr)?;
+                self.push32(ret_pc)?;
+                self.push32(cur_fp)?;
                 self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false });
                 Ok(())
             }
             0x0124 => {
                 // restore L1 S1 — suspend for the host to read a save file. On
-                // success execution resumes inside the original @save (with its
-                // baked-in -1); on failure complete_restore_failure() stores 1 here.
+                // success execution resumes inside the original @save's call
+                // stub (which stores -1, the "just restored" sentinel); on
+                // failure complete_restore_failure() stores 1 here.
                 let (_, s) = self.read_operands(1, 1)?;
                 self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: true });
                 Ok(())
@@ -1137,7 +1146,16 @@ impl Machine {
         }
         // Discard the current frame (and any pushed values).
         self.sp = self.fp;
-        // Pop the stub: FramePtr, PC, DestAddr, DestType (reverse of the push).
+        self.pop_save_stub_and_store(v)
+    }
+
+    /// Pop a 4-word call stub (`DestType, DestAddr, PC, FramePtr` — reverse of
+    /// the push) off the top of the stack, restore the caller's `fp`/`pc`, and
+    /// store `v` per the stub's destination. Shared tail of [`Machine::return_value`]
+    /// (which first discards the current frame via `sp = fp`) and `@save`'s
+    /// `complete_save` (which must NOT discard a frame — `@save` pushed only a
+    /// stub, not a new one).
+    fn pop_save_stub_and_store(&mut self, v: u32) -> R<()> {
         if self.sp < 16 {
             return Err("corrupt call stub on return".to_string());
         }
@@ -1483,6 +1501,48 @@ impl Machine {
         // Glk: the window/stream model, so a snapshot is self-contained and a
         // cross-session restore (a fresh Machine) reinstalls the display state.
         push_chunk(&mut body, b"Glk ", &self.glk.serialize());
+
+        let mut out = Vec::with_capacity(body.len() + 12);
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(b"IFZS");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Serialize a **spec-conformant standard Glulx-Quetzal** in-game save
+    /// (Glulx spec §1.8): `FORM IFZS` with `IFhd + CMem + Stks + MAll` only — no
+    /// `GReg`, no `Glk ` chunk. Unlike [`Machine::save_state`], PC/FP/SP are not
+    /// serialized as registers; they are recovered on restore from the saved
+    /// stack together with the call stub `@save` pushes for its result operand
+    /// (§1.3.2, §1.8.2). This is the format `@save` hands to the host.
+    pub fn save_quetzal(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+
+        // IFhd: the first 128 bytes of memory (identity).
+        let mut ifhd = Vec::with_capacity(128);
+        for a in 0..128 {
+            ifhd.push(self.mem.read8(a).unwrap_or(0) as u8);
+        }
+        push_chunk(&mut body, b"IFhd", &ifhd);
+
+        // CMem: current memsize, then the RLE-compressed diff against the
+        // original image over [RAMSTART, memsize).
+        push_chunk(&mut body, b"CMem", &self.compress_ram());
+
+        // Stks: the live stack bytes [0, sp), including the pending @save call
+        // stub — restore_quetzal (Task 2) pops it to resume.
+        push_chunk(&mut body, b"Stks", &self.stack[..self.sp]);
+
+        // MAll: heap-start, block count, then (addr, len) per block.
+        let mut mall = Vec::new();
+        mall.extend_from_slice(&self.heap_start.to_be_bytes());
+        mall.extend_from_slice(&(self.heap_blocks.len() as u32).to_be_bytes());
+        for &(a, sz) in &self.heap_blocks {
+            mall.extend_from_slice(&a.to_be_bytes());
+            mall.extend_from_slice(&sz.to_be_bytes());
+        }
+        push_chunk(&mut body, b"MAll", &mall);
 
         let mut out = Vec::with_capacity(body.len() + 12);
         out.extend_from_slice(b"FORM");
@@ -3398,30 +3458,25 @@ impl Machine {
     }
 
     /// Deliver the result of a game-initiated `@save` back to the machine, then
-    /// resume. `ok == true` stores 0 (success) into the `@save`'s S1; `false`
-    /// stores 1 (failure). Glulx spec §2.9. A no-op if no `@save` is pending.
+    /// resume. Pops the call stub `@save` pushed for its S1 operand and stores
+    /// the current-run result: 0 (success) or 1 (failure). Glulx spec §1.8.2,
+    /// §2.9. A no-op if no `@save` is pending.
     pub fn complete_save(&mut self, ok: bool) {
-        if let Some(p) = self.pending_saveload.take() {
-            if p.dest == Dest::Push {
-                // The @save handler already pushed the baked -1 sentinel onto
-                // the stack (so a restored snapshot resumes with it as the
-                // @save "result"). For a Push destination that landed on the
-                // stack rather than in memory/a local, so overwriting it in
-                // place isn't possible: pop it before pushing the current-run
-                // result, or the stack would end with a stray -1 underneath.
-                let _ = self.pop32();
-            }
-            let _ = self.store(p.dest, if ok { 0 } else { 1 });
+        if self.pending_saveload.take().is_some() {
+            let _ = self.pop_save_stub_and_store(if ok { 0 } else { 1 });
         }
     }
 
     /// Complete a game-initiated `@restore` with the supplied save bytes.
     ///
     /// On success the machine state is replaced by the snapshot, whose PC sits just
-    /// after the original `@save` and whose S1 already reads -1 (baked in when the
-    /// `@save` fired) — so execution simply resumes there and the `@restore`'s own
-    /// S1 is discarded. Returns `true` when the state was applied. On failure the
-    /// machine is left as-is and the caller should call `complete_restore_failure`.
+    /// after the original `@save` — so execution simply resumes there and the
+    /// `@restore`'s own S1 is discarded (this is the full host-snapshot path;
+    /// it restores the raw stack byte for byte, including any not-yet-popped
+    /// `@save` call stub, rather than understanding and popping it — see
+    /// `restore_quetzal` for the stub-aware standard-save path). Returns `true`
+    /// when the state was applied. On failure the machine is left as-is and the
+    /// caller should call `complete_restore_failure`.
     pub fn complete_restore_success(&mut self, blob: &[u8]) -> bool {
         match self.restore_state(blob) {
             Ok(()) => {
@@ -4035,14 +4090,15 @@ mod tests {
         .concat();
         let mut m = machine_with_body(&[], body);
 
-        // @save suspends with SaveRequest; before the snapshot S1 reads back -1
-        // (the "just restored" sentinel, Glulx spec §2.9), which the saved state
-        // therefore captures.
+        // @save suspends with SaveRequest without writing S1 at all — it pushes
+        // a call stub instead of baking a value, so S1 still reads fresh RAM (0)
+        // at snapshot time.
         assert_eq!(m.step(), StepResult::SaveRequest);
-        assert_eq!(m.mem.read32(0x110), Some(0xFFFF_FFFF), "@save bakes -1 into S1 pre-snapshot");
+        assert_eq!(m.mem.read32(0x110), Some(0), "@save no longer bakes a value into S1 pre-snapshot");
         let blob = m.save_state();
 
-        // complete_save(true) overwrites S1 with the current-run success code (0).
+        // complete_save(true) pops the stub and stores the current-run success
+        // code (0) into S1.
         m.complete_save(true);
         assert_eq!(m.mem.read32(0x110), Some(0), "complete_save(true) stores 0 into S1");
 
@@ -4054,9 +4110,9 @@ mod tests {
         assert_eq!(m.step(), StepResult::RestoreRequest);
         assert!(m.complete_restore_success(&blob), "restore of our own blob must succeed");
 
-        // State is back to the @save snapshot: S1 reads the -1 sentinel again, the
-        // witness byte reverted, and the pending state cleared.
-        assert_eq!(m.mem.read32(0x110), Some(0xFFFF_FFFF), "restore reverts S1 to the -1 sentinel");
+        // State is back to the @save snapshot: S1 reads its pre-snapshot value
+        // again (0), the witness byte reverted, and the pending state cleared.
+        assert_eq!(m.mem.read32(0x110), Some(0), "restore reverts S1 to its pre-snapshot value");
         assert_eq!(m.mem.read8(0x120), Some(0), "restore reverts the mutated witness byte");
         assert!(m.pending_saveload.is_none(), "restore clears the pending save/restore");
 
@@ -4084,9 +4140,10 @@ mod tests {
 
     #[test]
     fn save_push_dest_leaves_single_result_on_stack() {
-        // @save L1=0 S1->stack; quit. The store destination is Push (mode 0x8),
-        // not Mem/Local, so complete_save must not leave the baked -1 sentinel
-        // sitting under the current-run result.
+        // @save L1=0 S1->stack; quit. The store destination is Push (mode 0x8):
+        // @save pushes a 4-word call stub (16 bytes) while suspended; complete_save
+        // pops it and pushes exactly the current-run result, leaving one net
+        // value on the stack — not the stub underneath it.
         let body = [
             asm::ins(0x0123, &[asm::Op::Zero, asm::Op::Stack]),
             asm::ins(0x120, &[]),
@@ -4094,13 +4151,13 @@ mod tests {
         .concat();
         let mut m = machine_with_body(&[], body);
 
+        let before = m.value_count();
         assert_eq!(m.step(), StepResult::SaveRequest);
-        // @save's bake pushed -1 onto the stack pre-snapshot.
-        assert_eq!(m.value_count(), 1, "the baked -1 sentinel is on the stack");
+        assert_eq!(m.value_count(), before + 4, "a 4-word call stub was pushed for the Push destination");
 
         m.complete_save(true);
-        assert_eq!(m.value_count(), 1, "complete_save must leave exactly one new value on the stack");
-        assert_eq!(m.pop32().unwrap(), 0, "complete_save(true) pushes the success code 0, not a stray -1 underneath");
+        assert_eq!(m.value_count(), before + 1, "complete_save pops the stub and pushes exactly the result");
+        assert_eq!(m.pop32().unwrap(), 0, "complete_save(true) pushes the success code 0, not a stray stub underneath");
     }
 
     #[test]
@@ -4112,48 +4169,44 @@ mod tests {
         .concat();
         let mut m = machine_with_body(&[], body);
 
+        let before = m.value_count();
         assert_eq!(m.step(), StepResult::SaveRequest);
         m.complete_save(false);
-        assert_eq!(m.value_count(), 1, "complete_save must leave exactly one new value on the stack");
-        assert_eq!(m.pop32().unwrap(), 1, "complete_save(false) pushes the failure code 1, not a stray -1 underneath");
+        assert_eq!(m.value_count(), before + 1, "complete_save pops the stub and pushes exactly the result");
+        assert_eq!(m.pop32().unwrap(), 1, "complete_save(false) pushes the failure code 1, not a stray stub underneath");
     }
 
     #[test]
-    fn save_push_dest_restore_resumes_with_minus_one_on_stack() {
+    fn save_push_dest_restore_preserves_raw_stub_bytes() {
         // Mirrors game_save_restore_round_trips_and_stores_results but with a
-        // Push store destination: the snapshot (captured pre-complete_save) must
-        // still resume with -1 pushed as the @save "result", per the restore
-        // convention, even though complete_save's own pop-then-push doesn't
-        // affect the already-captured blob.
+        // Push store destination. save_state()/restore_state() operate BELOW
+        // @save's own semantics: they restore the raw stack bytes exactly as
+        // captured, including a not-yet-popped call stub if the snapshot was
+        // taken mid-suspension. (Only save_quetzal()/restore_quetzal() — Task 2
+        // — understand and pop that stub to resume with the -1 sentinel.)
         let body = [
             asm::ins(0x0123, &[asm::Op::Zero, asm::Op::Stack]),
-            asm::ins(0x40, &[asm::Op::Stack, asm::Op::Mem32(0x110)]), // copy popped @save result -> mem[0x110]
-            asm::ins(0x0124, &[asm::Op::Zero, asm::Op::Mem32(0x118)]),
             asm::ins(0x120, &[]),
         ]
         .concat();
         let mut m = machine_with_body(&[], body);
 
+        let before = m.value_count();
         assert_eq!(m.step(), StepResult::SaveRequest);
+        assert_eq!(m.value_count(), before + 4, "the pushed call stub is 4 words");
         let blob = m.save_state();
 
         m.complete_save(true);
-        assert_eq!(m.value_count(), 1, "current run: exactly one value (the success code) on the stack");
+        assert_eq!(m.pop32().unwrap(), 0, "current run: complete_save(true) pushes the success code 0");
 
-        // Drive the current run forward: the copy op pops the success code (0)
-        // into mem[0x110], confirming the current-run stack wasn't corrupted.
-        assert_eq!(m.step(), StepResult::Continue);
-        assert_eq!(m.mem.read32(0x110), Some(0), "current run observes its own success code 0");
-
-        // Now restore the snapshot captured at @save time (pre-complete_save):
-        // it must resume with the baked -1 still pushed on the stack.
+        // Restore the snapshot captured at @save time (pre-complete_save): the
+        // raw, still-unpopped stub reappears on the stack byte for byte.
         assert!(m.complete_restore_success(&blob), "restore of our own blob must succeed");
-        assert_eq!(m.step(), StepResult::Continue, "resumes just after the original @save, at the copy op");
-        assert_eq!(
-            m.mem.read32(0x110),
-            Some(0xFFFF_FFFF),
-            "restored run observes the baked -1 sentinel as the @save result"
-        );
+        assert_eq!(m.value_count(), before + 4, "restore reinstates the unpopped stub, byte for byte");
+        // The stub's top (last-pushed) word is the caller frame pointer
+        // captured at @save time — 0 for the top-level start frame — not a
+        // semantic -1 sentinel (that convention belongs to restore_quetzal).
+        assert_eq!(m.pop32().unwrap(), 0, "raw stub top word (caller fp), not a semantic sentinel");
     }
 
     #[test]
@@ -5784,6 +5837,30 @@ mod tests {
         assert_eq!(m.value_count(), 2);
         assert_eq!(m.pop32().unwrap(), 0x3333_4444);
         assert_eq!(m.pop32().unwrap(), 0x1111_2222);
+    }
+
+    /// `save_quetzal()` is the standard, spec-conformant bare save (Glulx spec
+    /// §1.8): `IFhd`/`CMem`/`Stks`/`MAll` only — no `GReg`, no `Glk `. `save_state()`
+    /// (the host `.babelmap` snapshot) still carries both.
+    #[test]
+    fn save_quetzal_omits_greg_and_glk_chunks() {
+        fn has_chunk(save: &[u8], id: &[u8; 4]) -> bool {
+            save.windows(4).any(|w| w == id)
+        }
+        let mut m = machine_with_body(&[], vec![]);
+        m.mem.write32(0x100, 0xCAFE_BABE).unwrap();
+
+        let bare = m.save_quetzal();
+        assert!(has_chunk(&bare, b"IFhd"), "save_quetzal carries IFhd");
+        assert!(has_chunk(&bare, b"CMem"), "save_quetzal carries CMem");
+        assert!(has_chunk(&bare, b"Stks"), "save_quetzal carries Stks");
+        assert!(has_chunk(&bare, b"MAll"), "save_quetzal carries MAll");
+        assert!(!has_chunk(&bare, b"GReg"), "save_quetzal omits GReg");
+        assert!(!has_chunk(&bare, b"Glk "), "save_quetzal omits the Glk chunk");
+
+        let full = m.save_state();
+        assert!(has_chunk(&full, b"GReg"), "save_state still carries GReg");
+        assert!(has_chunk(&full, b"Glk "), "save_state still carries the Glk chunk");
     }
 
     #[test]
@@ -7471,6 +7548,28 @@ mod tests {
         m.complete_save(false);
         assert_eq!(m.mem.read32(0x100).unwrap(), 1, "@save failure stores 1 into S1");
         assert_eq!(m.step(), StepResult::Quit, "resumes to the trailing quit");
+    }
+
+    #[test]
+    fn save_pushes_call_stub_and_complete_save_resumes_via_stub() {
+        use asm::Op::{C8, Mem16, Zero};
+        // @save 0, -> mem[0x100]; copy 0x7F -> mem[0x104] (sentinel); quit.
+        let mut body = asm::ins(0x123, &[Zero, Mem16(0x0100)]);
+        body.extend(asm::ins(0x40, &[C8(0x7F), Mem16(0x0104)]));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+
+        let before = m.value_count();
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        assert_eq!(m.value_count(), before + 4, "a 4-word (16-byte) call stub was pushed");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "@save no longer bakes anything into S1 pre-snapshot");
+
+        m.complete_save(true);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "complete_save(true) stores the success code via the popped stub");
+        assert_eq!(m.value_count(), before, "the stub was popped (S1 is Mem, not Push), nothing left on the stack");
+
+        assert_eq!(m.step(), StepResult::Continue, "resumes at the stub's PC, just after @save");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x7F, "execution reached the trailing sentinel");
     }
 
     #[test]
