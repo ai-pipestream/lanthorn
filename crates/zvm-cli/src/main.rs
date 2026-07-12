@@ -310,10 +310,11 @@ struct Args {
     no_more: bool,
     no_timed_input: bool,
     no_sound: bool,
+    data_dir: Option<String>,
 }
 
 fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false };
+    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false, data_dir: None };
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -325,12 +326,36 @@ fn parse_args(argv: &[String]) -> Args {
             "--volume" => i += 1, // also skip the following value token
             "--no-game-colours" => {}
             "-I" | "--interpreter" => i += 1, // also skip the following value token
+            "--data-dir" => { i += 1; if i < argv.len() { a.data_dir = Some(argv[i].clone()); } }
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
             _ => {}
         }
         i += 1;
     }
     a
+}
+
+/// Per-game directory name: the story file's basename (incl. extension),
+/// sanitized to a filesystem-safe token. Empty -> "game".
+fn story_key(story_path: &std::path::Path) -> String {
+    let name = story_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let s: String = name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    if s.is_empty() { "game".to_string() } else { s }
+}
+
+/// Resolve an interactive `@save`/`@restore` filename prompt: a bare name
+/// (no path separator) lands in `game_dir` with a `.qzl` extension; a
+/// path-bearing value is honored verbatim.
+fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::PathBuf {
+    let t = input.trim();
+    if t.contains('/') || t.contains('\\') {
+        std::path::PathBuf::from(t)
+    } else {
+        let name = if t.ends_with(".qzl") { t.to_string() } else { format!("{t}.qzl") };
+        game_dir.join(name)
+    }
 }
 
 /// Returns `true` (honour game colours) unless `--no-game-colours` is present.
@@ -485,10 +510,13 @@ fn aux_preload(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
     }
 }
 
-/// Flush aux_data to the IFID-keyed aux file when dirty; clear the flag regardless.
+/// Flush aux_data to the per-game aux file when dirty; clear the flag regardless.
 fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
     if no_aux || !machine.aux_dirty {
         return;
+    }
+    if let Some(dir) = aux_file.parent() {
+        let _ = fs::create_dir_all(dir);
     }
     if let Err(e) = fs::write(aux_file, aux::encode_aux(&machine.aux_data)) {
         eprintln!("zvm: warning: aux save to {} failed: {}", aux_file.display(), e);
@@ -743,9 +771,13 @@ fn main() {
     // Keep the original bytes for Restart.
     let original_bytes = story_bytes.clone();
 
-    // Compute the IFID once; the aux file lives next to the story, keyed by IFID.
-    let ifid = zvm::ifid::compute_ifid(&original_bytes);
-    let aux_file = aux::aux_path(&story_path, &ifid);
+    // Per-game directory: base (--data-dir override, else the story's own
+    // directory) joined with the sanitized story filename.
+    let base = args.data_dir.as_deref().map(std::path::PathBuf::from)
+        .unwrap_or_else(|| story_path.parent().filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")));
+    let game_dir = base.join(story_key(&story_path));
+    let aux_file = aux::aux_path(&game_dir);
 
     let stdout_is_tty = io::stdout().is_terminal();
     let stdin_is_tty = io::stdin().is_terminal();
@@ -999,10 +1031,14 @@ fn main() {
             StepResult::SaveRequest => {
                 let filename = prompt_and_read_line("\nSave to file: ");
                 let filename = filename.trim();
+                let path = resolve_save_input(filename, &game_dir);
+                if let Some(dir) = path.parent() {
+                    let _ = fs::create_dir_all(dir);
+                }
                 let save_data = machine.save_quetzal();
-                match fs::write(filename, &save_data) {
+                match fs::write(&path, &save_data) {
                     Ok(()) => {
-                        println!("Saved to '{filename}'.");
+                        println!("Saved to '{}'.", path.display());
                         machine.complete_save(true);
                     }
                     Err(e) => {
@@ -1015,7 +1051,8 @@ fn main() {
             StepResult::RestoreRequest => {
                 let filename = prompt_and_read_line("\nRestore from file: ");
                 let filename = filename.trim();
-                match fs::read(filename) {
+                let path = resolve_save_input(filename, &game_dir);
+                match fs::read(&path) {
                     Ok(data) => match machine.complete_restore_success(&data) {
                         Ok(()) => {} // restored; @save descriptor completed forward
                         Err(e) => {
@@ -1101,6 +1138,24 @@ mod arg_tests {
     #[test]
     fn parse_interpreter_bad_value_is_none() {
         assert_eq!(parse_interpreter(&["-I".into(), "notanumber".into(), "story.z5".into()]), None);
+    }
+
+    #[test]
+    fn story_key_keeps_extension_and_sanitizes() {
+        use std::path::Path;
+        assert_eq!(story_key(Path::new("/g/Zork1.z5")), "Zork1.z5");
+        assert_ne!(story_key(Path::new("/g/Zork1.z5")), story_key(Path::new("/g/Zork1.gblorb")));
+        assert_eq!(story_key(Path::new("/g/a b?.z5")), "a_b_.z5");
+        assert_eq!(story_key(Path::new("")), "game");
+    }
+
+    #[test]
+    fn resolve_save_input_bare_vs_path() {
+        use std::path::{Path, PathBuf};
+        let gd = Path::new("/data/Zork1.z5");
+        assert_eq!(resolve_save_input("quick", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
+        assert_eq!(resolve_save_input("quick.qzl", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
+        assert_eq!(resolve_save_input("/tmp/foo.qzl", gd), PathBuf::from("/tmp/foo.qzl"));
     }
 }
 

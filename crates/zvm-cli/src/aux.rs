@@ -14,20 +14,9 @@ pub enum AuxError {
     Truncated,
 }
 
-/// Replace any character that is not ASCII-alphanumeric / `-` / `_` with `_`.
-pub fn sanitize_ifid(ifid: &str) -> String {
-    ifid.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect()
-}
-
-/// Aux file path: the story file's directory + the sanitized IFID + `.aux`.
-pub fn aux_path(story_path: &Path, ifid: &str) -> PathBuf {
-    let dir = story_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    dir.join(format!("{}.aux", sanitize_ifid(ifid)))
+/// Aux file path: `default.aux` inside the per-game directory.
+pub fn aux_path(game_dir: &Path) -> PathBuf {
+    game_dir.join("default.aux")
 }
 
 /// Encode the aux-table map as the length-prefixed `ZAUX` v1 format.
@@ -81,18 +70,20 @@ pub fn decode_aux(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, AuxError> {
 }
 
 #[cfg(test)]
-mod tests {
+mod path_tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
     #[test]
-    fn aux_path_uses_ifid_in_story_dir() {
-        assert_eq!(
-            aux_path(Path::new("/g/story.z5"), "ZCODE-1-840726-ABCD"),
-            Path::new("/g/ZCODE-1-840726-ABCD.aux")
-        );
-        // unsafe characters in an IFID are sanitized
-        assert_eq!(sanitize_ifid("ZCODE-1-../x"), "ZCODE-1-___x");
+    fn aux_path_is_default_aux_in_the_game_dir() {
+        let gd = Path::new("/data/Zork1.z5");
+        assert_eq!(aux_path(gd), PathBuf::from("/data/Zork1.z5/default.aux"));
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn codec_round_trips() {
