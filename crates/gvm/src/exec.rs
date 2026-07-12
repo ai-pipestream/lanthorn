@@ -2982,7 +2982,13 @@ impl Machine {
                 self.glk.take_hyperlink_request(a(0));
                 0
             }
-            0x0150 => 0, // glk_set_echo_line_event: best-effort no-op
+            0x0150 => {
+                // glk_set_echo_line_event(win, val): record the window's echo flag
+                // so scrolling-terminal hosts can avoid double-echoing a game that
+                // echoes its own input line.
+                self.glk.set_window_echo_line(a(0), a(1) != 0);
+                0
+            }
             0x0151 => {
                 // glk_set_terminators_line_event(win, keycodes, count)
                 self.glk_set_terminators(a(0), a(1), a(2))?;
@@ -3662,6 +3668,16 @@ impl Machine {
     /// via [`Machine::deliver_hyperlink`].
     pub fn hyperlink_requested(&self, win: u32) -> bool {
         self.glk.hyperlink_requested(win)
+    }
+
+    /// The line-echo flag of window `win` (`glk_set_echo_line_event`; default true).
+    pub fn window_line_echo(&self, win: u32) -> bool {
+        self.glk.window_echo_line(win)
+    }
+
+    /// The resolved `GlkStyle::Input` colour for window `win` (for host input echo).
+    pub fn window_input_colour(&self, win: u32) -> crate::glk::StyleColour {
+        self.glk.window_input_colour(win)
     }
 
     /// Recompute the window layout from the backend's (freshly updated) screen
@@ -7249,6 +7265,20 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert!(m.diagnostics.is_empty(), "accepted as best-effort: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_set_echo_line_event_toggles_the_window_flag() {
+        use asm::Op::{C8, Zero};
+        // A fresh window defaults to echo-on.
+        let mut on = glk_call(0x150, &[C8(1), C8(0)], Zero); // set_echo_line_event(win=1, 0)
+        on.extend(asm::ins(0x120, &[])); // quit
+        let m = run_program(on);
+        assert!(!m.window_line_echo(1), "echo turned off for window 1");
+
+        // A window that never set the flag reports the default (true).
+        let base = run_program(asm::ins(0x120, &[]));
+        assert!(base.window_line_echo(1), "default echo is on");
     }
 
     // ── Task 4 (glulxercise conformance fixes) ────────────────────────────────

@@ -708,6 +708,10 @@ struct Window {
     /// (`glk_set_terminators_line_event`); persists across line requests until
     /// reset. Empty = Enter-only (the default).
     terminators: Vec<u32>,
+    /// Whether completed line input is echoed (`glk_set_echo_line_event`).
+    /// Default true (Glk spec §4.2). Hosts that echo typed input consult this;
+    /// a game that turns it off takes responsibility for echoing itself.
+    echo_line: bool,
     // Pair-window fields (all 0 for leaf windows):
     child1: u32,
     child2: u32,
@@ -954,6 +958,7 @@ impl Model {
             mouse_req: false,
             hyperlink_req: false,
             terminators: Vec::new(),
+            echo_line: true,
             child1: 0,
             child2: 0,
             key: 0,
@@ -1915,6 +1920,27 @@ impl Model {
         self.win(win).map(|w| w.terminators.contains(&key)).unwrap_or(false)
     }
 
+    /// Set the window's line-echo flag (`glk_set_echo_line_event`). No-op for an
+    /// invalid window id.
+    pub fn set_window_echo_line(&mut self, win: u32, on: bool) {
+        if let Some(w) = self.win_mut(win) {
+            w.echo_line = on;
+        }
+    }
+
+    /// The window's line-echo flag (default true; unknown window → true).
+    pub fn window_echo_line(&self, win: u32) -> bool {
+        self.win(win).map(|w| w.echo_line).unwrap_or(true)
+    }
+
+    /// The resolved colour for `GlkStyle::Input` in this window (its wintype's
+    /// Input style hint); falls back to a text-buffer Input colour for an unknown
+    /// window. Used by scrolling-terminal hosts to colour the input echo.
+    pub fn window_input_colour(&self, win: u32) -> StyleColour {
+        let wt = self.win(win).map(|w| w.wintype).unwrap_or(WinType::TextBuffer);
+        self.style_colour(wt, GlkStyle::Input)
+    }
+
     /// The first window (lowest id) with a pending line request: `(win, unicode)`.
     pub fn first_line_request(&self) -> Option<(u32, bool)> {
         self.windows
@@ -2130,7 +2156,7 @@ impl Model {
             let hyperlink_req = r.u32()? != 0;
             windows.push(Some(Window {
                 id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
-                hyperlink_req, terminators: Vec::new(), child1, child2, key, method, size,
+                hyperlink_req, terminators: Vec::new(), echo_line: true, child1, child2, key, method, size,
             }));
         }
 
