@@ -2684,22 +2684,8 @@ fn main() {
                         code => match quit_dialog_key_focused(code, state.dialog_focus) {
                             QuitDialogAction::Save => {
                                 state.quit_dialog = false;
-                                {
-                                    let meta = app::archive::Meta {
-                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
-                                        ifid: Some(ifid.clone()),
-                                        name: None,
-                                        turns: state.turns,
-                                        saved_at: format_rfc3339(
-                                            std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_secs())
-                                                .unwrap_or(0),
-                                        ),
-                                    };
-                                    let _ = save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
-                                    break;
-                                }
+                                quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
+                                break;
                             }
                             QuitDialogAction::Quit => {
                                 break;
@@ -2723,22 +2709,8 @@ fn main() {
                             let in_dialog = qd.area.contains(pt);
                             if in_save {
                                 state.quit_dialog = false;
-                                {
-                                    let meta = app::archive::Meta {
-                                        format_version: app::archive::CURRENT_FORMAT_VERSION,
-                                        ifid: Some(ifid.clone()),
-                                        name: None,
-                                        turns: state.turns,
-                                        saved_at: format_rfc3339(
-                                            std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .map(|d| d.as_secs())
-                                                .unwrap_or(0),
-                                        ),
-                                    };
-                                    let _ = save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
-                                    break;
-                                }
+                                quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
+                                break;
                             } else if in_quit {
                                 break;
                             } else if in_close || in_cancel {
@@ -4082,6 +4054,39 @@ fn exit_auto_save(
             eprintln!("babelmap: warning: could not save to {}: {}", arc_file.display(), e);
         }
     }
+}
+
+/// Quit-dialog "Save State & quit" host snapshot, extracted from the quit-dialog
+/// keyboard and mouse handlers so the guard below is unit-testable.
+/// Skip while a Glulx in-game @save/@restore is suspended, awaiting host I/O:
+/// snapshotting mid-suspension would capture the un-popped @save call stub, and
+/// restore_state never pops it -> a corrupted stack on a later Save State
+/// restore (SQ-0283 carry-forward fix). The in-game save the player was already
+/// making is the relevant persistence in that case; the dialog still proceeds
+/// to quit either way.
+fn quit_dialog_save(
+    session: &dyn Engine,
+    mapper: &Mapper,
+    state: &app::state::AppState,
+    ifid: &str,
+    arc_file: &std::path::Path,
+) {
+    if session.is_saveload_pending() {
+        return;
+    }
+    let meta = app::archive::Meta {
+        format_version: app::archive::CURRENT_FORMAT_VERSION,
+        ifid: Some(ifid.to_string()),
+        name: None,
+        turns: state.turns,
+        saved_at: format_rfc3339(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        ),
+    };
+    let _ = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
 }
 
 // ── Pending config-write flush ────────────────────────────────────────────────
@@ -6107,6 +6112,27 @@ mod tests {
         super::exit_auto_save(&engine, &mapper, &state, "ZCODE-1", &arc_file);
 
         assert!(!arc_file.exists(), "exit auto-save must not write while a save/restore is pending");
+        let _ = std::fs::remove_file(&arc_file);
+    }
+
+    #[test]
+    fn quit_dialog_save_skips_snapshot_while_a_save_is_pending() {
+        // SQ-0283 review fix: the quit-dialog "Save State & quit" path was an
+        // unguarded save_state() reachable while a Glulx in-game @save is
+        // suspended (Ctrl+Q wins even over an open SaveAs prompt). Mirrors
+        // exit_auto_save_skips_snapshot_while_a_save_is_pending above but for the
+        // extracted quit_dialog_save helper, which has no auto_save gate.
+        let engine = SaveloadPendingEngine;
+        let state = app::state::AppState::default();
+        let mapper = mapper::mapper::Mapper::default();
+        let arc_file = std::env::temp_dir().join(format!("bm-t6-quit-pending-{}.babelmap", std::process::id()));
+        let _ = std::fs::remove_file(&arc_file);
+
+        // Must not panic (save_state()/aux_data() are unreachable!()) and must not
+        // write the archive file.
+        super::quit_dialog_save(&engine, &mapper, &state, "ZCODE-1", &arc_file);
+
+        assert!(!arc_file.exists(), "quit-dialog save must not write while a save/restore is pending");
         let _ = std::fs::remove_file(&arc_file);
     }
 
