@@ -123,12 +123,6 @@ fn sgr_open(style: GlkStyle, colour: StyleColour, honor: bool) -> String {
     s
 }
 
-/// Opening SGR for the Input style + resolved colour, for a host echoing typed
-/// input (mirrors zvm-cli drawing its echo in the game's input style/colour).
-pub fn sgr_input(colour: StyleColour, honor: bool) -> String {
-    sgr_open(GlkStyle::Input, colour, honor)
-}
-
 /// Wrap `s` in SGR for `style` + `colour` when on a TTY and something is set.
 fn style_wrap(s: &str, style: GlkStyle, colour: StyleColour, honor: bool, tty: bool) -> String {
     let open = sgr_open(style, colour, honor);
@@ -217,8 +211,15 @@ pub struct TerminalBackend {
     grid_cells: Vec<Vec<(char, GlkStyle, StyleColour)>>,
     /// Whether the ANSI scroll region is currently in effect.
     region_set: bool,
+    /// The `(top, bottom)` bounds of the scroll region as last emitted. Used to
+    /// avoid re-emitting `enter_region` (which parks the cursor at the bottom-left)
+    /// on an unchanged re-layout, which would yank the cursor to column 0 mid-line.
+    region_bounds: (u32, u32),
     /// Whether the screen has been initialized (cleared) once.
     started: bool,
+    /// A command just read via line input, awaiting deferred echo resolution on
+    /// the next buffer output (SQ-0282). `None` when no input echo is pending.
+    pending_echo: Option<String>,
     /// Emit terminal-detection diagnostics to stderr (env `BABELMAP_DEBUG_TERM`).
     debug: bool,
 }
@@ -246,7 +247,9 @@ impl TerminalBackend {
             grid_rect: Rect::default(),
             grid_cells: Vec::new(),
             region_set: false,
+            region_bounds: (0, 0),
             started: false,
+            pending_echo: None,
             debug,
         }
     }
@@ -275,7 +278,9 @@ impl TerminalBackend {
             grid_rect: Rect::default(),
             grid_cells: Vec::new(),
             region_set: false,
+            region_bounds: (0, 0),
             started: false,
+            pending_echo: None,
             debug: false,
         }
     }
@@ -339,12 +344,35 @@ impl TerminalBackend {
     /// Flush buffered output to the display **without** tearing down the scroll
     /// region (used before reading input, so the prompt is visible mid-run).
     pub fn flush_out(&mut self) {
+        // A line input that produced no reprinting buffer output before the next
+        // prompt still needs its command echoed, or it would vanish (SQ-0282).
+        if let Some(cmd) = self.pending_echo.take() {
+            self.emit_library_echo(&cmd);
+        }
         // Emit any word still sitting in the pending buffer before blocking on
         // input — without this, the last word before a prompt would be invisible.
         if !self.pending_word.is_empty() {
             self.flush_pending_word();
         }
         let _ = self.out.flush();
+    }
+
+    /// Arm a deferred echo of `cmd` (a just-read line-input command) to be resolved
+    /// on the next buffer output (SQ-0282). No-op when stdout is not a TTY (piped
+    /// output carries no echo, keeping it byte-identical).
+    pub fn arm_input_echo(&mut self, cmd: String) {
+        if self.is_tty {
+            self.pending_echo = Some(cmd);
+        }
+    }
+
+    /// Echo `cmd` in the Input style followed by a newline — the library echo a
+    /// game expects when it does not reprint the command itself.
+    fn emit_library_echo(&mut self, cmd: &str) {
+        let text = style_wrap(cmd, GlkStyle::Input, StyleColour::default(), self.honor, self.is_tty);
+        let _ = self.out.write_all(text.as_bytes());
+        let _ = self.out.write_all(b"\n");
+        self.current_col = 0;
     }
 
     /// Redraw the pinned grid (TTY only).
@@ -399,7 +427,17 @@ impl GlkBackend for TerminalBackend {
                     self.started = true;
                 }
                 let top = rect.height + 1;
-                let _ = self.out.write_all(enter_region(top, self.rows).as_bytes());
+                let bounds = (top, self.rows);
+                // Only (re)enter the scroll region when its bounds actually change.
+                // enter_region parks the cursor at the region's bottom-left, so
+                // re-emitting it on an unchanged re-layout would yank the cursor to
+                // column 0 mid-line — which is why the first prompt landed at the
+                // start of the line (CM re-lays-out its windows right before input).
+                if self.region_bounds != bounds {
+                    let _ = self.out.write_all(enter_region(top, self.rows).as_bytes());
+                    self.region_bounds = bounds;
+                    self.current_col = 0; // cursor now parked at the region's bottom-left
+                }
                 self.region_set = true;
             }
         }
@@ -423,6 +461,17 @@ impl GlkBackend for TerminalBackend {
         if !self.is_tty {
             let _ = self.out.write_all(s.as_bytes());
             return;
+        }
+
+        // Deferred input echo (SQ-0282): the first buffer output after a line input
+        // resolves it. If the game reprints the command itself in style_Input (e.g.
+        // Counterfeit Monkey) let that stand; otherwise (e.g. sensory, which relies
+        // on library echo gvm doesn't implement) echo the command here so it isn't
+        // lost. Cleared either way so it fires only once per input.
+        if let Some(cmd) = self.pending_echo.take() {
+            if style != GlkStyle::Input {
+                self.emit_library_echo(&cmd);
+            }
         }
 
         // TTY: buffer chars into a pending word. Whole words are placed at a
@@ -507,6 +556,7 @@ impl GlkBackend for TerminalBackend {
             let _ = self.out.write_all(leave_region().as_bytes());
             let _ = write!(self.out, "\x1b[{};1H", self.rows);
             self.region_set = false;
+            self.region_bounds = (0, 0);
         }
         // Cursor is now at the start of a new line; reset column tracking.
         self.current_col = 0;
@@ -857,6 +907,43 @@ mod tests {
         assert_eq!(super::page_bg_escape(Some((1, 2, 3)), Some((1, 2, 3))), None);
         assert_eq!(super::page_bg_escape(Some((9, 9, 9)), Some((1, 2, 3))), Some("\x1b]11;#090909\x07".into()));
         assert_eq!(super::page_bg_escape(None, Some((1, 2, 3))), Some("\x1b]111\x07".into()));
+    }
+
+    // ── deferred input echo (SQ-0282) ─────────────────────────────────────────
+
+    #[test]
+    fn deferred_echo_emitted_when_game_does_not_reprint() {
+        // sensory case: the turn's first output is Normal-styled, not a command
+        // reprint, so the backend must echo the command itself (library echo).
+        let (mut b, buf) = backend(true);
+        b.arm_input_echo("look".into());
+        b.put_text_attr(1, GlkStyle::Normal, StyleColour::default(), 0, "You see nothing.");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains("look"), "library echo emitted: {out:?}");
+        assert!(out.contains("You see nothing."), "game output still rendered: {out:?}");
+    }
+
+    #[test]
+    fn deferred_echo_suppressed_when_game_reprints_in_input_style() {
+        // CM case: the game reprints the command in Input style, so the backend
+        // must NOT add a second copy.
+        let (mut b, buf) = backend(true);
+        b.arm_input_echo("look".into());
+        b.put_text_attr(1, GlkStyle::Input, StyleColour::default(), 0, "look");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert_eq!(out.matches("look").count(), 1, "no duplicate command echo: {out:?}");
+    }
+
+    #[test]
+    fn deferred_echo_falls_back_on_flush_when_no_buffer_output() {
+        // A turn that produces no buffer output before the next prompt must still
+        // echo the command (via flush_out) or it would vanish.
+        let (mut b, buf) = backend(true);
+        b.arm_input_echo("wait".into());
+        b.flush_out();
+        assert!(out_string(&buf).contains("wait"), "command echoed on flush");
     }
 
     #[test]

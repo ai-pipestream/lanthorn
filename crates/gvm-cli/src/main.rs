@@ -84,22 +84,39 @@ fn read_line_stdin() -> (String, u32) {
     (line, 0)
 }
 
-/// Read a line of input in RAW mode, echoing typed characters manually. `echo`
-/// is `Some(sgr)` to echo (the SGR prefix colours it; empty string = plain echo)
-/// or `None` to read WITHOUT echoing — used when the game has disabled Glk line
-/// echo (`glk_set_echo_line_event(win, 0)`), so a self-echoing game is not shown
-/// twice on a scrolling terminal. Falls back to cooked line input on non-TTY
-/// stdin (piped input has no terminal echo, so it is already correct).
-/// The terminator is always 0 (normal Enter), matching the prior cooked path.
-fn read_line_raw(is_tty: bool, echo: Option<&str>) -> (String, u32) {
+/// How [`read_line_raw`] should echo the typed line.
+enum LineEcho {
+    /// Glk line echo is ON: echo the input (opened with this SGR, empty = plain)
+    /// and leave it on screen, ending the line with CR/LF. The library owns the
+    /// echo; the game does not repeat it.
+    Shown(String),
+    /// Glk line echo is OFF (`glk_set_echo_line_event(win, 0)`): the game echoes
+    /// the command itself. Show the input live (plain) so the player isn't typing
+    /// blind, then ERASE exactly what we echoed on Enter — so the game's own echo
+    /// is the only copy that survives on a scrolling terminal (SQ-0282). Mirrors a
+    /// redrawable Glk library, which removes echo-off input once the line ends.
+    EraseOnEnter,
+}
+
+/// Read a line of input in RAW mode, echoing typed characters manually so the
+/// terminal's cooked echo can't double a self-echoing game (SQ-0275). `echo`
+/// selects library-echo (kept on screen) vs echo-off (shown live, then erased on
+/// Enter — SQ-0282). Falls back to cooked line input on non-TTY stdin (piped
+/// input has no terminal echo, so it is already correct). The terminator is
+/// always 0 (normal Enter), matching the prior cooked path.
+fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
     if !is_tty {
         return read_line_stdin(); // (String, 0)
     }
-    let echoing = echo.is_some();
-    let sgr = echo.unwrap_or("");
+    let (sgr, erase_after): (&str, bool) = match &echo {
+        LineEcho::Shown(s) => (s.as_str(), false),
+        LineEcho::EraseOnEnter => ("", true),
+    };
     let _ = terminal::enable_raw_mode();
     let mut buf = String::new();
-    if echoing && !sgr.is_empty() {
+    // Count of visible characters we echoed, so EraseOnEnter can wipe exactly them.
+    let mut echoed: usize = 0;
+    if !sgr.is_empty() {
         print!("{sgr}");
         let _ = io::Write::flush(&mut io::stdout());
     }
@@ -111,7 +128,7 @@ fn read_line_raw(is_tty: bool, echo: Option<&str>) -> (String, u32) {
                 KeyCode::Char('c') | KeyCode::Char('d')
                     if modifiers.contains(KeyModifiers::CONTROL) =>
                 {
-                    if echoing && !sgr.is_empty() { print!("\x1b[0m"); }
+                    if !sgr.is_empty() { print!("\x1b[0m"); }
                     print!("\r\n");
                     let _ = io::Write::flush(&mut io::stdout());
                     let _ = terminal::disable_raw_mode();
@@ -123,14 +140,14 @@ fn read_line_raw(is_tty: bool, echo: Option<&str>) -> (String, u32) {
                 }
                 KeyCode::Char(c) => {
                     buf.push(c);
-                    if echoing {
-                        print!("{c}");
-                        let _ = io::Write::flush(&mut io::stdout());
-                    }
+                    print!("{c}");
+                    echoed += 1;
+                    let _ = io::Write::flush(&mut io::stdout());
                 }
                 KeyCode::Backspace => {
-                    if buf.pop().is_some() && echoing {
+                    if buf.pop().is_some() {
                         print!("\x08 \x08");
+                        echoed = echoed.saturating_sub(1);
                         let _ = io::Write::flush(&mut io::stdout());
                     }
                 }
@@ -140,9 +157,18 @@ fn read_line_raw(is_tty: bool, echo: Option<&str>) -> (String, u32) {
             _ => {}
         }
     }
-    if echoing && !sgr.is_empty() { print!("\x1b[0m"); }
+    if !sgr.is_empty() { print!("\x1b[0m"); }
+    if erase_after {
+        // Wipe exactly the characters we echoed so the game's own echo is the only
+        // copy; stay on the same line (no CR/LF) so the game's output continues
+        // from wherever its prompt left the cursor.
+        for _ in 0..echoed {
+            print!("\x08 \x08");
+        }
+    } else {
+        print!("\r\n"); // raw mode does not translate Enter to CRLF
+    }
     let _ = terminal::disable_raw_mode();
-    print!("\r\n"); // raw mode does not translate Enter to CRLF
     let _ = io::Write::flush(&mut io::stdout());
     (buf, 0)
 }
@@ -209,7 +235,7 @@ fn drive(
     honor: bool,
     stdout_is_tty: bool,
     mut before_input: impl FnMut(&mut Machine),
-    mut read_line: impl FnMut(Option<&str>) -> (String, u32),
+    mut read_line: impl FnMut(LineEcho) -> (String, u32),
     mut read_char: impl FnMut() -> u32,
 ) {
     // Page background: reflect the game's Normal-style bg onto the terminal's
@@ -229,23 +255,23 @@ fn drive(
         match machine.step() {
             StepResult::Continue => {}
             StepResult::Quit => break,
-            StepResult::NeedLine { win } => {
+            StepResult::NeedLine { .. } => {
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
-                // Echo typed input ourselves (raw mode), UNLESS the game disabled
-                // Glk line echo — then it echoes its own command and we must not,
-                // or a scrolling terminal shows it twice (SQ-0275).
-                let echo: Option<String> = if machine.window_line_echo(win) {
-                    Some(if honor {
-                        glk_term::sgr_input(machine.window_input_colour(win), true)
-                    } else {
-                        String::new()
-                    })
-                } else {
-                    None
-                };
-                let (line, terminator) = read_line(echo.as_deref());
-                machine.supply_line_terminated(line.trim_end_matches(['\n', '\r']), terminator);
+                // Show live typing in raw mode and erase it on Enter, then arm a
+                // deferred echo: if the game reprints the command itself in
+                // style_Input (Inform 7 / Counterfeit Monkey) that stands; otherwise
+                // the backend echoes it so it isn't lost (e.g. sensory, which relies
+                // on library echo gvm does not implement). See
+                // TerminalBackend::arm_input_echo (SQ-0275 + SQ-0282).
+                let (line, terminator) = read_line(LineEcho::EraseOnEnter);
+                let cmd = line.trim_end_matches(['\n', '\r']);
+                if let Some(t) =
+                    machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>()
+                {
+                    t.arm_input_echo(cmd.to_string());
+                }
+                machine.supply_line_terminated(cmd, terminator);
             }
             StepResult::NeedChar { .. } => {
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
@@ -264,7 +290,7 @@ fn drive(
                 } else {
                     before_input(machine);
                     eprint!("Filename (blank to cancel): ");
-                    let (line, _) = read_line(Some(""));
+                    let (line, _) = read_line(LineEcho::Shown(String::new()));
                     let name = line.trim_end_matches(['\n', '\r']);
                     machine.supply_filename(if name.is_empty() { None } else { Some(name.to_string()) });
                 }
