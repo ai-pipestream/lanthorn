@@ -1591,8 +1591,10 @@ impl Machine {
     pub fn restore_state(&mut self, data: &[u8]) -> Result<(), GError> {
         let chunks = parse_ifzs(data)?;
         let find = |id: &[u8; 4]| chunks.iter().find(|(cid, _)| cid == id).map(|(_, d)| *d);
-        let cmem = find(b"CMem").ok_or_else(|| GError::BadSave("missing CMem chunk".into()))?;
-        let stks = find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
+        // Preserve the original missing-chunk error precedence (CMem, Stks,
+        // GReg) even though the shared core re-derives CMem/Stks itself.
+        find(b"CMem").ok_or_else(|| GError::BadSave("missing CMem chunk".into()))?;
+        find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
         let greg = find(b"GReg").ok_or_else(|| GError::BadSave("missing GReg chunk".into()))?;
         if greg.len() != 32 {
             return Err(GError::BadSave("GReg chunk has wrong length".into()));
@@ -1602,34 +1604,8 @@ impl Machine {
         let (iosys_mode, iosys_rock, stringtbl) = (g(12), g(16), g(20));
         let (paddr, plen) = (g(24), g(28));
 
-        // Snapshot the currently-protected bytes (preserved across restore).
-        let (cur_paddr, cur_plen) = self.protect;
-        let mut protected: Vec<(u32, u8)> = Vec::new();
-        for a in cur_paddr..cur_paddr.saturating_add(cur_plen) {
-            if let Some(b) = self.mem.read8(a) {
-                protected.push((a, b as u8));
-            }
-        }
+        self.restore_vm_core(&chunks, Some(sp))?;
 
-        // Reset RAM to the original image and apply the saved CMem diff.
-        self.decompress_ram(cmem)?;
-
-        // Re-impose the protected bytes' pre-restore values.
-        for (a, b) in protected {
-            if a >= self.mem.ramstart() && a < self.mem.mem_size() {
-                self.mem.write_byte_raw(a, b);
-            }
-        }
-
-        // Stack: the Stks bytes must fit the buffer and match the saved sp.
-        if stks.len() != sp as usize {
-            return Err(GError::BadSave("Stks length disagrees with sp".into()));
-        }
-        if sp as usize > self.stack.len() {
-            return Err(GError::BadSave("saved sp exceeds the stack size".into()));
-        }
-        self.stack[..sp as usize].copy_from_slice(stks);
-        self.sp = sp as usize;
         self.fp = fp as usize;
         self.pc = pc;
         self.iosys_mode = iosys_mode;
@@ -1637,13 +1613,6 @@ impl Machine {
         self.cur_stringtbl = stringtbl;
         self.protect = (paddr, plen);
         self.pending_fileref = None;
-
-        // Heap: rebuild from MAll (absent/empty → inactive).
-        self.heap_start = 0;
-        self.heap_blocks.clear();
-        if let Some(mall) = find(b"MAll") {
-            self.restore_heap(mall)?;
-        }
 
         // Recompute the current-frame cache from the restored stack.
         self.reload_frame_meta().map_err(GError::BadSave)?;
@@ -1655,6 +1624,94 @@ impl Machine {
             Some(d) => Model::deserialize(d).map_err(GError::BadSave)?,
             None => Model::new(),
         };
+        Ok(())
+    }
+
+    /// Restore VM state from a [`Machine::save_quetzal`] blob (a standard,
+    /// spec-conformant Glulx-Quetzal save — Glulx spec §1.8). Restores
+    /// RAM/stack/heap exactly like [`Machine::restore_state`], then **pops the
+    /// `@save` call stub off the restored stack and stores the "just restored"
+    /// sentinel `-1` into it** (§1.8.2, §2.9) — recovering PC/FramePtr from the
+    /// stub rather than from a serialized register, since the bare format
+    /// carries none.
+    ///
+    /// Per §1.8.5, this leaves all other live interpreter state **untouched**:
+    /// the Glk model (windows/streams/VFS), `iosys_mode`/`iosys_rock`, the
+    /// current string-decoding table, and the protect range keep their current
+    /// live values. This is the correct semantics for a mid-session in-game
+    /// `@restore`; contrast [`Machine::restore_state`], which *replaces* all of
+    /// that from `GReg`/`Glk ` (correct only for a cold, cross-session Save
+    /// State restore into a fresh machine).
+    pub fn restore_quetzal(&mut self, blob: &[u8]) -> Result<(), GError> {
+        let chunks = parse_ifzs(blob)?;
+        self.restore_vm_core(&chunks, None)?;
+        self.pop_save_stub_and_store((-1i32) as u32).map_err(GError::BadSave)
+    }
+
+    /// Shared memory/stack/heap restore core for both [`Machine::restore_state`]
+    /// and [`Machine::restore_quetzal`]: resets RAM to the original image and
+    /// applies the saved `CMem` (RLE diff, spec §1.8) or `UMem` (literal, no
+    /// diff) chunk — honoring the *live* protect range so protected bytes keep
+    /// their pre-restore values — then loads the stack from `Stks` and rebuilds
+    /// the heap from `MAll`. Does **not** touch fp/pc/iosys/stringtbl/protect/Glk;
+    /// callers apply those from their own register source (or leave them live)
+    /// afterward, and callers own `reload_frame_meta()`/the stub pop once fp is
+    /// known.
+    ///
+    /// `expected_sp`, when `Some`, cross-checks the `Stks` chunk's length against
+    /// a register-carried `sp` the way `restore_state`'s `GReg` does;
+    /// `restore_quetzal` has no such register (sp is simply the `Stks` length)
+    /// and passes `None`.
+    fn restore_vm_core(&mut self, chunks: &IfzsChunks, expected_sp: Option<u32>) -> Result<(), GError> {
+        let find = |id: &[u8; 4]| chunks.iter().find(|(cid, _)| cid == id).map(|(_, d)| *d);
+        let stks = find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
+
+        // Snapshot the currently-protected bytes (preserved across restore).
+        let (cur_paddr, cur_plen) = self.protect;
+        let mut protected: Vec<(u32, u8)> = Vec::new();
+        for a in cur_paddr..cur_paddr.saturating_add(cur_plen) {
+            if let Some(b) = self.mem.read8(a) {
+                protected.push((a, b as u8));
+            }
+        }
+
+        // Reset RAM to the original image and apply the saved memory chunk —
+        // CMem (RLE diff) or UMem (literal), whichever is present.
+        if let Some(cmem) = find(b"CMem") {
+            self.decompress_ram(cmem)?;
+        } else if let Some(umem) = find(b"UMem") {
+            self.load_umem(umem)?;
+        } else {
+            return Err(GError::BadSave("missing CMem/UMem chunk".into()));
+        }
+
+        // Re-impose the protected bytes' pre-restore values.
+        for (a, b) in protected {
+            if a >= self.mem.ramstart() && a < self.mem.mem_size() {
+                self.mem.write_byte_raw(a, b);
+            }
+        }
+
+        // Stack: the Stks bytes must fit the buffer and (for restore_state)
+        // must agree with the GReg-carried sp.
+        if let Some(sp) = expected_sp {
+            if stks.len() != sp as usize {
+                return Err(GError::BadSave("Stks length disagrees with sp".into()));
+            }
+        }
+        if stks.len() > self.stack.len() {
+            return Err(GError::BadSave("saved sp exceeds the stack size".into()));
+        }
+        self.stack[..stks.len()].copy_from_slice(stks);
+        self.sp = stks.len();
+
+        // Heap: rebuild from MAll (absent/empty → inactive).
+        self.heap_start = 0;
+        self.heap_blocks.clear();
+        if let Some(mall) = find(b"MAll") {
+            self.restore_heap(mall)?;
+        }
+
         Ok(())
     }
 
@@ -1698,6 +1755,29 @@ impl Machine {
                 self.mem.write_byte_raw(addr, base ^ b);
                 addr += 1;
             }
+        }
+        Ok(())
+    }
+
+    /// Load a `UMem` (uncompressed) body into RAM: read the saved memsize,
+    /// resize memory, and copy `[RAMSTART, memsize)` literally — no XOR diff,
+    /// no RLE (spec §1.8, the `CMem` alternative). Faults on a
+    /// truncated/mismatched stream.
+    fn load_umem(&mut self, umem: &[u8]) -> Result<(), GError> {
+        if umem.len() < 4 {
+            return Err(GError::BadSave("UMem chunk too short".into()));
+        }
+        let memsize = u32::from_be_bytes([umem[0], umem[1], umem[2], umem[3]]);
+        let ramstart = self.mem.ramstart();
+        if memsize < ramstart || memsize > Self::MAX_MEMSIZE {
+            return Err(GError::BadSave("UMem memsize out of range".into()));
+        }
+        if umem.len() != 4 + (memsize - ramstart) as usize {
+            return Err(GError::BadSave("UMem data length disagrees with memsize".into()));
+        }
+        self.mem.set_raw_size(memsize);
+        for (i, addr) in (ramstart..memsize).enumerate() {
+            self.mem.write_byte_raw(addr, umem[4 + i]);
         }
         Ok(())
     }
@@ -3457,6 +3537,15 @@ impl Machine {
             .map(|p| StepResult::NeedFilename { usage: p.usage, fmode: p.fmode })
     }
 
+    /// Whether a game-initiated `@save`/`@restore` is currently suspended,
+    /// awaiting the host's file I/O (`complete_save`/`complete_restore_success`/
+    /// `complete_restore_quetzal`/`complete_restore_failure`). Hosts can use
+    /// this to guard a snapshot trigger (e.g. an exit auto-save) against firing
+    /// mid-suspension, which would capture an un-popped `@save` call stub.
+    pub fn is_saveload_pending(&self) -> bool {
+        self.pending_saveload.is_some()
+    }
+
     /// Deliver the result of a game-initiated `@save` back to the machine, then
     /// resume. Pops the call stub `@save` pushed for its S1 operand and stores
     /// the current-run result: 0 (success) or 1 (failure). Glulx spec §1.8.2,
@@ -3479,6 +3568,27 @@ impl Machine {
     /// caller should call `complete_restore_failure`.
     pub fn complete_restore_success(&mut self, blob: &[u8]) -> bool {
         match self.restore_state(blob) {
+            Ok(()) => {
+                self.pending_saveload = None;
+                self.undo_stack.clear();
+                true
+            }
+            Err(e) => {
+                self.diagnostics.push(format!("@restore failed: {e:?}"));
+                false
+            }
+        }
+    }
+
+    /// Complete a game-initiated `@restore` of a standard `.qzl` (Glulx-Quetzal)
+    /// blob written by [`Machine::save_quetzal`]/`@save`. Mirrors
+    /// [`Machine::complete_restore_success`] but calls
+    /// [`Machine::restore_quetzal`] (stub-based, live-state-preserving) instead
+    /// of `restore_state`. Returns `true` when the state was applied. On
+    /// failure the machine is left as-is and the caller should call
+    /// `complete_restore_failure`.
+    pub fn complete_restore_quetzal(&mut self, blob: &[u8]) -> bool {
+        match self.restore_quetzal(blob) {
             Ok(()) => {
                 self.pending_saveload = None;
                 self.undo_stack.clear();
@@ -5861,6 +5971,154 @@ mod tests {
         let full = m.save_state();
         assert!(has_chunk(&full, b"GReg"), "save_state still carries GReg");
         assert!(has_chunk(&full, b"Glk "), "save_state still carries the Glk chunk");
+    }
+
+    // ── Task 2 (SQ-0283): restore_quetzal (live-state preserving) ─────────────
+
+    /// The key §1.8.5 property: `restore_quetzal` reverts VM memory/stack/heap
+    /// to the save point and resumes with `-1` in `@save`'s S1, but leaves the
+    /// live Glk model (windows/streams/VFS) and `iosys_mode`/`iosys_rock`
+    /// completely untouched — including further mutations made to them AFTER
+    /// the save. This is what distinguishes it from `restore_state`, which
+    /// replaces that state from `GReg`/`Glk `.
+    #[test]
+    fn restore_quetzal_reverts_vm_state_but_preserves_live_glk_and_iosys() {
+        use asm::Op::{C8, Mem32, Zero};
+        // @save 0, -> mem[0x180]; copy 0x7F -> mem[0x184] (sentinel); quit.
+        let mut body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body.extend(asm::ins(0x40, &[C8(0x7F), Mem32(0x184)]));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+
+        // Live state that restore_quetzal must leave alone.
+        let root = m.glk.root();
+        let fref = m.glk.fileref_create(0x00, "witness".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x01, false, 0); // Write
+        m.glk.file_stream_write(sid, "A");
+        m.iosys_mode = 2;
+        m.iosys_rock = 0x55;
+
+        // VM state that restore_quetzal must revert to the save point.
+        m.mem.write32(0x190, 0xCAFE_BABE).unwrap();
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal();
+
+        // Mutate everything after the save point.
+        m.mem.write32(0x190, 0).unwrap();
+        m.iosys_mode = 9;
+        m.iosys_rock = 0x77;
+        m.glk.file_stream_write(sid, "B"); // more writes to the SAME live stream
+
+        m.restore_quetzal(&blob).unwrap();
+        // restore_quetzal is the low-level primitive (mirrors restore_state);
+        // clearing the pending @save/@restore suspension is complete_restore_quetzal's
+        // job (mirrors complete_restore_success), so do it by hand here to
+        // check that stepping resumes normally afterward.
+        m.pending_saveload = None;
+
+        // VM memory reverted to save time.
+        assert_eq!(m.mem.read32(0x190).unwrap(), 0xCAFE_BABE, "restore_quetzal reverts VM RAM to save time");
+        // @save's S1 is stored with -1 (the "just restored" sentinel) directly
+        // by the stub pop, before any further stepping.
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0xFFFF_FFFF, "restore_quetzal stores -1 into S1");
+
+        // Live Glk/iosys untouched by restore_quetzal (§1.8.5) — the
+        // post-save-mutation values survive; the bare format has no saved
+        // register/model state to revert them to in the first place.
+        assert_eq!(m.glk.root(), root, "the live window tree survives untouched");
+        assert_eq!(m.iosys_mode, 9, "iosys is left at its live value, not reverted");
+        assert_eq!(m.iosys_rock, 0x77, "iosys rock is left at its live value, not reverted");
+
+        // The live stream (opened before the save) kept writing after the save
+        // and survives the restore with everything it holds.
+        m.glk.stream_close(sid);
+        let rf2 = m.glk.fileref_create(0x00, "witness".to_string(), 0);
+        let rsid = m.glk.stream_open_file(rf2, 0x02, false, 0); // Read
+        let mut got = String::new();
+        while let Some(c) = m.glk.file_stream_read_char(rsid) {
+            got.push(c as u8 as char);
+        }
+        assert_eq!(got, "AB", "the live VFS stream survives restore_quetzal with post-save writes intact");
+
+        // Resuming steps into the trailing sentinel, just after the original @save.
+        assert_eq!(m.step(), StepResult::Continue, "resumes at the stub's PC, just after @save");
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0x7F, "execution reached the trailing sentinel");
+    }
+
+    /// `restore_quetzal` must accept a `UMem` (uncompressed) memory chunk, not
+    /// just `CMem` — spec §1.8.
+    #[test]
+    fn restore_quetzal_accepts_umem_uncompressed_chunk() {
+        use asm::Op::{Mem32, Zero};
+        let mut body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.mem.write32(0x190, 0x1111_2222).unwrap();
+        assert_eq!(m.step(), StepResult::SaveRequest);
+
+        // Hand-build a FORM IFZS with a literal UMem chunk (the entire
+        // [RAMSTART, memsize) image) instead of a CMem diff.
+        let memsize = m.mem.mem_size();
+        let ramstart = m.mem.ramstart();
+        let mut umem_body = Vec::new();
+        umem_body.extend_from_slice(&memsize.to_be_bytes());
+        for a in ramstart..memsize {
+            umem_body.push(m.mem.read8(a).unwrap() as u8);
+        }
+        // Overwrite the target word in the desired image so the assertion
+        // proves UMem was actually applied, not just left as-is.
+        let idx = 4 + (0x190 - ramstart) as usize;
+        umem_body[idx..idx + 4].copy_from_slice(&0xAAAA_BBBBu32.to_be_bytes());
+
+        let mut body_chunks = Vec::new();
+        push_chunk(&mut body_chunks, b"IFhd", &[0u8; 128]);
+        push_chunk(&mut body_chunks, b"UMem", &umem_body);
+        push_chunk(&mut body_chunks, b"Stks", &m.stack[..m.sp].to_vec());
+        push_chunk(&mut body_chunks, b"MAll", &[]);
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"FORM");
+        blob.extend_from_slice(&((body_chunks.len() + 4) as u32).to_be_bytes());
+        blob.extend_from_slice(b"IFZS");
+        blob.extend_from_slice(&body_chunks);
+
+        m.restore_quetzal(&blob).unwrap();
+        assert_eq!(m.mem.read32(0x190).unwrap(), 0xAAAA_BBBB, "UMem chunk applied literally");
+    }
+
+    /// The live protect range (not part of the bare-save format) is honored
+    /// during `restore_quetzal`'s memory diff: protected bytes keep their
+    /// pre-restore (live) values instead of the blob's (spec §1.8.5).
+    #[test]
+    fn restore_quetzal_honors_the_live_protect_range() {
+        use asm::Op::{Mem32, Zero};
+        let mut body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal(); // save-time: 0x190 and 0x194 both read 0
+
+        // Protect [0x190, 0x194) live, then mutate inside and outside it.
+        m.protect = (0x190, 4);
+        m.mem.write32(0x190, 0x2222_2222).unwrap(); // inside protect
+        m.mem.write32(0x194, 0x3333_3333).unwrap(); // outside protect
+
+        m.restore_quetzal(&blob).unwrap();
+
+        assert_eq!(m.mem.read32(0x190).unwrap(), 0x2222_2222, "protected bytes keep their live pre-restore value");
+        assert_eq!(m.mem.read32(0x194).unwrap(), 0, "unprotected bytes are restored from the blob");
+    }
+
+    #[test]
+    fn is_saveload_pending_reflects_a_suspended_save_or_restore() {
+        use asm::Op::{Mem32, Zero};
+        let body = asm::ins(0x0123, &[Zero, Mem32(0x180)]); // @save 0, -> mem[0x180]
+        let mut m = machine_with_body(&[], body);
+        assert!(!m.is_saveload_pending(), "nothing pending at start");
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        assert!(m.is_saveload_pending(), "pending while suspended on @save");
+        m.complete_save(true);
+        assert!(!m.is_saveload_pending(), "cleared once complete_save resolves it");
     }
 
     #[test]
