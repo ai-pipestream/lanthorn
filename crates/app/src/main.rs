@@ -3683,9 +3683,16 @@ fn main() {
 
             Action::SavesImport => {
                 // Close saves modal and open file browser in PickFile mode.
+                // Start in this story's per-game dir (where its saves live, honoring
+                // --data-dir), falling back to the data base then the user dir.
                 state.saves = None;
-                let start_dir = saves_dir(&state.config.user_dir);
-                let start_dir = if start_dir.is_dir() { start_dir } else { state.config.user_dir.clone() };
+                let start_dir = if game_dir.is_dir() {
+                    game_dir.clone()
+                } else if data_base.is_dir() {
+                    data_base.clone()
+                } else {
+                    state.config.user_dir.clone()
+                };
                 state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile));
             }
 
