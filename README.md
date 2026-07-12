@@ -112,6 +112,10 @@ default, so the file is optional. Command-line flags take precedence over the
 config file, which takes precedence over built-in defaults. See
 [customization & configuration](docs/features/customization.md) for the settings.
 
+Saves and sidecars live under `~/.babelmap/saves/<story-filename>/` by
+default; pass `--data-dir <path>` to store them elsewhere. → [persistence
+model](docs/persistence.md)
+
 ---
 
 ## Development
@@ -126,12 +130,15 @@ cargo run -p gvm-cli -- story.ulx # DOS-style Glulx CLI player (no map)
 `zvm-cli` / `gvm-cli` render a basic DOS-style screen (pinned status line / upper
 window via ANSI when interactive, clearing the screen on start) and degrade to a
 clean line stream when piped. Interactively they do single-key input (arrow/function
-keys decoded for `read_char` menus) and `[MORE]` paging on long output; aux save
-tables persist per game by IFID. On piped stdin, a `read_char` menu exits cleanly
-at true EOF instead of spinning. The flags `--no-status` (byte-identical
-lower-stream output), `--no-aux`, and `--no-more` keep the headless test harness
-deterministic; `--no-sound` disables audio and `--volume <0-100>` sets the master
-volume.
+keys decoded for `read_char` menus) and `[MORE]` paging on long output; saves and
+aux/VFS sidecars persist per game under `<story-dir>/<story-filename>/` by
+default (`--data-dir <path>` overrides the base). A bare filename typed at the
+game's own `@save`/`@restore` prompt (e.g. `quick`) lands in that per-game
+directory; a path-bearing value (e.g. `/tmp/x.qzl`) is honored verbatim. On
+piped stdin, a `read_char` menu exits cleanly at true EOF instead of spinning.
+The flags `--no-status` (byte-identical lower-stream output), `--no-aux`, and
+`--no-more` keep the headless test harness deterministic; `--no-sound`
+disables audio and `--volume <0-100>` sets the master volume.
 
 The crates are layered `zvm`/`gvm` → `mapper` → `app`; the CLIs are thin VM
 front-ends. The mapper has no dependency on any VM, so layout logic can be tested
