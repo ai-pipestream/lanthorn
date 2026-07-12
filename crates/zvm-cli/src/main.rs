@@ -9,7 +9,7 @@
 //   NeedLine     → read a line from stdin, supply to machine
 //   NeedChar     → read one byte from stdin, supply to machine
 //   SaveRequest  → prompt for filename, write Quetzal bytes, complete_save
-//   RestoreRequest → prompt for filename, read Quetzal bytes, restore_quetzal
+//   RestoreRequest → prompt for filename, read Quetzal bytes, complete_restore_success
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -1016,8 +1016,8 @@ fn main() {
                 let filename = prompt_and_read_line("\nRestore from file: ");
                 let filename = filename.trim();
                 match fs::read(filename) {
-                    Ok(data) => match machine.restore_quetzal(&data) {
-                        Ok(()) => {} // restored; execution continues from saved PC
+                    Ok(data) => match machine.complete_restore_success(&data) {
+                        Ok(()) => {} // restored; @save descriptor completed forward
                         Err(e) => {
                             eprintln!("Restore failed: {e:?}");
                             machine.complete_restore_failure();
@@ -1282,5 +1282,79 @@ mod sound_idmap_tests {
 
         assert!(!ids.contains_key(&3), "finished id must be cleared even without a routine");
         assert_eq!(ids.get(&4), Some(&99), "unrelated entries must be untouched");
+    }
+}
+
+#[cfg(test)]
+mod restore_request_tests {
+    use super::*;
+
+    /// Minimal but structurally valid v4 story buffer. Mirrors zvm's own
+    /// `header::tests_support::sample_story`, which is `pub(crate)` to the
+    /// `zvm` crate and not visible from here.
+    fn sample_v4_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x400];
+        buf[0x00] = 4; // version
+        buf[0x04] = 0x04;
+        buf[0x05] = 0x00; // high_mem_base = 0x0400
+        buf[0x06] = 0x00;
+        buf[0x07] = 0x40; // initial_pc = 0x0040
+        buf[0x08] = 0x02;
+        buf[0x09] = 0x00; // dictionary = 0x0200
+        buf[0x0A] = 0x01;
+        buf[0x0B] = 0x00; // object_table = 0x0100
+        buf[0x0C] = 0x03;
+        buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04;
+        buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00;
+        buf[0x19] = 0x40; // abbrev_table = 0x0040
+        buf
+    }
+
+    /// A v4 story: `save -> G0` at 0x40 (store form, one store byte), then quit.
+    fn save_v4_into_g0_story() -> Vec<u8> {
+        let mut buf = sample_v4_story();
+        buf[0x40] = 0xB5; // 0OP:0x05 save (store form, v4+)
+        buf[0x41] = 0x10; // store -> global 0 (var 0x10)
+        buf[0x42] = 0xBA; // quit
+        buf
+    }
+
+    /// SQ-0283 Task 7: the `RestoreRequest` arm must call
+    /// `machine.complete_restore_success(&data)`, not the raw
+    /// `machine.restore_quetzal(&data)`. The raw call would leave the
+    /// machine resuming AT the `@save`'s result descriptor (the store byte
+    /// itself, per Quetzal §5.8) with that descriptor never resolved;
+    /// `complete_restore_success` completes it forward — storing 2 into the
+    /// `@save`'s result and resuming PAST the descriptor — matching how the
+    /// app completes an in-game restore.
+    #[test]
+    fn restore_request_completes_the_save_descriptor_forward() {
+        let mem = Memory::new(save_v4_into_g0_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+
+        let r = m.step();
+        assert_eq!(r, StepResult::SaveRequest, "save opcode suspends with SaveRequest");
+        assert_eq!(m.state.pc, 0x42, "PC is post-instruction after @save suspends");
+
+        let blob = m.save_quetzal();
+        m.complete_save(true);
+        assert_eq!(m.global(0), 1, "save success stored 1 into G0");
+
+        // Clobber state the way later play would, so the restore must actually reset it.
+        m.do_store(Some(0x10), 0x99);
+        m.state.pc = 0x00AB;
+
+        // This is the exact call zvm-cli's RestoreRequest arm makes.
+        m.complete_restore_success(&blob).expect("in-game restore must succeed");
+
+        assert_eq!(m.global(0), 2, "descriptor advanced: the original @save 'returns' 2");
+        assert_eq!(m.state.pc, 0x42, "execution resumes PAST the @save, not at its descriptor");
+
+        // A properly-resumed machine must not immediately re-suspend.
+        let r2 = m.step();
+        assert_ne!(r2, StepResult::SaveRequest, "resumed machine does not re-suspend on save");
     }
 }
