@@ -62,7 +62,7 @@
 - Test: same file's tests.
 
 **Interfaces:**
-- Produces: `pub fn restore_quetzal(&mut self, blob: &[u8]) -> Result<(), GError>`; `pub fn complete_restore_quetzal(&mut self, blob: &[u8]) -> bool`; a private shared `fn restore_vm_core(&mut self, chunks…) -> Result<(), GError>` used by both `restore_state` and `restore_quetzal`.
+- Produces: `pub fn restore_quetzal(&mut self, blob: &[u8]) -> Result<(), GError>`; `pub fn complete_restore_quetzal(&mut self, blob: &[u8]) -> bool`; `pub fn is_saveload_pending(&self) -> bool` (`self.pending_saveload.is_some()` — consumed by Task 6's host-snapshot guard); a private shared `fn restore_vm_core(&mut self, chunks…) -> Result<(), GError>` used by both `restore_state` and `restore_quetzal`.
 - Consumes: `pop_save_stub_and_store` (Task 1); existing `CMem`/`UMem`/`Stks`/`MAll` parsing in `restore_state`.
 
 **Design notes:** Factor the shared parse+apply of `IFhd`(verify identity)/`CMem`|`UMem`(reset image + diff, honoring the live protect range)/`Stks`(load stack)/`MAll`(heap) into `restore_vm_core`. `restore_state` = `restore_vm_core` + apply `GReg` (sp/fp/pc/iosys/stringtbl/protect) + replace Glk from `Glk ` chunk. `restore_quetzal` = `restore_vm_core` + **pop the call stub storing `-1`** (recovers pc/fp; sp from Stks length) + **leave `self.glk`, iosys, stringtbl, protect untouched** (§1.8.5). Also confirm `CMem`/`UMem` both read (write `CMem` only).
@@ -78,7 +78,8 @@
 - [ ] **Step 5: Failing tests — `UMem` read + protect-range honored.**
   (a) Hand-build a `FORM IFZS` with a `UMem` (uncompressed) chunk and assert `restore_quetzal` applies it. (b) Set a `@protect` range, `restore_quetzal` a blob whose diff would overwrite it, assert those bytes keep pre-restore values (§1.8.5).
 - [ ] **Step 6: Run — expect fail; Step 7: implement any gaps; Step 8: run — pass.**
-- [ ] **Step 9: Regression — `save_state`/`restore_state` unchanged.** Run the existing Save-State round-trip test (`save_restore_roundtrips_ram_stack_heap_registers` ~5752) — must still pass byte-for-byte after the refactor. Run `cargo test -p gvm`.
+- [ ] **Step 9: Add `is_saveload_pending()`** (`pub fn is_saveload_pending(&self) -> bool { self.pending_saveload.is_some() }`) with a one-line test (pending after `@save`/`@restore` suspends, false otherwise). This is consumed by Task 6's host-snapshot guard (see the carry-forward below).
+- [ ] **Step 10: Regression — `save_state`/`restore_state` unchanged.** Run the existing Save-State round-trip test (`save_restore_roundtrips_ram_stack_heap_registers` ~5752) — must still pass byte-for-byte after the refactor. Run `cargo test -p gvm`.
 - [ ] **Step 10: Commit** — `feat(gvm): live-state-preserving restore_quetzal for in-game @restore (SQ-0283)`. Stage only `crates/gvm/src/exec.rs`.
 
 ---
@@ -156,10 +157,14 @@
 
 **Design notes:** Only the Glulx path changes: swap `session.save_state().bytes` → the new `save_quetzal()` bytes in `save_game_named_bytes`; route the Glulx in-game `.qzl` restore through `complete_restore_quetzal` instead of `complete_restore_success`. Z-machine paths and the `.babelmap` Save State path are untouched. The `<ifid>-<slug>.qzl` naming stays (SQ-0284 changes naming later).
 
+**CARRY-FORWARD FIX (from Task 1 review, Important):** With the new stack-based `@save` stub, a host `save_state()` taken *during* an `@save` suspension captures the un-popped stub, and `restore_state` never pops it → corrupted stack on resume. Interactive Ctrl+S is already overlay-guarded, but **exit auto-save** (`crates/app/src/main.rs` ~4047–4060, `session.save_state()` called unconditionally when `config.auto_save`) is NOT. Guard every host-snapshot trigger against a pending in-game save: use the new `Engine`/`Machine::is_saveload_pending()` (Task 2) and, when it's true, **skip the exit auto-save** (the in-game save the user was making is the relevant persistence anyway) — do not capture a snapshot mid-suspension. Add a regression test.
+
 - [ ] **Step 1: Failing test — Glulx in-game save/restore round-trips via `save_quetzal`.** In `glulx_session.rs` tests: build a Glulx session, run to a prompt, take a Glulx in-game save (bare bytes), mutate, restore, assert VM state restored and the live Glk window survives. Expect fail (until wired).
 - [ ] **Step 2: Run — fail. Step 3: implement** the accessor(s) + `save_game_named_bytes` byte-source swap + the restore-branch method swap.
-- [ ] **Step 4: Run — pass. Step 5: `cargo test -p app` (full) + `cargo build -p app`.** Confirm no Save State / `.babelmap` regressions.
-- [ ] **Step 6: Commit** — `feat(app): Glulx in-game @save writes a standard .qzl, restore preserves live state (SQ-0283)`. Stage the edited app files by path.
+- [ ] **Step 4: Run — pass.**
+- [ ] **Step 4b: Carry-forward guard (failing test first).** Add a test that exit auto-save is skipped when a save/restore is pending (`is_saveload_pending()` true) — e.g. simulate a session at an `@save` suspension and assert the exit-save path does not call `save_state()`. Then implement the guard at the exit auto-save site (`main.rs` ~4047) and any other unconditional host `save_state()` trigger. Run — pass.
+- [ ] **Step 5: `cargo test -p app` (full) + `cargo build -p app`.** Confirm no Save State / `.babelmap` regressions.
+- [ ] **Step 6: Commit** — `feat(app): Glulx in-game @save writes a standard .qzl, restore preserves live state (SQ-0283)`. Stage the edited app files by path. (Guard fix may be a second commit `fix(app): skip host snapshot while an in-game @save is pending (SQ-0283)`.)
 
 ---
 
