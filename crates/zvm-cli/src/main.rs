@@ -586,6 +586,10 @@ fn read_line_raw(
                     let _ = terminal::disable_raw_mode();
                     print!("{}", crate::screen::leave_region());
                     let _ = io::stdout().flush();
+                    // Unconditional: this path can't see honor/last_page_bg, and an
+                    // OSC 111 when nothing was set is harmless.
+                    print!("{}", crate::screen::osc_reset_bg());
+                    let _ = io::stdout().flush();
                     std::process::exit(0);
                 }
                 KeyCode::Char(c) => {
@@ -800,6 +804,12 @@ fn main() {
     print!("{}", view.start());
     let _ = io::stdout().flush();
 
+    // Page background: reflects the game's current bg onto the terminal's own
+    // default background (OSC 11) so the whole window is painted, not just
+    // coloured text runs. Honor- and stdout-TTY-gated; reset (OSC 111) on
+    // every exit path below.
+    let mut last_page_bg: Option<(u8, u8, u8)> = None;
+
     loop {
         let step = machine.step();
         for d in machine.diagnostics.drain(..) {
@@ -848,6 +858,10 @@ fn main() {
                 let _ = io::stdout().flush();
                 // Ensure raw mode is not left active on exit.
                 let _ = terminal::disable_raw_mode();
+                if stdout_is_tty && machine.honor_game_colours {
+                    print!("{}", screen::osc_reset_bg());
+                    let _ = io::stdout().flush();
+                }
                 break;
             }
 
@@ -859,6 +873,10 @@ fn main() {
                     for line in trace.to_lines() {
                         eprintln!("{line}");
                     }
+                }
+                if stdout_is_tty && machine.honor_game_colours {
+                    print!("{}", screen::osc_reset_bg());
+                    let _ = io::stdout().flush();
                 }
                 std::process::exit(70); // EX_SOFTWARE: internal software error
             }
@@ -891,6 +909,16 @@ fn main() {
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
+                let cur_bg = if stdout_is_tty && machine.honor_game_colours {
+                    screen::zcolour_rgb(machine.screen.current_bg)
+                } else {
+                    None
+                };
+                if let Some(esc) = screen::page_bg_escape(cur_bg, last_page_bg) {
+                    print!("{esc}");
+                    let _ = io::stdout().flush();
+                    last_page_bg = cur_bg;
+                }
                 // Echo input in the game's current style/colour (Default unless a
                 // game set colour and honoring is on — matching the output sink).
                 let echo = if honor {
@@ -925,6 +953,16 @@ fn main() {
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
                 let _ = io::stdout().flush();
+                let cur_bg = if stdout_is_tty && machine.honor_game_colours {
+                    screen::zcolour_rgb(machine.screen.current_bg)
+                } else {
+                    None
+                };
+                if let Some(esc) = screen::page_bg_escape(cur_bg, last_page_bg) {
+                    print!("{esc}");
+                    let _ = io::stdout().flush();
+                    last_page_bg = cur_bg;
+                }
                 let timeout = if timed { machine.pending_timeout() } else { None };
                 let (ch, resize, aborted) = read_char_input(stdin_is_tty, &mut machine, &mut view, timeout, &mut sound);
                 // Handle any resize that happened DURING the char read.

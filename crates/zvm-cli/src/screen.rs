@@ -28,6 +28,45 @@ fn push_colour_sgr(params: &mut Vec<String>, c: ZColour, fg: bool) {
     }
 }
 
+/// Resolve a `ZColour` to a 24-bit RGB triple for painting the terminal's
+/// *page* background (OSC 11), mirroring `push_colour_sgr`'s per-variant
+/// colour sources. `Default` (no game colour) is `None`. `Standard(2..=9)`
+/// has no RGB source here either — `push_colour_sgr` emits a bare ANSI base
+/// code for it and lets the terminal's own colour scheme resolve the actual
+/// colour, so there is no concrete triple to paint OSC 11 with; that case is
+/// also `None` rather than an invented palette value.
+pub fn zcolour_rgb(c: ZColour) -> Option<(u8, u8, u8)> {
+    match c {
+        ZColour::Default => None,
+        ZColour::Standard(2..=9) => None,
+        ZColour::Standard(n) => Some(grey_rgb(n)),
+        ZColour::True(v) => Some(rgb15_to_888(v)),
+        ZColour::True24(v) => Some((((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)),
+    }
+}
+
+/// OSC 11: set the terminal's default background to `#rrggbb`.
+pub fn osc_set_bg((r, g, b): (u8, u8, u8)) -> String {
+    format!("\x1b]11;#{r:02x}{g:02x}{b:02x}\x07")
+}
+
+/// OSC 111: reset the terminal's default background to the user's default.
+pub fn osc_reset_bg() -> &'static str {
+    "\x1b]111\x07"
+}
+
+/// The escape to emit for a page-bg transition from `prev` to `cur` (both are
+/// already honor-resolved: `None` = no game bg / default). `None` return = no change.
+pub fn page_bg_escape(cur: Option<(u8, u8, u8)>, prev: Option<(u8, u8, u8)>) -> Option<String> {
+    if cur == prev {
+        return None;
+    }
+    Some(match cur {
+        Some(rgb) => osc_set_bg(rgb),
+        None => osc_reset_bg().to_string(),
+    })
+}
+
 /// SGR set-sequence (`ESC[...m`, no trailing reset) for `attrs`, or `""` when
 /// no style/colour is active. Shared by `style_wrap` and the raw-mode input
 /// editor (to echo typed input in the game's current style/colour).
@@ -600,6 +639,37 @@ mod colour_tests {
         assert_eq!(style_wrap("x", g, true), "\x1b[38;2;128;128;128mx\x1b[0m");
         // non-tty stays plain
         assert_eq!(style_wrap("x", a, false), "x");
+    }
+}
+
+#[cfg(test)]
+mod page_bg_tests {
+    use zvm::screen::ZColour;
+
+    #[test]
+    fn osc_and_transition() {
+        assert_eq!(super::osc_set_bg((0x12, 0x34, 0x56)), "\x1b]11;#123456\x07");
+        assert_eq!(super::page_bg_escape(None, None), None);
+        assert_eq!(super::page_bg_escape(Some((1, 2, 3)), None), Some("\x1b]11;#010203\x07".into()));
+        assert_eq!(super::page_bg_escape(Some((1, 2, 3)), Some((1, 2, 3))), None);
+        assert_eq!(super::page_bg_escape(None, Some((1, 2, 3))), Some("\x1b]111\x07".into()));
+    }
+
+    #[test]
+    fn zcolour_rgb_default_is_none_true24_unpacks() {
+        assert_eq!(super::zcolour_rgb(ZColour::Default), None);
+        assert_eq!(super::zcolour_rgb(ZColour::True24(0x123456)), Some((0x12, 0x34, 0x56)));
+    }
+
+    #[test]
+    fn zcolour_rgb_standard_and_true() {
+        // 2..=9 are scheme-relative in push_colour_sgr (bare ANSI code, no RGB
+        // source) — no invented palette here either.
+        assert_eq!(super::zcolour_rgb(ZColour::Standard(3)), None);
+        // 10..=12 resolve via the shared grey_rgb table, same as push_colour_sgr.
+        assert_eq!(super::zcolour_rgb(ZColour::Standard(11)), Some((0x80, 0x80, 0x80)));
+        // True colour goes through rgb15_to_888, same as push_colour_sgr.
+        assert_eq!(super::zcolour_rgb(ZColour::True(0x001F)), Some((255, 0, 0)));
     }
 }
 
