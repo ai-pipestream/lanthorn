@@ -115,6 +115,10 @@ fn read_line_raw(is_tty: bool, echo: Option<&str>) -> (String, u32) {
                     print!("\r\n");
                     let _ = io::Write::flush(&mut io::stdout());
                     let _ = terminal::disable_raw_mode();
+                    // Unconditional: this path can't see `honor`/`last_page_bg`;
+                    // resetting when nothing was set is harmless.
+                    print!("{}", glk_term::osc_reset_bg());
+                    let _ = io::Write::flush(&mut io::stdout());
                     std::process::exit(0);
                 }
                 KeyCode::Char(c) => {
@@ -184,10 +188,16 @@ fn drive(
     save_path: &std::path::Path,
     vfs_path: &std::path::Path,
     honor: bool,
+    stdout_is_tty: bool,
     mut before_input: impl FnMut(&mut Machine),
     mut read_line: impl FnMut(Option<&str>) -> (String, u32),
     mut read_char: impl FnMut() -> u32,
 ) {
+    // Page background: reflect the game's Normal-style bg onto the terminal's
+    // default background (OSC 11), honor-gated and TTY-only. Emits only on
+    // change; reset (OSC 111) happens once at the single teardown point in
+    // `main`, after `drive` returns.
+    let mut last_page_bg: Option<(u8, u8, u8)> = None;
     loop {
         // Flush the Glk file VFS to its sidecar whenever a game mutation dirtied
         // it, each iteration, so a game's files survive even if the process is
@@ -195,6 +205,19 @@ fn drive(
         if machine.vfs_dirty() {
             let _ = fs::write(vfs_path, machine.vfs_bytes());
             machine.clear_vfs_dirty();
+        }
+        let cur_bg = if honor && stdout_is_tty {
+            machine
+                .style_colour(gvm::WinType::TextBuffer, gvm::glk::GlkStyle::Normal)
+                .bg
+                .map(glk_term::rgb24)
+        } else {
+            None
+        };
+        if let Some(esc) = glk_term::page_bg_escape(cur_bg, last_page_bg) {
+            print!("{esc}");
+            let _ = io::Write::flush(&mut io::stdout());
+            last_page_bg = cur_bg;
         }
         match machine.step() {
             StepResult::Continue => {}
@@ -333,6 +356,7 @@ fn main() {
         &save_path,
         &vfs_path,
         honor,
+        stdout_is_tty,
         |m| {
             // Re-poll terminal size before each input (interactive TTY only).
             if both_tty {
@@ -365,6 +389,13 @@ fn main() {
     machine.flush();
     // Ensure raw mode is not left active on exit (harmless if already off).
     let _ = terminal::disable_raw_mode();
+    // Restore the terminal's own background (OSC 111): covers normal quit and
+    // the fault/exit(70) path below (single teardown point; drive() never
+    // resets itself, to avoid a double-reset).
+    if honor && stdout_is_tty {
+        print!("{}", glk_term::osc_reset_bg());
+        let _ = io::Write::flush(&mut io::stdout());
+    }
 
     if let Some(trace) = machine.take_fault_trace() {
         for line in trace.to_lines() {
@@ -624,7 +655,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, false, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -648,7 +679,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glksave"), std::path::Path::new("unused.glkvfs"), true, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }
@@ -751,7 +782,7 @@ mod tests {
         // Run 1: a game writes "Hi" into a Glk file, then quits. drive's in-loop,
         // dirty-gated flush should persist the VFS to the sidecar.
         let mut m = build_machine(vfs_image(write_hi_program(), 2), Box::new(TestBackend::new())).unwrap();
-        drive(&mut m, &save_path, &vfs_path, true, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m, &save_path, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
 
         assert!(vfs_path.exists(), "the .glkvfs sidecar is written to disk");
         let blob = fs::read(&vfs_path).unwrap();
@@ -764,7 +795,7 @@ mod tests {
         let mut m2 = build_machine(vfs_image(read_hi_program(), 4), Box::new(TestBackend::new())).unwrap();
         m2.load_vfs(&fs::read(&vfs_path).unwrap());
         m2.clear_vfs_dirty();
-        drive(&mut m2, &save_path, &vfs_path, true, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m2, &save_path, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
         let text = m2.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Hi", "the persisted bytes are readable after load_vfs");
 
