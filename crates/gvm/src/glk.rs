@@ -628,6 +628,11 @@ pub enum StreamKind {
     /// encoding (4-byte-BE / UTF-8 vs 1 byte per char); the mutable name/mode/pos
     /// state lives in [`Model::file_streams`] keyed by stream id so this stays `Copy`.
     File { unicode: bool },
+    /// A `SavedGame`-usage stream: a host conduit fully decoupled from the VFS.
+    /// Opens successfully for every mode (Read succeeds even with no prior save,
+    /// so the game always reaches `@save`/`@restore` and the host decides).
+    /// Writes discard, reads return EOF; no `self.files`/`file_streams` entry.
+    Null,
 }
 
 /// A Glk stream.
@@ -1523,6 +1528,14 @@ impl Model {
         let Some((name, usage)) = self.fileref_name(fref) else {
             return 0;
         };
+        // SavedGame-usage streams are host conduits, fully decoupled from the
+        // VFS (saves live in host `.qzl` files, not `self.files`): no VFS entry
+        // is created, and every mode succeeds — crucially Read succeeds even
+        // with no prior save, so the game always reaches `@save`/`@restore`
+        // and the host decides.
+        if usage & 0x0f == 0x01 {
+            return self.alloc_stream(StreamKind::Null, rock);
+        }
         let pos = match fmode {
             0x01 => {
                 self.files.insert(name.clone(), Vec::new());
@@ -1569,7 +1582,7 @@ impl Model {
         // Window streams are owned by their window; only free memory/file streams
         // here. A file stream also drops its side-table cursor state.
         if let Some(kind) = self.stream(id).map(|s| s.kind) {
-            if matches!(kind, StreamKind::Memory { .. } | StreamKind::File { .. }) {
+            if matches!(kind, StreamKind::Memory { .. } | StreamKind::File { .. } | StreamKind::Null) {
                 self.streams[(id - 1) as usize] = None;
             }
             if matches!(kind, StreamKind::File { .. }) {
@@ -1606,6 +1619,7 @@ impl Model {
             StreamKind::Memory { pos, .. } => Some(pos),
             StreamKind::File { .. } => Some(self.file_streams.get(&id).map_or(0, |f| f.pos as u32)),
             StreamKind::Window(_) => Some(self.stream(id)?.write_count),
+            StreamKind::Null => Some(0),
         }
     }
     /// Seek a memory stream. `seekmode`: 0 = from start, 1 = from current,
@@ -2080,6 +2094,9 @@ impl Model {
                             w(&mut out, 2);
                             w(&mut out, unicode as u32);
                         }
+                        StreamKind::Null => {
+                            w(&mut out, 3);
+                        }
                     }
                 }
             }
@@ -2190,6 +2207,7 @@ impl Model {
                 // The cursor (name/mode/pos/usage) is restored from the
                 // `file_streams` table below, keyed by this stream's id.
                 2 => StreamKind::File { unicode: r.u32()? != 0 },
+                3 => StreamKind::Null,
                 other => return Err(format!("Glk snapshot: bad stream kind {other}")),
             };
             streams.push(Some(Stream {
@@ -2843,6 +2861,52 @@ mod style_hint_tests {
 
         assert_eq!(m.stream_close(sid), Some((0, 42)), "write_count credited, no reads");
         assert_eq!(m.files["f"], Vec::<u8>::new(), "no bytes were actually stored");
+    }
+
+    #[test]
+    fn savedgame_stream_is_a_null_conduit_decoupled_from_vfs() {
+        let mut m = Model::new();
+        // usage 0x01 = fileusage_SavedGame.
+        let f = m.fileref_create(0x01, "s".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        assert_ne!(sid, 0, "SavedGame Write opens a conduit");
+        assert!(!m.files.contains_key("s"), "no VFS entry is created for a SavedGame stream");
+
+        // Read succeeds even though nothing was ever saved this session.
+        let f2 = m.fileref_create(0x01, "s".to_string(), 0);
+        let rsid = m.stream_open_file(f2, FM_READ, false, 0);
+        assert_ne!(rsid, 0, "Read on a SavedGame conduit succeeds with no prior save");
+
+        // Writes discard; the VFS stays empty.
+        m.file_stream_write(sid, "hello");
+        assert!(!m.files.contains_key("s"), "writes to a null conduit are discarded");
+
+        // Reads return EOF.
+        assert_eq!(m.file_stream_read_char(rsid), None, "a null conduit reads as EOF");
+    }
+
+    #[test]
+    fn savedgame_conduit_never_persists_into_the_vfs() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x01, "save".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        // The `@save` write-count shim (Task 3) still works on a null conduit.
+        m.note_stream_write(sid, 1234);
+        m.file_stream_write(sid, "ignored");
+        assert!(m.files.is_empty(), "a SavedGame conduit never materializes a VFS entry");
+    }
+
+    #[test]
+    fn non_savedgame_usages_still_use_the_real_vfs_unchanged() {
+        let mut m = Model::new();
+        // usage 0x00 = fileusage_Data: Write creates a VFS entry, Read fails absent.
+        let f = m.fileref_create(0x00, "notes".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        assert_ne!(sid, 0);
+        assert!(m.files.contains_key("notes"), "a Data Write still creates a VFS entry");
+
+        let f2 = m.fileref_create(0x00, "missing".to_string(), 0);
+        assert_eq!(m.stream_open_file(f2, FM_READ, false, 0), 0, "Data Read still fails if absent");
     }
 
     #[test]

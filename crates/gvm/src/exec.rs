@@ -2399,6 +2399,9 @@ impl Machine {
                 self.glk.memory_stream_advance(sid, s.chars().count() as u32);
             }
             StreamKind::File { .. } => self.glk.file_stream_write(sid, s),
+            // A SavedGame host conduit: writes discard (the `@save` shim credits
+            // its write count separately via `note_stream_write`).
+            StreamKind::Null => {}
         }
     }
 
