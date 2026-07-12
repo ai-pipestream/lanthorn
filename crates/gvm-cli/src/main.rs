@@ -135,6 +135,7 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
                     // Unconditional: this path can't see `honor`/`last_page_bg`;
                     // resetting when nothing was set is harmless.
                     print!("{}", glk_term::osc_reset_bg());
+                    print!("{}", glk_term::cursor_reset());
                     let _ = io::Write::flush(&mut io::stdout());
                     std::process::exit(0);
                 }
@@ -360,6 +361,12 @@ fn main() {
     let stdout_is_tty = io::stdout().is_terminal();
     let both_tty = stdin_is_tty && stdout_is_tty;
 
+    // Force a steady block cursor (SQ-0281); reset to the terminal default on exit.
+    if stdout_is_tty {
+        print!("{}", glk_term::cursor_steady_block());
+        let _ = io::Write::flush(&mut io::stdout());
+    }
+
     // Track the last-known terminal size so we can detect resize events.
     // Re-poll before each input using crossterm::terminal::size(); when
     // changed, update the backend and queue a Glk evtype_Arrange event so
@@ -429,6 +436,12 @@ fn main() {
     // resets itself, to avoid a double-reset).
     if honor && stdout_is_tty {
         print!("{}", glk_term::osc_reset_bg());
+        let _ = io::Write::flush(&mut io::stdout());
+    }
+    // Restore the terminal's default cursor shape (SQ-0281). Not honor-gated —
+    // the cursor is a UI preference, not a game colour.
+    if stdout_is_tty {
+        print!("{}", glk_term::cursor_reset());
         let _ = io::Write::flush(&mut io::stdout());
     }
 

@@ -589,6 +589,7 @@ fn read_line_raw(
                     // Unconditional: this path can't see honor/last_page_bg, and an
                     // OSC 111 when nothing was set is harmless.
                     print!("{}", crate::screen::osc_reset_bg());
+                    print!("{}", crate::screen::cursor_reset());
                     let _ = io::stdout().flush();
                     std::process::exit(0);
                 }
@@ -750,6 +751,12 @@ fn main() {
     let stdin_is_tty = io::stdin().is_terminal();
     let both_tty = stdout_is_tty && stdin_is_tty;
 
+    // Force a steady block cursor (SQ-0281); reset to the terminal default on exit.
+    if stdout_is_tty {
+        print!("{}", screen::cursor_steady_block());
+        let _ = io::stdout().flush();
+    }
+
     // Paging is only safe when BOTH ends are TTYs (else it would block the
     // headless harness); --no-more disables it.
     let (mut term_rows, mut term_cols) = detect_term_size();
@@ -862,6 +869,10 @@ fn main() {
                     print!("{}", screen::osc_reset_bg());
                     let _ = io::stdout().flush();
                 }
+                if stdout_is_tty {
+                    print!("{}", screen::cursor_reset());
+                    let _ = io::stdout().flush();
+                }
                 break;
             }
 
@@ -876,6 +887,10 @@ fn main() {
                 }
                 if stdout_is_tty && machine.honor_game_colours {
                     print!("{}", screen::osc_reset_bg());
+                    let _ = io::stdout().flush();
+                }
+                if stdout_is_tty {
+                    print!("{}", screen::cursor_reset());
                     let _ = io::stdout().flush();
                 }
                 std::process::exit(70); // EX_SOFTWARE: internal software error

@@ -88,6 +88,17 @@ pub fn osc_reset_bg() -> &'static str {
     "\x1b]111\x07"
 }
 
+/// DECSCUSR: force a steady block cursor (SQ-0281 — a box rather than the
+/// terminal's default underline).
+pub fn cursor_steady_block() -> &'static str {
+    "\x1b[2 q"
+}
+
+/// DECSCUSR: restore the terminal's default cursor shape.
+pub fn cursor_reset() -> &'static str {
+    "\x1b[0 q"
+}
+
 /// The escape to emit for a page-bg transition from `prev` to `cur` (both are
 /// already honor-resolved: `None` = no game bg / default). `None` return = no
 /// change.
