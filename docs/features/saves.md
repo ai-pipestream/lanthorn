@@ -21,7 +21,10 @@
   standard `.qzl` saves are interoperability-tested against `dfrotz` in both
   directions (babelmap reads dfrotz's saves and vice-versa); run the live suite
   with `scripts/gen-interop-goldens.sh` or `cargo test -p zvm --test save_interop
-  -- --ignored`. (Glulx save interop is tracked separately in SQ-0229.)
+  -- --ignored`. Glulx now also writes a real, standard in-game save via its own
+  `@save`/`@restore` — VM state only, distinct from `.babelmap` — the same shape
+  as the Z-machine's `.qzl`. Its round-trip is verified internally, but Glulx
+  *cross-interpreter* save interop isn't golden-tested yet (tracked in SQ-0229).
 - **Auto-save** (per turn) and **auto-load** (resume on launch) — both
   configurable.
 - **Glulx external file storage** — a Glulx game's own Glk files (its

@@ -434,6 +434,48 @@ I/O-system/string-table settings are not part of a real Quetzal *file*; our
 internal snapshot additionally carries iosys/string-table/protect in `GReg` so
 that `saveundo`/`restoreundo` (§15) restore the full VM state exactly.
 
+**A second, spec-conformant standard serializer (`@save`/`@restore`, SQ-0283).**
+`save_state`/`restore_state` above back the host **Save State** (Layer 2, a
+cold cross-session snapshot into a fresh `Machine`). The game's own
+`@save`/`@restore` (opcodes 0x0123/0x0124) instead use a second pair,
+`save_quetzal()`/`restore_quetzal()`, that produces a real, portable, standard
+Glulx-Quetzal save — the same shape as the Z-machine's `.qzl`:
+
+- **`save_quetzal()`** emits `FORM IFZS` with **`IFhd`/`CMem`/`Stks`/`MAll`
+  only** — no `GReg`, no `Glk `. Per §1.8, PC/FP/SP are not serialized as
+  registers at all: `@save` pushes a 4-word call stub (`DestType, DestAddr,
+  PC, FramePtr` — §1.3.2, reusing `call_function`'s stub machinery, exec.rs
+  ~1134) for its `S1` before suspending, so the resume point self-describes
+  from the saved stack instead.
+- **`restore_quetzal(blob)`** restores RAM/stack/heap through the same shared
+  core as `restore_state` (`restore_vm_core`, honoring the live protect
+  range; accepts `UMem` as well as `CMem`), then **pops that call stub back
+  off the restored stack and stores `-1`** into it — the "just restored"
+  sentinel, spec §2.9 — to resume execution just after the original `@save`.
+  Per **§1.8.5 it leaves every other piece of live interpreter state
+  untouched**: the Glk model (windows/streams/VFS), `iosys_mode`/`iosys_rock`,
+  the current string-decoding table, and the protect range keep their live
+  values, rather than being replaced from `GReg`/`Glk ` the way
+  `restore_state` does.
+
+**Why two serializers.** `save_state` targets a *cold* restore into a fresh
+`Machine` with no live Glk model to inherit, so it must be self-contained —
+hence `GReg` (registers) and the `Glk ` chunk (the whole window/stream/VFS
+tree). `save_quetzal` is a *mid-session* in-game save: it always resumes
+inside the same running interpreter via the call stub it pushed, so PC/FP
+recover from the stack and every other piece of live state is already
+correct and must NOT be reset out from under the game.
+
+**The "Save failed." shim.** `@save` delivers its bytes to the host, not to
+the game's own output stream `L1` — so the Glk library's write-count check on
+`L1` would otherwise see 0 bytes written and report failure. `@save` calls
+`glk.note_stream_write(l[0], save_quetzal().len())`, which bumps the stream's
+write count without storing any bytes, so the library sees success. A
+`glk_fileref_create_by_prompt` stream opened for `fileusage_SavedGame` is a
+`StreamKind::Null` conduit for exactly this purpose (writes discarded, reads
+EOF, no VFS entry) — so `@save`/`@restore` never depend on, or pollute, the
+story's Glk file VFS (§20).
+
 ## 15. Undo (Phase 2c, spec §2.11)
 
 | Opcode      | Num   | L | S | Effect                                            |

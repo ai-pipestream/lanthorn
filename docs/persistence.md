@@ -14,8 +14,9 @@ what each one captures, when it triggers, and what survives.
   and Ctrl+R / `/restore-state`. This is babelmap's own mechanism, not something
   the game knows about.
 - **`@save` / `@restore`** — the *game's* own in-game save, the standard path a
-  story invokes when the player types `SAVE` / `RESTORE`. On the Z-machine this
-  produces a portable **Quetzal** file; on Glulx it produces the host snapshot blob.
+  story invokes when the player types `SAVE` / `RESTORE`. On both engines this
+  produces a portable, standard **Quetzal** file — on the Z-machine, Quetzal
+  proper; on Glulx, standard **Glulx-Quetzal**.
 
 The two are genuinely different files with different contents — keep the names
 straight.
@@ -28,9 +29,16 @@ Player-initiated, from inside the story ("Type SAVE to save your position").
   same format other interpreters (e.g. `dfrotz`) read and write, all versions
   including v3 branch-form `@save`/`@restore`. VM state only: no map, no screen,
   no transcript. Implemented in `crates/zvm/src/quetzal.rs`.
-- **Glulx:** the game's `@save`/`@restore` is served by the **host Save State**
-  blob (`machine.save_state()`) — the same snapshot format Layer 2 uses. In
-  `gvm-cli` this is written next to the story as `<story>.glksave`.
+- **Glulx:** babelmap writes a bare, standard **Glulx-Quetzal** save
+  (`machine.save_quetzal()`) — `IFhd`/`CMem`/`Stks`/`MAll` only, no `GReg`, no
+  `Glk ` chunk. VM state only: no map, no screen, no VFS embed. Per the Glulx
+  spec, `@save` pushes a call stub before suspending, so PC and FramePtr are
+  recovered from the stack on restore rather than serialized as registers; the
+  save is the same shape as the Z-machine's `.qzl`. Implemented in
+  `crates/gvm/src/exec.rs` (`save_quetzal`/`restore_quetzal`). In `gvm-cli` this
+  is written to a filename you're prompted for, like the Z-machine, not a fixed
+  `<story>.glksave` slot. Round-trip is verified internally (gvm unit tests);
+  cross-interpreter golden-file interop is tracked separately under SQ-0229.
 
 ## Layer 2 — host Save State / Restore State (emulator snapshot)
 
@@ -91,7 +99,8 @@ engines. The CLIs have no IFID and key on the story path instead.
 |-------|--------|------|------|
 | 1 — game's `@save`/`@restore` | Z-machine | app | Quetzal `.qzl` (VM state only) |
 | 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | Quetzal `.qzl` |
-| 1 — game's `@save`/`@restore` | Glulx | `gvm-cli` | `<story>.glksave` (host snapshot) |
+| 1 — game's `@save`/`@restore` | Glulx | app | Glulx-Quetzal `.qzl` (VM state only) |
+| 1 — game's `@save`/`@restore` | Glulx | `gvm-cli` | Glulx-Quetzal `.qzl` (VM state only, prompted filename) |
 | 2 — Save State / Restore State | Z-machine | app | `.babelmap` archive (`game.qzl` inside) |
 | 2 — Save State / Restore State | Glulx | app | `.babelmap` archive (`game.glksave` inside; embeds full Glk VFS) |
 | 3 — auto per-story (aux) | Z-machine | app | `<save_dir>/<ifid>.aux` |
@@ -110,6 +119,18 @@ Layer 2 Save States — there is no separate on-disk file. `gvm-cli` prompts for
 name on stdin (blank cancels). This matches the layering above: a game reaching for
 `create_by_prompt` is writing an *external named file*, which by the game's own
 choice belongs in the automatic per-story (global) layer, not a save slot.
+
+**Exception — `fileusage_SavedGame`.** A `create_by_prompt` stream opened for
+saved-game usage does **not** resolve into a VFS slot at all: it's a host
+conduit (`StreamKind::Null`) that discards writes and reads EOF, with no
+`self.files` entry and nothing persisted to `.gvfs`/`.glkvfs` or embedded in a
+Save State. The library's write-count check is satisfied by
+`note_stream_write` (crediting the stream with the save's byte length) without
+storing any bytes. The game's `@save`/`@restore` always reaches the opcode —
+even on a first-ever restore, with no prior save this session — and the *host*
+decides success by writing/reading the actual `.qzl` (Layer 1, above). Net: the
+VFS (Layer 3) now holds only the game's genuine external files — transcripts,
+command recordings, and data files — never saves.
 
 ## Known limitations (Glk file VFS)
 
