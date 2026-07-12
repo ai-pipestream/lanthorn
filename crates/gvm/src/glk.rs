@@ -1551,6 +1551,17 @@ impl Model {
         self.file_streams.insert(sid, FileStream { name, mode: fmode, pos, unicode, usage });
         sid
     }
+    /// Credit a stream's `write_count` by `n` without writing any bytes. Used
+    /// by the Glulx `@save` shim: the real save bytes go to a host file (the
+    /// stream the game opened stays empty), but the library checks the
+    /// stream's write count to decide save succeeded, so this satisfies that
+    /// check without embedding the save into the VFS.
+    pub fn note_stream_write(&mut self, id: u32, n: u32) {
+        if let Some(st) = self.stream_mut(id) {
+            st.write_count = st.write_count.saturating_add(n);
+        }
+    }
+
     /// Close a stream, returning its `(read_count, write_count)`. The current
     /// stream is cleared if it was this one.
     pub fn stream_close(&mut self, id: u32) -> Option<(u32, u32)> {
@@ -2819,6 +2830,19 @@ mod style_hint_tests {
         assert_eq!(m.stream_position(sid), Some(2), "append seeks to end");
         m.file_stream_write(sid, "CD");
         assert_eq!(m.files["f"], b"ABCD");
+    }
+
+    #[test]
+    fn note_stream_write_bumps_write_count_without_storing_bytes() {
+        let mut m = Model::new();
+        let f = m.fileref_create(0x00, "f".to_string(), 0);
+        let sid = m.stream_open_file(f, FM_WRITE, false, 0);
+        assert_ne!(sid, 0);
+
+        m.note_stream_write(sid, 42);
+
+        assert_eq!(m.stream_close(sid), Some((0, 42)), "write_count credited, no reads");
+        assert_eq!(m.files["f"], Vec::<u8>::new(), "no bytes were actually stored");
     }
 
     #[test]

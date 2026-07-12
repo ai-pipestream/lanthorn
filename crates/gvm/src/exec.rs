@@ -729,7 +729,7 @@ impl Machine {
                 // stores the current-run result (0 success / 1 failure). A
                 // restore of the saved blob instead pops the stub storing -1
                 // (the "just restored" sentinel, spec §2.9) — see restore_quetzal.
-                let (_l, s) = self.read_operands(1, 1)?; // _l (the stream): Task 3's write-count shim.
+                let (l, s) = self.read_operands(1, 1)?;
                 let (dtype, daddr) = s[0].to_stub();
                 let ret_pc = self.pc;
                 let cur_fp = self.fp as u32;
@@ -738,6 +738,12 @@ impl Machine {
                 self.push32(ret_pc)?;
                 self.push32(cur_fp)?;
                 self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false });
+                // Credit the game's save stream with the bytes it would have
+                // received if delivery weren't host-intercepted, so the
+                // library's write-count check sees success (spec §1.8.2's
+                // save is delivered to a host file, not this Glk stream).
+                let n = self.save_quetzal().len() as u32;
+                self.glk.note_stream_write(l[0], n);
                 Ok(())
             }
             0x0124 => {
@@ -7874,6 +7880,38 @@ mod tests {
 
         assert_eq!(m.step(), StepResult::Continue, "resumes at the stub's PC, just after @save");
         assert_eq!(m.mem.read32(0x104).unwrap(), 0x7F, "execution reached the trailing sentinel");
+    }
+
+    #[test]
+    fn save_credits_its_stream_write_count_with_the_quetzal_length() {
+        use asm::Op::{C8, Mem16};
+        // @save 2, -> mem[0x100] — L1 = the file stream opened below. Stream
+        // id 1 is the main window's stream, opened by machine_with_body's
+        // default window; the file stream opened after it is id 2.
+        let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+
+        let fref = m.glk.fileref_create(0x00, "save".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x01, false, 0); // Write
+        assert_eq!(sid, 2, "the file stream opened after the main window is id 2, matching @save's L1 operand");
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+
+        // Before complete_save resolves the request, the stream the game
+        // opened for its save has already been credited with the bytes the
+        // real (host-intercepted) save would have delivered.
+        let expected = m.save_quetzal().len() as u32;
+        assert_eq!(
+            m.glk.stream_close(sid),
+            Some((0, expected)),
+            "the stream's write_count equals save_quetzal()'s length, with no bytes actually stored"
+        );
+
+        // No bytes were actually written into the VFS file (a fresh read
+        // stream over it is immediately at EOF).
+        let rf = m.glk.fileref_create(0x00, "save".to_string(), 0);
+        let rsid = m.glk.stream_open_file(rf, 0x02, false, 0); // Read
+        assert_eq!(m.glk.file_stream_read_char(rsid), None, "the VFS file is still empty");
     }
 
     #[test]
