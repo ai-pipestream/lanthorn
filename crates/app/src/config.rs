@@ -169,6 +169,11 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub user_dir: Option<PathBuf>,
 
+    /// Override the storage base for saves/sidecars (default: <user_dir>/saves).
+    /// Files land in `<data_dir>/<story-filename>/`.
+    #[arg(long, value_name = "PATH")]
+    pub data_dir: Option<PathBuf>,
+
     /// Path to a non-default config file
     #[arg(long, value_name = "PATH")]
     pub config: Option<PathBuf>,
@@ -813,6 +818,7 @@ mod tests {
         let cli = Cli {
             story: PathBuf::from("foo.z5"),
             user_dir: Some(PathBuf::from("/tmp/from-cli")),
+            data_dir: None,
             config: Some(cfg_path),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
@@ -828,6 +834,7 @@ mod tests {
         let cli = Cli {
             story: PathBuf::from("foo.z5"),
             user_dir: None,
+            data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
@@ -844,6 +851,7 @@ mod tests {
         let cli = Cli {
             story: PathBuf::from("foo.z5"),
             user_dir: None,
+            data_dir: None,
             config: Some(cfg_path),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
@@ -1172,6 +1180,7 @@ use_defaults = false
         let cli = Cli {
             story: PathBuf::from("foo.z5"),
             user_dir: None,
+            data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: true,
             image_protocol: ImageProtocol::Auto,
@@ -1188,6 +1197,7 @@ use_defaults = false
         let cli = Cli {
             story: PathBuf::from("foo.z5"),
             user_dir: None,
+            data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
             image_protocol: ImageProtocol::Auto,

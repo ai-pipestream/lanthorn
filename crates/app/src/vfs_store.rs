@@ -6,27 +6,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// `<save_dir>/<sanitized-ifid>.gvfs`. Uses the same defensive ifid
-/// sanitization as `aux_store::aux_path` (`[A-Za-z0-9_-]`, no `.`, so `..`
-/// cannot survive) with no separators.
-pub fn vfs_path(save_dir: &Path, ifid: &str) -> PathBuf {
-    let safe: String = ifid
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' })
-        .collect();
-    let stem = if safe.is_empty() { "game".to_string() } else { safe };
-    save_dir.join(format!("{stem}.gvfs"))
+/// `<game_dir>/default.glkvfs` (SQ-0284). The VFS sidecar is the game's
+/// singleton Glk file store, kept under the per-game directory keyed by story
+/// filename.
+pub fn vfs_path(game_dir: &Path) -> PathBuf {
+    game_dir.join("default.glkvfs")
 }
 
 /// Read the per-game VFS sidecar (empty bytes if absent or unreadable).
-pub fn read_vfs(save_dir: &Path, ifid: &str) -> Vec<u8> {
-    std::fs::read(vfs_path(save_dir, ifid)).unwrap_or_default()
+pub fn read_vfs(game_dir: &Path) -> Vec<u8> {
+    std::fs::read(vfs_path(game_dir)).unwrap_or_default()
 }
 
-/// Write the per-game VFS sidecar (creating `save_dir` if needed).
-pub fn write_vfs(save_dir: &Path, ifid: &str, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::create_dir_all(save_dir)?;
-    std::fs::write(vfs_path(save_dir, ifid), bytes)
+/// Write the per-game VFS sidecar (creating `game_dir` if needed).
+pub fn write_vfs(game_dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(game_dir)?;
+    std::fs::write(vfs_path(game_dir), bytes)
 }
 
 #[cfg(test)]
@@ -34,29 +29,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vfs_path_sanitizes_and_stays_in_dir() {
-        let dir = Path::new("/tmp/saves");
-        let p = vfs_path(dir, "../../etc/ZCODE-1-840726");
-        assert_eq!(p.parent(), Some(dir), "no path escape");
-        let fname = p.file_name().unwrap().to_string_lossy();
-        assert!(fname.ends_with(".gvfs"));
-        assert!(!fname.contains('/') && !fname.contains("..") && !fname.contains('\\'));
-    }
-
-    #[test]
-    fn empty_ifid_falls_back_to_game_stem() {
-        assert_eq!(vfs_path(Path::new("/tmp"), "").file_name().unwrap(), "game.gvfs");
+    fn vfs_path_is_default_glkvfs_in_game_dir() {
+        let dir = Path::new("/tmp/saves/Advent.gblorb");
+        let p = vfs_path(dir);
+        assert_eq!(p, PathBuf::from("/tmp/saves/Advent.gblorb/default.glkvfs"));
+        assert_eq!(p.parent(), Some(dir), "stays in the game dir");
     }
 
     #[test]
     fn round_trips_through_temp_dir() {
         let dir = std::env::temp_dir().join(format!("babelmap-vfs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let ifid = "ZCODE-1-840726-ABCD";
-        assert!(read_vfs(&dir, ifid).is_empty(), "absent file → empty");
+        assert!(read_vfs(&dir).is_empty(), "absent file → empty");
         let blob = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        write_vfs(&dir, ifid, &blob).unwrap();
-        assert_eq!(read_vfs(&dir, ifid), blob);
+        write_vfs(&dir, &blob).unwrap();
+        assert_eq!(read_vfs(&dir), blob);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

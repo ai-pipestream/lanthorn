@@ -23,7 +23,8 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::anim::PanelSlide;
 use app::archive::{load_archive, save_archive_meta};
-use app::ifid::{archive_path, compute_ifid};
+use app::ifid::compute_ifid;
+use app::storage::{default_state_path, game_dir as story_game_dir, story_key};
 use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
 use app::persist_files::{delete_save, list_saves, load_map, save_game_named, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
@@ -1011,13 +1012,13 @@ fn ensure_aux(
     cache: &mut [Option<app::picker::StoryAux>],
     stories: &[app::picker::StoryEntry],
     idx: usize,
-    save_dir: &std::path::Path,
+    data_base: &std::path::Path,
     hint_index: &app::hints::HintIndex,
 ) {
     if let Some(slot) = cache.get_mut(idx) {
         if slot.is_none() {
             if let Some(entry) = stories.get(idx) {
-                *slot = Some(app::picker::resolve_aux(entry, save_dir, hint_index));
+                *slot = Some(app::picker::resolve_aux(entry, data_base, hint_index));
             }
         }
     }
@@ -1051,6 +1052,7 @@ fn build_cover_picker(mode: app::config::ImageProtocol) -> Option<ratatui_image:
 fn run_story_picker(
     dir: &std::path::Path,
     cfg: &app::config::Config,
+    data_base: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
     let stories = app::picker::scan_stories(dir);
     if stories.is_empty() {
@@ -1062,18 +1064,12 @@ fn run_story_picker(
     let (base, _w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
     let (cs, _set, _w2) = app::style::resolve(&base, &cfg.user_dir);
 
-    // Row badges: one saves-dir readdir + one shared hint index, computed once.
-    let save_dir = saves_dir(&cfg.user_dir);
-    let save_names: std::collections::HashSet<String> = std::fs::read_dir(&save_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-        .collect();
+    // Row badges: each story's per-game dir under `data_base` + one shared hint
+    // index, computed once (SQ-0284).
     let hint_index = app::hints::load_hint_index(&cfg.user_dir);
     let row_badges: Vec<app::picker::RowBadges> = stories
         .iter()
-        .map(|e| app::picker::compute_row_badges(e, &save_names, &hint_index))
+        .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
         .collect();
     let sym_cfg = app::style::finalize_symbols(&base.symbols);
     let badge_glyphs = app::picker::BadgeGlyphs::from_symbols(&sym_cfg);
@@ -1193,7 +1189,7 @@ fn run_story_picker(
             cover_arrived = true;
         }
         if slide.open {
-            ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+            ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
             let sel = stories[list.selected].path.clone();
             if list.selected != last_sel {
                 last_sel = list.selected;
@@ -1280,7 +1276,7 @@ fn run_story_picker(
                                 slide.arm(&cfg.animation);
                                 if target {
                                     panel_scroll = 0;
-                                    ensure_aux(&mut aux_cache, &stories, list.selected, &save_dir, &hint_index);
+                                    ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
                                 }
                             }
                         }
@@ -1712,10 +1708,14 @@ fn main() {
     let cfg = resolve(&cli);
     let story_path = cli.story.clone();
 
+    // Storage base for saves/sidecars (SQ-0284): `--data-dir` overrides the
+    // default `<user_dir>/saves`. Each story gets `<data_base>/<story-key>/`.
+    let data_base = cli.data_dir.clone().unwrap_or_else(|| saves_dir(&cfg.user_dir));
+
     // If a directory was passed instead of a story file, run the pre-game story
     // picker and continue with the chosen file (or exit if the user quits).
     let story_path = if story_path.is_dir() {
-        match run_story_picker(&story_path, &cfg) {
+        match run_story_picker(&story_path, &cfg, &data_base) {
             Some(p) => p,
             None => std::process::exit(0),
         }
@@ -1839,8 +1839,11 @@ fn main() {
 
     let ifid = compute_ifid(&story_bytes);
     let dir = map_dir(&cfg.user_dir);
-    let save_dir = saves_dir(&cfg.user_dir);
-    let arc_file = archive_path(&save_dir, &ifid);
+    // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>/`,
+    // keyed by the story filename (IFID stays for title/hint/display only).
+    let game_dir = story_game_dir(&data_base, &story_key(&story_path));
+    let _ = std::fs::create_dir_all(&game_dir);
+    let arc_file = default_state_path(&game_dir);
 
     // Load mapper (and optionally restore the game save) from the archive.
     let mut startup_transcript: app::state::LoadedTranscript = None;
@@ -1895,13 +1898,13 @@ fn main() {
     // global mode.  In archive mode the table was populated above from the
     // loaded archive (if any).
     if cfg.aux_storage == app::config::AuxStorage::Global {
-        session.set_aux_data(app::aux_store::read_global_aux(&save_dir, &ifid));
+        session.set_aux_data(app::aux_store::read_global_aux(&game_dir));
     }
 
     // Startup: pre-load the per-story Glk file VFS sidecar (Glulx only; the
     // Z-machine session's no-op default ignores it, and an absent sidecar
     // yields empty bytes). Loading isn't a game mutation, so clear the flag.
-    session.load_vfs(&app::vfs_store::read_vfs(&save_dir, &ifid));
+    session.load_vfs(&app::vfs_store::read_vfs(&game_dir));
     session.clear_vfs_dirty();
 
     // Export paths (fixed per IFID).
@@ -2429,7 +2432,7 @@ fn main() {
                         // immediately every iteration).
                         state.input_deadline = None;
                         if apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                         ) {
                             break;
                         }
@@ -2446,7 +2449,7 @@ fn main() {
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.deliver_timer();
                         if apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                         ) {
                             break;
                         }
@@ -2464,7 +2467,7 @@ fn main() {
                         if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                             let result = zs.run_sound_finish(routine);
                             if apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                                &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                             ) {
                                 break 'event_loop;
                             }
@@ -2477,7 +2480,7 @@ fn main() {
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.sound_notify(snd, notify);
                         if apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                         ) {
                             break 'event_loop;
                         }
@@ -2559,7 +2562,7 @@ fn main() {
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, session.aux_data());
+                                let _ = app::aux_store::write_global_aux(&game_dir, session.aux_data());
                                 session.clear_aux_dirty();
                             }
                             AuxDialogAction::None => {}
@@ -2598,7 +2601,7 @@ fn main() {
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
-                                let _ = app::aux_store::write_global_aux(&save_dir, &ifid, session.aux_data());
+                                let _ = app::aux_store::write_global_aux(&game_dir, session.aux_data());
                                 session.clear_aux_dirty();
                             }
                         }
@@ -3086,7 +3089,7 @@ fn main() {
                             .and_then(|ki| session.submit_key(ki))
                         {
                             if apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                                &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                             ) {
                                 break;
                             }
@@ -3129,7 +3132,7 @@ fn main() {
                                 .submit_line_with_terminator(&cmd, term);
                             if finish_command_turn(
                                 &cmd, result, &mut state, &mut mapper, &mut *session,
-                                &save_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
+                                &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                             ) {
                                 break;
                             }
@@ -3150,7 +3153,7 @@ fn main() {
                         let outcome = slash::parse_in_context(&s, state.config.command_prefix, ctx);
                         let should_break = dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
-                            &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                            &game_dir, &ifid, &arc_file, &story_bytes, &story_path,
                             last_panes.map, last_panes.story, true,
                         );
                         if close_leader {
@@ -3197,7 +3200,7 @@ fn main() {
                                     ) {
                                         let result = gs.deliver_hyperlink(win, link);
                                         if apply_game_driven_result(
-                                            &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                                         ) {
                                             break 'event_loop;
                                         }
@@ -3223,7 +3226,7 @@ fn main() {
                             if let Some((win, vx, vy)) = target {
                                 let result = gs.deliver_mouse(win, vx, vy);
                                 if apply_game_driven_result(
-                                    &mut state, &mut mapper, &result, &save_dir, &ifid, last_panes.map,
+                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                                 ) {
                                     break 'event_loop;
                                 }
@@ -3491,14 +3494,14 @@ fn main() {
                     // Handle any saves-manager or reset prompt that was submitted.
                     if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
                         handle_saves_prompt(
-                            kind, buf, &save_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes,
+                            kind, buf, &game_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes,
                         );
                     }
                     // Resume an in-game save/restore if this prompt resolved it.
-                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map)
-                        || resolve_filename_request(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
-                    persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
-                    persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
+                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                        || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                    persist_vfs_after_turn(&mut *session, &game_dir);
                     if quit { break; }
                     continue;
                 }
@@ -3527,7 +3530,7 @@ fn main() {
                         let outcome = slash::parse(body, state.config.command_prefix);
                         let should_break = dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
-                            &save_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                            &game_dir, &ifid, &arc_file, &story_bytes, &story_path,
                             last_panes.map, last_panes.story, false,
                         );
                         flush_pending_config_write(&mut state);
@@ -3549,7 +3552,7 @@ fn main() {
                 let result = session.submit(&cmd);
                 if finish_command_turn(
                     &cmd, result, &mut state, &mut mapper, &mut *session,
-                    &save_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
+                    &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                 ) {
                     break;
                 }
@@ -3673,7 +3676,7 @@ fn main() {
             Action::OpenSaves => {
                 // Populate the saves list (both .babelmap Save States and .qzl
                 // game saves — SQ-0227 Task 3) and open the modal.
-                let entries = combined_saves(&save_dir, &ifid);
+                let entries = combined_saves(&game_dir);
                 state.saves = Some(SavesState { entries, scroll: Default::default() });
                 state.dialog_focus = 0;
             }
@@ -3756,11 +3759,11 @@ fn main() {
                             session.resume_restore(None)
                         }
                     };
-                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &save_dir, &ifid, last_panes.map);
-                    persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
-                    persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
+                    let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                    persist_vfs_after_turn(&mut *session, &game_dir);
                     if let Some(io) = state.ingame_io {
-                        open_ingame_saves(io, &save_dir, &ifid, &mut state);
+                        open_ingame_saves(io, &game_dir, &mut state);
                     }
                     if quit { break; }
                     continue;
@@ -3812,11 +3815,11 @@ fn main() {
                                 state.saves = None;
                                 state.ingame_io = None;
                                 let result = session.resume_restore(None);
-                                let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &save_dir, &ifid, last_panes.map);
-                                persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
-                                persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
+                                let quit = finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
+                                persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                                persist_vfs_after_turn(&mut *session, &game_dir);
                                 if let Some(io) = state.ingame_io {
-                                    open_ingame_saves(io, &save_dir, &ifid, &mut state);
+                                    open_ingame_saves(io, &game_dir, &mut state);
                                 }
                                 if quit { break; }
                                 continue;
@@ -3917,7 +3920,7 @@ fn main() {
         // After apply_action: check for saves-manager or reset prompt that was submitted.
         // (This covers the case where apply_action routed a saves/reset prompt submit.)
         if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
-            handle_saves_prompt(kind, buf, &save_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes);
+            handle_saves_prompt(kind, buf, &game_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes);
         }
 
         // After apply_action: if a sound toggle / config save flipped enable_sound,
@@ -3931,10 +3934,10 @@ fn main() {
 
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was
         // just confirmed (flag-hop) or cancelled (overlay closed without confirm).
-        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map)
-            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &save_dir, &ifid, last_panes.map);
-        persist_aux_after_turn(&mut *session, &mut state, &save_dir, &ifid);
-        persist_vfs_after_turn(&mut *session, &save_dir, &ifid);
+        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+        persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+        persist_vfs_after_turn(&mut *session, &game_dir);
         if quit {
             break;
         }
@@ -4122,7 +4125,7 @@ fn dispatch_slash_outcome(
     mapper: &mut Mapper,
     session: &mut dyn Engine,
     style_watcher: &mut Option<app::watch::StyleWatcher>,
-    save_dir: &std::path::Path,
+    game_dir: &std::path::Path,
     ifid: &str,
     arc_file: &std::path::Path,
     story_bytes: &[u8],
@@ -4187,7 +4190,7 @@ fn dispatch_slash_outcome(
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
-                    save_named(save_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
+                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -4225,7 +4228,7 @@ fn dispatch_slash_outcome(
                 None => Some(arc_file.to_path_buf()),
                 Some(ref name) => {
                     // Find the first named save whose display name matches.
-                    let saves = combined_saves(save_dir, ifid);
+                    let saves = combined_saves(game_dir);
                     saves.into_iter()
                         .find(|e| !e.is_default && e.name.to_lowercase() == name.to_lowercase())
                         .map(|e| e.path)
@@ -4550,10 +4553,10 @@ fn handle_saves_prompt(
                 // Quetzal; Glulx writes `save_quetzal()` bytes (both land as
                 // `<ifid>-<slug>.qzl` so the in-game restore picker lists them).
                 match zvm_session_opt(&*session) {
-                    Some(z) => save_game_named(dir, ifid, &buf, &z.machine).map(|_| ()),
+                    Some(z) => save_game_named(dir, &buf, &z.machine).map(|_| ()),
                     None => {
                         let bytes = glulx_session_opt(&*session).map(|g| g.save_quetzal()).unwrap_or_default();
-                        app::persist_files::save_game_named_bytes(dir, ifid, &buf, &bytes).map(|_| ())
+                        app::persist_files::save_game_named_bytes(dir, &buf, &bytes).map(|_| ())
                     }
                 }
             } else {
@@ -4570,7 +4573,7 @@ fn handle_saves_prompt(
                     }
                     // Refresh saves list.
                     if let Some(s) = &mut state.saves {
-                        s.entries = list_saves(dir, ifid);
+                        s.entries = list_saves(dir);
                     }
                     // In-game SAVE: flag-hop so the run loop resumes the VM
                     // (resume + recenter need session/mapper/last_panes scope).
@@ -4597,7 +4600,7 @@ fn handle_saves_prompt(
                     Ok(()) => {
                         state.push_notice("[Save deleted]");
                         if let Some(s) = &mut state.saves {
-                            s.entries = list_saves(dir, ifid);
+                            s.entries = list_saves(dir);
                             // Re-clamp the selection/offset to the new entry count.
                             s.scroll.len(s.entries.len());
                         }
@@ -4653,7 +4656,7 @@ fn finish_command_turn(
     state: &mut AppState,
     mapper: &mut Mapper,
     session: &mut dyn Engine,
-    save_dir: &std::path::Path,
+    game_dir: &std::path::Path,
     ifid: &str,
     arc_file: &std::path::Path,
     map_area: Rect,
@@ -4717,7 +4720,7 @@ fn finish_command_turn(
     // in-game mode and defer auto-save/history capture until the
     // resume completes (the turn is still in flight).
     if let Some(io) = result.pending_io {
-        open_ingame_saves(io, save_dir, ifid, state);
+        open_ingame_saves(io, game_dir, state);
         return false;
     }
 
@@ -4733,8 +4736,8 @@ fn finish_command_turn(
         state, mapper, &*session, &result, cmd,
         rooms_before, conns_before, ifid, arc_file,
     );
-    persist_aux_after_turn(session, state, save_dir, ifid);
-    persist_vfs_after_turn(session, save_dir, ifid);
+    persist_aux_after_turn(session, state, game_dir);
+    persist_vfs_after_turn(session, game_dir);
 
     // Background tidy: silently re-tidy the active layer when the
     // configured mode calls for it. Only runs in Auto layout mode.
@@ -4798,8 +4801,7 @@ fn finish_command_turn(
 
 fn open_ingame_saves(
     io: app::session::PendingIo,
-    save_dir: &std::path::Path,
-    ifid: &str,
+    game_dir: &std::path::Path,
     state: &mut AppState,
 ) {
     use app::session::PendingIo;
@@ -4816,45 +4818,36 @@ fn open_ingame_saves(
         }
         PendingIo::Restore => {
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
-            let entries = combined_saves(save_dir, ifid);
+            let entries = combined_saves(game_dir);
             state.saves = Some(SavesState { entries, scroll: Default::default() });
         }
     }
 }
 
-/// List plain `*.qzl` Quetzal files in `dir` as SaveInfo rows (for the in-game
-/// restore picker). Mirrors the SaveInfo shape used by `list_saves`.
-/// List the current story's game saves (`<ifid>-<slug>.qzl`, written by
-/// `save_game_named`). Filtered to the given IFID so other stories' saves don't
-/// appear — and so a bare `<ifid>.qzl` (e.g. an old Save-State export) is
-/// excluded, since only `save_game_named` produces the `<ifid>-` prefix.
 /// The current story's saves for the saves manager: `.babelmap` Save States and
-/// `.qzl` game saves merged into one list, sorted newest-first by save time.
-/// RFC3339 timestamps sort chronologically as strings; untimestamped/legacy
-/// saves (empty timestamp) sort to the bottom.
-fn combined_saves(dir: &std::path::Path, ifid: &str) -> Vec<app::persist_files::SaveInfo> {
-    let mut entries = list_saves(dir, ifid);
-    entries.extend(list_qzl(dir, ifid));
+/// `.qzl` game saves in `game_dir` merged into one list, sorted newest-first by
+/// save time. RFC3339 timestamps sort chronologically as strings; untimestamped/
+/// legacy saves (empty timestamp) sort to the bottom.
+fn combined_saves(game_dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
+    let mut entries = list_saves(game_dir);
+    entries.extend(list_qzl(game_dir));
     entries.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
     entries
 }
 
-fn list_qzl(dir: &std::path::Path, ifid: &str) -> Vec<app::persist_files::SaveInfo> {
-    let named_prefix = format!("{}-", ifid);
+/// List `*.qzl` game saves in `game_dir` as SaveInfo rows (for the in-game
+/// restore picker). All `.qzl` files in the per-game dir belong to this story
+/// (SQ-0284); there is no default `.qzl`, so none is skipped in practice. `.qzl`
+/// saves carry no metadata, so they're timestamped from the file's mtime and the
+/// slug (filename stem) is the display name.
+fn list_qzl(game_dir: &std::path::Path) -> Vec<app::persist_files::SaveInfo> {
     let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(dir) {
+    if let Ok(rd) = std::fs::read_dir(game_dir) {
         for e in rd.flatten() {
             let p = e.path();
             let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
-            if fname.starts_with(&named_prefix) && fname.ends_with(".qzl") {
-                // Display the slug only: strip the `<ifid>-` prefix (the ZCODE-*
-                // game id) and the `.qzl` suffix. `.qzl` saves carry no metadata,
-                // so timestamp them from the file's modification time.
-                let name = fname
-                    .strip_prefix(&named_prefix)
-                    .and_then(|s| s.strip_suffix(".qzl"))
-                    .unwrap_or(fname)
-                    .to_string();
+            if let Some(slug) = fname.strip_suffix(".qzl") {
+                let name = slug.to_string();
                 let saved_at = app::persist_files::rfc3339_mtime(&p);
                 out.push(app::persist_files::SaveInfo {
                     path: p, name, turns: 0, saved_at, is_default: false,
@@ -4972,15 +4965,14 @@ fn post_turn_bookkeeping(
 fn persist_aux_after_turn(
     session: &mut dyn Engine,
     state: &mut AppState,
-    save_dir: &std::path::Path,
-    ifid: &str,
+    game_dir: &std::path::Path,
 ) {
     if !session.aux_dirty() {
         return;
     }
     match state.config.aux_storage {
         app::config::AuxStorage::Global => {
-            let _ = app::aux_store::write_global_aux(save_dir, ifid, session.aux_data());
+            let _ = app::aux_store::write_global_aux(game_dir, session.aux_data());
             session.clear_aux_dirty();
         }
         app::config::AuxStorage::Archive => {
@@ -4998,13 +4990,12 @@ fn persist_aux_after_turn(
 /// always false). Mirrors `persist_aux_after_turn`.
 fn persist_vfs_after_turn(
     session: &mut dyn Engine,
-    save_dir: &std::path::Path,
-    ifid: &str,
+    game_dir: &std::path::Path,
 ) {
     if !session.vfs_dirty() {
         return;
     }
-    let _ = app::vfs_store::write_vfs(save_dir, ifid, &session.vfs_bytes());
+    let _ = app::vfs_store::write_vfs(game_dir, &session.vfs_bytes());
     session.clear_vfs_dirty();
 }
 
@@ -5018,7 +5009,7 @@ fn finish_resumed_turn(
     mapper: &mut Mapper,
     state: &mut AppState,
     session: &dyn Engine,
-    save_dir: &std::path::Path,
+    game_dir: &std::path::Path,
     ifid: &str,
     map_area: Rect,
 ) -> bool {
@@ -5055,7 +5046,7 @@ fn finish_resumed_turn(
         // The resumed turn chained straight into a create_by_prompt.
         open_filename_modal(req, session, state);
     } else {
-        let arc_file = archive_path(save_dir, ifid);
+        let arc_file = default_state_path(game_dir);
         post_turn_bookkeeping(state, mapper, session, &result, "", rooms_before, conns_before, ifid, &arc_file);
     }
     should_exit
@@ -5069,7 +5060,7 @@ fn resolve_ingame_dialog(
     session: &mut dyn Engine,
     mapper: &mut Mapper,
     state: &mut AppState,
-    save_dir: &std::path::Path,
+    game_dir: &std::path::Path,
     ifid: &str,
     map_area: Rect,
 ) -> bool {
@@ -5079,9 +5070,9 @@ fn resolve_ingame_dialog(
     if let Some(wrote_ok) = state.ingame_resume_save.take() {
         state.ingame_io = None;
         let result = session.resume_save(wrote_ok);
-        let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        let quit = finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
         if let Some(io) = state.ingame_io {
-            open_ingame_saves(io, save_dir, ifid, state);
+            open_ingame_saves(io, game_dir, state);
         }
         return quit;
     }
@@ -5099,9 +5090,9 @@ fn resolve_ingame_dialog(
                 PendingIo::Restore => session.resume_restore(None),
             };
             state.push_notice("[In-game save/restore cancelled]");
-            let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+            let quit = finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
             if let Some(io) = state.ingame_io {
-                open_ingame_saves(io, save_dir, ifid, state);
+                open_ingame_saves(io, game_dir, state);
             }
             return quit;
         }
@@ -5141,16 +5132,16 @@ fn resolve_filename_request(
     session: &mut dyn Engine,
     mapper: &mut Mapper,
     state: &mut AppState,
-    save_dir: &std::path::Path,
+    game_dir: &std::path::Path,
     ifid: &str,
     map_area: Rect,
 ) -> bool {
     if let Some(choice) = state.filename_submitted.take() {
         state.pending_filename = None;
         let result = session.resume_filename(choice);
-        let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        let quit = finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
         if let Some(io) = state.ingame_io {
-            open_ingame_saves(io, save_dir, ifid, state);
+            open_ingame_saves(io, game_dir, state);
         }
         return quit;
     }
@@ -5162,9 +5153,9 @@ fn resolve_filename_request(
         state.pending_filename = None;
         let result = session.resume_filename(None);
         state.push_notice("[create_by_prompt cancelled]");
-        let quit = finish_resumed_turn(result, mapper, state, session, save_dir, ifid, map_area);
+        let quit = finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
         if let Some(io) = state.ingame_io {
-            open_ingame_saves(io, save_dir, ifid, state);
+            open_ingame_saves(io, game_dir, state);
         }
         return quit;
     }
@@ -5710,8 +5701,7 @@ fn apply_game_driven_result(
     state: &mut AppState,
     mapper: &mut Mapper,
     result: &TurnResult,
-    save_dir: &std::path::Path,
-    ifid: &str,
+    game_dir: &std::path::Path,
     map_area: Rect,
 ) -> bool {
     if result.erase_lower { state.mark_screen_clear(); }
@@ -5730,7 +5720,7 @@ fn apply_game_driven_result(
     // Game-initiated (v4+) save/restore: open the saves dialog in in-game mode
     // and defer the rest of the turn.
     if let Some(io) = result.pending_io {
-        open_ingame_saves(io, save_dir, ifid, state);
+        open_ingame_saves(io, game_dir, state);
         return false;
     }
     state.graph_gen = state.graph_gen.wrapping_add(1);
@@ -5785,29 +5775,25 @@ mod tests {
     // ── SQ-0230: list_qzl filters to the current story's game saves ─────────────
 
     #[test]
-    fn list_qzl_filters_to_current_ifid_and_excludes_bare_export() {
+    fn list_qzl_lists_game_saves_in_game_dir_and_skips_babelmap() {
         use std::fs;
-        let dir = std::env::temp_dir().join(format!("bm-listqzl-{}", std::process::id()));
+        // SQ-0284: all `.qzl` in a per-game dir belong to this story (no IFID
+        // prefix filtering). `.babelmap` files are never picked up by list_qzl.
+        let dir = std::env::temp_dir().join(format!("bm-listqzl-{}/Zork1.z5", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        // A real game save for our story, another story's game save, a bare
-        // <ifid>.qzl (the shape an old Save-State export produced), and a
-        // .babelmap (must never be picked up by list_qzl).
-        fs::write(dir.join("aaa-slot1.qzl"), b"x").unwrap();
-        fs::write(dir.join("bbb-slot1.qzl"), b"x").unwrap();
-        fs::write(dir.join("aaa.qzl"), b"x").unwrap();
-        fs::write(dir.join("aaa-slot1.babelmap"), b"x").unwrap();
+        fs::write(dir.join("slot1.qzl"), b"x").unwrap();
+        fs::write(dir.join("slot1.babelmap"), b"x").unwrap();
 
-        // combined_saves merges .babelmap + .qzl newest-first; here (no .babelmap,
-        // no meta needed) it should return the one game save.
-        let combined: Vec<String> = super::combined_saves(&dir, "aaa").iter().map(|s| s.name.clone()).collect();
+        // combined_saves merges .babelmap + .qzl newest-first; here the .babelmap
+        // has no valid archive so list_saves skips it, leaving the one game save.
+        let combined: Vec<String> = super::combined_saves(&dir).iter().map(|s| s.name.clone()).collect();
         assert_eq!(combined, vec!["slot1".to_string()], "combined list includes the game save");
 
-        let infos = super::list_qzl(&dir, "aaa");
+        let infos = super::list_qzl(&dir);
         let names: Vec<String> = infos.iter().map(|s| s.name.clone()).collect();
-        // Only the current story's <ifid>-*.qzl game saves list (no other story,
-        // no bare <ifid>.qzl export, no .babelmap), with the <ifid>- prefix and
-        // .qzl suffix stripped to the slug for display.
+        // The `.qzl` suffix is stripped to the slug for display; the `.babelmap`
+        // is excluded from list_qzl.
         assert_eq!(names, vec!["slot1".to_string()]);
         // And they carry a save timestamp read from the file's mtime.
         assert!(!infos[0].saved_at.is_empty(), "game saves are timestamped from file mtime");

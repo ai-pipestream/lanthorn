@@ -21,20 +21,17 @@ pub struct SaveInfo {
     pub is_default: bool,
 }
 
-/// List all save files for the given IFID in `dir`.
+/// List all Save-State files in a game dir (SQ-0284).
 ///
-/// Discovers `<ifid>.babelmap` (default slot) and `<ifid>-*.babelmap` (named
-/// slots), reads their `Meta`, and returns sorted results: default slot first,
-/// then named saves sorted by `saved_at` descending (newest first). Files that
-/// fail to parse are silently skipped.
-pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo> {
-    let entries = match std::fs::read_dir(dir) {
+/// Discovers `default.babelmap` (default slot) and `<slug>.babelmap` (named
+/// slots) inside `game_dir`, reads their `Meta`, and returns sorted results:
+/// default slot first, then named saves sorted by `saved_at` descending (newest
+/// first). Files that fail to parse are silently skipped.
+pub fn list_saves(game_dir: &Path) -> Vec<SaveInfo> {
+    let entries = match std::fs::read_dir(game_dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
-
-    let default_name = format!("{}.babelmap", ifid);
-    let named_prefix = format!("{}-", ifid);
 
     let mut infos: Vec<SaveInfo> = Vec::new();
 
@@ -42,12 +39,10 @@ pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo> {
         let path = entry.path();
         let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
 
-        let is_default = fname == default_name;
-        let is_named = !is_default && fname.starts_with(&named_prefix) && fname.ends_with(".babelmap");
-
-        if !is_default && !is_named {
+        if !fname.ends_with(".babelmap") {
             continue;
         }
+        let is_default = fname == "default.babelmap";
 
         // Read only meta.json; skip on failure (corrupt/unsupported → not listed).
         let meta = match crate::archive::read_archive_meta(&path) {
@@ -58,10 +53,10 @@ pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo> {
         let name = if is_default {
             "(default)".to_string()
         } else {
-            // Strip "<ifid>-" prefix and ".babelmap" suffix to recover the slug.
-            let inner = &fname[named_prefix.len()..fname.len() - ".babelmap".len()];
+            // The slug is the filename stem (`<slug>.babelmap`).
+            let slug = &fname[..fname.len() - ".babelmap".len()];
             // Prefer the name stored in Meta, fall back to the slug.
-            meta.name.clone().unwrap_or_else(|| inner.to_string())
+            meta.name.clone().unwrap_or_else(|| slug.to_string())
         };
 
         infos.push(SaveInfo {
@@ -85,12 +80,15 @@ pub fn list_saves(dir: &Path, ifid: &str) -> Vec<SaveInfo> {
     infos
 }
 
-/// Write a named save: `<dir>/<ifid>-<slug>.babelmap`.
+/// Write a named Save State: `<game_dir>/<slug>.babelmap` (SQ-0284).
 ///
-/// `name` is sanitized into a filesystem-safe slug (lowercase alphanum + hyphens).
+/// `name` is sanitized into a filesystem-safe slug (lowercase alphanum +
+/// hyphens). The IFID is retained only as archive metadata (identity/display).
+/// The reserved `default` slug is rejected so a named save never clobbers the
+/// auto/singleton slot.
 #[allow(clippy::too_many_arguments)]
 pub fn save_named(
-    dir: &Path,
+    game_dir: &Path,
     ifid: &str,
     name: &str,
     mapper: &Mapper,
@@ -106,7 +104,10 @@ pub fn save_named(
     if slug.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
     }
-    let path = dir.join(format!("{}-{}.babelmap", ifid, slug));
+    if crate::storage::is_reserved_slug(&slug) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "\"default\" is a reserved save name"));
+    }
+    let path = game_dir.join(format!("{}.babelmap", slug));
 
     let saved_at = rfc3339_now();
     let meta = crate::archive::Meta {
@@ -217,30 +218,36 @@ pub fn save_game(path: &Path, machine: &zvm::cpu::exec::Machine) -> std::io::Res
     std::fs::write(path, machine.save_quetzal())
 }
 
-/// Write a named in-game save: `<dir>/<ifid>-<slug>.qzl` (bare standard Quetzal).
+/// Write a named in-game save: `<game_dir>/<slug>.qzl` (bare standard Quetzal).
 ///
-/// `name` is sanitized into a filesystem-safe slug (lowercase alphanum + hyphens).
-pub fn save_game_named(dir: &Path, ifid: &str, name: &str, machine: &zvm::cpu::exec::Machine) -> io::Result<PathBuf> {
-    let slug = slugify(name);
-    if slug.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
-    }
-    let path = dir.join(format!("{}-{}.qzl", ifid, slug));
+/// `name` is sanitized into a filesystem-safe slug (lowercase alphanum +
+/// hyphens); the reserved `default` slug is rejected (SQ-0284).
+pub fn save_game_named(game_dir: &Path, name: &str, machine: &zvm::cpu::exec::Machine) -> io::Result<PathBuf> {
+    let path = game_save_path(game_dir, name)?;
     save_game(&path, machine)?;
     Ok(path)
 }
 
-/// Write a named in-game save from raw engine bytes: `<dir>/<ifid>-<slug>.qzl`.
+/// Write a named in-game save from raw engine bytes: `<game_dir>/<slug>.qzl`.
 /// The engine-agnostic counterpart to [`save_game_named`] — the Glulx adapter has
 /// no `zvm::Machine`, so it passes its own `save_state()` snapshot bytes here.
-pub fn save_game_named_bytes(dir: &Path, ifid: &str, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+pub fn save_game_named_bytes(game_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
+    let path = game_save_path(game_dir, name)?;
+    std::fs::write(&path, bytes)?;
+    Ok(path)
+}
+
+/// Resolve a named `.qzl` game-save path inside `game_dir`, rejecting an empty
+/// or reserved (`default`) slug.
+fn game_save_path(game_dir: &Path, name: &str) -> io::Result<PathBuf> {
     let slug = slugify(name);
     if slug.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
     }
-    let path = dir.join(format!("{}-{}.qzl", ifid, slug));
-    std::fs::write(&path, bytes)?;
-    Ok(path)
+    if crate::storage::is_reserved_slug(&slug) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "\"default\" is a reserved save name"));
+    }
+    Ok(game_dir.join(format!("{}.qzl", slug)))
 }
 
 /// A `.qzl` file is a game save (bare standard Quetzal, descriptor-PC
@@ -400,7 +407,10 @@ mod tests {
         super::save_named(&dir, ifid, "before-troll", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 42, &[], &[], &[])
             .expect("save_named ok");
 
-        let saves = super::list_saves(&dir, ifid);
+        // Path is `<slug>.babelmap` inside the game dir (no ifid in the name).
+        assert!(dir.join("before-troll.babelmap").exists(), "named save lands at <slug>.babelmap");
+
+        let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1, "should have 1 save");
         let s = &saves[0];
         assert_eq!(s.name, "before-troll");
@@ -408,10 +418,27 @@ mod tests {
         assert!(!s.is_default);
         assert!(!s.saved_at.is_empty(), "saved_at should be set");
 
-        // The file should be loadable as an archive.
+        // The file should be loadable as an archive; the ifid is retained as meta.
         let ac = crate::archive::load_archive(&s.path).expect("load_archive ok");
         assert_eq!(ac.meta.turns, 42);
         assert_eq!(ac.meta.name.as_deref(), Some("before-troll"));
+        assert_eq!(ac.meta.ifid.as_deref(), Some(ifid), "ifid retained as archive metadata");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_named_rejects_reserved_default_slug() {
+        let Some(machine) = fake_machine() else { return };
+        let dir = make_temp_dir("reserved-babelmap");
+        let mapper = Mapper::default();
+        let ifid = "ZCODE-1-TEST00-0009";
+
+        // "Default" slugifies to "default" — reserved for the auto/singleton slot.
+        let err = super::save_named(&dir, ifid, "Default", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 1, &[], &[], &[])
+            .expect_err("reserved slug must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!dir.join("default.babelmap").exists(), "must not clobber the default slot");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -423,8 +450,8 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0002";
 
-        // Write a default archive.
-        let default_path = dir.join(format!("{}.babelmap", ifid));
+        // Write the default archive (`default.babelmap`).
+        let default_path = crate::storage::default_state_path(&dir);
         crate::archive::save_archive(&default_path, &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, &[], &[], &[], &[], &[])
             .expect("default save ok");
 
@@ -435,7 +462,7 @@ mod tests {
         // — instead, just verify ordering constraint is maintained.
         super::save_named(&dir, ifid, "save-b", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 20, &[], &[], &[]).unwrap();
 
-        let saves = super::list_saves(&dir, ifid);
+        let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
         assert!(saves[0].is_default, "default save must be first");
         // Remaining two are named; order between them is by saved_at desc (both
@@ -450,13 +477,12 @@ mod tests {
     #[test]
     fn list_saves_skips_non_archive_files() {
         let dir = make_temp_dir("skip");
-        let ifid = "ZCODE-1-TEST00-0003";
 
-        // Write a non-archive file matching the pattern.
-        std::fs::write(dir.join(format!("{}-notanarchive.babelmap", ifid)), b"garbage")
+        // Write a non-archive file matching the extension.
+        std::fs::write(dir.join("notanarchive.babelmap"), b"garbage")
             .unwrap();
 
-        let saves = super::list_saves(&dir, ifid);
+        let saves = super::list_saves(&dir);
         assert!(saves.is_empty(), "garbage file should be skipped");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -470,12 +496,12 @@ mod tests {
         let ifid = "ZCODE-1-TEST00-0004";
 
         super::save_named(&dir, ifid, "to-delete", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 5, &[], &[], &[]).unwrap();
-        let saves = super::list_saves(&dir, ifid);
+        let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1);
         let path = saves[0].path.clone();
 
         super::delete_save(&path).expect("delete ok");
-        let saves_after = super::list_saves(&dir, ifid);
+        let saves_after = super::list_saves(&dir);
         assert!(saves_after.is_empty(), "save should be gone after delete");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -597,10 +623,14 @@ mod tests {
         assert_eq!(m.step(), StepResult::SaveRequest);
 
         let dir = std::env::temp_dir();
-        let path = super::save_game_named(&dir, "IFIDX", "slot one", &m).unwrap();
-        assert!(path.to_string_lossy().ends_with("IFIDX-slot-one.qzl"));
+        let path = super::save_game_named(&dir, "slot one", &m).unwrap();
+        assert!(path.to_string_lossy().ends_with("slot-one.qzl"));
         assert_eq!(std::fs::read(&path).unwrap(), m.save_quetzal(), "bare Quetzal bytes");
         let _ = std::fs::remove_file(&path);
+
+        // The reserved `default` slug is rejected for game saves too.
+        let err = super::save_game_named(&dir, "default", &m).expect_err("reserved slug rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

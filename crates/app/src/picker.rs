@@ -4,7 +4,6 @@
 //! Titles are resolved cheaply (no game is run): the known-title table keyed by
 //! the IFID, falling back to the filename stem.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::hints;
@@ -151,11 +150,13 @@ pub struct StoryAux {
     pub hints_available: bool,
 }
 
-/// Resolve the lazy aux for one story. `save_dir` is `user_dir/saves`;
-/// `hint_index` is the shared index loaded once at picker start.
+/// Resolve the lazy aux for one story. `data_base` is the storage base
+/// (`user_dir/saves` or `--data-dir`); the story's saves live in its per-game
+/// dir `<data_base>/<story-key>/` (SQ-0284). `hint_index` is the shared index
+/// loaded once at picker start (still keyed by IFID).
 pub fn resolve_aux(
     entry: &StoryEntry,
-    save_dir: &Path,
+    data_base: &Path,
     hint_index: &hints::HintIndex,
 ) -> StoryAux {
     // Only record an ASSOCIATED blorb (a different file); the self-blorb case is
@@ -164,7 +165,8 @@ pub fn resolve_aux(
         Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
         _ => None,
     };
-    let saves = crate::persist_files::list_saves(save_dir, &entry.meta.ifid);
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&entry.path));
+    let saves = crate::persist_files::list_saves(&game_dir);
     let hints_available = hint_index.get(&entry.meta.ifid).is_some();
     StoryAux { assoc_blorb, saves, hints_available }
 }
@@ -556,19 +558,35 @@ fn sibling_blorb_exists(path: &Path) -> bool {
     })
 }
 
-/// Compute a row's artifact badges. `save_names` is the saves-dir listing read
-/// once; `hint_index` is loaded once at picker start. No archive reads.
+/// Compute a row's artifact badges. `data_base` is the storage base; the save
+/// badge lights when the story's per-game dir `<data_base>/<story-key>/` exists
+/// and holds a `.babelmap` or `.qzl` (SQ-0284). `hint_index` (IFID-keyed) is
+/// loaded once at picker start. No archive reads.
 pub fn compute_row_badges(
     entry: &StoryEntry,
-    save_names: &HashSet<String>,
+    data_base: &Path,
     hint_index: &hints::HintIndex,
 ) -> RowBadges {
     let ifid = &entry.meta.ifid;
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&entry.path));
     RowBadges {
         blorb: entry.meta.self_blorb.is_some() || sibling_blorb_exists(&entry.path),
-        save: save_names.iter().any(|n| n.starts_with(ifid.as_str())),
+        save: game_dir_has_save(&game_dir),
         hint: hint_index.get(ifid).is_some(),
     }
+}
+
+/// True if `game_dir` exists and contains at least one `.babelmap` or `.qzl`.
+fn game_dir_has_save(game_dir: &Path) -> bool {
+    std::fs::read_dir(game_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.ends_with(".babelmap") || n.ends_with(".qzl"))
+        })
 }
 
 /// Borrowed badge glyphs from the `[symbols]` config, for row rendering.
@@ -741,15 +759,21 @@ mod tests {
         // A plain story with nothing.
         let e_bare = entry_with("IFID-C", dir.join("c.z5"), None);
 
-        let mut save_names = HashSet::new();
-        save_names.insert("IFID-A.babelmap".to_string());          // default save for A
-        save_names.insert("IFID-B-before.babelmap".to_string());   // named save for B
+        // Storage base with per-game dirs keyed by story filename (SQ-0284):
+        // A has a default Save State, B a named `.qzl` game save, C nothing.
+        let base = dir.join("data");
+        let a_dir = crate::storage::game_dir(&base, &crate::storage::story_key(&dir.join("a.z5")));
+        let b_dir = crate::storage::game_dir(&base, &crate::storage::story_key(&dir.join("b.z5")));
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        std::fs::write(a_dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(b_dir.join("before.qzl"), b"x").unwrap();
 
         let hi = hints::load_hint_index(&dir); // empty index (no hints/index.toml)
 
-        let a = compute_row_badges(&e_self, &save_names, &hi);
-        let b = compute_row_badges(&e_sibling, &save_names, &hi);
-        let c = compute_row_badges(&e_bare, &save_names, &hi);
+        let a = compute_row_badges(&e_self, &base, &hi);
+        let b = compute_row_badges(&e_sibling, &base, &hi);
+        let c = compute_row_badges(&e_bare, &base, &hi);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!((a.blorb, a.save, a.hint), (true, true, false));
@@ -793,7 +817,7 @@ mod tests {
         let entry = entry_with("IFID-G", dir.join("g.z5"), None);
 
         let hi = hints::load_hint_index(&dir);
-        let aux = resolve_aux(&entry, &dir, &hi); // save_dir=dir (no saves present)
+        let aux = resolve_aux(&entry, &dir, &hi); // data_base=dir (no per-game saves)
         let _ = std::fs::remove_dir_all(&dir);
 
         let (src, chunks) = aux.assoc_blorb.expect("sibling blorb resolved");

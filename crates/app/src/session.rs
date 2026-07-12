@@ -2023,7 +2023,7 @@ mod tests {
             if r.pending_io == Some(PendingIo::Save) {
                 blob = Some(sess.machine.save_quetzal());
                 qzl_path = Some(
-                    crate::persist_files::save_game_named(&dir, "MINIZORK-TEST", "task5", &sess.machine)
+                    crate::persist_files::save_game_named(&dir, "task5", &sess.machine)
                         .expect("save_game_named writes the .qzl file"),
                 );
                 let _ = sess.resume_save(true); // host "wrote" the file; @save returns success

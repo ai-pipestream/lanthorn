@@ -44,30 +44,24 @@ pub fn decode_aux(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     out
 }
 
-/// `<save_dir>/<sanitized-ifid>.aux`. The IFID is interpreter-generated and
-/// normally safe; sanitized defensively to `[A-Za-z0-9_-]` (no `.`, so `..`
-/// cannot survive) with no separators.
-pub fn aux_path(save_dir: &Path, ifid: &str) -> PathBuf {
-    let safe: String = ifid
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' })
-        .collect();
-    let stem = if safe.is_empty() { "game".to_string() } else { safe };
-    save_dir.join(format!("{stem}.aux"))
+/// `<game_dir>/default.aux` (SQ-0284). The aux table is the game's singleton
+/// side data, stored under the per-game directory keyed by story filename.
+pub fn aux_path(game_dir: &Path) -> PathBuf {
+    game_dir.join("default.aux")
 }
 
 /// Read the per-game global aux file (empty map if absent or unreadable).
-pub fn read_global_aux(save_dir: &Path, ifid: &str) -> BTreeMap<String, Vec<u8>> {
-    match std::fs::read(aux_path(save_dir, ifid)) {
+pub fn read_global_aux(game_dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    match std::fs::read(aux_path(game_dir)) {
         Ok(bytes) => decode_aux(&bytes),
         Err(_) => BTreeMap::new(),
     }
 }
 
-/// Write the per-game global aux file (creating `save_dir` if needed).
-pub fn write_global_aux(save_dir: &Path, ifid: &str, table: &BTreeMap<String, Vec<u8>>) -> std::io::Result<()> {
-    std::fs::create_dir_all(save_dir)?;
-    std::fs::write(aux_path(save_dir, ifid), encode_aux(table))
+/// Write the per-game global aux file (creating `game_dir` if needed).
+pub fn write_global_aux(game_dir: &Path, table: &BTreeMap<String, Vec<u8>>) -> std::io::Result<()> {
+    std::fs::create_dir_all(game_dir)?;
+    std::fs::write(aux_path(game_dir), encode_aux(table))
 }
 
 #[cfg(test)]
@@ -94,23 +88,20 @@ mod tests {
     }
 
     #[test]
-    fn aux_path_sanitizes_and_stays_in_dir() {
-        let dir = Path::new("/tmp/saves");
-        let p = aux_path(dir, "../../etc/ZCODE-1-840726");
-        assert_eq!(p.parent(), Some(dir), "no path escape");
-        let fname = p.file_name().unwrap().to_string_lossy();
-        assert!(fname.ends_with(".aux"));
-        assert!(!fname.contains('/') && !fname.contains("..") && !fname.contains('\\'));
+    fn aux_path_is_default_aux_in_game_dir() {
+        let dir = Path::new("/tmp/saves/Zork1.z5");
+        let p = aux_path(dir);
+        assert_eq!(p, PathBuf::from("/tmp/saves/Zork1.z5/default.aux"));
+        assert_eq!(p.parent(), Some(dir), "stays in the game dir");
     }
 
     #[test]
     fn global_file_round_trips() {
         let dir = std::env::temp_dir().join(format!("babelmap-aux-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let ifid = "ZCODE-1-840726-ABCD";
-        assert!(read_global_aux(&dir, ifid).is_empty(), "absent file → empty");
-        write_global_aux(&dir, ifid, &sample()).unwrap();
-        assert_eq!(read_global_aux(&dir, ifid), sample());
+        assert!(read_global_aux(&dir).is_empty(), "absent file → empty");
+        write_global_aux(&dir, &sample()).unwrap();
+        assert_eq!(read_global_aux(&dir), sample());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

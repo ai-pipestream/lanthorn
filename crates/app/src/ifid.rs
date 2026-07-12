@@ -1,17 +1,1 @@
 pub use zvm::ifid::compute_ifid;
-
-pub fn archive_path(base_dir: &std::path::Path, ifid: &str) -> std::path::PathBuf {
-    base_dir.join(format!("{ifid}.babelmap"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::Path;
-
-    #[test]
-    fn archive_path_uses_ifid() {
-        let p = archive_path(Path::new("/tmp/maps"), "ZCODE-42-871124-ABCD");
-        assert_eq!(p, Path::new("/tmp/maps/ZCODE-42-871124-ABCD.babelmap"));
-    }
-}

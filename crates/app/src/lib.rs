@@ -35,6 +35,7 @@ pub mod render;
 pub mod roomid;
 pub mod session;
 pub mod state;
+pub mod storage;
 pub mod style;
 pub mod style_mru;
 pub mod styles;
