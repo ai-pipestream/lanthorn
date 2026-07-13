@@ -161,6 +161,21 @@ fn rfc3339_now() -> String {
     rfc3339_from_secs(secs)
 }
 
+/// A human-friendly default save name from the current time: `YYYY-MM-DD HHMM`
+/// (UTC). Used to prefill the save-name dialog's placeholder.
+pub fn default_save_name() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let min = (s / 60) % 60;
+    let hour = (s / 3600) % 24;
+    let days = s / 86400;
+    let (year, month, day) = days_to_ymd(days);
+    format!("{:04}-{:02}-{:02} {:02}{:02}", year, month, day, hour, min)
+}
+
 /// A file's modification time as an RFC3339 string (UTC, second precision), or
 /// an empty string if it can't be read. Used to timestamp bare `.qzl` game
 /// saves, which carry no metadata of their own.

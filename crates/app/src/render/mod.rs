@@ -17,6 +17,7 @@ pub mod map;
 pub mod quit_dialog;
 pub mod glyph_picker;
 pub mod reset_dialog;
+pub mod save_name_dialog;
 pub mod style_editor;
 pub mod room_info;
 pub mod saves;

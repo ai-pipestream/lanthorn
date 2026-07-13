@@ -740,6 +740,35 @@ pub enum PromptKind {
     CreateFile,
 }
 
+// ── Save-name dialog ──────────────────────────────────────────────────────────
+
+/// State for the save-name modal (a common-dialog with a caret text field). Opened
+/// for both the host "Save State as named slot" and an in-game `@save` (which one is
+/// tracked by `AppState.ingame_io`). The `field` is prefilled with a date-time
+/// default shown greyed until `active`; see the field-behavior state machine in
+/// `main.rs`'s save-name intercept.
+#[derive(Debug, Clone)]
+pub struct SaveNameDialog {
+    /// The editable buffer + caret.
+    pub field: crate::text_field::TextField,
+    /// false = the greyed default placeholder; true = live editing.
+    pub active: bool,
+    /// True when opened for an in-game `@save` (vs a host Save State slot). Kept for
+    /// clarity; the actual save branch is chosen by `AppState.ingame_io`.
+    pub ingame: bool,
+}
+
+impl SaveNameDialog {
+    /// Open with the given date-time default name, greyed and inactive.
+    pub fn new(default_name: String, ingame: bool) -> SaveNameDialog {
+        SaveNameDialog {
+            field: crate::text_field::TextField::new(default_name),
+            active: false,
+            ingame,
+        }
+    }
+}
+
 /// Which modal the run loop opens for a `create_by_prompt` filename request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilenameModal {
@@ -1334,6 +1363,14 @@ pub struct AppState {
     /// Save State) is deleted so the game re-initializes from scratch.
     pub reset_delete_data: bool,
 
+    // ── Save-name dialog state ────────────────────────────────────────────────
+
+    /// When `Some`, the save-name modal is open (host Save State slot or in-game
+    /// `@save`). Replaces the old bottom-bar `PromptKind::SaveAs` overlay so the
+    /// prompt renders in the graphics-free dialog area instead of hiding behind a
+    /// Glulx graphics window.
+    pub save_name_dialog: Option<SaveNameDialog>,
+
     // ── Aux-storage prompt state ──────────────────────────────────────────────
 
     /// When true, the first-use aux-storage prompt is open.
@@ -1521,6 +1558,7 @@ impl Default for AppState {
             prev_location: None,
             prev_objects_here: std::collections::BTreeSet::new(),
             reset_dialog: false,
+            save_name_dialog: None,
             reset_clear_map: false,
             reset_delete_data: false,
             aux_prompt: false,
@@ -1728,6 +1766,7 @@ impl AppState {
             || self.tidy_anim.is_some()
             || self.prompt.is_some()
             || self.reset_dialog
+            || self.save_name_dialog.is_some()
             || self.aux_prompt
             || self.quit_dialog
             || self.launch_dialog
