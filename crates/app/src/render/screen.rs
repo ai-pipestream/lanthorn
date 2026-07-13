@@ -13,9 +13,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use crate::colors::ColorScheme;
-use crate::engine::{BufferWindow, Introspect, ScreenModel, StatusModel, WinNode};
+use crate::engine::{BorderPref, BufferWindow, Introspect, ScreenModel, StatusModel, WinNode};
 use crate::render::transcript::{draw_str_runs, render_transcript, visible_wrapped_lines_kinded};
-use crate::render::upper_window::{draw_grid, draw_upper_window, grid_border_overhead};
+use crate::render::upper_window::{draw_grid, draw_upper_window};
 use crate::state::{AppState, TranscriptKind};
 
 /// Metrics the story-pane render reports back for scrollbar / mouse routing.
@@ -257,14 +257,23 @@ fn render_node(
     }
     match node {
         WinNode::Pair { vertical, split, first, second } => {
-            let (a1, a2) = pair_areas(*vertical, split.fixed, first, second, &state.colors, area);
+            let (a1, a2) = split_area(area, *vertical, split.fixed);
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
             m1.or(m2)
         }
         WinNode::Grid(g) => {
             let show_cursor = char_mode && g.cursor_active;
-            draw_grid(g, g.active_rows, g.cursor, show_cursor, grid_colors, area, buf, state.config.honor_game_colours, links);
+            // Game-managed multi-window (generic) path: the game owns the layout
+            // and draws its own borders (e.g. Kerkerkruip renders its panel rules
+            // as graphics windows), so draw the grid FRAMELESS at its exact rect —
+            // no app frame over the game's own separators, and no borrowed rows
+            // (SQ-0303). The simple status-line path keeps the app frame via
+            // `draw_upper_window`, so the Z-machine / Counterfeit Monkey status
+            // bar (SQ-0267) is unaffected.
+            let mut frameless = g.clone();
+            frameless.border = BorderPref::NoBorder;
+            draw_grid(&frameless, frameless.active_rows, frameless.cursor, show_cursor, grid_colors, area, buf, state.config.honor_game_colours, links);
             None
         }
         WinNode::Buffer(b) => {
@@ -305,9 +314,9 @@ fn render_node(
 /// inside it); pass an empty rect when the story pane isn't shown.
 ///
 /// With no graphics windows this returns `frame` unchanged (today's behavior).
-pub fn dialog_bounds(model: &ScreenModel, colors: &ColorScheme, story_area: Rect, frame: Rect) -> Rect {
+pub fn dialog_bounds(model: &ScreenModel, story_area: Rect, frame: Rect) -> Rect {
     let mut graphics: Vec<Rect> = Vec::new();
-    collect_graphics_rects(&model.root, colors, story_area, &mut graphics);
+    collect_graphics_rects(&model.root, story_area, &mut graphics);
     let mut bounds = frame;
     for g in graphics {
         bounds = subtract_rect(bounds, g);
@@ -316,16 +325,16 @@ pub fn dialog_bounds(model: &ScreenModel, colors: &ColorScheme, story_area: Rect
 }
 
 /// Walk the tree assigning each leaf its terminal rect (exactly as `render_node`
-/// does, including grid border-row borrowing), collecting every graphics leaf's rect.
-fn collect_graphics_rects(node: &WinNode, colors: &ColorScheme, area: Rect, out: &mut Vec<Rect>) {
+/// does), collecting every graphics leaf's rect.
+fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     match node {
         WinNode::Pair { vertical, split, first, second } => {
-            let (a1, a2) = pair_areas(*vertical, split.fixed, first, second, colors, area);
-            collect_graphics_rects(first, colors, a1, out);
-            collect_graphics_rects(second, colors, a2, out);
+            let (a1, a2) = split_area(area, *vertical, split.fixed);
+            collect_graphics_rects(first, a1, out);
+            collect_graphics_rects(second, a2, out);
         }
         WinNode::Graphics(_) => out.push(area),
         WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
@@ -381,54 +390,6 @@ fn split_area(area: Rect, vertical: bool, fixed: u16) -> (Rect, Rect) {
         let first = Rect::new(area.x, area.y, w, area.height);
         let second = Rect::new(area.x + w, area.y, area.width - w, area.height);
         (first, second)
-    }
-}
-
-/// Split `area` for a `Pair`, granting a stacked (vertical) active grid child
-/// the extra rows its border chrome needs — borrowed from its sibling — so the
-/// chrome isn't squished into the grid's exact Glk allotment (SQ-0200). This
-/// mirrors the simple path, where the framed grid takes its border rows from the
-/// transcript below. Horizontal splits and non-grid children are unaffected.
-///
-/// Used by both `render_node` (to draw) and `collect_graphics_rects` (so
-/// `dialog_bounds` sees graphics where they're actually rendered).
-fn pair_areas(
-    vertical: bool,
-    split_fixed: u16,
-    first: &WinNode,
-    second: &WinNode,
-    colors: &ColorScheme,
-    area: Rect,
-) -> (Rect, Rect) {
-    let (mut a1, mut a2) = split_area(area, vertical, split_fixed);
-    if vertical {
-        // Borrow exactly the border rows the child grid's frame will occupy —
-        // per-grid, so a NoBorder grid (SQ-0286) borrows none and leaves no gap.
-        if let Some(overhead) = grid_frame_overhead(first, colors) {
-            let take = overhead.min(a2.height);
-            a1.height += take;
-            a2.y += take;
-            a2.height -= take;
-        } else if let Some(overhead) = grid_frame_overhead(second, colors) {
-            let take = overhead.min(a1.height);
-            a1.height -= take;
-            a2.y -= take;
-            a2.height += take;
-        }
-    }
-    (a1, a2)
-}
-
-/// The border rows an active text-grid child needs borrowed from its sibling, or
-/// `None` when the child isn't an active grid (or draws no frame — a NoBorder
-/// grid borrows nothing). Honors the game's border presence (SQ-0286).
-fn grid_frame_overhead(node: &WinNode, colors: &ColorScheme) -> Option<u16> {
-    match node {
-        WinNode::Grid(g) if g.active_rows > 0 => match grid_border_overhead(g, colors) {
-            0 => None,
-            o => Some(o),
-        },
-        _ => None,
     }
 }
 
@@ -685,24 +646,37 @@ mod tests {
         assert!(right[10..].contains("RIGHT"), "right buffer at col>=10: {:?}", right);
     }
 
-    /// SQ-0200: in the generic multi-window path a bordered status grid must not
-    /// be squished into its exact 1-row Glk split — it borrows its border rows
-    /// from the sibling below (as the simple path does), so the chrome fits.
+    /// SQ-0303 Stage 2: in the game-managed multi-window (generic) path the app
+    /// must NOT frame the grid or borrow rows — the game owns the layout and draws
+    /// its own borders (Kerkerkruip renders its panel rules as graphics windows).
+    /// The grid renders frameless at its exact 1-row rect, the buffer below starts
+    /// at the grid's exact bottom (not +2), and the columns stay row-aligned — even
+    /// when the grid carries an explicit `winmethod_Border` and the theme has every
+    /// border side on. (Replaces the old SQ-0200 border-row-borrow behavior.)
     #[test]
-    fn generic_grid_borrows_border_rows_from_sibling() {
+    fn generic_grid_renders_frameless_without_borrowing_rows() {
         use crate::render::paneframe::{BorderStyle, PaneSides};
-        // status grid (1 row) over [graphics banner | primary buffer]; the
-        // graphics leaf forces the generic path.
+        // Kerkerkruip-shaped: a center column of an explicit-Border status grid
+        // over an inline BODY buffer, beside a right column of a graphics rule
+        // (the game's own separator) + an inline SIDE panel. The graphics leaf
+        // forces the generic path.
+        let mut grid = grid_with("ST");
+        grid.border = BorderPref::Border; // explicit winmethod_Border
         let model = ScreenModel {
             root: WinNode::Pair {
-                vertical: true,
-                split: Split { fixed: 1 },
-                first: Box::new(WinNode::Grid(grid_with("HI"))),
-                second: Box::new(WinNode::Pair {
+                vertical: false,
+                split: Split { fixed: 8 },
+                first: Box::new(WinNode::Pair {
                     vertical: true,
-                    split: Split { fixed: 3 },
+                    split: Split { fixed: 1 },
+                    first: Box::new(WinNode::Grid(grid)),
+                    second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+                }),
+                second: Box::new(WinNode::Pair {
+                    vertical: false,
+                    split: Split { fixed: 1 },
                     first: Box::new(graphics_node()),
-                    second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+                    second: Box::new(WinNode::Buffer(inline_buffer("SIDE"))),
                 }),
             },
             status: StatusModel::HostManaged,
@@ -712,6 +686,8 @@ mod tests {
         };
         assert!(!is_simple(&model));
 
+        // Theme with EVERY border side on — the old code would have framed the grid
+        // and borrowed 2 rows; the fix suppresses both on the generic path.
         let mut colors = crate::colors::ColorScheme::terminal_default();
         colors.virtual_window_border = BorderStyle::Single;
         colors.upper_window_border_sides = PaneSides::all(BorderStyle::Single);
@@ -722,11 +698,67 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut buf);
 
-        // Grid "HI" (2 cols) framed: uw_w = 2 + 2 borders = 4, centered in 20 →
-        // x_off = 8, content at x=9. Top border row 0, content row 1.
-        assert_ne!(buf.cell((8, 0)).unwrap().symbol(), " ", "top-left border corner drawn");
-        assert_eq!(buf.cell((9, 1)).unwrap().symbol(), "H", "grid content sits inside the border, not squished");
-        assert_eq!(buf.cell((10, 1)).unwrap().symbol(), "I");
+        // Frameless: NO box-drawing glyph anywhere in the pane.
+        for y in 0..10 {
+            for x in 0..20 {
+                let s = buf.cell((x, y)).unwrap().symbol();
+                assert!(
+                    !"┌┐└┘─│".contains(s),
+                    "no frame glyph on the generic path, found {s:?} at ({x},{y})"
+                );
+            }
+        }
+        // Grid "ST" sits frameless on row 0 (cols=2 centered in the 8-wide center
+        // column: x_off=(8-2)/2=3).
+        assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "S", "grid content on row 0, no top border");
+        assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "T");
+        // No row borrowed: the BODY buffer starts at the grid's EXACT bottom (row 1),
+        // not shoved to row 3 by a 2-row border-borrow.
+        assert_eq!(row_text(&buf, 1, 4), "BODY", "buffer below starts at grid bottom (row 1), not +2");
+        // Columns stay row-aligned: the SIDE panel's first line is on row 0, level
+        // with the grid — the center column is not shifted down relative to it.
+        let side = row_text(&buf, 0, 20);
+        assert!(side[9..].contains("SIDE"), "side panel level with grid on row 0: {side:?}");
+    }
+
+    /// SQ-0303 Stage 2 guard: the SIMPLE (Z-machine / lone-grid) path is unchanged
+    /// — a `BorderPref::Border` grid over the primary buffer still draws its frame
+    /// (via `draw_upper_window`), so Counterfeit Monkey's coloured status border
+    /// (SQ-0267) is preserved. Only the generic path went frameless.
+    #[test]
+    fn simple_path_still_frames_a_bordered_grid() {
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        let mut grid = grid_with("HI");
+        grid.border = BorderPref::Border;
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                first: Box::new(WinNode::Grid(grid)),
+                second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+        assert!(is_simple(&model), "grid-over-primary-buffer is the simple path");
+
+        // Theme sides OFF: BorderPref::Border still forces a fallback single frame.
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = PaneSides::all(BorderStyle::None);
+        let mut state = AppState::default();
+        state.colors = colors;
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // uw_w = 2 + 2 borders = 4, centered in 20 → x_off = 8; top-left corner at
+        // (8,0), content pushed inside the frame to row 1.
+        assert_eq!(buf.cell((8, 0)).unwrap().symbol(), "┌", "simple path still frames a Border grid");
+        assert_eq!(buf.cell((9, 1)).unwrap().symbol(), "H", "content sits inside the frame");
     }
 
     /// SQ-0303: gvm snaps its working width down and leaves a blank margin, so the
@@ -910,16 +942,12 @@ mod tests {
         ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) }
     }
 
-    fn dialog_colors() -> ColorScheme {
-        crate::colors::ColorScheme::terminal_default()
-    }
-
     #[test]
     fn dialog_bounds_returns_frame_when_no_graphics() {
         // A pure-text tree: no graphics → dialogs keep full-frame centering.
         let model = model_with(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }));
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, &dialog_colors(), Rect::new(0, 0, 20, 12), frame), frame);
+        assert_eq!(dialog_bounds(&model, Rect::new(0, 0, 20, 12), frame), frame);
     }
 
     #[test]
@@ -935,7 +963,7 @@ mod tests {
         });
         let story_area = Rect::new(0, 0, 20, 12);
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, &dialog_colors(), story_area, frame), Rect::new(10, 0, 30, 12));
+        assert_eq!(dialog_bounds(&model, story_area, frame), Rect::new(10, 0, 30, 12));
     }
 
     #[test]
@@ -948,7 +976,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let area = Rect::new(0, 0, 20, 12);
-        assert_eq!(dialog_bounds(&model, &dialog_colors(), area, area), Rect::new(0, 3, 20, 9));
+        assert_eq!(dialog_bounds(&model, area, area), Rect::new(0, 3, 20, 9));
     }
 
     #[test]
@@ -962,7 +990,7 @@ mod tests {
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
         let frame = Rect::new(0, 0, 40, 12);
-        assert_eq!(dialog_bounds(&model, &dialog_colors(), Rect::default(), frame), frame);
+        assert_eq!(dialog_bounds(&model, Rect::default(), frame), frame);
     }
 
     #[test]
@@ -980,6 +1008,34 @@ mod tests {
         let has_pixels = (area.top()..area.bottom()).any(|y| (area.left()..area.right())
             .any(|x| buf.cell((x, y)).map(|c| c.symbol()) == Some("\u{2580}")));
         assert!(has_pixels, "graphics canvas should render half-block pixels");
+    }
+
+    /// SQ-0303 Step 0 regression: Counterfeit Monkey must stay on the SIMPLE
+    /// path (a status grid over the primary buffer; inline images go INTO the
+    /// buffer, not a separate graphics window — so `others == 0`). The frameless
+    /// generic-path grid fix (SQ-0303 Stage 2) only touches the generic path, so
+    /// keeping CM simple is what preserves its framed/coloured status border
+    /// (SQ-0267). If a future change pushes CM onto the generic path this fails
+    /// loudly. Skips when the (git-ignored) gblorb is absent.
+    #[test]
+    fn counterfeit_monkey_stays_on_the_simple_path() {
+        use crate::engine::Engine;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/CounterfeitMonkey-11.gblorb");
+        if !path.exists() {
+            eprintln!("SKIP: stories/CounterfeitMonkey-11.gblorb absent");
+            return;
+        }
+        let blorb = blorb::Blorb::parse(std::fs::read(&path).unwrap()).expect("parse gblorb");
+        let image = blorb.executable().expect("exec chunk").1.to_vec();
+        let sess = crate::glulx_session::GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[])
+            .expect("boot CM");
+        let model = sess.screen();
+        let (grids, buffers, others) = count_leaves(&model.root);
+        assert!(
+            is_simple(&model),
+            "CM must be on the simple path (grids={grids}, buffers={buffers}, others={others})"
+        );
     }
 
     #[test]

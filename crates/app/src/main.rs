@@ -801,7 +801,7 @@ fn draw_frame(
         // Clamp to gvm's content bounding box so the graphics-rect walk matches the
         // clamped composite render (the snap-margin has no windows). (SQ-0303)
         let story_bbox = app::render::screen::content_bounds(&screen_model, story_area);
-        let dialog_area = app::render::screen::dialog_bounds(&screen_model, &state.colors, story_bbox, full);
+        let dialog_area = app::render::screen::dialog_bounds(&screen_model, story_bbox, full);
 
         // ── Hotkey dialog overlay — drawn over everything ─────────────────────
         if state.hotkey_dialog {
