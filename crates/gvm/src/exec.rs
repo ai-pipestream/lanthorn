@@ -119,7 +119,7 @@ struct PendingSaveLoad {
 /// What the host needs to service a suspended `@save`/`@restore`
 /// ([`StepResult::SaveRequest`]/[`RestoreRequest`]): the game's target file
 /// `name` and whether it is the player's prompted SAVE/RESTORE verb.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaveLoadRequest {
     /// The (sanitized) fixed file name for a game-managed save (empty if unknown).
     pub name: String,
@@ -763,7 +763,7 @@ impl Machine {
                 // Carry the target fileref's name + prompt-ness (L1 is the save
                 // stream) so the host can service a game-managed save silently or
                 // surface the player's SAVE-verb UI (see SaveLoadRequest).
-                let (name, by_prompt) = self.glk.savegame_stream_info(l[0]).unwrap_or_default();
+                let (name, by_prompt) = self.glk.stream_saveload_info(l[0]).unwrap_or_default();
                 self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false, name, by_prompt });
                 // Credit the game's save stream with the bytes it would have
                 // received if delivery weren't host-intercepted, so the
@@ -782,7 +782,7 @@ impl Machine {
                 // L1 is the restore stream; carry its fileref name + prompt-ness so
                 // the host reads the game's fixed file silently (failing cleanly if
                 // absent) or surfaces the player's RESTORE-verb picker.
-                let (name, by_prompt) = self.glk.savegame_stream_info(l[0]).unwrap_or_default();
+                let (name, by_prompt) = self.glk.stream_saveload_info(l[0]).unwrap_or_default();
                 self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: true, name, by_prompt });
                 Ok(())
             }

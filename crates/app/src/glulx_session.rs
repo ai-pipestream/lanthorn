@@ -90,6 +90,10 @@ pub struct GlulxSession {
     /// transcript instead of being stripped. Default true. See
     /// [`Engine::set_strip_prompt`].
     strip_prompt: bool,
+    /// The per-story persistent store for the game's OWN fixed-name saves
+    /// (`create_by_name`). Empty = no store (game-auto saves auto-fail). See
+    /// [`drive_auto`].
+    game_dir: std::path::PathBuf,
 }
 
 /// Wall-clock budget for a single drive (one turn's worth of execution). A
@@ -166,13 +170,50 @@ fn drive(machine: &mut Machine) -> DriveStop {
     }
 }
 
-/// Drive to an input request or quit, returning `(pending_kind, quit)`. Any
-/// in-game `@save`/`@restore` fired during a non-interactive drive (startup,
-/// resize, sound-notify) is auto-failed — those paths have no UI to prompt the
-/// player, and leaving the VM suspended would wedge the next turn.
-fn drive_settled(machine: &mut Machine) -> (InputKind, bool) {
+/// Drive to a player-facing stop, transparently servicing the game's OWN
+/// (`create_by_name`) `@save`/`@restore` against `game_dir` — no host UI. A
+/// game-managed `@save` writes `<game_dir>/<name>.qzl`; a game-managed
+/// `@restore` reads it if present, else fails cleanly (so a first run runs the
+/// game's init). Only the player's SAVE/RESTORE verb (`create_by_prompt`), or
+/// any save when no store is configured (`game_dir` empty), bubbles up as
+/// `DriveStop::Save`/`Restore`.
+fn drive_auto(machine: &mut Machine, game_dir: &std::path::Path) -> DriveStop {
     loop {
-        match drive(machine) {
+        let stop = drive(machine);
+        let restore = match stop {
+            DriveStop::Save => false,
+            DriveStop::Restore => true,
+            other => return other,
+        };
+        let req = machine.pending_saveload_request().unwrap_or_default();
+        // The player's verb (by_prompt), an unknown target, or no store: let the
+        // caller decide (host UI in a turn, auto-fail in a non-interactive drive).
+        if req.by_prompt || req.name.is_empty() || game_dir.as_os_str().is_empty() {
+            return stop;
+        }
+        let path = game_dir.join(format!("{}.qzl", req.name));
+        if restore {
+            match std::fs::read(&path) {
+                Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {}
+                _ => machine.complete_restore_failure(),
+            }
+        } else {
+            let ok = std::fs::create_dir_all(game_dir).is_ok()
+                && std::fs::write(&path, machine.save_quetzal()).is_ok();
+            machine.complete_save(ok);
+        }
+        // Keep driving: the op may chain into another game-managed save/restore.
+    }
+}
+
+/// Drive to an input request or quit, returning `(pending_kind, quit)`. A
+/// player `@save`/`@restore` fired during a non-interactive drive (startup,
+/// resize, sound-notify) is auto-failed — those paths have no UI to prompt the
+/// player, and leaving the VM suspended would wedge the next turn. The game's
+/// OWN fixed-name saves are serviced silently by [`drive_auto`] first.
+fn drive_settled(machine: &mut Machine, game_dir: &std::path::Path) -> (InputKind, bool) {
+    loop {
+        match drive_auto(machine, game_dir) {
             DriveStop::Input(k) => return (k, false),
             DriveStop::Quit => return (InputKind::Line, true),
             DriveStop::Save => machine.complete_save(false),
@@ -188,7 +229,34 @@ impl GlulxSession {
     /// Steps to the first input request / quit (driving the opening text into the
     /// backend); the text is NOT drained here, so `take_transcript` returns the
     /// banner.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        image: Vec<u8>,
+        cols: u32,
+        rows: u32,
+        acceleration: bool,
+        graphics_enabled: bool,
+        sound_enabled: bool,
+        char_px: (u32, u32),
+        pict_blorb: Option<blorb::Blorb>,
+        vfs_bytes: &[u8],
+    ) -> Result<GlulxSession, GError> {
+        // No persistent store: the game's own fixed-name @save/@restore auto-fail
+        // (empty game_dir), matching pre-persistence behavior. Used by tests.
+        Self::new_in(
+            std::path::PathBuf::new(), image, cols, rows, acceleration,
+            graphics_enabled, sound_enabled, char_px, pict_blorb, vfs_bytes,
+        )
+    }
+
+    /// Like [`GlulxSession::new`] but with a `game_dir` persistent store: the
+    /// game's OWN fixed-name saves (`create_by_name` — CM's init cache, undo,
+    /// autotesting) are serviced silently against `<game_dir>/<name>.qzl` during
+    /// every drive (including boot), with no host UI. Only the player's SAVE/
+    /// RESTORE verb (`create_by_prompt`) bubbles up for the app's saves dialog.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_in(
+        game_dir: std::path::PathBuf,
         image: Vec<u8>,
         cols: u32,
         rows: u32,
@@ -210,7 +278,7 @@ impl GlulxSession {
         // may read a cache during boot (e.g. CM skips its long init) or write one
         // (leaving vfs_dirty set), so the sidecar must be in place first (SQ-0290).
         machine.load_vfs(vfs_bytes);
-        let (pending, quit) = drive_settled(&mut machine);
+        let (pending, quit) = drive_settled(&mut machine, &game_dir);
         let mut session = GlulxSession {
             machine,
             pending,
@@ -222,6 +290,7 @@ impl GlulxSession {
             aux_dirty: false,
             last_room: None,
             strip_prompt: true,
+            game_dir,
         };
         session.refresh_screen();
         session.last_room =
@@ -253,7 +322,7 @@ impl GlulxSession {
         }
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
-        let (pending, quit) = drive_settled(&mut self.machine);
+        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
         self.pending = pending;
         self.quit = quit;
         self.refresh_screen();
@@ -264,7 +333,7 @@ impl GlulxSession {
     /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
     /// performs the file I/O and calls `resume_save`/`resume_restore`.
     fn drive_turn(&mut self) {
-        match drive(&mut self.machine) {
+        match drive_auto(&mut self.machine, &self.game_dir) {
             DriveStop::Input(k) => {
                 self.pending = k;
                 self.quit = false;
@@ -380,7 +449,7 @@ impl GlulxSession {
     pub fn deliver_timer(&mut self) -> TurnResult {
         if !self.quit {
             self.machine.deliver_timer();
-            let (pending, quit) = drive_settled(&mut self.machine);
+            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
             self.pending = pending;
             self.quit = quit;
         }
@@ -394,7 +463,7 @@ impl GlulxSession {
     pub fn sound_notify(&mut self, sound: u32, notify: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_sound_notify(sound, notify);
-            let (pending, quit) = drive_settled(&mut self.machine);
+            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
             self.pending = pending;
             self.quit = quit;
         }
@@ -436,7 +505,7 @@ impl GlulxSession {
     pub fn deliver_mouse(&mut self, win: u32, x: u32, y: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_mouse(win, x, y);
-            let (pending, quit) = drive_settled(&mut self.machine);
+            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
             self.pending = pending;
             self.quit = quit;
         }
@@ -451,7 +520,7 @@ impl GlulxSession {
     pub fn deliver_hyperlink(&mut self, win: u32, link: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_hyperlink(win, link);
-            let (pending, quit) = drive_settled(&mut self.machine);
+            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
             self.pending = pending;
             self.quit = quit;
         }
@@ -1079,6 +1148,47 @@ mod tests {
         // touches self.glk) -- the screen tree still has an open window, and
         // the session can keep driving turns through it.
         assert!(!matches!(sess.screen().root, WinNode::Blank), "the live window survives restore_quetzal");
+    }
+
+    #[test]
+    fn game_managed_save_is_serviced_silently_to_game_dir_without_bubbling() {
+        use E::*;
+        // A create_by_name (game's OWN, not player-prompted) SavedGame @save must
+        // be written silently to <game_dir>/<name>.qzl during the drive — no
+        // Save request bubbled to the host UI. This is CM's init-cache path.
+        const SAVE_RES: u32 = 0x410;
+        const NAMEADDR: u32 = 0x420; // free RAM; the byte after is already NUL
+        let dir = std::env::temp_dir().join(format!("bm-gameauto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut body = open_buffer_prelude();
+        // Write the C-string "c" at NAMEADDR (astoreb; mem[NAMEADDR+1] is 0 already).
+        body.extend(enc(0x4E, &[Imm(NAMEADDR), Imm(0), Imm(b'c' as u32)]));
+        // fref = glk_fileref_create_by_name(usage=1 SavedGame, NAMEADDR, rock=0) -> local0.
+        body.extend(enc(0x40, &[Imm(0), Push])); // rock
+        body.extend(enc(0x40, &[Imm(NAMEADDR), Push])); // nameptr
+        body.extend(enc(0x40, &[Imm(1), Push])); // usage (arg0, topmost)
+        body.extend(enc(0x130, &[Imm(0x61), Imm(3), LocStore(0)]));
+        // str = glk_stream_open_file(fref, fmode=1 Write, rock=0) -> local1.
+        body.extend(enc(0x40, &[Imm(0), Push])); // rock
+        body.extend(enc(0x40, &[Imm(1), Push])); // fmode Write
+        body.extend(enc(0x40, &[LocLoad(0), Push])); // fref (arg0)
+        body.extend(enc(0x130, &[Imm(0x42), Imm(3), LocStore(4)]));
+        // @save str -> mem[SAVE_RES]: game-managed, serviced silently at boot.
+        body.extend(enc(0x123, &[LocLoad(4), MemLoad(SAVE_RES)]));
+        body.extend(line_prompt());
+        body.extend(enc(0x120, &[])); // quit
+
+        let sess = GlulxSession::new_in(
+            dir.clone(), image_for(body, 2), 80, 24, true, false, false, (1, 1), None, &[],
+        )
+        .expect("new");
+        // No Save request reached the host: the boot drive ran straight to the prompt.
+        assert_eq!(sess.pending_input(), InputKind::Line, "the game-managed @save did not bubble");
+        // The fixed-name slot was written to <dir>/c.qzl.
+        let bytes = std::fs::read(dir.join("c.qzl")).expect("game-managed @save wrote c.qzl silently");
+        assert!(!bytes.is_empty(), "the saved slot carries the save bytes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

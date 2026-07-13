@@ -1826,7 +1826,8 @@ fn main() {
         }
         app::hints::LoadedStory::Glulx(bytes) => {
             let pict_blorb = resolve_pict_blorb(&story_path, cfg.images);
-            match GlulxSession::new(
+            match GlulxSession::new_in(
+                game_dir.clone(),
                 bytes,
                 cfg.virtual_screen_cols as u32,
                 cfg.virtual_screen_rows as u32,
@@ -2642,7 +2643,7 @@ fn main() {
                             ResetDialogAction::Confirm => {
                                 let clear = state.reset_clear_map;
                                 state.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear);
                             }
                             ResetDialogAction::Cancel => {
                                 state.reset_dialog = false;
@@ -2672,7 +2673,7 @@ fn main() {
                             } else if in_reset {
                                 let clear = state.reset_clear_map;
                                 state.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear);
                             } else if in_checkbox {
                                 state.reset_clear_map = !state.reset_clear_map;
                             } else if !in_dialog {
@@ -4320,7 +4321,7 @@ fn dispatch_slash_outcome(
             if from_key {
                 apply_action(Action::ResetGame, state, mapper);
             } else {
-                reset_game(session, mapper, state, story_bytes, story_path, reset_map);
+                reset_game(session, mapper, state, story_bytes, story_path, game_dir, reset_map);
                 let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
                 state.set_status(status_msg);
             }
@@ -4429,6 +4430,7 @@ fn reset_game(
     state: &mut AppState,
     story_bytes: &[u8],
     story_path: &std::path::Path,
+    game_dir: &std::path::Path,
     clear_map: bool,
 ) {
     // Rebuild the engine from the original story bytes via the same factory used
@@ -4462,7 +4464,8 @@ fn reset_game(
             // kept in sync with the sidecar) into the restarted session so the
             // fresh boot still sees it (SQ-0290).
             let carry_vfs = session.vfs_bytes();
-            GlulxSession::new(
+            GlulxSession::new_in(
+                game_dir.to_path_buf(),
                 bytes,
                 state.config.virtual_screen_cols as u32,
                 state.config.virtual_screen_rows as u32,
@@ -6146,7 +6149,7 @@ mod tests {
         // strip_prompt=false so @restart doesn't revert to stripping the game's `>`.
         state.config.command_bar = false;
         state.turns = 5;
-        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, false);
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false);
         assert_eq!(state.turns, 0, "restart resets the turn counter");
         assert!(engine.as_any().is::<app::session::GameSession>(),
             "still a Z-machine session after restart");
@@ -6175,7 +6178,7 @@ mod tests {
         // threaded in — the rebuild must succeed without panicking.
         assert!(state.config.images, "default config enables images");
         state.turns = 5;
-        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, false);
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false);
         assert_eq!(state.turns, 0, "restart resets the turn counter for Glulx");
         assert!(engine.as_any().is::<app::glulx_session::GlulxSession>(),
             "still a Glulx session after restart");

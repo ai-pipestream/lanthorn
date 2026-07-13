@@ -212,6 +212,14 @@ pub fn list_qzl(game_dir: &Path) -> Vec<SaveInfo> {
             let p = e.path();
             let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
             if let Some(slug) = fname.strip_suffix(".qzl") {
+                // Skip the game's OWN internal saves (create_by_name — CM's init
+                // cache, undo, autotesting), written by the session to a fixed
+                // `<name>.qzl`. Their names begin with `_`; player-save slugs
+                // (slugified: lowercase alphanumerics + hyphens) never do, so
+                // this cleanly hides internal files from the player saves list.
+                if slug.starts_with('_') {
+                    continue;
+                }
                 let name = slug.to_string();
                 let saved_at = rfc3339_mtime(&p);
                 out.push(SaveInfo {
@@ -524,6 +532,21 @@ mod tests {
         assert!(out.iter().all(|q| !q.is_default && q.turns == 0));
         assert!(out.iter().any(|q| q.name == "quick")); // name = stem
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_qzl_hides_game_managed_underscore_saves() {
+        // The game's OWN fixed-name saves (create_by_name: CM's init cache, undo,
+        // autotesting) land as `_<name>.qzl` and must NOT appear in the player's
+        // saves list. Player-save slugs (slugified: no leading `_`) still do.
+        let dir = make_temp_dir("list-qzl-underscore");
+        std::fs::write(dir.join("myslot.qzl"), b"x").unwrap();
+        std::fs::write(dir.join("_Counterfeit_Monkey-startup-data.qzl"), b"x").unwrap();
+        std::fs::write(dir.join("_autotesting.qzl"), b"x").unwrap();
+        let out = super::list_qzl(&dir);
+        assert_eq!(out.len(), 1, "only the player save is listed");
+        assert_eq!(out[0].name, "myslot");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

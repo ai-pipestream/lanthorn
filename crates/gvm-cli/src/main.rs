@@ -300,47 +300,68 @@ fn drive(
                     machine.supply_filename(if name.is_empty() { None } else { Some(name.to_string()) });
                 }
             }
-            // Game @save: prompt for a filename (mirrors zvm-cli) and write a
-            // standard, bare Glulx-Quetzal save. Blank cancels.
+            // @save. The game's OWN fixed-name saves (create_by_name: CM's init
+            // cache, undo, autotesting) are serviced SILENTLY against a fixed
+            // path in game_dir — no prompt. Only the player's SAVE verb
+            // (create_by_prompt) prompts for a filename.
             StepResult::SaveRequest => {
-                before_input(machine);
-                eprint!("Save to file: ");
-                let (line, _) = read_line(LineEcho::Shown(String::new()));
-                let name = line.trim_end_matches(['\n', '\r']);
-                if name.is_empty() {
-                    machine.complete_save(false);
-                } else {
-                    let path = resolve_save_input(name, game_dir);
-                    std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))).ok();
-                    let ok = fs::write(&path, machine.save_quetzal()).is_ok();
-                    if ok {
-                        eprintln!("[saved to {}]", path.display());
+                let req = machine.pending_saveload_request().unwrap_or_default();
+                if req.by_prompt || req.name.is_empty() {
+                    before_input(machine);
+                    eprint!("Save to file: ");
+                    let (line, _) = read_line(LineEcho::Shown(String::new()));
+                    let name = line.trim_end_matches(['\n', '\r']);
+                    if name.is_empty() {
+                        machine.complete_save(false);
                     } else {
-                        eprintln!("[save failed]");
+                        let path = resolve_save_input(name, game_dir);
+                        std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))).ok();
+                        let ok = fs::write(&path, machine.save_quetzal()).is_ok();
+                        if ok {
+                            eprintln!("[saved to {}]", path.display());
+                        } else {
+                            eprintln!("[save failed]");
+                        }
+                        machine.complete_save(ok);
                     }
+                } else {
+                    // Silent game-managed save: <game_dir>/<fileref name>.qzl.
+                    let path = game_auto_save_path(game_dir, &req.name);
+                    std::fs::create_dir_all(game_dir).ok();
+                    let ok = fs::write(&path, machine.save_quetzal()).is_ok();
                     machine.complete_save(ok);
                 }
             }
-            // Game @restore: prompt for a filename and restore via the
-            // live-state-preserving standard path. Blank or a read/parse
-            // failure fails cleanly.
+            // @restore. Symmetric: the game's own saves read a fixed file
+            // silently (clean-failing when it's absent — the first run — so the
+            // game runs its init); only the player's RESTORE verb prompts.
             StepResult::RestoreRequest => {
-                before_input(machine);
-                eprint!("Restore from file: ");
-                let (line, _) = read_line(LineEcho::Shown(String::new()));
-                let name = line.trim_end_matches(['\n', '\r']);
-                if name.is_empty() {
-                    machine.complete_restore_failure();
+                let req = machine.pending_saveload_request().unwrap_or_default();
+                if req.by_prompt || req.name.is_empty() {
+                    before_input(machine);
+                    eprint!("Restore from file: ");
+                    let (line, _) = read_line(LineEcho::Shown(String::new()));
+                    let name = line.trim_end_matches(['\n', '\r']);
+                    if name.is_empty() {
+                        machine.complete_restore_failure();
+                    } else {
+                        let path = resolve_save_input(name, game_dir);
+                        match fs::read(&path) {
+                            Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {
+                                eprintln!("[restored from {}]", path.display());
+                            }
+                            _ => {
+                                eprintln!("[restore failed]");
+                                machine.complete_restore_failure();
+                            }
+                        }
+                    }
                 } else {
-                    let path = resolve_save_input(name, game_dir);
+                    // Silent game-managed restore: read the fixed file if present.
+                    let path = game_auto_save_path(game_dir, &req.name);
                     match fs::read(&path) {
-                        Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {
-                            eprintln!("[restored from {}]", path.display());
-                        }
-                        _ => {
-                            eprintln!("[restore failed]");
-                            machine.complete_restore_failure();
-                        }
+                        Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {}
+                        _ => machine.complete_restore_failure(),
                     }
                 }
             }
@@ -358,6 +379,16 @@ fn story_key(story_path: &std::path::Path) -> String {
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
         .collect();
     if s.is_empty() { "game".to_string() } else { s }
+}
+
+/// The fixed path for a game-managed (create_by_name) save slot:
+/// `<game_dir>/<sanitized fileref name>.qzl`. `name` is already sanitized by the
+/// VM (gvm's `sanitize_fileref_name`), so `@save` and `@restore` on the same
+/// fileref name resolve to the same file across launches — the payoff that lets
+/// a game skip its init on relaunch. These names are game-internal (CM's begin
+/// with `_`), keeping them clear of the player's `<name>.qzl` saves.
+fn game_auto_save_path(game_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    game_dir.join(format!("{name}.qzl"))
 }
 
 /// Resolve an interactive `@save`/`@restore` filename prompt: a bare name
@@ -696,6 +727,19 @@ mod tests {
         assert_eq!(resolve_save_input("quick", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
         assert_eq!(resolve_save_input("quick.qzl", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
         assert_eq!(resolve_save_input("/tmp/foo.qzl", gd), PathBuf::from("/tmp/foo.qzl"));
+    }
+
+    #[test]
+    fn game_auto_save_path_is_fixed_named_in_game_dir() {
+        use std::path::{Path, PathBuf};
+        // A game-managed (create_by_name) slot resolves to a fixed
+        // <game_dir>/<name>.qzl — same path across launches, so a relaunch's
+        // @restore finds it (init-skip). Names are pre-sanitized by the VM.
+        let gd = Path::new("/data/CM.gblorb.save");
+        assert_eq!(
+            game_auto_save_path(gd, "_Counterfeit_Monkey-startup-data"),
+            PathBuf::from("/data/CM.gblorb.save/_Counterfeit_Monkey-startup-data.qzl"),
+        );
     }
 
     #[test]

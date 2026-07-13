@@ -760,6 +760,11 @@ struct FileStream {
     pos: usize,
     unicode: bool,
     usage: u32,
+    /// Whether the originating fileref was `create_by_prompt` (the player's SAVE
+    /// verb). Lets `@save`/`@restore` over a VFS file stream (a game that saves to
+    /// a Data-usage fileref, e.g. CM's init cache) route silently vs. via the
+    /// host UI. Not serialized (defaults `false` on snapshot restore).
+    by_prompt: bool,
 }
 
 /// The Glk window/stream model.
@@ -1633,7 +1638,7 @@ impl Model {
             _ => return 0,
         };
         let sid = self.alloc_stream(StreamKind::File { unicode }, rock);
-        self.file_streams.insert(sid, FileStream { name, mode: fmode, pos, unicode, usage });
+        self.file_streams.insert(sid, FileStream { name, mode: fmode, pos, unicode, usage, by_prompt });
         sid
     }
     /// Credit a stream's `write_count` by `n` without writing any bytes. Used
@@ -1653,12 +1658,16 @@ impl Model {
         }
     }
 
-    /// For a live `SavedGame` `Null` stream, its `(fileref name, by_prompt)` — the
-    /// hook the `@save`/`@restore` shim uses to route the game's own fixed-name
-    /// saves silently vs. surfacing the player's SAVE-verb UI. `None` if `id`
-    /// isn't a host-managed save stream.
-    pub fn savegame_stream_info(&self, id: u32) -> Option<(String, bool)> {
-        self.savegame_streams.get(&id).map(|ss| (ss.name.clone(), ss.by_prompt))
+    /// For a live file-backed stream (a `SavedGame` `Null` conduit OR a VFS
+    /// `File` stream — a game may `@save` to either), its `(fileref name,
+    /// by_prompt)`. This is the hook `@save`/`@restore` use to route the game's
+    /// own fixed-name saves (`create_by_name`) silently vs. surfacing the
+    /// player's SAVE-verb UI (`create_by_prompt`). `None` for any other stream.
+    pub fn stream_saveload_info(&self, id: u32) -> Option<(String, bool)> {
+        if let Some(ss) = self.savegame_streams.get(&id) {
+            return Some((ss.name.clone(), ss.by_prompt));
+        }
+        self.file_streams.get(&id).map(|fs| (fs.name.clone(), fs.by_prompt))
     }
 
     /// Close a stream, returning its `(read_count, write_count)`. The current
@@ -2359,7 +2368,7 @@ impl Model {
             let pos = r.u32()? as usize;
             let unicode = r.u32()? != 0;
             let usage = r.u32()?;
-            file_streams.insert(sid, FileStream { name, mode, pos, unicode, usage });
+            file_streams.insert(sid, FileStream { name, mode, pos, unicode, usage, by_prompt: false });
         }
 
         if !r.done() {
