@@ -48,12 +48,19 @@
 - **Transcript search / filter / export** — `/search <query>` highlights matches
   (case-insensitive) and lands on the most recent; `n`/`N` step back/forward
   (configurable), `Esc` clears. `/filter story|meta|both` shows only game output
-  (including your commands), only app/engine output, or both. `/export [file]`
-  writes the visible transcript to a text file (auto-named under
-  `~/.babelmap/exports/` by default). Every transcript line carries a category —
-  **story**, your **input** echo, **meta** (app/slash), and VM **warnings** — each
-  independently themeable; meta and warning lines are set off with their own
-  configurable gutter markers (`▏` / `!`).
+  (including your commands), only app/engine output, or both. `/export-transcript
+  [file]` writes the visible transcript to `transcript.txt` in the story's
+  per-game directory by default (overwriting); a bare name lands beside it, a
+  path-bearing value is honored verbatim — see [Storage layout](../persistence.md#storage-layout-sq-0284).
+  Every transcript line carries a category — **story**, your **input** echo,
+  **meta** (app/slash), and VM **warnings** — each independently themeable;
+  meta and warning lines are set off with their own configurable gutter markers
+  (`▏` / `!`).
+- **Map export** — `/export-svg [file]`, `/export-dot [file]`, and
+  `/export-dump [file]` write the map as SVG, a Graphviz DOT graph, or an
+  annotatable text/ASCII dump. Each defaults to a fixed name in the story's
+  per-game directory (`map.svg` / `map.dot` / `map.txt`, overwriting); the
+  optional `[file]` argument resolves the same way as the transcript export.
 
 ## Story picker
 Launching with a directory instead of a story file (`babelmap path/to/stories/`)

@@ -133,6 +133,16 @@ into the per-game directory — `<base>/<story-key>/quick.qzl` — matching the
 `@save /tmp/x.qzl`) is honored verbatim, bypassing the per-game directory
 entirely.
 
+### Map/transcript exports (SQ-0288)
+
+The app's `/export-svg`, `/export-dot`, `/export-dump`, and `/export-transcript`
+commands write into the same per-game directory, using fixed default names —
+`map.svg`, `map.dot`, `map.txt`, `transcript.txt` — overwriting on repeat
+export. Each takes an optional `[file]` argument that resolves the same way as
+`@save`/`@restore` above: a **bare name** lands in `<base>/<story-key>/`
+(the format's extension is appended if the name has none), a **path-bearing
+value** is honored verbatim.
+
 ### No migration (alpha)
 
 There is **no migration** from the old IFID-keyed layout. Saves and sidecars
@@ -156,6 +166,7 @@ directory (renaming to the `default.*` / `<slug>.*` names above as needed).
 | 3 — auto per-story (aux) | Z-machine | `zvm-cli` | `<base>/<story-key>/default.aux` (`ZAUX`) |
 | 3 — auto per-story (Glk VFS) | Glulx | app | `<base>/<story-key>/default.glkvfs` (`GVFS`) |
 | 3 — auto per-story (Glk VFS) | Glulx | `gvm-cli` | `<base>/<story-key>/default.glkvfs` (`GVFS`) |
+| export — `/export-svg`\|`-dot`\|`-dump`\|`-transcript` | either | app | `<base>/<story-key>/map.svg`\|`map.dot`\|`map.txt`\|`transcript.txt` (bare `[file]` arg) or verbatim path |
 
 `<base>` and `<story-key>` are as defined in [Storage layout](#storage-layout-sq-0284)
 above.
