@@ -2070,6 +2070,19 @@ impl Model {
         self.win(win).map(|w| w.hyperlink_req).unwrap_or(false)
     }
 
+    /// Whether any window has a pending mouse request. The VM reads this at a
+    /// `glk_select` with no line/char request to decide whether to block on a
+    /// non-input event (see [`crate::exec::StepResult::NeedEvent`]).
+    pub fn any_mouse_requested(&self) -> bool {
+        self.windows.iter().flatten().any(|w| w.mouse_req)
+    }
+
+    /// Whether any window has a pending hyperlink request. Companion to
+    /// [`Model::any_mouse_requested`] for the non-input `glk_select` case.
+    pub fn any_hyperlink_requested(&self) -> bool {
+        self.windows.iter().flatten().any(|w| w.hyperlink_req)
+    }
+
     /// Every window (lowest id first) with a pending mouse request, as
     /// `(id, wintype, rect)`. The host reads this to decide whether a terminal
     /// click lands inside a mouse-watching window.

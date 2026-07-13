@@ -83,6 +83,10 @@ fn kerkerkruip_boots_past_storage_menu() {
                 quit_before_input = true;
                 break;
             }
+            StepResult::NeedEvent { timer_ms: Some(_), .. } => m.deliver_timer(),
+            StepResult::NeedEvent { .. } => {
+                panic!("unexpected non-timer event wait during Kerkerkruip boot");
+            }
             StepResult::SaveRequest | StepResult::RestoreRequest | StepResult::NeedFilename { .. } => {
                 // The boot path should not hit a host @save/@restore before its
                 // first input; treat as a boot failure to investigate.

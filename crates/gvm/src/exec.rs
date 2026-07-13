@@ -55,6 +55,22 @@ pub enum StepResult {
         /// The Glk filemode (Read `0x02`, Write `0x01`, ReadWrite `0x03`, WriteAppend `0x05`).
         fmode: u32,
     },
+    /// A `glk_select` is pending a **non-input** event: the game armed only a
+    /// timer, mouse, and/or hyperlink request (no line/char input) and is blocked
+    /// until one fires (Glk spec §4.4 — such a `glk_select` must block, never
+    /// return `evtype_None`). The host resolves it by delivering the event: a
+    /// timer tick on its own clock ([`Machine::deliver_timer`]) when `timer_ms`
+    /// is set, or a mouse/hyperlink event on a user action
+    /// ([`Machine::deliver_mouse`]/[`Machine::deliver_hyperlink`]) — then the VM
+    /// resumes.
+    NeedEvent {
+        /// The armed timer interval in ms, or `None` when no timer is running.
+        timer_ms: Option<u32>,
+        /// Whether any window has a pending mouse request.
+        mouse: bool,
+        /// Whether any window has a pending hyperlink request.
+        hyperlink: bool,
+    },
 }
 
 /// Where a produced value (a function's return value, or an opcode's store
@@ -95,6 +111,21 @@ struct PendingInput {
     line: bool,
     /// Whether the request was the Unicode (`_uni`) variant.
     unicode: bool,
+}
+
+/// A suspended `glk_select` awaiting a host-supplied **non-input** event: the
+/// game armed only a timer/mouse/hyperlink request (no line/char input) and is
+/// blocked until one fires (see [`StepResult::NeedEvent`]). Mirrors
+/// [`PendingInput`]; mutually exclusive with it (a `glk_select` sets exactly one).
+struct PendingEvent {
+    /// Glulx address of the `event_t` to fill when the event arrives.
+    event_addr: u32,
+    /// The armed timer interval in ms at suspend time, or `None`.
+    timer_ms: Option<u32>,
+    /// Whether any window had a pending mouse request at suspend time.
+    mouse: bool,
+    /// Whether any window had a pending hyperlink request at suspend time.
+    hyperlink: bool,
 }
 
 /// A suspended game-initiated `@save`/`@restore` awaiting the host's file I/O.
@@ -203,6 +234,12 @@ pub struct Machine {
     /// is awaited. Set when `glk_select` finds a pending request; cleared when
     /// the host supplies the event ([`Machine::supply_line`]/[`supply_char`]).
     pending_input: Option<PendingInput>,
+    /// A suspended `glk_select` awaiting a non-input event (timer/mouse/hyperlink;
+    /// see [`StepResult::NeedEvent`]). Set when `glk_select` finds no line/char
+    /// request but a timer/mouse/hyperlink is armed; cleared when the host
+    /// delivers the event ([`Machine::deliver_timer`] etc.). Mutually exclusive
+    /// with `pending_input`.
+    pending_event: Option<PendingEvent>,
     /// A suspended game `@save`/`@restore` (see [`StepResult::SaveRequest`]).
     /// Set when the opcode fires; consumed by the host-facing `complete_*` methods.
     pending_saveload: Option<PendingSaveLoad>,
@@ -361,6 +398,7 @@ impl Machine {
             heap_blocks: Vec::new(),
             glk: Model::new(),
             pending_input: None,
+            pending_event: None,
             pending_saveload: None,
             pending_fileref: None,
             backend,
@@ -1957,6 +1995,7 @@ impl Machine {
         self.heap_blocks.clear();
         self.glk = Model::new();
         self.pending_input = None;
+        self.pending_event = None;
         self.pending_fileref = None;
         self.halted = false;
         self.protect = (0, 0);
@@ -3548,9 +3587,21 @@ impl Machine {
         } else if let Some((win, unicode)) = self.glk.first_char_request() {
             self.pending_input = Some(PendingInput { event_addr, win, line: false, unicode });
         } else {
-            self.diagnostics
-                .push("glk_select with no pending input request (returning evtype_None)".to_string());
-            self.write_event(event_addr, GlkEvent::none())?;
+            // No line/char request. If a timer/mouse/hyperlink is armed, this is a
+            // legal blocking select on a non-input event (Glk §4.4): suspend and
+            // let the host deliver the event, rather than spinning on evtype_None.
+            let timer_ms = self.glk_timer_interval();
+            let mouse = self.glk.any_mouse_requested();
+            let hyperlink = self.glk.any_hyperlink_requested();
+            if timer_ms.is_some() || mouse || hyperlink {
+                self.pending_event = Some(PendingEvent { event_addr, timer_ms, mouse, hyperlink });
+            } else {
+                // Nothing at all is armed: a malformed program that would otherwise
+                // deadlock. Preserve the diagnostic + evtype_None escape hatch.
+                self.diagnostics
+                    .push("glk_select with no pending input request (returning evtype_None)".to_string());
+                self.write_event(event_addr, GlkEvent::none())?;
+            }
         }
         Ok(())
     }
@@ -3588,12 +3639,17 @@ impl Machine {
 
     /// The [`StepResult`] for the current suspended `glk_select`, if any.
     fn suspend_result(&self) -> Option<StepResult> {
-        self.pending_input.as_ref().map(|pi| {
-            if pi.line {
+        if let Some(pi) = self.pending_input.as_ref() {
+            return Some(if pi.line {
                 StepResult::NeedLine { win: pi.win }
             } else {
                 StepResult::NeedChar { win: pi.win, unicode: pi.unicode }
-            }
+            });
+        }
+        self.pending_event.as_ref().map(|pe| StepResult::NeedEvent {
+            timer_ms: pe.timer_ms,
+            mouse: pe.mouse,
+            hyperlink: pe.hyperlink,
         })
     }
 
@@ -3883,6 +3939,10 @@ impl Machine {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
                 self.diagnostics.push(e);
             }
+        } else if let Some(pe) = self.pending_event.take() {
+            if let Err(e) = self.write_event(pe.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
         } else {
             self.glk.push_event(ev);
         }
@@ -3901,6 +3961,10 @@ impl Machine {
         let ev = GlkEvent { etype: glk::evtype::MOUSE_INPUT, win, val1: x, val2: y };
         if let Some(pi) = self.pending_input.take() {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else if let Some(pe) = self.pending_event.take() {
+            if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
         } else {
@@ -3928,6 +3992,10 @@ impl Machine {
         let ev = GlkEvent { etype: glk::evtype::HYPERLINK, win, val1: linkval, val2: 0 };
         if let Some(pi) = self.pending_input.take() {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else if let Some(pe) = self.pending_event.take() {
+            if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
         } else {
@@ -7432,6 +7500,93 @@ mod tests {
         let body = glk_call(0x04, &[C8(5), C8(0)], Mem16(0x0100)); // gestalt_Timer
         let m = run_with_ram(body, 0x200, |_| {});
         assert_eq!(m.mem.read32(0x100).unwrap(), 1, "gestalt_Timer supported");
+    }
+
+    // ── SQ-0299: glk_select on a non-input event (timer/mouse/hyperlink) ──────
+
+    #[test]
+    fn glk_select_timer_only_suspends_as_needevent() {
+        use asm::Op::{C16, Zero};
+        // request_timer_events(130) then select with NO line/char request: a legal
+        // blocking select on a timer (Glk §4.4). Must suspend as NeedEvent, never
+        // fall through to the evtype_None spin.
+        let mut body = glk_call(0xD6, &[C16(130)], Zero); // request_timer_events(130)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedEvent { timer_ms: Some(130), mouse: false, hyperlink: false },
+            "timer-only select suspends as NeedEvent"
+        );
+        assert!(m.diagnostics.is_empty(), "no evtype_None diagnostic: {:?}", m.diagnostics);
+        // The host's clock delivers a tick, resolving the suspended select.
+        m.deliver_timer();
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "resumes and quits");
+        assert_eq!(read_event(&m, 0x100), (1, 0, 0, 0), "evtype_Timer written");
+    }
+
+    #[test]
+    fn glk_select_mouse_only_suspends_as_needevent() {
+        use asm::Op::{C16, C8, Zero};
+        // request_mouse_event(win=1) then select with no line/char request →
+        // NeedEvent{mouse}; a delivered click resolves it.
+        let mut body = glk_call(0xD4, &[C8(1)], Zero); // request_mouse_event(1)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedEvent { timer_ms: None, mouse: true, hyperlink: false },
+            "mouse-only select suspends as NeedEvent"
+        );
+        assert!(m.diagnostics.is_empty(), "no diagnostic: {:?}", m.diagnostics);
+        m.deliver_mouse(1, 3, 4);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "resumes and quits");
+        // evtype_MouseInput = 4, win 1, val1 = x (3), val2 = y (4).
+        assert_eq!(read_event(&m, 0x100), (4, 1, 3, 4), "mouse event written");
+    }
+
+    #[test]
+    fn glk_select_hyperlink_only_suspends_as_needevent() {
+        use asm::Op::{C16, C8, Zero};
+        // request_hyperlink_event(win=1) then select with no line/char request →
+        // NeedEvent{hyperlink}; a delivered link click resolves it.
+        let mut body = glk_call(0x102, &[C8(1)], Zero); // request_hyperlink_event(1)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedEvent { timer_ms: None, mouse: false, hyperlink: true },
+            "hyperlink-only select suspends as NeedEvent"
+        );
+        assert!(m.diagnostics.is_empty(), "no diagnostic: {:?}", m.diagnostics);
+        m.deliver_hyperlink(1, 77);
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "resumes and quits");
+        // evtype_Hyperlink = 8, win 1, val1 = linkval (77).
+        assert_eq!(read_event(&m, 0x100), (8, 1, 77, 0), "hyperlink event written");
+    }
+
+    #[test]
+    fn glk_select_with_nothing_armed_still_returns_evtype_none() {
+        use asm::Op::{C16, Zero};
+        // No line/char AND no timer/mouse/hyperlink: a genuinely malformed program.
+        // The evtype_None + diagnostic escape hatch must survive (no deadlock).
+        let mut body = glk_call(0xC0, &[C16(0x0100)], Zero); // select @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "does not suspend; runs to quit");
+        assert_eq!(read_event(&m, 0x100), (0, 0, 0, 0), "evtype_None written");
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("no pending input request")),
+            "the malformed-program diagnostic is still emitted: {:?}",
+            m.diagnostics
+        );
     }
 
     #[test]
