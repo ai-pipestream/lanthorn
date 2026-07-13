@@ -248,6 +248,13 @@ fn drive(
     // (constructed that way in `main`, and by the tests below), so its parent
     // is the game dir — no need to thread a second path through.
     let game_dir = vfs_path.parent().unwrap_or(std::path::Path::new("."));
+    // A timer-only glk_select (StepResult::NeedEvent) has no async clock in this
+    // line-oriented client, so we deliver ticks synchronously. A timer-paced
+    // intro converges in a handful of ticks (Kerkerkruip needs ~10); this cap —
+    // reset at each real input stop — is a backstop against a game that re-arms a
+    // timer and selects forever without ever reaching input.
+    const MAX_CONSECUTIVE_TIMER_TICKS: u64 = 10_000;
+    let mut consecutive_timer_ticks: u64 = 0;
     loop {
         // Flush the Glk file VFS to its sidecar whenever a game mutation dirtied
         // it, each iteration, so a game's files survive even if the process is
@@ -260,7 +267,26 @@ fn drive(
         match machine.step() {
             StepResult::Continue => {}
             StepResult::Quit => break,
+            // A glk_select waiting only on a non-input event (Glk §4.4). With a
+            // timer armed, drive its clock synchronously; a bare mouse/hyperlink
+            // wait has no click to deliver headless, so treat it as end-of-input.
+            StepResult::NeedEvent { timer_ms, .. } => {
+                if timer_ms.is_some() {
+                    consecutive_timer_ticks += 1;
+                    if consecutive_timer_ticks > MAX_CONSECUTIVE_TIMER_TICKS {
+                        eprintln!(
+                            "[timer wait exceeded {MAX_CONSECUTIVE_TIMER_TICKS} ticks without \
+                             reaching input; stopping]"
+                        );
+                        break;
+                    }
+                    machine.deliver_timer();
+                } else {
+                    break;
+                }
+            }
             StepResult::NeedLine { .. } => {
+                consecutive_timer_ticks = 0;
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
                 // Show live typing in raw mode and erase it on Enter, then arm a
@@ -279,6 +305,7 @@ fn drive(
                 machine.supply_line_terminated(cmd, terminator);
             }
             StepResult::NeedChar { .. } => {
+                consecutive_timer_ticks = 0;
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
                 let key = read_char();
