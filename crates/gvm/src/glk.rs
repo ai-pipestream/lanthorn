@@ -733,6 +733,13 @@ struct FileRef {
     rock: u32,
     name: String,
     usage: u32,
+    /// `true` only for a `glk_fileref_create_by_prompt` fileref (the player's
+    /// own SAVE/RESTORE verb): its `@save`/`@restore` should surface the host's
+    /// save UI. `create_by_name`/`create_temp`/`create_from` filerefs (the
+    /// game's own fixed-name saves — CM's init cache, undo, autotesting) are
+    /// `false`: the host services them silently against a fixed path. Not
+    /// serialized (defaults to `false` on snapshot restore).
+    by_prompt: bool,
 }
 
 /// Glk `fileusage_TextMode` bit (garglk `glk.h`): when set on a fileref's usage,
@@ -796,12 +803,25 @@ pub struct Model {
     /// "Save failed." even though the host wrote the file. Session-transient (not
     /// serialized), like `vfs_dirty`.
     saved_game_files: std::collections::BTreeMap<String, u32>,
-    /// Per-`SavedGame` `Null`-stream cursor state, keyed by stream id: the
-    /// fileref name it was opened on and its current byte position. Mirrors
+    /// Per-`SavedGame` `Null`-stream state, keyed by stream id. Mirrors
     /// [`Model::file_streams`] (keeps [`StreamKind`] `Copy`). Lets
     /// `glk_stream_get_position`/`glk_stream_set_position` behave over the
-    /// host-managed save's known length (from `saved_game_files`).
-    savegame_streams: std::collections::BTreeMap<u32, (String, u32)>,
+    /// host-managed save's known length (from `saved_game_files`), and carries
+    /// the originating fileref's `by_prompt` so `@save`/`@restore` can tell the
+    /// player's SAVE verb from the game's own fixed-name saves.
+    savegame_streams: std::collections::BTreeMap<u32, SaveStream>,
+}
+
+/// Per-`Null`-stream state for a host-managed `SavedGame` slot (see
+/// [`Model::savegame_streams`]).
+#[derive(Clone, Debug)]
+struct SaveStream {
+    /// The (sanitized) fileref name this stream was opened on.
+    name: String,
+    /// Current byte cursor (over the slot's known length).
+    pos: u32,
+    /// Whether the fileref was `create_by_prompt` (the player's SAVE verb).
+    by_prompt: bool,
 }
 
 impl Default for Model {
@@ -1033,29 +1053,40 @@ impl Model {
     }
 
     /// Allocate a fileref slot for a (already-chosen) name; returns its id.
-    fn alloc_fileref(&mut self, usage: u32, name: String, rock: u32) -> u32 {
+    /// `by_prompt` marks a `create_by_prompt` fileref (the player's SAVE/RESTORE
+    /// verb) so the host later surfaces its save UI instead of servicing it silently.
+    fn alloc_fileref(&mut self, usage: u32, name: String, rock: u32, by_prompt: bool) -> u32 {
         let id = (self.filerefs.len() + 1) as u32;
-        self.filerefs.push(Some(FileRef { id, rock, name, usage }));
+        self.filerefs.push(Some(FileRef { id, rock, name, usage, by_prompt }));
         id
     }
 
     /// `glk_fileref_create_by_name`: sanitize `name`, allocate a fileref, return id.
+    /// A game-fixed name (not `by_prompt`).
     pub fn fileref_create(&mut self, usage: u32, name: String, rock: u32) -> u32 {
         let name = Self::sanitize_fileref_name(&name);
-        self.alloc_fileref(usage, name, rock)
+        self.alloc_fileref(usage, name, rock, false)
+    }
+
+    /// Like [`Model::fileref_create`] but flagged `by_prompt` — the player picked
+    /// the name via `glk_fileref_create_by_prompt` (their SAVE/RESTORE verb), so
+    /// the host should surface its save UI for this fileref's `@save`/`@restore`.
+    pub fn fileref_create_prompted(&mut self, usage: u32, name: String, rock: u32) -> u32 {
+        let name = Self::sanitize_fileref_name(&name);
+        self.alloc_fileref(usage, name, rock, true)
     }
 
     /// `glk_fileref_create_temp`: synthesize a unique name and allocate a fileref.
     pub fn fileref_create_temp(&mut self, usage: u32, rock: u32) -> u32 {
         let name = format!("__temp_{}__", self.filerefs.len());
-        self.alloc_fileref(usage, name, rock)
+        self.alloc_fileref(usage, name, rock, false)
     }
 
     /// `glk_fileref_create_by_prompt`: no TUI picker is available, so degrade to a
     /// fixed per-usage default name. (Known limitation.)
     pub fn fileref_create_by_prompt(&mut self, usage: u32, _fmode: u32, rock: u32) -> u32 {
         let name = format!("__prompt_{}__", usage & 0x0f);
-        self.alloc_fileref(usage, name, rock)
+        self.alloc_fileref(usage, name, rock, true)
     }
 
     /// The user-visible filenames in the VFS: every written file except the internal
@@ -1073,7 +1104,7 @@ impl Model {
     /// usage/rock. Returns 0 if `oldfref` is invalid.
     pub fn fileref_create_from(&mut self, usage: u32, oldfref: u32, rock: u32) -> u32 {
         match self.fileref(oldfref).map(|f| f.name.clone()) {
-            Some(name) => self.alloc_fileref(usage, name, rock),
+            Some(name) => self.alloc_fileref(usage, name, rock, false),
             None => 0,
         }
     }
@@ -1550,6 +1581,7 @@ impl Model {
         let Some((name, usage)) = self.fileref_name(fref) else {
             return 0;
         };
+        let by_prompt = self.fileref(fref).is_some_and(|f| f.by_prompt);
         // SavedGame-usage streams are host conduits, fully decoupled from the
         // VFS (saves live in host `.qzl` files, not `self.files`): no VFS entry
         // is created, and every mode succeeds — crucially Read succeeds even
@@ -1573,7 +1605,7 @@ impl Model {
                 _ => {} // Read: leave existence/size as-is
             }
             let sid = self.alloc_stream(StreamKind::Null, rock);
-            self.savegame_streams.insert(sid, (name, 0));
+            self.savegame_streams.insert(sid, SaveStream { name, pos: 0, by_prompt });
             return sid;
         }
         let pos = match fmode {
@@ -1616,9 +1648,17 @@ impl Model {
         if let Some(st) = self.stream_mut(id) {
             st.write_count = st.write_count.saturating_add(n);
         }
-        if let Some((name, _)) = self.savegame_streams.get(&id) {
-            self.saved_game_files.insert(name.clone(), n);
+        if let Some(ss) = self.savegame_streams.get(&id) {
+            self.saved_game_files.insert(ss.name.clone(), n);
         }
+    }
+
+    /// For a live `SavedGame` `Null` stream, its `(fileref name, by_prompt)` — the
+    /// hook the `@save`/`@restore` shim uses to route the game's own fixed-name
+    /// saves silently vs. surfacing the player's SAVE-verb UI. `None` if `id`
+    /// isn't a host-managed save stream.
+    pub fn savegame_stream_info(&self, id: u32) -> Option<(String, bool)> {
+        self.savegame_streams.get(&id).map(|ss| (ss.name.clone(), ss.by_prompt))
     }
 
     /// Close a stream, returning its `(read_count, write_count)`. The current
@@ -1670,7 +1710,7 @@ impl Model {
             StreamKind::Window(_) => Some(self.stream(id)?.write_count),
             // A host-managed SavedGame stream reports its tracked cursor (the
             // library seeks to the end and reads the position to size the save).
-            StreamKind::Null => Some(self.savegame_streams.get(&id).map_or(0, |&(_, pos)| pos)),
+            StreamKind::Null => Some(self.savegame_streams.get(&id).map_or(0, |ss| ss.pos)),
         }
     }
     /// Seek a memory stream. `seekmode`: 0 = from start, 1 = from current,
@@ -1705,15 +1745,15 @@ impl Model {
             Some(StreamKind::Null) => {
                 // Seek over the host-managed save's known byte length, so a
                 // seek-to-end + get-position reports the true save size.
-                if let Some((name, cur)) = self.savegame_streams.get(&id) {
-                    let len = self.saved_game_files.get(name).copied().unwrap_or(0) as i64;
+                if let Some(ss) = self.savegame_streams.get(&id) {
+                    let len = self.saved_game_files.get(&ss.name).copied().unwrap_or(0) as i64;
                     let base = match seekmode {
-                        1 => *cur as i64,
+                        1 => ss.pos as i64,
                         2 => len,
                         _ => 0,
                     };
                     let np = (base + pos as i64).clamp(0, len) as u32;
-                    self.savegame_streams.get_mut(&id).unwrap().1 = np;
+                    self.savegame_streams.get_mut(&id).unwrap().pos = np;
                 }
             }
             _ => {}
@@ -2308,7 +2348,7 @@ impl Model {
             let rock = r.u32()?;
             let usage = r.u32()?;
             let name = r.string()?;
-            filerefs.push(Some(FileRef { id, rock, name, usage }));
+            filerefs.push(Some(FileRef { id, rock, name, usage, by_prompt: false }));
         }
         let mut file_streams = std::collections::BTreeMap::new();
         let nfs = r.u32()?;

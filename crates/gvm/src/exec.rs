@@ -105,6 +105,29 @@ struct PendingSaveLoad {
     dest: Dest,
     /// `false` = `@save` (SaveRequest); `true` = `@restore` (RestoreRequest).
     restore: bool,
+    /// The (sanitized) fileref name the game opened the save stream on — the
+    /// host's fixed file for a game-managed save. Empty if the operand stream
+    /// wasn't a `SavedGame` file stream.
+    name: String,
+    /// `true` when the fileref was `create_by_prompt` (the player's SAVE/RESTORE
+    /// verb): the host surfaces its save UI. `false` for the game's own
+    /// fixed-name saves (CM's init cache, undo, autotesting): the host services
+    /// them silently against `name`.
+    by_prompt: bool,
+}
+
+/// What the host needs to service a suspended `@save`/`@restore`
+/// ([`StepResult::SaveRequest`]/[`RestoreRequest`]): the game's target file
+/// `name` and whether it is the player's prompted SAVE/RESTORE verb.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveLoadRequest {
+    /// The (sanitized) fixed file name for a game-managed save (empty if unknown).
+    pub name: String,
+    /// `true` = the player's SAVE/RESTORE verb (surface the host UI); `false` =
+    /// the game's own fixed-name save (service silently against `name`).
+    pub by_prompt: bool,
+    /// `true` = `@restore`; `false` = `@save`.
+    pub restore: bool,
 }
 
 /// A suspended `glk_fileref_create_by_prompt` awaiting the host's chosen filename.
@@ -737,7 +760,11 @@ impl Machine {
                 self.push32(daddr)?;
                 self.push32(ret_pc)?;
                 self.push32(cur_fp)?;
-                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false });
+                // Carry the target fileref's name + prompt-ness (L1 is the save
+                // stream) so the host can service a game-managed save silently or
+                // surface the player's SAVE-verb UI (see SaveLoadRequest).
+                let (name, by_prompt) = self.glk.savegame_stream_info(l[0]).unwrap_or_default();
+                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false, name, by_prompt });
                 // Credit the game's save stream with the bytes it would have
                 // received if delivery weren't host-intercepted, so the
                 // library's write-count check sees success (spec §1.8.2's
@@ -751,8 +778,12 @@ impl Machine {
                 // success execution resumes inside the original @save's call
                 // stub (which stores -1, the "just restored" sentinel); on
                 // failure complete_restore_failure() stores 1 here.
-                let (_, s) = self.read_operands(1, 1)?;
-                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: true });
+                let (l, s) = self.read_operands(1, 1)?;
+                // L1 is the restore stream; carry its fileref name + prompt-ness so
+                // the host reads the game's fixed file silently (failing cleanly if
+                // absent) or surfaces the player's RESTORE-verb picker.
+                let (name, by_prompt) = self.glk.savegame_stream_info(l[0]).unwrap_or_default();
+                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: true, name, by_prompt });
                 Ok(())
             }
             // Floating point (single-precision, GLULX_NOTES §13.1).
@@ -3568,6 +3599,18 @@ impl Machine {
         self.pending_saveload.is_some()
     }
 
+    /// The suspended `@save`/`@restore`'s routing info — the game's target file
+    /// name and whether it is the player's prompted SAVE/RESTORE verb — for the
+    /// host to decide between silent game-managed I/O and its own save UI.
+    /// `None` when no save/restore is pending.
+    pub fn pending_saveload_request(&self) -> Option<SaveLoadRequest> {
+        self.pending_saveload.as_ref().map(|p| SaveLoadRequest {
+            name: p.name.clone(),
+            by_prompt: p.by_prompt,
+            restore: p.restore,
+        })
+    }
+
     /// Deliver the result of a game-initiated `@save` back to the machine, then
     /// resume. Pops the call stub `@save` pushed for its S1 operand and stores
     /// the current-run result: 0 (success) or 1 (failure). Glulx spec §1.8.2,
@@ -3638,7 +3681,10 @@ impl Machine {
     pub fn supply_filename(&mut self, name: Option<String>) {
         if let Some(p) = self.pending_fileref.take() {
             let id = match name {
-                Some(n) => self.glk.fileref_create(p.usage, n, p.rock),
+                // `by_prompt`: this fileref came from glk_fileref_create_by_prompt
+                // (the player's SAVE/RESTORE verb), so its @save/@restore surfaces
+                // the host save UI rather than a silent game-managed file.
+                Some(n) => self.glk.fileref_create_prompted(p.usage, n, p.rock),
                 None => 0,
             };
             let _ = self.store(p.dest, id);
@@ -7915,6 +7961,60 @@ mod tests {
         let rf = m.glk.fileref_create(0x00, "save".to_string(), 0);
         let rsid = m.glk.stream_open_file(rf, 0x02, false, 0); // Read
         assert_eq!(m.glk.file_stream_read_char(rsid), None, "the VFS file is still empty");
+    }
+
+    #[test]
+    fn save_request_routes_create_by_name_as_silent_game_managed() {
+        use asm::Op::{C8, Mem16};
+        // @save 2 -> mem[0x100]; L1 = the SavedGame stream opened below (id 2).
+        let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        // The game's OWN fixed-name save slot: create_by_name, SavedGame usage.
+        let fref = m.glk.fileref_create(0x01, "startup-data".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x01, false, 0); // Write -> Null stream
+        assert_eq!(sid, 2);
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let req = m.pending_saveload_request().expect("a save is pending");
+        assert_eq!(
+            req,
+            SaveLoadRequest { name: "startup-data".to_string(), by_prompt: false, restore: false },
+            "a create_by_name @save carries its fixed name and is NOT by_prompt (host writes it silently)"
+        );
+    }
+
+    #[test]
+    fn save_request_routes_create_by_prompt_to_host_ui() {
+        use asm::Op::{C8, Mem16};
+        let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        // The player's SAVE verb: create_by_prompt binds the name via
+        // supply_filename -> fileref_create_prompted (by_prompt = true).
+        let fref = m.glk.fileref_create_prompted(0x01, "myslot".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x01, false, 0);
+        assert_eq!(sid, 2);
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let req = m.pending_saveload_request().expect("a save is pending");
+        assert!(req.by_prompt, "a create_by_prompt @save is by_prompt (host surfaces the save UI)");
+        assert_eq!(req.name, "myslot");
+        assert!(!req.restore);
+    }
+
+    #[test]
+    fn restore_request_routes_create_by_name_as_silent_game_managed() {
+        use asm::Op::{C8, Mem16};
+        // @restore 2 -> mem[0x100]; L1 = the SavedGame read stream (id 2).
+        let body = asm::ins(0x124, &[C8(2), Mem16(0x0100)]);
+        let mut m = machine_with_body(&[], body);
+        let fref = m.glk.fileref_create(0x01, "startup-data".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x02, false, 0); // Read -> Null stream
+        assert_eq!(sid, 2);
+        assert_eq!(m.step(), StepResult::RestoreRequest);
+        let req = m.pending_saveload_request().expect("a restore is pending");
+        assert_eq!(
+            req,
+            SaveLoadRequest { name: "startup-data".to_string(), by_prompt: false, restore: true },
+            "a create_by_name @restore is silent + game-managed (host reads its fixed file, clean-fails if absent)"
+        );
     }
 
     #[test]
