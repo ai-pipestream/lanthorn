@@ -1546,6 +1546,40 @@ fn draw_info_panel(
         lines.push((format!("Features: {}", feats.join(" ")), cs.story_info_value));
     }
 
+    // Saves + sidecars (SQ-0285). Rendered above Resources so the user's own
+    // saves are the first thing they see below the metadata.
+    if let Some(a) = aux {
+        let has_any = !a.saves.is_empty() || !a.qzl_saves.is_empty()
+            || !a.auto_saves.is_empty() || !a.sidecars.is_empty();
+        if has_any {
+            lines.push((String::new(), cs.story_info_value));
+            // Header: "Saves · <dir>" with $HOME abbreviated to ~.
+            let dir = abbreviate_home(&a.game_dir);
+            lines.push((format!("Saves · {dir}"), cs.story_info_label));
+            for s in &a.saves {
+                let when = s.saved_at.get(0..10).unwrap_or(&s.saved_at);
+                let fname = s.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                lines.push((format!(" {}  turn {} · {}  {}", s.name, s.turns, when, fname), cs.story_info_value));
+            }
+            for q in &a.qzl_saves {
+                let when = q.saved_at.get(0..10).unwrap_or(&q.saved_at);
+                let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                lines.push((format!(" {}  {}  {}", q.name, when, fname), cs.story_info_value));
+            }
+            if !a.auto_saves.is_empty() {
+                lines.push(("Automatic:".to_string(), cs.story_info_label));
+                for q in &a.auto_saves {
+                    let when = q.saved_at.get(0..10).unwrap_or(&q.saved_at);
+                    let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    lines.push((format!(" (auto) {}  {}  {}", q.name, when, fname), cs.story_info_value));
+                }
+            }
+            if !a.sidecars.is_empty() {
+                lines.push((format!("Sidecars: {}", a.sidecars.join(" · ")), cs.story_info_value));
+            }
+        }
+    }
+
     // Resources: self_blorb, else aux.assoc_blorb.
     let (res_header, chunks): (Option<String>, &[app::picker::ChunkInfo]) =
         if let Some(c) = &meta.self_blorb {
@@ -1571,30 +1605,6 @@ fn draw_info_panel(
                 None => format!("{base} ({})", human_size(c.len as u64)),
             };
             lines.push((line, cs.story_info_value));
-        }
-    }
-
-    // Saves + sidecars (SQ-0285).
-    if let Some(a) = aux {
-        let has_any = !a.saves.is_empty() || !a.qzl_saves.is_empty() || !a.sidecars.is_empty();
-        if has_any {
-            lines.push((String::new(), cs.story_info_value));
-            // Header: "Saves · <dir>" with $HOME abbreviated to ~.
-            let dir = abbreviate_home(&a.game_dir);
-            lines.push((format!("Saves · {dir}"), cs.story_info_label));
-            for s in &a.saves {
-                let when = s.saved_at.get(0..10).unwrap_or(&s.saved_at);
-                let fname = s.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                lines.push((format!(" {}  turn {} · {}  {}", s.name, s.turns, when, fname), cs.story_info_value));
-            }
-            for q in &a.qzl_saves {
-                let when = q.saved_at.get(0..10).unwrap_or(&q.saved_at);
-                let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                lines.push((format!(" {}  {}  {}", q.name, when, fname), cs.story_info_value));
-            }
-            if !a.sidecars.is_empty() {
-                lines.push((format!("Sidecars: {}", a.sidecars.join(" · ")), cs.story_info_value));
-            }
         }
     }
 
@@ -7262,6 +7272,13 @@ mod tests {
                 saved_at: "2026-06-29T00:00:00Z".into(),
                 is_default: false,
             }],
+            auto_saves: vec![app::persist_files::SaveInfo {
+                path: game_dir.join("_startup.qzl"),
+                name: "_startup".into(),
+                turns: 0,
+                saved_at: "2026-06-28T00:00:00Z".into(),
+                is_default: false,
+            }],
             sidecars: vec!["default.aux"],
         };
         // Wide enough that the resource detail suffix isn't clipped.
@@ -7292,6 +7309,13 @@ mod tests {
         assert!(text.contains("quick.qzl"), "qzl filename: {text:?}");
         assert!(text.contains("Sidecars:"), "sidecars line: {text:?}");
         assert!(text.contains("default.aux"), "sidecar filename: {text:?}");
+        // SQ-0285-b: auto (game-managed) saves render, clearly labeled.
+        assert!(text.contains("(auto)"), "auto-save label: {text:?}");
+        assert!(text.contains("_startup.qzl"), "auto-save filename: {text:?}");
+        // SQ-0285-b: Saves section now renders ABOVE Resources.
+        let saves_pos = text.find("Saves ·").expect("saves header present");
+        let resources_pos = text.find("Resources").expect("resources header present");
+        assert!(saves_pos < resources_pos, "Saves must render before Resources: saves@{saves_pos} resources@{resources_pos}");
     }
 
     #[test]

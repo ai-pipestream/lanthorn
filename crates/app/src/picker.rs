@@ -152,6 +152,9 @@ pub struct StoryAux {
     pub game_dir: PathBuf,
     /// `.qzl` in-game saves in `game_dir` (SQ-0285).
     pub qzl_saves: Vec<crate::persist_files::SaveInfo>,
+    /// Game-managed automatic `.qzl` saves in `game_dir` (SQ-0296): the
+    /// `_`-prefixed fixed-name files the player saves list hides.
+    pub auto_saves: Vec<crate::persist_files::SaveInfo>,
     /// Sidecar filenames present in `game_dir` (`default.aux`/`default.glkvfs`).
     pub sidecars: Vec<&'static str>,
 }
@@ -175,10 +178,11 @@ pub fn resolve_aux(
     let saves = crate::persist_files::list_saves(&game_dir);
     let hints_available = hint_index.get(&entry.meta.ifid).is_some();
     let qzl_saves = crate::persist_files::list_qzl(&game_dir);
+    let auto_saves = crate::persist_files::list_qzl_auto(&game_dir);
     let mut sidecars = Vec::new();
     if game_dir.join("default.aux").exists() { sidecars.push("default.aux"); }
     if game_dir.join("default.glkvfs").exists() { sidecars.push("default.glkvfs"); }
-    StoryAux { assoc_blorb, saves, hints_available, game_dir, qzl_saves, sidecars }
+    StoryAux { assoc_blorb, saves, hints_available, game_dir, qzl_saves, auto_saves, sidecars }
 }
 
 /// Convert a parsed blorb's resource index into displayable `ChunkInfo`.
@@ -850,6 +854,7 @@ mod tests {
         std::fs::create_dir_all(&game_dir).unwrap();
         std::fs::write(game_dir.join("default.babelmap"), b"x").unwrap();
         std::fs::write(game_dir.join("quick.qzl"), b"x").unwrap();
+        std::fs::write(game_dir.join("_startup.qzl"), b"x").unwrap();
         std::fs::write(game_dir.join("default.aux"), b"x").unwrap();
 
         let hi = hints::load_hint_index(&dir);
@@ -861,6 +866,9 @@ mod tests {
         assert_eq!(aux.saves.len(), 0, "notanarchive default.babelmap is skipped by list_saves");
         assert_eq!(aux.qzl_saves.len(), 1);
         assert_eq!(aux.qzl_saves[0].name, "quick");
+        assert!(!aux.qzl_saves.iter().any(|s| s.name == "_startup"), "auto save excluded from player list");
+        assert_eq!(aux.auto_saves.len(), 1, "auto_saves carries the game-managed underscore save");
+        assert_eq!(aux.auto_saves[0].name, "_startup");
         assert_eq!(aux.sidecars, vec!["default.aux"]);
     }
 

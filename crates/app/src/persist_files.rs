@@ -232,6 +232,33 @@ pub fn list_qzl(game_dir: &Path) -> Vec<SaveInfo> {
     out
 }
 
+/// List the game's OWN internal `.qzl` saves in `game_dir` (SQ-0296): the
+/// `_`-prefixed fixed-name files `list_qzl` hides from the player saves list
+/// (CM's init cache, undo, autotesting, etc). The story-picker info panel
+/// shows these so the user can see what's on disk; the in-game restore picker
+/// still uses `list_qzl` and never sees them.
+pub fn list_qzl_auto(game_dir: &Path) -> Vec<SaveInfo> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(game_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let Some(fname) = p.file_name().and_then(|n| n.to_str()) else { continue };
+            if let Some(slug) = fname.strip_suffix(".qzl") {
+                if !slug.starts_with('_') {
+                    continue;
+                }
+                let name = slug.to_string();
+                let saved_at = rfc3339_mtime(&p);
+                out.push(SaveInfo {
+                    path: p, name, turns: 0, saved_at, is_default: false,
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    out
+}
+
 pub fn load_map(path: &Path) -> Option<Mapper> {
     let contents = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -547,6 +574,30 @@ mod tests {
         let out = super::list_qzl(&dir);
         assert_eq!(out.len(), 1, "only the player save is listed");
         assert_eq!(out[0].name, "myslot");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_qzl_auto_lists_only_underscore_saves() {
+        // The mirror of list_qzl: game dir with a player save + two auto
+        // (game-managed) saves. list_qzl returns only the player save;
+        // list_qzl_auto returns only the two `_`-prefixed ones.
+        let dir = make_temp_dir("list-qzl-auto");
+        std::fs::write(dir.join("default.babelmap"), b"x").unwrap();
+        std::fs::write(dir.join("quicksave.qzl"), b"x").unwrap();
+        std::fs::write(dir.join("_undo-x.qzl"), b"x").unwrap();
+        std::fs::write(dir.join("_startup.qzl"), b"x").unwrap();
+
+        let player = super::list_qzl(&dir);
+        assert_eq!(player.len(), 1, "player list excludes underscore saves");
+        assert_eq!(player[0].name, "quicksave");
+
+        let auto = super::list_qzl_auto(&dir);
+        assert_eq!(auto.len(), 2, "auto list has only the two underscore saves");
+        let names: Vec<&str> = auto.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"_undo-x"));
+        assert!(names.contains(&"_startup"));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
