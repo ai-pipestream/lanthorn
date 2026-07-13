@@ -4,30 +4,75 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Encode the aux table as a compact length-prefixed binary blob:
-/// `u32 count` then per entry `u16 name_len, name, u32 data_len, data`
-/// (all big-endian). Deterministic because the input is a BTreeMap.
+/// Shared cross-host aux format: `ZAUX` magic + version + little-endian widths,
+/// byte-identical to zvm-cli's `encode_aux` so one `default.aux` is readable by
+/// both hosts (SQ-0300).
+const MAGIC: &[u8; 4] = b"ZAUX";
+const VERSION: u8 = 1;
+
+/// Encode the aux table as the length-prefixed `ZAUX` v1 blob: `"ZAUX",
+/// u8 version, u32 count`, then per entry `u32 name_len, name, u32 data_len,
+/// data` (all little-endian). Byte-identical to zvm-cli's `encode_aux` so a
+/// shared `default.aux` is cross-host readable. Deterministic (BTreeMap input).
 pub fn encode_aux(table: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    out.extend_from_slice(MAGIC);
+    out.push(VERSION);
+    out.extend_from_slice(&(table.len() as u32).to_le_bytes());
     for (name, data) in table {
         let nb = name.as_bytes();
-        out.extend_from_slice(&(nb.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(nb.len() as u32).to_le_bytes());
         out.extend_from_slice(nb);
-        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
         out.extend_from_slice(data);
     }
     out
 }
 
-/// Decode `encode_aux` output. Tolerant: any truncation/overflow yields whatever
-/// was parsed so far (empty for non-aux bytes), never panics or errors.
+/// Decode aux bytes into the table. Tolerant on two axes: it accepts both the
+/// current `ZAUX` format (magic present) and the legacy app format (no magic,
+/// big-endian, u16 name length) for back-compat, and any truncation/overflow
+/// yields whatever parsed so far (empty for non-aux bytes) — never panics.
 pub fn decode_aux(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    if bytes.len() >= 4 && &bytes[..4] == MAGIC {
+        decode_zaux(bytes)
+    } else {
+        decode_legacy(bytes)
+    }
+}
+
+/// Parse the current `ZAUX` format (little-endian, u32 name length). Tolerant.
+fn decode_zaux(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut p = 5usize; // skip 4-byte MAGIC + 1-byte VERSION
+    let take = |p: &mut usize, n: usize| -> Option<&[u8]> {
+        let end = p.checked_add(n)?;
+        let s = bytes.get(*p..end)?;
+        *p = end;
+        Some(s)
+    };
+    let count = match take(&mut p, 4) {
+        Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        None => return out,
+    };
+    for _ in 0..count {
+        let nl = match take(&mut p, 4) { Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize, None => break };
+        let name = match take(&mut p, nl) { Some(b) => String::from_utf8_lossy(b).into_owned(), None => break };
+        let dl = match take(&mut p, 4) { Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize, None => break };
+        let data = match take(&mut p, dl) { Some(b) => b.to_vec(), None => break };
+        out.insert(name, data);
+    }
+    out
+}
+
+/// Parse the legacy app format (no magic, big-endian, u16 name length). Tolerant.
+fn decode_legacy(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
     let mut p = 0usize;
     let take = |p: &mut usize, n: usize| -> Option<&[u8]> {
-        let s = bytes.get(*p..*p + n)?;
-        *p += n;
+        let end = p.checked_add(n)?;
+        let s = bytes.get(*p..end)?;
+        *p = end;
         Some(s)
     };
     let count = match take(&mut p, 4) {
@@ -75,10 +120,56 @@ mod tests {
         m
     }
 
+    /// A one-entry table with the exact `ZAUX` v1 bytes both hosts must emit.
+    fn cross_host_sample() -> BTreeMap<String, Vec<u8>> {
+        let mut m = BTreeMap::new();
+        m.insert("AB".to_string(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        m
+    }
+    const ZAUX_BYTES: &[u8] = &[
+        b'Z', b'A', b'U', b'X', 0x01, // magic + version
+        0x01, 0x00, 0x00, 0x00, // count = 1 (LE)
+        0x02, 0x00, 0x00, 0x00, b'A', b'B', // name_len 2 (LE) + "AB"
+        0x04, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, // data_len 4 (LE) + data
+    ];
+
+    /// Legacy app format: no magic, big-endian, u16 name length. Test-only
+    /// helper reproducing the pre-SQ-0300 encoder to exercise back-compat.
+    fn encode_legacy(table: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+        for (name, data) in table {
+            let nb = name.as_bytes();
+            out.extend_from_slice(&(nb.len() as u16).to_be_bytes());
+            out.extend_from_slice(nb);
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(data);
+        }
+        out
+    }
+
     #[test]
     fn codec_round_trips() {
         let m = sample();
         assert_eq!(decode_aux(&encode_aux(&m)), m);
+    }
+
+    #[test]
+    fn encodes_canonical_zaux_bytes() {
+        // Byte-identity with zvm-cli: both hosts assert against this same literal.
+        assert_eq!(encode_aux(&cross_host_sample()), ZAUX_BYTES);
+    }
+
+    #[test]
+    fn decodes_zaux_from_other_host() {
+        assert_eq!(decode_aux(ZAUX_BYTES), cross_host_sample());
+    }
+
+    #[test]
+    fn decodes_legacy_app_format() {
+        // Back-compat: a pre-SQ-0300 (no-magic/BE/u16) file still loads.
+        let m = sample();
+        assert_eq!(decode_aux(&encode_legacy(&m)), m);
     }
 
     #[test]
