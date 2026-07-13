@@ -52,6 +52,7 @@ pub fn draw_file_browser(
         show_close: true,
         default: Some(ButtonId::Done),
         focus: None,
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);

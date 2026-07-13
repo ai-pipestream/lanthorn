@@ -115,6 +115,7 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
         show_close: true,
         default: None,
         focus: None,
+        field: None,
     };
     let bounds = *buf.area();
     let dr = draw_dialog(buf, bounds, &spec, dialog_style);

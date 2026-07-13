@@ -50,6 +50,7 @@ pub fn draw_saves(
         show_close: true,
         default: Some(ButtonId::Done),
         focus: Some(state.dialog_focus),
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);

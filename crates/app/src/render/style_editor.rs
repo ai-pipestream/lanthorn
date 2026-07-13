@@ -88,6 +88,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         // Highlight a footer button only once focus has Tabbed onto the button row;
         // otherwise just the default (Save) is marked, and the body widgets own focus.
         focus: if ed.focus == StyleFocus::Buttons { Some(state.dialog_focus) } else { None },
+        field: None,
     };
 
     let dialog_rects = draw_dialog(buf, area, &spec, &ds);

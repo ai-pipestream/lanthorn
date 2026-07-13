@@ -178,6 +178,33 @@ impl DialogStyle {
     }
 }
 
+// ── DialogField ───────────────────────────────────────────────────────────────
+
+/// An optional single-line caret text field drawn in the top row of a dialog's
+/// content area. Purely additive: a `DialogSpec` with `field: None` renders
+/// exactly as before. The caller owns the buffer (a `TextField`) and supplies the
+/// display state here; `draw_dialog` returns the field's row rect for hit-testing.
+pub struct DialogField<'a> {
+    /// Leading label, e.g. `"Name: "`.
+    pub label: &'a str,
+    /// The current buffer contents to display.
+    pub value: &'a str,
+    /// Caret position as a char index into `value`.
+    pub cursor: usize,
+    /// Draw a block caret at `cursor` (typically only when the field is focused
+    /// and actively being edited).
+    pub show_caret: bool,
+    /// Render `value` in the placeholder (dimmed) style rather than the normal
+    /// text style — used when the field still holds its greyed default.
+    pub dim: bool,
+    /// Style for the label and the (non-dim) value text.
+    pub text_style: Style,
+    /// Style for the value when `dim` (placeholder).
+    pub dim_style: Style,
+    /// Style for the block caret cell.
+    pub caret_style: Style,
+}
+
 // ── DialogSpec ────────────────────────────────────────────────────────────────
 
 pub struct DialogSpec<'a> {
@@ -189,6 +216,9 @@ pub struct DialogSpec<'a> {
     pub default: Option<ButtonId>,
     /// Index into `buttons` to highlight with `button_active` (Tab focus).
     pub focus: Option<usize>,
+    /// Optional caret text field drawn in the content's top row. `None` (the
+    /// default for every existing dialog) renders identically to before.
+    pub field: Option<DialogField<'a>>,
 }
 
 // ── DialogRects ───────────────────────────────────────────────────────────────
@@ -198,6 +228,9 @@ pub struct DialogRects {
     pub content: Rect,
     pub close: Option<Rect>,
     pub buttons: Vec<(ButtonId, Rect)>,
+    /// Row rect of the optional text field (its whole content row), for click
+    /// hit-testing. `None` when the spec carried no field.
+    pub field: Option<Rect>,
 }
 
 // ── draw_dialog ───────────────────────────────────────────────────────────────
@@ -332,7 +365,49 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
         pane.content
     };
 
-    DialogRects { area, content, close, buttons: button_rects }
+    // (8) Optional caret text field, drawn in the content's top row. Additive:
+    // dialogs without a field skip this entirely and render as before.
+    let field_rect = spec.field.as_ref().and_then(|f| {
+        if content.height == 0 || content.width == 0 {
+            return None;
+        }
+        let row = content.y;
+        let mut x = content.x;
+        // Label (always in the normal text style).
+        for ch in f.label.chars() {
+            if x >= content.right() {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                let mut tmp = [0u8; 4];
+                cell.set_symbol(ch.encode_utf8(&mut tmp)).set_style(f.text_style);
+            }
+            x += 1;
+        }
+        // Value chars; the char at `cursor` carries the caret style when shown.
+        let value_style = if f.dim { f.dim_style } else { f.text_style };
+        let chars: Vec<char> = f.value.chars().collect();
+        for (i, ch) in chars.iter().enumerate() {
+            if x >= content.right() {
+                break;
+            }
+            let style = if f.show_caret && i == f.cursor { f.caret_style } else { value_style };
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                let mut tmp = [0u8; 4];
+                cell.set_symbol(ch.encode_utf8(&mut tmp)).set_style(style);
+            }
+            x += 1;
+        }
+        // Caret at end-of-text: a trailing block cell.
+        if f.show_caret && f.cursor >= chars.len() && x < content.right() {
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_symbol(" ").set_style(f.caret_style);
+            }
+        }
+        Some(Rect::new(content.x, row, content.width, 1))
+    });
+
+    DialogRects { area, content, close, buttons: button_rects, field: field_rect }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -350,7 +425,7 @@ mod tests {
         // pre-fill a REVERSED cell where the dialog will sit
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
         let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
-        let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None };
+        let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None, field: None };
         let r = draw_dialog(&mut buf, full, &spec, &st);
         // opaque: the covered cell no longer REVERSED
         assert!(!buf.cell((20,6)).unwrap().modifier.contains(Modifier::REVERSED));
@@ -373,7 +448,7 @@ mod tests {
         };
         let spec = DialogSpec {
             title: "T", placement: Placement::Centered { w: 10, h: 4 },
-            buttons: &[], show_close: false, default: None, focus: None,
+            buttons: &[], show_close: false, default: None, focus: None, field: None,
         };
         let r = draw_dialog(&mut buf, bounds, &spec, &st);
         // Centered within bounds: x = 20 + (20-10)/2 = 25 — not 15 (whole-buffer center).
@@ -487,11 +562,64 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style,Color}};
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
         let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
-        let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None };
+        let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None, field: None };
         let r = draw_dialog(&mut buf, Rect::new(0,0,40,12), &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
         let sx = r.area.right(); let sy = r.area.bottom();
         if sx < 40 && sy < 12 { assert_eq!(buf.cell((sx, sy)).unwrap().style().bg, Some(Color::DarkGray)); }
+    }
+
+    #[test]
+    fn dialog_field_renders_label_value_and_caret_and_records_rect() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Style, Modifier}};
+        let full = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            frame: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            title: Style::default(), button: Style::default(), button_active: Style::default(),
+            shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
+        };
+        let field = DialogField {
+            label: "Name: ", value: "ab", cursor: 2, show_caret: true, dim: false,
+            text_style: Style::default(),
+            dim_style: Style::default().add_modifier(Modifier::DIM),
+            caret_style: Style::default().add_modifier(Modifier::REVERSED),
+        };
+        let spec = DialogSpec {
+            title: "Save", placement: Placement::Centered { w: 30, h: 6 },
+            buttons: &[DialogButton { id: ButtonId::Save, label: "Save" }],
+            show_close: true, default: Some(ButtonId::Save), focus: None,
+            field: Some(field),
+        };
+        let rects = draw_dialog(&mut buf, full, &spec, &st);
+        let fr = rects.field.expect("field rect recorded");
+        // The label + value appear on the field row.
+        let row: String = (fr.x..fr.right())
+            .filter_map(|x| buf.cell((x, fr.y)).map(|c| c.symbol().chars().next().unwrap_or(' ')))
+            .collect();
+        assert!(row.contains("Name: ab"), "label+value drawn, got {row:?}");
+        // Caret at end-of-text: the cell just past "ab" carries the caret (REVERSED).
+        let caret_x = fr.x + "Name: ab".chars().count() as u16;
+        assert!(buf.cell((caret_x, fr.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
+            "end caret cell is reversed");
+    }
+
+    #[test]
+    fn dialog_without_field_records_none() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let full = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            frame: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            title: Style::default(), button: Style::default(), button_active: Style::default(),
+            shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
+        };
+        let spec = DialogSpec {
+            title: "T", placement: Placement::Centered { w: 20, h: 6 },
+            buttons: &[], show_close: false, default: None, focus: None, field: None,
+        };
+        let rects = draw_dialog(&mut buf, full, &spec, &st);
+        assert!(rects.field.is_none(), "no field => rects.field is None");
     }
 
     #[test]
@@ -521,6 +649,7 @@ mod tests {
             show_close: true,
             default: Some(ButtonId::Save),
             focus: Some(1),
+            field: None,
         };
         let rects = draw_dialog(&mut buf, full, &spec, &st);
         // The Save (default) button label cells carry UNDERLINED.

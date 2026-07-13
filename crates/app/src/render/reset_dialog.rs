@@ -60,6 +60,7 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         show_close: true,
         default: Some(ButtonId::Reset),
         focus: button_focus,
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);

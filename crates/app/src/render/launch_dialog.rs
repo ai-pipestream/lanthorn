@@ -52,6 +52,7 @@ pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         show_close: true,
         default: Some(ButtonId::Resume),
         focus: Some(state.dialog_focus),
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);

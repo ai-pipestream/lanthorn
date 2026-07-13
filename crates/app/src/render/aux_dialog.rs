@@ -52,6 +52,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
         show_close: true,
         default: Some(ButtonId::Archive),
         focus: Some(state.dialog_focus),
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);

@@ -64,6 +64,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         show_close: true,
         default: Some(ButtonId::Close),
         focus: None,
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);

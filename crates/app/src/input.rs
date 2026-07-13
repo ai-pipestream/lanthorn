@@ -5961,6 +5961,7 @@ mod tests {
             content: Rect::new(11, 7, 38, 10),
             close: Some(Rect::new(48, 5, 1, 1)),
             buttons: Vec::new(),
+            field: None,
         });
         // Wheel over the map area, with the dialog open.
         assert!(matches!(
@@ -7392,6 +7393,7 @@ mod tests {
                 (ButtonId::Save,   Rect::new(20, 19, 8,  1)),
                 (ButtonId::Cancel, Rect::new(29, 19, 10, 1)),
             ],
+            field: None,
         };
 
         // State with config_screen open (so dialog routing knows which modal).
@@ -7444,6 +7446,7 @@ mod tests {
             content: Rect::new(11, 7, 38, 10),
             close:   Some(Rect::new(48, 5, 1, 1)),
             buttons: vec![(ButtonId::Done, Rect::new(40, 19, 8, 1))],
+            field: None,
         };
 
         let mut state = AppState::default();
@@ -7486,6 +7489,7 @@ mod tests {
             content: Rect::new(9, 6, 48, 13),
             close:   Some(Rect::new(56, 4, 1, 1)),
             buttons: vec![(ButtonId::Done, Rect::new(48, 21, 8, 1))],
+            field: None,
         };
 
         let mut state = AppState::default();
@@ -7549,6 +7553,7 @@ mod tests {
             content: Rect::new(11, 7, 58, 26),
             close:   Some(Rect::new(68, 5, 1, 1)),
             buttons: vec![(ButtonId::Done, Rect::new(60, 34, 8, 1))],
+            field: None,
         };
 
         let mut state = AppState::default();
@@ -7595,6 +7600,7 @@ mod tests {
             content: Rect::new(6, 1, 68, 20),
             close:   Some(Rect::new(99, 0, 1, 1)),
             buttons: vec![(ButtonId::Done, Rect::new(90, 23, 8, 1))],
+            field: None,
         };
 
         // 1. Gallery: ESC → GalleryClose, [X] → GalleryClose
@@ -7755,6 +7761,7 @@ mod tests {
             content: Rect::new(6, 5, 68, 19),
             close:   Some(Rect::new(73, 3, 1, 1)),
             buttons: vec![(ButtonId::Ok, Rect::new(65, 26, 8, 1))],
+            field: None,
         };
 
         let mut state = AppState::default();
@@ -7817,6 +7824,7 @@ mod tests {
             content: Rect::new(6, 5, 68, 19),
             close:   Some(Rect::new(73, 3, 1, 1)),
             buttons: vec![(ButtonId::Done, Rect::new(65, 26, 8, 1))],
+            field: None,
         });
 
         // Click OUTSIDE the gallery dialog (at (0,0), which is on the room).
@@ -8030,6 +8038,7 @@ mod tests {
             content: Rect::new(1, 1, 38, 12),
             close:   Some(Rect::new(38, 0, 1, 1)),
             buttons: vec![(ButtonId::Ok, Rect::new(30, 14, 6, 1))],
+            field: None,
         };
 
         let mut state = AppState::default();
@@ -8060,6 +8069,7 @@ mod tests {
             content: Rect::new(1, 1, 38, 12),
             close:   Some(Rect::new(38, 0, 1, 1)),
             buttons: vec![(ButtonId::Ok, Rect::new(30, 14, 6, 1))],
+            field: None,
         };
 
         let mut state = AppState::default();
@@ -8332,6 +8342,7 @@ mod tests {
                 (ButtonId::Save,   save_rect),
                 (ButtonId::Cancel, cancel_rect),
             ],
+            field: None,
         };
 
         // Save button click → StyleSave
@@ -8375,6 +8386,7 @@ mod tests {
                 (ButtonId::SaveGame, savegame_rect),
                 (ButtonId::Cancel,   cancel_rect),
             ],
+            field: None,
         };
         assert!(matches!(style_dialog_action(&rects, 31, 5), Some(Action::StyleSaveGame)),
             "clicking Save Game Style maps to StyleSaveGame");

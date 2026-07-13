@@ -103,6 +103,7 @@ pub fn draw_room_info(
         show_close: true,
         default: Some(ButtonId::Ok),
         focus: None,
+        field: None,
     };
     let bounds = *buf.area();
     let dr = draw_dialog(buf, bounds, &spec, dialog_style);

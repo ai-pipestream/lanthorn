@@ -54,6 +54,7 @@ pub fn draw_quit_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         show_close: true,
         default: Some(ButtonId::Save),
         focus: Some(state.dialog_focus),
+        field: None,
     };
 
     let rects = draw_dialog(buf, area, &spec, &st);
