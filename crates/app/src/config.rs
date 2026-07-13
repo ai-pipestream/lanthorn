@@ -54,6 +54,7 @@ pub(crate) fn default_badge_glulx() -> String { "G".into() }
 pub(crate) fn default_badge_blorb() -> String { "B".into() }
 pub(crate) fn default_badge_save() -> String { "S".into() }
 pub(crate) fn default_badge_hint() -> String { "H".into() }
+pub(crate) fn default_true() -> bool { true }
 
 /// The `[symbols]` section of config.toml.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
@@ -369,11 +370,11 @@ pub struct Config {
     pub mouse_wheel_invert: bool,
     /// When true, capture the mouse (click-to-select in the story browser and
     /// map, wheel scrolling, and Glk mouse input to games that request it).
-    /// Default false: mouse capture puts the terminal in any-motion reporting
-    /// mode, so every mouse movement floods the redraw loop and can feel
-    /// sluggish; it also disables the terminal's native text selection. Opt in
-    /// to trade those off for in-app mouse support.
-    #[serde(default)]
+    /// Default true (SQ-0298): in-app mouse support is on out of the box. Set
+    /// `mouse = false` to disable it — mouse capture puts the terminal in
+    /// any-motion reporting mode (every movement drives a redraw) and overrides
+    /// the terminal's native text selection.
+    #[serde(default = "default_true")]
     pub mouse: bool,
     /// When true, edit story commands in a persistent command bar instead of
     /// the inline story-text prompt. Default false: the inline prompt.
@@ -497,7 +498,7 @@ impl Default for Config {
             auto_load: true,
             auto_save: false,
             mouse_wheel_invert: false,
-            mouse: false,
+            mouse: true,
             command_bar: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
@@ -1028,7 +1029,7 @@ use_defaults = false
     fn mouse_capture_defaults_off_and_opts_in_from_file() {
         // Absent from the file → mouse capture stays off (the responsive default).
         let default: Config = toml::from_str("").unwrap();
-        assert!(!default.mouse, "mouse capture must default off");
+        assert!(default.mouse, "mouse capture defaults on");
         // Explicit opt-in is honored.
         let on: Config = toml::from_str("mouse = true\n").unwrap();
         assert!(on.mouse, "mouse = true must enable capture");
