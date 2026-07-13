@@ -163,9 +163,18 @@ pub fn render_story_pane(
 
     // Generic multi-window path. Grid windows push their hyperlink cells into
     // `grid_links`; the primary buffer's own links ride on its metrics. (SQ-0258)
+    //
+    // Clamp the composite to gvm's content bounding box: gvm snaps proportional
+    // splits to whole cells and leaves a blank margin, so walking the tree into the
+    // FULL pane would let the last right-spine leaf balloon to absorb the surplus
+    // width. Render into the box and keep the margin blank (SQ-0303).
+    let inner = content_bounds(model, area);
     let mut grid_links: Vec<((u16, u16), u32)> = Vec::new();
     let gc = grid_scheme(state, model);
-    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, area, buf, gi, &mut grid_links, &gc);
+    let metrics = render_node(&model.root, &model.status, char_mode, introspect, state, inner, buf, gi, &mut grid_links, &gc);
+    // Keep gvm's snap-margin (the strips of `area` outside `inner`) clean, so no
+    // stale cells from a prior frame or the map remain beside the window tree.
+    fill_margin(area, inner, model, state, buf);
 
     // Prune the graphics protocol cache to only the windows still live in the
     // tree, so a closed window's stale cache entry can't be matched by a
@@ -177,6 +186,55 @@ pub fn render_story_pane(
     let mut m = metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height, links: Vec::new() });
     m.links.extend(grid_links);
     m
+}
+
+/// The sub-rect of the story pane that gvm's window tree actually covers: the
+/// top-left corner of `area` sized to `model.content_size`, clamped to `area`.
+/// gvm snaps proportional splits to whole cells and leaves a blank margin
+/// (SQ-0303); clamping the composite (and the graphics-rect walk, so
+/// `dialog_bounds` agrees with what's drawn) to this keeps the margin blank
+/// instead of ballooning the last right-spine window. Falls back to the full
+/// `area` when `content_size` is `(0, 0)` (the simple/Z-machine paths — no margin).
+pub fn content_bounds(model: &ScreenModel, area: Rect) -> Rect {
+    let (cw, ch) = model.content_size;
+    if cw == 0 || ch == 0 {
+        return area;
+    }
+    Rect::new(area.x, area.y, cw.min(area.width), ch.min(area.height))
+}
+
+/// The background style gvm's snap-margin should be painted with: the game's
+/// honoured page background when it set a concrete one (matching the story-pane
+/// fill at the top of `render_story_pane`), else the theme transcript background
+/// (matching `fill`).
+fn margin_style(model: &ScreenModel, state: &AppState) -> ratatui::style::Style {
+    if state.config.honor_game_colours {
+        let bg = crate::state::unpack_zcolour(model.bg);
+        if !matches!(bg, zvm::screen::ZColour::Default) {
+            return ratatui::style::Style::new().bg(crate::render::resolve_zcolour(bg, &state.colors));
+        }
+    }
+    state.colors.transcript
+}
+
+/// Blank gvm's snap-margin — the L-shaped region of `area` outside `inner` (the
+/// full-height strip right of `inner`, plus the strip below `inner` within its
+/// columns) — so no stale cells remain beside the clamped window tree (SQ-0303).
+fn fill_margin(area: Rect, inner: Rect, model: &ScreenModel, state: &AppState, buf: &mut Buffer) {
+    let style = margin_style(model, state);
+    let paint = |r: Rect, buf: &mut Buffer| {
+        for y in r.y..r.bottom() {
+            for x in r.x..r.right() {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_symbol(" ").set_style(style);
+                }
+            }
+        }
+    };
+    let right = Rect::new(inner.right(), area.y, area.right().saturating_sub(inner.right()), area.height);
+    let bottom = Rect::new(area.x, inner.bottom(), inner.width, area.bottom().saturating_sub(inner.bottom()));
+    paint(right, buf);
+    paint(bottom, buf);
 }
 
 /// Recursively render a tree node into `area`. Returns the primary buffer's
@@ -455,6 +513,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: crate::state::pack_zcolour(bg),
             fg: crate::state::pack_zcolour(fg),
+            content_size: (0, 0),
         }
     }
 
@@ -540,6 +599,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         assert!(is_simple(&zm));
         // Lone buffer: simple.
@@ -548,6 +608,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         assert!(is_simple(&lone));
         // Two buffers: not simple.
@@ -561,6 +622,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         assert!(!is_simple(&two));
     }
@@ -600,6 +662,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         assert!(!is_simple(&model));
 
@@ -645,6 +708,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         assert!(!is_simple(&model));
 
@@ -663,6 +727,57 @@ mod tests {
         assert_ne!(buf.cell((8, 0)).unwrap().symbol(), " ", "top-left border corner drawn");
         assert_eq!(buf.cell((9, 1)).unwrap().symbol(), "H", "grid content sits inside the border, not squished");
         assert_eq!(buf.cell((10, 1)).unwrap().symbol(), "I");
+    }
+
+    /// SQ-0303: gvm snaps its working width down and leaves a blank margin, so the
+    /// composite must clamp to `content_size` — the right-edge leaf keeps its own
+    /// width instead of ballooning into the surplus, and the margin stays blank.
+    #[test]
+    fn generic_clamps_composite_to_content_size_leaving_margin_blank() {
+        // Grid (top row) over a left|right buffer split, content 8 wide inside a
+        // 12-wide render area → a 4-col snap-margin. Without the clamp the RIGHT
+        // buffer (last right-spine leaf) would stretch to absorb cols 5..12.
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                first: Box::new(WinNode::Grid(grid_with("ST"))),
+                second: Box::new(WinNode::Pair {
+                    vertical: false,
+                    split: Split { fixed: 4 },
+                    first: Box::new(WinNode::Buffer(inline_buffer("LEFT"))),
+                    second: Box::new(WinNode::Buffer(inline_buffer("RGHT"))),
+                }),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (8, 6),
+        };
+        assert!(!is_simple(&model));
+
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.virtual_window_border = crate::render::paneframe::BorderStyle::None;
+        colors.upper_window_border_sides =
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::None);
+        let mut state = AppState::default();
+        state.colors = colors;
+
+        let area = Rect::new(0, 0, 12, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // The RIGHT buffer draws in the content box's right half [4,8), NOT stretched
+        // to the pane's right edge.
+        let row1 = row_text(&buf, 1, 12);
+        assert!(row1[4..8].contains("RGHT"), "right buffer sits in cols 4..8: {:?}", row1);
+        // The snap-margin (cols 8..12) is blank — no leaf stretched into it.
+        assert_eq!(&row1[8..12], "    ", "snap-margin blank on row 1: {:?}", row1);
+        // The margin is blank on every row (right strip is full-height).
+        for y in 0..6 {
+            let r = row_text(&buf, y, 12);
+            assert_eq!(&r[8..12], "    ", "snap-margin blank on row {}: {:?}", y, r);
+        }
     }
 
     #[test]
@@ -724,6 +839,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         model.bg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(2)); // black
         let area = Rect::new(0, 0, 10, 5);
@@ -791,7 +907,7 @@ mod tests {
     }
 
     fn model_with(root: WinNode) -> ScreenModel {
-        ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0 }
+        ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) }
     }
 
     fn dialog_colors() -> ColorScheme {

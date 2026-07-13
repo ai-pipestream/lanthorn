@@ -798,7 +798,10 @@ fn draw_frame(
         // Modal dialogs center within the graphics-free text region (story text +
         // map together), never over a Glulx graphics window — the terminal image
         // protocol would otherwise overpaint them (SQ-0203). No graphics → `full`.
-        let dialog_area = app::render::screen::dialog_bounds(&screen_model, &state.colors, story_area, full);
+        // Clamp to gvm's content bounding box so the graphics-rect walk matches the
+        // clamped composite render (the snap-margin has no windows). (SQ-0303)
+        let story_bbox = app::render::screen::content_bounds(&screen_model, story_area);
+        let dialog_area = app::render::screen::dialog_bounds(&screen_model, &state.colors, story_bbox, full);
 
         // ── Hotkey dialog overlay — drawn over everything ─────────────────────
         if state.hotkey_dialog {

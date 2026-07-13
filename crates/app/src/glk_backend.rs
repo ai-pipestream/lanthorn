@@ -389,11 +389,24 @@ impl AppGlk {
             leaves.push((rect, node));
         }
         let root = assemble(&leaves);
+        // The bounding box of the laid-out leaves. gvm lays leaves from (0,0) and
+        // snaps proportional splits to whole cells, so this may be narrower/shorter
+        // than the story pane — the remaining cols/rows are gvm's intended blank
+        // margin. The composite clamps to this box so no leaf absorbs the surplus
+        // (SQ-0303). (0, 0) when there are no leaves → composite uses the full pane.
+        let content_size = leaves.iter().fold((0u32, 0u32), |(w, h), (r, _)| {
+            (w.max(r.left + r.width), h.max(r.top + r.height))
+        });
+        let content_size = (
+            content_size.0.min(u16::MAX as u32) as u16,
+            content_size.1.min(u16::MAX as u32) as u16,
+        );
         ScreenModel {
             root,
             status: StatusModel::HostManaged,
             bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
             fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            content_size,
         }
     }
 

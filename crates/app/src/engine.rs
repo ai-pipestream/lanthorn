@@ -254,6 +254,13 @@ pub struct ScreenModel {
     /// The game's current foreground colour, packed (see `crate::state::pack_zcolour`).
     /// `pack_zcolour(ZColour::Default)` when unset; used to colour the live input line.
     pub fg: u32,
+    /// The extent (cols, rows) gvm's window tree actually covers; may be smaller
+    /// than the story pane because gvm snaps proportional splits to whole cells and
+    /// leaves a blank margin (SQ-0303). The generic multi-window composite clamps to
+    /// this so the margin stays blank rather than stretching the last window. `(0, 0)`
+    /// means unknown (the simple/Z-machine paths, which have no snap margin) → the
+    /// composite falls back to the full pane.
+    pub content_size: (u16, u16),
 }
 
 impl ScreenModel {
@@ -516,6 +523,7 @@ mod tests {
             status: StatusModel::HostManaged,
             bg: 0,
             fg: 0,
+            content_size: (0, 0),
         };
         let g = model.grid().expect("tree has a grid");
         assert_eq!(g.cell(1, 1).ch, 'H');

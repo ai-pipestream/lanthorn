@@ -674,6 +674,7 @@ fn blank_screen() -> ScreenModel {
         status: StatusModel::HostManaged,
         bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
         fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+        content_size: (0, 0),
     }
 }
 
