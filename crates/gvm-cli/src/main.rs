@@ -391,6 +391,29 @@ fn game_auto_save_path(game_dir: &std::path::Path, name: &str) -> std::path::Pat
     game_dir.join(format!("{name}.qzl"))
 }
 
+/// Seed the machine's host-managed SavedGame existence index from every
+/// `<game_dir>/*.qzl` on disk (raw basename minus the `.qzl` suffix, matching
+/// [`game_auto_save_path`] and how the index is keyed), so a `create_by_name`
+/// game probing `glk_fileref_does_file_exist` before `@restore` sees its save
+/// across launches (SQ-0301). No-op when `game_dir` is unreadable (e.g. a first
+/// run before it exists). Over-seeding player-save `.qzl` names is inert.
+fn seed_saved_games(machine: &mut Machine, game_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(game_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("qzl") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0) as u32;
+        machine.seed_saved_game_file(name.to_string(), size);
+    }
+}
+
 /// Resolve an interactive `@save`/`@restore` filename prompt: a bare name
 /// (no path separator) lands in `game_dir` with a `.qzl` extension; a
 /// path-bearing value is honored verbatim.
@@ -496,6 +519,12 @@ fn main() {
         }
         machine.clear_vfs_dirty(); // loading is not a game mutation
     }
+
+    // Reseed host-managed SavedGame slots from disk before the first drive: the
+    // machine's existence index is session-transient, so a create_by_name game
+    // probing glk_fileref_does_file_exist during init would otherwise never see
+    // its own on-disk `.qzl` save across launches (SQ-0301).
+    seed_saved_games(&mut machine, &game_dir);
 
     drive(
         &mut machine,

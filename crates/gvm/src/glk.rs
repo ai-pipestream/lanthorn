@@ -1170,6 +1170,15 @@ impl Model {
         self.files = decode_files(bytes);
     }
 
+    /// Seed a host-managed `SavedGame` slot's existence + size so a
+    /// `create_by_name` game probing `glk_fileref_does_file_exist` before
+    /// `@restore` sees its on-disk save across launches. `saved_game_files` is
+    /// session-transient (host `.qzl` saves are decoupled from the VFS), so the
+    /// host reseeds it from disk at boot, keyed by the raw fileref name. (SQ-0301)
+    pub fn seed_saved_game_file(&mut self, name: String, size: u32) {
+        self.saved_game_files.insert(name, size);
+    }
+
     /// Whether the file VFS has been mutated since the last [`clear_vfs_dirty`].
     pub fn vfs_dirty(&self) -> bool {
         self.vfs_dirty
@@ -2925,6 +2934,26 @@ mod style_hint_tests {
         // Deleting the slot clears both existence and the recorded size.
         m.fileref_delete(fref);
         assert!(!m.fileref_exists(fref), "delete removes the slot");
+    }
+
+    #[test]
+    fn seeded_saved_game_slot_is_visible_without_an_in_session_save() {
+        // A host reseeds saved_game_files from disk at boot (SQ-0301). A slot
+        // seeded that way must read as present at its recorded size to a
+        // create_by_name game that only probes/restores — no in-session @save.
+        let mut m = Model::new();
+        m.seed_saved_game_file("slot".to_string(), 1234);
+
+        // The game's create_by_name fileref on that slot now exists.
+        let fref = m.fileref_create(0x01, "slot".to_string(), 0);
+        assert!(m.fileref_exists(fref), "a seeded slot exists across launches");
+
+        // Reopen for read, seek to end: the position reports the seeded size,
+        // so a game gating @restore on it sees its save.
+        let rstr = m.stream_open_file(fref, 0x02, false, 0);
+        assert_ne!(rstr, 0);
+        m.stream_set_position(rstr, 0, 2); // seekmode 2 = from end
+        assert_eq!(m.stream_position(rstr), Some(1234), "seek-to-end reports the seeded size");
     }
 
     #[test]

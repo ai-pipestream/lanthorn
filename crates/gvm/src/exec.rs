@@ -2035,6 +2035,15 @@ impl Machine {
         self.glk.load_vfs(bytes);
     }
 
+    /// Seed a host-managed `SavedGame` slot's existence + size so a
+    /// `create_by_name` game that probes `glk_fileref_does_file_exist` before
+    /// `@restore` sees its on-disk save across launches. The host calls this at
+    /// boot for each `<game_dir>/<name>.qzl` (raw basename minus `.qzl`) before
+    /// `drive_settled`, mirroring the VFS-before-boot ordering. (SQ-0301)
+    pub fn seed_saved_game_file(&mut self, name: String, size: u32) {
+        self.glk.seed_saved_game_file(name, size);
+    }
+
     /// Whether the Glk file VFS changed since the last [`Machine::clear_vfs_dirty`],
     /// so the host can flush the sidecar only when it changed. (SQ-0278)
     pub fn vfs_dirty(&self) -> bool {

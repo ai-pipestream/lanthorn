@@ -177,6 +177,33 @@ fn drive(machine: &mut Machine) -> DriveStop {
 /// game's init). Only the player's SAVE/RESTORE verb (`create_by_prompt`), or
 /// any save when no store is configured (`game_dir` empty), bubbles up as
 /// `DriveStop::Save`/`Restore`.
+/// Seed the machine's host-managed SavedGame existence index from every
+/// `<game_dir>/*.qzl` on disk (raw basename minus the `.qzl` suffix, matching
+/// how [`drive_auto`] writes and how the index is keyed), so a `create_by_name`
+/// game probing `glk_fileref_does_file_exist` before `@restore` sees its save
+/// across launches (SQ-0301). No-op when `game_dir` is empty (the no-store
+/// path) or unreadable. Over-seeding player-save `.qzl` names is inert — a game
+/// only ever probes names it created.
+fn seed_saved_games(machine: &mut Machine, game_dir: &std::path::Path) {
+    if game_dir.as_os_str().is_empty() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(game_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("qzl") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0) as u32;
+        machine.seed_saved_game_file(name.to_string(), size);
+    }
+}
+
 fn drive_auto(machine: &mut Machine, game_dir: &std::path::Path) -> DriveStop {
     loop {
         let stop = drive(machine);
@@ -278,6 +305,12 @@ impl GlulxSession {
         // may read a cache during boot (e.g. CM skips its long init) or write one
         // (leaving vfs_dirty set), so the sidecar must be in place first (SQ-0290).
         machine.load_vfs(vfs_bytes);
+        // Reseed host-managed SavedGame slots from disk BEFORE booting: `.qzl`
+        // saves live in host files decoupled from the VFS and the machine's
+        // existence index is session-transient, so a create_by_name game probing
+        // glk_fileref_does_file_exist during init would otherwise never see its
+        // own on-disk save across launches (SQ-0301).
+        seed_saved_games(&mut machine, &game_dir);
         let (pending, quit) = drive_settled(&mut machine, &game_dir);
         let mut session = GlulxSession {
             machine,
@@ -957,6 +990,52 @@ mod tests {
             Some(b"init-data".as_slice()),
             "the sidecar VFS entry must be loaded into the VM before boot"
         );
+    }
+
+    #[test]
+    fn new_in_seeds_on_disk_saved_game_slot_before_boot() {
+        use E::*;
+        // SQ-0301: a create_by_name SavedGame slot's save lives in a host
+        // <game_dir>/<name>.qzl file, decoupled from the VFS. The machine's
+        // existence index is session-transient, so new_in must reseed it from
+        // disk BEFORE booting — else a game probing glk_fileref_does_file_exist
+        // during init never sees its own on-disk save across launches. Probe:
+        // create_by_name("foo", SavedGame) then streamnum(does_file_exist) — the
+        // banner shows "1" only if the on-disk foo.qzl was seeded.
+        const NAMEADDR: u32 = 0x420; // free RAM; NAMEADDR+3 is already NUL
+
+        let mut body = open_buffer_prelude(); // buffer window -> loc0
+        for (i, &c) in b"foo".iter().enumerate() {
+            body.extend(enc(0x4E, &[Imm(NAMEADDR), Imm(i as u32), Imm(c as u32)])); // astoreb
+        }
+        // fref = glk_fileref_create_by_name(usage=1 SavedGame, NAMEADDR, rock=0) -> loc4.
+        body.extend(enc(0x40, &[Imm(0), Push])); // rock
+        body.extend(enc(0x40, &[Imm(NAMEADDR), Push])); // nameptr
+        body.extend(enc(0x40, &[Imm(1), Push])); // usage (arg0, topmost)
+        body.extend(enc(0x130, &[Imm(0x61), Imm(3), LocStore(4)]));
+        // exists = glk_fileref_does_file_exist(fref) -> loc8.
+        body.extend(enc(0x40, &[LocLoad(4), Push]));
+        body.extend(enc(0x130, &[Imm(0x67), Imm(1), LocStore(8)]));
+        body.extend(enc(0x71, &[LocLoad(8)])); // streamnum -> prints "1"/"0" to the window
+        body.extend(line_prompt());
+        body.extend(enc(0x120, &[])); // quit
+
+        let dir = std::env::temp_dir().join(format!("bm-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp game_dir");
+        std::fs::write(dir.join("foo.qzl"), b"pretend-save-bytes").expect("write foo.qzl");
+
+        let mut sess = GlulxSession::new_in(
+            dir.clone(), image_for(body, 3), 80, 24, true, false, false, (1, 1), None, &[],
+        )
+        .expect("new_in");
+        assert_eq!(sess.pending_input(), InputKind::Line);
+        assert_eq!(
+            sess.take_transcript(),
+            "1",
+            "an on-disk .qzl slot is seeded before boot, so does_file_exist reports true across launches",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
