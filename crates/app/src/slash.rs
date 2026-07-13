@@ -360,14 +360,14 @@ pub static COMMANDS: &[CommandSpec] = &[
 
     // ── Export ────────────────────────────────────────────────────────────
     CommandSpec { name: "export-svg", category: Category::Export, context: Context::Global,
-        usage: "export-svg", description: "export the map as SVG",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ExportSvg) },
+        usage: "export-svg [file]", description: "export the map as SVG; default path when omitted",
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportSvg(a.first().map(|s| s.to_string()))) },
     CommandSpec { name: "export-dot", category: Category::Export, context: Context::Global,
-        usage: "export-dot", description: "export the map as Graphviz DOT",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ExportDot) },
+        usage: "export-dot [file]", description: "export the map as Graphviz DOT; default path when omitted",
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportDot(a.first().map(|s| s.to_string()))) },
     CommandSpec { name: "export-dump", category: Category::Export, context: Context::Global,
-        usage: "export-dump", description: "dump the map structure",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ExportDump) },
+        usage: "export-dump [file]", description: "dump the map structure; default path when omitted",
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportDump(a.first().map(|s| s.to_string()))) },
 
     // ── Animation ─────────────────────────────────────────────────────────
     CommandSpec { name: "animate-tidy", category: Category::Animation, context: Context::Global,

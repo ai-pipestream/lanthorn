@@ -153,20 +153,6 @@ fn write_crash_log(
     writeln!(f, "\n=== babelmap panic ===\n{info}\n\nbacktrace:\n{backtrace}")
 }
 
-// ── Map directory ─────────────────────────────────────────────────────────────
-
-/// Determine the directory where maps (and saves) are stored.
-///
-/// Priority:
-/// 1. `$BABELMAP_MAP_DIR` environment variable (escape hatch for scripts).
-/// 2. `config.user_dir/maps` (from config file / CLI flags / defaults).
-fn map_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
-    if let Ok(d) = std::env::var("BABELMAP_MAP_DIR") {
-        return std::path::PathBuf::from(d);
-    }
-    user_dir.join("maps")
-}
-
 /// Directory holding per-game save archives (`.babelmap`, default + named) and
 /// the game's own standard `.qzl` saves. Kept separate from the map
 /// directory. Defaults to `config.user_dir/saves`.
@@ -1861,7 +1847,6 @@ fn main() {
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
     let ifid = compute_ifid(&story_bytes);
-    let dir = map_dir(&cfg.user_dir);
     // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>/`,
     // keyed by the story filename (IFID stays for title/hint/display only).
     let game_dir = story_game_dir(&data_base, &story_key(&story_path));
@@ -1929,11 +1914,6 @@ fn main() {
     // yields empty bytes). Loading isn't a game mutation, so clear the flag.
     session.load_vfs(&app::vfs_store::read_vfs(&game_dir));
     session.clear_vfs_dirty();
-
-    // Export paths (fixed per IFID).
-    let svg_path = dir.join(format!("{}.svg", ifid));
-    let dot_path = dir.join(format!("{}.dot", ifid));
-    let dump_path = dir.join(format!("{}.map.txt", ifid));
 
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
@@ -3653,13 +3633,15 @@ fn main() {
                 }
             }
 
-            Action::ExportSvg => {
+            Action::ExportSvg(dest) => {
+                let path = app::export::resolve_export_path(dest.as_deref(), &game_dir, "map.svg");
+                if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
                 let rm = render_map_data(&mapper.graph);
-                match export_svg(&svg_path, &rm) {
+                match export_svg(&path, &rm) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[SVG exported to {}]",
-                            svg_path.display()
+                            abbreviate_home(&path)
                         ));
                     }
                     Err(e) => {
@@ -3668,13 +3650,15 @@ fn main() {
                 }
             }
 
-            Action::ExportDot => {
-                match export_dot(&dot_path, &mapper.graph) {
+            Action::ExportDot(dest) => {
+                let path = app::export::resolve_export_path(dest.as_deref(), &game_dir, "map.dot");
+                if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+                match export_dot(&path, &mapper.graph) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[DOT exported to {} — render with: dot -Tsvg {} -o map.svg]",
-                            dot_path.display(),
-                            dot_path.display()
+                            abbreviate_home(&path),
+                            abbreviate_home(&path)
                         ));
                     }
                     Err(e) => {
@@ -3683,10 +3667,12 @@ fn main() {
                 }
             }
 
-            Action::ExportDump => {
-                match std::fs::write(&dump_path, render_dump(&mapper.graph)) {
+            Action::ExportDump(dest) => {
+                let path = app::export::resolve_export_path(dest.as_deref(), &game_dir, "map.txt");
+                if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+                match std::fs::write(&path, render_dump(&mapper.graph)) {
                     Ok(()) => {
-                        state.push_notice(&format!("[map dump written to {}]", dump_path.display()));
+                        state.push_notice(&format!("[map dump written to {}]", abbreviate_home(&path)));
                     }
                     Err(e) => {
                         state.push_notice(&format!("[map dump failed: {}]", e));
@@ -4398,14 +4384,7 @@ fn dispatch_slash_outcome(
                 .into_iter()
                 .map(|i| state.transcript[i].clone())
                 .collect();
-            let exports_dir = state.config.user_dir.join("exports");
-            let stamp = format_stamp(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-            );
-            match export_transcript(&lines, dest.as_deref(), &exports_dir, &stamp) {
+            match export_transcript(&lines, dest.as_deref(), game_dir) {
                 Ok(path) => state.set_status(format!("exported: {}", path.display())),
                 Err(e)   => state.set_status(format!("export failed: {}", e)),
             }
@@ -5167,16 +5146,6 @@ fn resolve_filename_request(
         return quit;
     }
     false
-}
-
-/// Format a Unix timestamp (seconds since epoch) as YYYYMMDD-HHMMSS (UTC).
-fn format_stamp(secs: u64) -> String {
-    let sec = secs % 60;
-    let min = (secs / 60) % 60;
-    let hour = (secs / 3600) % 24;
-    let days = secs / 86400;
-    let (year, month, day) = days_to_ymd_main(days);
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", year, month, day, hour, min, sec)
 }
 
 /// Format a Unix timestamp (seconds since epoch) as an RFC3339 UTC string.
@@ -7012,10 +6981,9 @@ mod tests {
 
     #[test]
     fn saves_dir_is_user_dir_join_saves() {
-        // Save archives live under user_dir/saves, separate from user_dir/maps.
+        // Save archives live under user_dir/saves.
         let d = super::saves_dir(std::path::Path::new("/tmp/bm"));
         assert_eq!(d, std::path::Path::new("/tmp/bm/saves"));
-        assert_ne!(d, super::map_dir(std::path::Path::new("/tmp/bm")));
     }
 
     // ── char-mode gate predicate test ─────────────────────────────────────────

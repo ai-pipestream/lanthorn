@@ -151,12 +151,12 @@ pub enum Action {
     SaveGame,
     /// Caller: restore a saved game.
     RestoreGame,
-    /// Caller: export the map as SVG.
-    ExportSvg,
-    /// Caller: export the map as a Graphviz DOT graph.
-    ExportDot,
-    /// Caller: write an annotatable text/ASCII map dump.
-    ExportDump,
+    /// Caller: export the map as SVG. `Some(dest)` is the optional `[file]` arg.
+    ExportSvg(Option<String>),
+    /// Caller: export the map as a Graphviz DOT graph. `Some(dest)` is the optional `[file]` arg.
+    ExportDot(Option<String>),
+    /// Caller: write an annotatable text/ASCII map dump. `Some(dest)` is the optional `[file]` arg.
+    ExportDump(Option<String>),
     /// Toggle the in-box alignment code overlay (Ctrl+A).
     ToggleAlignment,
     /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
@@ -3416,9 +3416,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SubmitCommand(_)
         | Action::SaveGame
         | Action::RestoreGame
-        | Action::ExportSvg
-        | Action::ExportDot
-        | Action::ExportDump
+        | Action::ExportSvg(_)
+        | Action::ExportDot(_)
+        | Action::ExportDump(_)
         | Action::SavesLoad
         | Action::SavesImport
         | Action::FbEnter
@@ -4413,9 +4413,9 @@ mod tests {
         // commands fire via their authored leader letters instead.
         s.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportDump));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg(_)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot(_)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportDump(_)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::CycleLayout));
     }
 
