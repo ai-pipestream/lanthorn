@@ -197,6 +197,7 @@ impl GlulxSession {
         sound_enabled: bool,
         char_px: (u32, u32),
         pict_blorb: Option<blorb::Blorb>,
+        vfs_bytes: &[u8],
     ) -> Result<GlulxSession, GError> {
         let mem = Memory::new(image)?;
         let picts = crate::graphics::PictSource::new(pict_blorb);
@@ -205,6 +206,10 @@ impl GlulxSession {
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
         machine.set_sound(sound_enabled);
+        // Load the per-story Glk file VFS sidecar BEFORE booting: a Glulx game
+        // may read a cache during boot (e.g. CM skips its long init) or write one
+        // (leaving vfs_dirty set), so the sidecar must be in place first (SQ-0290).
+        machine.load_vfs(vfs_bytes);
         let (pending, quit) = drive_settled(&mut machine);
         let mut session = GlulxSession {
             machine,
@@ -839,7 +844,7 @@ mod tests {
         // we assert the app-side delegation: `load_vfs` populates the machine VFS
         // and `vfs_bytes` re-encodes it, using gvm's public sidecar codec.
         let mut sess =
-            GlulxSession::new(image_for(enc(0x120, &[]), 1), 80, 24, true, false, false, (1, 1), None)
+            GlulxSession::new(image_for(enc(0x120, &[]), 1), 80, 24, true, false, false, (1, 1), None, &[])
                 .expect("new");
         assert!(!sess.vfs_dirty(), "a fresh session's VFS is not dirty");
         assert!(
@@ -858,6 +863,30 @@ mod tests {
             out.get("scores").map(Vec::as_slice),
             Some(b"42".as_slice()),
             "the loaded file survives a vfs_bytes round-trip through the session"
+        );
+    }
+
+    #[test]
+    fn new_loads_vfs_sidecar_before_boot() {
+        // SQ-0290: a Glulx game may read/write a Glk file during BOOT (e.g. CM's
+        // init cache). GlulxSession::new must load the sidecar into the VM's VFS
+        // BEFORE driving the boot, so the running game sees it and any boot-time
+        // write persists. Pin that ordering guarantee: a non-empty sidecar passed
+        // to new() is present in the session's VFS immediately after construction.
+        let mut files = std::collections::BTreeMap::new();
+        files.insert("cache".to_string(), b"init-data".to_vec());
+        let sidecar = gvm::glk::encode_files(&files);
+
+        let sess = GlulxSession::new(
+            simple_line_image(), 80, 24, true, false, false, (1, 1), None, &sidecar,
+        )
+        .expect("new");
+
+        let out = gvm::glk::decode_files(&sess.vfs_bytes());
+        assert_eq!(
+            out.get("cache").map(Vec::as_slice),
+            Some(b"init-data".as_slice()),
+            "the sidecar VFS entry must be loaded into the VM before boot"
         );
     }
 
@@ -915,7 +944,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0x84), Imm(2), Discard])); // glk_put_buffer
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 2), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 2), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         // Banner drained.
         assert_eq!(sess.take_transcript(), "OK");
@@ -969,7 +998,7 @@ mod tests {
         body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore -> mem[RESTORE_RES]
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
 
         // Turn 1: the command drives into @save, which bubbles a Save request.
@@ -1014,7 +1043,7 @@ mod tests {
         body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore -> mem[RESTORE_RES]
         body.extend(enc(0x120, &[])); // quit
 
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
 
         // A window is open (from open_buffer_prelude) before the save.
@@ -1066,7 +1095,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0x62), Imm(3), MemLoad(FREF_RES)]));
         body.extend(line_prompt()); // resume point after supply_filename
         body.extend(enc(0x120, &[])); // quit
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line, "opens at the turn-1 prompt");
 
         // The command drives into create_by_prompt, which bubbles a filename request.
@@ -1098,7 +1127,7 @@ mod tests {
         body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save (host-intercepted)
         body.extend(line_prompt());
         body.extend(enc(0x120, &[])); // quit
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         let r1 = sess.submit("save");
         // SavedGame create_by_prompt must NOT surface a filename request; it auto-resolves
         // in-session so the turn reaches @save and bubbles a Save request in ONE turn.
@@ -1114,7 +1143,7 @@ mod tests {
         body.extend(line_prompt());
         body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore
         body.extend(enc(0x120, &[])); // quit
-        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
 
         let r1 = sess.submit("restore");
         assert_eq!(r1.pending_io, Some(PendingIo::Restore));
@@ -1139,7 +1168,7 @@ mod tests {
 
     #[test]
     fn submit_key_delivers_char_and_skips_unmapped() {
-        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(char_echo_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char);
         // An unmapped key (Insert) leaves the VM untouched.
         assert!(sess.submit_key(KeyInput::Insert).is_none());
@@ -1216,7 +1245,7 @@ mod tests {
         // 80 cols x 12 rows → 160 x 24 px. Shrinking the pane to 40 cols halves
         // its width to 80 px; the game re-suspends on its line request (not quit).
         let mut sess =
-            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None)
+            GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
                 .expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         let (w0, h0) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
@@ -1232,7 +1261,7 @@ mod tests {
     #[test]
     fn resize_after_quit_is_a_noop() {
         // A quit session must ignore resize (no drive, no panic).
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None)
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[])
             .expect("new");
         let r = sess.submit("go"); // drives to quit
         assert!(r.quit);
@@ -1244,7 +1273,7 @@ mod tests {
     fn finish_turn_drains_buffered_sound_ops() {
         use crate::session::SchannelOp;
         use gvm::glk::GlkBackend;
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, true, (1, 1), None)
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, true, (1, 1), None, &[])
             .expect("new");
         {
             let g = sess.appglk();
@@ -1288,7 +1317,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert_eq!(sess.take_transcript(), "Hi", "banner drops the trailing prompt");
         let r = sess.submit("x");
         assert_eq!(r.transcript, "done", "turn output drops the trailing prompt");
@@ -1322,7 +1351,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         sess.strip_prompt = false;
         assert_eq!(sess.take_transcript(), "Hi\n> ", "banner keeps the trailing prompt");
         let r = sess.submit("x");
@@ -1350,7 +1379,7 @@ mod tests {
         body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select (banner)
         let image = image_for(body, 1);
 
-        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
@@ -1374,7 +1403,7 @@ mod tests {
 
     #[test]
     fn save_state_is_tagged_and_round_trips_with_guard() {
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         let save = sess.save_state();
         assert_eq!(save.engine, GLULX_ENGINE);
         assert!(!save.bytes.is_empty(), "gvm snapshot is non-empty");
@@ -1393,7 +1422,7 @@ mod tests {
 
     #[test]
     fn introspect_is_none() {
-        let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert!(sess.introspect().is_none(), "Glulx introspection is SP4");
     }
 
@@ -1413,7 +1442,7 @@ mod tests {
         // A Glulx engine save survives a .babelmap archive round-trip: write its
         // EngineSave (no screen.json), reload, and restore into a FRESH session
         // through Engine::restore_state — state is preserved, no panic.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         let _ = sess.take_transcript(); // drain the banner
         let es = sess.save_state();
         assert_eq!(es.engine, GLULX_ENGINE);
@@ -1430,7 +1459,7 @@ mod tests {
         assert!(ac.screen.is_none(), "Glulx archive carries no screen.json");
         assert_eq!(ac.save, es.bytes, "archived bytes are the Glulx save");
 
-        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut fresh = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         let _ = fresh.take_transcript();
         fresh.restore_state(&ac.engine_save()).expect("Glulx restore from archive");
         assert_eq!(fresh.pending_input(), InputKind::Line, "restored input state");
@@ -1441,7 +1470,7 @@ mod tests {
     fn glulx_restore_refuses_zmachine_archive() {
         // The foreign-engine guard fires gracefully (no panic) when a zmachine
         // save is offered to a Glulx session.
-        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(simple_line_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         let foreign = EngineSave::new("zmachine", 1, vec![1, 2, 3]);
         assert!(matches!(
             sess.restore_state(&foreign),
@@ -1478,7 +1507,7 @@ mod tests {
             image_for(body, 1)
         };
 
-        let mut sess = GlulxSession::new(image, 78, 20, true, false, false, (1, 1), None).expect("new");
+        let mut sess = GlulxSession::new(image, 78, 20, true, false, false, (1, 1), None, &[]).expect("new");
 
         // Mirror the app loop: drain the banner into the transcript, take a turn.
         let mut state = AppState::default();
@@ -1529,7 +1558,7 @@ mod tests {
     #[test]
     fn mouse_windows_lists_only_watching_windows_and_char_pixels_exposed() {
         let mut sess =
-            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (9, 19), None).expect("new");
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (9, 19), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
 
         // Only the grid (window 2) watches; the buffer (window 1) does not.
@@ -1545,7 +1574,7 @@ mod tests {
     #[test]
     fn deliver_mouse_resumes_the_game_and_is_one_shot() {
         let mut sess =
-            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+            GlulxSession::new(grid_mouse_watch_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert!(!sess.mouse_windows().is_empty(), "armed before the click");
 
         // The click resumes the suspended select; the game runs to its trailing quit.
@@ -1624,7 +1653,7 @@ mod tests {
     #[test]
     fn hyperlink_windows_lists_only_watching_windows() {
         let mut sess =
-            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (9, 19), None).expect("new");
+            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (9, 19), None, &[]).expect("new");
         assert_eq!(sess.pending_input(), InputKind::Char, "suspends on the grid char request");
 
         // Only the grid (window 2) watches; the buffer (window 1) does not.
@@ -1638,7 +1667,7 @@ mod tests {
     #[test]
     fn deliver_hyperlink_resumes_the_game_and_is_one_shot() {
         let mut sess =
-            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (1, 1), None).expect("new");
+            GlulxSession::new(grid_hyperlink_watch_image(), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
         assert!(!sess.hyperlink_windows().is_empty(), "armed before the click");
 
         // The click resumes the suspended select; the game runs to its trailing quit.

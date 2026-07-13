@@ -1786,6 +1786,14 @@ fn main() {
         })
         .unwrap_or((8, 16));
 
+    // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>/`,
+    // keyed by the story filename. Compute the per-game dir and read the Glk
+    // file VFS sidecar BEFORE building the engine, so a Glulx boot that reads or
+    // writes a Glk file (e.g. CM's init cache) sees the sidecar in place (SQ-0290).
+    let game_dir = story_game_dir(&data_base, &story_key(&story_path));
+    let _ = std::fs::create_dir_all(&game_dir);
+    let vfs_sidecar = app::vfs_store::read_vfs(&game_dir);
+
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -1827,6 +1835,7 @@ fn main() {
                 cfg.enable_sound,
                 char_px,
                 pict_blorb,
+                &vfs_sidecar,
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {
@@ -1847,10 +1856,8 @@ fn main() {
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
     let ifid = compute_ifid(&story_bytes);
-    // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>/`,
-    // keyed by the story filename (IFID stays for title/hint/display only).
-    let game_dir = story_game_dir(&data_base, &story_key(&story_path));
-    let _ = std::fs::create_dir_all(&game_dir);
+    // `game_dir` (per-story storage) was computed and created before the engine
+    // build; the IFID stays for title/hint/display only.
     let arc_file = default_state_path(&game_dir);
 
     // Load mapper (and optionally restore the game save) from the archive.
@@ -1909,11 +1916,15 @@ fn main() {
         session.set_aux_data(app::aux_store::read_global_aux(&game_dir));
     }
 
-    // Startup: pre-load the per-story Glk file VFS sidecar (Glulx only; the
-    // Z-machine session's no-op default ignores it, and an absent sidecar
-    // yields empty bytes). Loading isn't a game mutation, so clear the flag.
-    session.load_vfs(&app::vfs_store::read_vfs(&game_dir));
-    session.clear_vfs_dirty();
+    // The per-story Glk file VFS sidecar was loaded into the VM before boot
+    // (GlulxSession::new). A Glulx game may write a Glk file during boot (e.g.
+    // CM's init cache); flush it now so it persists before the first turn and
+    // survives an immediate quit (SQ-0290). For a Z-machine session vfs_dirty()
+    // is always false, so this is a no-op there.
+    if session.vfs_dirty() {
+        let _ = app::vfs_store::write_vfs(&game_dir, &session.vfs_bytes());
+        session.clear_vfs_dirty();
+    }
 
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
@@ -4447,6 +4458,10 @@ fn reset_game(
                 })
                 .unwrap_or((8, 16));
             let pict_blorb = resolve_pict_blorb(story_path, state.config.images);
+            // Carry the current in-memory Glk file VFS (e.g. CM's boot cache,
+            // kept in sync with the sidecar) into the restarted session so the
+            // fresh boot still sees it (SQ-0290).
+            let carry_vfs = session.vfs_bytes();
             GlulxSession::new(
                 bytes,
                 state.config.virtual_screen_cols as u32,
@@ -4456,6 +4471,7 @@ fn reset_game(
                 state.config.enable_sound,
                 char_px,
                 pict_blorb,
+                &carry_vfs,
             )
             .map_err(|e| format!("{e:?}"))
             .map(|new_session| {
@@ -6148,7 +6164,7 @@ mod tests {
             .join("../gvm-cli/tests/fixtures/glulxercise.ulx");
         let Ok(bytes) = std::fs::read(&fixture) else { return };
         let mut engine: Box<dyn app::engine::Engine> = Box::new(
-            app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true, false, false, (1, 1), None)
+            app::glulx_session::GlulxSession::new(bytes.clone(), 80, 24, true, false, false, (1, 1), None, &[])
                 .expect("glulx session"),
         );
         let mut mapper = mapper::mapper::Mapper::default();
