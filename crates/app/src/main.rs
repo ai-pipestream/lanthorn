@@ -1657,6 +1657,54 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Run a map-export Action (SVG/DOT/dump) into the per-game dir. Returns true if
+/// `action` was a map-export action (so callers fall through otherwise). Mirrors
+/// the resolve→create_dir_all→render→write→notice logic that was inline at the
+/// main-loop Action::Export* arms (SQ-0297: slash commands never reached that
+/// match, so this is shared so both the slash and key-dispatch paths export).
+fn handle_map_export(
+    action: &Action,
+    game_dir: &std::path::Path,
+    mapper: &Mapper,
+    state: &mut AppState,
+) -> bool {
+    match action {
+        Action::ExportSvg(dest) => {
+            let path = app::export::resolve_export_path(dest.as_deref(), game_dir, "map.svg");
+            if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+            let rm = render_map_data(&mapper.graph);
+            match export_svg(&path, &rm) {
+                Ok(()) => state.push_notice(&format!("[SVG exported to {}]", abbreviate_home(&path))),
+                Err(e) => state.push_notice(&format!("[SVG export failed: {}]", e)),
+            }
+            true
+        }
+        Action::ExportDot(dest) => {
+            let path = app::export::resolve_export_path(dest.as_deref(), game_dir, "map.dot");
+            if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+            match export_dot(&path, &mapper.graph) {
+                Ok(()) => state.push_notice(&format!(
+                    "[DOT exported to {} — render with: dot -Tsvg {} -o map.svg]",
+                    abbreviate_home(&path),
+                    abbreviate_home(&path)
+                )),
+                Err(e) => state.push_notice(&format!("[DOT export failed: {}]", e)),
+            }
+            true
+        }
+        Action::ExportDump(dest) => {
+            let path = app::export::resolve_export_path(dest.as_deref(), game_dir, "map.txt");
+            if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
+            match std::fs::write(&path, render_dump(&mapper.graph)) {
+                Ok(()) => state.push_notice(&format!("[map dump written to {}]", abbreviate_home(&path))),
+                Err(e) => state.push_notice(&format!("[map dump failed: {}]", e)),
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Abbreviate a leading $HOME in a path to `~` for display.
 fn abbreviate_home(p: &std::path::Path) -> String {
     let s = p.display().to_string();
@@ -3645,51 +3693,10 @@ fn main() {
                 }
             }
 
-            Action::ExportSvg(dest) => {
-                let path = app::export::resolve_export_path(dest.as_deref(), &game_dir, "map.svg");
-                if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
-                let rm = render_map_data(&mapper.graph);
-                match export_svg(&path, &rm) {
-                    Ok(()) => {
-                        state.push_notice(&format!(
-                            "[SVG exported to {}]",
-                            abbreviate_home(&path)
-                        ));
-                    }
-                    Err(e) => {
-                        state.push_notice(&format!("[SVG export failed: {}]", e));
-                    }
-                }
-            }
-
-            Action::ExportDot(dest) => {
-                let path = app::export::resolve_export_path(dest.as_deref(), &game_dir, "map.dot");
-                if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
-                match export_dot(&path, &mapper.graph) {
-                    Ok(()) => {
-                        state.push_notice(&format!(
-                            "[DOT exported to {} — render with: dot -Tsvg {} -o map.svg]",
-                            abbreviate_home(&path),
-                            abbreviate_home(&path)
-                        ));
-                    }
-                    Err(e) => {
-                        state.push_notice(&format!("[DOT export failed: {}]", e));
-                    }
-                }
-            }
-
-            Action::ExportDump(dest) => {
-                let path = app::export::resolve_export_path(dest.as_deref(), &game_dir, "map.txt");
-                if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
-                match std::fs::write(&path, render_dump(&mapper.graph)) {
-                    Ok(()) => {
-                        state.push_notice(&format!("[map dump written to {}]", abbreviate_home(&path)));
-                    }
-                    Err(e) => {
-                        state.push_notice(&format!("[map dump failed: {}]", e));
-                    }
-                }
+            // SQ-0297: shared with the slash-command path via handle_map_export
+            // (dispatch_slash_outcome never reaches this match).
+            a @ (Action::ExportSvg(_) | Action::ExportDot(_) | Action::ExportDump(_)) => {
+                handle_map_export(&a, &game_dir, &mapper, &mut state);
             }
 
             // ── Saves-manager actions ─────────────────────────────────────────
@@ -4164,7 +4171,9 @@ fn dispatch_slash_outcome(
 ) -> bool {
     match outcome {
         SlashOutcome::Action(a) => {
-            if matches!(a, Action::ToggleWatch) {
+            if handle_map_export(&a, game_dir, mapper, state) {
+                // handled
+            } else if matches!(a, Action::ToggleWatch) {
                 toggle_style_watch(state, style_watcher);
             } else {
                 apply_action(a, state, mapper);
@@ -5766,6 +5775,36 @@ mod tests {
     use super::{ANIM_HINTS, GAME_HINTS, MAP_HINTS};
     use app::keymap::{Context, HotkeyLayout, KeyMap};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
+
+    // ── SQ-0297: map-export slash commands must actually write the file ────────
+
+    #[test]
+    fn handle_map_export_writes_the_file_into_the_game_dir() {
+        use std::fs;
+        use app::input::Action;
+        use app::state::AppState;
+        use mapper::mapper::Mapper;
+        let dir = std::env::temp_dir().join(format!("bm-handle-map-export-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mapper = Mapper::default();
+        let mut state = AppState::default();
+
+        assert!(super::handle_map_export(&Action::ExportSvg(None), &dir, &mapper, &mut state));
+        assert!(dir.join("map.svg").exists(), "SVG export must write map.svg into the game dir");
+
+        assert!(super::handle_map_export(&Action::ExportDot(Some("mymap".into())), &dir, &mapper, &mut state));
+        assert!(dir.join("mymap.dot").exists(), "DOT export with a bare-name arg must land in the game dir");
+
+        assert!(super::handle_map_export(&Action::ExportDump(None), &dir, &mapper, &mut state));
+        assert!(dir.join("map.txt").exists(), "dump export must write map.txt into the game dir");
+
+        assert!(!super::handle_map_export(&Action::ToggleWatch, &dir, &mapper, &mut state),
+            "a non-export action must not be treated as handled");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // ── SQ-0230: list_qzl filters to the current story's game saves ─────────────
 
