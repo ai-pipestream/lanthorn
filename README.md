@@ -112,7 +112,7 @@ default, so the file is optional. Command-line flags take precedence over the
 config file, which takes precedence over built-in defaults. See
 [customization & configuration](docs/features/customization.md) for the settings.
 
-Saves and sidecars live under `~/.babelmap/saves/<story-filename>/` by
+Saves and sidecars live under `~/.babelmap/saves/<story-filename>.save/` by
 default; pass `--data-dir <path>` to store them elsewhere. → [persistence
 model](docs/persistence.md)
 
@@ -131,7 +131,7 @@ cargo run -p gvm-cli -- story.ulx # DOS-style Glulx CLI player (no map)
 window via ANSI when interactive, clearing the screen on start) and degrade to a
 clean line stream when piped. Interactively they do single-key input (arrow/function
 keys decoded for `read_char` menus) and `[MORE]` paging on long output; saves and
-aux/VFS sidecars persist per game under `<story-dir>/<story-filename>/` by
+aux/VFS sidecars persist per game under `<story-dir>/<story-filename>.save/` by
 default (`--data-dir <path>` overrides the base). A bare filename typed at the
 game's own `@save`/`@restore` prompt (e.g. `quick`) lands in that per-game
 directory; a path-bearing value (e.g. `/tmp/x.qzl`) is honored verbatim. On

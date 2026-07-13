@@ -67,12 +67,12 @@ sessions.
 
 - **Z-machine — aux data.** Games that use the v5 `@save` / `@restore`
   auxiliary-file mechanism (save/restore of a memory table to a named external
-  file) persist to `<base>/<story-key>/default.aux` — in the app
+  file) persist to `<base>/<story-key>.save/default.aux` — in the app
   (`crates/app/src/aux_store.rs`) and in `zvm-cli` (`ZAUX` format,
   `crates/zvm-cli/src/aux.rs`), each keyed by the story filename, not IFID.
 - **Glulx — the Glk file VFS (new, SQ-0278).** Every file a Glulx game writes
   through Glk file streams now auto-persists to
-  `<base>/<story-key>/default.glkvfs` — in the app
+  `<base>/<story-key>.save/default.glkvfs` — in the app
   (`crates/app/src/vfs_store.rs`) and in `gvm-cli`
   (`crates/gvm-cli/src/main.rs`), both keyed by the story filename. The blob is
   the files-only `GVFS` codec (`gvm::glk::encode_files` / `decode_files`): magic
@@ -96,7 +96,7 @@ flat **per-game directory**, one directory per story, holding everything for
 that game side by side:
 
 ```
-<base>/<story-key>/
+<base>/<story-key>.save/
     default.aux        # Z-machine aux sidecar (Layer 3)
     default.glkvfs     # Glulx VFS sidecar (Layer 3)
     default.babelmap   # the auto/singleton Save State slot (Layer 2)
@@ -110,6 +110,12 @@ file always maps to the same directory, and different files (even the same
 game shipped as `.z5` vs `.zblorb`) get separate directories. The IFID is
 still computed and used for the story's *title* and for interpreter-hint
 association, but it no longer keys any storage path.
+
+The directory name carries a **`.save` suffix** (`<story-key>.save`, e.g.
+`Zork1.z5.save/`) so it can never collide with the story file itself — this
+matters for `zvm-cli`/`gvm-cli`, whose default `<base>` is the story's own
+directory, where a directory named exactly `Zork1.z5` would collide with the
+file `Zork1.z5` (SQ-0294).
 
 `<base>` — the directory containing all per-game directories — defaults
 differently per host, and every host accepts `--data-dir <path>` to override
@@ -128,7 +134,7 @@ is claimed by the auto/singleton slot.
 
 When `zvm-cli` / `gvm-cli` prompt for a filename on the game's own `@save` /
 `@restore`, a **bare name** (no path separator, e.g. `@save quick`) resolves
-into the per-game directory — `<base>/<story-key>/quick.qzl` — matching the
+into the per-game directory — `<base>/<story-key>.save/quick.qzl` — matching the
 `.qzl` extension automatically. A **path-bearing value** (e.g.
 `@save /tmp/x.qzl`) is honored verbatim, bypassing the per-game directory
 entirely.
@@ -139,7 +145,7 @@ The app's `/export-svg`, `/export-dot`, `/export-dump`, and `/export-transcript`
 commands write into the same per-game directory, using fixed default names —
 `map.svg`, `map.dot`, `map.txt`, `transcript.txt` — overwriting on repeat
 export. Each takes an optional `[file]` argument that resolves the same way as
-`@save`/`@restore` above: a **bare name** lands in `<base>/<story-key>/`
+`@save`/`@restore` above: a **bare name** lands in `<base>/<story-key>.save/`
 (the format's extension is appended if the name has none), a **path-bearing
 value** is honored verbatim.
 
@@ -149,24 +155,24 @@ There is **no migration** from the old IFID-keyed layout. Saves and sidecars
 previously written as `<save_dir>/<ifid>.babelmap`, `<ifid>.aux`, `<ifid>.gvfs`,
 etc. are orphaned — babelmap will not find or move them automatically. If you
 have saves from before this change, either re-create them under the new
-layout or manually move the files into the new `<base>/<story-key>/`
+layout or manually move the files into the new `<base>/<story-key>.save/`
 directory (renaming to the `default.*` / `<slug>.*` names above as needed).
 
 ## Where each thing lands
 
 | Layer | Engine | Host | File |
 |-------|--------|------|------|
-| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>/<slug>.qzl` (VM state only) |
-| 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | `<base>/<story-key>/<slug>.qzl` (bare name) or verbatim path |
-| 1 — game's `@save`/`@restore` | Glulx | app | `<base>/<story-key>/<slug>.qzl` (VM state only) |
-| 1 — game's `@save`/`@restore` | Glulx | `gvm-cli` | `<base>/<story-key>/<slug>.qzl` (bare name) or verbatim path |
-| 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside) |
-| 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>/default.babelmap` or `<slug>.babelmap` (`game.glksave` inside; embeds full Glk VFS) |
-| 3 — auto per-story (aux) | Z-machine | app | `<base>/<story-key>/default.aux` |
-| 3 — auto per-story (aux) | Z-machine | `zvm-cli` | `<base>/<story-key>/default.aux` (`ZAUX`) |
-| 3 — auto per-story (Glk VFS) | Glulx | app | `<base>/<story-key>/default.glkvfs` (`GVFS`) |
-| 3 — auto per-story (Glk VFS) | Glulx | `gvm-cli` | `<base>/<story-key>/default.glkvfs` (`GVFS`) |
-| export — `/export-svg`\|`-dot`\|`-dump`\|`-transcript` | either | app | `<base>/<story-key>/map.svg`\|`map.dot`\|`map.txt`\|`transcript.txt` (bare `[file]` arg) or verbatim path |
+| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
+| 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
+| 1 — game's `@save`/`@restore` | Glulx | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
+| 1 — game's `@save`/`@restore` | Glulx | `gvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
+| 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside) |
+| 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.glksave` inside; embeds full Glk VFS) |
+| 3 — auto per-story (aux) | Z-machine | app | `<base>/<story-key>.save/default.aux` |
+| 3 — auto per-story (aux) | Z-machine | `zvm-cli` | `<base>/<story-key>.save/default.aux` (`ZAUX`) |
+| 3 — auto per-story (Glk VFS) | Glulx | app | `<base>/<story-key>.save/default.glkvfs` (`GVFS`) |
+| 3 — auto per-story (Glk VFS) | Glulx | `gvm-cli` | `<base>/<story-key>.save/default.glkvfs` (`GVFS`) |
+| export — `/export-svg`\|`-dot`\|`-dump`\|`-transcript` | either | app | `<base>/<story-key>.save/map.svg`\|`map.dot`\|`map.txt`\|`transcript.txt` (bare `[file]` arg) or verbatim path |
 
 `<base>` and `<story-key>` are as defined in [Storage layout](#storage-layout-sq-0284)
 above.
