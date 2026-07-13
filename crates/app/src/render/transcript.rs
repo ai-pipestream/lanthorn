@@ -992,8 +992,9 @@ fn render_input_content(
     if region.height == 0 || region.width == 0 {
         return;
     }
-    // In read_char mode the prompt is meaningless — hide it entirely.
-    if state.char_mode {
+    // In read_char mode — or while a Glulx game waits on a timer/mouse/hyperlink
+    // event only — the prompt is meaningless: hide it entirely.
+    if state.char_mode || state.event_wait {
         return;
     }
     let w = region.width as usize;
@@ -1298,6 +1299,7 @@ fn render_middle(
     // (effective_scroll == 0) so scrolled-up history is never overwritten.
     if !state.config.command_bar
         && !state.char_mode
+        && !state.event_wait
         && state.focus == Focus::Game
         && !state.any_overlay_open()
         && effective_scroll == 0

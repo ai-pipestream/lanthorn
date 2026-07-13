@@ -1389,6 +1389,14 @@ pub struct AppState {
     /// Used by the renderer to hide the bottom input prompt.
     pub char_mode: bool,
 
+    /// True when a Glulx game is blocked on a non-input Glk event only (a
+    /// timer/mouse/hyperlink `glk_select` with no line/char request; see
+    /// [`InputKind::Event`]). Set each frame from `session.pending_input()`. Like
+    /// `char_mode` it hides the typed-input prompt/cursor, but keystrokes are NOT
+    /// forwarded to the game (there is no request to satisfy) — the host delivers
+    /// the timer tick / click instead.
+    pub event_wait: bool,
+
     // ── Timed input ───────────────────────────────────────────────────────────
 
     /// When a timed read/read_char is active and honored (`config.honor_timed_input`),
@@ -1525,6 +1533,7 @@ impl Default for AppState {
             search_idx: 0,
             dialog_focus: 0,
             char_mode: false,
+            event_wait: false,
             input_deadline: None,
             glulx_timer_next_fire: None,
             game_picker: None,

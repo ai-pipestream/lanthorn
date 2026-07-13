@@ -2362,6 +2362,10 @@ fn main() {
 
         // Update char_mode flag so the renderer hides the prompt during read_char.
         state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
+        // A Glulx timer/mouse/hyperlink-only glk_select: hide the prompt too (no
+        // typed input is requested), but unlike char_mode do NOT forward keys to
+        // the game — the timer clock / click delivers the event instead.
+        state.event_wait = matches!(session.pending_input(), app::session::InputKind::Event);
 
         // Re-arm the timed-input deadline each iteration. Only while the game is
         // actually awaiting input (no dialog/overlay/prompt covering the pane) and
@@ -3576,6 +3580,14 @@ fn main() {
                     persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                     persist_vfs_after_turn(&mut *session, &game_dir);
                     if quit { break; }
+                    continue;
+                }
+
+                // A Glulx game waiting on a timer/mouse/hyperlink event only has no
+                // line request pending: Enter has nothing to submit. Swallow it
+                // (keeping the typed buffer intact for the real prompt) rather than
+                // feed a stray line the VM would only diagnose.
+                if session.pending_input() == app::session::InputKind::Event {
                     continue;
                 }
 

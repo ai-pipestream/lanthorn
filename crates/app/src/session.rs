@@ -30,6 +30,12 @@ pub enum InputKind {
     Line,
     /// Waiting for a single keypress (`read_char` opcode).
     Char,
+    /// Waiting on a non-input Glk event only — a timer, mouse, or hyperlink
+    /// (`glk_select` with no line/char request; Glulx, Glk §4.4). The game
+    /// requested no typed input, so the host shows no prompt/cursor and delivers
+    /// the event (a timer tick on its clock, a mouse/hyperlink event on a click)
+    /// rather than a keystroke. Never produced by the Z-machine engine.
+    Event,
 }
 
 /// Which in-game (game-initiated) I/O the VM is suspended on after a turn.

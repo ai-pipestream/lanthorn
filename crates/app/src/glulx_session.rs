@@ -117,6 +117,10 @@ enum DriveStop {
     Input(InputKind),
     /// The VM quit (or the runaway watchdog aborted the turn).
     Quit,
+    /// A `glk_select` is waiting only on a non-input event (timer/mouse/hyperlink;
+    /// Glk §4.4). No typed input is requested: the host's timer clock delivers
+    /// ticks and a click routes to `deliver_mouse`/`deliver_hyperlink`.
+    Event,
     /// The game executed `@save`: the host must write a save file, then
     /// [`GlulxSession::resume_save`].
     Save,
@@ -151,6 +155,7 @@ fn drive(machine: &mut Machine) -> DriveStop {
             StepResult::Quit => return DriveStop::Quit,
             StepResult::NeedLine { .. } => return DriveStop::Input(InputKind::Line),
             StepResult::NeedChar { .. } => return DriveStop::Input(InputKind::Char),
+            StepResult::NeedEvent { .. } => return DriveStop::Event,
             StepResult::SaveRequest => return DriveStop::Save,
             StepResult::RestoreRequest => return DriveStop::Restore,
             StepResult::NeedFilename { usage, fmode } => {
@@ -242,6 +247,7 @@ fn drive_settled(machine: &mut Machine, game_dir: &std::path::Path) -> (InputKin
     loop {
         match drive_auto(machine, game_dir) {
             DriveStop::Input(k) => return (k, false),
+            DriveStop::Event => return (InputKind::Event, false),
             DriveStop::Quit => return (InputKind::Line, true),
             DriveStop::Save => machine.complete_save(false),
             DriveStop::Restore => machine.complete_restore_failure(),
@@ -369,6 +375,15 @@ impl GlulxSession {
         match drive_auto(&mut self.machine, &self.game_dir) {
             DriveStop::Input(k) => {
                 self.pending = k;
+                self.quit = false;
+                self.pending_io = None;
+                self.pending_filename = None;
+            }
+            DriveStop::Event => {
+                // Waiting on a timer/mouse/hyperlink only: no typed input pending.
+                // The run loop's Glk timer clock delivers ticks; a click routes to
+                // deliver_mouse/deliver_hyperlink.
+                self.pending = InputKind::Event;
                 self.quit = false;
                 self.pending_io = None;
                 self.pending_filename = None;
@@ -1368,6 +1383,38 @@ mod tests {
         let r = sess.submit_key(KeyInput::Char('Z')).expect("mapped key produces a turn");
         assert_eq!(r.transcript, "Z");
         assert!(r.quit);
+    }
+
+    /// Program: open a buffer, arm a 50ms timer, then glk_select with NO line/char
+    /// request — a legal blocking wait on the timer (Glk §4.4). Once the timer
+    /// resolves the select, quit.
+    fn timer_wait_image() -> Vec<u8> {
+        use E::*;
+        let mut body = open_buffer_prelude();
+        body.extend(enc(0x40, &[Imm(50), Push]));
+        body.extend(enc(0x130, &[Imm(0xd6), Imm(1), Discard])); // request_timer_events(50)
+        body.extend(enc(0x40, &[Imm(EVENT), Push]));
+        body.extend(enc(0x130, &[Imm(0xc0), Imm(1), Discard])); // glk_select
+        body.extend(enc(0x120, &[])); // quit
+        image_for(body, 1)
+    }
+
+    #[test]
+    fn timer_only_select_suspends_as_event_and_deliver_timer_advances() {
+        let mut sess = GlulxSession::new(timer_wait_image(), 80, 24, true, false, false, (1, 1), None, &[])
+            .expect("new");
+        // The timer-only select suspends as Event (not Line/Char) and did NOT
+        // spin to quit — the SQ-0299 fix.
+        assert_eq!(sess.pending_input(), InputKind::Event, "timer-only select suspends as Event");
+        assert!(!sess.has_quit(), "the game blocks on the timer; it did not run to quit");
+        assert_eq!(
+            sess.timer_interval(),
+            Some(std::time::Duration::from_millis(50)),
+            "the timer clock is armed"
+        );
+        // The host clock delivers a tick, resolving the select; the game resumes.
+        let r = sess.deliver_timer();
+        assert!(r.quit, "the delivered timer tick advanced the game past the select to quit");
     }
 
     /// Program: open a buffer, request a line, quit on input.
