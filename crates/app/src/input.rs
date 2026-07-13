@@ -2473,12 +2473,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // the actual I/O is caller-handled.
 
         Action::SavesSaveAs => {
-            // Open the name-entry prompt; on submit the caller performs the save.
+            // Open the save-name dialog (a common-dialog modal, not a bottom-bar
+            // prompt); on submit the caller performs the host Save State save.
             state.hotkey_dialog = false;
-            state.prompt = Some(crate::state::Prompt {
-                kind: crate::state::PromptKind::SaveAs,
-                buffer: String::new(),
-            });
+            state.dialog_focus = 0;
+            state.save_name_dialog = Some(crate::state::SaveNameDialog::new(
+                crate::persist_files::default_save_name(),
+                false,
+            ));
         }
 
         Action::SavesDelete => {
@@ -5535,16 +5537,19 @@ mod tests {
     }
 
     #[test]
-    fn saves_submode_s_opens_save_as_prompt() {
+    fn saves_submode_s_opens_save_name_dialog() {
         let mut s = state_with_saves_open();
         let a = key_to_action(&s, key(KeyCode::Char('s')));
         assert!(matches!(a, Action::SavesSaveAs));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert!(s.prompt.is_some(), "SavesSaveAs should open the prompt sub-mode");
-        assert!(matches!(
-            s.prompt.as_ref().unwrap().kind,
-            crate::state::PromptKind::SaveAs
-        ));
+        // SavesSaveAs now opens the common-dialog save-name modal (not a bottom-bar
+        // prompt), prefilled with a greyed date-time default, focused on the field.
+        assert!(s.prompt.is_none(), "no bottom-bar prompt is opened anymore");
+        let dlg = s.save_name_dialog.as_ref().expect("save-name dialog opened");
+        assert!(!dlg.active, "opens greyed (placeholder) until edited");
+        assert!(!dlg.ingame, "host Save State context");
+        assert!(!dlg.field.value.is_empty(), "prefilled with a default name");
+        assert_eq!(s.dialog_focus, 0, "focus starts on the text field");
     }
 
     #[test]

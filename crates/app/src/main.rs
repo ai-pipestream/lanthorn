@@ -288,6 +288,8 @@ struct PaneRects {
     pub aux_dialog: Option<app::render::aux_dialog::AuxDialogRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
+    /// Hit-rects for the save-name dialog (when open).
+    pub save_name_dialog: Option<app::render::save_name_dialog::SaveNameDialogRects>,
     /// Hit-rects for the quit dialog (when open).
     pub quit_dialog: Option<app::render::quit_dialog::QuitDialogRects>,
     /// Hit-rects for the launch dialog (when open).
@@ -448,6 +450,7 @@ fn draw_frame(
     let mut dialog_rects_out: Option<DialogRects> = None;
     let mut aux_dialog_rects_out: Option<app::render::aux_dialog::AuxDialogRects> = None;
     let mut reset_dialog_rects_out: Option<app::render::reset_dialog::ResetDialogRects> = None;
+    let mut save_name_dialog_rects_out: Option<app::render::save_name_dialog::SaveNameDialogRects> = None;
     let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
     let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
@@ -860,6 +863,12 @@ fn draw_frame(
             reset_dialog_rects_out = draw_reset_dialog(state, dialog_area, buf);
         }
 
+        // ── Save-name dialog overlay — drawn over everything ───────────────────
+        if state.save_name_dialog.is_some() {
+            save_name_dialog_rects_out =
+                app::render::save_name_dialog::draw_save_name_dialog(state, dialog_area, buf);
+        }
+
         // ── Quit dialog overlay — drawn over everything ────────────────────────
         if state.quit_dialog {
             quit_dialog_rects_out = draw_quit_dialog(state, dialog_area, buf);
@@ -879,14 +888,11 @@ fn draw_frame(
         // render_middle (render/transcript.rs), which has the full wrapped-row set
         // and can select text beyond the visible viewport. (SQ-0197)
 
-        // ── Prompt overlay — map-editing prompts overlay the map; the save-name
-        // prompt (a game-driven SAVE) belongs with the story/game interaction, so
-        // it renders over the story pane instead. ──────────────────────────────
+        // ── Prompt overlay — map-editing prompts overlay the map. (The save-name
+        // prompt is no longer a bottom-bar prompt; it is a common-dialog modal that
+        // renders in the graphics-free dialog area — see save_name_dialog.) ───────
         if let Some(prompt) = &state.prompt {
-            let prefer_story = matches!(prompt.kind, PromptKind::SaveAs);
-            let overlay_area = if prefer_story && story_area.height > 0 {
-                story_area
-            } else if map_area.height > 0 {
+            let overlay_area = if map_area.height > 0 {
                 map_area
             } else if story_area.height > 0 {
                 story_area
@@ -895,42 +901,24 @@ fn draw_frame(
             };
             if overlay_area.height > 0 {
                 let y = overlay_area.bottom() - 1;
-                if prefer_story {
-                    // Save name entry reuses the story input line's look — the
-                    // normal transcript style with a reversed block cursor —
-                    // under a descriptive label, so it reads as part of the game
-                    // interaction rather than a map-editor overlay bar.
-                    let label = "Save Filename: ";
-                    let line = format!("{}{}", label, prompt.buffer);
-                    let normal_style = state.colors.transcript;
-                    draw_str_clipped(buf, overlay_area.x, y, &line, normal_style, overlay_area);
-                    let cursor_x = overlay_area.x + line.chars().count() as u16;
-                    if cursor_x < overlay_area.right() {
-                        if let Some(cell) = buf.cell_mut((cursor_x, y)) {
-                            cell.set_symbol("_")
-                                .set_style(app::render::transcript::CURSOR_STYLE);
-                        }
-                    }
-                } else {
-                    let label = match &prompt.kind {
-                        PromptKind::RenameRoom(_) => "Rename: ",
-                        PromptKind::EditNotes(_) => "Notes:  ",
-                        PromptKind::RelabelEdge(_, _) => "Dir:    ",
-                        PromptKind::RenameLayer(_) => "Layer:  ",
-                        PromptKind::SaveAs => "Name:   ",
-                        PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
-                        PromptKind::ConfigEditPath { .. } => "Path:   ",
-                        PromptKind::CreateFile => "File:   ",
-                    };
-                    let line = format!("{}{}_", label, prompt.buffer);
-                    let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
-                    draw_str_clipped(buf, overlay_area.x, y, &line, overlay_style, overlay_area);
-                }
+                let label = match &prompt.kind {
+                    PromptKind::RenameRoom(_) => "Rename: ",
+                    PromptKind::EditNotes(_) => "Notes:  ",
+                    PromptKind::RelabelEdge(_, _) => "Dir:    ",
+                    PromptKind::RenameLayer(_) => "Layer:  ",
+                    PromptKind::SaveAs => "Name:   ",
+                    PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
+                    PromptKind::ConfigEditPath { .. } => "Path:   ",
+                    PromptKind::CreateFile => "File:   ",
+                };
+                let line = format!("{}{}_", label, prompt.buffer);
+                let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
+                draw_str_clipped(buf, overlay_area.x, y, &line, overlay_style, overlay_area);
             }
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, save_name_dialog: save_name_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -2180,7 +2168,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, save_name_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -2757,6 +2745,178 @@ fn main() {
                 }
                 Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
                 _ => {}
+            }
+            continue;
+        }
+
+        // ── Save-name dialog intercept — before normal action routing ─────────
+        // A common-dialog modal with a caret text field. Focus ring: 0 = field,
+        // 1 = Save, 2 = Cancel. The field opens with a greyed date-time default
+        // (active = false); Tab/→/edit-keys adopt it for editing, typing starts
+        // fresh, Enter on the untouched placeholder saves the default. Submit reuses
+        // the same handle_saves_prompt path as the retired bottom-bar prompt.
+        if state.save_name_dialog.is_some() {
+            let mut do_save = false;
+            let mut do_cancel = false;
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    use crossterm::event::{KeyCode, KeyModifiers};
+                    let focus = state.dialog_focus;
+                    let mut new_focus = focus;
+                    {
+                        let dlg = state.save_name_dialog.as_mut().unwrap();
+                        if focus == 0 {
+                            // ── Text field focused ──
+                            match k.code {
+                                KeyCode::Esc => do_cancel = true,
+                                KeyCode::Enter => {
+                                    if dlg.active && dlg.field.value.is_empty() {
+                                        dlg.active = false; // empty: revert to placeholder
+                                    } else {
+                                        do_save = true; // placeholder saves default
+                                    }
+                                }
+                                KeyCode::BackTab => new_focus = 2, // reverse-wrap to Cancel
+                                KeyCode::Tab => {
+                                    if dlg.active {
+                                        new_focus = 1; // advance to Save
+                                    } else {
+                                        dlg.active = true; // adopt default for editing
+                                        dlg.field.end();
+                                    }
+                                }
+                                KeyCode::Right => {
+                                    if dlg.active {
+                                        dlg.field.right();
+                                    } else {
+                                        dlg.active = true; // adopt default
+                                        dlg.field.end();
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    if !dlg.active {
+                                        dlg.active = true;
+                                        dlg.field.end();
+                                    }
+                                    dlg.field.left();
+                                }
+                                KeyCode::Home => {
+                                    dlg.active = true;
+                                    dlg.field.home();
+                                }
+                                KeyCode::End => {
+                                    dlg.active = true;
+                                    dlg.field.end();
+                                }
+                                KeyCode::Backspace => {
+                                    if !dlg.active {
+                                        dlg.active = true;
+                                        dlg.field.end();
+                                    }
+                                    dlg.field.backspace();
+                                }
+                                KeyCode::Delete => {
+                                    if !dlg.active {
+                                        dlg.active = true;
+                                        dlg.field.end();
+                                    }
+                                    dlg.field.delete();
+                                }
+                                KeyCode::Char(c)
+                                    if !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+                                {
+                                    if dlg.active {
+                                        dlg.field.insert(c);
+                                    } else {
+                                        // Typing on the placeholder starts fresh.
+                                        dlg.field.set(String::new(), false);
+                                        dlg.field.insert(c);
+                                        dlg.active = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        } else {
+                            // ── Save / Cancel button focused ──
+                            match k.code {
+                                KeyCode::Esc => do_cancel = true,
+                                KeyCode::Enter | KeyCode::Char(' ') => {
+                                    if focus == 1 {
+                                        do_save = true;
+                                    } else {
+                                        do_cancel = true;
+                                    }
+                                }
+                                KeyCode::Tab | KeyCode::Right =>
+                                    new_focus = app::input::cycle_focus(focus, 3, 1),
+                                KeyCode::BackTab | KeyCode::Left =>
+                                    new_focus = app::input::cycle_focus(focus, 3, -1),
+                                _ => {}
+                            }
+                        }
+                    }
+                    state.dialog_focus = new_focus;
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(sd) = &last_panes.save_name_dialog {
+                            let in_close = sd.close.is_some_and(|r| r.contains(pt));
+                            let in_save = sd.save.is_some_and(|r| r.contains(pt));
+                            let in_cancel = sd.cancel.is_some_and(|r| r.contains(pt));
+                            let in_field = sd.field.is_some_and(|r| r.contains(pt));
+                            let in_dialog = sd.area.contains(pt);
+                            if in_close || in_cancel {
+                                do_cancel = true;
+                            } else if in_save {
+                                do_save = true;
+                            } else if in_field {
+                                // Focus + activate the field (caret to end).
+                                state.dialog_focus = 0;
+                                if let Some(dlg) = state.save_name_dialog.as_mut() {
+                                    dlg.active = true;
+                                    dlg.field.end();
+                                }
+                            } else if !in_dialog {
+                                // Click outside: swallow, keep the dialog open.
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
+                _ => {}
+            }
+
+            // Resolve a submit/cancel outside the dialog borrow. Empty names are
+            // rejected (the dialog stays open); valid names reuse handle_saves_prompt.
+            if do_save {
+                let value = state
+                    .save_name_dialog
+                    .as_ref()
+                    .map(|d| d.field.value.clone())
+                    .unwrap_or_default();
+                if value.trim().is_empty() {
+                    if let Some(d) = state.save_name_dialog.as_mut() { d.active = false; }
+                    state.push_notice("[Save name cannot be empty]");
+                } else {
+                    state.save_name_dialog = None;
+                    handle_saves_prompt(
+                        PromptKind::SaveAs, value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state, &story_bytes,
+                    );
+                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                        || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                    persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                    persist_vfs_after_turn(&mut *session, &game_dir);
+                    if quit { break; }
+                }
+            } else if do_cancel {
+                state.save_name_dialog = None;
+                let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                    || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                persist_vfs_after_turn(&mut *session, &game_dir);
+                if quit { break; }
             }
             continue;
         }
@@ -4620,12 +4780,12 @@ fn handle_saves_prompt(
             let ingame = state.ingame_io == Some(app::session::PendingIo::Save);
             if buf.is_empty() {
                 state.push_notice("[Save name cannot be empty]".to_string().as_str());
-                // In-game: stay pending — re-open the prompt so the user can retry.
+                // In-game: stay pending — re-open the dialog so the user can retry.
                 if ingame {
-                    state.prompt = Some(app::state::Prompt {
-                        kind: PromptKind::SaveAs,
-                        buffer: String::new(),
-                    });
+                    state.save_name_dialog = Some(app::state::SaveNameDialog::new(
+                        app::persist_files::default_save_name(),
+                        true,
+                    ));
                 }
                 return;
             }
@@ -4665,12 +4825,12 @@ fn handle_saves_prompt(
                 }
                 Err(e) => {
                     state.push_notice(&format!("[Save failed: {}]", e));
-                    // In-game: stay pending — re-open the prompt so the user can retry.
+                    // In-game: stay pending — re-open the dialog so the user can retry.
                     if ingame {
-                        state.prompt = Some(app::state::Prompt {
-                            kind: PromptKind::SaveAs,
-                            buffer: String::new(),
-                        });
+                        state.save_name_dialog = Some(app::state::SaveNameDialog::new(
+                            app::persist_files::default_save_name(),
+                            true,
+                        ));
                     }
                 }
             }
@@ -4891,12 +5051,13 @@ fn open_ingame_saves(
     state.dialog_focus = 0;
     match io {
         PendingIo::Save => {
-            // The game asked to SAVE: ask where. On submit -> resume_save(true);
-            // on cancel -> resume_save(false) (handled in the cancel resolver).
-            state.prompt = Some(app::state::Prompt {
-                kind: PromptKind::SaveAs,
-                buffer: String::new(),
-            });
+            // The game asked to SAVE: ask where via the save-name dialog. On submit
+            // -> resume_save(true); on cancel -> resume_save(false) (handled in the
+            // cancel resolver, which now watches save_name_dialog).
+            state.save_name_dialog = Some(app::state::SaveNameDialog::new(
+                app::persist_files::default_save_name(),
+                true,
+            ));
         }
         PendingIo::Restore => {
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
@@ -5139,7 +5300,7 @@ fn resolve_ingame_dialog(
     // (2) Cancel: an in-game overlay closed without a confirm.
     if let Some(io) = state.ingame_io {
         let overlay_open = match io {
-            PendingIo::Save => matches!(&state.prompt, Some(p) if matches!(p.kind, PromptKind::SaveAs)),
+            PendingIo::Save => state.save_name_dialog.is_some(),
             PendingIo::Restore => state.saves.is_some(),
         };
         if !overlay_open {
@@ -6078,7 +6239,7 @@ mod tests {
         let panes = super::PaneRects {
             map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
             room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None,
-            reset_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
+            reset_dialog: None, save_name_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
             style_editor: None, verb_menu: Default::default(), glyph_picker: None,
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,
             modal_list_viewport: 0,
