@@ -99,7 +99,7 @@ impl Default for GridCell {
 /// A text-grid window: fixed-size positioned cells with a cursor (a status line
 /// or a Glk text-grid).  The renderer applies a viewport over the logical grid
 /// and auto-follows the cursor.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GridWindow {
     /// Logical grid width in columns.
     pub cols: u16,
@@ -115,6 +115,25 @@ pub struct GridWindow {
     /// True when this grid is the engine's currently selected output window
     /// (drives whether the cursor is shown while awaiting a keypress).
     pub cursor_active: bool,
+    /// False when the game split this grid with `winmethod_NoBorder` — the
+    /// renderer then draws no frame regardless of theme (SQ-0286). Defaults to
+    /// true (the framed look) for the Z-machine and every non-Glulx path; only a
+    /// real NoBorder split flips it.
+    pub bordered: bool,
+}
+
+impl Default for GridWindow {
+    fn default() -> Self {
+        GridWindow {
+            cols: 0,
+            rows: 0,
+            cells: Vec::new(),
+            active_rows: 0,
+            cursor: (0, 0),
+            cursor_active: false,
+            bordered: true,
+        }
+    }
 }
 
 impl GridWindow {

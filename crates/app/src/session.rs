@@ -782,6 +782,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         active_rows: screen.upper.rows,
         cursor: (screen.cursor_row, screen.cursor_col),
         cursor_active: screen.current_window == 1,
+        bordered: true, // Z-machine upper window keeps today's framed look (SQ-0286)
     };
     ScreenModel {
         root: WinNode::Pair {

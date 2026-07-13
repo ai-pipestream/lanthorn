@@ -344,27 +344,34 @@ fn pair_areas(
 ) -> (Rect, Rect) {
     let (mut a1, mut a2) = split_area(area, vertical, split_fixed);
     if vertical {
-        let overhead = grid_border_overhead(colors);
-        if overhead > 0 {
-            if grid_is_active(first) {
-                let take = overhead.min(a2.height);
-                a1.height += take;
-                a2.y += take;
-                a2.height -= take;
-            } else if grid_is_active(second) {
-                let take = overhead.min(a1.height);
-                a1.height -= take;
-                a2.y -= take;
-                a2.height += take;
-            }
+        // Borrow exactly the border rows the child grid's frame will occupy —
+        // per-grid, so a NoBorder grid (SQ-0286) borrows none and leaves no gap.
+        if let Some(overhead) = grid_frame_overhead(first, colors) {
+            let take = overhead.min(a2.height);
+            a1.height += take;
+            a2.y += take;
+            a2.height -= take;
+        } else if let Some(overhead) = grid_frame_overhead(second, colors) {
+            let take = overhead.min(a1.height);
+            a1.height -= take;
+            a2.y -= take;
+            a2.height += take;
         }
     }
     (a1, a2)
 }
 
-/// True for a text-grid leaf that will actually draw (has active rows).
-fn grid_is_active(node: &WinNode) -> bool {
-    matches!(node, WinNode::Grid(g) if g.active_rows > 0)
+/// The border rows an active text-grid child needs borrowed from its sibling, or
+/// `None` when the child isn't an active grid (or draws no frame — a NoBorder
+/// grid borrows nothing). Honors the game's border presence (SQ-0286).
+fn grid_frame_overhead(node: &WinNode, colors: &ColorScheme) -> Option<u16> {
+    match node {
+        WinNode::Grid(g) if g.active_rows > 0 => match grid_border_overhead(g, colors) {
+            0 => None,
+            o => Some(o),
+        },
+        _ => None,
+    }
 }
 
 /// Draw an inline (non-primary) buffer window's wrapped, styled lines.
@@ -580,7 +587,13 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
-                first: Box::new(WinNode::Grid(grid_with("STATUS"))),
+                first: Box::new(WinNode::Grid({
+                    // Frameless grid (SQ-0286): this test checks buffer subrects,
+                    // not border chrome, so the grid draws no frame.
+                    let mut g = grid_with("STATUS");
+                    g.bordered = false;
+                    g
+                })),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
                     split: Split { fixed: 10 },

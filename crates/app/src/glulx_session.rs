@@ -507,10 +507,11 @@ impl GlulxSession {
     /// mouse request — the windows a terminal click may be diverted into. Empty
     /// when no window is watching for clicks.
     pub fn mouse_windows(&mut self) -> Vec<(u32, WinType, GlkRect)> {
-        let layout: Vec<(u32, WinType, GlkRect)> = self.appglk().layout().to_vec();
+        let layout = self.appglk().layout().to_vec();
         layout
             .into_iter()
-            .filter(|&(id, _, _)| self.machine.mouse_requested(id))
+            .filter(|&(id, _, _, _)| self.machine.mouse_requested(id))
+            .map(|(id, ty, rect, _)| (id, ty, rect))
             .collect()
     }
 
@@ -518,10 +519,11 @@ impl GlulxSession {
     /// hyperlink request — the windows a click on a linked transcript cell may be
     /// diverted into. Empty when no window is watching for hyperlink clicks.
     pub fn hyperlink_windows(&mut self) -> Vec<(u32, WinType, GlkRect)> {
-        let layout: Vec<(u32, WinType, GlkRect)> = self.appglk().layout().to_vec();
+        let layout = self.appglk().layout().to_vec();
         layout
             .into_iter()
-            .filter(|&(id, _, _)| self.machine.hyperlink_requested(id))
+            .filter(|&(id, _, _, _)| self.machine.hyperlink_requested(id))
+            .map(|(id, ty, rect, _)| (id, ty, rect))
             .collect()
     }
 

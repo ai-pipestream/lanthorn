@@ -8,7 +8,7 @@ use ratatui::style::Style;
 
 use crate::colors::ColorScheme;
 use crate::engine::{GridCell, GridWindow};
-use crate::render::paneframe::{draw_framed, BorderStyle};
+use crate::render::paneframe::{draw_framed, BorderStyle, PaneSides};
 
 /// Resolve a grid cell's game colour into a ratatui [`Style`], mirroring the
 /// mechanism used by `draw_str_runs` in the transcript renderer.
@@ -50,12 +50,29 @@ fn grid_cell_to_zvm(cell: GridCell) -> zvm::screen::Cell {
     }
 }
 
+/// The per-side border styles `draw_grid` will actually use for `grid`, after
+/// applying the game's border PRESENCE over the theme's glyph/colour (SQ-0286):
+/// - a NoBorder grid (`bordered == false`) draws no sides, whatever the theme;
+/// - a Border grid whose theme disabled every side falls back to a single-line
+///   full frame, so the game's border request is visibly honored;
+/// - otherwise the theme's per-side selection stands.
+pub fn resolved_grid_sides(grid: &GridWindow, colors: &ColorScheme) -> PaneSides {
+    if !grid.bordered {
+        PaneSides::all(BorderStyle::None)
+    } else if !colors.upper_window_border_sides.any_on() {
+        PaneSides::all(BorderStyle::Single)
+    } else {
+        colors.upper_window_border_sides
+    }
+}
+
 /// Terminal rows the grid's border chrome adds on top of its content rows
-/// (top + bottom borders, per-side aware). The generic multi-window path widens
-/// a stacked grid's allotment by this much so the chrome isn't squished into the
-/// grid's exact Glk split (SQ-0200); `draw_grid` sizes its own frame with it too.
-pub fn grid_border_overhead(colors: &ColorScheme) -> u16 {
-    let sides = colors.upper_window_border_sides;
+/// (top + bottom borders), honoring the game's border presence (SQ-0286). The
+/// generic multi-window path widens a stacked grid's allotment by this much so
+/// the chrome isn't squished into the grid's exact Glk split (SQ-0200);
+/// `draw_grid` sizes its own frame with it too.
+pub fn grid_border_overhead(grid: &GridWindow, colors: &ColorScheme) -> u16 {
+    let sides = resolved_grid_sides(grid, colors);
     (if sides.top != BorderStyle::None { 1 } else { 0 })
         + (if sides.bottom != BorderStyle::None { 1 } else { 0 })
 }
@@ -92,9 +109,12 @@ pub fn draw_grid(
     let content_style = colors.upper_window;
     let border_color = colors.upper_window_border;
 
+    // Resolve which sides to frame. The game controls border PRESENCE (SQ-0286);
+    // the theme controls only the glyph + colour (see `resolved_grid_sides`).
+    let sides = resolved_grid_sides(upper, colors);
+
     // How many terminal rows does the border frame consume? (top + bottom sides).
-    let sides = colors.upper_window_border_sides;
-    let border_overhead: u16 = grid_border_overhead(colors);
+    let border_overhead: u16 = grid_border_overhead(upper, colors);
 
     // Total terminal rows needed: grid rows + optional border.
     // Clamp to the available area height.
@@ -117,7 +137,7 @@ pub fn draw_grid(
     let uw_area = Rect::new(area.x + x_off, area.y, uw_w, needed);
 
     // Draw the optional border and get the inner content rect.
-    let frame = draw_framed(buf, uw_area, border_style, colors.upper_window_border_sides, &colors.upper_window_border_glyphs, border_color, false);
+    let frame = draw_framed(buf, uw_area, border_style, sides, &colors.upper_window_border_glyphs, border_color, false);
     let content = frame.content;
 
     if content.height == 0 || content.width == 0 {
@@ -307,6 +327,7 @@ mod tests {
     #[test]
     fn draw_grid_reverse_default_cell_has_reversed_in_buffer() {
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(1, 3);
         upper.put(1, 2, 'X', 0x01); // reverse, default colors
 
@@ -331,6 +352,7 @@ mod tests {
     #[test]
     fn draw_grid_hyperlinked_cell_underlines_and_maps_to_link() {
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(1, 3);
         // Put a plain char, then stamp a link on cell (1,2) directly.
         upper.put(1, 2, 'L', 0);
@@ -353,6 +375,59 @@ mod tests {
         assert_eq!(links, vec![((4, 0), 77)], "the linked cell is recorded at its buffer position");
     }
 
+    /// SQ-0286 (a): a NoBorder grid (`bordered == false`) draws NO frame even
+    /// when the theme has every border side on — the content sits flush at row 0
+    /// and no border row is consumed.
+    #[test]
+    fn draw_grid_noborder_suppresses_frame_despite_theme() {
+        let mut upper = make_upper_hi(); // 2×5 grid, "HI" at (1,1)
+        upper.bordered = false;
+
+        // Theme with ALL border sides on — normally this frames the grid.
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::Single;
+        colors.upper_window_border_sides = PaneSides::all(BorderStyle::Single);
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
+
+        // No border overhead: exactly the 2 grid rows, content flush at row 0.
+        assert_eq!(consumed, 2, "a NoBorder grid consumes only its content rows");
+        // cols=5 centered in 20 with no border cols: x_off = (20-5)/2 = 7.
+        assert_eq!(buf.cell((7, 0)).unwrap().symbol(), "H", "content sits at row 0, no top border");
+        assert_eq!(buf.cell((8, 0)).unwrap().symbol(), "I");
+        // No box-drawing corner anywhere on the top row.
+        for x in 0..20 {
+            assert_ne!(buf.cell((x, 0)).unwrap().symbol(), "┌", "no frame corner drawn for a NoBorder grid");
+        }
+    }
+
+    /// SQ-0286 (b): a Border grid (`bordered == true`) whose theme disabled every
+    /// side still renders a frame — the fallback single-line box — so the game's
+    /// border request is visibly honored.
+    #[test]
+    fn draw_grid_bordered_forces_frame_when_theme_off() {
+        let upper = make_upper_hi(); // bordered defaults to true
+        assert!(upper.bordered, "make_upper_hi grid is bordered by default");
+
+        // Theme with EVERY side off.
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = PaneSides::all(BorderStyle::None);
+
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        let consumed = draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
+
+        // Fallback single frame: top+bottom overhead added (2 grid rows + 2).
+        assert_eq!(consumed, 4, "the forced fallback frame adds top+bottom border rows");
+        // border_cols = 2 → uw_w = 7, x_off = (20-7)/2 = 6; top-left corner at (6,0).
+        assert_eq!(buf.cell((6, 0)).unwrap().symbol(), "┌", "fallback single-line corner is drawn");
+        // Content is pushed inside the frame: 'H' now at (7,1), not (7,0).
+        assert_eq!(buf.cell((7, 1)).unwrap().symbol(), "H", "content sits inside the forced frame");
+    }
+
     fn make_colors() -> ColorScheme {
         ColorScheme::terminal_default()
     }
@@ -368,7 +443,8 @@ mod tests {
 
     #[test]
     fn draws_grid_cells_and_consumes_rows() {
-        let upper = make_upper_hi();
+        let mut upper = make_upper_hi();
+        upper.bordered = false; // exercise the no-frame path (SQ-0286)
         let colors = make_colors();
         // Area taller than the grid so no scrolling needed.
         let area = Rect::new(0, 0, 20, 10);
@@ -395,6 +471,7 @@ mod tests {
         // own width centered in a wider pane — not stretched to the pane, which
         // made Bureaucracy's border too wide and its centered content off-place.
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(1, 10); // game screen is 10 cols wide
         upper.put(1, 1, 'A', 0);
         upper.put(1, 10, 'Z', 0); // content spans the full game screen
@@ -445,6 +522,7 @@ mod tests {
     #[test]
     fn viewport_scrolls_when_cursor_exceeds_height() {
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(5, 5);
         // Put 'A' at row 5 (last row, 1-based).
         upper.put(5, 1, 'A', 0);
@@ -470,6 +548,7 @@ mod tests {
     fn bold_and_reverse_style_applied() {
         use zvm::screen::ZColour;
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(1, 3);
         // ZMSD §8.7.2 operand values: 1 = reverse-video, 2 = bold
         upper.put(1, 1, 'X', 0x02); // bold
@@ -510,6 +589,7 @@ mod tests {
     fn cursor_on_nonreverse_cell_adds_reversed_modifier() {
         use zvm::screen::ZColour;
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(2, 5);
         // Give the cell under the cursor distinct game colours so the logical
         // ordering (fg/bg not swapped in buffer) can be verified.
@@ -549,6 +629,7 @@ mod tests {
     #[test]
     fn cursor_on_reverse_cell_toggles_reverse_off() {
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(1, 3);
         upper.put(1, 2, 'R', 0x01); // style=reverse (0x01)
 
@@ -574,6 +655,7 @@ mod tests {
     #[test]
     fn cursor_on_default_cell_carries_reversed_modifier() {
         let mut upper = GridWindow::default();
+        upper.bordered = false; // no-frame path (SQ-0286)
         upper.resize(1, 3);
         // Cell (1,2) keeps its default colours (ZColour::Default -> Color::Reset).
         upper.put(1, 2, ' ', 0);
