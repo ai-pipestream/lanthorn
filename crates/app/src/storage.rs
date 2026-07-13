@@ -1,6 +1,8 @@
 //! Per-game storage layout (SQ-0284). Saves and sidecars live in a flat
-//! per-game directory `<base>/<story-key>/`, keyed by the story's *filename*
-//! (not its IFID). Inside it: `default.aux`, `default.glkvfs`,
+//! per-game directory `<base>/<story-key>.save/`, keyed by the story's
+//! *filename* (not its IFID). The `.save` suffix keeps the directory from
+//! colliding with the story file when `base` is the story's own directory.
+//! Inside it: `default.aux`, `default.glkvfs`,
 //! `default.babelmap` (auto/singleton), plus `<slug>.babelmap` / `<slug>.qzl`
 //! (named). IFID is retained elsewhere for title/hint lookup only.
 
@@ -17,9 +19,11 @@ pub fn story_key(story_path: &Path) -> String {
     if s.is_empty() { "game".to_string() } else { s }
 }
 
-/// The per-game directory: `<base>/<story-key>/`.
+/// The per-game directory: `<base>/<story-key>.save/`. The `.save` suffix
+/// keeps the directory from colliding with the story file itself when `base`
+/// is the story's own directory (e.g. `Zork1.z5` vs `Zork1.z5.save/`).
 pub fn game_dir(base: &Path, key: &str) -> PathBuf {
-    base.join(key)
+    base.join(format!("{key}.save"))
 }
 
 /// The default (auto/singleton) Save-State slot inside a game dir.
@@ -47,14 +51,46 @@ mod tests {
 
     #[test]
     fn game_dir_joins() {
-        assert_eq!(game_dir(Path::new("/base"), "Zork1.z5"), PathBuf::from("/base/Zork1.z5"));
+        assert_eq!(game_dir(Path::new("/base"), "Zork1.z5"), PathBuf::from("/base/Zork1.z5.save"));
+    }
+
+    /// The per-game dir name must always end in `.save` — that's what keeps
+    /// it from colliding with a story file of the same name.
+    #[test]
+    fn game_dir_name_ends_with_dot_save() {
+        let dir = game_dir(Path::new("/base"), "Advent.gblorb");
+        assert!(
+            dir.file_name().unwrap().to_str().unwrap().ends_with(".save"),
+            "got {dir:?}"
+        );
+    }
+
+    /// Regression for SQ-0284: when `base` is the story's own directory (the
+    /// CLI default) and a file already exists at `<base>/<story-key>`,
+    /// `create_dir_all(game_dir(..))` must still succeed because the `.save`
+    /// suffix makes the two paths distinct.
+    #[test]
+    fn game_dir_does_not_collide_with_same_named_story_file() {
+        let tmp = std::env::temp_dir().join(format!("babelmap-storage-collision-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let story_path = tmp.join("game.gblorb");
+        std::fs::write(&story_path, b"x").unwrap(); // a FILE named game.gblorb
+
+        let dir = game_dir(&tmp, &story_key(&story_path));
+        assert_eq!(dir, tmp.join("game.gblorb.save"));
+        std::fs::create_dir_all(&dir).expect("must not collide with the story file");
+        assert!(dir.is_dir());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn default_state_path_is_in_game_dir() {
         assert_eq!(
-            default_state_path(Path::new("/base/Zork1.z5")),
-            PathBuf::from("/base/Zork1.z5/default.babelmap")
+            default_state_path(Path::new("/base/Zork1.z5.save")),
+            PathBuf::from("/base/Zork1.z5.save/default.babelmap")
         );
     }
 

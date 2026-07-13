@@ -450,7 +450,9 @@ fn main() {
     let base = data_dir.map(std::path::PathBuf::from)
         .unwrap_or_else(|| story_path.parent().filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")));
-    let game_dir = base.join(story_key(&story_path));
+    // `.save` suffix keeps the dir from colliding with the story file itself
+    // when `base` is the story's own directory (SQ-0294).
+    let game_dir = base.join(format!("{}.save", story_key(&story_path)));
 
     // The Glk file VFS sidecar: `<game_dir>/default.glkvfs`. Loaded here before
     // the run, flushed dirty-gated inside `drive`, so a game's external files
@@ -664,6 +666,27 @@ mod tests {
         assert_ne!(story_key(Path::new("/g/Zork1.z5")), story_key(Path::new("/g/Zork1.gblorb")));
         assert_eq!(story_key(Path::new("/g/a b?.z5")), "a_b_.z5");
         assert_eq!(story_key(Path::new("")), "game");
+    }
+
+    /// Regression for SQ-0284/SQ-0294: the CLI's default `base` is the
+    /// story's own directory, so `base.join(story_key(..))` used to collide
+    /// with the story file itself (`mkdir` on an existing filename fails).
+    /// The `.save` suffix makes the per-game dir a distinct path.
+    #[test]
+    fn game_dir_does_not_collide_with_same_named_story_file() {
+        let tmp = std::env::temp_dir().join(format!("gvm-cli-storage-collision-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let story_path = tmp.join("game.gblorb");
+        std::fs::write(&story_path, b"x").unwrap(); // a FILE named game.gblorb
+
+        let game_dir = tmp.join(format!("{}.save", story_key(&story_path)));
+        assert_eq!(game_dir, tmp.join("game.gblorb.save"));
+        std::fs::create_dir_all(&game_dir).expect("must not collide with the story file");
+        assert!(game_dir.is_dir());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
