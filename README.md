@@ -133,8 +133,11 @@ clean line stream when piped. Interactively they do single-key input (arrow/func
 keys decoded for `read_char` menus) and `[MORE]` paging on long output; saves and
 aux/VFS sidecars persist per game under `<story-dir>/<story-filename>.save/` by
 default (`--data-dir <path>` overrides the base). A bare filename typed at the
-game's own `@save`/`@restore` prompt (e.g. `quick`) lands in that per-game
-directory; a path-bearing value (e.g. `/tmp/x.qzl`) is honored verbatim. On
+**player's** SAVE/RESTORE prompt (e.g. `quick`) lands in that per-game
+directory; a path-bearing value (e.g. `/tmp/x.qzl`) is honored verbatim. A Glulx
+game's *own* fixed-name saves (its init cache, autosave, undo) are written and
+read there **silently** — no prompt — so e.g. Counterfeit Monkey auto-restores
+its startup cache on relaunch and skips its long init. On
 piped stdin, a `read_char` menu exits cleanly at true EOF instead of spinning.
 The flags `--no-status` (byte-identical lower-stream output), `--no-aux`, and
 `--no-more` keep the headless test harness deterministic; `--no-sound`

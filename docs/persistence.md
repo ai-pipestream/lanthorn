@@ -35,10 +35,28 @@ Player-initiated, from inside the story ("Type SAVE to save your position").
   spec, `@save` pushes a call stub before suspending, so PC and FramePtr are
   recovered from the stack on restore rather than serialized as registers; the
   save is the same shape as the Z-machine's `.qzl`. Implemented in
-  `crates/gvm/src/exec.rs` (`save_quetzal`/`restore_quetzal`). In `gvm-cli` this
-  is written to a filename you're prompted for, like the Z-machine, not a fixed
-  `<story>.glksave` slot. Round-trip is verified internally (gvm unit tests);
-  cross-interpreter golden-file interop is tracked separately under SQ-0229.
+  `crates/gvm/src/exec.rs` (`save_quetzal`/`restore_quetzal`). Round-trip is
+  verified internally (gvm unit tests); cross-interpreter golden-file interop is
+  tracked separately under SQ-0229.
+
+  **Two kinds of Glulx `@save`/`@restore`, routed by how the game made the
+  fileref (SQ-0296).** The VM carries the target file's name and a `by_prompt`
+  flag to the host on each save/restore request (`Machine::pending_saveload_request`
+  → `SaveLoadRequest { name, by_prompt, restore }`):
+  - **Player SAVE/RESTORE verb** — the game opens the file with
+    `glk_fileref_create_by_prompt` (`by_prompt = true`). The host surfaces its
+    save UI: `gvm-cli` prompts `Save to file:` / `Restore from file:`; the app
+    opens its saves dialog. Lands as `<slug>.qzl`.
+  - **The game's OWN fixed-name saves** — `glk_fileref_create_by_name` /
+    `create_by_usage` (`by_prompt = false`), e.g. Counterfeit Monkey's
+    `_Counterfeit_Monkey-startup-data` init cache, its autosave, and undo slots.
+    These are serviced **silently and automatically** — no prompt, no UI. `@save`
+    writes `<game-dir>/<name>.qzl`; `@restore` reads that fixed path if present,
+    else fails cleanly so the game runs its init. Because the file persists in the
+    per-game `.save` dir, the next launch's boot `@restore` finds it and the game
+    skips its (multi-second) init — measured for CM: ~3.5s first launch vs ~0.9s
+    on relaunch. These internal `_`-prefixed files are hidden from the player
+    saves list (app) and never prompt (both hosts).
 
 ## Layer 2 — host Save State / Restore State (emulator snapshot)
 
@@ -132,12 +150,17 @@ is claimed by the auto/singleton slot.
 
 ### Interactive `@save` / `@restore` in the CLIs
 
-When `zvm-cli` / `gvm-cli` prompt for a filename on the game's own `@save` /
-`@restore`, a **bare name** (no path separator, e.g. `@save quick`) resolves
+When `zvm-cli` / `gvm-cli` prompt for a filename on the **player's** SAVE /
+RESTORE verb (a `glk_fileref_create_by_prompt` fileref in Glulx; always in the
+Z-machine), a **bare name** (no path separator, e.g. `@save quick`) resolves
 into the per-game directory — `<base>/<story-key>.save/quick.qzl` — matching the
 `.qzl` extension automatically. A **path-bearing value** (e.g.
 `@save /tmp/x.qzl`) is honored verbatim, bypassing the per-game directory
 entirely.
+
+A Glulx game's **own** fixed-name saves (`glk_fileref_create_by_name`, e.g. CM's
+init cache) do **not** prompt: `gvm-cli` writes/reads `<story-key>.save/<name>.qzl`
+silently (see Layer 1, SQ-0296).
 
 ### Map/transcript exports (SQ-0288)
 
@@ -164,8 +187,9 @@ directory (renaming to the `default.*` / `<slug>.*` names above as needed).
 |-------|--------|------|------|
 | 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
 | 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
-| 1 — game's `@save`/`@restore` | Glulx | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
-| 1 — game's `@save`/`@restore` | Glulx | `gvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
+| 1 — player SAVE verb (`create_by_prompt`) | Glulx | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
+| 1 — player SAVE verb (`create_by_prompt`) | Glulx | `gvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
+| 1 — game's own save (`create_by_name`, SQ-0296) | Glulx | app & `gvm-cli` | `<base>/<story-key>.save/<name>.qzl` — silent, no prompt; hidden from the saves list |
 | 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside) |
 | 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.glksave` inside; embeds full Glk VFS) |
 | 3 — auto per-story (aux) | Z-machine | app | `<base>/<story-key>.save/default.aux` |
@@ -193,13 +217,26 @@ choice belongs in the automatic per-story (global) layer, not a save slot.
 saved-game usage does **not** resolve into a VFS slot at all: it's a host
 conduit (`StreamKind::Null`) that discards writes and reads EOF, with no
 `self.files` entry and nothing persisted to `default.glkvfs` or embedded in a
-Save State. The library's write-count check is satisfied by
-`note_stream_write` (crediting the stream with the save's byte length) without
-storing any bytes. The game's `@save`/`@restore` always reaches the opcode —
+Save State. The library's post-`@save` verification is satisfied without storing
+bytes: `note_stream_write` credits the stream (and records the slot's byte
+length), so `glk_fileref_does_file_exist` reports the slot exists and a reopen +
+seek-to-end reports the true save size — CM's SAVE verb otherwise printed "Save
+failed." (SQ-0292). The game's `@save`/`@restore` always reaches the opcode —
 even on a first-ever restore, with no prior save this session — and the *host*
 decides success by writing/reading the actual `.qzl` (Layer 1, above). Net: the
 VFS (Layer 3) now holds only the game's genuine external files — transcripts,
 command recordings, and data files — never saves.
+
+**Game-managed vs. player-prompted (SQ-0296).** The above concerns the
+*player's* verb (`create_by_prompt`). A game that saves to a **fixed-name**
+fileref (`create_by_name`/`create_by_usage` — CM's `_Counterfeit_Monkey-startup-data`
+init cache, its autosave, undo slots) is routed differently: the host writes/reads
+`<game-dir>/<name>.qzl` **silently, with no prompt**, keyed by the fileref name
+the VM now reports (`SaveLoadRequest.by_prompt = false`). This is what makes CM's
+boot cache auto-restore on relaunch (skipping its long init) and removes the
+spurious boot prompts. Note a Glulx game may open such a slot as a `Data`-usage
+VFS `File` stream rather than a `SavedGame` `Null` stream — CM does — so the
+name/`by_prompt` routing covers both stream kinds.
 
 ## Known limitations (Glk file VFS)
 

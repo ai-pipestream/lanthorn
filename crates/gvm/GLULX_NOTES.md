@@ -466,15 +466,32 @@ inside the same running interpreter via the call stub it pushed, so PC/FP
 recover from the stack and every other piece of live state is already
 correct and must NOT be reset out from under the game.
 
-**The "Save failed." shim.** `@save` delivers its bytes to the host, not to
-the game's own output stream `L1` — so the Glk library's write-count check on
-`L1` would otherwise see 0 bytes written and report failure. `@save` calls
-`glk.note_stream_write(l[0], save_quetzal().len())`, which bumps the stream's
-write count without storing any bytes, so the library sees success. A
-`glk_fileref_create_by_prompt` stream opened for `fileusage_SavedGame` is a
-`StreamKind::Null` conduit for exactly this purpose (writes discarded, reads
-EOF, no VFS entry) — so `@save`/`@restore` never depend on, or pollute, the
-story's Glk file VFS (§20).
+**The "Save failed." verification (SQ-0292).** `@save` delivers its bytes to
+the host, not to the game's own output stream `L1` — so the Glk library's
+post-save verification on `L1` would otherwise conclude the save is empty and
+report failure. `@save` calls `glk.note_stream_write(l[0], save_quetzal().len())`,
+which (a) bumps the stream's write count without storing bytes and (b) records
+the slot's byte length keyed by fileref name. That length + a create-mode open
+marking existence let `glk_fileref_does_file_exist` return true and a
+reopen-for-read + seek-to-end report the true save size — the two checks CM's
+SAVE verb runs after `@save` (`fileref_exists` / `stream_saveload_info` /
+`saved_game_files` in `glk.rs`). A `fileusage_SavedGame` stream is a
+`StreamKind::Null` conduit (writes discarded, reads EOF, no VFS entry) — so
+`@save`/`@restore` never depend on, or pollute, the story's Glk file VFS (§20).
+
+**Routing by fileref creation method (SQ-0296).** `@save`/`@restore` capture
+their `L1` stream's fileref `{name, by_prompt}` via `glk.stream_saveload_info`
+(covering both `SavedGame` `Null` streams and `Data`-usage VFS `File` streams —
+a game may save to either; CM's init cache is the latter) and stash them on the
+suspended `PendingSaveLoad`. The host reads them through
+`Machine::pending_saveload_request() -> SaveLoadRequest { name, by_prompt,
+restore }`. `by_prompt` is `true` only for a `glk_fileref_create_by_prompt`
+fileref (the player's SAVE/RESTORE verb — bound with `fileref_create_prompted`
+in `supply_filename`); `create_by_name`/`create_by_usage`/`create_temp` are
+`false`. Hosts service `by_prompt = false` silently against a fixed
+`<game-dir>/<name>.qzl` (no UI); `by_prompt = true` surfaces the save UI. The
+flag is session-transient (defaults `false` on a Glk-snapshot restore) and adds
+no `StepResult` variant (it stays `Copy`).
 
 ## 15. Undo (Phase 2c, spec §2.11)
 
