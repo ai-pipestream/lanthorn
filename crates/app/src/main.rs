@@ -2701,20 +2701,24 @@ fn main() {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
                         crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 4, 1),
                         crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 4, -1),
                         code => match reset_dialog_key_focused(code, state.dialog_focus) {
                             ResetDialogAction::Confirm => {
                                 let clear = state.reset_clear_map;
+                                let delete = state.reset_delete_data;
                                 state.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
                             }
                             ResetDialogAction::Cancel => {
                                 state.reset_dialog = false;
                             }
-                            ResetDialogAction::ToggleClear => {
+                            ResetDialogAction::ToggleClearMap => {
                                 state.reset_clear_map = !state.reset_clear_map;
+                            }
+                            ResetDialogAction::ToggleDeleteData => {
+                                state.reset_delete_data = !state.reset_delete_data;
                             }
                             ResetDialogAction::None => {}
                         },
@@ -2732,15 +2736,19 @@ fn main() {
                             let in_reset = rd.reset.is_some_and(|r| r.contains(pt));
                             let in_cancel = rd.cancel.is_some_and(|r| r.contains(pt));
                             let in_checkbox = rd.checkbox.contains(pt);
+                            let in_checkbox_data = rd.checkbox_data.contains(pt);
                             let in_dialog = rd.area.contains(pt);
                             if in_close || in_cancel {
                                 state.reset_dialog = false;
                             } else if in_reset {
                                 let clear = state.reset_clear_map;
+                                let delete = state.reset_delete_data;
                                 state.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear);
+                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
                             } else if in_checkbox {
                                 state.reset_clear_map = !state.reset_clear_map;
+                            } else if in_checkbox_data {
+                                state.reset_delete_data = !state.reset_delete_data;
                             } else if !in_dialog {
                                 // Click outside the dialog: swallow (do nothing, keep dialog open).
                             }
@@ -4349,15 +4357,17 @@ fn dispatch_slash_outcome(
                 None => state.set_status(format!("load-map failed: {}", full.display())),
             }
         }
-        SlashOutcome::Reset { map: reset_map } => {
+        SlashOutcome::Reset { map: reset_map, data: reset_data } => {
             // Source-aware: a key press (e.g. F5) opens the confirmation dialog with
-            // its "also clear map" checkbox; a typed `/reset-game [map]` acts immediately.
+            // its checkboxes; a typed `/reset-game [map] [data]` acts immediately.
             if from_key {
                 apply_action(Action::ResetGame, state, mapper);
             } else {
-                reset_game(session, mapper, state, story_bytes, story_path, game_dir, reset_map);
-                let status_msg = if reset_map { "reset (map cleared)" } else { "reset (map kept)" };
-                state.set_status(status_msg);
+                reset_game(session, mapper, state, story_bytes, story_path, game_dir, reset_map, reset_data);
+                let mut status_msg = String::from("reset");
+                if reset_map { status_msg.push_str(" (map cleared)"); }
+                if reset_data { status_msg.push_str(" (data deleted)"); }
+                state.set_status(&status_msg);
             }
         }
         SlashOutcome::Quit => {
@@ -4466,7 +4476,14 @@ fn reset_game(
     story_path: &std::path::Path,
     game_dir: &std::path::Path,
     clear_map: bool,
+    delete_data: bool,
 ) {
+    // Delete the game's AUTO persistent data BEFORE rebuilding so the fresh boot
+    // re-initializes: the on-disk sidecars go now, and the in-memory VFS carried
+    // into the Glulx rebuild is suppressed below (an empty carry_vfs).
+    if delete_data {
+        app::storage::delete_auto_persistent(game_dir);
+    }
     // Rebuild the engine from the original story bytes via the same factory used
     // at startup: classify the executable, then replace the concrete session in
     // place (restart re-runs the SAME story, so the engine type is unchanged).
@@ -4496,8 +4513,11 @@ fn reset_game(
             let pict_blorb = resolve_pict_blorb(story_path, state.config.images);
             // Carry the current in-memory Glk file VFS (e.g. CM's boot cache,
             // kept in sync with the sidecar) into the restarted session so the
-            // fresh boot still sees it (SQ-0290).
-            let carry_vfs = session.vfs_bytes();
+            // fresh boot still sees it (SQ-0290). When delete_data is set, carry
+            // an EMPTY VFS instead so the game boots with no cache and re-runs its
+            // full initialization (deleting default.glkvfs on disk is not enough —
+            // the cache also lives in memory and would otherwise be carried over).
+            let carry_vfs = if delete_data { Vec::new() } else { session.vfs_bytes() };
             GlulxSession::new_in(
                 game_dir.to_path_buf(),
                 bytes,
@@ -5323,36 +5343,43 @@ fn is_slash(input: &str, prefix: char) -> bool {
 /// Action to take when a key is pressed while the reset dialog is open.
 enum ResetDialogAction {
     None,
-    ToggleClear,
+    ToggleClearMap,
+    ToggleDeleteData,
     Confirm,
     Cancel,
 }
 
-/// Map a key code to a ResetDialogAction.
-/// Esc and 'c' cancel; Enter and 'r' confirm; Space toggles the checkbox.
+/// Map a key code to a ResetDialogAction (focus-agnostic accelerators only).
+/// Esc and 'c' cancel; Enter and 'r' confirm; Space toggles the clear-map box.
 #[cfg_attr(not(test), allow(dead_code))]
 fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
         KeyCode::Enter | KeyCode::Char('r') => ResetDialogAction::Confirm,
-        KeyCode::Char(' ') => ResetDialogAction::ToggleClear,
+        KeyCode::Char(' ') => ResetDialogAction::ToggleClearMap,
         _ => ResetDialogAction::None,
     }
 }
 
-/// Reset-dialog keys with button focus. Tab/BackTab are handled by the caller
-/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
-/// the existing accelerators.
+/// Reset-dialog keys with focus. Tab/BackTab are handled by the caller (which
+/// mutates dialog_focus over a 4-slot ring: 0 = clear-map checkbox, 1 = delete-data
+/// checkbox, 2 = Reset, 3 = Cancel). Space toggles the focused checkbox; Enter
+/// activates the focused button (or confirms when a checkbox is focused); 'r'/'c'
+/// stay as confirm/cancel accelerators.
 fn reset_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> ResetDialogAction {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
         KeyCode::Char('r') => ResetDialogAction::Confirm,
-        KeyCode::Char(' ') => ResetDialogAction::ToggleClear,
+        KeyCode::Char(' ') => match focus {
+            0 => ResetDialogAction::ToggleClearMap,
+            1 => ResetDialogAction::ToggleDeleteData,
+            _ => ResetDialogAction::None,
+        },
         KeyCode::Enter => match focus {
-            1 => ResetDialogAction::Cancel,
-            _ => ResetDialogAction::Confirm, // focus 0 = Reset (default)
+            3 => ResetDialogAction::Cancel,
+            _ => ResetDialogAction::Confirm, // checkboxes and Reset (focus 2) confirm
         },
         _ => ResetDialogAction::None,
     }
@@ -6213,7 +6240,7 @@ mod tests {
         // strip_prompt=false so @restart doesn't revert to stripping the game's `>`.
         state.config.command_bar = false;
         state.turns = 5;
-        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false);
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false, false);
         assert_eq!(state.turns, 0, "restart resets the turn counter");
         assert!(engine.as_any().is::<app::session::GameSession>(),
             "still a Z-machine session after restart");
@@ -6242,10 +6269,43 @@ mod tests {
         // threaded in — the rebuild must succeed without panicking.
         assert!(state.config.images, "default config enables images");
         state.turns = 5;
-        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false);
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false, false);
         assert_eq!(state.turns, 0, "restart resets the turn counter for Glulx");
         assert!(engine.as_any().is::<app::glulx_session::GlulxSession>(),
             "still a Glulx session after restart");
+    }
+
+    #[test]
+    fn reset_game_with_delete_data_removes_auto_sidecars() {
+        // delete_data = true wipes the three AUTO sidecars in game_dir before the
+        // rebuild, while keeping the player's named/in-game saves.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(bytes) = std::fs::read(&fixture) else { return };
+
+        let game_dir = std::env::temp_dir()
+            .join(format!("babelmap-reset-delete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&game_dir);
+        std::fs::create_dir_all(&game_dir).unwrap();
+        for f in ["default.glkvfs", "default.aux", "default.babelmap"] {
+            std::fs::write(game_dir.join(f), b"x").unwrap();
+        }
+        std::fs::write(game_dir.join("myslot.babelmap"), b"x").unwrap();
+        std::fs::write(game_dir.join("quick.qzl"), b"x").unwrap();
+
+        let mut engine: Box<dyn app::engine::Engine> =
+            Box::new(app::session::GameSession::new(bytes.clone(), true, false, None).expect("zcode session"));
+        let mut mapper = mapper::mapper::Mapper::default();
+        let mut state = app::state::AppState::default();
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, &game_dir, false, true);
+
+        for f in ["default.glkvfs", "default.aux", "default.babelmap"] {
+            assert!(!game_dir.join(f).exists(), "{f} should be deleted by delete_data");
+        }
+        assert!(game_dir.join("myslot.babelmap").exists(), "named save kept");
+        assert!(game_dir.join("quick.qzl").exists(), "in-game save kept");
+
+        let _ = std::fs::remove_dir_all(&game_dir);
     }
 
     #[test]
@@ -6893,7 +6953,7 @@ mod tests {
         assert!(matches!(reset_dialog_key(KeyCode::Char('c')), ResetDialogAction::Cancel));
         assert!(matches!(reset_dialog_key(KeyCode::Enter), ResetDialogAction::Confirm));
         assert!(matches!(reset_dialog_key(KeyCode::Char('r')), ResetDialogAction::Confirm));
-        assert!(matches!(reset_dialog_key(KeyCode::Char(' ')), ResetDialogAction::ToggleClear));
+        assert!(matches!(reset_dialog_key(KeyCode::Char(' ')), ResetDialogAction::ToggleClearMap));
     }
 
     // ── should_prompt_save_on_quit ────────────────────────────────────────────
@@ -6992,13 +7052,24 @@ mod tests {
     #[test]
     fn reset_dialog_tab_then_enter_fires_focused() {
         use crossterm::event::KeyCode;
-        // buttons: [Reset(0), Cancel(1)], default focus 0.
-        // Tab -> focus 1 (Cancel); Enter on focus 1 -> Cancel.
+        // Focus ring (4): 0 = clear-map checkbox, 1 = delete-data checkbox,
+        // 2 = Reset, 3 = Cancel. Default focus 0.
         let mut focus = 0usize;
-        focus = app::input::cycle_focus(focus, 2, 1);
+        // Space on focus 0 toggles the clear-map checkbox.
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Char(' '), focus), ResetDialogAction::ToggleClearMap));
+        // Tab -> focus 1 (delete-data checkbox); Space toggles delete-data.
+        focus = app::input::cycle_focus(focus, 4, 1);
         assert_eq!(focus, 1);
-        let act = reset_dialog_key_focused(KeyCode::Enter, focus);
-        assert!(matches!(act, ResetDialogAction::Cancel));
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Char(' '), focus), ResetDialogAction::ToggleDeleteData));
+        // Enter on a focused checkbox confirms.
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, focus), ResetDialogAction::Confirm));
+        // Tab to focus 3 (Cancel); Enter cancels.
+        focus = app::input::cycle_focus(focus, 4, 1); // 2 = Reset
+        focus = app::input::cycle_focus(focus, 4, 1); // 3 = Cancel
+        assert_eq!(focus, 3);
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, focus), ResetDialogAction::Cancel));
+        // Enter on focus 2 (Reset) confirms.
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, 2), ResetDialogAction::Confirm));
     }
 
     // ── aux_dialog_key_mapping ────────────────────────────────────────────────

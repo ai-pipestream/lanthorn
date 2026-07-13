@@ -3409,6 +3409,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.hotkey_dialog = false;
             state.reset_dialog = true;
             state.reset_clear_map = false;
+            state.reset_delete_data = false;
             state.dialog_focus = 0;
         }
 

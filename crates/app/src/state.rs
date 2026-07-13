@@ -1329,6 +1329,10 @@ pub struct AppState {
     pub reset_dialog: bool,
     /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
     pub reset_clear_map: bool,
+    /// When true, the "Delete saved progress" checkbox is checked in the reset
+    /// dialog: on confirm, the game's auto persistent data (VFS cache + aux + auto
+    /// Save State) is deleted so the game re-initializes from scratch.
+    pub reset_delete_data: bool,
 
     // ── Aux-storage prompt state ──────────────────────────────────────────────
 
@@ -1518,6 +1522,7 @@ impl Default for AppState {
             prev_objects_here: std::collections::BTreeSet::new(),
             reset_dialog: false,
             reset_clear_map: false,
+            reset_delete_data: false,
             aux_prompt: false,
             quit_dialog: false,
             launch_dialog: false,

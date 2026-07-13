@@ -42,8 +42,9 @@ pub enum SlashOutcome {
     Save(Option<String>),
     /// Load a save; optionally a named slot.
     Load(Option<String>),
-    /// Reset the app; `map: true` also clears the automapper state.
-    Reset { map: bool },
+    /// Reset the app; `map: true` also clears the automapper state; `data: true`
+    /// also deletes the game's auto persistent data (VFS cache + aux + auto save).
+    Reset { map: bool, data: bool },
     /// Quit the application.
     Quit,
     /// Search the transcript; `None` repeats the last search.
@@ -145,8 +146,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "restore-state [name]", description: "restore an emulator Save State, optionally a named slot",
         dispatch: |a| SlashOutcome::Load(a.first().map(|s| s.to_string())) },
     CommandSpec { name: "reset-game", category: Category::Game, context: Context::Global,
-        usage: "reset-game [map]", description: "restart the game; 'reset-game map' also clears the map",
-        dispatch: |a| SlashOutcome::Reset { map: a.first().copied() == Some("map") } },
+        usage: "reset-game [map] [data]", description: "restart the game; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
+        dispatch: |a| SlashOutcome::Reset { map: a.iter().any(|t| *t == "map"), data: a.iter().any(|t| *t == "data") } },
     CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
         usage: "quit", description: "exit babelmap",
         dispatch: |_| SlashOutcome::Quit },
@@ -507,8 +508,11 @@ mod tests {
         assert!(matches!(parse("cycle-layer next", '/'), SlashOutcome::Action(Action::CycleLayer(1))));
         assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));
         assert!(matches!(parse("save-state", '/'), SlashOutcome::Save(None)));
-        assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
-        assert!(matches!(parse("reset-game", '/'), SlashOutcome::Reset { map: false }));
+        assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true, data: false }));
+        assert!(matches!(parse("reset-game", '/'), SlashOutcome::Reset { map: false, data: false }));
+        assert!(matches!(parse("reset-game data", '/'), SlashOutcome::Reset { map: false, data: true }));
+        assert!(matches!(parse("reset-game map data", '/'), SlashOutcome::Reset { map: true, data: true }));
+        assert!(matches!(parse("reset-game data map", '/'), SlashOutcome::Reset { map: true, data: true }));
         assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
         assert!(matches!(parse("help", '/'), SlashOutcome::Help));
         // in registry:
@@ -609,7 +613,7 @@ mod tests {
         assert!(matches!(parse("zoom-map in", '/'), SlashOutcome::Action(Action::ZoomIn)));
         assert!(matches!(parse("select-room next", '/'), SlashOutcome::Action(Action::SelectNext)));
         assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));
-        assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true }));
+        assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true, data: false }));
         assert!(matches!(parse("quit", '/'), SlashOutcome::Quit));
         // Old short names no longer resolve (clean break).
         assert!(matches!(parse("center", '/'), SlashOutcome::Error(_)));
