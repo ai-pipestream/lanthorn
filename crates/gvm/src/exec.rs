@@ -3893,13 +3893,17 @@ impl Machine {
     /// request. A no-op when the VM is not currently waiting on input (e.g. it
     /// has quit) — an Arrange is only meaningful at a blocked `glk_select`.
     pub fn deliver_arrange(&mut self) {
-        let Some(pi) = self.pending_input.take() else {
-            return;
-        };
         let ev = GlkEvent { etype: glk::evtype::ARRANGE, win: 0, val1: 0, val2: 0 };
-        if let Err(e) = self.write_event(pi.event_addr, ev) {
-            self.diagnostics.push(e);
+        if let Some(pi) = self.pending_input.take() {
+            if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else if let Some(pe) = self.pending_event.take() {
+            if let Err(e) = self.write_event(pe.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
         }
+        // else: no-op — an Arrange is only meaningful at a blocked `glk_select`.
     }
 
     /// Deliver a Glk `Evtype_SoundNotify` for a finished sound: `sound` is the
@@ -3912,6 +3916,10 @@ impl Machine {
         let ev = GlkEvent { etype: glk::evtype::SOUND_NOTIFY, win: 0, val1: sound, val2: notify };
         if let Some(pi) = self.pending_input.take() {
             if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else if let Some(pe) = self.pending_event.take() {
+            if let Err(e) = self.write_event(pe.event_addr, ev) {
                 self.diagnostics.push(e);
             }
         } else {
@@ -7569,6 +7577,53 @@ mod tests {
         assert_eq!(step_to_event(&mut m), StepResult::Quit, "resumes and quits");
         // evtype_Hyperlink = 8, win 1, val1 = linkval (77).
         assert_eq!(read_event(&m, 0x100), (8, 1, 77, 0), "hyperlink event written");
+    }
+
+    // ── SQ-0302: any deliverable event wakes a pending_event-suspended select ──
+
+    #[test]
+    fn deliver_arrange_wakes_a_suspended_pending_event_select() {
+        use asm::Op::{C16, C8, Zero};
+        // A select suspended on a pending_event (mouse-only wait, no line/char)
+        // must be woken by an Arrange too — not just by a timer (SQ-0299 only
+        // wired deliver_timer). request_mouse_event(1) then select with no
+        // line/char → NeedEvent{mouse}; a terminal resize resolves it.
+        let mut body = glk_call(0xD4, &[C8(1)], Zero); // request_mouse_event(1)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedEvent { timer_ms: None, mouse: true, hyperlink: false },
+            "mouse-only select suspends as NeedEvent"
+        );
+        m.deliver_arrange();
+        // evtype_Arrange = 5, win 0.
+        assert_eq!(read_event(&m, 0x100), (5, 0, 0, 0), "Arrange written to the suspended pending_event select");
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "suspension cleared; VM resumes and quits");
+    }
+
+    #[test]
+    fn deliver_sound_notify_wakes_a_suspended_pending_event_select() {
+        use asm::Op::{C16, C8, Zero};
+        // A select suspended on a pending_event (hyperlink-only wait) must be
+        // woken by a sound-finish notify too. request_hyperlink_event(1) then
+        // select with no line/char → NeedEvent{hyperlink}; a sound-notify resolves it.
+        let mut body = glk_call(0x102, &[C8(1)], Zero); // request_hyperlink_event(1)
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select @0x100
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(
+            step_to_event(&mut m),
+            StepResult::NeedEvent { timer_ms: None, mouse: false, hyperlink: true },
+            "hyperlink-only select suspends as NeedEvent"
+        );
+        m.deliver_sound_notify(6, 42);
+        // evtype_SoundNotify = 7, win 0, val1 = sound (6), val2 = notify (42).
+        assert_eq!(read_event(&m, 0x100), (7, 0, 6, 42), "sound-notify written to the suspended pending_event select");
+        assert_eq!(step_to_event(&mut m), StepResult::Quit, "suspension cleared; VM resumes and quits");
     }
 
     #[test]
