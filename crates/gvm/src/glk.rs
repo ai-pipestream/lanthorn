@@ -785,6 +785,23 @@ pub struct Model {
     /// written, or deleted), so hosts can flush the sidecar only when it
     /// changed. Mirrors the Z-machine's `aux_dirty`. Not serialized.
     vfs_dirty: bool,
+    /// `SavedGame`-usage files that have been written this session, mapped to the
+    /// byte length of their most recent `@save`. Those saves live in host `.qzl`
+    /// files (decoupled from the VFS — see [`StreamKind::Null`]), so they never
+    /// appear in `files`. This table lets the emulated Glk answer the game's
+    /// post-`@save` verification (CounterfeitMonkey's SAVE verb): (1)
+    /// `glk_fileref_does_file_exist` returns true for a written slot, and (2)
+    /// reopening the slot for reading and seeking to its end reports the save's
+    /// byte count — without it both read as "empty/absent" and the game prints
+    /// "Save failed." even though the host wrote the file. Session-transient (not
+    /// serialized), like `vfs_dirty`.
+    saved_game_files: std::collections::BTreeMap<String, u32>,
+    /// Per-`SavedGame` `Null`-stream cursor state, keyed by stream id: the
+    /// fileref name it was opened on and its current byte position. Mirrors
+    /// [`Model::file_streams`] (keeps [`StreamKind`] `Copy`). Lets
+    /// `glk_stream_get_position`/`glk_stream_set_position` behave over the
+    /// host-managed save's known length (from `saved_game_files`).
+    savegame_streams: std::collections::BTreeMap<u32, (String, u32)>,
 }
 
 impl Default for Model {
@@ -808,6 +825,8 @@ impl Model {
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
             char_px: (1, 1),
             vfs_dirty: false,
+            saved_game_files: std::collections::BTreeMap::new(),
+            savegame_streams: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1083,18 +1102,21 @@ impl Model {
     }
 
     /// `glk_fileref_does_file_exist`: the fileref is live AND its file has been
-    /// written to the VFS.
+    /// written to the VFS — or, for a host-managed `SavedGame` slot, opened for
+    /// writing this session (see [`Model::saved_game_files`]).
     pub fn fileref_exists(&self, fref: u32) -> bool {
         match self.fileref(fref) {
-            Some(f) => self.files.contains_key(&f.name),
+            Some(f) => self.files.contains_key(&f.name) || self.saved_game_files.contains_key(&f.name),
             None => false,
         }
     }
 
-    /// `glk_fileref_delete_file`: remove the fileref's file from the VFS.
+    /// `glk_fileref_delete_file`: remove the fileref's file from the VFS (and
+    /// drop any host-managed `SavedGame` existence marker for its name).
     pub fn fileref_delete(&mut self, fref: u32) {
         if let Some(name) = self.fileref(fref).map(|f| f.name.clone()) {
             self.files.remove(&name);
+            self.saved_game_files.remove(&name);
             self.vfs_dirty = true;
         }
     }
@@ -1534,7 +1556,25 @@ impl Model {
         // with no prior save, so the game always reaches `@save`/`@restore`
         // and the host decides.
         if usage & 0x0f == 0x01 {
-            return self.alloc_stream(StreamKind::Null, rock);
+            // Opening in any create mode (Write / ReadWrite / WriteAppend) makes
+            // the file "exist" — mirroring real Glk — so the game's post-`@save`
+            // `glk_fileref_does_file_exist` check passes even though the save
+            // bytes went to a host `.qzl`, not the VFS. Read (0x02) must NOT mark
+            // existence: a game probing "is there a save?" before restoring still
+            // sees false until something has actually saved. A create-mode open
+            // truncates to length 0 until `@save` records the real byte count.
+            match fmode {
+                0x01 => {
+                    self.saved_game_files.insert(name.clone(), 0);
+                } // Write truncates
+                0x03 | 0x05 => {
+                    self.saved_game_files.entry(name.clone()).or_insert(0);
+                }
+                _ => {} // Read: leave existence/size as-is
+            }
+            let sid = self.alloc_stream(StreamKind::Null, rock);
+            self.savegame_streams.insert(sid, (name, 0));
+            return sid;
         }
         let pos = match fmode {
             0x01 => {
@@ -1568,10 +1608,16 @@ impl Model {
     /// by the Glulx `@save` shim: the real save bytes go to a host file (the
     /// stream the game opened stays empty), but the library checks the
     /// stream's write count to decide save succeeded, so this satisfies that
-    /// check without embedding the save into the VFS.
+    /// check without embedding the save into the VFS. For a `SavedGame` stream
+    /// it also records `n` as the slot's byte length (keyed by fileref name), so
+    /// a later reopen-for-read + seek-to-end reports the true save size — the
+    /// second half of the library's verification (CounterfeitMonkey's SAVE verb).
     pub fn note_stream_write(&mut self, id: u32, n: u32) {
         if let Some(st) = self.stream_mut(id) {
             st.write_count = st.write_count.saturating_add(n);
+        }
+        if let Some((name, _)) = self.savegame_streams.get(&id) {
+            self.saved_game_files.insert(name.clone(), n);
         }
     }
 
@@ -1587,6 +1633,9 @@ impl Model {
             }
             if matches!(kind, StreamKind::File { .. }) {
                 self.file_streams.remove(&id);
+            }
+            if matches!(kind, StreamKind::Null) {
+                self.savegame_streams.remove(&id);
             }
         }
         if self.cur_stream == id {
@@ -1619,7 +1668,9 @@ impl Model {
             StreamKind::Memory { pos, .. } => Some(pos),
             StreamKind::File { .. } => Some(self.file_streams.get(&id).map_or(0, |f| f.pos as u32)),
             StreamKind::Window(_) => Some(self.stream(id)?.write_count),
-            StreamKind::Null => Some(0),
+            // A host-managed SavedGame stream reports its tracked cursor (the
+            // library seeks to the end and reads the position to size the save).
+            StreamKind::Null => Some(self.savegame_streams.get(&id).map_or(0, |&(_, pos)| pos)),
         }
     }
     /// Seek a memory stream. `seekmode`: 0 = from start, 1 = from current,
@@ -1649,6 +1700,20 @@ impl Model {
                     };
                     let np = (base + pos as i64).clamp(0, len) as usize;
                     self.file_streams.get_mut(&id).unwrap().pos = np;
+                }
+            }
+            Some(StreamKind::Null) => {
+                // Seek over the host-managed save's known byte length, so a
+                // seek-to-end + get-position reports the true save size.
+                if let Some((name, cur)) = self.savegame_streams.get(&id) {
+                    let len = self.saved_game_files.get(name).copied().unwrap_or(0) as i64;
+                    let base = match seekmode {
+                        1 => *cur as i64,
+                        2 => len,
+                        _ => 0,
+                    };
+                    let np = (base + pos as i64).clamp(0, len) as u32;
+                    self.savegame_streams.get_mut(&id).unwrap().1 = np;
                 }
             }
             _ => {}
@@ -2272,6 +2337,8 @@ impl Model {
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
             char_px: (1, 1),
             vfs_dirty: false,
+            saved_game_files: std::collections::BTreeMap::new(),
+            savegame_streams: std::collections::BTreeMap::new(),
         })
     }
 }
@@ -2752,6 +2819,47 @@ mod style_hint_tests {
         assert!(m.fileref_exists(f));
         m.fileref_delete(f);
         assert!(!m.fileref_exists(f));
+    }
+
+    #[test]
+    fn savedgame_save_marks_existence_and_end_position_reports_size() {
+        // Reproduces the Inform/Glk library's post-`@save` verification (as used
+        // by CounterfeitMonkey's SAVE verb): open a SavedGame slot for writing,
+        // record the save's byte count, then reopen it for reading and seek to
+        // the end — the reported position must equal the save size (non-zero) and
+        // the slot must exist. Before the fix a SavedGame `Null` stream reported
+        // position 0 and the slot never "existed" (host `.qzl` saves are
+        // decoupled from the VFS), so the game read the save back as empty and
+        // printed "Save failed." even though the host wrote the file.
+        let mut m = Model::new();
+        // usage 0x01 = fileusage_SavedGame.
+        let fref = m.fileref_create(0x01, "slot".to_string(), 0);
+        assert!(!m.fileref_exists(fref), "a never-saved slot does not exist");
+
+        // The game opens the slot for writing; `@save`'s shim credits the byte
+        // count via note_stream_write (save_quetzal().len()).
+        let wstr = m.stream_open_file(fref, 0x01, false, 0);
+        assert_ne!(wstr, 0);
+        m.note_stream_write(wstr, 49336);
+        assert_eq!(m.stream_close(wstr), Some((0, 49336)));
+
+        // Verification step 1: the slot now exists.
+        assert!(m.fileref_exists(fref), "a written SavedGame slot exists");
+        // Verification step 2: reopen for read, seek to end, read the position —
+        // it reports the save's byte count, not 0.
+        let rstr = m.stream_open_file(fref, 0x02, false, 0);
+        assert_ne!(rstr, 0);
+        m.stream_set_position(rstr, 0, 2); // seekmode 2 = from end
+        assert_eq!(
+            m.stream_position(rstr),
+            Some(49336),
+            "seek-to-end on a saved slot reports its byte count, not 0",
+        );
+        m.stream_close(rstr);
+
+        // Deleting the slot clears both existence and the recorded size.
+        m.fileref_delete(fref);
+        assert!(!m.fileref_exists(fref), "delete removes the slot");
     }
 
     #[test]
