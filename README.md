@@ -74,7 +74,9 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   `~/.babelmap/crash.log`) while the app stays interactive, instead of taking the
   interpreter down. → [interpreter](docs/features/interpreter.md)
 
-For the full, exhaustive feature list, see **[`docs/features/`](docs/features/)**.
+For the full, exhaustive feature list, see **[`docs/features/`](docs/features/)**. For the
+interactive-fiction standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
+Treaty of Babel), see **[`docs/standards.md`](docs/standards.md)**.
 
 ---
 
