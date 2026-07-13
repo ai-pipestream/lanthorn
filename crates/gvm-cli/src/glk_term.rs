@@ -419,16 +419,17 @@ impl GlkBackend for TerminalBackend {
         (self.cols, self.rows)
     }
 
-    fn window_layout(&mut self, wins: &[(u32, WinType, Rect)]) {
+    fn window_layout(&mut self, wins: &[(u32, WinType, Rect, bool)]) {
         if self.debug {
-            for (id, ty, r) in wins {
+            for (id, ty, r, _bordered) in wins {
                 let kind = if *ty == WinType::TextGrid { "grid" } else if *ty == WinType::TextBuffer { "buffer" } else { "other" };
                 eprintln!("[term] layout: win={id} {kind} w={} h={} (left={} top={})", r.width, r.height, r.left, r.top);
             }
         }
-        // Track the first TextGrid as the pinned status window.
-        let grid = wins.iter().find(|(_, ty, _)| *ty == WinType::TextGrid);
-        if let Some(&(id, _, rect)) = grid {
+        // Track the first TextGrid as the pinned status window. The terminal
+        // backend draws no inter-window frames, so the border hint is ignored.
+        let grid = wins.iter().find(|(_, ty, _, _)| *ty == WinType::TextGrid);
+        if let Some(&(id, _, rect, _)) = grid {
             self.grid_win = Some(id);
             self.grid_rect = rect;
             self.ensure_grid(rect.height, rect.width);
@@ -758,8 +759,8 @@ mod tests {
     fn tty_pins_grid_and_sets_scroll_region() {
         let (mut b, buf) = backend(true);
         // Layout: a 1-row TextGrid (id 2) above an 80x23 TextBuffer (id 1).
-        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 });
-        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 23 });
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, true);
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 23 }, true);
         b.window_layout(&[buffer, grid]);
         b.grid_put(2, 0, 0, GlkStyle::Normal, "Score: 10");
         b.put_text(1, GlkStyle::Normal, "You are in a room.");
