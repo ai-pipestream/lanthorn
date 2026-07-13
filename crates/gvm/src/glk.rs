@@ -284,10 +284,11 @@ pub trait GlkBackend {
     /// A window was closed.
     fn window_close(&mut self, _id: u32) {}
     /// The resolved layout changed: each entry is `(window id, type, rect,
-    /// bordered)` for every non-pair window, in window-id order. `bordered` is
-    /// false when the game split this window's parent with `winmethod_NoBorder`
-    /// (SQ-0286) — a host that draws inter-window frames then omits this leaf's.
-    fn window_layout(&mut self, _wins: &[(u32, WinType, Rect, bool)]) {}
+    /// border)` for every non-pair window, in window-id order. `border` is the
+    /// leaf's border-presence hint (SQ-0286): `None` = no preference (parentless
+    /// root), `Some(false)` = `winmethod_NoBorder`, `Some(true)` = `winmethod_Border`.
+    /// A host that draws inter-window frames uses it to force presence on/off.
+    fn window_layout(&mut self, _wins: &[(u32, WinType, Rect, Option<bool>)]) {}
     /// Append `s` (already style-tagged) to a text-buffer window.
     fn put_text(&mut self, _win: u32, _style: GlkStyle, _s: &str) {}
     /// Write `s` to a text-grid window's cells starting at `(x, y)`.
@@ -526,8 +527,8 @@ impl GlkBackend for TestBackend {
         self.grid.remove(&id);
         self.dims.remove(&id);
     }
-    fn window_layout(&mut self, wins: &[(u32, WinType, Rect, bool)]) {
-        for &(id, _ty, rect, _bordered) in wins {
+    fn window_layout(&mut self, wins: &[(u32, WinType, Rect, Option<bool>)]) {
+        for &(id, _ty, rect, _border) in wins {
             self.dims.insert(id, rect);
         }
     }
@@ -1325,10 +1326,12 @@ impl Model {
     }
 
     /// Recompute every window's rectangle from the tree and `(width, height)`,
-    /// returning the leaf-window layout `(id, type, rect, bordered)` in id order
-    /// (to hand to [`GlkBackend::window_layout`]). `bordered` is false when the
-    /// leaf's parent pair was split with `winmethod_NoBorder` (SQ-0286).
-    pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32)) -> Vec<(u32, WinType, Rect, bool)> {
+    /// returning the leaf-window layout `(id, type, rect, border)` in id order
+    /// (to hand to [`GlkBackend::window_layout`]). `border` is the leaf's
+    /// border-presence hint from its parent pair's split method (SQ-0286):
+    /// `None` for a parentless root (no preference), `Some(false)` for a
+    /// `winmethod_NoBorder` split, `Some(true)` for the default (`winmethod_Border`).
+    pub fn relayout(&mut self, width: u32, height: u32, char_px: (u32, u32)) -> Vec<(u32, WinType, Rect, Option<bool>)> {
         self.char_px = char_px;
         // Snap the working screen size down so every proportional split lands on
         // whole cells (see `clean_dims`). Any leftover row/column is simply not
@@ -1343,13 +1346,12 @@ impl Model {
         for w in self.windows.iter().flatten() {
             if w.wintype != WinType::Pair {
                 // Border presence lives on the parent pair's split method; a
-                // parentless root keeps today's framed default. (SQ-0286)
-                let bordered = self
+                // parentless root expresses no preference (`None`). (SQ-0286)
+                let border = self
                     .window_parent(w.id)
                     .and_then(|p| self.window_arrangement(p))
-                    .map(|(method, _, _)| (method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER)
-                    .unwrap_or(true);
-                out.push((w.id, w.wintype, w.rect, bordered));
+                    .map(|(method, _, _)| (method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER);
+                out.push((w.id, w.wintype, w.rect, border));
             }
         }
         out
@@ -2656,27 +2658,35 @@ mod layout_snap_tests {
         assert_eq!(bottom, 41, "no proportional split → full height used");
     }
 
-    // A grid split with winmethod_NoBorder reports bordered=false for the grid
-    // leaf; the default (Border, bit clear) reports true. (SQ-0286)
+    // A grid split reports its parent pair's border hint (SQ-0286): the default
+    // (Border, bit clear) → Some(true); winmethod_NoBorder → Some(false); a
+    // parentless root → None.
     #[test]
     fn relayout_reports_border_presence_from_parent_split_method() {
-        // Default (Border): the grid leaf is framed.
+        // Default (Border): the grid leaf reports Some(true).
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
         let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
         let leaves = m.relayout(80, 24, (9, 19));
-        let grid_bordered = leaves.iter().find(|(id, ..)| *id == grid).map(|&(.., b)| b);
-        assert_eq!(grid_bordered, Some(true), "default split (Border) frames the grid leaf");
+        let grid_border = leaves.iter().find(|(id, ..)| *id == grid).map(|&(.., b)| b);
+        assert_eq!(grid_border, Some(Some(true)), "default split (Border) hints a framed grid leaf");
 
-        // NoBorder: the grid leaf is unframed.
+        // A lone, unsplit root has no parent pair → no border preference (None).
+        let mut m = Model::new();
+        let root = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root, never split
+        let leaves = m.relayout(80, 24, (9, 19));
+        let root_border = leaves.iter().find(|(id, ..)| *id == root).map(|&(.., b)| b);
+        assert_eq!(root_border, Some(None), "a parentless root expresses no border preference");
+
+        // NoBorder: the grid leaf reports Some(false).
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m
             .window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED | WINMETHOD_NOBORDER, 1, 4, 0)
             .unwrap();
         let leaves = m.relayout(80, 24, (9, 19));
-        let grid_bordered = leaves.iter().find(|(id, ..)| *id == grid).map(|&(.., b)| b);
-        assert_eq!(grid_bordered, Some(false), "NoBorder split suppresses the grid leaf's frame");
+        let grid_border = leaves.iter().find(|(id, ..)| *id == grid).map(|&(.., b)| b);
+        assert_eq!(grid_border, Some(Some(false)), "NoBorder split hints an unframed grid leaf");
     }
 
     // A live mouse request must survive a Glk-chunk save/restore, exactly like a

@@ -702,8 +702,8 @@ pub fn resolve_title(
 // mirrors the Z-machine screen into the neutral `ScreenModel`.
 
 use crate::engine::{
-    BufferWindow, Engine, EngineError, EngineSave, GridCell, GridWindow, Introspect, KeyInput,
-    LocationInfo, ScreenModel, Split, StatusField, StatusModel, WinNode,
+    BorderPref, BufferWindow, Engine, EngineError, EngineSave, GridCell, GridWindow, Introspect,
+    KeyInput, LocationInfo, ScreenModel, Split, StatusField, StatusModel, WinNode,
 };
 
 /// The engine tag recorded in an `EngineSave` produced by the Z-machine adapter.
@@ -782,7 +782,8 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         active_rows: screen.upper.rows,
         cursor: (screen.cursor_row, screen.cursor_col),
         cursor_active: screen.current_window == 1,
-        bordered: true, // Z-machine upper window keeps today's framed look (SQ-0286)
+        // The Z-machine has no Glk border concept — leave it to the theme (SQ-0286).
+        border: BorderPref::Unspecified,
     };
     ScreenModel {
         root: WinNode::Pair {

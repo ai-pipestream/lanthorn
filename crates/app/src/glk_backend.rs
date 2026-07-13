@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, StyleColour, WinType};
 
 use crate::engine::{
-    BufferWindow, GridCell, GridWindow, ScreenModel, Split, StatusModel, WinNode,
+    BorderPref, BufferWindow, GridCell, GridWindow, ScreenModel, Split, StatusModel, WinNode,
 };
 use crate::state::StyleRun;
 
@@ -107,10 +107,10 @@ pub struct AppGlk {
     /// Reported display size (the story-pane size the game lays windows out in).
     cols: u32,
     rows: u32,
-    /// The latest resolved leaf-window layout `(id, type, rect, bordered)`.
-    /// `bordered` is false when the game split the window with `winmethod_NoBorder`
-    /// (SQ-0286).
-    layout: Vec<(u32, WinType, GlkRect, bool)>,
+    /// The latest resolved leaf-window layout `(id, type, rect, border)`. The
+    /// border hint is `None` (no preference), `Some(false)` (`winmethod_NoBorder`),
+    /// or `Some(true)` (`winmethod_Border`). (SQ-0286)
+    layout: Vec<(u32, WinType, GlkRect, Option<bool>)>,
     grids: BTreeMap<u32, GridBuf>,
     buffers: BTreeMap<u32, BufBuf>,
     /// The primary buffer window id (the first text-buffer opened), if any.
@@ -209,11 +209,11 @@ impl AppGlk {
         self.primary
     }
 
-    /// The current resolved leaf-window layout `(id, type, rect, bordered)`.
+    /// The current resolved leaf-window layout `(id, type, rect, border)`.
     /// Rects are in story-pane cells (the Glk screen is sized to exactly the
     /// story pane). The host reads this to map terminal clicks to mouse-watching
-    /// windows. `bordered` is false for a `winmethod_NoBorder` split (SQ-0286).
-    pub fn layout(&self) -> &[(u32, WinType, GlkRect, bool)] {
+    /// windows. The border hint is `None`/`Some(false)`/`Some(true)` (SQ-0286).
+    pub fn layout(&self) -> &[(u32, WinType, GlkRect, Option<bool>)] {
         &self.layout
     }
 
@@ -365,7 +365,7 @@ impl AppGlk {
         // Build a (rect, node) pair for each laid-out leaf window, then assemble
         // the guillotine tree from the rects.
         let mut leaves: Vec<(GlkRect, WinNode)> = Vec::new();
-        for &(id, ty, rect, bordered) in &self.layout {
+        for &(id, ty, rect, border) in &self.layout {
             // A zero-area window (e.g. a collapsed/hidden graphics window a game
             // keeps around) is invisible, and a degenerate rect sitting on a
             // boundary defeats the guillotine reconstruction in `assemble` —
@@ -374,7 +374,7 @@ impl AppGlk {
                 continue;
             }
             let node = match ty {
-                WinType::TextGrid => WinNode::Grid(self.grid_node(id, rect, bordered)),
+                WinType::TextGrid => WinNode::Grid(self.grid_node(id, rect, border)),
                 WinType::TextBuffer => WinNode::Buffer(self.buffer_node(id)),
                 WinType::Pair => continue, // pair windows are never in the layout
                 WinType::Graphics => {
@@ -397,7 +397,7 @@ impl AppGlk {
         }
     }
 
-    fn grid_node(&self, id: u32, rect: GlkRect, bordered: bool) -> GridWindow {
+    fn grid_node(&self, id: u32, rect: GlkRect, border: Option<bool>) -> GridWindow {
         let g = self.grids.get(&id);
         let cols = g.map(|g| g.width).unwrap_or(rect.width).max(rect.width) as u16;
         let rows = g.map(|g| g.height).unwrap_or(rect.height).max(rect.height) as u16;
@@ -416,7 +416,12 @@ impl AppGlk {
             active_rows: rows,
             cursor: (1, 1),
             cursor_active: false,
-            bordered,
+            // Map the Glk border hint to the neutral preference (SQ-0286).
+            border: match border {
+                None => BorderPref::Unspecified,
+                Some(true) => BorderPref::Border,
+                Some(false) => BorderPref::NoBorder,
+            },
         }
     }
 
@@ -608,16 +613,16 @@ impl GlkBackend for AppGlk {
         }
     }
 
-    fn window_layout(&mut self, wins: &[(u32, WinType, GlkRect, bool)]) {
+    fn window_layout(&mut self, wins: &[(u32, WinType, GlkRect, Option<bool>)]) {
         self.layout = wins.to_vec();
-        for &(id, ty, rect, _bordered) in wins {
+        for &(id, ty, rect, _border) in wins {
             if ty == WinType::TextGrid {
                 let g = self.grids.entry(id).or_default();
                 g.width = rect.width;
                 g.height = rect.height;
             }
         }
-        for &(id, ty, rect, _bordered) in wins {
+        for &(id, ty, rect, _border) in wins {
             if ty == WinType::Graphics {
                 let (cw, ch) = (rect.width * self.char_px.0, rect.height * self.char_px.1);
                 if let Some(c) = self.graphics.get_mut(&id) {
@@ -836,8 +841,8 @@ mod tests {
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextGrid);
         glk.window_layout(&[
-            (1, WinType::TextBuffer, rect(0, 1, 80, 23), true),
-            (2, WinType::TextGrid, rect(0, 0, 80, 1), true),
+            (1, WinType::TextBuffer, rect(0, 1, 80, 23), Some(true)),
+            (2, WinType::TextGrid, rect(0, 0, 80, 1), Some(true)),
         ]);
         let model = glk.screen_model();
         match &model.root {
@@ -862,9 +867,9 @@ mod tests {
         glk.window_open(2, WinType::TextBuffer);
         glk.window_open(3, WinType::TextGrid);
         glk.window_layout(&[
-            (3, WinType::TextGrid, rect(0, 0, 80, 1), true),
-            (1, WinType::TextBuffer, rect(0, 1, 40, 23), true),
-            (2, WinType::TextBuffer, rect(40, 1, 40, 23), true),
+            (3, WinType::TextGrid, rect(0, 0, 80, 1), Some(true)),
+            (1, WinType::TextBuffer, rect(0, 1, 40, 23), Some(true)),
+            (2, WinType::TextBuffer, rect(40, 1, 40, 23), Some(true)),
         ]);
         let model = glk.screen_model();
         // Top-level: vertical pair (grid over the rest).
@@ -889,8 +894,8 @@ mod tests {
         glk.window_open(1, WinType::TextBuffer);
         glk.window_open(2, WinType::TextBuffer);
         glk.window_layout(&[
-            (1, WinType::TextBuffer, rect(0, 0, 40, 24), true),
-            (2, WinType::TextBuffer, rect(40, 0, 40, 24), true),
+            (1, WinType::TextBuffer, rect(0, 0, 40, 24), Some(true)),
+            (2, WinType::TextBuffer, rect(40, 0, 40, 24), Some(true)),
         ]);
         glk.put_text(2, GlkStyle::Normal, "ab");
         glk.put_text(2, GlkStyle::Header, "CD");
@@ -921,7 +926,7 @@ mod tests {
     fn primary_text_is_drainable() {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
-        glk.window_layout(&[(1, WinType::TextBuffer, rect(0, 0, 80, 24), true)]);
+        glk.window_layout(&[(1, WinType::TextBuffer, rect(0, 0, 80, 24), Some(true))]);
         glk.put_text(1, GlkStyle::Normal, "You are here. ");
         glk.put_text(1, GlkStyle::Emphasized, "Look!");
         let (text, chunks) = glk.take_transcript();
@@ -947,7 +952,7 @@ mod tests {
     fn grid_put_and_clear_update_cells() {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
-        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), true)]);
+        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
         glk.grid_put(1, 2, 0, GlkStyle::Header, "Hi");
         let model = glk.screen_model();
         let g = model.grid().expect("grid node");
@@ -997,7 +1002,7 @@ mod tests {
         use zvm::screen::ZColour;
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
-        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), true)]);
+        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
         let blue_on_white = StyleColour { fg: Some(0x0000_00FF), bg: Some(0x00FF_FFFF), reverse: false };
         glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, 0, "X");
         let cell = glk.screen_model().grid().unwrap().cell(1, 1);
@@ -1012,7 +1017,7 @@ mod tests {
         // neutral GridCell the renderer consumes. (SQ-0258)
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
-        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), true)]);
+        glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
         glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, StyleColour::default(), 42, "L");
         glk.grid_put_attr(1, 1, 0, GlkStyle::Normal, StyleColour::default(), 0, "x");
         assert_eq!(glk.screen_model().grid().unwrap().cell(1, 1).link, 42, "linked cell carries its link value");
@@ -1024,7 +1029,7 @@ mod tests {
         let mut g = AppGlk::with_graphics(80, 24, (2, 2), crate::graphics::PictSource::new(None));
         // Simulate a laid-out graphics window id=1 occupying 4x4 cells → 8x8 px.
         g.window_open(1, gvm::glk::WinType::Graphics);
-        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 4, height: 4 }, true)]);
+        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 4, height: 4 }, Some(true))]);
         g.graphics_fill_rect(1, 0x00FF_0000, 0, 0, 8, 8);
         let canvas = g.graphics.get(&1).unwrap();
         assert_eq!(canvas.img.dimensions(), (8, 8));
@@ -1035,7 +1040,7 @@ mod tests {
     fn screen_model_emits_graphics_leaf() {
         let mut g = AppGlk::with_graphics(80, 24, (1, 1), crate::graphics::PictSource::new(None));
         g.window_open(1, gvm::glk::WinType::Graphics);
-        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 10, height: 4 }, true)]);
+        g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 10, height: 4 }, Some(true))]);
         g.graphics_fill_rect(1, 0x00FF00, 0, 0, 10, 4);
         let model = g.screen_model();
         // The tree's single leaf is a Graphics node for window 1.
@@ -1063,10 +1068,10 @@ mod tests {
         g.window_open(4, WinType::Graphics);
         g.window_open(6, WinType::Graphics);
         g.window_layout(&[
-            (1, WinType::TextBuffer, Rect { left: 40, top: 1, width: 40, height: 23 }, true),
-            (2, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, true),
-            (4, WinType::Graphics, Rect { left: 0, top: 24, width: 80, height: 0 }, true), // collapsed
-            (6, WinType::Graphics, Rect { left: 0, top: 1, width: 40, height: 23 }, true), // the image
+            (1, WinType::TextBuffer, Rect { left: 40, top: 1, width: 40, height: 23 }, Some(true)),
+            (2, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(true)),
+            (4, WinType::Graphics, Rect { left: 0, top: 24, width: 80, height: 0 }, Some(true)), // collapsed
+            (6, WinType::Graphics, Rect { left: 0, top: 1, width: 40, height: 23 }, Some(true)), // the image
         ]);
         g.graphics_fill_rect(6, 0x00FF00, 0, 0, 40, 23);
         let model = g.screen_model();
@@ -1264,7 +1269,7 @@ mod heading_tests {
     fn primary_backend() -> AppGlk {
         let mut b = AppGlk::new(80, 24);
         b.window_open(1, WinType::TextBuffer);
-        b.window_layout(&[(1, WinType::TextBuffer, GlkRect { left: 0, top: 0, width: 80, height: 24 }, true)]);
+        b.window_layout(&[(1, WinType::TextBuffer, GlkRect { left: 0, top: 0, width: 80, height: 24 }, Some(true))]);
         b
     }
 

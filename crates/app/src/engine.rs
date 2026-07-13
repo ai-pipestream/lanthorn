@@ -99,7 +99,21 @@ impl Default for GridCell {
 /// A text-grid window: fixed-size positioned cells with a cursor (a status line
 /// or a Glk text-grid).  The renderer applies a viewport over the logical grid
 /// and auto-follows the cursor.
-#[derive(Debug, Clone)]
+/// A grid window's border-presence preference (SQ-0286). Only a Glulx window
+/// split carries an explicit preference; the Z-machine, the default constructor,
+/// and a parentless Glulx root leave it `Unspecified` so the theme decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderPref {
+    /// No border preference (Z-machine, or a parentless Glulx root): the theme decides.
+    #[default]
+    Unspecified,
+    /// A Glulx split explicitly requested a border (`winmethod_Border`). Presence forced on.
+    Border,
+    /// A Glulx split requested `winmethod_NoBorder`. Presence forced off.
+    NoBorder,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct GridWindow {
     /// Logical grid width in columns.
     pub cols: u16,
@@ -115,25 +129,9 @@ pub struct GridWindow {
     /// True when this grid is the engine's currently selected output window
     /// (drives whether the cursor is shown while awaiting a keypress).
     pub cursor_active: bool,
-    /// False when the game split this grid with `winmethod_NoBorder` — the
-    /// renderer then draws no frame regardless of theme (SQ-0286). Defaults to
-    /// true (the framed look) for the Z-machine and every non-Glulx path; only a
-    /// real NoBorder split flips it.
-    pub bordered: bool,
-}
-
-impl Default for GridWindow {
-    fn default() -> Self {
-        GridWindow {
-            cols: 0,
-            rows: 0,
-            cells: Vec::new(),
-            active_rows: 0,
-            cursor: (0, 0),
-            cursor_active: false,
-            bordered: true,
-        }
-    }
+    /// The game's border-presence preference (SQ-0286). `Unspecified` (the
+    /// default) lets the theme decide; a Glulx split forces `Border`/`NoBorder`.
+    pub border: BorderPref,
 }
 
 impl GridWindow {

@@ -3295,14 +3295,12 @@ mod tests {
         let area = Rect::new(0, 0, 9, 3);
         let mut buf = Buffer::empty(area);
         let used = crate::render::upper_window::draw_upper_window(grid, false, &colors, area, &mut buf, true, &mut Vec::new());
-        // SQ-0286: the Z-machine upper window is `bordered = true`, so a theme with
-        // every border side disabled now falls back to a single-line frame rather
-        // than rendering frameless. The painted cells still reproduce exactly,
-        // shifted inside the fallback frame.
-        assert_eq!(used, 3, "1 active row + fallback top/bottom border");
-        // uw_w = 3 cols + 2 side borders = 5, centered in 9 → x_off = 2, content x=3;
-        // top border row 0, content row 1.
-        assert_eq!(buf.cell((3, 1)).unwrap().symbol(), "A");
-        assert_eq!(buf.cell((5, 1)).unwrap().symbol(), "Z");
+        // SQ-0286: the Z-machine upper window's border preference is Unspecified, so
+        // a theme with every border side disabled renders frameless (the theme
+        // decides). The painted cells reproduce exactly at row 0.
+        assert_eq!(used, 1, "one active upper row consumed, no frame");
+        // cols=3 centered in 9 → x_off = 3.
+        assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "A");
+        assert_eq!(buf.cell((5, 0)).unwrap().symbol(), "Z");
     }
 }

@@ -587,13 +587,9 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
-                first: Box::new(WinNode::Grid({
-                    // Frameless grid (SQ-0286): this test checks buffer subrects,
-                    // not border chrome, so the grid draws no frame.
-                    let mut g = grid_with("STATUS");
-                    g.bordered = false;
-                    g
-                })),
+                // Grid border Unspecified + theme sides off → frameless (SQ-0286);
+                // this test checks buffer subrects, not border chrome.
+                first: Box::new(WinNode::Grid(grid_with("STATUS"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
                     split: Split { fixed: 10 },
