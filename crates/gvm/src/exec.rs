@@ -114,6 +114,19 @@ struct PendingSaveLoad {
     /// fixed-name saves (CM's init cache, undo, autotesting): the host services
     /// them silently against `name`.
     by_prompt: bool,
+    /// The game's save stream id (`@save`'s L1). Credited only on the success
+    /// path (`complete_save(true)`) via `note_stream_write`, so a cancelled save
+    /// leaves the library's write-count/existence checks reading failure
+    /// (SQ-0301). Unused for `@restore` (0).
+    save_stream: u32,
+    /// The would-be save byte count (`save_quetzal().len()`), carried so the
+    /// success path can credit it without recomputing. Unused for `@restore` (0).
+    save_bytes: u32,
+    /// `true` when this `@save` targets a brand-new SavedGame slot (no prior save
+    /// recorded this session). A cancel of a fresh save clears its open-for-write
+    /// existence marker so `does_file_exist` reads false (SQ-0301). Unused for
+    /// `@restore` (false).
+    fresh: bool,
 }
 
 /// What the host needs to service a suspended `@save`/`@restore`
@@ -764,13 +777,17 @@ impl Machine {
                 // stream) so the host can service a game-managed save silently or
                 // surface the player's SAVE-verb UI (see SaveLoadRequest).
                 let (name, by_prompt) = self.glk.stream_saveload_info(l[0]).unwrap_or_default();
-                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: false, name, by_prompt });
-                // Credit the game's save stream with the bytes it would have
-                // received if delivery weren't host-intercepted, so the
-                // library's write-count check sees success (spec §1.8.2's
-                // save is delivered to a host file, not this Glk stream).
+                // Whether this targets a brand-new slot (no prior save recorded)
+                // so a cancel can revert it to "absent" (SQ-0301).
+                let fresh = self.glk.saved_game_size(&name).unwrap_or(0) == 0;
+                // The bytes the game's save stream would receive if delivery
+                // weren't host-intercepted (spec §1.8.2's save goes to a host
+                // file, not this Glk stream). Carried, NOT credited yet: crediting
+                // eagerly would make a cancelled save's write-count/existence
+                // checks report success (SQ-0301). complete_save(true) credits it.
                 let n = self.save_quetzal().len() as u32;
-                self.glk.note_stream_write(l[0], n);
+                self.pending_saveload =
+                    Some(PendingSaveLoad { dest: s[0], restore: false, name, by_prompt, save_stream: l[0], save_bytes: n, fresh });
                 Ok(())
             }
             0x0124 => {
@@ -783,7 +800,8 @@ impl Machine {
                 // the host reads the game's fixed file silently (failing cleanly if
                 // absent) or surfaces the player's RESTORE-verb picker.
                 let (name, by_prompt) = self.glk.stream_saveload_info(l[0]).unwrap_or_default();
-                self.pending_saveload = Some(PendingSaveLoad { dest: s[0], restore: true, name, by_prompt });
+                self.pending_saveload =
+                    Some(PendingSaveLoad { dest: s[0], restore: true, name, by_prompt, save_stream: 0, save_bytes: 0, fresh: false });
                 Ok(())
             }
             // Floating point (single-precision, GLULX_NOTES §13.1).
@@ -3616,7 +3634,19 @@ impl Machine {
     /// the current-run result: 0 (success) or 1 (failure). Glulx spec §1.8.2,
     /// §2.9. A no-op if no `@save` is pending.
     pub fn complete_save(&mut self, ok: bool) {
-        if self.pending_saveload.take().is_some() {
+        if let Some(p) = self.pending_saveload.take() {
+            if ok {
+                // Now that the host has committed the file, credit the game's
+                // save stream — bumping its write_count and marking the SavedGame
+                // slot's existence at the true byte count for the library's
+                // post-@save verification (SQ-0301).
+                self.glk.note_stream_write(p.save_stream, p.save_bytes);
+            } else if p.fresh {
+                // A cancelled brand-new save wrote no `.qzl`: undo the
+                // open-for-write existence marking so does_file_exist reads false
+                // (SQ-0301). Re-saves over a pre-existing slot keep their marker.
+                self.glk.clear_saved_game_file(&p.name);
+            }
             let _ = self.pop_save_stub_and_store(if ok { 0 } else { 1 });
         }
     }
@@ -7946,10 +7976,13 @@ mod tests {
 
         assert_eq!(m.step(), StepResult::SaveRequest);
 
-        // Before complete_save resolves the request, the stream the game
-        // opened for its save has already been credited with the bytes the
-        // real (host-intercepted) save would have delivered.
+        // SQ-0301: the stream is credited on the SUCCESS path (complete_save(true)),
+        // not eagerly at suspend — so a cancelled save leaves the write-count check
+        // reading failure. Once the host commits the save, the stream the game
+        // opened has been credited with the bytes the real (host-intercepted) save
+        // would have delivered.
         let expected = m.save_quetzal().len() as u32;
+        m.complete_save(true);
         assert_eq!(
             m.glk.stream_close(sid),
             Some((0, expected)),
@@ -7997,6 +8030,59 @@ mod tests {
         assert!(req.by_prompt, "a create_by_prompt @save is by_prompt (host surfaces the save UI)");
         assert_eq!(req.name, "myslot");
         assert!(!req.restore);
+    }
+
+    #[test]
+    fn cancelled_fresh_save_reports_absent_and_leaves_no_credit() {
+        use asm::Op::{C8, Mem16};
+        // A brand-new by_prompt SAVE that the player cancels must report failure
+        // on BOTH result channels: S1 = 1, AND the secondary channel a library
+        // verifies through — glk_fileref_does_file_exist (→ false) + write_count
+        // (→ uncredited). Before SQ-0301 @save credited eagerly at suspend, so a
+        // cancel still reported the slot present at the full save size.
+        let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]); // @save 2 -> mem[0x100]
+        let mut m = machine_with_body(&[], body);
+        let fref = m.glk.fileref_create_prompted(0x01, "myslot".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x01, false, 0); // Write -> Null stream
+        assert_eq!(sid, 2);
+        assert!(m.glk.fileref_exists(fref), "open-for-write marks existence at 0 (mirrors real Glk)");
+        assert_eq!(m.step(), StepResult::SaveRequest);
+
+        // The player cancels the SAVE-verb prompt.
+        m.complete_save(false);
+
+        // (a) primary channel: S1 = 1 (failure).
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "cancelled @save stores 1 into S1");
+        // (b) secondary channel: a cancelled fresh save leaves no file.
+        assert!(!m.glk.fileref_exists(fref), "a cancelled brand-new save reports absent");
+        // (c) the save stream was never credited the save's bytes.
+        assert_eq!(m.glk.stream_close(2), Some((0, 0)), "no eager write-count credit on cancel");
+    }
+
+    #[test]
+    fn completed_save_credits_stream_and_marks_existence_at_true_size() {
+        use asm::Op::{C8, Mem16};
+        // The success path (complete_save(true)) must credit the save stream now
+        // (not eagerly at suspend): write_count bumped and the SavedGame slot
+        // marked present at the real save size for the library's verification.
+        let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]); // @save 2 -> mem[0x100]
+        let mut m = machine_with_body(&[], body);
+        let fref = m.glk.fileref_create(0x01, "startup-data".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x01, false, 0); // Write -> Null stream
+        assert_eq!(sid, 2);
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let expected = m.save_quetzal().len() as u32;
+        assert_ne!(expected, 0, "a real Glulx-Quetzal save is non-empty");
+
+        m.complete_save(true);
+
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0, "completed @save stores 0 into S1");
+        assert!(m.glk.fileref_exists(fref), "a committed save marks the slot present");
+        assert_eq!(
+            m.glk.stream_close(2),
+            Some((0, expected)),
+            "the save stream is credited the true save byte count on success",
+        );
     }
 
     #[test]

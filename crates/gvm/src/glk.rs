@@ -1658,6 +1658,22 @@ impl Model {
         }
     }
 
+    /// The recorded byte length of a host-managed `SavedGame` slot by fileref
+    /// name, or `None` if nothing has marked it this session. Lets `@save` tell a
+    /// brand-new save (absent / 0) from a re-save over an existing slot, so a
+    /// cancelled fresh save can be reverted to "absent" (SQ-0301).
+    pub fn saved_game_size(&self, name: &str) -> Option<u32> {
+        self.saved_game_files.get(name).copied()
+    }
+
+    /// Drop a host-managed `SavedGame` slot's existence marker by name. A
+    /// cancelled/failed brand-new `@save` wrote no `.qzl`, so its open-for-write
+    /// existence-at-0 must be undone, leaving `glk_fileref_does_file_exist`
+    /// false (SQ-0301).
+    pub fn clear_saved_game_file(&mut self, name: &str) {
+        self.saved_game_files.remove(name);
+    }
+
     /// For a live file-backed stream (a `SavedGame` `Null` conduit OR a VFS
     /// `File` stream — a game may `@save` to either), its `(fileref name,
     /// by_prompt)`. This is the hook `@save`/`@restore` use to route the game's
