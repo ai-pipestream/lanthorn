@@ -54,7 +54,6 @@ pub(crate) fn default_badge_glulx() -> String { "G".into() }
 pub(crate) fn default_badge_blorb() -> String { "B".into() }
 pub(crate) fn default_badge_save() -> String { "S".into() }
 pub(crate) fn default_badge_hint() -> String { "H".into() }
-pub(crate) fn default_true() -> bool { true }
 
 /// The `[symbols]` section of config.toml.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
