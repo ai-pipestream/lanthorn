@@ -1181,7 +1181,11 @@ fn draw_secondary_markers(
     let (off_x, off_y) = offset;
     let style = state.colors.shared_path;
     let arrows = &state.symbols.arrows;
-    let cell_of = |id: RoomId| rm.rooms.iter().find(|r| r.id == id).map(|r| r.cell);
+    // Room-cell lookup built once (was an O(rooms) `.iter().find` per connector end,
+    // i.e. O(connectors × rooms) over the loop below). (SQ-0305)
+    let room_cell: std::collections::HashMap<RoomId, (i32, i32)> =
+        rm.rooms.iter().map(|r| (r.id, r.cell)).collect();
+    let cell_of = |id: RoomId| room_cell.get(&id).copied();
 
     // Stamp the secondaries at one end, in the border slot right next to the retained arrowhead.
     // DIAGONAL end: the arrowhead is on the box CORNER (`corner_anchor`); each secondary hugs a

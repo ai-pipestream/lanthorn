@@ -1134,6 +1134,23 @@ impl std::fmt::Debug for TranscriptWrapCache {
     }
 }
 
+/// The cached map render model for the live graph, keyed by graph generation and
+/// viewed layer. `render_layer` re-runs chain detection + edge routing every call,
+/// so re-doing it on an animation / transcript / mouse-move redraw of an otherwise
+/// unchanged map is pure waste. The live graph only changes on a turn / tidy apply /
+/// map edit — each bumps `graph_gen` — so an unchanged `(gen, layer)` reuses this.
+/// Only the live map is cached; replay and tidy-animation graphs are not tracked by
+/// `graph_gen` and are rebuilt per frame (see `AppState::cached_map_render`). (SQ-0305)
+#[derive(Debug)]
+pub(crate) struct MapRenderCache {
+    /// Graph generation (`AppState::graph_gen`) this model was routed for.
+    pub gen: u64,
+    /// Viewed layer this model was routed for.
+    pub layer: LayerId,
+    /// The routed, zoom-independent render model.
+    pub rm: mapper::render::RenderMap,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -1180,6 +1197,11 @@ pub struct AppState {
     /// per-line filter+clone waterfall is skipped. Published/consumed by render.
     /// (SQ-0305)
     pub(crate) transcript_wrap: std::cell::RefCell<Option<TranscriptWrapCache>>,
+    /// Cache of the live map's routed render model, keyed by graph generation +
+    /// viewed layer, so an animation / transcript / mouse-move redraw of an
+    /// unchanged map reuses the routed model instead of re-running `render_layer`.
+    /// See [`MapRenderCache`] and [`AppState::cached_map_render`]. (SQ-0305)
+    pub(crate) map_render: std::cell::RefCell<Option<MapRenderCache>>,
     /// List-row viewport (rows) of the currently-open selection-list modal,
     /// captured from the last render so `apply_action` nav can keep the
     /// selection visible and arm scroll animations (mirrors the transcript's
@@ -1558,6 +1580,7 @@ impl Default for AppState {
             clear_anchor: None,
             transcript_gen: 0,
             transcript_wrap: std::cell::RefCell::new(None),
+            map_render: std::cell::RefCell::new(None),
             modal_list_viewport: 0,
             input: String::new(),
             status_msg: None,
@@ -1860,6 +1883,33 @@ impl AppState {
             }
         }
         graph.current().map(|id| graph.layer_of(id)).unwrap_or(MAIN_LAYER)
+    }
+
+    /// Borrow the live map's routed render model for `layer`, re-routing it (via
+    /// `build`) only when the graph generation or viewed layer changed since the
+    /// last frame. The routing in `render_layer` is the dominant per-frame map
+    /// cost, so a redraw that leaves the live graph untouched (animation frame,
+    /// transcript update, mouse move) reuses the cached model. Callers pass
+    /// `build` as `|| render_layer(&graph, layer)`; it runs only on a cache miss.
+    ///
+    /// Only the live map uses this — replay and tidy-animation graphs are not
+    /// tracked by `graph_gen`, so their models are built fresh each frame. (SQ-0305)
+    pub fn cached_map_render(
+        &self,
+        layer: LayerId,
+        build: impl FnOnce() -> mapper::render::RenderMap,
+    ) -> std::cell::Ref<'_, mapper::render::RenderMap> {
+        let gen = self.graph_gen;
+        {
+            let mut cache = self.map_render.borrow_mut();
+            let fresh = matches!(cache.as_ref(), Some(c) if c.gen == gen && c.layer == layer);
+            if !fresh {
+                *cache = Some(MapRenderCache { gen, layer, rm: build() });
+            }
+        }
+        std::cell::Ref::map(self.map_render.borrow(), |c| {
+            &c.as_ref().expect("cache populated above").rm
+        })
     }
 
     /// Toggle focus between Game and Map panes.
@@ -3506,6 +3556,41 @@ mod tests {
     fn appstate_default_symbols_are_default_set() {
         let st = AppState::default();
         assert_eq!(st.symbols, crate::symbols::SymbolSet::default());
+    }
+
+    #[test]
+    fn cached_map_render_reuses_until_gen_or_layer_change() {
+        use mapper::graph::MapGraph;
+        use std::cell::Cell;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        let mut s = AppState::default();
+        let builds = Cell::new(0usize);
+        // Build closure ignores the layer (keeps the test off layer-subgraph
+        // validity); its only job is to count how often the cache actually rebuilds.
+        let run = |s: &AppState, layer| {
+            let _ = s.cached_map_render(layer, || {
+                builds.set(builds.get() + 1);
+                mapper::render::render(&g)
+            });
+        };
+
+        // Same (gen, layer): routed once, then reused.
+        run(&s, 0);
+        run(&s, 0);
+        assert_eq!(builds.get(), 1, "unchanged gen+layer reuses the cached model");
+
+        // A layer switch invalidates, then holds.
+        run(&s, 1);
+        assert_eq!(builds.get(), 2, "layer switch rebuilds");
+        run(&s, 1);
+        assert_eq!(builds.get(), 2, "same layer again reuses");
+
+        // A graph-generation bump invalidates.
+        s.graph_gen = s.graph_gen.wrapping_add(1);
+        run(&s, 1);
+        assert_eq!(builds.get(), 3, "graph_gen bump rebuilds");
     }
 
     #[test]

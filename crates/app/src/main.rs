@@ -434,6 +434,25 @@ fn engine_supports_save(engine: &dyn Engine) -> bool {
     engine.as_any().downcast_ref::<GameSession>().is_some()
 }
 
+/// The map render model for one frame: either borrowed from the per-frame cache
+/// (the live graph, keyed by generation + layer) or freshly built and owned (the
+/// replay / tidy-animation graphs, which `graph_gen` does not track). Derefs to
+/// `&RenderMap` so the draw call sites are unchanged. (SQ-0305)
+enum FrameRenderMap<'a> {
+    Cached(std::cell::Ref<'a, mapper::render::RenderMap>),
+    Owned(mapper::render::RenderMap),
+}
+
+impl std::ops::Deref for FrameRenderMap<'_> {
+    type Target = mapper::render::RenderMap;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            FrameRenderMap::Cached(r) => r,
+            FrameRenderMap::Owned(o) => o,
+        }
+    }
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -480,12 +499,21 @@ fn draw_frame(
         });
 
         // During tidy-animation playback the map shows the current captured stage, not the live graph.
+        // The live graph's routed model is memoized on (graph_gen, layer) — see `cached_map_render` —
+        // so an animation / transcript / mouse-move redraw of an unchanged map skips re-routing.
+        // Replay and tidy-animation graphs are not tracked by `graph_gen`, so they are built fresh.
         let rm = if let Some(g) = &replay_graph {
-            render_layer(g, state.active_layer(g))
+            FrameRenderMap::Owned(render_layer(g, state.active_layer(g)))
         } else {
             match &state.tidy_anim {
-                Some(anim) => render_layer(&anim.current().graph, state.active_layer(&anim.current().graph)),
-                None => render_layer(&mapper.graph, state.active_layer(&mapper.graph)),
+                Some(anim) => {
+                    let g = &anim.current().graph;
+                    FrameRenderMap::Owned(render_layer(g, state.active_layer(g)))
+                }
+                None => {
+                    let layer = state.active_layer(&mapper.graph);
+                    FrameRenderMap::Cached(state.cached_map_render(layer, || render_layer(&mapper.graph, layer)))
+                }
             }
         };
 
