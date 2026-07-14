@@ -7,43 +7,38 @@
 
 use app::engine::Engine;
 use app::persist_files::{delete_save, list_saves, save_game_named, save_named};
-use app::state::{AppState, PromptKind, SavesState};
+use app::state::{AppState, SavesState};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
 use crate::engine_helpers::{glulx_session_opt, zvm_session_opt};
 use crate::{combined_saves, turn};
 
-/// Handle a submitted saves-manager delete-confirm prompt.
-/// Called after apply_action stores the prompt in `state.saves_prompt_submitted`.
-pub(crate) fn handle_saves_prompt(
-    kind: PromptKind,
-    buf: String,
+/// Resolve the confirm-delete dialog for the selected save. `confirmed` deletes
+/// it (refreshing the open saves list); otherwise the save is kept. Byte-identical
+/// to the retired y/n `handle_saves_prompt`. (SQ-0307)
+pub(crate) fn delete_save_confirmed(
+    path: &std::path::Path,
+    confirmed: bool,
     dir: &std::path::Path,
     state: &mut AppState,
 ) {
-    match kind {
-        PromptKind::ConfirmDeleteSave(path) => {
-            let confirmed = matches!(buf.trim().to_lowercase().as_str(), "y" | "yes");
-            if confirmed {
-                match delete_save(&path) {
-                    Ok(()) => {
-                        state.push_notice("[Save deleted]");
-                        if let Some(s) = &mut state.saves {
-                            s.entries = list_saves(dir);
-                            // Re-clamp the selection/offset to the new entry count.
-                            s.scroll.len(s.entries.len());
-                        }
-                    }
-                    Err(e) => {
-                        state.push_notice(&format!("[Delete failed: {}]", e));
-                    }
+    if confirmed {
+        match delete_save(path) {
+            Ok(()) => {
+                state.push_notice("[Save deleted]");
+                if let Some(s) = &mut state.saves {
+                    s.entries = list_saves(dir);
+                    // Re-clamp the selection/offset to the new entry count.
+                    s.scroll.len(s.entries.len());
                 }
-            } else {
-                state.push_notice("[Delete cancelled]");
+            }
+            Err(e) => {
+                state.push_notice(&format!("[Delete failed: {}]", e));
             }
         }
-        _ => {} // other prompt kinds are handled elsewhere
+    } else {
+        state.push_notice("[Delete cancelled]");
     }
 }
 
@@ -162,7 +157,7 @@ pub(crate) fn resolve_ingame_dialog(
 ) -> bool {
     use app::session::PendingIo;
 
-    // (1) SAVE confirmed in handle_saves_prompt (flag-hop): resume here.
+    // (1) SAVE confirmed in handle_save_as (flag-hop): resume here.
     if let Some(wrote_ok) = state.ingame_resume_save.take() {
         state.ingame_io = None;
         let result = session.resume_save(wrote_ok);
@@ -205,10 +200,9 @@ pub(crate) fn open_filename_modal(req: app::session::FilenameReq, session: &dyn 
     state.pending_filename = Some(req);
     match app::state::filename_modal_for(req, session.file_names().len()) {
         app::state::FilenameModal::NamePrompt => {
-            state.prompt = Some(app::state::Prompt {
-                kind: app::state::PromptKind::CreateFile,
-                buffer: String::new(),
-            });
+            state.dialog_focus = 0;
+            state.text_entry =
+                Some(app::state::TextEntryDialog::new(app::state::TextEntryKind::CreateFile, ""));
         }
         app::state::FilenameModal::Picker => {
             state.file_picker = Some(app::state::FilePickerState::new(session.file_names()));
@@ -243,7 +237,7 @@ pub(crate) fn resolve_filename_request(
     }
     // Modal closed without a submit (Esc) while a request is still pending -> cancel.
     if state.pending_filename.is_some()
-        && !matches!(&state.prompt, Some(p) if p.kind == app::state::PromptKind::CreateFile)
+        && !matches!(&state.text_entry, Some(d) if d.kind == app::state::TextEntryKind::CreateFile)
         && state.file_picker.is_none()
     {
         state.pending_filename = None;

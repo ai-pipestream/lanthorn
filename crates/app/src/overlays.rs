@@ -22,6 +22,8 @@ use app::render::launch_dialog::{draw_launch_dialog, LaunchDialogRects};
 use app::render::quit_dialog::{draw_quit_dialog, QuitDialogRects};
 use app::render::reset_dialog::{draw_reset_dialog, ResetDialogRects};
 use app::render::save_name_dialog::SaveNameDialogRects;
+use app::render::text_entry_dialog::{draw_text_entry_dialog, TextEntryDialogRects};
+use app::render::confirm_delete_dialog::{draw_confirm_delete_dialog, ConfirmDeleteDialogRects};
 use app::render::saves::draw_saves;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::file_picker::draw_file_picker;
@@ -38,6 +40,8 @@ pub(crate) struct OverlayRects {
     pub aux_dialog: Option<AuxDialogRects>,
     pub reset_dialog: Option<ResetDialogRects>,
     pub save_name_dialog: Option<SaveNameDialogRects>,
+    pub text_entry: Option<TextEntryDialogRects>,
+    pub confirm_delete: Option<ConfirmDeleteDialogRects>,
     pub quit_dialog: Option<QuitDialogRects>,
     pub launch_dialog: Option<LaunchDialogRects>,
     pub hints_panel: Option<HintsPanelRects>,
@@ -65,6 +69,8 @@ pub(crate) fn draw_all(
     let mut aux_dialog_rects_out: Option<AuxDialogRects> = None;
     let mut reset_dialog_rects_out: Option<ResetDialogRects> = None;
     let mut save_name_dialog_rects_out: Option<SaveNameDialogRects> = None;
+    let mut text_entry_rects_out: Option<TextEntryDialogRects> = None;
+    let mut confirm_delete_rects_out: Option<ConfirmDeleteDialogRects> = None;
     let mut quit_dialog_rects_out: Option<QuitDialogRects> = None;
     let mut launch_dialog_rects_out: Option<LaunchDialogRects> = None;
     let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
@@ -142,6 +148,16 @@ pub(crate) fn draw_all(
             app::render::save_name_dialog::draw_save_name_dialog(state, dialog_area, buf);
     }
 
+    // ── Text-entry dialog overlay — drawn over everything ──────────────────
+    if state.text_entry.is_some() {
+        text_entry_rects_out = draw_text_entry_dialog(state, dialog_area, buf);
+    }
+
+    // ── Confirm-delete dialog overlay — drawn over the saves manager ───────
+    if state.confirm_delete_save.is_some() {
+        confirm_delete_rects_out = draw_confirm_delete_dialog(state, dialog_area, buf);
+    }
+
     // ── Quit dialog overlay — drawn over everything ────────────────────────
     if state.quit_dialog {
         quit_dialog_rects_out = draw_quit_dialog(state, dialog_area, buf);
@@ -162,6 +178,8 @@ pub(crate) fn draw_all(
         aux_dialog: aux_dialog_rects_out,
         reset_dialog: reset_dialog_rects_out,
         save_name_dialog: save_name_dialog_rects_out,
+        text_entry: text_entry_rects_out,
+        confirm_delete: confirm_delete_rects_out,
         quit_dialog: quit_dialog_rects_out,
         launch_dialog: launch_dialog_rects_out,
         hints_panel: hints_panel_rects_out,

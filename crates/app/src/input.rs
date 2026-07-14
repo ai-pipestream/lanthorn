@@ -15,9 +15,10 @@
 //!     - Game: game_key_to_action, then Global fallthrough.
 //!     - Map: Map context lookup, filtered by hotkeys.is_direct (direct commands only).
 //!
-//! While `state.prompt` is `Some` (text-entry sub-mode), printable chars,
-//! Backspace, Enter and Esc are routed to the prompt buffer; everything else is
-//! absorbed.
+//! The former bottom-bar text-entry prompts are now the `text_entry` /
+//! `confirm_delete_save` modals, whose key/mouse input the run-loop intercepts in
+//! `main.rs` own directly (like the save-name dialog). This module only OPENS them
+//! and provides `apply_text_entry` for the submit. (SQ-0307)
 //!
 //! # Caller-handled actions
 //! `apply_action` handles view/light-correction actions in-process.  The
@@ -33,7 +34,7 @@ use mapper::mapper::Mapper;
 
 use crate::complete::{room_words_from_text, suggest};
 use crate::keymap::{Context, KeySpec};
-use crate::state::{AppState, Focus, Prompt, PromptKind};
+use crate::state::{AppState, Focus, TextEntryDialog, TextEntryKind};
 
 // ── AttrKind ──────────────────────────────────────────────────────────────────
 
@@ -433,7 +434,7 @@ pub enum KeyResolve {
 ///
 /// Routing order:
 /// 1. Ctrl+Q / Ctrl+C → Quit (hardwired, always wins).
-/// 2. Prompt active → prompt_key_to_action; everything else absorbed.
+/// 2. (text-entry / confirm-delete modals are intercepted in the run loop.)
 /// 3. Tidy-anim active → Anim context lookup (Ctrl+Left/Right stage-jump hardwired).
 ///    4-6. Modal sub-modes (gallery/saves/replay/file-browser/verb-menu/style-editor/
 ///    config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
@@ -451,11 +452,8 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return KeyResolve::Action(Action::Quit);
     }
 
-    // 2. Prompt sub-mode: consume all keys; only prompt-relevant ones produce
-    //    an action, everything else (Tab, Ctrl+S/R/E/L, …) is absorbed.
-    if state.prompt.is_some() {
-        return KeyResolve::Action(prompt_key_to_action(key));
-    }
+    // 2. The text-entry / confirm-delete modals are intercepted in the run loop
+    //    before key routing (like the save-name dialog), so they never reach here.
 
     // 3. Tidy-animation sub-mode: KeyMap lookup in Anim context; no fallthrough.
     if state.tidy_anim.is_some() {
@@ -1149,33 +1147,6 @@ fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> KeyResolve {
     KeyResolve::Action(Action::CloseHotkeyDialog)
 }
 
-// ── Internal: prompt key routing ──────────────────────────────────────────────
-
-/// When a prompt is active, all input (except global shortcuts already handled)
-/// is consumed by the prompt buffer.  We reuse the Action enum to signal intent:
-///   - InputChar → append to prompt buffer
-///   - Backspace → delete from prompt buffer
-///   - SubmitCommand("") → sentinel: Enter pressed (apply_action checks prompt)
-///   - ToggleFocus → sentinel: Esc pressed (apply_action cancels prompt)
-fn prompt_key_to_action(key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Enter => {
-            // Sentinel: empty string signals "apply prompt now".  apply_action
-            // reads the actual buffer from state.prompt.
-            Action::SubmitCommand(String::new())
-        }
-        KeyCode::Esc => Action::ToggleFocus, // re-used as cancel signal
-        KeyCode::Backspace => Action::Backspace,
-        KeyCode::Char(c)
-            if key.modifiers == KeyModifiers::NONE
-                || key.modifiers == KeyModifiers::SHIFT =>
-        {
-            Action::InputChar(c)
-        }
-        _ => Action::None,
-    }
-}
-
 // ── Internal: saves-manager key routing ───────────────────────────────────────
 
 /// Hardwired saves-manager sub-mode keys (not rebindable, like prompt and anim).
@@ -1528,12 +1499,9 @@ fn preset_count(cat: usize) -> usize {
 /// them): `SubmitCommand` (game focus), `SaveGame`, `RestoreGame`, `ExportSvg`,
 /// `Quit`.
 ///
-/// **Prompt sub-mode** — while `state.prompt` is `Some`:
-///   - `InputChar(c)` appends to `state.prompt.buffer`.
-///   - `Backspace` pops from `state.prompt.buffer`.
-///   - `SubmitCommand` (the Enter sentinel from `prompt_key_to_action`) applies
-///     the buffer to the mapper and clears `state.prompt`.
-///   - `ToggleFocus` (the Esc sentinel) cancels the prompt without applying.
+/// The former bottom-bar prompt sub-mode is gone: rename/notes/relabel/layer/
+/// config-path/create-file open the `text_entry` modal (submit via
+/// [`apply_text_entry`]), and delete-save opens the `confirm_delete_save` modal.
 ///
 /// **Edge rule for DeleteSelectedConnection / RelabelSelectedEdge**: operates on
 /// the *first* outgoing connection of the selected room as returned by
@@ -1544,62 +1512,6 @@ fn preset_count(cat: usize) -> usize {
 /// size used when the render pane size is not yet available.  The run loop
 /// should call `state.recenter_on` with the real pane size when it knows it.
 pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
-    // ── Prompt sub-mode ───────────────────────────────────────────────────
-    if state.prompt.is_some() {
-        match action {
-            Action::InputChar(c) => {
-                if let Some(p) = &mut state.prompt {
-                    p.buffer.push(c);
-                }
-            }
-            Action::Backspace => {
-                if let Some(p) = &mut state.prompt {
-                    p.buffer.pop();
-                }
-            }
-            // Enter sentinel: apply prompt to mapper then clear.
-            Action::SubmitCommand(_) => {
-                if let Some(p) = state.prompt.take() {
-                    // apply_prompt returns the prompt back for saves-manager and config kinds.
-                    // A `None` return means it applied a graph-mutating prompt (rename room,
-                    // edit notes, relabel edge, rename layer) — bump so the edit shows this
-                    // frame instead of waiting for the next turn. (SQ-0305)
-                    if let Some(returned) = apply_prompt(p, mapper) {
-                        match &returned.kind {
-                            crate::state::PromptKind::ConfigEditPath { field } => {
-                                if let Some(cs) = &mut state.config_screen {
-                                    match field {
-                                        crate::state::ConfigPathField::UserDir => {
-                                            cs.working.user_dir = std::path::PathBuf::from(&returned.buffer);
-                                        }
-                                    }
-                                }
-                            }
-                            crate::state::PromptKind::CreateFile => {
-                                state.filename_submitted = Some(
-                                    if returned.buffer.trim().is_empty() { None } else { Some(returned.buffer) }
-                                );
-                            }
-                            _ => {
-                                // Saves-manager prompt submitted: store for the caller to act on.
-                                state.saves_prompt_submitted =
-                                    Some((returned.kind, returned.buffer));
-                            }
-                        }
-                    } else {
-                        state.bump_graph_gen(); // a graph-mutating prompt was applied (SQ-0305)
-                    }
-                }
-            }
-            // Esc sentinel: cancel without applying.
-            Action::ToggleFocus => {
-                state.prompt = None;
-            }
-            _ => {} // global actions that reached here are handled by caller
-        }
-        return;
-    }
-
     // ── Normal action dispatch ────────────────────────────────────────────
     match action {
         Action::InputChar(c) => {
@@ -1910,28 +1822,25 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
                 state.hotkey_dialog = false;
-                state.prompt = Some(Prompt {
-                    kind: PromptKind::RenameRoom(id),
-                    buffer: String::new(),
-                });
+                state.dialog_focus = 0;
+                // Opens empty: an empty submit clears the room's custom label.
+                state.text_entry = Some(TextEntryDialog::new(TextEntryKind::RenameRoom(id), ""));
             }
         }
         Action::RenameLayer => {
             let layer = state.active_layer(&mapper.graph);
             let current_name = mapper.graph.layer_name(layer).to_owned();
             state.hotkey_dialog = false;
-            state.prompt = Some(Prompt {
-                kind: PromptKind::RenameLayer(layer),
-                buffer: current_name,
-            });
+            state.dialog_focus = 0;
+            state.text_entry =
+                Some(TextEntryDialog::new(TextEntryKind::RenameLayer(layer), current_name));
         }
         Action::EditNotes => {
             if let Some(id) = state.selected_room {
                 state.hotkey_dialog = false;
-                state.prompt = Some(Prompt {
-                    kind: PromptKind::EditNotes(id),
-                    buffer: String::new(),
-                });
+                state.dialog_focus = 0;
+                // Opens empty: submit replaces the room's notes (empty clears them).
+                state.text_entry = Some(TextEntryDialog::new(TextEntryKind::EditNotes(id), ""));
             }
         }
         Action::RelabelSelectedEdge => {
@@ -1942,10 +1851,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 {
                     let old_dir = conn.dir;
                     state.hotkey_dialog = false;
-                    state.prompt = Some(Prompt {
-                        kind: PromptKind::RelabelEdge(id, old_dir),
-                        buffer: String::new(),
-                    });
+                    state.dialog_focus = 0;
+                    state.text_entry =
+                        Some(TextEntryDialog::new(TextEntryKind::RelabelEdge(id, old_dir), ""));
                 }
             }
         }
@@ -2052,15 +1960,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::SavesDelete => {
-            // Open the confirm-delete prompt for the selected entry.
+            // Open the two-button confirm-delete dialog for the selected entry;
+            // focus starts on Cancel (index 1), the safe default.
             if let Some(s) = &state.saves {
                 if let Some(entry) = s.entries.get(s.scroll.selected) {
                     let path = entry.path.clone();
                     state.hotkey_dialog = false;
-                    state.prompt = Some(crate::state::Prompt {
-                        kind: crate::state::PromptKind::ConfirmDeleteSave(path),
-                        buffer: String::new(),
-                    });
+                    state.dialog_focus = 1;
+                    state.confirm_delete_save = Some(path);
                 }
             }
         }
@@ -2572,10 +2479,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     let current = match &f {
                         crate::state::ConfigPathField::UserDir => cs.working.user_dir.to_string_lossy().to_string(),
                     };
-                    state.prompt = Some(crate::state::Prompt {
-                        kind: crate::state::PromptKind::ConfigEditPath { field: f },
-                        buffer: current,
-                    });
+                    state.dialog_focus = 0;
+                    state.text_entry = Some(TextEntryDialog::new(
+                        TextEntryKind::ConfigEditPath { field: f },
+                        current,
+                    ));
                 }
             }
         }
@@ -2835,38 +2743,55 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Apply a completed prompt to the mapper.
-/// Returns the prompt back if it was a saves-manager kind (caller handles it).
-fn apply_prompt(prompt: Prompt, mapper: &mut Mapper) -> Option<Prompt> {
-    match prompt.kind {
-        PromptKind::RenameRoom(id) => {
-            let label = if prompt.buffer.is_empty() {
-                None
-            } else {
-                Some(prompt.buffer)
-            };
+/// Apply a submitted text-entry dialog. Byte-identical to the retired
+/// `apply_prompt`, per kind (SQ-0307):
+///   - map-edit kinds mutate the mapper and bump `graph_gen` so the edit shows
+///     this frame instead of waiting for the next turn (the Wave-1 choke);
+///   - `ConfigEditPath` writes the config-screen working copy;
+///   - `CreateFile` flag-hops the chosen filename (empty → cancel) to the run
+///     loop's `resolve_filename_request`.
+///
+/// Empty-value semantics are preserved per kind: RenameRoom empty clears the
+/// custom label; EditNotes empty clears the notes; RelabelEdge empty (or an
+/// unparseable direction) is a no-op; RenameLayer / ConfigEditPath store the
+/// empty string; CreateFile empty cancels the request.
+pub fn apply_text_entry(dlg: TextEntryDialog, state: &mut AppState, mapper: &mut Mapper) {
+    let value = dlg.field.value;
+    match dlg.kind {
+        TextEntryKind::RenameRoom(id) => {
+            let label = if value.is_empty() { None } else { Some(value) };
             mapper.rename_room(id, label);
+            state.bump_graph_gen(); // a graph-mutating edit was applied (SQ-0305)
         }
-        PromptKind::EditNotes(id) => {
-            mapper.set_notes(id, prompt.buffer);
+        TextEntryKind::EditNotes(id) => {
+            mapper.set_notes(id, value);
+            state.bump_graph_gen();
         }
-        PromptKind::RelabelEdge(id, old_dir) => {
+        TextEntryKind::RelabelEdge(id, old_dir) => {
             // Parse the user's input as a direction name.
-            if let Some(new_dir) = mapper::direction::parse_direction(&prompt.buffer) {
+            if let Some(new_dir) = mapper::direction::parse_direction(&value) {
                 mapper.relabel_edge(id, old_dir, new_dir);
             }
+            state.bump_graph_gen();
         }
-        PromptKind::RenameLayer(id) => {
-            mapper.graph.set_layer_name(id, prompt.buffer);
+        TextEntryKind::RenameLayer(id) => {
+            mapper.graph.set_layer_name(id, value);
+            state.bump_graph_gen();
         }
-        // Saves-manager and config-path prompts: return to the caller to act on.
-        PromptKind::CreateFile
-        | PromptKind::ConfirmDeleteSave(_)
-        | PromptKind::ConfigEditPath { .. } => {
-            return Some(prompt);
+        TextEntryKind::ConfigEditPath { field } => {
+            if let Some(cs) = &mut state.config_screen {
+                match field {
+                    crate::state::ConfigPathField::UserDir => {
+                        cs.working.user_dir = std::path::PathBuf::from(&value);
+                    }
+                }
+            }
+        }
+        TextEntryKind::CreateFile => {
+            state.filename_submitted =
+                Some(if value.trim().is_empty() { None } else { Some(value) });
         }
     }
-    None
 }
 
 /// Select the next (+1) or previous (-1) room, cycling through all room ids in
@@ -3016,16 +2941,15 @@ fn config_path_field(row: usize) -> Option<crate::state::ConfigPathField> {
 fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
     match selected {
         0 => {
-            // user_dir — open path edit prompt.
+            // user_dir — open the text-entry path edit dialog.
             let current = state.config_screen.as_ref()
                 .map(|cs| cs.working.user_dir.to_string_lossy().to_string())
                 .unwrap_or_default();
-            state.prompt = Some(crate::state::Prompt {
-                kind: crate::state::PromptKind::ConfigEditPath {
-                    field: crate::state::ConfigPathField::UserDir,
-                },
-                buffer: current,
-            });
+            state.dialog_focus = 0;
+            state.text_entry = Some(TextEntryDialog::new(
+                TextEntryKind::ConfigEditPath { field: crate::state::ConfigPathField::UserDir },
+                current,
+            ));
         }
         1 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
         2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
@@ -3211,48 +3135,11 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
     }
 
-    // ── Prompt-precedence tests ───────────────────────────────────────────────
-
-    /// Helper: build an AppState with an active RenameRoom prompt.
-    fn state_with_rename_prompt() -> AppState {
-        let mut s = AppState::default();
-        s.toggle_focus(); // Map
-        s.select_room(Some(1));
-        s.prompt = Some(crate::state::Prompt {
-            kind: crate::state::PromptKind::RenameRoom(1),
-            buffer: String::new(),
-        });
-        s
-    }
-
-    #[test]
-    fn ctrl_q_quits_during_prompt() {
-        let s = state_with_rename_prompt();
-        assert!(matches!(
-            key_to_action(&s, ctrl(KeyCode::Char('q'))),
-            Action::Quit
-        ));
-    }
-
-    #[test]
-    fn tab_ignored_during_prompt() {
-        let s = state_with_rename_prompt();
-        // Tab must be absorbed (Action::None), NOT ToggleFocus.
-        assert!(matches!(
-            key_to_action(&s, key(KeyCode::Tab)),
-            Action::None
-        ));
-    }
-
-    #[test]
-    fn ctrl_s_ignored_during_prompt() {
-        let s = state_with_rename_prompt();
-        // Ctrl+S must be absorbed (Action::None), NOT SaveGame.
-        assert!(matches!(
-            key_to_action(&s, ctrl(KeyCode::Char('s'))),
-            Action::None
-        ));
-    }
+    // The former "prompt-precedence" tests (Ctrl+Q/Tab/Ctrl+S during a bottom-bar
+    // prompt) covered the retired `key_to_command` prompt sub-mode. The text-entry
+    // modal is now driven by a run-loop intercept (like the save-name dialog), so
+    // key_to_command no longer special-cases it; that intercept is exercised via
+    // the `text_entry_dialog_key` unit tests in `render::text_entry_dialog`.
 
     // ── Additional tests ──────────────────────────────────────────────────────
 
@@ -3553,13 +3440,12 @@ mod tests {
         let mut m = Mapper::default();
         m.observe(1, "Old Name", None);
         s.select_room(Some(1));
-        s.prompt = Some(crate::state::Prompt {
-            kind: crate::state::PromptKind::RenameRoom(1),
-            buffer: "New Name".to_string(),
-        });
+        let dlg = crate::state::TextEntryDialog::new(
+            crate::state::TextEntryKind::RenameRoom(1),
+            "New Name",
+        );
         let before = s.graph_gen;
-        // The Enter sentinel the prompt submit runs through in production.
-        apply_action(Action::SubmitCommand(String::new()), &mut s, &mut m);
+        apply_text_entry(dlg, &mut s, &mut m);
         assert_eq!(m.graph.room(1).unwrap().label_override.as_deref(), Some("New Name"),
             "rename actually applied");
         assert_ne!(s.graph_gen, before, "renaming a room must invalidate the map memo");
@@ -3773,40 +3659,34 @@ mod tests {
         // RenameRoom is dialog-only: 'r' returns None when dialog is closed.
         assert!(matches!(key_to_action(&state, key(KeyCode::Char('r'))), Action::None));
 
-        // With dialog open, 'r' → RenameRoom action → prompt becomes active.
+        // With dialog open, 'r' → RenameRoom action → the text-entry dialog opens.
         state.hotkey_dialog = true;
         let a = key_to_action(&state, key(KeyCode::Char('r')));
         assert!(matches!(a, Action::RenameRoom));
         apply_action(a, &mut state, &mut mapper);
-        // apply_action clears hotkey_dialog when opening a sub-mode
-        assert!(!state.hotkey_dialog, "hotkey_dialog cleared when prompt opens");
-        assert!(state.prompt.is_some());
-        assert!(matches!(
-            state.prompt.as_ref().unwrap().kind,
-            PromptKind::RenameRoom(1)
-        ));
+        // apply_action clears hotkey_dialog when opening the dialog.
+        assert!(!state.hotkey_dialog, "hotkey_dialog cleared when the dialog opens");
+        let dlg = state.text_entry.as_ref().expect("text-entry dialog opened");
+        assert!(matches!(dlg.kind, crate::state::TextEntryKind::RenameRoom(1)));
+        assert_eq!(state.dialog_focus, 0, "focus starts on the field");
 
-        // Type "Lit Room" into the prompt.
+        // Type "Lit Room" into the field via the dialog's key routing.
         for c in "Lit Room".chars() {
-            let k = if c == ' ' {
-                key(KeyCode::Char(' '))
-            } else {
-                key(KeyCode::Char(c))
-            };
-            let a = key_to_action(&state, k);
-            apply_action(a, &mut state, &mut mapper);
+            let d = state.text_entry.as_mut().unwrap();
+            crate::render::text_entry_dialog::text_entry_dialog_key(KeyCode::Char(c), &mut d.field, 0);
         }
-        assert_eq!(state.prompt.as_ref().unwrap().buffer, "Lit Room");
+        assert_eq!(state.text_entry.as_ref().unwrap().field.value, "Lit Room");
 
-        // Press Enter → apply prompt → mapper updated, prompt cleared.
-        let a = key_to_action(&state, key(KeyCode::Enter));
-        apply_action(a, &mut state, &mut mapper);
-        assert!(state.prompt.is_none());
+        // Submit (what the run loop does on Enter) → mapper updated, dialog cleared.
+        let dlg = state.text_entry.take().unwrap();
+        apply_text_entry(dlg, &mut state, &mut mapper);
+        assert!(state.text_entry.is_none());
         assert_eq!(mapper.graph.room(1).unwrap().label(), "Lit Room");
     }
 
     #[test]
     fn prompt_esc_cancels_without_applying() {
+        use crate::render::text_entry_dialog::{text_entry_dialog_key, TextEntryAction};
         let mut mapper = Mapper::default();
         mapper.observe(1, "Original", None);
 
@@ -3814,14 +3694,17 @@ mod tests {
         state.toggle_focus();
         state.select_room(Some(1));
 
-        // Open rename prompt, type something, then Esc.
+        // Open rename dialog, type something.
         apply_action(Action::RenameRoom, &mut state, &mut mapper);
-        apply_action(Action::InputChar('X'), &mut state, &mut mapper);
-        assert_eq!(state.prompt.as_ref().unwrap().buffer, "X");
+        let d = state.text_entry.as_mut().unwrap();
+        text_entry_dialog_key(KeyCode::Char('X'), &mut d.field, 0);
+        assert_eq!(state.text_entry.as_ref().unwrap().field.value, "X");
 
-        // Esc cancels.
-        apply_action(Action::ToggleFocus, &mut state, &mut mapper);
-        assert!(state.prompt.is_none());
+        // Esc resolves to Cancel; the run loop drops the dialog without applying.
+        let d = state.text_entry.as_mut().unwrap();
+        let (act, _) = text_entry_dialog_key(KeyCode::Esc, &mut d.field, 0);
+        assert!(matches!(act, TextEntryAction::Cancel));
+        state.text_entry = None;
         // Room name unchanged.
         assert_eq!(mapper.graph.room(1).unwrap().label(), "Original");
     }
@@ -4445,7 +4328,7 @@ mod tests {
         apply_action(a, &mut s, &mut Mapper::default());
         // SavesSaveAs now opens the common-dialog save-name modal (not a bottom-bar
         // prompt), prefilled with a greyed date-time default, focused on the field.
-        assert!(s.prompt.is_none(), "no bottom-bar prompt is opened anymore");
+        assert!(s.text_entry.is_none(), "no text-entry dialog is opened for save-as");
         let dlg = s.save_name_dialog.as_ref().expect("save-name dialog opened");
         assert!(!dlg.active, "opens greyed (placeholder) until edited");
         assert!(!dlg.ingame, "host Save State context");
@@ -4454,18 +4337,15 @@ mod tests {
     }
 
     #[test]
-    fn saves_submode_d_opens_confirm_delete_prompt() {
+    fn saves_submode_d_opens_confirm_delete_dialog() {
         let mut s = state_with_saves_open();
         // Select entry 1 (the named save).
         s.saves.as_mut().unwrap().scroll.selected = 1;
         let a = key_to_action(&s, key(KeyCode::Char('d')));
         assert!(matches!(a, Action::SavesDelete));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert!(s.prompt.is_some(), "SavesDelete should open the confirm prompt");
-        assert!(matches!(
-            s.prompt.as_ref().unwrap().kind,
-            crate::state::PromptKind::ConfirmDeleteSave(_)
-        ));
+        assert!(s.confirm_delete_save.is_some(), "SavesDelete opens the confirm-delete dialog");
+        assert_eq!(s.dialog_focus, 1, "focus starts on Cancel (the safe default)");
     }
 
     #[test]
@@ -5361,7 +5241,7 @@ mod tests {
         apply_action(Action::ResetGame, &mut s, &mut m);
         assert!(s.reset_dialog, "ResetGame must set reset_dialog = true");
         assert!(!s.reset_clear_map, "checkbox must start unchecked");
-        assert!(s.prompt.is_none(), "no text prompt should be opened");
+        assert!(s.text_entry.is_none(), "no text-entry dialog should be opened");
     }
 
     // ── reset-game is now leader-only; F5 has no default binding ──────────────
@@ -5435,12 +5315,12 @@ mod tests {
         state.push_transcript_runs(&r1.transcript, crate::state::TranscriptKind::Story, &r1.transcript_runs);
         state.turns = 5;
 
-        // Rebuild session from story_bytes (what handle_saves_prompt does on confirm).
+        // Rebuild session from story_bytes (what the reset flow does on confirm).
         let mut new_session = GameSession::new(story_bytes.clone(), true, false, None).expect("GameSession::new for reset");
         let new_start_loc = current_location(&new_session.machine);
         let new_room_number = new_start_loc.as_ref().map(|s| s.number);
 
-        // Reset state fields exactly as handle_saves_prompt does.
+        // Reset state fields exactly as the reset flow does.
         state.turns = 0;
         state.input.clear();
         state.suggestions.clear();

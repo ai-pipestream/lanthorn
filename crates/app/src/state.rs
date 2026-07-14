@@ -715,7 +715,7 @@ pub enum Focus {
     Map,
 }
 
-// ── Prompt sub-mode ───────────────────────────────────────────────────────────
+// ── Text-entry prompt kinds ─────────────────────────────────────────────────
 
 /// Which path field is being edited in the config screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -723,20 +723,20 @@ pub enum ConfigPathField {
     UserDir,
 }
 
-/// What triggered the prompt, carrying the target room (and edge direction where
-/// applicable).  Used by `apply_action` to know which mapper method to call on
-/// Enter.
+/// Which text prompt a [`TextEntryDialog`] serves, carrying the target room (and
+/// edge direction where applicable) or config context each submit needs. Used by
+/// `apply_text_entry` to know which mapper/config method to call on submit.
+/// (SQ-0307 — replaces the retired bottom-bar `PromptKind`; the y/n
+/// `ConfirmDeleteSave` moved to a two-button confirm dialog.)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PromptKind {
+pub enum TextEntryKind {
     RenameRoom(RoomId),
     EditNotes(RoomId),
     /// Relabel the edge that exits `RoomId` in the given direction.
     RelabelEdge(RoomId, Direction),
     /// Rename the layer with the given id.
     RenameLayer(LayerId),
-    /// Confirm deletion of the named save at this path.
-    ConfirmDeleteSave(std::path::PathBuf),
-    /// Edit a config path field (user_dir or colors.scheme) from the config screen.
+    /// Edit a config path field (user_dir) from the config screen.
     ConfigEditPath { field: ConfigPathField },
     /// Enter a filename for a game `create_by_prompt` (write modes). The pending
     /// request lives on `AppState.pending_filename`.
@@ -769,6 +769,28 @@ impl SaveNameDialog {
             active: false,
             ingame,
         }
+    }
+}
+
+// ── Text-entry dialog ─────────────────────────────────────────────────────────
+
+/// A single-field text-entry modal (title, one caret field, OK/Cancel) — the
+/// common home for the former bottom-bar map-edit / config-path / create-file
+/// prompts (SQ-0307). Unlike the save-name dialog, the field opens ACTIVE with
+/// the prompt's initial value and the caret at the end (normal caret editing, no
+/// greyed-placeholder adopt semantics). Held in `AppState.text_entry`.
+#[derive(Debug, Clone)]
+pub struct TextEntryDialog {
+    /// Which prompt this dialog serves (carries the submit context).
+    pub kind: TextEntryKind,
+    /// The editable buffer + caret, prefilled with the prompt's initial value.
+    pub field: crate::text_field::TextField,
+}
+
+impl TextEntryDialog {
+    /// Open for `kind`, prefilled with `initial` (caret at the end).
+    pub fn new(kind: TextEntryKind, initial: impl Into<String>) -> TextEntryDialog {
+        TextEntryDialog { kind, field: crate::text_field::TextField::new(initial) }
     }
 }
 
@@ -989,15 +1011,6 @@ pub struct ConfigScreenState {
     pub scroll: crate::list_scroll::ListScroll,
 }
 
-/// A small text-entry sub-mode overlaid on map focus.  While `AppState::prompt`
-/// is `Some`, key events are routed to the prompt buffer rather than to the
-/// normal map bindings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prompt {
-    pub kind: PromptKind,
-    pub buffer: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     Split,
@@ -1210,9 +1223,14 @@ pub struct AppState {
     pub input: String,
     /// Transient status message shown on the status line (cleared on next keypress/turn).
     pub status_msg: Option<String>,
-    /// Active text-entry prompt, if any.  While set, key events are routed to
-    /// the prompt buffer instead of the normal map or game bindings.
-    pub prompt: Option<Prompt>,
+    /// Active single-field text-entry dialog (rename room / edit notes / relabel
+    /// edge / rename layer / config path / create-file), if any. A modal drawn in
+    /// the graphics-free dialog area; its run-loop intercept owns key/mouse input
+    /// while open. (SQ-0307)
+    pub text_entry: Option<TextEntryDialog>,
+    /// When `Some`, the two-button "delete this save?" confirm dialog is open for
+    /// the named save at this path. Confirm deletes it; cancel keeps it. (SQ-0307)
+    pub confirm_delete_save: Option<std::path::PathBuf>,
     /// When true, draw each chained room's alignment code (`R{id}` / `C{id}`) in
     /// its box interior (Boxes zoom only).  Toggled by `Ctrl+A`.
     pub show_alignment: bool,
@@ -1311,7 +1329,7 @@ pub struct AppState {
     /// `session.resume_save`/`resume_restore` instead of the Ctrl+S/Ctrl+R path.
     pub ingame_io: Option<crate::session::PendingIo>,
 
-    /// Flag-hop: set by `handle_saves_prompt` after a successful in-game SAVE so
+    /// Flag-hop: set by `handle_save_as` after a successful in-game SAVE so
     /// the run loop (where `session`/`mapper`/`last_panes` are in scope) performs
     /// the VM resume + recenter. `Some(true)` = file written. Cleared on resume.
     pub ingame_resume_save: Option<bool>,
@@ -1371,11 +1389,6 @@ pub struct AppState {
 
     /// Active rewind/replay modal state. `None` means the modal is closed.
     pub replay: Option<ReplayState>,
-
-    /// Set by apply_action when a saves-manager prompt (ConfirmDeleteSave)
-    /// is submitted. The caller (main.rs) reads this to perform the I/O operation,
-    /// then clears it. The tuple is (kind, user_input_buffer).
-    pub saves_prompt_submitted: Option<(PromptKind, String)>,
 
     /// A game `create_by_prompt` awaiting a host filename (its modal is open).
     pub pending_filename: Option<crate::session::FilenameReq>,
@@ -1584,7 +1597,8 @@ impl Default for AppState {
             modal_list_viewport: 0,
             input: String::new(),
             status_msg: None,
-            prompt: None,
+            text_entry: None,
+            confirm_delete_save: None,
             show_alignment: false,
             show_portal_labels: false,
             tidy_anim: None,
@@ -1633,7 +1647,6 @@ impl Default for AppState {
             unsaved_progress: false,
             history: Vec::new(),
             replay: None,
-            saves_prompt_submitted: None,
             pending_filename: None,
             filename_submitted: None,
             dict_words: Vec::new(),
@@ -1857,7 +1870,8 @@ impl AppState {
             || self.hotkey_dialog
             || self.room_panel.is_some()
             || self.tidy_anim.is_some()
-            || self.prompt.is_some()
+            || self.text_entry.is_some()
+            || self.confirm_delete_save.is_some()
             || self.reset_dialog
             || self.save_name_dialog.is_some()
             || self.aux_prompt
@@ -3421,10 +3435,15 @@ mod tests {
         assert!(s.any_overlay_open(), "tidy_anim active => any_overlay_open true");
         s.tidy_anim = None;
 
-        // prompt
-        s.prompt = Some(Prompt { kind: PromptKind::CreateFile, buffer: String::new() });
-        assert!(s.any_overlay_open(), "prompt active => any_overlay_open true");
-        s.prompt = None;
+        // text_entry
+        s.text_entry = Some(TextEntryDialog::new(TextEntryKind::CreateFile, ""));
+        assert!(s.any_overlay_open(), "text_entry active => any_overlay_open true");
+        s.text_entry = None;
+
+        // confirm_delete_save
+        s.confirm_delete_save = Some(std::path::PathBuf::from("/x.babelmap"));
+        assert!(s.any_overlay_open(), "confirm_delete_save active => any_overlay_open true");
+        s.confirm_delete_save = None;
 
         // launch_dialog
         s.launch_dialog = true;

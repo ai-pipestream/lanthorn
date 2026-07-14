@@ -19,7 +19,7 @@ use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
-use app::input::{apply_action, key_to_command, mouse_to_action, style_dialog_action, Action, KeyResolve};
+use app::input::{apply_action, apply_text_entry, key_to_command, mouse_to_action, style_dialog_action, Action, KeyResolve};
 use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};
 use app::render::style_editor::StyleEditorRects;
@@ -28,6 +28,8 @@ use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
 use app::render::aux_dialog::{aux_dialog_key_focused, AuxDialogAction};
 use app::render::reset_dialog::{reset_dialog_key_focused, ResetDialogAction};
 use app::render::save_name_dialog::{save_name_dialog_key, SaveNameAction};
+use app::render::text_entry_dialog::{text_entry_dialog_key, TextEntryAction};
+use app::render::confirm_delete_dialog::{confirm_delete_key_focused, ConfirmDeleteAction};
 use app::render::quit_dialog::{quit_dialog_key_focused, QuitDialogAction};
 use app::render::launch_dialog::{launch_dialog_key_focused, LaunchDialogAction};
 use app::render::verbmenu::draw_verb_menu;
@@ -46,7 +48,7 @@ use app::hints;
 use app::keymap::Context;
 use app::render::hintbar::{hint_bar, ANIM_HINTS, GAME_HINTS, MAP_HINTS};
 use app::slash;
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, RoomPanelMode, SavesState};
 
 mod engine_helpers;
 mod ingame_io;
@@ -61,7 +63,7 @@ mod turn;
 
 use crate::slash_dispatch::dispatch_slash_outcome;
 use crate::ingame_io::{
-    handle_save_as, handle_saves_prompt, open_ingame_saves, resolve_filename_request,
+    delete_save_confirmed, handle_save_as, open_ingame_saves, resolve_filename_request,
     resolve_ingame_dialog,
 };
 use crate::reset::reset_game;
@@ -210,6 +212,10 @@ struct PaneRects {
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
     /// Hit-rects for the save-name dialog (when open).
     pub save_name_dialog: Option<app::render::save_name_dialog::SaveNameDialogRects>,
+    /// Hit-rects for the generic text-entry dialog (when open).
+    pub text_entry: Option<app::render::text_entry_dialog::TextEntryDialogRects>,
+    /// Hit-rects for the confirm-delete dialog (when open).
+    pub confirm_delete: Option<app::render::confirm_delete_dialog::ConfirmDeleteDialogRects>,
     /// Hit-rects for the quit dialog (when open).
     pub quit_dialog: Option<app::render::quit_dialog::QuitDialogRects>,
     /// Hit-rects for the launch dialog (when open).
@@ -582,18 +588,6 @@ fn draw_frame(
             let hint_width = (pane_layout.help_row.width as usize).saturating_sub(prefix.chars().count() + 3);
             let hints = hint_bar(&state.keymap, &state.hotkeys, Context::Anim, ANIM_HINTS, hint_width);
             format!("{} | {}", prefix, hints)
-        } else if let Some(prompt) = &state.prompt {
-            // Show prompt label with instructions when a prompt is active.
-            let label = match &prompt.kind {
-                PromptKind::RenameRoom(_) => "Rename",
-                PromptKind::EditNotes(_) => "Notes",
-                PromptKind::RelabelEdge(_, _) => "Direction",
-                PromptKind::RenameLayer(_) => "Layer name",
-                PromptKind::ConfirmDeleteSave(_) => "Delete? (y/n)",
-                PromptKind::ConfigEditPath { .. } => "Config path",
-                PromptKind::CreateFile => "Filename",
-            };
-            format!("{}: type text | Enter: apply | Esc: cancel", label)
         } else if state.resize_mode {
             use app::state::ResizeTarget;
             let t = match state.resize_target {
@@ -641,39 +635,14 @@ fn draw_frame(
         // Story-pane text-selection highlight + copy extraction now happen inside
         // render_middle (render/transcript.rs), which has the full wrapped-row set
         // and can select text beyond the visible viewport. (SQ-0197)
-
-        // ── Prompt overlay — map-editing prompts overlay the map. (The save-name
-        // prompt is no longer a bottom-bar prompt; it is a common-dialog modal that
-        // renders in the graphics-free dialog area — see save_name_dialog.) ───────
-        if let Some(prompt) = &state.prompt {
-            let overlay_area = if map_area.height > 0 {
-                map_area
-            } else if story_area.height > 0 {
-                story_area
-            } else {
-                pane_layout.panes_area()
-            };
-            if overlay_area.height > 0 {
-                let y = overlay_area.bottom() - 1;
-                let label = match &prompt.kind {
-                    PromptKind::RenameRoom(_) => "Rename: ",
-                    PromptKind::EditNotes(_) => "Notes:  ",
-                    PromptKind::RelabelEdge(_, _) => "Dir:    ",
-                    PromptKind::RenameLayer(_) => "Layer:  ",
-                    PromptKind::ConfirmDeleteSave(_) => "Del y/n:",
-                    PromptKind::ConfigEditPath { .. } => "Path:   ",
-                    PromptKind::CreateFile => "File:   ",
-                };
-                let line = format!("{}{}_", label, prompt.buffer);
-                let overlay_style = Style::default().add_modifier(Modifier::REVERSED);
-                draw_str_clipped(buf, overlay_area.x, y, &line, overlay_style, overlay_area);
-            }
-        }
+        //
+        // The former bottom-bar map-edit prompts are now the text-entry modal drawn
+        // by the overlay ladder in the graphics-free dialog area (SQ-0307).
     })?;
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, save_name_dialog: overlay_rects.save_name_dialog, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -801,7 +770,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, save_name_dialog: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1328,7 +1297,7 @@ fn main() {
             }
 
             // Resolve a submit/cancel outside the dialog borrow. Empty names are
-            // rejected (the dialog stays open); valid names reuse handle_saves_prompt.
+            // rejected (the dialog stays open); valid names go through handle_save_as.
             if do_save {
                 let value = state
                     .save_name_dialog
@@ -1356,6 +1325,135 @@ fn main() {
                 turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                 turn::persist_vfs_after_turn(&mut *session, &game_dir);
                 if quit { break; }
+            }
+            continue;
+        }
+
+        // ── Text-entry dialog intercept — before normal action routing ────────
+        // The generic single-field modal (rename room / edit notes / relabel edge /
+        // rename layer / config path / create-file). Focus ring: 0 = field, 1 = OK,
+        // 2 = Cancel. The field opens active, prefilled; Enter submits (each kind
+        // decides empty semantics — see apply_text_entry), Esc cancels. (SQ-0307)
+        if state.text_entry.is_some() {
+            let mut do_submit = false;
+            let mut do_cancel = false;
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    use crossterm::event::{KeyCode, KeyModifiers};
+                    // Suppress Ctrl/Alt/Super-modified printable chars (accelerators,
+                    // not text); everything else routes to the field state machine.
+                    let ctrl_char = matches!(k.code, KeyCode::Char(_))
+                        && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
+                    if !ctrl_char {
+                        let focus = state.dialog_focus;
+                        let dlg = state.text_entry.as_mut().unwrap();
+                        let (act, new_focus) = text_entry_dialog_key(k.code, &mut dlg.field, focus);
+                        state.dialog_focus = new_focus;
+                        match act {
+                            TextEntryAction::Submit => do_submit = true,
+                            TextEntryAction::Cancel => do_cancel = true,
+                            TextEntryAction::None => {}
+                        }
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(td) = &last_panes.text_entry {
+                            let in_close = td.close.is_some_and(|r| r.contains(pt));
+                            let in_ok = td.ok.is_some_and(|r| r.contains(pt));
+                            let in_cancel = td.cancel.is_some_and(|r| r.contains(pt));
+                            let in_field = td.field.is_some_and(|r| r.contains(pt));
+                            let in_dialog = td.area.contains(pt);
+                            if in_close || in_cancel {
+                                do_cancel = true;
+                            } else if in_ok {
+                                do_submit = true;
+                            } else if in_field {
+                                // Focus the field (caret to end).
+                                state.dialog_focus = 0;
+                                if let Some(dlg) = state.text_entry.as_mut() { dlg.field.end(); }
+                            } else if !in_dialog {
+                                // Click outside: swallow, keep the dialog open.
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
+                _ => {}
+            }
+
+            if do_submit {
+                if let Some(dlg) = state.text_entry.take() {
+                    apply_text_entry(dlg, &mut state, &mut mapper);
+                }
+                // A CreateFile submit hops through filename_submitted → resume here;
+                // map-edit / config submits leave nothing pending (both resolvers no-op).
+                let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                    || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                if quit { break; }
+            } else if do_cancel {
+                state.text_entry = None;
+                // A cancelled CreateFile leaves pending_filename set with no dialog
+                // open → resolve_filename_request treats it as a NULL fileref.
+                let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                    || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                if quit { break; }
+            }
+            continue;
+        }
+
+        // ── Confirm-delete dialog intercept — before normal action routing ────
+        // A two-button confirm over the saves manager. Confirm deletes the save,
+        // Cancel keeps it; focus starts on Cancel (the safe default). (SQ-0307)
+        if state.confirm_delete_save.is_some() {
+            let mut outcome: Option<bool> = None; // Some(true)=delete, Some(false)=keep
+            match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => {
+                    use crossterm::event::KeyCode;
+                    match k.code {
+                        KeyCode::Tab | KeyCode::Right =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                        KeyCode::BackTab | KeyCode::Left =>
+                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                        code => match confirm_delete_key_focused(code, state.dialog_focus) {
+                            ConfirmDeleteAction::Confirm => outcome = Some(true),
+                            ConfirmDeleteAction::Cancel => outcome = Some(false),
+                            ConfirmDeleteAction::None => {}
+                        },
+                    }
+                }
+                Event::Mouse(m) => {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                        if let Some(cd) = &last_panes.confirm_delete {
+                            let in_close = cd.close.is_some_and(|r| r.contains(pt));
+                            let in_delete = cd.delete.is_some_and(|r| r.contains(pt));
+                            let in_cancel = cd.cancel.is_some_and(|r| r.contains(pt));
+                            if in_close || in_cancel {
+                                outcome = Some(false);
+                            } else if in_delete {
+                                outcome = Some(true);
+                            }
+                        }
+                    }
+                }
+                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
+                _ => {}
+            }
+
+            if let Some(confirmed) = outcome {
+                if let Some(path) = state.confirm_delete_save.take() {
+                    delete_save_confirmed(&path, confirmed, &game_dir, &mut state);
+                }
+                // Return the saves manager (still open behind us) to its default focus.
+                state.dialog_focus = 0;
             }
             continue;
         }
@@ -2173,24 +2271,7 @@ fn main() {
                 continue;
             }
 
-            Action::SubmitCommand(cmd) => {
-                // When a prompt is active, SubmitCommand is the Enter sentinel;
-                // route to apply_action to apply the prompt to the mapper.
-                if state.prompt.is_some() {
-                    apply_action(Action::SubmitCommand(cmd), &mut state, &mut mapper);
-                    // Handle any saves-manager or reset prompt that was submitted.
-                    if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
-                        handle_saves_prompt(kind, buf, &game_dir, &mut state);
-                    }
-                    // Resume an in-game save/restore if this prompt resolved it.
-                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
-                        || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
-                    turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                    turn::persist_vfs_after_turn(&mut *session, &game_dir);
-                    if quit { break; }
-                    continue;
-                }
-
+            Action::SubmitCommand(_) => {
                 // A Glulx game waiting on a timer/mouse/hyperlink event only has no
                 // line request pending: Enter has nothing to submit. Swallow it
                 // (keeping the typed buffer intact for the real prompt) rather than
@@ -2580,12 +2661,6 @@ fn main() {
             other => {
                 apply_action(other, &mut state, &mut mapper);
             }
-        }
-
-        // After apply_action: check for saves-manager or reset prompt that was submitted.
-        // (This covers the case where apply_action routed a saves/reset prompt submit.)
-        if let Some((kind, buf)) = state.saves_prompt_submitted.take() {
-            handle_saves_prompt(kind, buf, &game_dir, &mut state);
         }
 
         // After apply_action: if a sound toggle / config save flipped enable_sound,
