@@ -213,6 +213,10 @@ pub struct Machine {
     /// Recursion depth of filter-iosys (mode 1) callbacks, guarding against a
     /// filter function whose own output recurses back into `emit`.
     filter_depth: u32,
+    /// Recursion depth of echo-stream forwarding in `glk_stream_put`, bounding a
+    /// pathological echo loop (windows echoing to each other's streams, which the
+    /// Glk spec calls illegal) so output can never infinite-loop.
+    echo_depth: u32,
     /// When `Some`, `emit` diverts all output into this buffer instead of routing
     /// it through the I/O system. Used to decode a compressed (E1) string object
     /// handed to `glk_put_string` into a `String` (capturing embedded string- and
@@ -392,6 +396,7 @@ impl Machine {
             iosys_mode: 0,
             iosys_rock: 0,
             filter_depth: 0,
+            echo_depth: 0,
             emit_capture: None,
             cur_stringtbl: decode_table,
             heap_start: 0,
@@ -2477,6 +2482,15 @@ impl Machine {
                     _ => {} // pair window or stale: nothing to display
                 }
                 self.glk.window_stream_advance(sid, s.chars().count() as u32);
+                // Echo: text printed to a window is also written to its echo
+                // stream (Glk spec §3.6). `window_set_echo_stream` refuses a
+                // self-loop; `echo_depth` bounds any longer loop the game builds.
+                let echo = self.glk.window_echo_stream(win);
+                if echo != 0 && echo != sid && self.echo_depth < 8 {
+                    self.echo_depth += 1;
+                    self.glk_stream_put(echo, s);
+                    self.echo_depth -= 1;
+                }
             }
             StreamKind::Memory { addr, len, pos, unicode } => {
                 let elsize = if unicode { 4 } else { 1 };
@@ -2922,6 +2936,12 @@ impl Machine {
                 0
             }
             0x002C => self.glk.window_stream(a(0)).unwrap_or(0), // glk_window_get_stream
+            0x002D => {
+                // glk_window_set_echo_stream(win, str)
+                self.glk.window_set_echo_stream(a(0), a(1));
+                0
+            }
+            0x002E => self.glk.window_echo_stream(a(0)), // glk_window_get_echo_stream
             0x0030 => self.glk.window_sibling(a(0)).unwrap_or(0), // glk_window_get_sibling
             0x002F => {
                 // glk_set_window(win)
@@ -9097,6 +9117,25 @@ mod tests {
         assert_eq!(m.mem.read32(0x1C4).unwrap(), 1_784_030_400, "low_sec restored");
         // glk_current_time wrote a nonzero (modern) low_sec at 0x144.
         assert_ne!(m.mem.read32(0x144).unwrap(), 0, "current_time wrote the live clock");
+        assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_echo_stream_duplicates_window_output_to_a_second_stream() {
+        use asm::Op::{C16, C8, Mem16, Zero};
+        // Prelude made window 1 current. Open a memory stream (id 2) over
+        // [0x180,0x188), set it as window 1's echo, then print to the window.
+        let mut body = glk_call(0x43, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100)); // open_memory -> 2
+        body.extend(glk_call(0x2D, &[C8(1), C8(2)], Zero)); // window_set_echo_stream(1, 2)
+        body.extend(glk_call(0x2E, &[C8(1)], Mem16(0x0104))); // window_get_echo_stream(1) -> 0x104
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero)); // glk_put_string("Hi") -> window (+ echo)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open_memory returns stream 2");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 2, "get_echo_stream returns the set stream");
+        assert_eq!(backend_of(&m).text(1), "Hi", "the window still receives the text");
+        assert_eq!(m.mem.read8(0x180).unwrap(), b'H' as u32, "echo stream also got 'H'");
+        assert_eq!(m.mem.read8(0x181).unwrap(), b'i' as u32, "echo stream also got 'i'");
         assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
     }
 }

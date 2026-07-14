@@ -875,6 +875,12 @@ struct Window {
     /// Default true (Glk spec §4.2). Hosts that echo typed input consult this;
     /// a game that turns it off takes responsibility for echoing itself.
     echo_line: bool,
+    /// The window's echo stream (`glk_window_set_echo_stream`; 0 = none). Every
+    /// character printed to this window is also written to this stream (Glk spec
+    /// §3.6). Cleared to 0 when that stream is closed; not cleared when the
+    /// window itself closes (the echo stream outlives the window). Not
+    /// serialized (rebuilt by the game after a restore, like other stream links).
+    echo: u32,
     // Pair-window fields (all 0 for leaf windows):
     child1: u32,
     child2: u32,
@@ -1166,6 +1172,7 @@ impl Model {
             hyperlink_req: false,
             terminators: Vec::new(),
             echo_line: true,
+            echo: 0,
             child1: 0,
             child2: 0,
             key: 0,
@@ -1672,6 +1679,24 @@ impl Model {
     pub fn window_stream(&self, win: u32) -> Option<u32> {
         self.win(win).map(|w| w.stream)
     }
+
+    /// `glk_window_set_echo_stream`: set (or clear, with `str == 0`) the echo
+    /// stream of `win`. Setting a window's echo to its own window stream is
+    /// illegal (it would infinite-loop; Glk spec §3.6) — that request is refused
+    /// (echo left cleared). Longer echo loops are additionally bounded at the
+    /// output funnel in exec.rs. A no-op for an invalid or pair window.
+    pub fn window_set_echo_stream(&mut self, win: u32, str: u32) {
+        let own = self.win(win).map(|w| w.stream);
+        if let Some(w) = self.win_mut(win) {
+            w.echo = if str != 0 && Some(str) == own { 0 } else { str };
+        }
+    }
+
+    /// `glk_window_get_echo_stream`: the window's echo stream id (0 = none, or
+    /// an invalid/pair window).
+    pub fn window_echo_stream(&self, win: u32) -> u32 {
+        self.win(win).map(|w| w.echo).unwrap_or(0)
+    }
     /// Iterate windows: the smallest existing id greater than `prev`
     /// (`prev == 0` → the first), or 0 when exhausted. Returns `(id, rock)`.
     pub fn window_iterate(&self, prev: u32) -> (u32, u32) {
@@ -1881,6 +1906,13 @@ impl Model {
         }
         if self.cur_stream == id {
             self.cur_stream = 0;
+        }
+        // A closed stream that was some window's echo stream: those windows stop
+        // echoing (Glk spec §3.6).
+        for w in self.windows.iter_mut().flatten() {
+            if w.echo == id {
+                w.echo = 0;
+            }
         }
         Some(counts)
     }
@@ -2503,7 +2535,7 @@ impl Model {
             let hyperlink_req = r.u32()? != 0;
             windows.push(Some(Window {
                 id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
-                hyperlink_req, terminators: Vec::new(), echo_line: true, child1, child2, key, method, size,
+                hyperlink_req, terminators: Vec::new(), echo_line: true, echo: 0, child1, child2, key, method, size,
             }));
         }
 
@@ -3534,5 +3566,38 @@ mod style_hint_tests {
         // A simple time of 100 minutes (factor 60) = 6000s = 1970-01-01 01:40:00.
         let d = dt::time_to_date(100i64 * 60, 0);
         assert_eq!((d.hour, d.minute), (1, 40));
+    }
+
+    // ── echo streams (Glk 0.7.6 §3.6) ─────────────────────────────────────────
+
+    #[test]
+    fn echo_stream_set_and_get_round_trip() {
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let mem = m.stream_open_memory(0x1000, 64, false, 0);
+        assert_eq!(m.window_echo_stream(win), 0, "no echo by default");
+        m.window_set_echo_stream(win, mem);
+        assert_eq!(m.window_echo_stream(win), mem, "get returns the set echo stream");
+        m.window_set_echo_stream(win, 0);
+        assert_eq!(m.window_echo_stream(win), 0, "cleared with str = 0");
+    }
+
+    #[test]
+    fn echo_stream_refuses_self_loop() {
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let own = m.window_stream(win).unwrap();
+        m.window_set_echo_stream(win, own); // illegal per §3.6
+        assert_eq!(m.window_echo_stream(win), 0, "self-loop refused, echo stays cleared");
+    }
+
+    #[test]
+    fn closing_echo_stream_stops_the_window_echoing() {
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let mem = m.stream_open_memory(0x1000, 64, false, 0);
+        m.window_set_echo_stream(win, mem);
+        m.stream_close(mem);
+        assert_eq!(m.window_echo_stream(win), 0, "closed echo stream is unhooked");
     }
 }
