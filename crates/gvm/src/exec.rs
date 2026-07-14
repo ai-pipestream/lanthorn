@@ -2513,6 +2513,8 @@ impl Machine {
             // A SavedGame host conduit: writes discard (the `@save` shim credits
             // its write count separately via `note_stream_write`).
             StreamKind::Null => {}
+            // A resource stream is read-only: writes are silently discarded.
+            StreamKind::Resource { .. } => {}
         }
     }
 
@@ -2981,6 +2983,22 @@ impl Machine {
             0x0139 => self.glk.stream_open_memory(a(0), a(1), true, a(3)),  // open_memory_uni
             0x0042 => self.glk.stream_open_file(a(0), a(1), false, a(2)),   // open_file(fref,fmode,rock)
             0x0138 => self.glk.stream_open_file(a(0), a(1), true, a(2)),    // open_file_uni
+            0x0049 => {
+                // glk_stream_open_resource(filenum, rock) — read-only Blorb Data
+                // chunk; the host resolves the bytes + text/binary flag. Missing
+                // resource → open fails (0).
+                match self.backend.data_resource(a(0)) {
+                    Some((data, is_text)) => self.glk.stream_open_resource(data, false, is_text, a(1)),
+                    None => 0,
+                }
+            }
+            0x013A => {
+                // glk_stream_open_resource_uni(filenum, rock)
+                match self.backend.data_resource(a(0)) {
+                    Some((data, is_text)) => self.glk.stream_open_resource(data, true, is_text, a(1)),
+                    None => 0,
+                }
+            }
             0x0044 => {
                 // glk_stream_close(str, resultptr{readcount, writecount})
                 match self.glk.stream_close(a(0)) {
@@ -3014,6 +3032,9 @@ impl Machine {
                     _ if self.glk.file_stream_is_unicode(sid) == Some(false) => {
                         self.glk.file_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
                     }
+                    _ if self.glk.resource_stream_is_unicode(sid) == Some(false) => {
+                        self.glk.resource_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
+                    }
                     _ => 0xFFFF_FFFF, // EOF or not a byte stream
                 }
             }
@@ -3036,6 +3057,19 @@ impl Machine {
                 } else if self.glk.file_stream_is_unicode(sid) == Some(false) {
                     while count + 1 < maxlen {
                         match self.glk.file_stream_read_char(sid) {
+                            Some(byte) => {
+                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                                count += 1;
+                                if byte == b'\n' as u32 {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                } else if self.glk.resource_stream_is_unicode(sid) == Some(false) {
+                    while count + 1 < maxlen {
+                        match self.glk.resource_stream_read_char(sid) {
                             Some(byte) => {
                                 self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
                                 count += 1;
@@ -3075,6 +3109,16 @@ impl Machine {
                             None => break,
                         }
                     }
+                } else if self.glk.resource_stream_is_unicode(sid) == Some(false) {
+                    while count < maxlen {
+                        match self.glk.resource_stream_read_char(sid) {
+                            Some(byte) => {
+                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                                count += 1;
+                            }
+                            None => break,
+                        }
+                    }
                 }
                 count
             }
@@ -3089,6 +3133,9 @@ impl Machine {
                     }
                     _ if self.glk.file_stream_is_unicode(sid).is_some() => {
                         self.glk.file_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
+                    }
+                    _ if self.glk.resource_stream_is_unicode(sid).is_some() => {
+                        self.glk.resource_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
                     }
                     _ => 0xFFFF_FFFF,
                 }
@@ -3112,6 +3159,16 @@ impl Machine {
                 } else if self.glk.file_stream_is_unicode(sid).is_some() {
                     while count < maxlen {
                         match self.glk.file_stream_read_char(sid) {
+                            Some(cp) => {
+                                self.store_mem_sized(buf + count * 4, cp, 4)?;
+                                count += 1;
+                            }
+                            None => break,
+                        }
+                    }
+                } else if self.glk.resource_stream_is_unicode(sid).is_some() {
+                    while count < maxlen {
+                        match self.glk.resource_stream_read_char(sid) {
                             Some(cp) => {
                                 self.store_mem_sized(buf + count * 4, cp, 4)?;
                                 count += 1;
@@ -3145,6 +3202,19 @@ impl Machine {
                 } else if self.glk.file_stream_is_unicode(sid).is_some() {
                     while count + 1 < maxlen {
                         match self.glk.file_stream_read_char(sid) {
+                            Some(cp) => {
+                                self.store_mem_sized(buf + count * 4, cp, 4)?;
+                                count += 1;
+                                if cp == b'\n' as u32 {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
+                } else if self.glk.resource_stream_is_unicode(sid).is_some() {
+                    while count + 1 < maxlen {
+                        match self.glk.resource_stream_read_char(sid) {
                             Some(cp) => {
                                 self.store_mem_sized(buf + count * 4, cp, 4)?;
                                 count += 1;
@@ -4221,6 +4291,7 @@ impl Machine {
             12 => 1,                 // gestalt_HyperlinkInput(wintype) → supported
             0x1100 => 1,             // gestalt_GarglkText → garglk_set_zcolors/reversevideo supported
             20 => 1,                 // gestalt_DateTime → clock + date/time conversions supported
+            22 => 1,                 // gestalt_ResourceStream → glk_stream_open_resource[_uni] supported
             // the rest are not supported.
             _ => 0,
         }
@@ -8652,6 +8723,113 @@ mod tests {
         assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
     }
 
+    // ── Glk resource streams (glk_stream_open_resource over a Blorb Data chunk) ──
+
+    /// A machine over `ram` bytes of RAM whose backend serves the given canned
+    /// Data resources, for resource-stream dispatch tests (no window needed).
+    fn resource_machine(backend: glk::TestBackend, ram: u32) -> Machine {
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, ram);
+        let mem = Memory::new(built.image).expect("valid image");
+        Machine::with_glk(mem, Box::new(backend))
+    }
+
+    #[test]
+    fn glk_stream_open_resource_reads_bytes_and_reports_gestalt() {
+        // Data resource #1 is a TEXT chunk "Hi\n"; #2 a binary chunk of 3 bytes.
+        // Read them a byte at a time via glk_get_char_stream (0x0090) through the
+        // non-uni resource path, then confirm EOF and a clean close.
+        let backend = glk::TestBackend::new()
+            .with_data_resource(1, b"Hi\n".to_vec(), true)
+            .with_data_resource(2, vec![0xDE, 0xAD, 0xBE], false);
+        let mut m = resource_machine(backend, 0x100);
+
+        // gestalt_ResourceStream (22) is advertised.
+        assert_eq!(m.glk_dispatch(0x0004, &[22, 0]).unwrap(), 1, "gestalt_ResourceStream");
+
+        let sid = m.glk_dispatch(0x0049, &[1, 0]).unwrap(); // open_resource(filenum=1, rock=0)
+        assert_ne!(sid, 0, "text resource opened");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'H' as u32);
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'i' as u32);
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'\n' as u32);
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0xFFFF_FFFF, "EOF");
+        // get_position reports the byte cursor (3), then close cleanly.
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 3, "position after reads");
+        m.glk_dispatch(0x0044, &[sid, 0]).unwrap(); // stream_close, NULL result ptr
+
+        // Binary resource: raw bytes, no decoding, in the non-uni path.
+        let bin = m.glk_dispatch(0x0049, &[2, 0]).unwrap();
+        assert_ne!(bin, 0);
+        assert_eq!(m.glk_dispatch(0x0090, &[bin]).unwrap(), 0xDE);
+        assert_eq!(m.glk_dispatch(0x0090, &[bin]).unwrap(), 0xAD);
+        assert_eq!(m.glk_dispatch(0x0090, &[bin]).unwrap(), 0xBE);
+        assert_eq!(m.glk_dispatch(0x0090, &[bin]).unwrap(), 0xFFFF_FFFF, "EOF");
+        assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_stream_open_resource_uni_decodes_per_chunk_type() {
+        // A TEXT chunk read as unicode decodes UTF-8; a BINA chunk read as
+        // unicode takes 4 big-endian bytes per code point (cheapglk gtstream.c).
+        // Text: "Aλ" = 0x41, then the 2-byte UTF-8 for U+03BB.
+        let text = "Aλ".as_bytes().to_vec();
+        // Binary: one 32-bit BE code point U+1F600.
+        let bin = 0x0001_F600u32.to_be_bytes().to_vec();
+        let backend = glk::TestBackend::new()
+            .with_data_resource(1, text, true)
+            .with_data_resource(2, bin, false);
+        let mut m = resource_machine(backend, 0x100);
+
+        let tsid = m.glk_dispatch(0x013A, &[1, 0]).unwrap(); // open_resource_uni(1)
+        assert_ne!(tsid, 0);
+        assert_eq!(m.glk_dispatch(0x0130, &[tsid]).unwrap(), 0x41, "'A'");
+        assert_eq!(m.glk_dispatch(0x0130, &[tsid]).unwrap(), 0x03BB, "λ via UTF-8");
+        assert_eq!(m.glk_dispatch(0x0130, &[tsid]).unwrap(), 0xFFFF_FFFF, "EOF");
+
+        let bsid = m.glk_dispatch(0x013A, &[2, 0]).unwrap();
+        assert_ne!(bsid, 0);
+        assert_eq!(m.glk_dispatch(0x0130, &[bsid]).unwrap(), 0x0001_F600, "4-byte BE code point");
+        assert_eq!(m.glk_dispatch(0x0130, &[bsid]).unwrap(), 0xFFFF_FFFF, "EOF");
+        assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_stream_open_resource_buffer_read_and_missing() {
+        // glk_get_buffer_stream (0x0092) fills Glulx memory from a resource; a
+        // missing resource number opens as 0 (failure) per the Glk spec.
+        let backend = glk::TestBackend::new().with_data_resource(5, b"ABCDE".to_vec(), false);
+        let mut m = resource_machine(backend, 0x400);
+        let sid = m.glk_dispatch(0x0049, &[5, 0]).unwrap();
+        // Read 3 bytes into RAM at 0x300.
+        let n = m.glk_dispatch(0x0092, &[sid, 0x300, 3]).unwrap();
+        assert_eq!(n, 3, "buffer read count");
+        assert_eq!(m.mem.read8(0x300).unwrap(), b'A' as u32);
+        assert_eq!(m.mem.read8(0x301).unwrap(), b'B' as u32);
+        assert_eq!(m.mem.read8(0x302).unwrap(), b'C' as u32);
+        // Seek back to start (seekmode 0) then re-read the first byte.
+        m.glk_dispatch(0x0045, &[sid, 0, 0]).unwrap();
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'A' as u32, "seek to start");
+
+        // A resource number the backend has no chunk for → open fails.
+        assert_eq!(m.glk_dispatch(0x0049, &[99, 0]).unwrap(), 0, "missing resource → 0");
+        assert_eq!(m.glk_dispatch(0x013A, &[99, 0]).unwrap(), 0, "missing resource (uni) → 0");
+    }
+
+    #[test]
+    fn resource_stream_survives_snapshot_roundtrip() {
+        // An open resource stream round-trips through the Glk snapshot: after a
+        // partial read, serialize + deserialize the model and confirm the cursor
+        // and remaining bytes are preserved (the host isn't consulted on restore).
+        let mut model = glk::Model::new();
+        let sid = model.stream_open_resource(b"WXYZ".to_vec(), false, false, 0);
+        assert_eq!(model.resource_stream_read_char(sid), Some(b'W' as u32));
+        let blob = model.serialize();
+        let mut restored = glk::Model::deserialize(&blob).expect("snapshot round-trips");
+        assert_eq!(restored.resource_stream_read_char(sid), Some(b'X' as u32), "cursor preserved");
+        assert_eq!(restored.resource_stream_read_char(sid), Some(b'Y' as u32));
+        assert_eq!(restored.stream_position(sid), Some(3));
+    }
+
     #[test]
     fn machine_vfs_roundtrip() {
         // Write a file into one machine's VFS, snapshot it with the Machine
@@ -8706,7 +8884,7 @@ mod tests {
         assert_eq!(m.mem.read32(0x11C).unwrap(), 0, "DrawImage not supported");
         assert_eq!(m.mem.read32(0x120).unwrap(), 0, "Sound not supported");
         assert_eq!(m.mem.read32(0x124).unwrap(), 1, "Unicode supported");
-        assert_eq!(m.mem.read32(0x128).unwrap(), 0, "ResourceStream not supported");
+        assert_eq!(m.mem.read32(0x128).unwrap(), 1, "ResourceStream supported (SQ-0308)");
         assert!(m.diagnostics.is_empty(), "no noise: {:?}", m.diagnostics);
     }
 

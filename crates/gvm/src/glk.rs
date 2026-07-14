@@ -467,6 +467,13 @@ pub trait GlkBackend {
     fn image_info(&mut self, _resnum: u32) -> Option<(u32, u32)> {
         None
     }
+    /// The bytes of Blorb `Data` resource `num` plus a text-vs-binary flag
+    /// (`true` = a `TEXT` chunk, `false` = `BINA`/`FORM` binary), for
+    /// `glk_stream_open_resource`. `None` when the host has no such resource
+    /// (no Blorb, or no `Data` chunk with that number) — the open then fails.
+    fn data_resource(&mut self, _num: u32) -> Option<(Vec<u8>, bool)> {
+        None
+    }
     /// Fill a rectangle of a graphics window with `color`.
     fn graphics_fill_rect(&mut self, _win: u32, _color: u32, _left: i32, _top: i32, _w: u32, _h: u32) {}
     /// Erase a rectangle of a graphics window to its background color.
@@ -545,6 +552,9 @@ pub struct TestBackend {
     schannel_rocks: BTreeMap<u32, u32>,
     /// Human-readable log of schannel calls, in order (for dispatch assertions).
     sound_log: Vec<String>,
+    /// Canned Blorb `Data` resources by number → `(bytes, is_text)`, served by
+    /// [`GlkBackend::data_resource`] for `glk_stream_open_resource` tests.
+    data_resources: BTreeMap<u32, (Vec<u8>, bool)>,
 }
 
 impl Default for TestBackend {
@@ -571,6 +581,7 @@ impl TestBackend {
             next_schannel: 0,
             schannel_rocks: BTreeMap::new(),
             sound_log: Vec::new(),
+            data_resources: BTreeMap::new(),
         }
     }
     /// A backend reporting a specific display size.
@@ -586,6 +597,12 @@ impl TestBackend {
     /// false for it and records nothing.
     pub fn with_missing_image(mut self, resnum: u32) -> Self {
         self.missing_images.insert(resnum);
+        self
+    }
+    /// Register a canned Blorb `Data` resource (`num` → `(bytes, is_text)`) that
+    /// [`GlkBackend::data_resource`] will serve to `glk_stream_open_resource`.
+    pub fn with_data_resource(mut self, num: u32, bytes: Vec<u8>, is_text: bool) -> Self {
+        self.data_resources.insert(num, (bytes, is_text));
         self
     }
     /// Accumulated text for one text-buffer window (empty if none).
@@ -764,6 +781,9 @@ impl GlkBackend for TestBackend {
     fn schannel_set_volume(&mut self, chan: u32, vol: u32) {
         self.sound_log.push(format!("setvol chan={chan} vol={vol}"));
     }
+    fn data_resource(&mut self, num: u32) -> Option<(Vec<u8>, bool)> {
+        self.data_resources.get(&num).cloned()
+    }
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -791,6 +811,11 @@ pub enum StreamKind {
     /// so the game always reaches `@save`/`@restore` and the host decides).
     /// Writes discard, reads return EOF; no `self.files`/`file_streams` entry.
     Null,
+    /// A read-only Blorb data-resource stream (`glk_stream_open_resource[_uni]`).
+    /// The resource bytes + read cursor + text/binary flag live in
+    /// [`Model::resource_streams`] keyed by stream id so this stays `Copy`;
+    /// `unicode` selects 32-bit vs Latin-1 read elements.
+    Resource { unicode: bool },
 }
 
 /// A Glk stream.
@@ -979,6 +1004,25 @@ pub struct Model {
     /// the originating fileref's `by_prompt` so `@save`/`@restore` can tell the
     /// player's SAVE verb from the game's own fixed-name saves.
     savegame_streams: std::collections::BTreeMap<u32, SaveStream>,
+    /// Open Blorb data-resource streams keyed by stream id (the owned bytes +
+    /// read cursor for each [`StreamKind::Resource`] stream).
+    resource_streams: std::collections::BTreeMap<u32, ResourceStream>,
+}
+
+/// The read state of an open Blorb data-resource stream (see
+/// [`StreamKind::Resource`]), kept in a side table (`Model::resource_streams`)
+/// keyed by stream id so `StreamKind` stays `Copy`. Read-only.
+#[derive(Clone, Debug)]
+struct ResourceStream {
+    /// The resource chunk's bytes (owned copy handed over by the host at open).
+    data: Vec<u8>,
+    /// Current byte cursor.
+    pos: usize,
+    /// `true` for a `_uni` stream (32-bit read elements); `false` for Latin-1.
+    unicode: bool,
+    /// `true` for a `TEXT` chunk (UTF-8 when read as unicode); `false` for a
+    /// `BINA`/`FORM` binary chunk (raw byte / 4-byte big-endian when unicode).
+    text: bool,
 }
 
 /// Per-`Null`-stream state for a host-managed `SavedGame` slot (see
@@ -1016,6 +1060,7 @@ impl Model {
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
+            resource_streams: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1884,6 +1929,53 @@ impl Model {
         self.file_streams.insert(sid, FileStream { name, mode: fmode, pos, unicode, usage, by_prompt });
         sid
     }
+
+    /// `glk_stream_open_resource[_uni]`: open a read-only stream over a Blorb
+    /// `Data` chunk whose bytes the host resolved (`data`) and whose chunk type
+    /// it classified (`text` = a `TEXT` chunk, else `BINA`/`FORM` binary).
+    /// `unicode` selects the `_uni` variant (32-bit read elements). Returns the
+    /// new stream id. The caller returns 0 (open failed) when the host has no
+    /// such resource, mirroring real Glk.
+    pub fn stream_open_resource(&mut self, data: Vec<u8>, unicode: bool, text: bool, rock: u32) -> u32 {
+        let sid = self.alloc_stream(StreamKind::Resource { unicode }, rock);
+        self.resource_streams.insert(sid, ResourceStream { data, pos: 0, unicode, text });
+        sid
+    }
+
+    /// `Some(unicode)` if `id` is a resource stream (its read-element width),
+    /// else `None`. Lets the stream-read selectors branch onto the resource path
+    /// exactly as [`Model::file_stream_is_unicode`] does for file streams.
+    pub fn resource_stream_is_unicode(&self, id: u32) -> Option<bool> {
+        match self.stream(id)?.kind {
+            StreamKind::Resource { unicode } => Some(unicode),
+            _ => None,
+        }
+    }
+
+    /// Read one character from a resource stream at its cursor, decoding per the
+    /// stream's encoding — a byte for a non-unicode stream; for a unicode stream,
+    /// 4-byte big-endian from a binary chunk or one UTF-8 code point from a text
+    /// chunk (matching cheapglk's `gtstream.c` resource reads) — advancing `pos`
+    /// past the consumed bytes and bumping the read count. `None` at end-of-file.
+    pub fn resource_stream_read_char(&mut self, id: u32) -> Option<u32> {
+        let rs = self.resource_streams.get(&id)?;
+        let (val, adv) = if !rs.unicode {
+            (*rs.data.get(rs.pos)? as u32, 1)
+        } else if !rs.text {
+            if rs.pos + 4 > rs.data.len() {
+                return None;
+            }
+            let b = &rs.data[rs.pos..rs.pos + 4];
+            (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 4)
+        } else {
+            Self::vfs_decode_utf8(&rs.data, rs.pos)?
+        };
+        self.resource_streams.get_mut(&id).unwrap().pos += adv;
+        if let Some(st) = self.stream_mut(id) {
+            st.read_count = st.read_count.saturating_add(1);
+        }
+        Some(val)
+    }
     /// Credit a stream's `write_count` by `n` without writing any bytes. Used
     /// by the Glulx `@save` shim: the real save bytes go to a host file (the
     /// stream the game opened stays empty), but the library checks the
@@ -1936,7 +2028,10 @@ impl Model {
         // Window streams are owned by their window; only free memory/file streams
         // here. A file stream also drops its side-table cursor state.
         if let Some(kind) = self.stream(id).map(|s| s.kind) {
-            if matches!(kind, StreamKind::Memory { .. } | StreamKind::File { .. } | StreamKind::Null) {
+            if matches!(
+                kind,
+                StreamKind::Memory { .. } | StreamKind::File { .. } | StreamKind::Null | StreamKind::Resource { .. }
+            ) {
                 self.streams[(id - 1) as usize] = None;
             }
             if matches!(kind, StreamKind::File { .. }) {
@@ -1944,6 +2039,9 @@ impl Model {
             }
             if matches!(kind, StreamKind::Null) {
                 self.savegame_streams.remove(&id);
+            }
+            if matches!(kind, StreamKind::Resource { .. }) {
+                self.resource_streams.remove(&id);
             }
         }
         if self.cur_stream == id {
@@ -1986,6 +2084,9 @@ impl Model {
             // A host-managed SavedGame stream reports its tracked cursor (the
             // library seeks to the end and reads the position to size the save).
             StreamKind::Null => Some(self.savegame_streams.get(&id).map_or(0, |ss| ss.pos)),
+            StreamKind::Resource { .. } => {
+                Some(self.resource_streams.get(&id).map_or(0, |rs| rs.pos as u32))
+            }
         }
     }
     /// Seek a memory stream. `seekmode`: 0 = from start, 1 = from current,
@@ -2029,6 +2130,18 @@ impl Model {
                     };
                     let np = (base + pos as i64).clamp(0, len) as u32;
                     self.savegame_streams.get_mut(&id).unwrap().pos = np;
+                }
+            }
+            Some(StreamKind::Resource { .. }) => {
+                if let Some(rs) = self.resource_streams.get(&id) {
+                    let len = rs.data.len() as i64;
+                    let base = match seekmode {
+                        1 => rs.pos as i64,
+                        2 => len,
+                        _ => 0,
+                    };
+                    let np = (base + pos as i64).clamp(0, len) as usize;
+                    self.resource_streams.get_mut(&id).unwrap().pos = np;
                 }
             }
             _ => {}
@@ -2490,6 +2603,13 @@ impl Model {
                         StreamKind::Null => {
                             w(&mut out, 3);
                         }
+                        StreamKind::Resource { unicode } => {
+                            // The bytes + cursor + text flag persist out of band
+                            // below in the `resource_streams` table, keyed by
+                            // stream id; here we only tag the kind + encoding.
+                            w(&mut out, 4);
+                            w(&mut out, unicode as u32);
+                        }
                     }
                 }
             }
@@ -2532,6 +2652,19 @@ impl Model {
             w(&mut out, fs.unicode as u32);
             w(&mut out, fs.usage);
         }
+        // (d) resource_streams side table (snapshot version 5): the owned bytes
+        // are re-derivable from the host Blorb, but the model can't reach the
+        // host at restore, so an open resource stream round-trips its bytes here
+        // (mirroring the file_streams precedent) — a game holding one open across
+        // a host snapshot keeps reading from where it left off.
+        w(&mut out, self.resource_streams.len() as u32);
+        for (sid, rs) in &self.resource_streams {
+            w(&mut out, *sid);
+            wb(&mut out, &rs.data);
+            w(&mut out, rs.pos as u32);
+            w(&mut out, rs.unicode as u32);
+            w(&mut out, rs.text as u32);
+        }
         out
     }
 
@@ -2542,7 +2675,9 @@ impl Model {
     pub(crate) fn deserialize(data: &[u8]) -> Result<Model, String> {
         let mut r = SnapReader::new(data);
         let version = r.u32()?;
-        if version != GLK_SNAPSHOT_VERSION {
+        // Version 4 snapshots (pre resource streams, SQ-0308) lack the trailing
+        // resource_streams table and stream-kind tag 4; still restorable.
+        if version != 4 && version != GLK_SNAPSHOT_VERSION {
             return Err(format!("unsupported Glk snapshot version {version}"));
         }
         let root = r.u32()?;
@@ -2601,6 +2736,9 @@ impl Model {
                 // `file_streams` table below, keyed by this stream's id.
                 2 => StreamKind::File { unicode: r.u32()? != 0 },
                 3 => StreamKind::Null,
+                // The bytes/cursor/text flag are restored from the
+                // `resource_streams` table below, keyed by this stream's id.
+                4 => StreamKind::Resource { unicode: r.u32()? != 0 },
                 other => return Err(format!("Glk snapshot: bad stream kind {other}")),
             };
             streams.push(Some(Stream {
@@ -2649,6 +2787,19 @@ impl Model {
             let usage = r.u32()?;
             file_streams.insert(sid, FileStream { name, mode, pos, unicode, usage, by_prompt: false });
         }
+        // (d) resource_streams side table (snapshot version 5; absent in v4).
+        let mut resource_streams = std::collections::BTreeMap::new();
+        if version >= 5 {
+            let nrs = r.u32()?;
+            for _ in 0..nrs {
+                let sid = r.u32()?;
+                let data = r.bytes()?;
+                let pos = r.u32()? as usize;
+                let unicode = r.u32()? != 0;
+                let text = r.u32()? != 0;
+                resource_streams.insert(sid, ResourceStream { data, pos, unicode, text });
+            }
+        }
 
         if !r.done() {
             return Err("Glk snapshot: trailing bytes".to_string());
@@ -2667,6 +2818,7 @@ impl Model {
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
+            resource_streams,
         })
     }
 }
@@ -2742,7 +2894,7 @@ fn read_blob(bytes: &[u8], p: &mut usize) -> Option<Vec<u8>> {
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
-const GLK_SNAPSHOT_VERSION: u32 = 4;
+const GLK_SNAPSHOT_VERSION: u32 = 5;
 
 /// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
 /// an error, never a panic.

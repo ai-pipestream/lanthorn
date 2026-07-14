@@ -113,6 +113,16 @@ impl PictSource {
     pub fn image(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
         self.get(resnum).cloned()
     }
+
+    /// The bytes + text-flag of Blorb `Data` resource `resnum`, for
+    /// `glk_stream_open_resource`. `is_text` is true for a `TEXT` chunk, false
+    /// for `BINA`/`FORM` (binary). `None` when there is no Blorb or no such Data
+    /// resource. (The `PictSource` is AppGlk's sole Blorb holder, so Data lookup
+    /// lives here alongside `Pict` lookup.)
+    pub fn data_resource(&self, resnum: u32) -> Option<(Vec<u8>, bool)> {
+        let (ty, bytes) = self.blorb.as_ref()?.resource(b"Data", resnum)?;
+        Some((bytes.to_vec(), ty == b"TEXT"))
+    }
 }
 
 /// Test-only: build a minimal Blorb containing one `Pict` resource whose raw
@@ -221,6 +231,53 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
             .unwrap();
         bytes
+    }
+
+    /// Build a minimal Blorb carrying one `Data` resource at `resnum` with the
+    /// given chunk type (`b"TEXT"` / `b"BINA"`) and raw bytes.
+    fn test_blorb_with_data(resnum: u32, chunk_ty: &[u8; 4], data: &[u8]) -> blorb::Blorb {
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        let ridx_data_len = 4 + 12;
+        let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let data_chunk = chunk(chunk_ty, data);
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes());
+        ridx.extend_from_slice(b"Data");
+        ridx.extend_from_slice(&resnum.to_be_bytes());
+        ridx.extend_from_slice(&(first_res_off as u32).to_be_bytes());
+        let ridx_chunk = chunk(b"RIdx", &ridx);
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&ridx_chunk);
+        inner.extend_from_slice(&data_chunk);
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        blorb::Blorb::parse(file).expect("valid test blorb")
+    }
+
+    #[test]
+    fn data_resource_reads_text_and_binary_chunks() {
+        // A TEXT chunk reports is_text=true; a BINA chunk false; a missing
+        // number and a Blorb-less source both yield None.
+        let src = PictSource::new(Some(test_blorb_with_data(3, b"TEXT", b"hello")));
+        assert_eq!(src.data_resource(3), Some((b"hello".to_vec(), true)));
+        assert_eq!(src.data_resource(4), None, "no such Data resource");
+
+        let bin = PictSource::new(Some(test_blorb_with_data(1, b"BINA", &[1, 2, 3])));
+        assert_eq!(bin.data_resource(1), Some((vec![1, 2, 3], false)));
+
+        assert_eq!(PictSource::new(None).data_resource(1), None, "no blorb → None");
     }
 
     #[test]

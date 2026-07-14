@@ -233,6 +233,10 @@ pub struct TerminalBackend {
     pending_echo: Option<String>,
     /// Emit terminal-detection diagnostics to stderr (env `BABELMAP_DEBUG_TERM`).
     debug: bool,
+    /// The story Blorb, when one was loaded, retained to serve `Data` resource
+    /// streams (`glk_stream_open_resource`). `None` for a plain `.ulx` — the
+    /// resource open then fails, per spec.
+    data_blorb: Option<blorb::Blorb>,
 }
 
 impl TerminalBackend {
@@ -262,6 +266,7 @@ impl TerminalBackend {
             started: false,
             pending_echo: None,
             debug,
+            data_blorb: None,
         }
     }
 
@@ -270,6 +275,12 @@ impl TerminalBackend {
     /// own palette shows through, matching zvm-cli's `--no-game-colours`.
     pub fn set_honor_colours(&mut self, on: bool) {
         self.honor = on;
+    }
+
+    /// Retain the story Blorb so `glk_stream_open_resource` can read its `Data`
+    /// chunks. `None` for a plain `.ulx` (resource opens then fail).
+    pub fn set_data_blorb(&mut self, blorb: Option<blorb::Blorb>) {
+        self.data_blorb = blorb;
     }
 
     /// Build a backend over an explicit writer (for tests).
@@ -293,6 +304,7 @@ impl TerminalBackend {
             started: false,
             pending_echo: None,
             debug: false,
+            data_blorb: None,
         }
     }
 
@@ -417,6 +429,11 @@ impl Default for TerminalBackend {
 impl GlkBackend for TerminalBackend {
     fn screen_size(&self) -> (u32, u32) {
         (self.cols, self.rows)
+    }
+
+    fn data_resource(&mut self, num: u32) -> Option<(Vec<u8>, bool)> {
+        let (ty, bytes) = self.data_blorb.as_ref()?.resource(b"Data", num)?;
+        Some((bytes.to_vec(), ty == b"TEXT"))
     }
 
     fn window_layout(&mut self, wins: &[(u32, WinType, Rect, Option<bool>)]) {

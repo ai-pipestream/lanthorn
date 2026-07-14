@@ -86,9 +86,9 @@ Dispatch in `exec.rs` ~L2627 (`glk_gestalt` fn). `glk_gestalt_ext` (0x0005) dele
 | LineInputEcho | 17 | §4 | PARTIAL | Returns 0; `glk_set_echo_line_event` (0x0150) is a silent no-op | S | DEFER | NO |
 | LineTerminators | 18 | §4 | MISSING | Returns 0; `glk_set_terminators_line_event` (0x0151) is a silent no-op | M | ADD-soon | NO |
 | LineTerminatorKey | 19 | §4 | MISSING | Returns 0; val2 of line-input events is always 0 | M | ADD-soon | NO |
-| DateTime | 20 | §4 | MISSING | Returns 0; all glk_current_time / date API absent | M | DEFER | NO |
+| DateTime | 20 | §4 | DONE | Returns 1; full date/time selector family 0x0160–0x016F (UTC-only local; SQ-0308) | — | — | — |
 | Sound2 | 21 | §4 | MISSING | Returns 0 | L | DEFER | NO |
-| ResourceStream | 22 | §4 | MISSING | Returns 0; `glk_stream_open_resource` (0x0049) and `_uni` (0x014A) absent | M | ADD-soon | NO |
+| ResourceStream | 22 | §4 | DONE | Returns 1; `glk_stream_open_resource` (0x0049) and `_uni` (0x013A — this audit's 0x014A was wrong) implemented (SQ-0308) | — | — | — |
 | GraphicsCharInput | 23 | §4 | MISSING | Returns 0 | M | DEFER | NO |
 | GlkDisp (dispatch API) | N/A | §16 | MISSING | Glulx Glk dispatch interface; not a standard gestalt selector — tested by glulxercise `gidispa` group | M | SKIP | YES – TODO.md gidispa |
 
@@ -226,19 +226,21 @@ The following groups are fully implemented and pass glulxercise: arithmetic (§2
 | Memory streams (unicode) | §5.4 | DONE | glk_stream_open_memory_uni (0x0139) | — | — | — |
 | File streams (byte) | §5.5 | MISSING | glk_stream_open_file (0x0042) falls to diagnostic; StreamKind::File not in enum | M | ADD-soon | YES – saves plan A |
 | File streams (unicode) | §5.5 | MISSING | glk_stream_open_file_uni (0x0138) falls to diagnostic | M | ADD-soon | YES – saves plan A |
-| Resource streams (byte) | §5.8 | MISSING | glk_stream_open_resource (0x0049) falls to diagnostic; Blorb parser ready | M | ADD-soon | NO |
-| Resource streams (unicode) | §5.8 | MISSING | glk_stream_open_resource_uni (0x014A) falls to diagnostic | M | ADD-soon | NO |
+| Resource streams (byte) | §5.8 | DONE | glk_stream_open_resource (0x0049); host GlkBackend::data_resource serves Blorb Data chunks (SQ-0308) | — | — | — |
+| Resource streams (unicode) | §5.8 | DONE | glk_stream_open_resource_uni (0x013A); TEXT→UTF-8, BINA/FORM→4-byte BE (SQ-0308) | — | — | — |
 | glk_stream_iterate / get_rock | §5 | DONE | — | — | — | — |
 | glk_stream_close | §5 | DONE | Returns read/write counts | — | — | — |
 | glk_stream_set/get_current | §5 | DONE | — | — | — | — |
 | glk_stream_set/get_position | §5 | DONE | Memory streams; window streams return write_count | — | — | — |
 | glk_put_char / string / buffer | §5 | DONE | Latin-1 and unicode variants | — | — | — |
-| glk_get_char_stream (0x0090) | §5 | MISSING | Falls to diagnostic; needed for reading from memory/file streams | M | ADD-soon | NO |
-| glk_get_line_stream (0x0091) | §5 | MISSING | Falls to diagnostic | M | ADD-soon | NO |
-| glk_get_buffer_stream (0x0092) | §5 | MISSING | Falls to diagnostic | M | ADD-soon | NO |
-| glk_get_char_stream_uni (0x012C) | §5 | MISSING | Falls to diagnostic | M | ADD-soon | NO |
-| glk_get_buffer_stream_uni (0x012D) | §5 | MISSING | Falls to diagnostic | M | ADD-soon | NO |
-| glk_get_line_stream_uni (0x012E) | §5 | MISSING | Falls to diagnostic | M | ADD-soon | NO |
+| glk_put_*_stream_uni (0x012B–0x012D) | §5 | DONE | Unicode stream-put variants (SQ-0308) | — | — | — |
+| Echo streams (0x002D/0x002E) | §3.6 | DONE | window_set/get_echo_stream; loop-guarded; unhooked on stream close (SQ-0308) | — | — | — |
+| glk_get_char_stream (0x0090) | §5 | DONE | Reads memory / file / resource streams | — | — | — |
+| glk_get_line_stream (0x0091) | §5 | DONE | — | — | — | — |
+| glk_get_buffer_stream (0x0092) | §5 | DONE | — | — | — | — |
+| glk_get_char_stream_uni (0x0130) | §5 | DONE | Implemented at 0x0130 (this audit's 0x012C was wrong — that slot is put_string_stream_uni; fixed in SQ-0308) | — | — | — |
+| glk_get_buffer_stream_uni (0x0131) | §5 | DONE | Implemented at 0x0131 (audit's 0x012D was wrong; SQ-0308) | — | — | — |
+| glk_get_line_stream_uni (0x0132) | §5 | DONE | Implemented at 0x0132 (audit's 0x012E was wrong; SQ-0308) | — | — | — |
 
 ### 4c. Filerefs (Glk spec §6)
 
@@ -315,11 +317,11 @@ All hyperlink API functions fall to the diagnostic arm: `glk_set_hyperlink` (0x0
 
 ### 4i. Date and Time (Glk spec §11)
 
-All DateTime API functions fall to the diagnostic arm: `glk_current_time` (0x0160), `glk_current_simple_time` (0x0161), and date conversion functions (0x0168–0x016F).
+Implemented (SQ-0308): `glk_current_time` (0x0160), `glk_current_simple_time` (0x0161), and the date conversion functions (0x0168–0x016F), via the zero-dep `glk::datetime` module. `_local` selectors are UTC (no tz database — documented limitation).
 
 | Feature | Glk spec § | Status | Effort | Rec | Already tracked? |
 |---|---|---|---|---|---|
-| All DateTime API | §11 | MISSING | M | DEFER | NO |
+| All DateTime API | §11 | DONE | — | — | — |
 
 ### 4j. GlkBackend Trait Gaps
 

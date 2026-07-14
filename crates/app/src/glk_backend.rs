@@ -706,6 +706,10 @@ impl GlkBackend for AppGlk {
         self.picts.info(resnum)
     }
 
+    fn data_resource(&mut self, num: u32) -> Option<(Vec<u8>, bool)> {
+        self.picts.data_resource(num)
+    }
+
     fn graphics_fill_rect(&mut self, win: u32, color: u32, left: i32, top: i32, w: u32, h: u32) {
         let (cw, ch) = self.canvas_size(win);
         self.graphics

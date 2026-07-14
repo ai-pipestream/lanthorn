@@ -16,7 +16,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 
 use gvm::glk::keycode;
-use gvm::{GlkBackend, Machine, Memory, StepResult};
+#[cfg(test)]
+use gvm::GlkBackend;
+use gvm::{Machine, Memory, StepResult};
 
 mod glk_term;
 use glk_term::TerminalBackend;
@@ -49,7 +51,9 @@ fn decode_glk_keycode(code: KeyCode) -> u32 {
 // ── Blorb extraction ──────────────────────────────────────────────────────────
 
 /// Get the runnable Glulx image: the `GLUL` executable inside a Blorb, or the
-/// raw bytes when they aren't a Blorb (a plain `.ulx`).
+/// raw bytes when they aren't a Blorb (a plain `.ulx`). Test-only since `main`
+/// uses [`split_story`] (which also retains the Blorb for resource streams).
+#[cfg(test)]
 fn extract_executable(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     if !blorb::Blorb::is_blorb(&bytes) {
         return Ok(bytes);
@@ -64,9 +68,29 @@ fn extract_executable(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Split story bytes into the runnable Glulx image and, when the input was a
+/// Blorb, the parsed Blorb (retained so the backend can serve `Data` resource
+/// streams via `glk_stream_open_resource`). A plain `.ulx` yields no Blorb.
+fn split_story(bytes: Vec<u8>) -> Result<(Vec<u8>, Option<blorb::Blorb>), String> {
+    if !blorb::Blorb::is_blorb(&bytes) {
+        return Ok((bytes, None));
+    }
+    let b = blorb::Blorb::parse(bytes).map_err(|e| format!("Error: invalid Blorb: {e:?}"))?;
+    let image = match b.executable() {
+        Ok((blorb::ExecKind::Glulx, data)) => data.to_vec(),
+        Ok((blorb::ExecKind::ZCode, _)) => {
+            return Err("Error: this is a Z-code Blorb; run it with zvm-cli.".to_string())
+        }
+        Err(e) => return Err(format!("Error: Blorb has no executable: {e:?}")),
+    };
+    Ok((image, Some(b)))
+}
+
 // ── machine builder ───────────────────────────────────────────────────────────
 
-/// Build a machine from story bytes, sending Glk output to `backend`.
+/// Build a machine from story bytes, sending Glk output to `backend`. Test-only
+/// (a convenience that skips Blorb retention); `main` uses [`split_story`].
+#[cfg(test)]
 fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine, String> {
     let image = extract_executable(bytes)?;
     let mem = Memory::new(image).map_err(|e| format!("Error loading Glulx image: {e:?}"))?;
@@ -494,15 +518,24 @@ fn main() {
         }
     };
 
-    let mut backend = TerminalBackend::new();
-    backend.set_honor_colours(honor);
-    let mut machine = match build_machine(bytes, Box::new(backend)) {
-        Ok(m) => m,
+    let (image, blorb) = match split_story(bytes) {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
             process::exit(1);
         }
     };
+    let mem = match Memory::new(image) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Error loading Glulx image: {e:?}");
+            process::exit(1);
+        }
+    };
+    let mut backend = TerminalBackend::new();
+    backend.set_honor_colours(honor);
+    backend.set_data_blorb(blorb);
+    let mut machine = Machine::with_glk(mem, Box::new(backend));
     machine.set_acceleration(accel);
 
     let stdin_is_tty = io::stdin().is_terminal();
