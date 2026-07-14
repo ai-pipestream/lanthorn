@@ -2087,6 +2087,15 @@ impl AppState {
         self.transcript_gen = self.transcript_gen.wrapping_add(1);
     }
 
+    /// Bump the graph generation, invalidating the map render memo. Call after ANY
+    /// mutation of the mapper graph or its layout/labels — rename/notes/relabel/nudge,
+    /// tidy applies, room reassignment (restore/import/reset). The map render memo is
+    /// keyed on this (`cached_map_render`), so a missed bump paints a STALE MAP.
+    /// Double-bumping is harmless (`wrapping_add`); a missing bump is a wrong map. (SQ-0305)
+    pub fn bump_graph_gen(&mut self) {
+        self.graph_gen = self.graph_gen.wrapping_add(1);
+    }
+
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
         self.bump_transcript_gen();

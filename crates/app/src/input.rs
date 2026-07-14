@@ -2002,6 +2002,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             Action::SubmitCommand(_) => {
                 if let Some(p) = state.prompt.take() {
                     // apply_prompt returns the prompt back for saves-manager and config kinds.
+                    // A `None` return means it applied a graph-mutating prompt (rename room,
+                    // edit notes, relabel edge, rename layer) — bump so the edit shows this
+                    // frame instead of waiting for the next turn. (SQ-0305)
                     if let Some(returned) = apply_prompt(p, mapper) {
                         match &returned.kind {
                             crate::state::PromptKind::ConfigEditPath { field } => {
@@ -2024,6 +2027,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                                     Some((returned.kind, returned.buffer));
                             }
                         }
+                    } else {
+                        state.bump_graph_gen(); // a graph-mutating prompt was applied (SQ-0305)
                     }
                 }
             }
@@ -2139,6 +2144,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::PeelLayer => {
             if let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) {
                 if let Some(new) = mapper::layer::peel_region(&mut mapper.graph, room) {
+                    state.bump_graph_gen(); // rooms peeled into a new layer → invalidate memo (SQ-0305)
                     state.set_viewed_layer(Some(new));
                 }
             }
@@ -2146,6 +2152,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::MergeLayer => {
             let active = state.active_layer(&mapper.graph);
             mapper::layer::merge_layer(&mut mapper.graph, active); // merges into parent (Task 10)
+            state.bump_graph_gen(); // layer merged into parent → invalidate memo (SQ-0305)
             state.set_viewed_layer(None);
         }
 
@@ -2390,6 +2397,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     mapper.graph.connections().iter().find(|c| c.origin == id).cloned()
                 {
                     mapper.delete_connection(conn.origin, conn.dir);
+                    state.bump_graph_gen(); // edge removed → invalidate map memo (SQ-0305)
                 }
             }
         }
@@ -2399,6 +2407,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     if let Some(pos) = room.pos {
                         let target = (pos.0 + dx, pos.1 + dy);
                         mapper.nudge(id, target);
+                        state.bump_graph_gen(); // room moved → invalidate map memo + hit-testing (SQ-0305)
                     }
                 }
             }
@@ -4628,6 +4637,59 @@ mod tests {
             let (_frames, tidied) = job.handle.join().expect("retidy worker completes");
             m.graph = tidied;
         }
+    }
+
+    // ── Map-memo invalidation: production paths bump graph_gen (SQ-0305) ──────────
+    // The map render model is memoized on (graph_gen, viewed_layer). Any graph edit
+    // that reaches the live path with an unchanged graph_gen paints a STALE MAP, so
+    // each edit path must bump. These drive the real apply_action code, not a manual
+    // bump, so a regression that drops a bump fails here.
+
+    #[test]
+    fn rename_room_prompt_submit_bumps_graph_gen() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        m.observe(1, "Old Name", None);
+        s.select_room(Some(1));
+        s.prompt = Some(crate::state::Prompt {
+            kind: crate::state::PromptKind::RenameRoom(1),
+            buffer: "New Name".to_string(),
+        });
+        let before = s.graph_gen;
+        // The Enter sentinel the prompt submit runs through in production.
+        apply_action(Action::SubmitCommand(String::new()), &mut s, &mut m);
+        assert_eq!(m.graph.room(1).unwrap().label_override.as_deref(), Some("New Name"),
+            "rename actually applied");
+        assert_ne!(s.graph_gen, before, "renaming a room must invalidate the map memo");
+    }
+
+    #[test]
+    fn nudge_selected_bumps_graph_gen() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.set_mode(mapper::layout::LayoutMode::Manual); // nudge is Manual-mode only
+        m.graph.set_pos(1, (0, 0));
+        s.select_room(Some(1));
+        let before = s.graph_gen;
+        apply_action(Action::NudgeSelected(1, 0), &mut s, &mut m);
+        assert_eq!(m.graph.room(1).unwrap().pos, Some((1, 0)), "room actually moved");
+        assert_ne!(s.graph_gen, before, "moving a room must invalidate the map memo + hit-testing");
+    }
+
+    #[test]
+    fn delete_connection_bumps_graph_gen() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(mapper::direction::Direction::E)); // edge origin=1 --E--> 2
+        assert!(m.graph.connections().iter().any(|c| c.origin == 1),
+            "fixture must have an outgoing edge from room 1");
+        s.select_room(Some(1));
+        let before = s.graph_gen;
+        apply_action(Action::DeleteSelectedConnection, &mut s, &mut m);
+        assert!(!m.graph.connections().iter().any(|c| c.origin == 1), "edge actually deleted");
+        assert_ne!(s.graph_gen, before, "deleting a connection must invalidate the map memo");
     }
 
     #[test]

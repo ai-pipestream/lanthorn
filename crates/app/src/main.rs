@@ -2317,6 +2317,7 @@ fn main() {
                 Ok(tidied) => {
                     match apply_tidy_result(&mut mapper.graph, tidied, active_layer, job.gen, current_gen) {
                         ApplyTidyOutcome::Applied => {
+                            state.bump_graph_gen(); // tidied layout applied → invalidate map memo (SQ-0305)
                             // Re-center on the current room if it moved.
                             if let Some(rid) = mapper.graph.current() {
                                 if let Some(room) = mapper.graph.room(rid) {
@@ -2365,6 +2366,10 @@ fn main() {
             if let Ok((frames, tidied)) = job.handle.join() {
                 match apply_tidy_result(&mut mapper.graph, tidied, job.layer, job.gen, current_gen) {
                     ApplyTidyOutcome::Applied => {
+                        // Instant re-tidy (animate=false) and the anim's final settle both
+                        // land the tidied graph here — invalidate the map memo so the live
+                        // path shows it (and does not SNAP BACK when the anim ends). (SQ-0305)
+                        state.bump_graph_gen();
                         // `animate-tidy` plays the captured frames; the instant `tidy-map`
                         // re-tidy (animate=false) applies the tidied graph without an
                         // animation — it only used the off-thread build for the progress
@@ -4517,6 +4522,7 @@ fn dispatch_slash_outcome(
             match load_map(&full) {
                 Some(m) => {
                     *mapper = m;
+                    state.bump_graph_gen(); // imported map replaced the graph → invalidate memo (SQ-0305)
                     state.set_viewed_layer(None);
                     if let Some(rid) = mapper.graph.current() {
                         state.select_room(Some(rid));
@@ -4766,6 +4772,9 @@ fn reset_game(
                 let rid = snap_number as mapper::graph::RoomId;
                 state.select_room(Some(rid));
             }
+            // Reset cleared and/or re-seeded the mapper graph — invalidate the map
+            // memo so the fresh map (not the previous game's) shows. (SQ-0305)
+            state.bump_graph_gen();
             state.push_notice("[Game reset]");
         }
         Err(e) => {
@@ -5447,6 +5456,11 @@ fn reobserve_location(
     // Every caller is a restore/resume/import: the live state now equals a saved
     // one, so there is no unsaved progress to warn about on quit.
     state.unsaved_progress = false;
+    // The caller has just swapped in a restored/imported mapper (or is about to
+    // re-observe into it); invalidate the map render memo so the loaded map shows
+    // this frame instead of the pre-restore one. Unconditional so even the
+    // no-current-location early-return below still invalidates. (SQ-0305)
+    state.bump_graph_gen();
     let Some(snap) = session.current_location() else { return };
     let rid = snap.number as mapper::graph::RoomId;
     let restore_result = TurnResult {
@@ -6661,6 +6675,23 @@ mod tests {
             !engine.as_any().downcast_ref::<app::session::GameSession>().unwrap().strip_prompt(),
             "restart re-applies inline-prompt mode (strip_prompt stays false)"
         );
+    }
+
+    #[test]
+    fn reset_game_bumps_graph_gen() {
+        // Reset re-seeds the mapper graph via the production path; it must bump
+        // graph_gen so the map render memo invalidates and the fresh map — not the
+        // previous game's — is drawn this frame. (SQ-0305)
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(bytes) = std::fs::read(&fixture) else { return };
+        let mut engine: Box<dyn app::engine::Engine> =
+            Box::new(app::session::GameSession::new(bytes.clone(), true, false, None).expect("zcode session"));
+        let mut mapper = mapper::mapper::Mapper::default();
+        let mut state = app::state::AppState::default();
+        let before = state.graph_gen;
+        super::reset_game(&mut *engine, &mut mapper, &mut state, &bytes, &fixture, std::path::Path::new(""), false, false);
+        assert_ne!(state.graph_gen, before, "reset must bump graph_gen to invalidate the map memo");
     }
 
     #[test]
