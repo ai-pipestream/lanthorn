@@ -1129,6 +1129,48 @@ impl Model {
         sc
     }
 
+    // ── style measurement (Glk 0.7.6 §5.5.2) ──────────────────────────────────
+
+    /// `glk_style_measure`: the value of style `hint` for style class `styl` in
+    /// window `win`, if the model actually knows it (`None` = "unknown" — the
+    /// honest answer for hints this Glk subset does not track). Only the colour
+    /// hints are recorded, so only they can be measured: `stylehint_TextColor`
+    /// (7) and `stylehint_BackColor` (8) report a colour when one was set for
+    /// that style, and `stylehint_ReverseColor` (9) reports the effective flag.
+    /// Every other hint (size, weight, oblique, justification, indentation,
+    /// proportional) is untracked and honestly reported as unknown.
+    pub fn style_measure(&self, win: u32, styl: u32, hint: u32) -> Option<u32> {
+        let wintype = self.window_type(win)?;
+        if styl >= NUMSTYLES {
+            return None;
+        }
+        let sc = self.style_colour(wintype, GlkStyle::from_num(styl));
+        match hint {
+            7 => sc.fg,                   // stylehint_TextColor
+            8 => sc.bg,                   // stylehint_BackColor
+            9 => Some(sc.reverse as u32), // stylehint_ReverseColor
+            _ => None,                    // untracked hint -> honestly unknown
+        }
+    }
+
+    /// `glk_style_distinguish`: whether style classes `s1` and `s2` differ in a
+    /// hint the model records and the terminal renders (foreground/background
+    /// colour or reverse-video) in window `win`. Styles the model cannot tell
+    /// apart report `false` — the honest answer given only the recorded colour
+    /// hints (an intrinsic class difference like a bold Header is decided by the
+    /// host's style config, which this VM layer cannot see). Same style number,
+    /// or an invalid window, is likewise not distinguishable.
+    pub fn style_distinguish(&self, win: u32, s1: u32, s2: u32) -> bool {
+        let Some(wintype) = self.window_type(win) else {
+            return false;
+        };
+        if s1 == s2 {
+            return false;
+        }
+        self.style_colour(wintype, GlkStyle::from_num(s1))
+            != self.style_colour(wintype, GlkStyle::from_num(s2))
+    }
+
     // ── slot accessors ────────────────────────────────────────────────────────
 
     fn win(&self, id: u32) -> Option<&Window> {
@@ -3599,5 +3641,44 @@ mod style_hint_tests {
         m.window_set_echo_stream(win, mem);
         m.stream_close(mem);
         assert_eq!(m.window_echo_stream(win), 0, "closed echo stream is unhooked");
+    }
+
+    // ── style measurement (Glk 0.7.6 §5.5.2) ──────────────────────────────────
+
+    #[test]
+    fn style_measure_returns_set_colour_hints_and_unknown_otherwise() {
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer
+        // stylehint_set(wintype_TextBuffer=3, style_Note=6, TextColor=7, 0x00FF00).
+        m.set_style_hint(3, 6, 7, 0x00FF00);
+        m.set_style_hint(3, 6, 9, 1); // ReverseColor on
+        // TextColor is known and returns the set value.
+        assert_eq!(m.style_measure(win, 6, 7), Some(0x00FF00), "TextColor measured");
+        // ReverseColor is known (effective flag).
+        assert_eq!(m.style_measure(win, 6, 9), Some(1), "ReverseColor measured");
+        // BackColor was never set for this style -> unknown.
+        assert_eq!(m.style_measure(win, 6, 8), None, "unset BackColor is unknown");
+        // Weight/Size/Justification are not tracked -> unknown.
+        assert_eq!(m.style_measure(win, 6, 4), None, "Weight untracked -> unknown");
+        assert_eq!(m.style_measure(win, 6, 3), None, "Size untracked -> unknown");
+        // A style with no hints reports its default reverse (false) but unknown colour.
+        assert_eq!(m.style_measure(win, 0, 7), None, "Normal has no TextColor hint");
+        assert_eq!(m.style_measure(win, 0, 9), Some(0), "Normal reverse defaults off");
+    }
+
+    #[test]
+    fn style_distinguish_flips_on_a_differing_recorded_hint() {
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap();
+        // Same style number is never distinguishable.
+        assert!(!m.style_distinguish(win, 3, 3), "identical style is indistinguishable");
+        // Two styles with no recorded hints look the same to the model.
+        assert!(!m.style_distinguish(win, 0, 3), "unhinted styles are indistinguishable");
+        // Give Header a text colour: now it differs from Normal.
+        m.set_style_hint(3, 3, 7, 0xFF0000); // style_Header=3 TextColor red
+        assert!(m.style_distinguish(win, 0, 3), "a differing colour hint distinguishes them");
+        // Reverse-only difference also distinguishes.
+        m.set_style_hint(3, 4, 9, 1); // style_Subheader=4 ReverseColor on
+        assert!(m.style_distinguish(win, 0, 4), "a reverse-video difference distinguishes");
     }
 }

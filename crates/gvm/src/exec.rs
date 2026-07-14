@@ -3181,8 +3181,17 @@ impl Machine {
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
             0x00B0 => { self.glk.set_style_hint(a(0), a(1), a(2), a(3)); 0 } // glk_stylehint_set
             0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
-            0x00B2 => 0,           // glk_style_distinguish — styles not distinguishable
-            0x00B3 => 0,           // glk_style_measure — measurement unsupported
+            0x00B2 => self.glk.style_distinguish(a(0), a(1), a(2)) as u32, // glk_style_distinguish
+            0x00B3 => {
+                // glk_style_measure(win, styl, hint, result*) -> 1 if known + stored
+                match self.glk.style_measure(a(0), a(1), a(2)) {
+                    Some(v) => {
+                        self.glk_store_ptr(a(3), v)?;
+                        1
+                    }
+                    None => 0,
+                }
+            }
             // Gargoyle garglk_* colour extensions (gestalt_GarglkText, selector 0x1100).
             0x1100 => {
                 // garglk_set_zcolors(fg, bg) — on the current stream
@@ -9183,6 +9192,26 @@ mod tests {
         assert_eq!(m.mem.read32(0x184).unwrap(), b'A' as u32, "put_buffer_stream_uni word 0");
         assert_eq!(m.mem.read32(0x188).unwrap(), b'B' as u32, "put_buffer_stream_uni word 1");
         assert_eq!(m.mem.read32(0x18C).unwrap(), 0x3BB, "put_string_stream_uni decoded 'λ'");
+        assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_style_measure_and_distinguish_through_at_glk() {
+        use asm::Op::{C16, C32, C8, Mem16, Zero};
+        // Set style_Note (6) TextColor (7) = 0x00FF00 on the text-buffer window (3),
+        // then measure it and distinguish it from the unhinted style_Normal (0).
+        let mut body = glk_call(0xB0, &[C8(3), C8(6), C8(7), C32(0x00FF00)], Zero); // stylehint_set
+        body.extend(glk_call(0xB3, &[C8(1), C8(6), C8(7), C16(0x0100)], Mem16(0x0104))); // style_measure -> result@0x100, ret@0x104
+        body.extend(glk_call(0xB3, &[C8(1), C8(6), C8(8), C16(0x0110)], Mem16(0x0114))); // measure unset BackColor
+        body.extend(glk_call(0xB2, &[C8(1), C8(6), C8(0)], Mem16(0x0118))); // distinguish Note vs Normal
+        body.extend(glk_call(0xB2, &[C8(1), C8(0), C8(0)], Mem16(0x011C))); // distinguish Normal vs Normal
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x104).unwrap(), 1, "style_measure(TextColor) succeeded");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x00FF00, "measured colour stored in result");
+        assert_eq!(m.mem.read32(0x114).unwrap(), 0, "unset BackColor -> measure fails (0)");
+        assert_eq!(m.mem.read32(0x118).unwrap(), 1, "Note (hinted) distinguishable from Normal");
+        assert_eq!(m.mem.read32(0x11C).unwrap(), 0, "a style is not distinguishable from itself");
         assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
     }
 }
