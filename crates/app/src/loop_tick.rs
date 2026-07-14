@@ -54,6 +54,18 @@ pub(crate) fn poll_style_watch(
     redraw
 }
 
+/// Keep the Glulx backend's theme colours in sync with the live ColorScheme
+/// (SQ-0315): a style reload (watch, /reload-style, the per-game override) swaps
+/// `state.colors`, and glk_style_measure must answer with what is now rendered.
+/// Pushing the derived pairs every pass is cheap (four `Option<u32>` writes) and
+/// needs no reload-site plumbing. Z-machine sessions are untouched (not Glk).
+/// No redraw contribution.
+pub(crate) fn sync_theme_colours(state: &AppState, session: &mut dyn Engine) {
+    if let Some(gs) = session.as_any_mut().downcast_mut::<GlulxSession>() {
+        gs.set_theme_colours(app::glk_backend::theme_style_colours(&state.colors));
+    }
+}
+
 /// Glulx re-arrange on settled story-pane size (SQ-0201).
 /// Uses last frame's story rect (one-frame lag is fine). Runs BEFORE the
 /// draw so the resized graphics show on the next frame. Glulx-only; the

@@ -827,6 +827,7 @@ fn main() {
         // independent pollable subsystem lives in `loop_tick` and returns its
         // redraw contribution, OR-ed into `needs_redraw` here (order preserved).
         needs_redraw |= loop_tick::poll_style_watch(&mut state, &style_watcher, &mut watch_dirty);
+        loop_tick::sync_theme_colours(&state, &mut *session);
         needs_redraw |= loop_tick::poll_glulx_resize(
             &mut *session,
             &last_panes,

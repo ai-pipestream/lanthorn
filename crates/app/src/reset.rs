@@ -74,6 +74,9 @@ pub(crate) fn reset_game(
                 char_px,
                 pict_blorb,
                 &carry_vfs,
+                // The live theme's rendered colours, in place before the fresh
+                // boot probes glk_style_measure (SQ-0315).
+                app::glk_backend::theme_style_colours(&state.colors),
             )
             .map_err(|e| format!("{e:?}"))
             .map(|new_session| {

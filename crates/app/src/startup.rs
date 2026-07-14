@@ -142,6 +142,15 @@ pub(crate) fn boot() -> BootResult {
     let _ = std::fs::create_dir_all(&game_dir);
     let vfs_sidecar = app::vfs_store::read_vfs(&game_dir);
 
+    // Resolve the look from style.toml (the single styling source) BEFORE the
+    // engine builds: a Glulx game may probe glk_style_measure for the host's
+    // rendered colours during boot (Kerkerkruip's dark-background detection,
+    // SQ-0315), so the theme pairs must be in the backend first. `state.colors`
+    // is assigned from these below.
+    let (style_doc, style_w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
+    let (cs, set, style_w2) = app::style::resolve(&style_doc, &cfg.user_dir);
+    let theme_colours = app::glk_backend::theme_style_colours(&cs);
+
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -185,6 +194,7 @@ pub(crate) fn boot() -> BootResult {
                 char_px,
                 pict_blorb,
                 &vfs_sidecar,
+                theme_colours,
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {
@@ -278,12 +288,10 @@ pub(crate) fn boot() -> BootResult {
     // ── 3. Seed initial transcript + starting room ────────────────────────────
 
     let mut state = AppState::default();
-    // Resolve the look from style.toml (the single styling source).
-    let (base, w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (cs, set, w2) = app::style::resolve(&base, &cfg.user_dir);
+    // Apply the look resolved from style.toml above (before the engine build).
     state.colors = cs;
     state.symbols = set;
-    for w in w1.into_iter().chain(w2) {
+    for w in style_w1.into_iter().chain(style_w2) {
         state.push_notice(&format!("[{}]", w));
     }
     let (keymap, keymap_warnings) = app::keymap::KeyMap::resolve(&cfg.keymap);

@@ -275,10 +275,12 @@ impl GlulxSession {
         vfs_bytes: &[u8],
     ) -> Result<GlulxSession, GError> {
         // No persistent store: the game's own fixed-name @save/@restore auto-fail
-        // (empty game_dir), matching pre-persistence behavior. Used by tests.
+        // (empty game_dir), matching pre-persistence behavior. No theme colours
+        // (style_measure of an unhinted colour reports unknown). Used by tests.
         Self::new_in(
             std::path::PathBuf::new(), image, cols, rows, acceleration,
             graphics_enabled, sound_enabled, char_px, pict_blorb, vfs_bytes,
+            ((None, None), (None, None)),
         )
     }
 
@@ -299,10 +301,15 @@ impl GlulxSession {
         char_px: (u32, u32),
         pict_blorb: Option<blorb::Blorb>,
         vfs_bytes: &[u8],
+        theme: (crate::glk_backend::ThemePair, crate::glk_backend::ThemePair),
     ) -> Result<GlulxSession, GError> {
         let mem = Memory::new(image)?;
         let picts = crate::graphics::PictSource::new(pict_blorb);
-        let backend = Box::new(AppGlk::with_graphics(cols, rows, char_px, picts));
+        let mut backend = Box::new(AppGlk::with_graphics(cols, rows, char_px, picts));
+        // Theme colours must be in place BEFORE boot: a game may probe
+        // glk_style_measure for the host's rendered colours during its startup
+        // (Kerkerkruip's dark-background detection; SQ-0315).
+        backend.set_theme_colours(theme.0, theme.1);
         let mut machine = Machine::with_glk(mem, backend);
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
@@ -340,6 +347,16 @@ impl GlulxSession {
     /// Report a new display size to the backend (the host story-pane size).
     pub fn set_screen_size(&mut self, cols: u32, rows: u32) {
         self.appglk().set_screen_size(cols, rows);
+    }
+
+    /// Push the current theme's rendered default colours (`(buffer, grid)`
+    /// pairs) to the backend for `glk_style_measure` (SQ-0315). Called on boot
+    /// and kept fresh by the run loop so a live style reload is reflected.
+    pub fn set_theme_colours(
+        &mut self,
+        theme: (crate::glk_backend::ThemePair, crate::glk_backend::ThemePair),
+    ) {
+        self.appglk().set_theme_colours(theme.0, theme.1);
     }
 
     /// Enable/disable Glk sound on the running VM (the Sound gestalt + schannel
@@ -1045,6 +1062,7 @@ mod tests {
 
         let mut sess = GlulxSession::new_in(
             dir.clone(), image_for(body, 3), 80, 24, true, false, false, (1, 1), None, &[],
+            ((None, None), (None, None)),
         )
         .expect("new_in");
         assert_eq!(sess.pending_input(), InputKind::Line);
@@ -1278,6 +1296,7 @@ mod tests {
 
         let sess = GlulxSession::new_in(
             dir.clone(), image_for(body, 2), 80, 24, true, false, false, (1, 1), None, &[],
+            ((None, None), (None, None)),
         )
         .expect("new");
         // No Save request reached the host: the boot drive ran straight to the prompt.

@@ -436,6 +436,13 @@ impl GlkBackend for TerminalBackend {
         Some((bytes.to_vec(), ty == b"TEXT"))
     }
 
+    // `default_style_colours` (SQ-0315) deliberately stays at the trait default
+    // (None): the CLI renders on the terminal's own palette, which it cannot
+    // read portably, and the only colours it ever paints itself (the OSC-11
+    // page background) come from game-set stylehints — which glk_style_measure
+    // already answers from the model, taking precedence over any backend
+    // report. None is the honest "I don't know".
+
     fn window_layout(&mut self, wins: &[(u32, WinType, Rect, Option<bool>)]) {
         if self.debug {
             for (id, ty, r, _border) in wins {

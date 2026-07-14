@@ -62,6 +62,28 @@ fn resolve_glk_colour(style: GlkStyle, colour: StyleColour) -> (u8, u32, u32) {
     (bits, pack(colour.fg), pack(colour.bg))
 }
 
+/// One `(fg, bg)` theme colour pair reported through `glk_style_measure`
+/// (SQ-0315): each channel `Some(0x00RRGGBB)` or `None` for terminal-default.
+pub type ThemePair = (Option<u32>, Option<u32>);
+
+/// The theme's rendered default colours for Glk windows, derived from the
+/// active [`ColorScheme`](crate::colors::ColorScheme): `(buffer, grid)` pairs
+/// from the `transcript` (story pane) and `status_bar` styles. Only concrete
+/// RGB colours are reported; a named/indexed ANSI colour or an unset channel
+/// renders however the terminal decides, so it is honestly `None` (no guess).
+pub fn theme_style_colours(colors: &crate::colors::ColorScheme) -> (ThemePair, ThemePair) {
+    let rgb = |c: Option<ratatui::style::Color>| match c {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => {
+            Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
+        }
+        _ => None,
+    };
+    (
+        (rgb(colors.transcript.fg), rgb(colors.transcript.bg)),
+        (rgb(colors.status_bar.fg), rgb(colors.status_bar.bg)),
+    )
+}
+
 // ── Per-window record ──────────────────────────────────────────────────────────
 
 /// A text-grid window's cell buffer (cells keyed by 0-based `(row, col)`).
@@ -142,6 +164,15 @@ pub struct AppGlk {
     next_schannel: u32,
     /// Buffered per-turn sound operations, drained by `take_sound_ops`.
     sound_ops: Vec<crate::session::SchannelOp>,
+    /// The theme's rendered default `(fg, bg)` for text-buffer windows (from the
+    /// story-pane `transcript` style) as `0x00RRGGBB`; `None` per channel =
+    /// terminal default (unknowable — no guess). Reported to the game through
+    /// `glk_style_measure` via `GlkBackend::default_style_colours` so it can
+    /// detect a dark background (SQ-0315). Pushed by the app on boot and kept
+    /// fresh each loop pass (live style reload).
+    theme_buffer: (Option<u32>, Option<u32>),
+    /// Same, for text-grid windows (from the `status_bar` style).
+    theme_grid: (Option<u32>, Option<u32>),
 }
 
 impl Default for AppGlk {
@@ -182,7 +213,23 @@ impl AppGlk {
             schannels: BTreeMap::new(),
             next_schannel: 0,
             sound_ops: Vec::new(),
+            theme_buffer: (None, None),
+            theme_grid: (None, None),
         }
+    }
+
+    /// Update the theme's rendered default colours reported through
+    /// `glk_style_measure` (SQ-0315): `buffer` for text-buffer windows (the
+    /// story-pane `transcript` style), `grid` for text-grid windows (the
+    /// `status_bar` style). Each channel is `Some(0x00RRGGBB)` or `None` for a
+    /// terminal-default (no explicit colour — honestly unknown).
+    pub fn set_theme_colours(
+        &mut self,
+        buffer: (Option<u32>, Option<u32>),
+        grid: (Option<u32>, Option<u32>),
+    ) {
+        self.theme_buffer = buffer;
+        self.theme_grid = grid;
     }
 
     /// The pixel size of a graphics window `win` as laid out, from `layout` ×
@@ -710,6 +757,16 @@ impl GlkBackend for AppGlk {
         self.picts.data_resource(num)
     }
 
+    fn default_style_colours(&self, wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
+        // The theme paints one base colour pair per pane, not per style class,
+        // so every style reports the same pair for its window type.
+        match wintype {
+            WinType::TextBuffer => Some(self.theme_buffer),
+            WinType::TextGrid => Some(self.theme_grid),
+            WinType::Pair | WinType::Graphics => None,
+        }
+    }
+
     fn graphics_fill_rect(&mut self, win: u32, color: u32, left: i32, top: i32, w: u32, h: u32) {
         let (cw, ch) = self.canvas_size(win);
         self.graphics
@@ -823,6 +880,46 @@ mod tests {
         assert_eq!(glk_style_bits(GlkStyle::Header), 0x02);
         assert_eq!(glk_style_bits(GlkStyle::Alert), 0x03);
         assert_eq!(glk_style_bits(GlkStyle::Preformatted), 0x08);
+    }
+
+    #[test]
+    fn default_style_colours_reports_theme_pairs_per_wintype() {
+        // SQ-0315: AppGlk reports the pushed theme pairs through the
+        // GlkBackend hook — buffer pair for TextBuffer, grid pair for TextGrid,
+        // nothing for Pair/Graphics. Unset → (None, None) pairs (still Some
+        // outer: the host knows its answer is "terminal default").
+        let mut glk = AppGlk::new(80, 24);
+        assert_eq!(glk.default_style_colours(WinType::TextBuffer, 0), Some((None, None)));
+        glk.set_theme_colours((Some(0x00C5C8C6), Some(0x001D1F21)), (None, Some(0x00303030)));
+        assert_eq!(
+            glk.default_style_colours(WinType::TextBuffer, 0),
+            Some((Some(0x00C5C8C6), Some(0x001D1F21)))
+        );
+        // Every style class reports the same pane pair.
+        assert_eq!(
+            glk.default_style_colours(WinType::TextBuffer, 5),
+            Some((Some(0x00C5C8C6), Some(0x001D1F21)))
+        );
+        assert_eq!(
+            glk.default_style_colours(WinType::TextGrid, 0),
+            Some((None, Some(0x00303030))),
+            "grid fg is terminal-default -> None channel"
+        );
+        assert_eq!(glk.default_style_colours(WinType::Graphics, 0), None);
+        assert_eq!(glk.default_style_colours(WinType::Pair, 0), None);
+    }
+
+    #[test]
+    fn theme_style_colours_converts_only_concrete_rgb() {
+        // Rgb channels convert to 0x00RRGGBB; a named ANSI colour or an unset
+        // channel is terminal-defined, so it honestly reports None.
+        use ratatui::style::{Color, Style};
+        let mut cs = crate::colors::ColorScheme::default();
+        cs.transcript = Style::new().fg(Color::Rgb(0xC5, 0xC8, 0xC6)).bg(Color::Rgb(0x1D, 0x1F, 0x21));
+        cs.status_bar = Style::new().fg(Color::Yellow); // named -> None; bg unset -> None
+        let (buffer, grid) = theme_style_colours(&cs);
+        assert_eq!(buffer, (Some(0x00C5C8C6), Some(0x001D1F21)));
+        assert_eq!(grid, (None, None));
     }
 
     #[test]

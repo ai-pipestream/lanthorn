@@ -3251,10 +3251,30 @@ impl Machine {
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
             0x00B0 => { self.glk.set_style_hint(a(0), a(1), a(2), a(3)); 0 } // glk_stylehint_set
             0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
-            0x00B2 => self.glk.style_distinguish(a(0), a(1), a(2)) as u32, // glk_style_distinguish
+            // glk_style_distinguish: hints only. The backend's default colours
+            // (SQ-0315) are per-window-type base colours, identical across style
+            // classes, so they can never make two styles distinguishable — the
+            // model's hint-based answer already is the honest one.
+            0x00B2 => self.glk.style_distinguish(a(0), a(1), a(2)) as u32,
             0x00B3 => {
-                // glk_style_measure(win, styl, hint, result*) -> 1 if known + stored
-                match self.glk.style_measure(a(0), a(1), a(2)) {
+                // glk_style_measure(win, styl, hint, result*) -> 1 if known + stored.
+                // Answer order (SQ-0315): a game-set stylehint colour wins (it IS
+                // what's rendered when set); else the backend's actually-rendered
+                // default colour for that style; else unknown (0). Only the two
+                // colour hints consult the backend — TextColor (7) / BackColor (8).
+                let measured = self.glk.style_measure(a(0), a(1), a(2)).or_else(|| {
+                    if a(1) >= glk::NUMSTYLES {
+                        return None;
+                    }
+                    let wintype = self.glk.window_type(a(0))?;
+                    let (fg, bg) = self.backend.default_style_colours(wintype, a(1))?;
+                    match a(2) {
+                        7 => fg, // stylehint_TextColor
+                        8 => bg, // stylehint_BackColor
+                        _ => None,
+                    }
+                });
+                match measured {
                     Some(v) => {
                         self.glk_store_ptr(a(3), v)?;
                         1
@@ -9391,5 +9411,57 @@ mod tests {
         assert_eq!(m.mem.read32(0x118).unwrap(), 1, "Note (hinted) distinguishable from Normal");
         assert_eq!(m.mem.read32(0x11C).unwrap(), 0, "a style is not distinguishable from itself");
         assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_style_measure_falls_back_to_backend_default_colours() {
+        // SQ-0315: with no game-set hint, style_measure answers with the host's
+        // actually-rendered default colours; a game-set hint takes precedence;
+        // a channel the host reports as terminal-default (None) stays unknown.
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let backend =
+            glk::TestBackend::new().with_default_colours(Some(0x00C5C8C6), Some(0x001D1F21));
+        let mut m = Machine::with_glk(mem, Box::new(backend));
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // text buffer
+        assert_ne!(win, 0);
+
+        // No hint set → backend colours reported for TextColor (7) / BackColor (8).
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 7, 0x100]).unwrap(), 1, "fg known via backend");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x00C5C8C6, "backend fg");
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 8, 0x104]).unwrap(), 1, "bg known via backend");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x001D1F21, "backend bg");
+        // Non-colour hints never consult the backend (still honestly unknown).
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 4, 0x108]).unwrap(), 0, "Size stays unknown");
+
+        // A game-set hint wins over the backend's default.
+        m.glk_dispatch(0x00B0, &[3, 0, 8, 0x00FF0000]).unwrap(); // stylehint_set BackColor red
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 8, 0x10C]).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 0x00FF0000, "game hint wins over backend");
+        // ...and clearing it falls back to the backend again.
+        m.glk_dispatch(0x00B1, &[3, 0, 8]).unwrap(); // stylehint_clear
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 8, 0x110]).unwrap(), 1);
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x001D1F21, "cleared hint -> backend bg again");
+    }
+
+    #[test]
+    fn glk_style_measure_backend_partial_and_absent_info() {
+        // A host that knows only its bg (fg is terminal-default) reports just
+        // that channel; a host with no info at all (trait default) yields 0.
+        let start = asm::func(0xC1, &[], &[]);
+        let built = asm::assemble(&[start], 0, 0x200);
+        let mem = Memory::new(built.image).expect("valid image");
+        let backend = glk::TestBackend::new().with_default_colours(None, Some(0x00101010));
+        let mut m = Machine::with_glk(mem, Box::new(backend));
+        let win = m.glk_open_window(0, 0, 0, 3, 0);
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 7, 0x100]).unwrap(), 0, "fg unknown (terminal default)");
+        assert_eq!(m.glk_dispatch(0x00B3, &[win, 0, 8, 0x104]).unwrap(), 1, "bg known");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x00101010);
+
+        // Backend with no colour info at all: measure of an unhinted colour → 0.
+        let mut plain = machine_with_glk(&[]);
+        let win2 = plain.glk.root();
+        assert_eq!(plain.glk_dispatch(0x00B3, &[win2, 0, 7, 0x100]).unwrap(), 0, "no info -> unknown");
     }
 }

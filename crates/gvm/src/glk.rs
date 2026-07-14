@@ -474,6 +474,17 @@ pub trait GlkBackend {
     fn data_resource(&mut self, _num: u32) -> Option<(Vec<u8>, bool)> {
         None
     }
+    /// The colours the host actually renders by default for style class `style`
+    /// (a `style_*` number) in a window of type `wintype`, as `(fg, bg)` — each
+    /// channel `Some(0x00RRGGBB)` or `None` when it is the terminal's own
+    /// default (unknowable, so no guess). The outer `None` means the host
+    /// reports no rendered colours at all (the default). Consulted by
+    /// `glk_style_measure` only for a colour hint the game did not set itself,
+    /// so games (e.g. Kerkerkruip) can detect a dark host background and adapt
+    /// (SQ-0315).
+    fn default_style_colours(&self, _wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
+        None
+    }
     /// Fill a rectangle of a graphics window with `color`.
     fn graphics_fill_rect(&mut self, _win: u32, _color: u32, _left: i32, _top: i32, _w: u32, _h: u32) {}
     /// Erase a rectangle of a graphics window to its background color.
@@ -555,6 +566,9 @@ pub struct TestBackend {
     /// Canned Blorb `Data` resources by number → `(bytes, is_text)`, served by
     /// [`GlkBackend::data_resource`] for `glk_stream_open_resource` tests.
     data_resources: BTreeMap<u32, (Vec<u8>, bool)>,
+    /// Canned host-rendered default style colours `(fg, bg)`, served by
+    /// [`GlkBackend::default_style_colours`] for every wintype/style when set.
+    default_colours: Option<(Option<u32>, Option<u32>)>,
 }
 
 impl Default for TestBackend {
@@ -582,6 +596,7 @@ impl TestBackend {
             schannel_rocks: BTreeMap::new(),
             sound_log: Vec::new(),
             data_resources: BTreeMap::new(),
+            default_colours: None,
         }
     }
     /// A backend reporting a specific display size.
@@ -603,6 +618,12 @@ impl TestBackend {
     /// [`GlkBackend::data_resource`] will serve to `glk_stream_open_resource`.
     pub fn with_data_resource(mut self, num: u32, bytes: Vec<u8>, is_text: bool) -> Self {
         self.data_resources.insert(num, (bytes, is_text));
+        self
+    }
+    /// Set the canned host-rendered default style colours `(fg, bg)` that
+    /// [`GlkBackend::default_style_colours`] reports for every wintype/style.
+    pub fn with_default_colours(mut self, fg: Option<u32>, bg: Option<u32>) -> Self {
+        self.default_colours = Some((fg, bg));
         self
     }
     /// Accumulated text for one text-buffer window (empty if none).
@@ -783,6 +804,9 @@ impl GlkBackend for TestBackend {
     }
     fn data_resource(&mut self, num: u32) -> Option<(Vec<u8>, bool)> {
         self.data_resources.get(&num).cloned()
+    }
+    fn default_style_colours(&self, _wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
+        self.default_colours
     }
     fn as_any(&self) -> &dyn Any {
         self
