@@ -187,7 +187,10 @@ pub(crate) fn trim_elems_to_len(elems: &mut [TranscriptElem], keep: usize) {
 /// volume so the player (which cannot see `AppGlk`) can compute gain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchannelOp {
-    Play { chan: u32, snd: u32, repeats: u32, notify: u32, volume: u32 },
+    /// `paused` snapshots the channel's pause state (Glk 0.7.3 §8.3): a sound
+    /// played on a channel paused while empty must start paused, and release
+    /// only on `unpause`.
+    Play { chan: u32, snd: u32, repeats: u32, notify: u32, volume: u32, paused: bool },
     Stop { chan: u32 },
     SetVolume { chan: u32, vol: u32 },
     Destroy { chan: u32 },

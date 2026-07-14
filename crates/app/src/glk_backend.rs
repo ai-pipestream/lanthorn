@@ -122,6 +122,10 @@ struct SoundChannel {
     rock: u32,
     /// Glk volume (0x10000 = full); snapshotted into each `Play` op.
     volume: u32,
+    /// Whether the channel is paused (Glk 0.7.3 §8.3). Set by `schannel_pause`,
+    /// cleared by `schannel_unpause`, and snapshotted into each `Play` op so a
+    /// sound played on a channel paused while empty starts paused.
+    paused: bool,
 }
 
 /// The app Glk display backend (see the module docs).
@@ -819,7 +823,7 @@ impl GlkBackend for AppGlk {
     fn schannel_create(&mut self, rock: u32) -> u32 {
         self.next_schannel += 1;
         let id = self.next_schannel;
-        self.schannels.insert(id, SoundChannel { rock, volume: 0x10000 });
+        self.schannels.insert(id, SoundChannel { rock, volume: 0x10000, paused: false });
         id
     }
     fn schannel_destroy(&mut self, chan: u32) {
@@ -841,8 +845,12 @@ impl GlkBackend for AppGlk {
         self.schannels.get(&chan).map(|c| c.rock).unwrap_or(0)
     }
     fn schannel_play(&mut self, chan: u32, snd: u32, repeats: u32, notify: u32) -> u32 {
-        let volume = self.schannels.get(&chan).map(|c| c.volume).unwrap_or(0x10000);
-        self.sound_ops.push(crate::session::SchannelOp::Play { chan, snd, repeats, notify, volume });
+        let (volume, paused) = self
+            .schannels
+            .get(&chan)
+            .map(|c| (c.volume, c.paused))
+            .unwrap_or((0x10000, false));
+        self.sound_ops.push(crate::session::SchannelOp::Play { chan, snd, repeats, notify, volume, paused });
         1
     }
     fn schannel_stop(&mut self, chan: u32) {
@@ -857,13 +865,19 @@ impl GlkBackend for AppGlk {
     fn schannel_create_ext(&mut self, rock: u32, volume: u32) -> u32 {
         self.next_schannel += 1;
         let id = self.next_schannel;
-        self.schannels.insert(id, SoundChannel { rock, volume });
+        self.schannels.insert(id, SoundChannel { rock, volume, paused: false });
         id
     }
     fn schannel_pause(&mut self, chan: u32) {
+        if let Some(c) = self.schannels.get_mut(&chan) {
+            c.paused = true;
+        }
         self.sound_ops.push(crate::session::SchannelOp::Pause { chan });
     }
     fn schannel_unpause(&mut self, chan: u32) {
+        if let Some(c) = self.schannels.get_mut(&chan) {
+            c.paused = false;
+        }
         self.sound_ops.push(crate::session::SchannelOp::Unpause { chan });
     }
     fn schannel_set_volume_ext(&mut self, chan: u32, vol: u32, duration_ms: u32, notify: u32) {
@@ -1373,7 +1387,7 @@ mod tests {
         let ops = g.take_sound_ops();
         assert_eq!(ops, vec![
             SchannelOp::SetVolume { chan: c, vol: 0x8000 },
-            SchannelOp::Play { chan: c, snd: 5, repeats: 3, notify: 9, volume: 0x8000 },
+            SchannelOp::Play { chan: c, snd: 5, repeats: 3, notify: 9, volume: 0x8000, paused: false },
             SchannelOp::Stop { chan: c },
             SchannelOp::Destroy { chan: c },
         ]);
@@ -1389,7 +1403,38 @@ mod tests {
         let c = g.schannel_create(0); // no set_volume → default 0x10000 (Glk full)
         g.schannel_play(c, 1, 1, 0);
         let ops = g.take_sound_ops();
-        assert_eq!(ops, vec![SchannelOp::Play { chan: c, snd: 1, repeats: 1, notify: 0, volume: 0x10000 }]);
+        assert_eq!(ops, vec![SchannelOp::Play { chan: c, snd: 1, repeats: 1, notify: 0, volume: 0x10000, paused: false }]);
+    }
+
+    #[test]
+    fn appglk_pause_on_empty_channel_snapshots_paused_into_next_play() {
+        // Glk 0.7.3 §8.3: pausing a channel while it is empty must make a
+        // subsequently-played sound start paused; unpause releases it. The
+        // paused state is snapshotted into the Play op (like volume), so the
+        // player (which cannot see AppGlk) starts the sink paused.
+        use gvm::glk::GlkBackend;
+        use crate::session::SchannelOp;
+        let mut g = AppGlk::new(80, 24);
+        let c = g.schannel_create(0);
+        g.schannel_pause(c); // pause the empty channel
+        g.schannel_play(c, 1, 1, 0); // this sound must start paused
+        assert_eq!(
+            g.take_sound_ops(),
+            vec![
+                SchannelOp::Pause { chan: c },
+                SchannelOp::Play { chan: c, snd: 1, repeats: 1, notify: 0, volume: 0x10000, paused: true },
+            ],
+        );
+        // Unpause clears it, so a later play starts unpaused again.
+        g.schannel_unpause(c);
+        g.schannel_play(c, 2, 1, 0);
+        assert_eq!(
+            g.take_sound_ops(),
+            vec![
+                SchannelOp::Unpause { chan: c },
+                SchannelOp::Play { chan: c, snd: 2, repeats: 1, notify: 0, volume: 0x10000, paused: false },
+            ],
+        );
     }
 
     #[test]
@@ -1407,7 +1452,7 @@ mod tests {
         g.schannel_set_volume_ext(c, 0x8000, 500, 7);
         let ops = g.take_sound_ops();
         assert_eq!(ops, vec![
-            SchannelOp::Play { chan: c, snd: 2, repeats: 1, notify: 0, volume: 0x4000 },
+            SchannelOp::Play { chan: c, snd: 2, repeats: 1, notify: 0, volume: 0x4000, paused: false },
             SchannelOp::Pause { chan: c },
             SchannelOp::Unpause { chan: c },
             SchannelOp::SetVolumeExt { chan: c, vol: 0x8000, duration_ms: 500, notify: 7 },

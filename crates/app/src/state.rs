@@ -1782,7 +1782,7 @@ impl AppState {
         let Some(backend) = self.audio.as_mut() else { return };
         for op in ops {
             match *op {
-                SchannelOp::Play { chan, snd, repeats, notify, volume } => {
+                SchannelOp::Play { chan, snd, repeats, notify, volume, paused } => {
                     // Playing on a busy channel stops the old sound first; the
                     // replaced sound fires no notify.
                     if let Some(old) = self.glulx_channels.remove(&chan) {
@@ -1798,6 +1798,13 @@ impl AppState {
                                     self.glulx_channels.insert(chan, id);
                                     if notify != 0 {
                                         self.glulx_sound_notify.insert(id, (snd, notify));
+                                    }
+                                    // A sound played on a channel paused while empty
+                                    // starts paused (Glk 0.7.3 §8.3); a paused sink is
+                                    // not "empty", so no finish-notify fires until it
+                                    // is unpaused and actually plays out.
+                                    if paused {
+                                        backend.pause(id);
                                     }
                                 }
                             }
