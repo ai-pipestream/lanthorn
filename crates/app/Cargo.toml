@@ -31,3 +31,4 @@ clap = { version = "4", features = ["derive"] }
 notify = "6"
 unicode-width = "0.1"
 signal-hook = "0.3"
+jiff = "0.2"

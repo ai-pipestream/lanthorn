@@ -640,6 +640,15 @@ impl GlkBackend for TerminalBackend {
         let _ = self.out.flush();
     }
 
+    /// The system timezone's UTC offset (seconds east of Greenwich) at the given
+    /// instant, for the Glk `_local` date/time selectors — resolved per instant
+    /// (DST-correct at any time), thread-safe, and cross-platform via `jiff`.
+    /// Out-of-range instants → `None` → the selectors fall back to UTC.
+    fn local_utc_offset_seconds(&self, epoch_seconds: i64) -> Option<i32> {
+        let ts = jiff::Timestamp::from_second(epoch_seconds).ok()?;
+        Some(jiff::tz::TimeZone::system().to_offset(ts).seconds())
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }

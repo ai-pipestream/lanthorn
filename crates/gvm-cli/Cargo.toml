@@ -7,3 +7,4 @@ edition = "2021"
 gvm = { path = "../gvm" }
 blorb = { path = "../blorb" }
 crossterm = "0.29"
+jiff = "0.2"

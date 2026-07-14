@@ -3597,7 +3597,7 @@ impl Machine {
                 if self.sound_enabled { self.backend.schannel_unpause(a(0)); }
                 0
             }
-            // ── date/time (Glk 0.7.6; UTC only — see glk::datetime) ────────────
+            // ── date/time (Glk 0.7.6; _local via GlkBackend — see glk::datetime) ─
             0x0160 => {
                 // glk_current_time(timeval*)
                 let (secs, micro) = Self::now_seconds();
@@ -3609,30 +3609,66 @@ impl Machine {
                 let (secs, _) = Self::now_seconds();
                 glk::datetime::simplify_time(secs, a(0)) as u32
             }
-            // glk_time_to_date_utc / _local (timeval* -> date*); _local == UTC.
-            0x0168 | 0x0169 => {
+            // glk_time_to_date_utc (timeval* -> date*).
+            0x0168 => {
                 let tv = self.read_timeval(a(0))?;
                 let secs = glk::datetime::timeval_to_timestamp(tv);
                 self.write_glkdate(a(1), glk::datetime::time_to_date(secs, tv.microsec))?;
                 0
             }
-            // glk_simple_time_to_date_utc / _local (time, factor -> date*).
-            0x016A | 0x016B => {
+            // glk_time_to_date_local (timeval* -> date*).
+            0x0169 => {
+                let tv = self.read_timeval(a(0))?;
+                let secs = glk::datetime::timeval_to_timestamp(tv);
+                let date = glk::datetime::time_to_date_local(secs, tv.microsec, |t| {
+                    self.backend.local_utc_offset_seconds(t)
+                });
+                self.write_glkdate(a(1), date)?;
+                0
+            }
+            // glk_simple_time_to_date_utc (time, factor -> date*).
+            0x016A => {
                 let secs = a(0) as i32 as i64 * a(1) as i64;
                 self.write_glkdate(a(2), glk::datetime::time_to_date(secs, 0))?;
                 0
             }
-            // glk_date_to_time_utc / _local (date* -> timeval*); _local == UTC.
-            0x016C | 0x016D => {
+            // glk_simple_time_to_date_local (time, factor -> date*).
+            0x016B => {
+                let secs = a(0) as i32 as i64 * a(1) as i64;
+                let date = glk::datetime::time_to_date_local(secs, 0, |t| {
+                    self.backend.local_utc_offset_seconds(t)
+                });
+                self.write_glkdate(a(2), date)?;
+                0
+            }
+            // glk_date_to_time_utc (date* -> timeval*).
+            0x016C => {
                 let date = self.read_glkdate(a(0))?;
                 let (secs, micro) = glk::datetime::date_to_time(date);
                 self.write_timeval(a(1), glk::datetime::timestamp_to_timeval(secs, micro))?;
                 0
             }
-            // glk_date_to_simple_time_utc / _local (date*, factor -> time).
-            0x016E | 0x016F => {
+            // glk_date_to_time_local (date* -> timeval*).
+            0x016D => {
+                let date = self.read_glkdate(a(0))?;
+                let (secs, micro) = glk::datetime::date_to_time_local(date, |t| {
+                    self.backend.local_utc_offset_seconds(t)
+                });
+                self.write_timeval(a(1), glk::datetime::timestamp_to_timeval(secs, micro))?;
+                0
+            }
+            // glk_date_to_simple_time_utc (date*, factor -> time).
+            0x016E => {
                 let date = self.read_glkdate(a(0))?;
                 let (secs, _) = glk::datetime::date_to_time(date);
+                glk::datetime::simplify_time(secs, a(1)) as u32
+            }
+            // glk_date_to_simple_time_local (date*, factor -> time).
+            0x016F => {
+                let date = self.read_glkdate(a(0))?;
+                let (secs, _) = glk::datetime::date_to_time_local(date, |t| {
+                    self.backend.local_utc_offset_seconds(t)
+                });
                 glk::datetime::simplify_time(secs, a(1)) as u32
             }
             other => {

@@ -86,7 +86,7 @@ Dispatch in `exec.rs` ~L2627 (`glk_gestalt` fn). `glk_gestalt_ext` (0x0005) dele
 | LineInputEcho | 17 | §4 | PARTIAL | Returns 0; `glk_set_echo_line_event` (0x0150) is a silent no-op | S | DEFER | NO |
 | LineTerminators | 18 | §4 | MISSING | Returns 0; `glk_set_terminators_line_event` (0x0151) is a silent no-op | M | ADD-soon | NO |
 | LineTerminatorKey | 19 | §4 | MISSING | Returns 0; val2 of line-input events is always 0 | M | ADD-soon | NO |
-| DateTime | 20 | §4 | DONE | Returns 1; full date/time selector family 0x0160–0x016F (UTC-only local; Wave-5 T1) | — | — | — |
+| DateTime | 20 | §4 | DONE | Returns 1; full date/time selector family 0x0160–0x016F; `_local` uses real host tz offset via `GlkBackend::local_utc_offset_seconds` (Wave-5 T1; T4 SQ-0317 real local time) | — | — | — |
 | Sound2 | 21 | §4 | DONE | Returns 1 (follows sound_enabled); extended suite `glk_schannel_create_ext` (0x00F4), `_play_multi` (0x00F7), `_set_volume_ext` (0x00FD), `_pause` (0x00FE), `_unpause` (0x00FF) + evtype_VolumeNotify (9) implemented (SQ-0308) | — | — | — |
 | ResourceStream | 22 | §4 | DONE | Returns 1; `glk_stream_open_resource` (0x0049) and `_uni` (0x013A — this audit's 0x014A was wrong) implemented (SQ-0308) | — | — | — |
 | GraphicsCharInput | 23 | §4 | MISSING | Returns 0 | M | DEFER | NO |
@@ -317,7 +317,7 @@ All hyperlink API functions fall to the diagnostic arm: `glk_set_hyperlink` (0x0
 
 ### 4i. Date and Time (Glk spec §11)
 
-Implemented (Wave-5 T1): `glk_current_time` (0x0160), `glk_current_simple_time` (0x0161), and the date conversion functions (0x0168–0x016F), via the zero-dep `glk::datetime` module. `_local` selectors are UTC (no tz database — documented limitation).
+Implemented (Wave-5 T1): `glk_current_time` (0x0160), `glk_current_simple_time` (0x0161), and the date conversion functions (0x0168–0x016F), via the zero-dep `glk::datetime` module. Real local time (T4, SQ-0317): the `_local` selectors take a per-instant UTC offset from the host via `GlkBackend::local_utc_offset_seconds` (DST-correct; `date_to_time_local` uses mktime-style two-pass offset resolution), falling back to UTC when the host returns `None`. The `app` and `gvm-cli` hosts supply it via `jiff` (thread-safe, cross-platform); gvm stays zero-dep.
 
 | Feature | Glk spec § | Status | Effort | Rec | Already tracked? |
 |---|---|---|---|---|---|

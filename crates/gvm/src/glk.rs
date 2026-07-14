@@ -261,10 +261,12 @@ pub mod keycode {
 /// caller from [`std::time::SystemTime`]. The semantics match cheapglk's
 /// `cgdate.c` (the reference Glk implementation).
 ///
-/// **UTC only.** `std` has no timezone database and this crate makes no unsafe
-/// platform calls, so the `_local` selectors are implemented identically to the
-/// `_utc` ones (some interpreters do the same). This is a documented limitation,
-/// not a bug: absent a tz database there is no honest local answer to give.
+/// **UTC math, host-supplied local offset.** `std` has no timezone database and
+/// this crate makes no unsafe platform calls, so the civil arithmetic below is
+/// UTC-only. The `_local` selectors add a UTC offset supplied by the host via
+/// [`GlkBackend::local_utc_offset_seconds`] (queried per instant, so DST is
+/// correct); when the host returns `None` they fall back to UTC exactly as the
+/// `_utc` selectors do.
 pub mod datetime {
     /// A Glk `glktimeval_t`: seconds since the Unix epoch as a signed 64-bit
     /// count split into `high_sec` (top 32 bits, signed) and `low_sec` (bottom
@@ -397,6 +399,39 @@ pub mod datetime {
             return 0;
         }
         secs.div_euclid(factor as i64) as i32
+    }
+
+    /// Broken-down LOCAL date for a UTC epoch second count + `microsec`
+    /// (`glk_time_to_date_local`). `offset` reports the local UTC offset in
+    /// seconds east of Greenwich at a given instant; the input `secs` is the
+    /// exact UTC instant, so we query the offset there and shift the wall clock
+    /// forward by it before reusing the UTC civil math. `None` → UTC (no shift).
+    pub fn time_to_date_local(
+        secs: i64,
+        microsec: i32,
+        offset: impl Fn(i64) -> Option<i32>,
+    ) -> GlkDate {
+        let off = offset(secs).unwrap_or(0) as i64;
+        time_to_date(secs + off, microsec)
+    }
+
+    /// Invert a broken-down LOCAL date to a UTC epoch second count + normalized
+    /// `microsec` (`glk_date_to_time_local`). The broken-down fields describe
+    /// local wall-clock time; [`date_to_time`] first reduces them as if they were
+    /// UTC, giving `naive = utc + offset(utc)`. We then recover `utc` with the
+    /// standard two-pass offset resolution (the same shape as libc `mktime`):
+    /// query the offset at `naive`, subtract it for a first estimate, then query
+    /// again at that estimate and subtract — one refinement is enough to land on
+    /// the correct side of a DST transition. `None` → UTC (no shift).
+    ///
+    /// Fold/gap ambiguity (a wall-clock time that occurs twice, or not at all,
+    /// around a DST change) is resolved to whatever offset the second query
+    /// returns for the estimated instant — mktime-like, not specified by Glk.
+    pub fn date_to_time_local(date: GlkDate, offset: impl Fn(i64) -> Option<i32>) -> (i64, i32) {
+        let (naive, micro) = date_to_time(date);
+        let guess = naive - offset(naive).unwrap_or(0) as i64;
+        let utc = naive - offset(guess).unwrap_or(0) as i64;
+        (utc, micro)
     }
 }
 
@@ -561,6 +596,15 @@ pub trait GlkBackend {
     }
     /// Flush any buffered output to the display.
     fn flush(&mut self) {}
+    /// The local timezone's offset from UTC, in seconds east of Greenwich, at
+    /// the instant `epoch_seconds` (Unix time). Because it is queried per
+    /// instant, DST is honored correctly (a summer query and a winter query of
+    /// the same zone return different offsets). `None` = the host has no
+    /// timezone knowledge, in which case the `_local` date/time selectors fall
+    /// back to UTC (identical to the `_utc` selectors). Default: `None`.
+    fn local_utc_offset_seconds(&self, _epoch_seconds: i64) -> Option<i32> {
+        None
+    }
     /// Immutable downcast support (used by tests to read recorded output).
     fn as_any(&self) -> &dyn Any;
     /// Mutable downcast support.
@@ -617,6 +661,10 @@ pub struct TestBackend {
     /// Canned host-rendered default style colours `(fg, bg)`, served by
     /// [`GlkBackend::default_style_colours`] for every wintype/style when set.
     default_colours: Option<(Option<u32>, Option<u32>)>,
+    /// Fixed local UTC offset in seconds served by
+    /// [`GlkBackend::local_utc_offset_seconds`] for the `_local` date/time
+    /// selector tests (`None` = no tz knowledge → selectors fall back to UTC).
+    local_offset: Option<i32>,
 }
 
 impl Default for TestBackend {
@@ -646,6 +694,7 @@ impl TestBackend {
             sound_log: Vec::new(),
             data_resources: BTreeMap::new(),
             default_colours: None,
+            local_offset: None,
         }
     }
     /// A backend reporting a specific display size.
@@ -673,6 +722,13 @@ impl TestBackend {
     /// [`GlkBackend::default_style_colours`] reports for every wintype/style.
     pub fn with_default_colours(mut self, fg: Option<u32>, bg: Option<u32>) -> Self {
         self.default_colours = Some((fg, bg));
+        self
+    }
+    /// Set the fixed local UTC offset (seconds east of Greenwich) that
+    /// [`GlkBackend::local_utc_offset_seconds`] reports for the `_local`
+    /// date/time selectors (e.g. `-25200` = PDT, UTC-7).
+    pub fn with_local_offset(mut self, seconds: i32) -> Self {
+        self.local_offset = Some(seconds);
         self
     }
     /// Accumulated text for one text-buffer window (empty if none).
@@ -883,6 +939,9 @@ impl GlkBackend for TestBackend {
     }
     fn default_style_colours(&self, _wintype: WinType, _style: u32) -> Option<(Option<u32>, Option<u32>)> {
         self.default_colours
+    }
+    fn local_utc_offset_seconds(&self, _epoch_seconds: i64) -> Option<i32> {
+        self.local_offset
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -3954,6 +4013,77 @@ mod style_hint_tests {
         // A simple time of 100 minutes (factor 60) = 6000s = 1970-01-01 01:40:00.
         let d = dt::time_to_date(100i64 * 60, 0);
         assert_eq!((d.hour, d.minute), (1, 40));
+    }
+
+    // ── date/time _local (host-supplied UTC offset) ───────────────────────────
+
+    // PDT = UTC-7 = -25200s.
+    const PDT: i32 = -25200;
+
+    #[test]
+    fn local_none_offset_is_identical_to_utc() {
+        // A None-returning host must leave the _local selectors == _utc.
+        let secs = epoch(2026, 7, 14, 12, 0, 0);
+        assert_eq!(
+            dt::time_to_date_local(secs, 123, |_| None),
+            dt::time_to_date(secs, 123),
+        );
+        let date = dt::GlkDate {
+            year: 2026, month: 7, day: 14, weekday: 0, hour: 12, minute: 0, second: 0, microsec: 42,
+        };
+        assert_eq!(dt::date_to_time_local(date, |_| None), dt::date_to_time(date));
+    }
+
+    #[test]
+    fn local_time_to_date_shifts_across_a_day_boundary() {
+        // 2026-07-14 03:00:00 UTC, shifted back 7h into PDT, lands on the 13th.
+        let secs = epoch(2026, 7, 14, 3, 0, 0);
+        let d = dt::time_to_date_local(secs, 0, |_| Some(PDT));
+        assert_eq!((d.year, d.month, d.day), (2026, 7, 13));
+        assert_eq!((d.hour, d.minute, d.second), (20, 0, 0));
+        assert_eq!(d.weekday, 1, "2026-07-13 is a Monday");
+    }
+
+    #[test]
+    fn local_date_to_time_round_trips() {
+        // A local wall-clock date -> UTC -> local returns the same fields.
+        let local = dt::GlkDate {
+            year: 2026, month: 7, day: 13, weekday: 0, hour: 20, minute: 0, second: 0, microsec: 0,
+        };
+        let (utc, _) = dt::date_to_time_local(local, |_| Some(PDT));
+        // 20:00 PDT == 03:00 UTC the next day.
+        assert_eq!(utc, epoch(2026, 7, 14, 3, 0, 0));
+        let back = dt::time_to_date_local(utc, 0, |_| Some(PDT));
+        assert_eq!((back.year, back.month, back.day), (2026, 7, 13));
+        assert_eq!((back.hour, back.minute, back.second), (20, 0, 0));
+    }
+
+    #[test]
+    fn local_date_to_time_two_pass_resolves_spring_forward() {
+        // US spring-forward: PST (-8h) before 2026-03-08 10:00 UTC, PDT (-7h)
+        // at/after it. A single-pass guess would use PST and be an hour off; the
+        // refinement pass must re-query at the corrected instant and land on PDT.
+        let threshold = epoch(2026, 3, 8, 10, 0, 0);
+        let dst = move |t: i64| Some(if t >= threshold { -25200 } else { -28800 });
+        // Local 03:30 PDT (a valid post-transition wall time).
+        let local = dt::GlkDate {
+            year: 2026, month: 3, day: 8, weekday: 0, hour: 3, minute: 30, second: 0, microsec: 0,
+        };
+        let (utc, _) = dt::date_to_time_local(local, dst);
+        // 03:30 PDT == 10:30 UTC (not 11:30, which the un-refined PST guess gives).
+        assert_eq!(utc, epoch(2026, 3, 8, 10, 30, 0));
+        // And it maps back to 03:30 local.
+        let back = dt::time_to_date_local(utc, 0, dst);
+        assert_eq!((back.hour, back.minute), (3, 30));
+    }
+
+    #[test]
+    fn testbackend_serves_configured_local_offset() {
+        // The backend hook (not just the pure fns) reports the fixture offset.
+        let be = super::TestBackend::new().with_local_offset(PDT);
+        use super::GlkBackend;
+        assert_eq!(be.local_utc_offset_seconds(0), Some(PDT));
+        assert_eq!(super::TestBackend::new().local_utc_offset_seconds(0), None);
     }
 
     // ── echo streams (Glk 0.7.6 §3.6) ─────────────────────────────────────────

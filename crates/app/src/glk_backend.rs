@@ -764,6 +764,17 @@ impl GlkBackend for AppGlk {
 
     fn flush(&mut self) {}
 
+    /// The system timezone's UTC offset (seconds east of Greenwich) at the given
+    /// instant, for the Glk `_local` date/time selectors. `jiff` resolves the
+    /// offset per instant, so DST is correct at any queried time (not just now),
+    /// and it is thread-safe (no `localtime_r`/`setenv` race) and cross-platform
+    /// (system tzdb on Unix/macOS, a bundled tzdb on Windows). Out-of-range
+    /// instants → `None` → the selectors fall back to UTC.
+    fn local_utc_offset_seconds(&self, epoch_seconds: i64) -> Option<i32> {
+        let ts = jiff::Timestamp::from_second(epoch_seconds).ok()?;
+        Some(jiff::tz::TimeZone::system().to_offset(ts).seconds())
+    }
+
     fn char_pixels(&self) -> (u32, u32) {
         self.char_px
     }
@@ -918,6 +929,20 @@ mod tests {
 
     fn rect(left: u32, top: u32, width: u32, height: u32) -> GlkRect {
         GlkRect { left, top, width, height }
+    }
+
+    #[test]
+    fn local_offset_is_some_and_plausible() {
+        // We can't assert a specific zone on an unknown CI host, but the hook
+        // must resolve the system zone to a sane offset at a real instant
+        // (SQ-0317 T4); real-TZ correctness is left to the SQ-0312 sweep.
+        let glk = AppGlk::new(80, 24);
+        let off = glk
+            .local_utc_offset_seconds(1_784_030_400) // 2026-07-14 12:00:00 UTC
+            .expect("system timezone resolves to some offset");
+        assert!(off.abs() <= 14 * 3600, "offset {off}s within ±14h");
+        // An absurd instant (out of jiff's timestamp range) falls back to None.
+        assert_eq!(glk.local_utc_offset_seconds(i64::MAX), None);
     }
 
     #[test]
