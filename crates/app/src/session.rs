@@ -191,6 +191,14 @@ pub enum SchannelOp {
     Stop { chan: u32 },
     SetVolume { chan: u32, vol: u32 },
     Destroy { chan: u32 },
+    /// Glk 0.7.3 Sound2 `glk_schannel_pause` — pause playback, keeping position.
+    Pause { chan: u32 },
+    /// Glk 0.7.3 Sound2 `glk_schannel_unpause` — resume a paused channel.
+    Unpause { chan: u32 },
+    /// Glk 0.7.3 Sound2 `glk_schannel_set_volume_ext` — a volume change ramped
+    /// over `duration_ms` (0 = immediate). When `notify != 0` the host fires an
+    /// `evtype_VolumeNotify(val2 = notify)` once the ramp completes.
+    SetVolumeExt { chan: u32, vol: u32, duration_ms: u32, notify: u32 },
 }
 
 /// Result of one player turn.

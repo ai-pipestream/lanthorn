@@ -180,6 +180,10 @@ pub mod evtype {
     pub const SOUND_NOTIFY: u32 = 7;
     /// `evtype_Hyperlink`.
     pub const HYPERLINK: u32 = 8;
+    /// `evtype_VolumeNotify` — a gradual `glk_schannel_set_volume_ext` change
+    /// completed (Glk 0.7.3 Sound2). `win` is NULL, `val1` is 0, `val2` is the
+    /// game's notify value.
+    pub const VOLUME_NOTIFY: u32 = 9;
 }
 
 /// Glk special keycodes for character input (`keycode_*`). These occupy the top
@@ -514,6 +518,31 @@ pub trait GlkBackend {
     fn schannel_stop(&mut self, _chan: u32) {}
     /// Set `chan`'s volume (Glk scale: 0x10000 = full).
     fn schannel_set_volume(&mut self, _chan: u32, _vol: u32) {}
+    /// Create a sound channel with an initial `volume` (Glk scale, 0x10000 =
+    /// full) already applied (Sound2 `glk_schannel_create_ext`). Default: create
+    /// then set the volume, so a backend that only overrode the base calls still
+    /// gets the initial level.
+    fn schannel_create_ext(&mut self, rock: u32, volume: u32) -> u32 {
+        let chan = self.schannel_create(rock);
+        if chan != 0 {
+            self.schannel_set_volume(chan, volume);
+        }
+        chan
+    }
+    /// Pause playback on `chan`, retaining position (Sound2 `glk_schannel_pause`);
+    /// a sound later started on a paused channel begins paused. Default no-op.
+    fn schannel_pause(&mut self, _chan: u32) {}
+    /// Resume a paused `chan` from where it left off (Sound2
+    /// `glk_schannel_unpause`). Default no-op.
+    fn schannel_unpause(&mut self, _chan: u32) {}
+    /// Change `chan`'s volume to `vol`, ramped over `duration_ms` (0 = immediate)
+    /// (Sound2 `glk_schannel_set_volume_ext`). When `notify != 0` the HOST must
+    /// deliver an `evtype_VolumeNotify(val2 = notify)` once the ramp completes
+    /// (see [`crate::exec::Machine::deliver_volume_notify`]); the model does not
+    /// hold a clock. Default: immediate set (the host owns the ramp + notify).
+    fn schannel_set_volume_ext(&mut self, chan: u32, vol: u32, _duration_ms: u32, _notify: u32) {
+        self.schannel_set_volume(chan, vol);
+    }
     /// Flush any buffered output to the display.
     fn flush(&mut self) {}
     /// Immutable downcast support (used by tests to read recorded output).
@@ -801,6 +830,23 @@ impl GlkBackend for TestBackend {
     }
     fn schannel_set_volume(&mut self, chan: u32, vol: u32) {
         self.sound_log.push(format!("setvol chan={chan} vol={vol}"));
+    }
+    fn schannel_create_ext(&mut self, rock: u32, volume: u32) -> u32 {
+        self.next_schannel += 1;
+        let id = self.next_schannel;
+        self.schannel_rocks.insert(id, rock);
+        self.sound_log.push(format!("create_ext rock={rock} vol={volume} -> {id}"));
+        id
+    }
+    fn schannel_pause(&mut self, chan: u32) {
+        self.sound_log.push(format!("pause chan={chan}"));
+    }
+    fn schannel_unpause(&mut self, chan: u32) {
+        self.sound_log.push(format!("unpause chan={chan}"));
+    }
+    fn schannel_set_volume_ext(&mut self, chan: u32, vol: u32, duration_ms: u32, notify: u32) {
+        self.sound_log
+            .push(format!("setvol_ext chan={chan} vol={vol} dur={duration_ms} notify={notify}"));
     }
     fn data_resource(&mut self, num: u32) -> Option<(Vec<u8>, bool)> {
         self.data_resources.get(&num).cloned()

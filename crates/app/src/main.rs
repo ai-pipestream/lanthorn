@@ -885,7 +885,9 @@ fn main() {
         // When a timed-input deadline is armed, clamp further so the loop wakes in
         // time to fire the interrupt — the normal cadence stays the ceiling, so
         // this is a no-op when no timer is running (regression guard).
-        let sound_active = !state.sound_routines.is_empty() || !state.glulx_sound_notify.is_empty();
+        let sound_active = !state.sound_routines.is_empty()
+            || !state.glulx_sound_notify.is_empty()
+            || !state.glulx_volume_notify.is_empty();
         let timer_active = state.glulx_timer_next_fire.is_some();
         // Continuous story-pane selection auto-scroll: while a drag is held at an
         // edge and that direction can still scroll, keep the loop live so it steps
@@ -899,9 +901,11 @@ fn main() {
             } else { false }
         };
         let base_poll_ms = if state.has_active_animation() || sound_active || timer_active || selecting_at_edge { TIDY_POLL_MS } else { 50 };
-        // Clamp to whichever clock is due first: the Z-machine timed-input deadline
-        // or the Glulx Glk-timer deadline (either may be `None`).
-        let next_deadline = [state.input_deadline, state.glulx_timer_next_fire]
+        // Clamp to whichever clock is due first: the Z-machine timed-input deadline,
+        // the Glulx Glk-timer deadline, or the soonest pending Sound2 volume-ramp
+        // completion (any may be `None`/empty).
+        let next_volume_deadline = state.glulx_volume_notify.values().map(|(t, _)| *t).min();
+        let next_deadline = [state.input_deadline, state.glulx_timer_next_fire, next_volume_deadline]
             .into_iter()
             .flatten()
             .min();
@@ -1008,6 +1012,31 @@ fn main() {
                         ) {
                             break 'event_loop;
                         }
+                    }
+                }
+            }
+            // Glulx Sound2 volume-ramp completion: a gradual set_volume_ext whose
+            // duration has elapsed delivers an evtype_VolumeNotify. The host owns
+            // the ramp clock (mirroring the sound-finish notify above); deliver every
+            // due one, newest-driven output redrawn next iteration.
+            let now = std::time::Instant::now();
+            let due_volume: Vec<(u32, u32)> = state
+                .glulx_volume_notify
+                .iter()
+                .filter(|(_, (deadline, _))| *deadline <= now)
+                .map(|(&chan, &(_, notify))| (chan, notify))
+                .collect();
+            if !due_volume.is_empty() {
+                needs_redraw = true;
+            }
+            for (chan, notify) in due_volume {
+                state.glulx_volume_notify.remove(&chan);
+                if let Some(gs) = glulx_session_opt_mut(&mut *session) {
+                    let result = gs.volume_notify(notify);
+                    if turn::apply_game_driven_result(
+                        &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                    ) {
+                        break 'event_loop;
                     }
                 }
             }

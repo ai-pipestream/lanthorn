@@ -1321,6 +1321,11 @@ pub struct AppState {
     pub glulx_channels: std::collections::HashMap<u32, audio::SoundId>,
     /// Pending sound-notify per playing SoundId: `(sound resource, notify value)`.
     pub glulx_sound_notify: std::collections::HashMap<audio::SoundId, (u32, u32)>,
+    /// Pending volume-notify per Glk channel ref (Sound2 `set_volume_ext`):
+    /// `(ramp-completion deadline, notify value)`. The host owns the ramp clock;
+    /// when the deadline passes the event loop delivers an `evtype_VolumeNotify`.
+    /// At most one entry per channel (a new volume change interrupts the prior).
+    pub glulx_volume_notify: std::collections::HashMap<u32, (std::time::Instant, u32)>,
     /// A pending change to the running Glulx VM's Sound gestalt, set when the
     /// sound toggle / config save flips `enable_sound`. The event loop drains it
     /// (it holds the session) and calls `GlulxSession::set_sound`, so a game that
@@ -1622,6 +1627,7 @@ impl Default for AppState {
             sound_routines: std::collections::HashMap::new(),
             glulx_channels: std::collections::HashMap::new(),
             glulx_sound_notify: std::collections::HashMap::new(),
+            glulx_volume_notify: std::collections::HashMap::new(),
             pending_vm_sound: None,
             scroll_anim: None,
             graph_gen: 0,
@@ -1798,15 +1804,52 @@ impl AppState {
                         }
                     }
                 }
-                SchannelOp::Stop { chan } | SchannelOp::Destroy { chan } => {
+                SchannelOp::Stop { chan } => {
                     if let Some(id) = self.glulx_channels.remove(&chan) {
                         backend.stop(id);
                         self.glulx_sound_notify.remove(&id);
                     }
                 }
+                SchannelOp::Destroy { chan } => {
+                    if let Some(id) = self.glulx_channels.remove(&chan) {
+                        backend.stop(id);
+                        self.glulx_sound_notify.remove(&id);
+                    }
+                    // A destroyed channel can never complete a pending ramp.
+                    self.glulx_volume_notify.remove(&chan);
+                }
                 SchannelOp::SetVolume { chan, vol } => {
                     if let Some(&id) = self.glulx_channels.get(&chan) {
                         backend.set_sample_gain(id, glk_volume_to_gain(vol));
+                    }
+                    // A plain set_volume is an immediate change; it interrupts any
+                    // in-progress ramp (whose notify is then dropped, per spec §8.3).
+                    self.glulx_volume_notify.remove(&chan);
+                }
+                SchannelOp::Pause { chan } => {
+                    if let Some(&id) = self.glulx_channels.get(&chan) {
+                        backend.pause(id);
+                    }
+                }
+                SchannelOp::Unpause { chan } => {
+                    if let Some(&id) = self.glulx_channels.get(&chan) {
+                        backend.unpause(id);
+                    }
+                }
+                SchannelOp::SetVolumeExt { chan, vol, duration_ms, notify } => {
+                    // First cut: apply the target volume immediately (rodio has no
+                    // native ramp) — the notify TIMING is what games sequence on.
+                    if let Some(&id) = self.glulx_channels.get(&chan) {
+                        backend.set_sample_gain(id, glk_volume_to_gain(vol));
+                    }
+                    // A new volume change interrupts any prior one on this channel
+                    // (the prior notify is dropped). Schedule this one's notify at
+                    // now + duration, regardless of whether a sound is playing.
+                    self.glulx_volume_notify.remove(&chan);
+                    if notify != 0 {
+                        let deadline = std::time::Instant::now()
+                            + std::time::Duration::from_millis(duration_ms as u64);
+                        self.glulx_volume_notify.insert(chan, (deadline, notify));
                     }
                 }
             }
@@ -1825,6 +1868,7 @@ impl AppState {
         self.sound_routines.clear();
         self.glulx_channels.clear();
         self.glulx_sound_notify.clear();
+        self.glulx_volume_notify.clear();
     }
 
     /// Set the transcript scroll target to `target`. When animation is enabled
@@ -2665,11 +2709,38 @@ mod tests {
         state.sound_routines.insert(1, 0x1234);
         state.glulx_channels.insert(1, 5);
         state.glulx_sound_notify.insert(5, (7, 42));
+        state.glulx_volume_notify.insert(1, (std::time::Instant::now(), 9));
         state.reset_sound_sidecars();
         assert!(state.sound_ids.is_empty());
         assert!(state.sound_routines.is_empty());
         assert!(state.glulx_channels.is_empty());
         assert!(state.glulx_sound_notify.is_empty());
+        assert!(state.glulx_volume_notify.is_empty());
+    }
+
+    #[test]
+    fn play_glulx_sound_ops_schedules_and_interrupts_volume_notify() {
+        use crate::session::SchannelOp;
+        let mut state = AppState::default();
+        state.config.enable_sound = true;
+        state.audio = Some(audio::AudioBackend::new(50));
+        // A ramped set_volume_ext with a nonzero notify schedules a pending
+        // volume-notify keyed by channel (no live sound needed).
+        state.play_glulx_sound_ops(&[SchannelOp::SetVolumeExt { chan: 1, vol: 0x8000, duration_ms: 1000, notify: 7 }]);
+        assert_eq!(state.glulx_volume_notify.get(&1).map(|&(_, n)| n), Some(7), "notify scheduled");
+        // A second change on the same channel interrupts the first (spec §8.3):
+        // the prior notify is dropped and replaced.
+        state.play_glulx_sound_ops(&[SchannelOp::SetVolumeExt { chan: 1, vol: 0x2000, duration_ms: 500, notify: 9 }]);
+        assert_eq!(state.glulx_volume_notify.get(&1).map(|&(_, n)| n), Some(9), "new change replaces the prior notify");
+        // notify == 0 requests no event → schedules nothing and clears the channel.
+        state.play_glulx_sound_ops(&[SchannelOp::SetVolumeExt { chan: 1, vol: 0, duration_ms: 0, notify: 0 }]);
+        assert!(state.glulx_volume_notify.is_empty(), "notify=0 schedules no event and clears the channel");
+        // Destroy cancels a channel's pending ramp notify.
+        state.play_glulx_sound_ops(&[
+            SchannelOp::SetVolumeExt { chan: 2, vol: 0x8000, duration_ms: 1000, notify: 3 },
+            SchannelOp::Destroy { chan: 2 },
+        ]);
+        assert!(state.glulx_volume_notify.is_empty(), "destroy cancels the pending volume-notify");
     }
 
     #[test]

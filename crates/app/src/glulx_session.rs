@@ -535,6 +535,19 @@ impl GlulxSession {
         self.finish_turn()
     }
 
+    /// A gradual volume change completed (Sound2 `set_volume_ext`): deliver a Glk
+    /// `Evtype_VolumeNotify` to the game and drive it to its next input request.
+    /// Mirrors [`Self::sound_notify`]. A no-op turn once the game has quit.
+    pub fn volume_notify(&mut self, notify: u32) -> TurnResult {
+        if !self.quit {
+            self.machine.deliver_volume_notify(notify);
+            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+            self.pending = pending;
+            self.quit = quit;
+        }
+        self.finish_turn()
+    }
+
     /// The layout rects (in story-pane cells) of every window with an active Glk
     /// mouse request — the windows a terminal click may be diverted into. Empty
     /// when no window is watching for clicks.

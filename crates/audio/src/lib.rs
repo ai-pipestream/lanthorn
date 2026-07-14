@@ -357,6 +357,21 @@ impl AudioBackend {
         }
     }
 
+    /// Pause a live sample, retaining its position (Glk `schannel_pause`). A
+    /// paused sink is not "empty", so `finished()` never reports it as done.
+    pub fn pause(&mut self, id: SoundId) {
+        if let Some((sink, _)) = self.samples.get(&id) {
+            sink.pause();
+        }
+    }
+
+    /// Resume a paused sample from where it left off (Glk `schannel_unpause`).
+    pub fn unpause(&mut self, id: SoundId) {
+        if let Some((sink, _)) = self.samples.get(&id) {
+            sink.play();
+        }
+    }
+
     pub fn stop_all(&mut self) {
         for (_, (sink, _)) in self.samples.drain() {
             sink.stop();
@@ -405,6 +420,8 @@ impl AudioBackend {
     pub fn play_sample(&mut self, _bytes: &[u8], _format: SoundFormat, _z_volume: u8, _repeats: u8) -> Option<SoundId> { None }
     pub fn play_sample_gain(&mut self, _bytes: &[u8], _format: SoundFormat, _gain: f32, _repeats: u8) -> Option<SoundId> { None }
     pub fn set_sample_gain(&mut self, _id: SoundId, _gain: f32) {}
+    pub fn pause(&mut self, _id: SoundId) {}
+    pub fn unpause(&mut self, _id: SoundId) {}
     pub fn stop(&mut self, _id: SoundId) {}
     pub fn stop_all(&mut self) {}
     pub fn set_volume(&mut self, _volume: u8) {}

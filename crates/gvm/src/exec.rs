@@ -3518,6 +3518,32 @@ impl Machine {
                 if self.sound_enabled { self.backend.schannel_destroy(a(0)); }
                 0
             }
+            0x00F4 => {
+                // glk_schannel_create_ext(rock, volume) -> chan  (Sound2)
+                if self.sound_enabled { self.backend.schannel_create_ext(a(0), a(1)) } else { 0 }
+            }
+            0x00F7 => {
+                // glk_schannel_play_multi(chanarray, chancount, sndarray, soundcount,
+                // notify) -> count started (Sound2). Each sound plays once with the
+                // shared notify; each finished sound posts its own SoundNotify
+                // (val1 = its resource, val2 = notify), so this reuses schannel_play.
+                if self.sound_enabled {
+                    let (chan_ptr, count, snd_ptr) = (a(0), a(1), a(2));
+                    // chancount and soundcount are required to be equal (spec §8.3);
+                    // clamp to the shorter to stay memory-safe if a game disagrees.
+                    let count = count.min(a(3));
+                    let notify = a(4);
+                    let mut started = 0u32;
+                    for i in 0..count {
+                        let chan = self.m32(chan_ptr + i * 4)?;
+                        let snd = self.m32(snd_ptr + i * 4)?;
+                        started += self.backend.schannel_play(chan, snd, 1, notify);
+                    }
+                    started
+                } else {
+                    0
+                }
+            }
             0x00F8 => {
                 // glk_schannel_play(chan, snd) -> 1/0  (repeats=1, no notify)
                 if self.sound_enabled { self.backend.schannel_play(a(0), a(1), 1, 0) } else { 0 }
@@ -3538,6 +3564,22 @@ impl Machine {
             }
             0x00FC => {
                 // glk_sound_load_hint(snd, flag) — decoding is on-demand; accept + ignore.
+                0
+            }
+            0x00FD => {
+                // glk_schannel_set_volume_ext(chan, vol, duration, notify) (Sound2):
+                // ramped volume change; the host fires evtype_VolumeNotify when done.
+                if self.sound_enabled { self.backend.schannel_set_volume_ext(a(0), a(1), a(2), a(3)); }
+                0
+            }
+            0x00FE => {
+                // glk_schannel_pause(chan) (Sound2)
+                if self.sound_enabled { self.backend.schannel_pause(a(0)); }
+                0
+            }
+            0x00FF => {
+                // glk_schannel_unpause(chan) (Sound2)
+                if self.sound_enabled { self.backend.schannel_unpause(a(0)); }
                 0
             }
             // ── date/time (Glk 0.7.6; UTC only — see glk::datetime) ────────────
@@ -4171,6 +4213,26 @@ impl Machine {
         }
     }
 
+    /// Deliver a Glk `Evtype_VolumeNotify` for a completed gradual volume change
+    /// (`glk_schannel_set_volume_ext` with a nonzero `notify`). The host owns the
+    /// ramp clock and calls this when the duration elapses. The event is
+    /// `{ type: VolumeNotify, win: 0, val1: 0, val2: notify }` (Glk spec §8.3).
+    /// Delivery mirrors [`Machine::deliver_sound_notify`].
+    pub fn deliver_volume_notify(&mut self, notify: u32) {
+        let ev = GlkEvent { etype: glk::evtype::VOLUME_NOTIFY, win: 0, val1: 0, val2: notify };
+        if let Some(pi) = self.pending_input.take() {
+            if let Err(e) = self.write_event(pi.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else if let Some(pe) = self.pending_event.take() {
+            if let Err(e) = self.write_event(pe.event_addr, ev) {
+                self.diagnostics.push(e);
+            }
+        } else {
+            self.glk.push_event(ev);
+        }
+    }
+
     /// The currently armed Glk timer interval in milliseconds, or `None` when
     /// timer events are off. The host reads this to arm its own clock and fires
     /// [`Machine::deliver_timer`] once per interval. Set by
@@ -4307,6 +4369,7 @@ impl Machine {
             8 => self.sound_enabled as u32,  // gestalt_Sound
             9 => self.sound_enabled as u32,  // gestalt_SoundVolume
             10 => self.sound_enabled as u32, // gestalt_SoundNotify
+            21 => self.sound_enabled as u32, // gestalt_Sound2 (0.7.3 extended sound suite)
             11 => 1,                 // gestalt_Hyperlinks → supported
             12 => 1,                 // gestalt_HyperlinkInput(wintype) → supported
             0x1100 => 1,             // gestalt_GarglkText → garglk_set_zcolors/reversevideo supported
@@ -7951,17 +8014,19 @@ mod tests {
 
     #[test]
     fn glk_gestalt_reports_sound_capabilities() {
-        // gestalt_Sound(8)/SoundVolume(9)/SoundNotify(10) follow sound_enabled;
-        // gestalt_Sound2(21) is never supported.
+        // gestalt_Sound(8)/SoundVolume(9)/SoundNotify(10)/Sound2(21) all follow
+        // sound_enabled. Sound2 (0.7.3) advertises the extended-suite selectors
+        // (create_ext/play_multi/pause/unpause/set_volume_ext).
         let mut m = machine_with_glk(&[]);
         assert_eq!(m.glk_gestalt(8, 0), 0, "Sound off by default");
         assert_eq!(m.glk_gestalt(9, 0), 0);
         assert_eq!(m.glk_gestalt(10, 0), 0);
+        assert_eq!(m.glk_gestalt(21, 0), 0, "Sound2 off by default");
         m.set_sound(true);
         assert_eq!(m.glk_gestalt(8, 0), 1, "Sound supported once enabled");
         assert_eq!(m.glk_gestalt(9, 0), 1, "SoundVolume supported");
         assert_eq!(m.glk_gestalt(10, 0), 1, "SoundNotify supported");
-        assert_eq!(m.glk_gestalt(21, 0), 0, "Sound2 never supported");
+        assert_eq!(m.glk_gestalt(21, 0), 1, "Sound2 supported once enabled");
     }
 
     #[test]
@@ -8018,6 +8083,78 @@ mod tests {
         let m = run_with_ram(body, 0x200, |_| {}); // sound left disabled
         assert_eq!(m.mem.read32(0x0100).unwrap(), 0, "create returns NULL when sound is off");
         assert!(backend_of(&m).sound_log().is_empty(), "no backend calls when sound is off");
+    }
+
+    #[test]
+    fn schannel_sound2_dispatch_routes_to_backend() {
+        use asm::Op::{C16, C32, C8, Mem16, Zero};
+        // Sound2 (0.7.3) selectors (gi_dispa.c): F4 create_ext, F7 play_multi,
+        // FD set_volume_ext, FE pause, FF unpause.
+        // play_multi reads two same-length arrays from RAM: chanarray=[1,2] at
+        // 0x0180, sndarray=[5,6] at 0x0190; notify=9 applies to both sounds.
+        let mut body = glk_call(0xF4, &[C8(7), C32(0x8000)], Mem16(0x0100)); // create_ext(rock=7, vol=0x8000)
+        body.extend(glk_call(0xF7, &[C16(0x0180), C8(2), C16(0x0190), C8(2), C8(9)], Mem16(0x0104))); // play_multi
+        body.extend(glk_call(0xFD, &[C8(1), C32(0x4000), C16(500), C8(3)], Zero)); // set_volume_ext(chan=1, vol=0x4000, 500ms, notify=3)
+        body.extend(glk_call(0xFE, &[C8(1)], Zero)); // pause(1)
+        body.extend(glk_call(0xFF, &[C8(1)], Zero)); // unpause(1)
+        body.extend(asm::ins(0x120, &[]));           // quit
+        let m = run_with_ram(body, 0x200, |m| {
+            m.set_sound(true);
+            poke(m, 0x0180, &1u32.to_be_bytes());
+            poke(m, 0x0184, &2u32.to_be_bytes());
+            poke(m, 0x0190, &5u32.to_be_bytes());
+            poke(m, 0x0194, &6u32.to_be_bytes());
+        });
+
+        assert_ne!(m.mem.read32(0x0100).unwrap(), 0, "create_ext returns a channel ref");
+        assert_eq!(m.mem.read32(0x0104).unwrap(), 2, "play_multi returns the number of sounds started");
+
+        let log = backend_of(&m).sound_log();
+        assert!(log.iter().any(|l| l == "create_ext rock=7 vol=32768 -> 1"),
+            "create_ext threads rock + initial volume: {log:?}");
+        assert!(log.iter().any(|l| l == "play chan=1 snd=5 repeats=1 notify=9"),
+            "play_multi starts the first pair with shared notify + repeats=1: {log:?}");
+        assert!(log.iter().any(|l| l == "play chan=2 snd=6 repeats=1 notify=9"),
+            "play_multi starts the second pair: {log:?}");
+        assert!(log.iter().any(|l| l == "setvol_ext chan=1 vol=16384 dur=500 notify=3"),
+            "set_volume_ext threads vol/duration/notify: {log:?}");
+        assert!(log.iter().any(|l| l == "pause chan=1"), "pause forwarded: {log:?}");
+        assert!(log.iter().any(|l| l == "unpause chan=1"), "unpause forwarded: {log:?}");
+        assert!(!m.diagnostics.iter().any(|d| d.contains("unhandled")),
+            "no unhandled-selector diagnostic: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn schannel_sound2_dispatch_is_inert_when_sound_disabled() {
+        use asm::Op::{C32, C8, Mem16, Zero};
+        // With sound off, create_ext (0xF4) returns 0 and pause/set_volume_ext
+        // record nothing — a probe gets a safe 0, not a diagnostic fallthrough.
+        let mut body = glk_call(0xF4, &[C8(7), C32(0x8000)], Mem16(0x0100)); // create_ext
+        body.extend(glk_call(0xFD, &[C8(1), C32(0x4000), C8(0), C8(0)], Zero)); // set_volume_ext
+        body.extend(glk_call(0xFE, &[C8(1)], Zero)); // pause
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {}); // sound left disabled
+        assert_eq!(m.mem.read32(0x0100).unwrap(), 0, "create_ext returns NULL when sound is off");
+        assert!(backend_of(&m).sound_log().is_empty(), "no backend calls when sound is off");
+    }
+
+    #[test]
+    fn deliver_volume_notify_writes_into_a_suspended_select() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event then select: the select suspends on the line request;
+        // a volume-notify is written into it WITHOUT consuming the line request, so
+        // the next select re-suspends on the still-pending read.
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero)); // select → suspend @0x100
+        body.extend(glk_call(0xC0, &[C16(0x0110)], Zero)); // select again → re-suspend @0x110
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "first select suspends");
+        m.deliver_volume_notify(42);
+        // evtype_VolumeNotify = 9, win = 0, val1 = 0, val2 = notify (42).
+        assert_eq!(read_event(&m, 0x100), (9, 0, 0, 42), "volume-notify written to the suspended select");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 }, "line request persisted across the notify");
     }
 
     #[test]

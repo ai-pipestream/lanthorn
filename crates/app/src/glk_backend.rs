@@ -854,6 +854,24 @@ impl GlkBackend for AppGlk {
         }
         self.sound_ops.push(crate::session::SchannelOp::SetVolume { chan, vol });
     }
+    fn schannel_create_ext(&mut self, rock: u32, volume: u32) -> u32 {
+        self.next_schannel += 1;
+        let id = self.next_schannel;
+        self.schannels.insert(id, SoundChannel { rock, volume });
+        id
+    }
+    fn schannel_pause(&mut self, chan: u32) {
+        self.sound_ops.push(crate::session::SchannelOp::Pause { chan });
+    }
+    fn schannel_unpause(&mut self, chan: u32) {
+        self.sound_ops.push(crate::session::SchannelOp::Unpause { chan });
+    }
+    fn schannel_set_volume_ext(&mut self, chan: u32, vol: u32, duration_ms: u32, notify: u32) {
+        if let Some(c) = self.schannels.get_mut(&chan) {
+            c.volume = vol;
+        }
+        self.sound_ops.push(crate::session::SchannelOp::SetVolumeExt { chan, vol, duration_ms, notify });
+    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -1372,6 +1390,28 @@ mod tests {
         g.schannel_play(c, 1, 1, 0);
         let ops = g.take_sound_ops();
         assert_eq!(ops, vec![SchannelOp::Play { chan: c, snd: 1, repeats: 1, notify: 0, volume: 0x10000 }]);
+    }
+
+    #[test]
+    fn appglk_sound2_create_ext_seeds_volume_and_new_ops_buffer() {
+        use gvm::glk::GlkBackend;
+        use crate::session::SchannelOp;
+        let mut g = AppGlk::new(80, 24);
+        // create_ext seeds the channel volume, so a later play snapshots it.
+        let c = g.schannel_create_ext(4, 0x4000); // quarter volume
+        assert_ne!(c, 0, "create_ext returns a nonzero channel ref");
+        assert_eq!(g.schannel_get_rock(c), 4, "create_ext stores the rock");
+        g.schannel_play(c, 2, 1, 0);
+        g.schannel_pause(c);
+        g.schannel_unpause(c);
+        g.schannel_set_volume_ext(c, 0x8000, 500, 7);
+        let ops = g.take_sound_ops();
+        assert_eq!(ops, vec![
+            SchannelOp::Play { chan: c, snd: 2, repeats: 1, notify: 0, volume: 0x4000 },
+            SchannelOp::Pause { chan: c },
+            SchannelOp::Unpause { chan: c },
+            SchannelOp::SetVolumeExt { chan: c, vol: 0x8000, duration_ms: 500, notify: 7 },
+        ]);
     }
 }
 
