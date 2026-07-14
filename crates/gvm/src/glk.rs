@@ -233,6 +233,155 @@ pub mod keycode {
     }
 }
 
+// ── Date/time (Glk 0.7.6 §"The System Clock" + "Time and Date Conversions") ────
+
+/// Pure civil-calendar and clock arithmetic for the Glk date/time selectors
+/// (`glk_current_time`, `glk_*_to_date_*`, `glk_date_to_*`). Zero-dependency:
+/// no `chrono`, no platform `libc` calls — the day↔year/month/day conversions
+/// use Howard Hinnant's well-known `days_from_civil` / `civil_from_days`
+/// algorithms (proleptic Gregorian, unlimited range), and "now" is read by the
+/// caller from [`std::time::SystemTime`]. The semantics match cheapglk's
+/// `cgdate.c` (the reference Glk implementation).
+///
+/// **UTC only.** `std` has no timezone database and this crate makes no unsafe
+/// platform calls, so the `_local` selectors are implemented identically to the
+/// `_utc` ones (some interpreters do the same). This is a documented limitation,
+/// not a bug: absent a tz database there is no honest local answer to give.
+pub mod datetime {
+    /// A Glk `glktimeval_t`: seconds since the Unix epoch as a signed 64-bit
+    /// count split into `high_sec` (top 32 bits, signed) and `low_sec` (bottom
+    /// 32 bits, unsigned), plus a `microsec` fraction. Field order matches
+    /// `glk.h`: `{ glsi32 high_sec; glui32 low_sec; glsi32 microsec; }`.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub struct GlkTimeVal {
+        pub high_sec: i32,
+        pub low_sec: u32,
+        pub microsec: i32,
+    }
+
+    /// A Glk `glkdate_t` (field order per `glk.h`): full four-digit `year`,
+    /// `month` 1–12 (1 = January), `day` 1–31, `weekday` 0–6 (0 = Sunday),
+    /// `hour` 0–23, `minute` 0–59, `second` 0–59 (maybe 60 at a leap second),
+    /// `microsec` 0–999999.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub struct GlkDate {
+        pub year: i32,
+        pub month: i32,
+        pub day: i32,
+        pub weekday: i32,
+        pub hour: i32,
+        pub minute: i32,
+        pub second: i32,
+        pub microsec: i32,
+    }
+
+    /// Days from the Unix epoch (1970-01-01) to civil date `y-m-d` (proleptic
+    /// Gregorian). Hinnant's algorithm; linear in `d`, so an out-of-range day
+    /// (e.g. Jan 32) normalizes forward exactly as `timegm` would. Requires
+    /// `m` in 1..=12 (the caller normalizes month into range first).
+    pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = (if y >= 0 { y } else { y - 399 }) / 400;
+        let yoe = y - era * 400; // [0, 399]
+        let mp = if m > 2 { m - 3 } else { m + 9 }; // [0, 11]
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+
+    /// Civil date `(year, month, day)` for a day count from the Unix epoch
+    /// (inverse of [`days_from_civil`]). Hinnant's algorithm.
+    pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
+        let z = z + 719468;
+        let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+        let doe = z - era * 146097; // [0, 146096]
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+        let y = yoe + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+        let mp = (5 * doy + 2) / 153; // [0, 11]
+        let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+        let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+        (if m <= 2 { y + 1 } else { y }, m, d)
+    }
+
+    /// Day-of-week for a day count from the Unix epoch, 0 = Sunday. Epoch day 0
+    /// (1970-01-01) was a Thursday (4).
+    pub fn weekday_from_days(z: i64) -> i64 {
+        (z % 7 + 4).rem_euclid(7)
+    }
+
+    /// Split a signed epoch-second count + `microsec` into a [`GlkTimeVal`]
+    /// (`cgdate.c` `gli_timestamp_to_time`).
+    pub fn timestamp_to_timeval(secs: i64, microsec: i32) -> GlkTimeVal {
+        GlkTimeVal {
+            high_sec: (secs >> 32) as i32,
+            low_sec: (secs & 0xFFFF_FFFF) as u32,
+            microsec,
+        }
+    }
+
+    /// Recombine a [`GlkTimeVal`]'s `high_sec`/`low_sec` into a signed epoch
+    /// second count (`cgdate.c`: `timestamp = low_sec; timestamp += high_sec<<32`).
+    pub fn timeval_to_timestamp(tv: GlkTimeVal) -> i64 {
+        ((tv.high_sec as i64) << 32) + (tv.low_sec as i64)
+    }
+
+    /// Convert an epoch second count + `microsec` to a broken-down UTC date
+    /// (`glk_time_to_date_utc`). Seconds floor-divide toward the past for
+    /// pre-1970 timestamps, so the time-of-day fields stay in range.
+    pub fn time_to_date(secs: i64, microsec: i32) -> GlkDate {
+        let days = secs.div_euclid(86400);
+        let rem = secs.rem_euclid(86400);
+        let (y, m, d) = civil_from_days(days);
+        GlkDate {
+            year: y as i32,
+            month: m as i32,
+            day: d as i32,
+            weekday: weekday_from_days(days) as i32,
+            hour: (rem / 3600) as i32,
+            minute: (rem % 3600 / 60) as i32,
+            second: (rem % 60) as i32,
+            microsec,
+        }
+    }
+
+    /// Normalize a (possibly out-of-range) [`GlkDate`] to an epoch second count
+    /// and a normalized `microsec` in 0..=999999 (`glk_date_to_time_utc`).
+    /// Mirrors cgdate.c's `gli_date_to_tm` microsecond carry, then reduces the
+    /// broken-down fields to a single second count via [`days_from_civil`]
+    /// (which absorbs out-of-range day/hour/minute/second linearly, as `timegm`
+    /// does); month is carried into the year first so the day-of-year formula
+    /// stays valid.
+    pub fn date_to_time(date: GlkDate) -> (i64, i32) {
+        let mut sec = date.second as i64;
+        let mut microsec = date.microsec as i64;
+        if microsec >= 1_000_000 {
+            sec += microsec / 1_000_000;
+            microsec %= 1_000_000;
+        } else if microsec < 0 {
+            microsec = -1 - microsec;
+            sec -= 1 + microsec / 1_000_000;
+            microsec = 999_999 - (microsec % 1_000_000);
+        }
+        let total_months = date.year as i64 * 12 + (date.month as i64 - 1);
+        let ny = total_months.div_euclid(12);
+        let nm = total_months.rem_euclid(12) + 1; // [1, 12]
+        let days = days_from_civil(ny, nm, date.day as i64);
+        let secs = days * 86400 + date.hour as i64 * 3600 + date.minute as i64 * 60 + sec;
+        (secs, microsec as i32)
+    }
+
+    /// Divide an epoch second count by `factor`, rounding toward negative
+    /// infinity (`glk_*_simple_time`, cgdate.c `gli_simplify_time`). `factor == 0`
+    /// is invalid and yields 0.
+    pub fn simplify_time(secs: i64, factor: u32) -> i32 {
+        if factor == 0 {
+            return 0;
+        }
+        secs.div_euclid(factor as i64) as i32
+    }
+}
+
 /// A delivered Glk event: the four `glui32` words written at the `event_t*`
 /// passed to `glk_select` — `type`, the window id (`winid_t`), and `val1`/`val2`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -3285,5 +3434,105 @@ mod style_hint_tests {
         // The file stream + its bytes survived.
         assert_eq!(restored.files["d"], b"Z");
         assert_eq!(restored.stream_position(fsid), Some(1));
+    }
+
+    // ── date/time (Glk 0.7.6) ─────────────────────────────────────────────────
+
+    use super::datetime as dt;
+
+    /// The epoch second count for a UTC date, via the round-trip conversion.
+    fn epoch(y: i32, mo: i32, d: i32, h: i32, mi: i32, s: i32) -> i64 {
+        let (secs, _) = dt::date_to_time(dt::GlkDate {
+            year: y, month: mo, day: d, weekday: 0, hour: h, minute: mi, second: s, microsec: 0,
+        });
+        secs
+    }
+
+    #[test]
+    fn epoch_zero_is_1970_new_year_thursday() {
+        let d = dt::time_to_date(0, 0);
+        assert_eq!((d.year, d.month, d.day), (1970, 1, 1));
+        assert_eq!((d.hour, d.minute, d.second), (0, 0, 0));
+        assert_eq!(d.weekday, 4, "1970-01-01 is a Thursday (Sunday=0)");
+        assert_eq!(epoch(1970, 1, 1, 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn known_timestamp_round_trips_both_ways() {
+        // 2026-07-14 12:00:00 UTC = 1_784_030_400 (verified against date -u).
+        let secs = 1_784_030_400;
+        let d = dt::time_to_date(secs, 123_456);
+        assert_eq!((d.year, d.month, d.day), (2026, 7, 14));
+        assert_eq!((d.hour, d.minute, d.second), (12, 0, 0));
+        assert_eq!(d.weekday, 2, "2026-07-14 is a Tuesday");
+        assert_eq!(d.microsec, 123_456, "microsec carried through unchanged");
+        assert_eq!(epoch(2026, 7, 14, 12, 0, 0), secs, "date -> time inverts time -> date");
+    }
+
+    #[test]
+    fn negative_pre_1970_time_floors_correctly() {
+        // 1969-12-31 23:59:59 UTC = -1.
+        let d = dt::time_to_date(-1, 0);
+        assert_eq!((d.year, d.month, d.day), (1969, 12, 31));
+        assert_eq!((d.hour, d.minute, d.second), (23, 59, 59));
+        assert_eq!(d.weekday, 3, "1969-12-31 is a Wednesday");
+        assert_eq!(epoch(1969, 12, 31, 23, 59, 59), -1);
+        // A full day before the epoch.
+        assert_eq!(epoch(1969, 12, 31, 0, 0, 0), -86400);
+    }
+
+    #[test]
+    fn leap_day_2000_02_29_is_valid() {
+        let secs = epoch(2000, 2, 29, 0, 0, 0);
+        let d = dt::time_to_date(secs, 0);
+        assert_eq!((d.year, d.month, d.day), (2000, 2, 29));
+        assert_eq!(d.weekday, 2, "2000-02-29 is a Tuesday");
+    }
+
+    #[test]
+    fn out_of_range_date_fields_normalize_like_timegm() {
+        // Jan 32 -> Feb 1; month 13 -> next January; 25:00 -> next day 01:00.
+        assert_eq!(
+            dt::time_to_date(epoch(2001, 1, 32, 0, 0, 0), 0),
+            dt::time_to_date(epoch(2001, 2, 1, 0, 0, 0), 0),
+        );
+        let d = dt::time_to_date(epoch(2001, 13, 1, 0, 0, 0), 0);
+        assert_eq!((d.year, d.month, d.day), (2002, 1, 1));
+        let d = dt::time_to_date(epoch(2001, 6, 1, 25, 0, 0), 0);
+        assert_eq!((d.day, d.hour), (2, 1));
+    }
+
+    #[test]
+    fn microsecond_carry_matches_cgdate() {
+        // >= 1e6 carries whole seconds up; the remainder stays in microsec.
+        let (secs, micro) = dt::date_to_time(dt::GlkDate {
+            year: 1970, month: 1, day: 1, weekday: 0, hour: 0, minute: 0, second: 0,
+            microsec: 2_500_000,
+        });
+        assert_eq!((secs, micro), (2, 500_000));
+        // Negative microsec borrows a second and normalizes into 0..=999999.
+        let (secs, micro) = dt::date_to_time(dt::GlkDate {
+            year: 1970, month: 1, day: 1, weekday: 0, hour: 0, minute: 0, second: 5,
+            microsec: -1,
+        });
+        assert_eq!((secs, micro), (4, 999_999));
+    }
+
+    #[test]
+    fn simple_time_floors_toward_negative_infinity() {
+        assert_eq!(dt::simplify_time(100, 60), 1);
+        assert_eq!(dt::simplify_time(59, 60), 0);
+        // -1 second / 60 rounds DOWN to -1, not toward zero.
+        assert_eq!(dt::simplify_time(-1, 60), -1);
+        assert_eq!(dt::simplify_time(-60, 60), -1);
+        assert_eq!(dt::simplify_time(-61, 60), -2);
+        assert_eq!(dt::simplify_time(5, 0), 0, "factor 0 is invalid -> 0");
+    }
+
+    #[test]
+    fn simple_time_to_date_multiplies_by_factor() {
+        // A simple time of 100 minutes (factor 60) = 6000s = 1970-01-01 01:40:00.
+        let d = dt::time_to_date(100i64 * 60, 0);
+        assert_eq!((d.hour, d.minute), (1, 40));
     }
 }

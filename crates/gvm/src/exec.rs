@@ -3402,6 +3402,44 @@ impl Machine {
                 // glk_sound_load_hint(snd, flag) — decoding is on-demand; accept + ignore.
                 0
             }
+            // ── date/time (Glk 0.7.6; UTC only — see glk::datetime) ────────────
+            0x0160 => {
+                // glk_current_time(timeval*)
+                let (secs, micro) = Self::now_seconds();
+                self.write_timeval(a(0), glk::datetime::timestamp_to_timeval(secs, micro))?;
+                0
+            }
+            0x0161 => {
+                // glk_current_simple_time(factor) -> simplified time
+                let (secs, _) = Self::now_seconds();
+                glk::datetime::simplify_time(secs, a(0)) as u32
+            }
+            // glk_time_to_date_utc / _local (timeval* -> date*); _local == UTC.
+            0x0168 | 0x0169 => {
+                let tv = self.read_timeval(a(0))?;
+                let secs = glk::datetime::timeval_to_timestamp(tv);
+                self.write_glkdate(a(1), glk::datetime::time_to_date(secs, tv.microsec))?;
+                0
+            }
+            // glk_simple_time_to_date_utc / _local (time, factor -> date*).
+            0x016A | 0x016B => {
+                let secs = a(0) as i32 as i64 * a(1) as i64;
+                self.write_glkdate(a(2), glk::datetime::time_to_date(secs, 0))?;
+                0
+            }
+            // glk_date_to_time_utc / _local (date* -> timeval*); _local == UTC.
+            0x016C | 0x016D => {
+                let date = self.read_glkdate(a(0))?;
+                let (secs, micro) = glk::datetime::date_to_time(date);
+                self.write_timeval(a(1), glk::datetime::timestamp_to_timeval(secs, micro))?;
+                0
+            }
+            // glk_date_to_simple_time_utc / _local (date*, factor -> time).
+            0x016E | 0x016F => {
+                let date = self.read_glkdate(a(0))?;
+                let (secs, _) = glk::datetime::date_to_time(date);
+                glk::datetime::simplify_time(secs, a(1)) as u32
+            }
             other => {
                 self.diagnostics
                     .push(format!("unhandled @glk selector {other:#06x} (returning 0)"));
@@ -3496,6 +3534,74 @@ impl Machine {
     /// Deliver a single Glk output reference value (see [`Machine::glk_out_ref`]).
     fn glk_store_ptr(&mut self, ptr: u32, v: u32) -> R<()> {
         self.glk_out_ref(ptr, &[v])
+    }
+
+    // ── date/time (Glk 0.7.6) ─────────────────────────────────────────────────
+
+    /// The wall-clock "now" as `(epoch seconds, microsec)` from
+    /// [`std::time::SystemTime`]. Times before the Unix epoch (the host clock is
+    /// set wrong) yield a negative second count with a normalized `microsec`.
+    fn now_seconds() -> (i64, i32) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => (d.as_secs() as i64, d.subsec_micros() as i32),
+            Err(e) => {
+                // Clock is before 1970: report the negative offset (borrowing a
+                // second when there's a sub-second remainder, so microsec >= 0).
+                let d = e.duration();
+                let micros = d.subsec_micros();
+                if micros == 0 {
+                    (-(d.as_secs() as i64), 0)
+                } else {
+                    (-(d.as_secs() as i64) - 1, (1_000_000 - micros) as i32)
+                }
+            }
+        }
+    }
+
+    /// Read a Glk `glktimeval_t` (3 words: high_sec, low_sec, microsec) at `addr`.
+    fn read_timeval(&self, addr: u32) -> R<glk::datetime::GlkTimeVal> {
+        Ok(glk::datetime::GlkTimeVal {
+            high_sec: self.m32(addr)? as i32,
+            low_sec: self.m32(addr + 4)?,
+            microsec: self.m32(addr + 8)? as i32,
+        })
+    }
+
+    /// Write a Glk `glktimeval_t` (3 words) to `addr` (honors NULL / push-to-stack).
+    fn write_timeval(&mut self, addr: u32, tv: glk::datetime::GlkTimeVal) -> R<()> {
+        self.glk_out_ref(addr, &[tv.high_sec as u32, tv.low_sec, tv.microsec as u32])
+    }
+
+    /// Read a Glk `glkdate_t` (8 words) at `addr`.
+    fn read_glkdate(&self, addr: u32) -> R<glk::datetime::GlkDate> {
+        Ok(glk::datetime::GlkDate {
+            year: self.m32(addr)? as i32,
+            month: self.m32(addr + 4)? as i32,
+            day: self.m32(addr + 8)? as i32,
+            weekday: self.m32(addr + 12)? as i32,
+            hour: self.m32(addr + 16)? as i32,
+            minute: self.m32(addr + 20)? as i32,
+            second: self.m32(addr + 24)? as i32,
+            microsec: self.m32(addr + 28)? as i32,
+        })
+    }
+
+    /// Write a Glk `glkdate_t` (8 words) to `addr` (honors NULL / push-to-stack).
+    fn write_glkdate(&mut self, addr: u32, d: glk::datetime::GlkDate) -> R<()> {
+        self.glk_out_ref(
+            addr,
+            &[
+                d.year as u32,
+                d.month as u32,
+                d.day as u32,
+                d.weekday as u32,
+                d.hour as u32,
+                d.minute as u32,
+                d.second as u32,
+                d.microsec as u32,
+            ],
+        )
     }
 
     // ── input requests + glk_select suspend/resume (3a-2) ─────────────────────
@@ -4066,7 +4172,8 @@ impl Machine {
             11 => 1,                 // gestalt_Hyperlinks → supported
             12 => 1,                 // gestalt_HyperlinkInput(wintype) → supported
             0x1100 => 1,             // gestalt_GarglkText → garglk_set_zcolors/reversevideo supported
-            // echo and the rest are not supported.
+            20 => 1,                 // gestalt_DateTime → clock + date/time conversions supported
+            // the rest are not supported.
             _ => 0,
         }
     }
@@ -8955,5 +9062,41 @@ mod tests {
     fn gestalt_reports_float_support() {
         let m = machine_with_body(&[], vec![]);
         assert_eq!(m.gestalt(11, 0), 1);
+    }
+
+    // ── Glk 0.7.6: date/time, echo streams, uni stream-puts, style measure ─────
+
+    #[test]
+    fn glk_gestalt_reports_datetime_support() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.glk_gestalt(20, 0), 1, "gestalt_DateTime supported");
+    }
+
+    #[test]
+    fn glk_date_time_selectors_round_trip_through_at_glk() {
+        use asm::Op::{C16, Zero};
+        // A known timeval at 0x180 = { high=0, low=1_784_030_400, micro=0 } is
+        // 2026-07-14 12:00:00 UTC. Convert to a date, then back to a timeval.
+        let mut body = glk_call(0x160, &[C16(0x0140)], Zero); // glk_current_time -> exercises the clock
+        body.extend(glk_call(0x168, &[C16(0x0180), C16(0x01A0)], Zero)); // time_to_date_utc
+        body.extend(glk_call(0x16C, &[C16(0x01A0), C16(0x01C0)], Zero)); // date_to_time_utc (inverse)
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            poke(m, 0x180, &0u32.to_be_bytes()); // high_sec
+            poke(m, 0x184, &1_784_030_400u32.to_be_bytes()); // low_sec
+            poke(m, 0x188, &0u32.to_be_bytes()); // microsec
+        });
+        // The glkdate written at 0x1A0 (year, month, day, weekday, hour, ...).
+        assert_eq!(m.mem.read32(0x1A0).unwrap(), 2026, "year");
+        assert_eq!(m.mem.read32(0x1A4).unwrap(), 7, "month");
+        assert_eq!(m.mem.read32(0x1A8).unwrap(), 14, "day");
+        assert_eq!(m.mem.read32(0x1AC).unwrap(), 2, "weekday = Tuesday");
+        assert_eq!(m.mem.read32(0x1B0).unwrap(), 12, "hour");
+        // date_to_time_utc inverts the conversion back to the original timeval.
+        assert_eq!(m.mem.read32(0x1C0).unwrap(), 0, "high_sec restored");
+        assert_eq!(m.mem.read32(0x1C4).unwrap(), 1_784_030_400, "low_sec restored");
+        // glk_current_time wrote a nonzero (modern) low_sec at 0x144.
+        assert_ne!(m.mem.read32(0x144).unwrap(), 0, "current_time wrote the live clock");
+        assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
     }
 }
