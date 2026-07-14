@@ -82,7 +82,7 @@ Dispatch in `exec.rs` ~L2627 (`glk_gestalt` fn). `glk_gestalt_ext` (0x0005) dele
 | HyperlinkInput | 12 | §4 | MISSING | Returns 0 | M | DEFER | NO |
 | GraphicsTransparency | 13 | §4 | MISSING | Returns 0 | L | DEFER | NO |
 | Unicode | 15 | §4 | DONE | Returns 1 | — | — | — |
-| UnicodeNorm | 16 | §4 | MISSING | Returns 0; `glk_buffer_canon_decompose_uni` (0x0123) and `_normalize_uni` (0x0124) are unimplemented (fall to diagnostic) | M | DEFER | NO |
+| UnicodeNorm | 16 | §4 | DONE | Returns 1; `glk_buffer_canon_decompose_uni` (0x0123, NFD) and `_normalize_uni` (0x0124, NFC) implemented via checked-in generated Unicode 16.0.0 tables (SQ-0317) | — | — | — |
 | LineInputEcho | 17 | §4 | PARTIAL | Returns 0; `glk_set_echo_line_event` (0x0150) is a silent no-op | S | DEFER | NO |
 | LineTerminators | 18 | §4 | MISSING | Returns 0; `glk_set_terminators_line_event` (0x0151) is a silent no-op | M | ADD-soon | NO |
 | LineTerminatorKey | 19 | §4 | MISSING | Returns 0; val2 of line-input events is always 0 | M | ADD-soon | NO |
@@ -296,8 +296,8 @@ The following groups are fully implemented and pass glulxercise: arithmetic (§2
 | glk_buffer_to_lower_case_uni | §12 | DONE | Full Unicode via Rust `char::to_lowercase` | — | — | — |
 | glk_buffer_to_upper_case_uni | §12 | DONE | Full Unicode via Rust `char::to_uppercase` | — | — | — |
 | glk_buffer_to_title_case_uni | §12 | DONE | lower_rest variant included | — | — | — |
-| glk_buffer_canon_decompose_uni (0x0123) | §12 | MISSING | Falls to diagnostic; Unicode canonical decomposition | M | DEFER | NO |
-| glk_buffer_canon_normalize_uni (0x0124) | §12 | MISSING | Falls to diagnostic; Unicode canonical composition | M | DEFER | NO |
+| glk_buffer_canon_decompose_uni (0x0123) | §12 | DONE | NFD (full recursive canonical decomposition + canonical ordering) via generated Unicode 16.0.0 tables; Hangul algorithmic (SQ-0317) | — | — | — |
+| glk_buffer_canon_normalize_uni (0x0124) | §12 | DONE | NFC (NFD then canonical composition, honoring composition exclusions + Hangul) via generated Unicode 16.0.0 tables (SQ-0317) | — | — | — |
 
 ### 4g. Sound Channels (Glk spec §9)
 
@@ -417,5 +417,5 @@ Counting distinct items (not rows of FP opcodes individually, but as one group):
 | Recommendation | Count | Key items |
 |---|---|---|
 | **ADD-soon** | **16** | @restart, @save/@restore (+ graceful fallback), @save graceful fallback, debugtrap, glk file layer, glk stream reads (get_char/line/buffer + uni = 6 selectors counted as 1 group), resource streams, glk_style_distinguish + measure, line terminators, timer events, GlulxSession→notify_resize, UMem read, Glk side-car, compliant Quetzal |
-| **DEFER** | **25** | Float ops (group), Acceleration interception, Filter IOSystem, ExtUndo gestalt, wintype_Blank, wintype_Graphics, charOutput gestalt_ext arr, MouseInput, Graphics gestalt, DrawImage, SoundVolume, SoundNotify, HyperlinkInput, GraphicsTransparency, UnicodeNorm, LineInputEcho, DateTime, Sound2, GraphicsCharInput, setrandom(0), evtype_Redraw, evtype_MouseInput, evtype_SoundNotify, evtype_Hyperlink, sound channel API, hyperlink API, datetime API |
+| **DEFER** | **24** | Float ops (group), Acceleration interception, Filter IOSystem, ExtUndo gestalt, wintype_Blank, wintype_Graphics, charOutput gestalt_ext arr, MouseInput, Graphics gestalt, DrawImage, SoundVolume, SoundNotify, HyperlinkInput, GraphicsTransparency, LineInputEcho, DateTime, Sound2, GraphicsCharInput, setrandom(0), evtype_Redraw, evtype_MouseInput, evtype_SoundNotify, evtype_Hyperlink, sound channel API, hyperlink API, datetime API |
 | **SKIP** | **4** | FyreVM, DoubleFloat, winmethod_NoBorder, gidispa |

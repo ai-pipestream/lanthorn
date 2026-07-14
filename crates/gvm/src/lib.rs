@@ -17,6 +17,9 @@ pub mod glk;
 pub mod header;
 pub mod memory;
 pub mod trace;
+mod unicode_norm;
+#[rustfmt::skip]
+mod unicode_norm_tables;
 
 pub use error::GError;
 pub use exec::{Machine, SaveLoadRequest, StepResult};

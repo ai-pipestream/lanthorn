@@ -1,0 +1,16 @@
+# Empty [workspace] table detaches this package from the gvm workspace so it can
+# be built/run standalone (it is also listed in the workspace `exclude`).
+[workspace]
+
+[package]
+name = "gvm-unicode-tables-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone generator — deliberately NOT a member of the gvm workspace (see the
+# workspace `exclude` list). It runs only when the pinned Unicode version bumps;
+# its output (`crates/gvm/src/unicode_norm_tables.rs`) is committed, so gvm keeps
+# building with zero dependencies and no build.rs. std-only, no dependencies.
+
+[dependencies]

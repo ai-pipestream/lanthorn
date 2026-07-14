@@ -12,6 +12,7 @@
 use crate::error::GError;
 use crate::glk::{self, GlkBackend, GlkEvent, GlkStyle, Model, StreamKind, WinType};
 use crate::memory::Memory;
+use crate::unicode_norm;
 
 /// A recoverable runtime fault. Carries a human-readable diagnostic; the run
 /// loop records it and Quits rather than panicking.
@@ -99,6 +100,15 @@ enum CaseOp {
         /// Whether to lowercase everything after the first character.
         lower_rest: bool,
     },
+}
+
+/// Which Unicode normalization a `glk_buffer_canon_*_uni` selector performs.
+#[derive(Clone, Copy)]
+enum NormForm {
+    /// `glk_buffer_canon_decompose_uni` — canonical decomposition (NFD).
+    Nfd,
+    /// `glk_buffer_canon_normalize_uni` — canonical composition (NFC).
+    Nfc,
 }
 
 /// A suspended `glk_select` awaiting a host-supplied event.
@@ -3251,6 +3261,8 @@ impl Machine {
             0x0120 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Lower)?, // _to_lower_case_uni
             0x0121 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Upper)?, // _to_upper_case_uni
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
+            0x0123 => self.glk_buffer_norm_uni(a(0), a(1), a(2), NormForm::Nfd)?, // _canon_decompose_uni
+            0x0124 => self.glk_buffer_norm_uni(a(0), a(1), a(2), NormForm::Nfc)?, // _canon_normalize_uni
             0x00B0 => { self.glk.set_style_hint(a(0), a(1), a(2), a(3)); 0 } // glk_stylehint_set
             0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
             // glk_style_distinguish: compares the rendered stylehints the model
@@ -3825,6 +3837,30 @@ impl Machine {
         Ok(result.len() as u32)
     }
 
+    /// A Unicode buffer normalization (`glk_buffer_canon_decompose_uni` / NFD,
+    /// `glk_buffer_canon_normalize_uni` / NFC): read `numchars` code points from
+    /// the 32-bit array at `buf`, normalize them (the count may change), write
+    /// the result back clamped to `buflen` elements, and return the FULL result
+    /// length — the same buffer-function contract as [`Self::glk_buffer_case_uni`]
+    /// and cheapglk's `cgunicod.c` (truncated on write, untruncated in the value).
+    fn glk_buffer_norm_uni(&mut self, buf: u32, buflen: u32, numchars: u32, form: NormForm) -> R<u32> {
+        let mut input = Vec::with_capacity(numchars as usize);
+        for i in 0..numchars {
+            input.push(self.m32(buf + i * 4)?);
+        }
+        let result = match form {
+            NormForm::Nfd => unicode_norm::canonical_decompose(&input),
+            NormForm::Nfc => unicode_norm::canonical_compose(&input),
+        };
+        for (i, &c) in result.iter().enumerate() {
+            if i as u32 >= buflen {
+                break;
+            }
+            self.store_mem_sized(buf + i as u32 * 4, c, 4)?;
+        }
+        Ok(result.len() as u32)
+    }
+
     /// Record a pending line-input request; diagnose a bad window.
     fn glk_request_line(&mut self, win: u32, buf: u32, maxlen: u32, initlen: u32, unicode: bool) {
         if !self.glk.request_line_event(win, buf, maxlen, initlen, unicode) {
@@ -4377,6 +4413,7 @@ impl Machine {
             2 => 1,                 // gestalt_LineInput → supported
             3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
             15 => 1,                // gestalt_Unicode
+            16 => 1,                // gestalt_UnicodeNorm → canon_decompose/normalize supported
             17 => 1,                // gestalt_LineTerminators → set_terminators supported
             18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
             4 => 1,                 // gestalt_MouseInput → supported (grid + graphics)
@@ -8512,6 +8549,64 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 4, "result length");
         let got: String = (0..4).map(|i| char::from_u32(m.mem.read32(0x180 + i * 4).unwrap()).unwrap()).collect();
         assert_eq!(got, "hélo", "lower-cased in place (Unicode-aware)");
+    }
+
+    // glk_buffer_canon_decompose_uni (selector 0x0123): é (U+00E9) decomposes to
+    // U+0065 U+0301 (NFD), writing 2 chars back and returning the new count.
+    #[test]
+    fn glk_buffer_canon_decompose_uni_dispatch() {
+        use asm::Op::{C16, C8, Mem16};
+        let mut body = glk_call(0x0123, &[C16(0x0180), C8(8), C8(1)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, 0x00E9).unwrap();
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "NFD length");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0x0065, "base 'e'");
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0x0301, "combining acute");
+    }
+
+    // glk_buffer_canon_normalize_uni (selector 0x0124): U+0065 U+0301 composes to
+    // é (U+00E9) under NFC, returning length 1.
+    #[test]
+    fn glk_buffer_canon_normalize_uni_dispatch() {
+        use asm::Op::{C16, C8, Mem16};
+        let mut body = glk_call(0x0124, &[C16(0x0180), C8(8), C8(2)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, 0x0065).unwrap();
+            m.mem.write32(0x184, 0x0301).unwrap();
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "NFC length");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0x00E9, "composed é");
+    }
+
+    // Buffer-function contract: when the result is longer than buflen it is
+    // truncated on write, but the FULL untruncated length is returned (mirrors
+    // glk_buffer_to_lower_case_uni / cheapglk cgunicod.c).
+    #[test]
+    fn glk_buffer_canon_decompose_uni_truncates_but_returns_full_len() {
+        use asm::Op::{C16, C8, Mem16};
+        // buflen = 1, but é decomposes to 2 chars.
+        let mut body = glk_call(0x0123, &[C16(0x0180), C8(1), C8(1)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, 0x00E9).unwrap();
+            m.mem.write32(0x184, 0xDEAD).unwrap(); // sentinel past buflen
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "full untruncated length returned");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0x0065, "first char written");
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0xDEAD, "past buflen left untouched");
+    }
+
+    // gestalt_UnicodeNorm (16) now reports the normalization selectors supported.
+    #[test]
+    fn glk_gestalt_unicode_norm_reports_supported() {
+        use asm::Op::{C8, Mem16};
+        let mut body = glk_call(0x0004, &[C8(16), C8(0)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |_| {});
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "gestalt_UnicodeNorm -> supported");
     }
 
     #[test]
