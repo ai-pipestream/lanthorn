@@ -1076,6 +1076,64 @@ pub type PendingResume =
 /// style runs).
 pub type LoadedTranscript = Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>)>;
 
+/// Cache key for the wrapped-transcript product: every input the wrap output
+/// depends on. A change in any field forces a re-wrap; an unchanged key lets an
+/// idle redraw / scroll reuse the cached rows without re-wrapping. Only the
+/// inputs `wrap_lines_kinded` actually consumes are keyed — search query,
+/// command_bar mode and viewport height do NOT change the wrapped rows (they act
+/// at draw / windowing time), so they are deliberately excluded. (SQ-0305)
+#[derive(Debug, Clone)]
+pub(crate) struct TranscriptWrapKey {
+    /// Content generation (see `AppState::transcript_gen`) — catches a same-length
+    /// content replacement (rewind / restore) that a length check alone misses.
+    pub gen: u64,
+    /// Transcript length — a cheap co-key catching append / clear even if a gen
+    /// bump were ever missed.
+    pub len: usize,
+    /// Active filter (which kinds are visible → which lines are wrapped).
+    pub filter: TranscriptFilter,
+    /// Wrap width (body columns).
+    pub width: u16,
+    /// Whether inline-image bands are emitted (a game picker is present).
+    pub images_enabled: bool,
+    /// Picker cell pixel size (drives image-band fit).
+    pub char_px: (u16, u16),
+    /// Screen-clear anchor (full-transcript index); drives top-anchoring.
+    pub clear_anchor: Option<usize>,
+    /// Current room name — location-header style matching in `resolve_story_style`.
+    pub room_name: Option<String>,
+    /// Resolved colour scheme (theme / `/reload`); Story styles resolve from it.
+    pub colors: crate::colors::ColorScheme,
+}
+
+/// The cached wrapped-transcript product for one [`TranscriptWrapKey`]. Holds the
+/// fully wrapped rows (so the per-frame filter+clone+wrap waterfall runs only on
+/// change, not every frame) plus the two derived products the draw path needs.
+/// (SQ-0305)
+pub(crate) struct TranscriptWrapCache {
+    /// The key these products were built for.
+    pub key: TranscriptWrapKey,
+    /// Fully wrapped rows for the whole filtered transcript (oldest-first).
+    pub rows: Vec<crate::render::transcript::WrappedRow>,
+    /// Wrapped-row count before the filtered screen-clear anchor, when it maps
+    /// into range (drives top-anchoring); `None` otherwise.
+    pub anchor_row: Option<usize>,
+    /// Arc-ptr set of every inline image present in the filtered transcript, for
+    /// bounding the inline-image protocol cache (`InlineImageRender::retain_live`).
+    pub live_bands: std::collections::HashSet<usize>,
+}
+
+// `WrappedRow` carries images and is not `Debug`; summarise instead of recursing.
+impl std::fmt::Debug for TranscriptWrapCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TranscriptWrapCache")
+            .field("rows", &self.rows.len())
+            .field("anchor_row", &self.anchor_row)
+            .field("live_bands", &self.live_bands.len())
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -1111,6 +1169,17 @@ pub struct AppState {
     /// post-clear lines to the top of the pane so a screen clear looks fresh
     /// while older scrollback stays reachable above it. See `mark_screen_clear`.
     pub clear_anchor: Option<usize>,
+    /// Monotonic transcript-content generation, bumped by every mutation of the
+    /// transcript vecs (append / insert / merge / in-place edit / wholesale
+    /// reset). Distinguishes a same-length content replacement (rewind / restore)
+    /// from an unchanged buffer, which a length check alone cannot. Read by the
+    /// transcript wrap cache. (SQ-0305)
+    pub transcript_gen: u64,
+    /// Cache of the fully wrapped transcript rows, keyed by [`TranscriptWrapKey`],
+    /// so an unchanged transcript (idle redraw / scroll) is not re-wrapped and the
+    /// per-line filter+clone waterfall is skipped. Published/consumed by render.
+    /// (SQ-0305)
+    pub(crate) transcript_wrap: std::cell::RefCell<Option<TranscriptWrapCache>>,
     /// List-row viewport (rows) of the currently-open selection-list modal,
     /// captured from the last render so `apply_action` nav can keep the
     /// selection visible and arm scroll animations (mirrors the transcript's
@@ -1487,6 +1556,8 @@ impl Default for AppState {
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
             clear_anchor: None,
+            transcript_gen: 0,
+            transcript_wrap: std::cell::RefCell::new(None),
             modal_list_viewport: 0,
             input: String::new(),
             status_msg: None,
@@ -1959,8 +2030,16 @@ impl AppState {
             .then(|| self.transcript.len().saturating_sub(1))
     }
 
+    /// Bump the transcript-content generation, invalidating the wrap cache. Call
+    /// from every method that mutates the transcript vecs (content, kinds, runs,
+    /// styles, or images). (SQ-0305)
+    fn bump_transcript_gen(&mut self) {
+        self.transcript_gen = self.transcript_gen.wrapping_add(1);
+    }
+
     /// Split `text` on `'\n'` and append each line to the transcript with the given kind tag.
     pub fn push_transcript_kind(&mut self, text: &str, kind: TranscriptKind) {
+        self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
         self.transcript_images.resize(self.transcript.len(), None); // self-heal alignment
@@ -1978,6 +2057,7 @@ impl AppState {
     /// but in inline-prompt mode it inserts the line(s) ABOVE a trailing game `>`
     /// prompt so the prompt the caret sits at is never buried (SQ-0270).
     pub fn push_transcript_internal(&mut self, text: &str, kind: TranscriptKind) {
+        self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_images.resize(self.transcript.len(), None);
@@ -2019,6 +2099,7 @@ impl AppState {
             self.push_transcript_kind(text, TranscriptKind::Input);
             return;
         }
+        self.bump_transcript_gen();
         let start = self.transcript.last().unwrap().chars().count();
         self.transcript.last_mut().unwrap().push_str(text);
         let end = start + text.chars().count();
@@ -2048,6 +2129,7 @@ impl AppState {
         if idx == 0 || idx >= self.transcript.len() {
             return;
         }
+        self.bump_transcript_gen();
         let base = self.transcript[idx - 1].chars().count();
         let moved = std::mem::take(&mut self.transcript[idx]);
         self.transcript[idx - 1].push_str(&moved);
@@ -2109,6 +2191,7 @@ impl AppState {
         if len == 0 {
             return;
         }
+        self.bump_transcript_gen();
         // Resolve per char: (bits, fg, bg, link). Unstyled chars take the fill.
         let mut per: Vec<(u8, u32, u32, u32)> = vec![(0, fg, bg, 0); len];
         for r in self.transcript_runs.get(idx).cloned().unwrap_or_default() {
@@ -2146,6 +2229,7 @@ impl AppState {
 
     /// Append lines with the given kind and an explicit per-line render style.
     pub fn push_transcript_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
+        self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
         self.transcript_images.resize(self.transcript.len(), None); // self-heal alignment
@@ -2161,6 +2245,7 @@ impl AppState {
     /// Like [`push_transcript_styled`], but inserts app-internal styled output
     /// above a trailing game prompt in inline-prompt mode (SQ-0270).
     pub fn push_transcript_internal_styled(&mut self, text: &str, kind: TranscriptKind, style: ratatui::style::Style) {
+        self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_images.resize(self.transcript.len(), None);
@@ -2205,6 +2290,7 @@ impl AppState {
         if text.is_empty() {
             return;
         }
+        self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_images.resize(self.transcript.len(), None);
@@ -2283,6 +2369,7 @@ impl AppState {
     /// Append a logical image unit: an empty placeholder line tagged `Story`
     /// carrying an inline image, keeping the parallel Vecs length-synced.
     pub fn push_transcript_image(&mut self, img: crate::inline_image::InlineImage) {
+        self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
         self.transcript_images.resize(self.transcript.len(), None);
@@ -2303,6 +2390,7 @@ impl AppState {
     /// `Some(..)` at retained head indices (e.g. an inline image a Glulx game drew
     /// before the load, now indexing a different, shorter transcript).
     pub fn reset_transcript_sidecars(&mut self) {
+        self.bump_transcript_gen();
         self.transcript_styles = vec![None; self.transcript.len()];
         self.transcript_images = vec![None; self.transcript.len()];
     }

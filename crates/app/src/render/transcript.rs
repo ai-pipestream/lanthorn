@@ -445,12 +445,91 @@ pub(crate) fn wrap_lines_kinded(
         .collect()
 }
 
+/// Wrapped-row count before the screen-clear anchor `clear_anchor` (a source-line
+/// index into the given slices), or `None` when the anchor is unset or out of
+/// range. This is the number of display rows the pre-clear lines `[..a]` occupy,
+/// used to top-anchor post-clear content. Defensively clamps each parallel slice
+/// (`runs` and, in principle, the others, may be shorter than `transcript`).
+/// (SQ-0305)
+pub(crate) fn anchor_wrapped_rows(
+    transcript: &[String],
+    kinds: &[TranscriptKind],
+    styles: &[Style],
+    runs: &[Vec<StyleRun>],
+    images: &[Option<crate::inline_image::InlineImage>],
+    char_px: (u16, u16),
+    images_enabled: bool,
+    width: u16,
+    clear_anchor: Option<usize>,
+) -> Option<usize> {
+    let a = clear_anchor?;
+    if a >= transcript.len() {
+        return None;
+    }
+    Some(
+        wrap_lines_kinded(
+            &transcript[..a],
+            &kinds[..a.min(kinds.len())],
+            &styles[..a.min(styles.len())],
+            &runs[..a.min(runs.len())],
+            &images[..a.min(images.len())],
+            char_px,
+            images_enabled,
+            width,
+        )
+        .len(),
+    )
+}
+
+/// Window the fully wrapped `display_rows` down to the `rows` rows visible at
+/// `scroll` (0 = newest at bottom; higher = further back). `anchor_row` is the
+/// pre-computed [`anchor_wrapped_rows`] value; when present and the view is at the
+/// bottom (`scroll == 0`) and the post-clear content still fits, those lines are
+/// pinned to the TOP (returning fewer than `rows` rows → the caller leaves the
+/// rest blank) instead of bottom-sticking, which would pull pre-clear history
+/// back into view. Older lines above the anchor stay reachable by scrolling up;
+/// once post-clear content overflows the viewport this no longer triggers.
+///
+/// Returns (visible rows oldest-first, total wrapped-row count, first visible
+/// absolute row). This does NOT wrap — the wrapping is done once by the caller
+/// (cached across frames), so windowing/scroll is cheap. (SQ-0305)
+pub(crate) fn window_wrapped_rows(
+    display_rows: &[WrappedRow],
+    anchor_row: Option<usize>,
+    rows: usize,
+    scroll: u16,
+) -> (Vec<WrappedRow>, usize, usize) {
+    if rows == 0 || display_rows.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+    let n = display_rows.len();
+    if scroll == 0 {
+        if let Some(anchor_row) = anchor_row {
+            if n.saturating_sub(anchor_row) <= rows {
+                return (display_rows[anchor_row..n].to_vec(), n, anchor_row);
+            }
+        }
+    }
+    // Clamp scroll so it never exceeds the top: past `n - rows` the window would
+    // otherwise shrink from the bottom, blanking viewport rows.
+    let max_scroll = n.saturating_sub(rows);
+    let scroll = (scroll as usize).min(max_scroll);
+    let end = n.saturating_sub(scroll);
+    let start = end.saturating_sub(rows);
+    (display_rows[start..end].to_vec(), n, start)
+}
+
 /// Return the **wrapped** display rows (with kinds) visible in `rows` rows,
 /// honouring `scroll` (0 = newest at bottom; higher = further back in history).
 ///
 /// The returned vec is ordered oldest-first so the caller can draw top-to-bottom.
 /// Returns the visible window of wrapped rows AND the total wrapped-row count
 /// (so callers can size a scrollbar without re-wrapping).
+///
+/// This wraps the whole slice every call; the main transcript pane instead caches
+/// the wrapped product (see `AppState::transcript_wrap`) and calls
+/// [`window_wrapped_rows`] directly. This entry point is retained for secondary
+/// buffer windows and unit tests.
 pub(crate) fn visible_wrapped_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
@@ -468,43 +547,14 @@ pub(crate) fn visible_wrapped_lines_kinded(
         return (Vec::new(), 0, 0);
     }
     let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, images, char_px, images_enabled, width);
-    let n = display_rows.len();
-    // Screen-clear top-anchor: when the view is at the bottom (scroll == 0) and
-    // the post-clear content still fits the viewport, pin those lines to the TOP
-    // (returning fewer than `rows` rows → the caller leaves the rest blank),
-    // instead of bottom-sticking which would pull pre-clear history back into
-    // view. Older lines above the anchor stay in the buffer, reachable by
-    // scrolling up. Once post-clear content overflows the viewport this no
-    // longer triggers and normal bottom-stick resumes.
-    if scroll == 0 {
-        if let Some(a) = clear_anchor {
-            if a < transcript.len() {
-                // Clamp each parallel slice defensively: `runs` (and, in
-                // principle, the others) may be shorter than `transcript`.
-                let anchor_row = wrap_lines_kinded(
-                    &transcript[..a],
-                    &kinds[..a.min(kinds.len())],
-                    &styles[..a.min(styles.len())],
-                    &runs[..a.min(runs.len())],
-                    &images[..a.min(images.len())],
-                    char_px,
-                    images_enabled,
-                    width,
-                )
-                .len();
-                if n.saturating_sub(anchor_row) <= rows {
-                    return (display_rows[anchor_row..n].to_vec(), n, anchor_row);
-                }
-            }
-        }
-    }
-    // Clamp scroll so it never exceeds the top: past `n - rows` the window would
-    // otherwise shrink from the bottom, blanking viewport rows.
-    let max_scroll = n.saturating_sub(rows);
-    let scroll = (scroll as usize).min(max_scroll);
-    let end = n.saturating_sub(scroll);
-    let start = end.saturating_sub(rows);
-    (display_rows[start..end].to_vec(), n, start)
+    // Only the bottom (scroll == 0) view can top-anchor, so skip the extra wrap
+    // of `[..a]` while scrolled back.
+    let anchor_row = if scroll == 0 {
+        anchor_wrapped_rows(transcript, kinds, styles, runs, images, char_px, images_enabled, width, clear_anchor)
+    } else {
+        None
+    };
+    window_wrapped_rows(&display_rows, anchor_row, rows, scroll)
 }
 
 /// Draw `text` at `(x, y)` into `buf`, using `base_style` for normal characters
@@ -1115,49 +1165,6 @@ fn render_middle(
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
-    let visible_indices = state.visible_transcript_indices();
-    let filtered_lines: Vec<String> = visible_indices.iter().map(|&i| state.transcript[i].clone()).collect();
-    let filtered_kinds: Vec<TranscriptKind> = visible_indices.iter().map(|&i| state.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story)).collect();
-    // Resolve each logical line's text style ONCE, before wrapping. Story lines
-    // run through the rule list (user → location → system → base); the other
-    // kinds use their fixed per-category style. Resolving here (not per wrapped
-    // fragment) keeps whole-line matching correct when a line wraps.
-    let room_name = state.current_room_name.as_deref();
-    let filtered_styles: Vec<Style> = visible_indices
-        .iter()
-        .zip(filtered_kinds.iter())
-        .map(|(&i, kind)| {
-            if let Some(ov) = state.transcript_styles.get(i).copied().flatten() {
-                return ov;
-            }
-            match kind {
-                TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
-                TranscriptKind::Input   => state.colors.transcript_input,
-                TranscriptKind::Meta    => state.colors.transcript_meta,
-                TranscriptKind::Warning => state.colors.transcript_warning,
-            }
-        })
-        .collect();
-    let filtered_runs: Vec<Vec<StyleRun>> = visible_indices
-        .iter()
-        .map(|&i| state.transcript_runs.get(i).cloned().unwrap_or_default())
-        .collect();
-    // Inline images parallel the filtered lines, indexed by the SAME visible
-    // indices. Bands are only emitted when a game Picker is present (images
-    // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.
-    let filtered_images: Vec<Option<crate::inline_image::InlineImage>> = visible_indices
-        .iter()
-        .map(|&i| state.transcript_images.get(i).cloned().flatten())
-        .collect();
-    // Per-frame eviction: bound the inline-image protocol cache to the images
-    // currently visible, keyed by source Arc-ptr. Combined with the pinned Arc
-    // in each cache value, this drops entries only once their image is truly gone.
-    let live_bands: std::collections::HashSet<usize> = filtered_images
-        .iter()
-        .flatten()
-        .map(|img| std::sync::Arc::as_ptr(&img.pixels) as usize)
-        .collect();
-    state.inline_image_render.borrow_mut().retain_live(&live_bands);
     let images_enabled = state.game_picker.is_some();
     let char_px = state
         .game_picker
@@ -1177,24 +1184,127 @@ fn render_middle(
     // Effective scroll: the animated displayed offset (line-rounded) while a
     // smooth scroll is in flight, else the logical target. Clamped below.
     let effective_scroll = state.effective_transcript_scroll();
-    // Map the screen-clear boundary (a full-transcript index) to a position in
-    // the filtered line list, so top-anchoring works under any transcript filter.
-    let clear_anchor_filtered = state
-        .clear_anchor
-        .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
-    let (lines, total_rows, first_abs_row) = visible_wrapped_lines_kinded(
-        &filtered_lines,
-        &filtered_kinds,
-        &filtered_styles,
-        &filtered_runs,
-        &filtered_images,
-        char_px,
-        images_enabled,
-        transcript_rows,
-        effective_scroll,
-        body_area.width,
-        clear_anchor_filtered,
-    );
+
+    // Wrapped-transcript cache (SQ-0305): re-wrapping the whole filtered history
+    // and cloning every visible line/run/image is the dominant per-frame cost, so
+    // do it only when an input the wrapped rows actually depend on changed. An
+    // idle redraw or a scroll (transcript, width, filter, styles all unchanged)
+    // reuses the cached rows and just re-windows them to the viewport below.
+    let cache_stale = {
+        let cache = state.transcript_wrap.borrow();
+        match cache.as_ref() {
+            None => true,
+            // Field-by-field so the hot (cache-hit) path never clones the colour
+            // scheme / room name — only a rebuild pays for that (see the key built
+            // below; keep the two field lists in sync).
+            Some(c) => {
+                c.key.gen != state.transcript_gen
+                    || c.key.len != state.transcript.len()
+                    || c.key.filter != state.transcript_filter
+                    || c.key.width != body_area.width
+                    || c.key.images_enabled != images_enabled
+                    || c.key.char_px != char_px
+                    || c.key.clear_anchor != state.clear_anchor
+                    || c.key.room_name.as_deref() != state.current_room_name.as_deref()
+                    || c.key.colors != state.colors
+            }
+        }
+    };
+    if cache_stale {
+        let visible_indices = state.visible_transcript_indices();
+        let filtered_lines: Vec<String> = visible_indices.iter().map(|&i| state.transcript[i].clone()).collect();
+        let filtered_kinds: Vec<TranscriptKind> = visible_indices.iter().map(|&i| state.transcript_kinds.get(i).copied().unwrap_or(TranscriptKind::Story)).collect();
+        // Resolve each logical line's text style ONCE, before wrapping. Story lines
+        // run through the rule list (user → location → system → base); the other
+        // kinds use their fixed per-category style. Resolving here (not per wrapped
+        // fragment) keeps whole-line matching correct when a line wraps.
+        let room_name = state.current_room_name.as_deref();
+        let filtered_styles: Vec<Style> = visible_indices
+            .iter()
+            .zip(filtered_kinds.iter())
+            .map(|(&i, kind)| {
+                if let Some(ov) = state.transcript_styles.get(i).copied().flatten() {
+                    return ov;
+                }
+                match kind {
+                    TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
+                    TranscriptKind::Input   => state.colors.transcript_input,
+                    TranscriptKind::Meta    => state.colors.transcript_meta,
+                    TranscriptKind::Warning => state.colors.transcript_warning,
+                }
+            })
+            .collect();
+        let filtered_runs: Vec<Vec<StyleRun>> = visible_indices
+            .iter()
+            .map(|&i| state.transcript_runs.get(i).cloned().unwrap_or_default())
+            .collect();
+        // Inline images parallel the filtered lines, indexed by the SAME visible
+        // indices. Bands are only emitted when a game Picker is present (images
+        // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.
+        let filtered_images: Vec<Option<crate::inline_image::InlineImage>> = visible_indices
+            .iter()
+            .map(|&i| state.transcript_images.get(i).cloned().flatten())
+            .collect();
+        // Bound the inline-image protocol cache to the images present in the
+        // filtered transcript, keyed by source Arc-ptr. Combined with the pinned
+        // Arc in each cache value, this drops entries only once their image is
+        // truly gone. Cached and re-applied every frame (below).
+        let live_bands: std::collections::HashSet<usize> = filtered_images
+            .iter()
+            .flatten()
+            .map(|img| std::sync::Arc::as_ptr(&img.pixels) as usize)
+            .collect();
+        let rows = wrap_lines_kinded(
+            &filtered_lines,
+            &filtered_kinds,
+            &filtered_styles,
+            &filtered_runs,
+            &filtered_images,
+            char_px,
+            images_enabled,
+            body_area.width,
+        );
+        // Map the screen-clear boundary (a full-transcript index) to a position in
+        // the filtered line list, so top-anchoring works under any transcript filter.
+        let clear_anchor_filtered = state
+            .clear_anchor
+            .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
+        let anchor_row = anchor_wrapped_rows(
+            &filtered_lines,
+            &filtered_kinds,
+            &filtered_styles,
+            &filtered_runs,
+            &filtered_images,
+            char_px,
+            images_enabled,
+            body_area.width,
+            clear_anchor_filtered,
+        );
+        *state.transcript_wrap.borrow_mut() = Some(crate::state::TranscriptWrapCache {
+            key: crate::state::TranscriptWrapKey {
+                gen: state.transcript_gen,
+                len: state.transcript.len(),
+                filter: state.transcript_filter,
+                width: body_area.width,
+                images_enabled,
+                char_px,
+                clear_anchor: state.clear_anchor,
+                room_name: state.current_room_name.clone(),
+                colors: state.colors.clone(),
+            },
+            rows,
+            anchor_row,
+            live_bands,
+        });
+    }
+    let cache = state.transcript_wrap.borrow();
+    let entry = cache.as_ref().expect("wrap cache populated above");
+    // Per-frame eviction: bound the inline-image protocol cache to present images.
+    state.inline_image_render.borrow_mut().retain_live(&entry.live_bands);
+    // Window the cached rows to the visible viewport (cheap; no re-wrap). The
+    // top-anchor only applies at the bottom, handled inside `window_wrapped_rows`.
+    let (lines, total_rows, first_abs_row) =
+        window_wrapped_rows(&entry.rows, entry.anchor_row, transcript_rows, effective_scroll);
     // Search highlight style: black text on yellow background.
     let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
@@ -1363,13 +1473,12 @@ fn render_middle(
                 }
             }
         }
-        // Extract the copy from the FULL wrapped set (off-screen rows included).
+        // Extract the copy from the FULL wrapped set (off-screen rows included),
+        // reusing the cached rows rather than re-wrapping. (SQ-0305)
         if sel.is_empty() {
             *state.selection_text.borrow_mut() = None;
         } else {
-            let all = wrap_lines_kinded(&filtered_lines, &filtered_kinds, &filtered_styles,
-                &filtered_runs, &filtered_images, char_px, images_enabled, body_area.width);
-            let texts: Vec<&str> = all.iter().map(|r| r.text.as_str()).collect();
+            let texts: Vec<&str> = entry.rows.iter().map(|r| r.text.as_str()).collect();
             *state.selection_text.borrow_mut() = Some(crate::clipboard::extract(&texts, width, sel));
         }
     }
@@ -3304,5 +3413,150 @@ mod tests {
         // cols=3 centered in 9 → x_off = 3.
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "A");
         assert_eq!(buf.cell((5, 0)).unwrap().symbol(), "Z");
+    }
+
+    // ── Transcript wrap cache (SQ-0305) ───────────────────────────────────────
+    //
+    // The cache holds the fully wrapped rows so an unchanged transcript is not
+    // re-wrapped. These tests POISON the cached rows with a sentinel after a
+    // render, then render again: a cache HIT leaves the sentinel in place (no
+    // rebuild), while an invalidation rebuilds it from the real transcript
+    // (sentinel gone). This directly observes hit vs. rebuild without a counter.
+
+    fn wrap_render(state: &AppState, area: Rect) {
+        let machine = minimal_machine();
+        let status = crate::session::status_model_from_machine(&machine);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&status, None, state, area, &mut buf, None);
+    }
+
+    fn poison_wrap_cache(state: &AppState) {
+        let mut c = state.transcript_wrap.borrow_mut();
+        let e = c.as_mut().expect("cache built by a prior render");
+        e.rows.clear();
+        e.rows.push(WrappedRow {
+            text: "SENTINEL".to_string(),
+            kind: TranscriptKind::Story,
+            style: Style::default(),
+            runs: Vec::new(),
+            band: None,
+        });
+    }
+
+    fn cached_first_text(state: &AppState) -> String {
+        state
+            .transcript_wrap
+            .borrow()
+            .as_ref()
+            .expect("cache present")
+            .rows
+            .first()
+            .map(|r| r.text.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn wrap_cache_hit_reuses_rows_when_nothing_changed() {
+        let mut state = AppState::default();
+        state.push_transcript_kind("hello world", TranscriptKind::Story);
+        let area = Rect::new(0, 0, 20, 8);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+        // Nothing changed → the second render must reuse the cached rows.
+        wrap_render(&state, area);
+        assert_eq!(cached_first_text(&state), "SENTINEL", "unchanged transcript must not re-wrap");
+    }
+
+    #[test]
+    fn wrap_cache_invalidates_on_append() {
+        let mut state = AppState::default();
+        state.push_transcript_kind("hello world", TranscriptKind::Story);
+        let area = Rect::new(0, 0, 20, 8);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+        state.push_transcript_kind("more", TranscriptKind::Story); // bumps gen + len
+        wrap_render(&state, area);
+        assert_eq!(cached_first_text(&state), "hello world", "append must rebuild from real content");
+    }
+
+    #[test]
+    fn wrap_cache_invalidates_on_width_change() {
+        let mut state = AppState::default();
+        state.push_transcript_kind("hello world", TranscriptKind::Story);
+        wrap_render(&state, Rect::new(0, 0, 20, 8));
+        poison_wrap_cache(&state);
+        wrap_render(&state, Rect::new(0, 0, 30, 8)); // different wrap width
+        assert_ne!(cached_first_text(&state), "SENTINEL", "width change must re-wrap");
+    }
+
+    #[test]
+    fn wrap_cache_invalidates_on_filter_change() {
+        let mut state = AppState::default();
+        state.push_transcript_kind("hello world", TranscriptKind::Story);
+        let area = Rect::new(0, 0, 20, 8);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+        state.transcript_filter = TranscriptFilter::Meta; // hides the Story line
+        wrap_render(&state, area);
+        assert_ne!(cached_first_text(&state), "SENTINEL", "filter change must re-wrap");
+    }
+
+    #[test]
+    fn wrap_cache_invalidates_on_anchor_change() {
+        let mut state = AppState::default();
+        state.push_transcript_kind("hello world", TranscriptKind::Story);
+        let area = Rect::new(0, 0, 20, 8);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+        state.clear_anchor = Some(0); // screen-clear boundary moved
+        wrap_render(&state, area);
+        assert_ne!(cached_first_text(&state), "SENTINEL", "anchor change must re-wrap");
+    }
+
+    #[test]
+    fn wrap_cache_invalidates_on_same_length_content_replacement() {
+        // A rewind/restore can replace the transcript with a DIFFERENT content of
+        // the SAME length — a length check alone would serve stale rows. The
+        // generation counter (bumped by reset_transcript_sidecars) catches it.
+        let mut state = AppState::default();
+        state.push_transcript_kind("AAAAA", TranscriptKind::Story);
+        let area = Rect::new(0, 0, 20, 8);
+        wrap_render(&state, area);
+        poison_wrap_cache(&state);
+        let gen_before = state.transcript_gen;
+        state.transcript = vec!["BBBBB".to_string()];
+        state.transcript_kinds = vec![TranscriptKind::Story];
+        state.transcript_runs = vec![Vec::new()];
+        state.reset_transcript_sidecars(); // bumps gen; length unchanged (1)
+        assert_ne!(state.transcript_gen, gen_before, "reset must bump the generation");
+        assert_eq!(state.transcript.len(), 1, "same length as before");
+        wrap_render(&state, area);
+        assert_eq!(cached_first_text(&state), "BBBBB", "same-length replacement must re-wrap to new content");
+    }
+
+    #[test]
+    fn window_wrapped_rows_windows_and_top_anchors() {
+        let rows: Vec<WrappedRow> = (0..6)
+            .map(|i| WrappedRow {
+                text: format!("R{i}"),
+                kind: TranscriptKind::Story,
+                style: Style::default(),
+                runs: Vec::new(),
+                band: None,
+            })
+            .collect();
+        // No anchor, scroll 0 → newest 3 at the bottom.
+        let (vis, total, first) = window_wrapped_rows(&rows, None, 3, 0);
+        assert_eq!(total, 6);
+        assert_eq!(first, 3);
+        assert_eq!(vis.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["R3", "R4", "R5"]);
+        // Anchor at row 4 with the post-anchor content (2 rows) fitting the 3-row
+        // viewport → pin from the anchor (top-anchored), fewer than `rows` returned.
+        let (vis2, _t, first2) = window_wrapped_rows(&rows, Some(4), 3, 0);
+        assert_eq!(first2, 4);
+        assert_eq!(vis2.iter().map(|r| r.text.as_str()).collect::<Vec<_>>(), vec!["R4", "R5"]);
+        // While scrolled (scroll != 0) the anchor does not apply.
+        let (_v3, _t3, first3) = window_wrapped_rows(&rows, Some(4), 3, 1);
+        assert_eq!(first3, 2);
     }
 }
