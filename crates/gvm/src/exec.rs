@@ -2859,6 +2859,25 @@ impl Machine {
                 self.glk_put_current(&s);
                 0
             }
+            0x012B => {
+                // glk_put_char_stream_uni(str, ch)
+                let s = char::from_u32(a(1)).unwrap_or('\u{FFFD}').to_string();
+                self.glk_stream_put(a(0), &s);
+                0
+            }
+            0x012C => {
+                // glk_put_string_stream_uni(str, addr)
+                if let Some(s) = self.decode_glk_string(a(1))? {
+                    self.glk_stream_put(a(0), &s);
+                }
+                0
+            }
+            0x012D => {
+                // glk_put_buffer_stream_uni(str, addr, len)
+                let s = self.read_uni_buffer(a(1), a(2))?;
+                self.glk_stream_put(a(0), &s);
+                0
+            }
             // ── windows ───────────────────────────────────────────────────────
             0x0020 => {
                 // glk_window_iterate(win, rockptr) -> next window id
@@ -3059,7 +3078,7 @@ impl Machine {
                 }
                 count
             }
-            0x012C => {
+            0x0130 => {
                 // glk_get_char_stream_uni(str) — read one codepoint, or 0xFFFFFFFF = EOF
                 let sid = a(0);
                 match self.glk.memory_stream_read_info(sid) {
@@ -3074,7 +3093,7 @@ impl Machine {
                     _ => 0xFFFF_FFFF,
                 }
             }
-            0x012D => {
+            0x0131 => {
                 // glk_get_buffer_stream_uni(str, buf, len) — read up to len codepoints
                 let (sid, buf, maxlen) = (a(0), a(1), a(2));
                 let mut count = 0u32;
@@ -3103,7 +3122,7 @@ impl Machine {
                 }
                 count
             }
-            0x012E => {
+            0x0132 => {
                 // glk_get_line_stream_uni(str, buf, maxlen) — read up to maxlen-1 codepoints
                 let (sid, buf, maxlen) = (a(0), a(1), a(2));
                 let mut count = 0u32;
@@ -8556,9 +8575,9 @@ mod tests {
         use asm::Op::{C8, C16, Mem16, Zero};
         // open_memory_uni over 2 codepoints at 0x180: U+0048 ('H'), U+1F600 (emoji).
         let mut body = glk_call(0x0139, &[C16(0x0180), C8(2), C8(1), C8(0)], Zero); // open_memory_uni -> 2
-        body.extend(glk_call(0x012C, &[C8(2)], Mem16(0x0100))); // get_char_stream_uni
-        body.extend(glk_call(0x012C, &[C8(2)], Mem16(0x0104)));
-        body.extend(glk_call(0x012C, &[C8(2)], Mem16(0x0108))); // EOF
+        body.extend(glk_call(0x0130, &[C8(2)], Mem16(0x0100))); // get_char_stream_uni
+        body.extend(glk_call(0x0130, &[C8(2)], Mem16(0x0104)));
+        body.extend(glk_call(0x0130, &[C8(2)], Mem16(0x0108))); // EOF
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |m| {
             m.mem.write32(0x180, 0x0048).unwrap();     // 'H'
@@ -8574,7 +8593,7 @@ mod tests {
         use asm::Op::{C8, C16, Mem16, Zero};
         // 3-codepoint unicode stream at 0x180; read 2 into buf at 0x1C0.
         let mut body = glk_call(0x0139, &[C16(0x0180), C8(3), C8(1), C8(0)], Zero);
-        body.extend(glk_call(0x012D, &[C8(2), C16(0x01C0), C8(2)], Mem16(0x0100)));
+        body.extend(glk_call(0x0131, &[C8(2), C16(0x01C0), C8(2)], Mem16(0x0100)));
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |m| {
             m.mem.write32(0x180, b'A' as u32).unwrap();
@@ -9136,6 +9155,34 @@ mod tests {
         assert_eq!(backend_of(&m).text(1), "Hi", "the window still receives the text");
         assert_eq!(m.mem.read8(0x180).unwrap(), b'H' as u32, "echo stream also got 'H'");
         assert_eq!(m.mem.read8(0x181).unwrap(), b'i' as u32, "echo stream also got 'i'");
+        assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_uni_stream_put_variants_write_words_including_astral() {
+        use asm::Op::{C16, C32, C8, Mem16, Zero};
+        // open_memory_uni -> stream 2 over 8 words at 0x180. Write via all three
+        // uni stream-put variants: char (astral emoji), buffer, and string.
+        let mut body = glk_call(0x139, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100));
+        // put_char_stream_uni(2, U+1F600) at word 0.
+        body.extend(glk_call(0x12B, &[C8(2), C32(0x1F600)], Zero));
+        // put_buffer_stream_uni(2, 0x220, 2): the 32-bit code points at 0x220.
+        body.extend(glk_call(0x12D, &[C8(2), C16(0x0220), C8(2)], Zero));
+        // put_string_stream_uni(2, 0x240): an E2 Unicode string object "λ".
+        body.extend(glk_call(0x12C, &[C8(2), C16(0x0240)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x300, |m| {
+            poke(m, 0x220, &0x41u32.to_be_bytes()); // 'A'
+            poke(m, 0x224, &0x42u32.to_be_bytes()); // 'B'
+            poke(m, 0x240, &[0xE2, 0, 0, 0]); // E2 tag + 3 pad bytes
+            poke(m, 0x244, &0x3BBu32.to_be_bytes()); // 'λ'
+            poke(m, 0x248, &0u32.to_be_bytes()); // terminator
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "open_memory_uni -> stream 2");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0x1F600, "put_char_stream_uni wrote the astral char");
+        assert_eq!(m.mem.read32(0x184).unwrap(), b'A' as u32, "put_buffer_stream_uni word 0");
+        assert_eq!(m.mem.read32(0x188).unwrap(), b'B' as u32, "put_buffer_stream_uni word 1");
+        assert_eq!(m.mem.read32(0x18C).unwrap(), 0x3BB, "put_string_stream_uni decoded 'λ'");
         assert!(m.diagnostics.is_empty(), "no unhandled selector: {:?}", m.diagnostics);
     }
 }
