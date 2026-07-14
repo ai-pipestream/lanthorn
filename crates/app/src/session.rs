@@ -69,7 +69,7 @@ pub struct FilenameReq {
 /// layout, carried via [`crate::glk_backend::AppGlk::take_transcript_elems`]).
 pub struct CaptureSink {
     pub text: String,
-    pub runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt)>,
+    pub runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
 }
 
 impl CaptureSink {
@@ -78,7 +78,7 @@ impl CaptureSink {
     }
 
     /// Drain accumulated text and style runs together, leaving both empty.
-    pub fn take_styled(&mut self) -> (String, Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt)>) {
+    pub fn take_styled(&mut self) -> (String, Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>) {
         (std::mem::take(&mut self.text), std::mem::take(&mut self.runs))
     }
 
@@ -90,15 +90,15 @@ impl CaptureSink {
 
 impl Output for CaptureSink {
     fn print(&mut self, s: &str) {
-        self.runs.push((s.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()));
+        self.runs.push((s.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0));
         self.text.push_str(s);
     }
     fn print_styled(&mut self, s: &str, style: u8) {
-        self.runs.push((s.chars().count(), style, ZColour::Default, ZColour::Default, 0, ParaFmt::default()));
+        self.runs.push((s.chars().count(), style, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0));
         self.text.push_str(s);
     }
     fn print_attr(&mut self, s: &str, attrs: TextAttrs) {
-        self.runs.push((s.chars().count(), attrs.style, attrs.fg, attrs.bg, 0, ParaFmt::default()));
+        self.runs.push((s.chars().count(), attrs.style, attrs.fg, attrs.bg, 0, ParaFmt::default(), 0));
         self.text.push_str(s);
     }
     fn as_any(&self) -> &dyn Any {
@@ -115,17 +115,17 @@ impl Output for CaptureSink {
 /// truncated. A list shorter than `char_len` is returned unchanged (the missing
 /// tail is treated as plain by `push_transcript_runs`).
 pub(crate) fn clamp_runs(
-    runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt)>,
+    runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
     char_len: usize,
-) -> Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt)> {
+) -> Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> {
     let mut out = Vec::with_capacity(runs.len());
     let mut total = 0usize;
-    for (c, b, fg, bg, link, para) in runs {
+    for (c, b, fg, bg, link, para, gs) in runs {
         if total >= char_len {
             break;
         }
         let take = c.min(char_len - total);
-        out.push((take, b, fg, bg, link, para));
+        out.push((take, b, fg, bg, link, para, gs));
         total += take;
     }
     out
@@ -137,7 +137,7 @@ pub(crate) fn clamp_runs(
 /// chunks) or an inline image. Preserves emission order so images land between
 /// the right lines.
 pub enum TranscriptElem {
-    Text { text: String, runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt)> },
+    Text { text: String, runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> },
     Image(crate::inline_image::InlineImage),
 }
 
@@ -216,7 +216,7 @@ pub struct TurnResult {
     /// list covering every char of `transcript`, fed to `push_transcript_runs`. All
     /// chunks carry bits 0, default colours and default `para` when the turn emitted
     /// no styling (the Z-machine path never sets a non-default `para`).
-    pub transcript_runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt)>,
+    pub transcript_runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
     /// The game issued `erase_window` (lower / all) this turn (ZMSD §8.7.3) — a
@@ -796,6 +796,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
                 fg: crate::state::pack_zcolour(c.fg),
                 bg: crate::state::pack_zcolour(c.bg),
                 link: 0, // Z-machine grid cells carry no Glk hyperlink
+                glk_style: 0, // Z-machine is always Normal
             })
             .collect(),
         // `upper.rows` equals `upper_window_rows` normally, but grows when a game
@@ -1029,8 +1030,8 @@ mod tests {
         let (text, runs) = s.take_styled();
         assert_eq!(text, "abCD");
         assert_eq!(runs, vec![
-            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
-            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
+            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
+            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
         ]);
     }
 
@@ -1039,12 +1040,12 @@ mod tests {
         use zvm::screen::ZColour;
         // strip_read_prompt removed 3 trailing chars ("\n> " etc.) → clamp.
         let runs = vec![
-            (2, 0u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default()),
-            (5, 0x02u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default()),
+            (2, 0u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0),
+            (5, 0x02u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0),
         ];
         assert_eq!(clamp_runs(runs, 4), vec![
-            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
-            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
+            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
+            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
         ]);
     }
 
@@ -1065,7 +1066,7 @@ mod tests {
         let kept = strip_read_prompt(raw).chars().count();
         let mut elems = vec![TranscriptElem::Text {
             text: raw.to_string(),
-            runs: vec![(raw.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())],
+            runs: vec![(raw.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)],
         }];
         trim_elems_to_len(&mut elems, kept);
         let TranscriptElem::Text { text, runs } = &elems[0] else { panic!("expected Text") };
@@ -1080,9 +1081,9 @@ mod tests {
         // The trim clears the trailing ">" element and reaches back past the
         // image to trim the "\n" off "foo\n".
         let mut elems = vec![
-            TranscriptElem::Text { text: "foo\n".into(), runs: vec![(4, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())] },
+            TranscriptElem::Text { text: "foo\n".into(), runs: vec![(4, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)] },
             TranscriptElem::Image(dummy_inline_image()),
-            TranscriptElem::Text { text: ">".into(), runs: vec![(1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())] },
+            TranscriptElem::Text { text: ">".into(), runs: vec![(1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)] },
         ];
         trim_elems_to_len(&mut elems, 3);
         let TranscriptElem::Text { text, .. } = &elems[0] else { panic!("expected Text") };

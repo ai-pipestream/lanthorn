@@ -36,6 +36,15 @@ impl PartialEq for CompiledRule {
     }
 }
 
+/// One per-Glk-style theme colour slot: an optional foreground / background
+/// applied between the game's stylehint and the per-app-element base (SQ-0331).
+/// `None` = inherit (fall through to the element). `Default` = both `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GlkStyleColour {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+}
+
 /// Which alignment cluster a status-bar segment belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
@@ -364,6 +373,27 @@ pub struct ColorScheme {
     /// Used by `resolve_zcolour` to map `ZColour::Standard(2..=9)` through the
     /// user's colour scheme rather than the Z-machine's raw ANSI numbers.
     pub palette: [Color; 16],
+    /// Per-Glk-style theme colours, resolved between the game's stylehint and the
+    /// per-app-element base (SQ-0331). Row 0 = text-buffer windows (base
+    /// `transcript`); row 1 = text-grid windows (base `upper_window`). Indexed by
+    /// the Glk style class (0=Normal .. 10=User2). A slot's `None` channel falls
+    /// through to the element, so a `Default` (all-`None`) array leaves the
+    /// Z-machine (all-Normal) render byte-identical. Seeded here (buffer Input←
+    /// `input_text`, buffer Subheader←`transcript_location`); the SQ-0319
+    /// garglk.ini importer will populate the rest. Not yet editable via style.toml
+    /// (deferred to the SQ-0309 style redesign).
+    pub glk_styles: [[GlkStyleColour; 11]; 2],
+}
+
+/// Build the seed `glk_styles` array (SQ-0331): buffer Input(8) ← `input_text`,
+/// buffer Subheader(4) ← `transcript_location`; every other slot inherits its
+/// element (left `None`), so Normal is definitionally the element and the
+/// Z-machine render stays byte-identical.
+fn seed_glk_styles(input_text: Style, transcript_location: Style) -> [[GlkStyleColour; 11]; 2] {
+    let mut styles = [[GlkStyleColour::default(); 11]; 2];
+    styles[0][8] = GlkStyleColour { fg: input_text.fg, bg: input_text.bg };
+    styles[0][4] = GlkStyleColour { fg: transcript_location.fg, bg: transcript_location.bg };
+    styles
 }
 
 impl ColorScheme {
@@ -480,6 +510,7 @@ impl ColorScheme {
                 Color::LightCyan,  // 14
                 Color::White,      // 15 bright white
             ],
+            glk_styles: seed_glk_styles(Style::new(), Style::new().add_modifier(Modifier::BOLD)),
         }
     }
 
@@ -654,6 +685,7 @@ impl ColorScheme {
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
             palette: scheme.palette,
+            glk_styles: seed_glk_styles(Style::new(), Style::new().add_modifier(Modifier::BOLD)),
         }
     }
 
@@ -891,6 +923,38 @@ pub fn parse_named_color(s: &str) -> Option<Color> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_glk_styles_copies_input_and_subheader_leaves_rest_none() {
+        let styles = seed_glk_styles(
+            Style::new().fg(Color::Cyan).bg(Color::Black),
+            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+        );
+        // Buffer (row 0): Input(8) ← input_text fg/bg; Subheader(4) ← transcript_location.
+        assert_eq!(styles[0][8], GlkStyleColour { fg: Some(Color::Cyan), bg: Some(Color::Black) });
+        assert_eq!(styles[0][4], GlkStyleColour { fg: Some(Color::Green), bg: None });
+        // Normal(0) is always None → definitionally the element (byte-identical Z-machine).
+        assert_eq!(styles[0][0], GlkStyleColour::default());
+        // Every other buffer slot and the entire grid row inherit (None).
+        for i in [1usize, 2, 3, 5, 6, 7, 9, 10] {
+            assert_eq!(styles[0][i], GlkStyleColour::default(), "buffer slot {i} inherits");
+        }
+        for i in 0..11 {
+            assert_eq!(styles[1][i], GlkStyleColour::default(), "grid slot {i} inherits (row 1 unseeded)");
+        }
+    }
+
+    #[test]
+    fn terminal_default_glk_styles_are_all_none() {
+        // input_text / transcript_location carry no concrete colour in the terminal
+        // default, so the seeds resolve to None and Normal stays the element.
+        let cs = ColorScheme::terminal_default();
+        for row in 0..2 {
+            for i in 0..11 {
+                assert_eq!(cs.glk_styles[row][i], GlkStyleColour::default(), "row {row} slot {i}");
+            }
+        }
+    }
 
     #[test]
     fn border_sides_default_to_all_of_base_and_headers_on() {

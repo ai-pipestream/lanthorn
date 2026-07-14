@@ -17,7 +17,7 @@ use crate::render::paneframe::{draw_framed, BorderStyle, PaneSides};
 /// modifier so the terminal performs exactly one swap. fg/bg are applied in
 /// logical order (pre-reverse) for non-Default channels when
 /// `honor_game_colours` is true; Default channels inherit from the theme base.
-fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme, honor_game_colours: bool, bg_override: Option<u32>) -> Style {
+fn cell_style(cell: zvm::screen::Cell, glk_style: u8, scheme: &ColorScheme, honor_game_colours: bool, bg_override: Option<u32>) -> Style {
     use zvm::screen::ZColour;
     // Use the theme upper_window content style as the base (consistent with the
     // blank-fill path in draw_grid, and with how transcript.rs draws styled runs).
@@ -31,15 +31,18 @@ fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme, honor_game_colours:
     // The terminal performs exactly one swap for the REVERSED modifier — no manual
     // fg/bg swap here (which would be a no-op for Default/Reset channels, C1 bug).
     let mut s = crate::render::apply_text_style(base, cell.style);
-    // Apply game fg/bg in logical order only when honor_game_colours is on and the
-    // channel is not Default (mirrors draw_str_runs in transcript.rs exactly).
-    if honor_game_colours {
-        if !matches!(cell.fg, ZColour::Default) {
-            s = s.fg(crate::render::resolve_zcolour(cell.fg, scheme));
-        }
-        if !matches!(cell.bg, ZColour::Default) {
-            s = s.bg(crate::render::resolve_zcolour(cell.bg, scheme));
-        }
+    // Per-channel colour resolution (SQ-0331): game-set cell colour (gated by
+    // honor_game_colours), then the theme's per-Glk-style slot (grid = row 1),
+    // then the element base. Mirrors draw_str_runs in transcript.rs exactly.
+    let glk = scheme.glk_styles[1].get(glk_style as usize).copied().unwrap_or_default();
+    let game = |c: ZColour| -> Option<ratatui::style::Color> {
+        (!matches!(c, ZColour::Default)).then(|| crate::render::resolve_zcolour(c, scheme))
+    };
+    if let Some(c) = crate::render::resolve_glk_channel(game(cell.fg), glk.fg, base.fg, honor_game_colours) {
+        s = s.fg(c);
+    }
+    if let Some(c) = crate::render::resolve_glk_channel(game(cell.bg), glk.bg, base.bg, honor_game_colours) {
+        s = s.bg(c);
     }
     s
 }
@@ -209,7 +212,7 @@ pub fn draw_grid(
             let bx = content.x + dx;
             let by = content.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
-                let mut style = cell_style(grid_cell_to_zvm(cell), colors, honor_game_colours, upper.bg);
+                let mut style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, upper.bg);
                 // Glk hyperlink affordance: layer the themeable `hyperlink` colour
                 // and an underline on top, and record the cell for click hit-testing.
                 // Mirrors the transcript path in `draw_str_runs`. (SQ-0258)
@@ -242,9 +245,10 @@ pub fn draw_grid(
         if cur_dy < content.height && cur_dx < content.width {
             let grid_row = cur_dy + row_offset + 1; // 1-based
             let grid_col = cur_dx + col_offset + 1; // 1-based
-            let mut cur_zvm = grid_cell_to_zvm(upper.cell(grid_row, grid_col));
+            let cur_cell = upper.cell(grid_row, grid_col);
+            let mut cur_zvm = grid_cell_to_zvm(cur_cell);
             cur_zvm.style ^= 0x01; // toggle reverse bit
-            let style = cell_style(cur_zvm, colors, honor_game_colours, upper.bg);
+            let style = cell_style(cur_zvm, cur_cell.glk_style, colors, honor_game_colours, upper.bg);
             if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
                 c.modifier = ratatui::style::Modifier::empty(); // clear before re-apply
                 c.set_style(style);
@@ -304,6 +308,7 @@ mod tests {
         // no reverse: fg=red, bg=blue (logical order, no REVERSED modifier)
         let s = cell_style(
             Cell { ch: 'x', style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
+            0,
             &scheme,
             true,
             None,
@@ -315,6 +320,7 @@ mod tests {
         // the terminal performs the single swap via the modifier.
         let r = cell_style(
             Cell { ch: 'x', style: 0x01, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
+            0,
             &scheme,
             true,
             None,
@@ -322,6 +328,29 @@ mod tests {
         assert!(r.add_modifier.contains(Modifier::REVERSED), "REVERSED modifier for style=0x01");
         assert_eq!(r.fg, Some(Color::Rgb(200, 0, 0)), "fg stays logical (not swapped)");
         assert_eq!(r.bg, Some(Color::Rgb(0, 0, 200)), "bg stays logical (not swapped)");
+    }
+
+    /// A grid cell's Glk style class selects the theme's per-style colour slot
+    /// from the GRID row (row 1) — applying in both gate states, while a Normal
+    /// cell (unseeded row 1) inherits the `upper_window` element base (SQ-0331).
+    #[test]
+    fn cell_style_grid_glk_style_slot_uses_row1() {
+        use zvm::screen::{Cell, ZColour};
+        use crate::colors::GlkStyleColour;
+        let mut scheme = ColorScheme::default();
+        scheme.glk_styles[1][4] = GlkStyleColour { fg: Some(Color::Green), bg: None };
+        // Subheader (glk_style 4) grid cell, no game colour → slot green, honor OFF.
+        let s = cell_style(
+            Cell { ch: 'x', style: 0, fg: ZColour::Default, bg: ZColour::Default },
+            4, &scheme, false, None,
+        );
+        assert_eq!(s.fg, Some(Color::Green), "grid Subheader → row-1 slot");
+        // Normal (glk_style 0) cell → element base (upper_window fg, None by default).
+        let n = cell_style(
+            Cell { ch: 'x', style: 0, fg: ZColour::Default, bg: ZColour::Default },
+            0, &scheme, false, None,
+        );
+        assert_eq!(n.fg, scheme.upper_window.fg, "grid Normal → upper_window element base");
     }
 
     /// C1 regression guard: a reverse cell with DEFAULT colours (fg==bg==ZColour::Default)
@@ -334,6 +363,7 @@ mod tests {
         let scheme = ColorScheme::default();
         let s = cell_style(
             Cell { ch: ' ', style: 0x01, fg: ZColour::Default, bg: ZColour::Default },
+            0,
             &scheme,
             true,
             None,

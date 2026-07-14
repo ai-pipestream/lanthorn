@@ -81,6 +81,33 @@ pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
     }
 }
 
+/// Resolve one colour channel (fg or bg) through the per-Glk-style theme layer
+/// (SQ-0331). Returns the colour to explicitly set, or `None` to leave the base
+/// element style's channel untouched (so an unset element channel keeps
+/// inheriting — preserving byte-identity for the all-Normal Z-machine path).
+///
+/// - `game_set`: the run/cell's own resolved colour when the game set one (else
+///   `None`). Gated by `honor`: when `honor` is off the game layer is IGNORED
+///   entirely (garglk "disable game modifications"), NOT merely ranked below the
+///   slot.
+/// - `slot`: the theme's `glk_styles[wintype][style]` channel (USER/THEME
+///   styling — applies in BOTH gate states).
+/// - `base`: the per-app-element base channel (`transcript` / `upper_window`).
+///
+/// Chain: `honor ? game_set.or(slot).or(base) : slot.or(base)`.
+pub(crate) fn resolve_glk_channel(
+    game_set: Option<Color>,
+    slot: Option<Color>,
+    base: Option<Color>,
+    honor: bool,
+) -> Option<Color> {
+    if honor {
+        game_set.or(slot).or(base)
+    } else {
+        slot.or(base)
+    }
+}
+
 // ── Shared clipped drawing helpers ────────────────────────────────────────────
 
 /// Write a single char into the buffer, clipped to `area`.
@@ -148,6 +175,20 @@ pub fn put_str(buf: &mut Buffer, x: i32, y: i32, s: &str, style: Style, area: Re
 mod text_style_tests {
     use super::*;
     use ratatui::style::{Color, Modifier, Style};
+
+    #[test]
+    fn resolve_glk_channel_honours_chain_and_gate() {
+        let (red, blue, green) = (Color::Red, Color::Blue, Color::Green);
+        // honor ON: game > slot > base.
+        assert_eq!(resolve_glk_channel(Some(red), Some(blue), Some(green), true), Some(red));
+        assert_eq!(resolve_glk_channel(None, Some(blue), Some(green), true), Some(blue));
+        assert_eq!(resolve_glk_channel(None, None, Some(green), true), Some(green));
+        assert_eq!(resolve_glk_channel(None, None, None, true), None);
+        // honor OFF: game colour IGNORED entirely; slot > base still apply.
+        assert_eq!(resolve_glk_channel(Some(red), Some(blue), Some(green), false), Some(blue));
+        assert_eq!(resolve_glk_channel(Some(red), None, Some(green), false), Some(green));
+        assert_eq!(resolve_glk_channel(Some(red), None, None, false), None);
+    }
 
     #[test]
     fn resolve_zcolour_maps_palette_grey_true_default() {

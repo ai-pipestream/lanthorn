@@ -511,7 +511,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         if crate::render::inline_image::try_blit_band_row(state, wr, area.x, area.width, row_y, buf) {
             continue;
         }
-        draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, state.config.honor_game_colours.then_some(&state.colors));
+        draw_str_runs(buf, area.x, row_y, &wr.text, wr.style, &wr.runs, None, area, &state.colors, state.config.honor_game_colours);
     }
 }
 
@@ -1054,7 +1054,7 @@ mod tests {
     #[test]
     fn inline_buffer_renders_styled_runs() {
         let mut b = inline_buffer("abCD");
-        b.runs = vec![vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0 }]];
+        b.runs = vec![vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]];
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
         let area = Rect::new(0, 0, 10, 3);

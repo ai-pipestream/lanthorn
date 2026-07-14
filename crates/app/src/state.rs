@@ -232,6 +232,8 @@ pub struct StyleRun {
     pub bg: u32, // packed ZColour; 0 = Default
     #[serde(default)]
     pub link: u32, // Glk hyperlink value for this span (0 = no link)
+    #[serde(default)]
+    pub glk_style: u8, // Glk style class (0=Normal .. 10=User2); indexes the theme's per-style colour slot (SQ-0331)
 }
 
 /// Per-paragraph layout formatting for one transcript line, derived from the Glk
@@ -2348,7 +2350,7 @@ impl AppState {
         if let Some(runs) = self.transcript_runs.last_mut() {
             if let Some(&StyleRun { fg, bg, .. }) = runs.last() {
                 if fg != 0 || bg != 0 {
-                    runs.push(StyleRun { start, end, bits: 0, fg, bg, link: 0 });
+                    runs.push(StyleRun { start, end, bits: 0, fg, bg, link: 0, glk_style: 0 });
                 }
             }
         }
@@ -2432,8 +2434,8 @@ impl AppState {
             return;
         }
         self.bump_transcript_gen();
-        // Resolve per char: (bits, fg, bg, link). Unstyled chars take the fill.
-        let mut per: Vec<(u8, u32, u32, u32)> = vec![(0, fg, bg, 0); len];
+        // Resolve per char: (bits, fg, bg, link, glk_style). Unstyled chars take the fill.
+        let mut per: Vec<(u8, u32, u32, u32, u8)> = vec![(0, fg, bg, 0, 0); len];
         for r in self.transcript_runs.get(idx).cloned().unwrap_or_default() {
             for c in r.start..r.end.min(len) {
                 per[c] = (
@@ -2441,17 +2443,18 @@ impl AppState {
                     if r.fg != 0 { r.fg } else { fg },
                     if r.bg != 0 { r.bg } else { bg },
                     r.link,
+                    r.glk_style,
                 );
             }
         }
         // Coalesce adjacent identical cells back into runs.
         let mut runs: Vec<StyleRun> = Vec::new();
-        for (c, &(bits, cf, cb, link)) in per.iter().enumerate() {
+        for (c, &(bits, cf, cb, link, gs)) in per.iter().enumerate() {
             match runs.last_mut() {
-                Some(last) if last.end == c && last.bits == bits && last.fg == cf && last.bg == cb && last.link == link => {
+                Some(last) if last.end == c && last.bits == bits && last.fg == cf && last.bg == cb && last.link == link && last.glk_style == gs => {
                     last.end = c + 1;
                 }
-                _ => runs.push(StyleRun { start: c, end: c + 1, bits, fg: cf, bg: cb, link }),
+                _ => runs.push(StyleRun { start: c, end: c + 1, bits, fg: cf, bg: cb, link, glk_style: gs }),
             }
         }
         if idx < self.transcript_runs.len() {
@@ -2526,7 +2529,7 @@ impl AppState {
         &mut self,
         text: &str,
         kind: TranscriptKind,
-        chunks: &[(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, ParaFmt)],
+        chunks: &[(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, ParaFmt, u8)],
     ) {
         // A turn with no new lower-window output (e.g. a read_char keypress that
         // only redrew the upper window) yields an empty string; appending it would
@@ -2549,24 +2552,27 @@ impl AppState {
         let mut bg = zvm::screen::ZColour::Default;
         let mut link: u32 = 0;
         let mut para = ParaFmt::default();
+        let mut glk_style: u8 = 0;
         // Advance to the next non-exhausted chunk when the current one is spent.
         // When chunks run out, treat the remainder as plain (bits 0, default
-        // colours, no link, default layout).
+        // colours, no link, default layout, Normal style).
         let mut refill = |rem: &mut usize,
                           bits: &mut u8,
                           fg: &mut zvm::screen::ZColour,
                           bg: &mut zvm::screen::ZColour,
                           link: &mut u32,
-                          para: &mut ParaFmt| {
+                          para: &mut ParaFmt,
+                          glk_style: &mut u8| {
             while *rem == 0 {
                 match chunk_iter.next() {
-                    Some((c, b, f, bk, lk, pf)) => {
+                    Some((c, b, f, bk, lk, pf, gs)) => {
                         *rem = c;
                         *bits = b;
                         *fg = f;
                         *bg = bk;
                         *link = lk;
                         *para = pf;
+                        *glk_style = gs;
                     }
                     None => {
                         *rem = usize::MAX;
@@ -2575,6 +2581,7 @@ impl AppState {
                         *bg = zvm::screen::ZColour::Default;
                         *link = 0;
                         *para = ParaFmt::default();
+                        *glk_style = 0;
                         break;
                     }
                 }
@@ -2586,7 +2593,7 @@ impl AppState {
             // Consume the '\n' separator's chunk char (one per separator, i.e.
             // before every line except the first).
             if !first {
-                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para, &mut glk_style);
                 rem = rem.saturating_sub(1);
             }
             first = false;
@@ -2596,19 +2603,22 @@ impl AppState {
             let mut line_para: Option<ParaFmt> = None;
             let mut runs: Vec<StyleRun> = Vec::new();
             for (col, _ch) in line.chars().enumerate() {
-                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para, &mut glk_style);
                 if line_para.is_none() {
                     line_para = Some(para);
                 }
                 let pfg = pack_zcolour(fg);
                 let pbg = pack_zcolour(bg);
-                let has_style = bits != 0 || pfg != 0 || pbg != 0 || link != 0;
+                // A run is also emitted for a non-Normal Glk style with no other
+                // styling, so the theme's per-style colour slot can apply at render
+                // (SQ-0331). A Normal (glk_style 0) unstyled char still yields no run.
+                let has_style = bits != 0 || pfg != 0 || pbg != 0 || link != 0 || glk_style != 0;
                 if has_style {
                     match runs.last_mut() {
-                        Some(r) if r.end == col && r.bits == bits && r.fg == pfg && r.bg == pbg && r.link == link => {
+                        Some(r) if r.end == col && r.bits == bits && r.fg == pfg && r.bg == pbg && r.link == link && r.glk_style == glk_style => {
                             r.end = col + 1;
                         }
-                        _ => runs.push(StyleRun { start: col, end: col + 1, bits, fg: pfg, bg: pbg, link }),
+                        _ => runs.push(StyleRun { start: col, end: col + 1, bits, fg: pfg, bg: pbg, link, glk_style }),
                     }
                 }
                 rem = rem.saturating_sub(1);
@@ -2960,9 +2970,9 @@ mod tests {
             scaled: None,
         };
         let elems = vec![
-            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default())] },
+            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0)] },
             TranscriptElem::Image(dummy),
-            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default())] },
+            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0)] },
         ];
         apply_transcript_elems(&mut st, &elems);
         assert_eq!(st.transcript, vec!["a".to_string(), "".to_string(), "b".to_string()]);
@@ -3143,7 +3153,7 @@ mod tests {
         s.push_transcript_runs(
             ">",
             TranscriptKind::Story,
-            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default())],
+            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0)],
         );
         s.append_to_last_transcript_line("look");
         assert_eq!(s.transcript.last().unwrap(), ">look");
@@ -3173,7 +3183,7 @@ mod tests {
         // as a separate pushed line — CounterfeitMonkey's shape.
         s.push_transcript_kind(">", TranscriptKind::Story);
         s.push_transcript_runs("look", TranscriptKind::Story,
-            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
+            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
         assert_eq!(s.transcript.len(), 2);
         s.merge_line_into_previous(1);
         // One line now: ">look", and the bold run is shifted past the ">".
@@ -3195,10 +3205,10 @@ mod tests {
         // A `>look` line where `>` has no run and "look" is bold with DEFAULT colour,
         // except a single char CM coloured red explicitly.
         s.push_transcript_runs(">look", TranscriptKind::Story, &[
-            (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),       // '>' — unstyled
-            (1, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),       // 'l' — bold, default colour
-            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0, ParaFmt::default()), // 'o' — bold + explicit red fg
-            (2, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),       // 'ok' — bold, default colour
+            (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),       // '>' — unstyled
+            (1, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),       // 'l' — bold, default colour
+            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0, ParaFmt::default(), 0), // 'o' — bold + explicit red fg
+            (2, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),       // 'ok' — bold, default colour
         ]);
         s.fill_line_default_colours(0, black, white);
         // Every char now has fg/bg resolved; the '>' and default chars take black/white,
@@ -3331,8 +3341,8 @@ mod tests {
             "plain\ncentered",
             TranscriptKind::Story,
             &[
-                (6, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default()), // "plain\n"
-                (8, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, centered),           // "centered"
+                (6, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0), // "plain\n"
+                (8, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, centered, 0),        // "centered"
             ],
         );
         assert_eq!(st.transcript, vec!["plain".to_string(), "centered".to_string()]);
@@ -3375,9 +3385,9 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("ab cd", TranscriptKind::Story,
-            &[(2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default()), (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
+            &[(2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0), (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
         assert_eq!(s.transcript.last().unwrap(), "ab cd");
-        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
+        assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
         assert_eq!(s.transcript.len(), s.transcript_kinds.len());
     }
@@ -3387,14 +3397,14 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("A\nB", TranscriptKind::Story,
-            &[(1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
-              (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
-              (1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
+            &[(1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
+              (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
+              (1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
         let n = s.transcript.len();
         assert_eq!(s.transcript[n - 2], "A");
         assert_eq!(s.transcript[n - 1], "B");
-        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
-        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
+        assert_eq!(s.transcript_runs[n - 2], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
+        assert_eq!(s.transcript_runs[n - 1], vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
     }
 
     #[test]
@@ -3406,8 +3416,8 @@ mod tests {
         // the two spans stay separate runs. (Unstyled/default spans emit no run,
         // which is why both spans here carry a nonzero link.)
         s.push_transcript_runs("link more", TranscriptKind::Story,
-            &[(4, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default()),
-              (5, 0, ZColour::Default, ZColour::Default, 99, ParaFmt::default())]);
+            &[(4, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default(), 0),
+              (5, 0, ZColour::Default, ZColour::Default, 99, ParaFmt::default(), 0)]);
         let runs = s.transcript_runs.last().unwrap();
         assert_eq!(runs.len(), 2, "differing links do not coalesce");
         assert_eq!((runs[0].start, runs[0].end, runs[0].link), (0, 4, 42));
@@ -3427,7 +3437,7 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("hello", TranscriptKind::Story,
-            &[(5, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
+            &[(5, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
         assert!(s.transcript_runs.last().unwrap().is_empty());
     }
 
@@ -3468,7 +3478,7 @@ mod tests {
         // Thread colour through push_transcript_runs → StyleRun.
         let mut s = AppState::default();
         s.push_transcript_runs("ab", TranscriptKind::Story,
-            &[(2, 0x02, ZColour::Standard(3), ZColour::Default, 0, ParaFmt::default())]);
+            &[(2, 0x02, ZColour::Standard(3), ZColour::Default, 0, ParaFmt::default(), 0)]);
         let run = s.transcript_runs.last().unwrap().first()
             .expect("coloured chunk must produce a StyleRun");
         assert_eq!(unpack_zcolour(run.fg), ZColour::Standard(3),

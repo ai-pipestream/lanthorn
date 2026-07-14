@@ -327,7 +327,7 @@ fn rebase_runs(line_runs: Option<&Vec<StyleRun>>, start: usize, end: usize) -> V
         let s = r.start.max(start);
         let e = r.end.min(end);
         if s < e {
-            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits, fg: r.fg, bg: r.bg, link: r.link });
+            out.push(StyleRun { start: s - start, end: e - start, bits: r.bits, fg: r.fg, bg: r.bg, link: r.link, glk_style: r.glk_style });
         }
     }
     out
@@ -787,8 +787,11 @@ fn highlight_mask(text: &str, query_lower: &str) -> Vec<bool> {
 /// `draw_str_clipped`; with empty `runs` and a search it matches
 /// `draw_str_highlighted`.
 ///
-/// `colours` is used to resolve `ZColour::Standard` palette entries; pass
-/// `None` to skip colour application (style bits still apply).
+/// `scheme` is always supplied (for palette + per-Glk-style theme slots); `honor`
+/// gates the GAME's own run colours (garglk `stylehint 0/1`): when off, a run's
+/// game-set fg/bg is IGNORED, but the theme slot and element base still apply
+/// (SQ-0331). Style bits (bold/italic/reverse) and the hyperlink affordance are
+/// unaffected by `honor`, exactly as before.
 pub(crate) fn draw_str_runs(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -798,7 +801,8 @@ pub(crate) fn draw_str_runs(
     runs: &[StyleRun],
     search: Option<(&str, Style)>,
     area: ratatui::layout::Rect,
-    colours: Option<&crate::colors::ColorScheme>,
+    scheme: &crate::colors::ColorScheme,
+    honor: bool,
 ) {
     if y < area.y || y >= area.bottom() {
         return;
@@ -817,27 +821,36 @@ pub(crate) fn draw_str_runs(
             let run = runs.iter().find(|r| i >= r.start && i < r.end);
             let bits = run.map(|r| r.bits).unwrap_or(0);
             let mut s = crate::render::apply_text_style(base_style, bits);
-            // Apply game colour unconditionally (gating added in Task 12).
-            // fg/bg are logical (pre-reverse); apply_text_style already set
-            // REVERSED when bit 1 is on, so the terminal performs exactly one swap.
-            if let (Some(run), Some(scheme)) = (run, colours) {
+            // Per-channel colour resolution (SQ-0331): game-set run colour (gated
+            // by `honor`), then the theme's per-Glk-style slot (buffer = row 0),
+            // then the element base (`base_style`). fg/bg are logical (pre-reverse);
+            // apply_text_style already set REVERSED for bit 1, so the terminal
+            // performs exactly one swap.
+            {
                 use crate::state::unpack_zcolour;
                 use zvm::screen::ZColour;
-                let fg = unpack_zcolour(run.fg);
-                let bg = unpack_zcolour(run.bg);
-                if !matches!(fg, ZColour::Default) {
-                    s = s.fg(crate::render::resolve_zcolour(fg, scheme));
+                use crate::render::resolve_glk_channel;
+                let game = |packed: u32| -> Option<ratatui::style::Color> {
+                    let z = unpack_zcolour(packed);
+                    (!matches!(z, ZColour::Default)).then(|| crate::render::resolve_zcolour(z, scheme))
+                };
+                let glk = run.map(|r| r.glk_style as usize).unwrap_or(0);
+                let slot = scheme.glk_styles[0].get(glk).copied().unwrap_or_default();
+                let game_fg = run.and_then(|r| game(r.fg));
+                let game_bg = run.and_then(|r| game(r.bg));
+                if let Some(c) = resolve_glk_channel(game_fg, slot.fg, base_style.fg, honor) {
+                    s = s.fg(c);
                 }
-                if !matches!(bg, ZColour::Default) {
-                    s = s.bg(crate::render::resolve_zcolour(bg, scheme));
+                if let Some(c) = resolve_glk_channel(game_bg, slot.bg, base_style.bg, honor) {
+                    s = s.bg(c);
                 }
             }
             // Glk hyperlink affordance: layer the themeable `hyperlink` colour
-            // and an underline ON TOP of the game's own styling. The underline
-            // is applied here (not via `bits`) because `apply_text_style` has no
-            // underline bit. Colour comes from the scheme when available.
+            // and an underline ON TOP of the styling. The underline is applied
+            // here (not via `bits`) because `apply_text_style` has no underline
+            // bit. Colour is gated on `honor`, matching the prior behaviour.
             if run.map(|r| r.link).unwrap_or(0) != 0 {
-                if let Some(scheme) = colours {
+                if honor {
                     s = s.patch(scheme.hyperlink);
                 }
                 s = s.add_modifier(ratatui::style::Modifier::UNDERLINED);
@@ -1435,7 +1448,7 @@ fn render_middle(
             body_area.x
         };
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
-        draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, state.config.honor_game_colours.then_some(&state.colors));
+        draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, &state.colors, state.config.honor_game_colours);
 
         // Record cell→link for every linked span on this row. `run.start/end`
         // are char offsets within `wr.text` (re-based by `rebase_runs`), and
@@ -1877,8 +1890,8 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}};
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
-        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0 }]; // bold chars 2..4
-        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area, None);
+        let runs = vec![StyleRun { start: 2, end: 4, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]; // bold chars 2..4
+        draw_str_runs(&mut buf, 0, 0, "abcdef", Style::default(), &runs, None, area, &crate::colors::ColorScheme::terminal_default(), false);
         assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(2, 0)].modifier.contains(Modifier::BOLD));
         assert!(buf[(3, 0)].modifier.contains(Modifier::BOLD));
@@ -1893,8 +1906,8 @@ mod tests {
         let mut cs = crate::colors::ColorScheme::terminal_default();
         cs.hyperlink = Style::new().fg(Color::Magenta);
         // chars 2..5 carry link 7 (bold too, to prove the link layers on top).
-        let runs = vec![StyleRun { start: 2, end: 5, bits: 0x02, fg: 0, bg: 0, link: 7 }];
-        draw_str_runs(&mut buf, 0, 0, "abcdefgh", Style::default(), &runs, None, area, Some(&cs));
+        let runs = vec![StyleRun { start: 2, end: 5, bits: 0x02, fg: 0, bg: 0, link: 7, glk_style: 0 }];
+        draw_str_runs(&mut buf, 0, 0, "abcdefgh", Style::default(), &runs, None, area, &cs, true);
         for x in 2..5u16 {
             assert!(buf[(x, 0)].modifier.contains(Modifier::UNDERLINED), "linked cell {x} underlined");
             assert_eq!(buf[(x, 0)].fg, Color::Magenta, "linked cell {x} uses hyperlink fg");
@@ -1908,13 +1921,48 @@ mod tests {
     }
 
     #[test]
+    fn draw_str_runs_glk_style_slots_seed_and_gate() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
+        use crate::colors::GlkStyleColour;
+        let area = Rect::new(0, 0, 6, 1);
+        let base = Style::new().fg(Color::White); // element = transcript White
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        // Seed buffer (row 0): Input(8) cyan, Subheader(4) green.
+        cs.glk_styles[0][8] = GlkStyleColour { fg: Some(Color::Cyan), bg: None };
+        cs.glk_styles[0][4] = GlkStyleColour { fg: Some(Color::Green), bg: None };
+
+        let draw = |glk_style: u8, fg: u32, honor: bool| {
+            let mut b = Buffer::empty(area);
+            let runs = vec![StyleRun { start: 0, end: 3, bits: 0, fg, bg: 0, link: 0, glk_style }];
+            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, &cs, honor);
+            b[(0, 0)].fg
+        };
+
+        // Input run, no game colour → input_text (cyan) in BOTH gate states.
+        assert_eq!(draw(8, 0, false), Color::Cyan, "Input slot applies (honor off)");
+        assert_eq!(draw(8, 0, true), Color::Cyan, "Input slot applies (honor on)");
+        // Subheader run → transcript_location (green).
+        assert_eq!(draw(4, 0, false), Color::Green, "Subheader slot applies");
+        // Normal run (empty runs) → element base (white).
+        let mut b = Buffer::empty(area);
+        draw_str_runs(&mut b, 0, 0, "abc", base, &[], None, area, &cs, false);
+        assert_eq!(b[(0, 0)].fg, Color::White, "Normal → element base");
+
+        // honor gate: a game-set red fg on an Input run — honor ON → game red wins
+        // over the slot; honor OFF → game IGNORED, slot cyan shows.
+        let red = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x00FF_0000));
+        assert_eq!(draw(8, red, true), Color::Rgb(255, 0, 0), "honor ON: game colour wins over slot");
+        assert_eq!(draw(8, red, false), Color::Cyan, "honor OFF: game ignored, slot wins");
+    }
+
+    #[test]
     fn render_transcript_builds_cell_link_map() {
         use zvm::screen::ZColour;
         use ratatui::style::Modifier;
         let machine = minimal_machine();
         let mut state = AppState::default();
         // A linked line ("northgate" → link 42) followed by a plain line.
-        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default())]);
+        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default(), 0)]);
         state.push_transcript("plain text");
         state.focus = Focus::Game;
 
@@ -1946,7 +1994,7 @@ mod tests {
         state.config.honor_game_colours = true;
         state.push_transcript_runs(
             "hi", TranscriptKind::Story,
-            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default())],
+            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0)],
         );
         state.focus = Focus::Game;
         let area = Rect::new(0, 0, 40, 10);
@@ -1970,7 +2018,7 @@ mod tests {
         // Two black-on-white paragraphs separated by a blank line: the blank line
         // between them must also fill white, so the band is contiguous. (SQ-0263)
         use zvm::screen::ZColour;
-        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32, ParaFmt::default());
+        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32, ParaFmt::default(), 0);
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.honor_game_colours = true;
@@ -2024,7 +2072,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut a = Buffer::empty(area);
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area, None);
+        draw_str_runs(&mut a, 0, 0, "hello", Style::default(), &[], None, area, &crate::colors::ColorScheme::terminal_default(), false);
         crate::render::draw_str_clipped(&mut b, 0, 0, "hello", Style::default(), area);
         assert_eq!(a, b, "empty runs render identically to draw_str_clipped");
     }
@@ -2037,7 +2085,7 @@ mod tests {
         let hl = Style::new().fg(Color::Black).bg(Color::Yellow);
         let mut a = Buffer::empty(area);
         let mut b = Buffer::empty(area);
-        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area, None);
+        draw_str_runs(&mut a, 0, 0, "the cat sat", base, &[], Some(("cat", hl)), area, &crate::colors::ColorScheme::terminal_default(), false);
         draw_str_highlighted(&mut b, 0, 0, "the cat sat", base, "cat", hl, area);
         assert_eq!(a, b, "empty runs + search render identically to draw_str_highlighted");
     }
@@ -2058,11 +2106,11 @@ mod tests {
         let lines = vec!["AAAAA BBBBB".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0 }]]; // bold "BBBBB"
+        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]]; // bold "BBBBB"
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, 5);
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
         assert!(out[0].runs.is_empty());
-        assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
+        assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
     }
 
     // ── SQ-0330: Glk paragraph layout (indent / para_indent / justification) ──
@@ -2073,14 +2121,14 @@ mod tests {
         let lines = vec!["hi".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let runs = vec![vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0 }]];
+        let runs = vec![vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]];
         let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, 10);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "    hi", "text padded to centre");
         // The bold run must move right by the 4 padding columns so selection/copy
         // stays aligned with the drawn text.
-        assert_eq!(out[0].runs, vec![StyleRun { start: 4, end: 6, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
+        assert_eq!(out[0].runs, vec![StyleRun { start: 4, end: 6, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
     }
 
     #[test]
@@ -2126,7 +2174,7 @@ mod tests {
         let lines = vec!["AAAAA BBBBB".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0 }]];
+        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]];
         let para = vec![ParaFmt::default()];
         let with_para = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, 5);
         let without = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, 5);
