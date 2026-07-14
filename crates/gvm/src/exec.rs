@@ -2476,7 +2476,8 @@ impl Machine {
                 match self.glk.window_type(win) {
                     Some(WinType::TextBuffer) => {
                         let colour = self.glk.stream_style_colour(sid, WinType::TextBuffer, style);
-                        self.backend.put_text_attr(win, style, colour, link, s);
+                        let attrs = self.glk.style_attrs(WinType::TextBuffer, style);
+                        self.backend.put_text_attr(win, style, colour, attrs, link, s);
                     }
                     Some(WinType::TextGrid) => self.grid_put_str(sid, win, style, link, s),
                     _ => {} // pair window or stale: nothing to display
@@ -2524,6 +2525,7 @@ impl Machine {
     fn grid_put_str(&mut self, sid: u32, win: u32, style: GlkStyle, link: u32, s: &str) {
         let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
         let colour = self.glk.stream_style_colour(sid, WinType::TextGrid, style);
+        let attrs = self.glk.style_attrs(WinType::TextGrid, style);
         for ch in s.chars() {
             if ch == '\n' {
                 cx = 0;
@@ -2535,7 +2537,7 @@ impl Machine {
                 cy += 1;
             }
             if cy < h && cx < w {
-                self.backend.grid_put_attr(win, cx, cy, style, colour, link, &ch.to_string());
+                self.backend.grid_put_attr(win, cx, cy, style, colour, attrs, link, &ch.to_string());
             }
             cx += 1;
         }
@@ -7403,6 +7405,29 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
         assert!(m.diagnostics.is_empty(), "stylehints accepted: {:?}", m.diagnostics);
+    }
+
+    // A Weight/Oblique stylehint flows to the backend's per-run rendered
+    // attributes (SQ-0317); clearing it restores the class default (no hint).
+    #[test]
+    fn glk_stylehint_weight_flows_to_run_attrs_and_clears() {
+        use asm::Op::{C16, C8, Zero};
+        // stylehint_set(TextBuffer=3, Normal=0, Weight=4, 1); put_string("Hi");
+        // stylehint_clear(3, 0, 4); put_string("Hi") again.
+        let mut body = glk_call(0xB0, &[C8(3), C8(0), C8(4), C8(1)], Zero);
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero));
+        body.extend(glk_call(0xB1, &[C8(3), C8(0), C8(4)], Zero));
+        body.extend(glk_call(0x82, &[C16(0x0200)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| poke(m, 0x200, &[0xE0, b'H', b'i', 0]));
+        let runs = backend_of(&m).attr_runs(1);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(
+            runs[0].1,
+            crate::glk::StyleAttrs { weight: Some(1), oblique: None },
+            "weight hint carried on the run"
+        );
+        assert_eq!(runs[1].1, crate::glk::StyleAttrs::default(), "cleared hint → class default");
     }
 
     // glk_gestalt(gestalt_GarglkText=0x1100) reports the garglk_* colour

@@ -8,7 +8,7 @@
 
 use std::io::{self, IsTerminal, Write};
 
-use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleColour, WinType};
+use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleAttrs, StyleColour, WinType};
 
 // ── word-wrap helper ──────────────────────────────────────────────────────────
 
@@ -59,16 +59,40 @@ pub fn soft_wrap(text: &str, cols: u32, current_col: u32) -> (String, u32) {
 
 // ── SGR helpers ───────────────────────────────────────────────────────────────
 
-/// SGR set-codes for a Glk style class (no trailing reset).
-fn sgr_set(style: GlkStyle) -> &'static str {
-    match style {
-        GlkStyle::Emphasized => "\x1b[3m",   // italic
-        GlkStyle::Header => "\x1b[1m",        // bold
-        GlkStyle::Subheader => "\x1b[1m",     // bold
-        GlkStyle::Alert => "\x1b[1m\x1b[7m",  // bold + reverse
-        GlkStyle::Input => "\x1b[1m",         // bold
-        _ => "",                              // Normal/Preformatted/Note/… plain
+/// SGR set-codes for a Glk style class with its rendered Weight/Oblique
+/// stylehints layered on top (no trailing reset). A set hint overrides the
+/// class default — Weight 1 → bold, any other value → not bold ("lighter" has
+/// no terminal rendering, so it maps to plain); Oblique 1 → italic, other →
+/// upright. An unset hint keeps the class's intrinsic look (SQ-0317).
+fn sgr_set(style: GlkStyle, attrs: StyleAttrs) -> String {
+    // Class-intrinsic (bold, italic, reverse) look.
+    let (mut bold, mut italic, reverse) = match style {
+        GlkStyle::Emphasized => (false, true, false),
+        GlkStyle::Header | GlkStyle::Subheader | GlkStyle::Input => (true, false, false),
+        GlkStyle::Alert => (true, false, true),
+        _ => (false, false, false), // Normal/Preformatted/Note/… plain
+    };
+    match attrs.weight {
+        Some(1) => bold = true,
+        Some(_) => bold = false,
+        None => {}
     }
+    match attrs.oblique {
+        Some(1) => italic = true,
+        Some(_) => italic = false,
+        None => {}
+    }
+    let mut s = String::new();
+    if bold {
+        s.push_str("\x1b[1m");
+    }
+    if italic {
+        s.push_str("\x1b[3m");
+    }
+    if reverse {
+        s.push_str("\x1b[7m");
+    }
+    s
 }
 
 /// Split a 24-bit `0xRRGGBB` colour into `(r, g, b)`.
@@ -112,12 +136,12 @@ pub fn page_bg_escape(cur: Option<(u8, u8, u8)>, prev: Option<(u8, u8, u8)>) -> 
     })
 }
 
-/// Opening SGR for a style + resolved colour. Style attributes always apply;
-/// the game's fg/bg/reverse colour is added only when `honor` is true (the
-/// `--no-game-colours` gate), emitted as 24-bit truecolor so no fidelity is
-/// lost. Returns `""` when nothing needs setting.
-fn sgr_open(style: GlkStyle, colour: StyleColour, honor: bool) -> String {
-    let mut s = String::from(sgr_set(style));
+/// Opening SGR for a style + resolved colour and attribute hints. Style
+/// attributes always apply; the game's fg/bg/reverse colour is added only when
+/// `honor` is true (the `--no-game-colours` gate), emitted as 24-bit truecolor
+/// so no fidelity is lost. Returns `""` when nothing needs setting.
+fn sgr_open(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, honor: bool) -> String {
+    let mut s = sgr_set(style, attrs);
     if honor {
         if colour.reverse {
             s.push_str("\x1b[7m");
@@ -134,9 +158,9 @@ fn sgr_open(style: GlkStyle, colour: StyleColour, honor: bool) -> String {
     s
 }
 
-/// Wrap `s` in SGR for `style` + `colour` when on a TTY and something is set.
-fn style_wrap(s: &str, style: GlkStyle, colour: StyleColour, honor: bool, tty: bool) -> String {
-    let open = sgr_open(style, colour, honor);
+/// Wrap `s` in SGR for `style` + `colour` + `attrs` when on a TTY and something is set.
+fn style_wrap(s: &str, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, honor: bool, tty: bool) -> String {
+    let open = sgr_open(style, colour, attrs, honor);
     if tty && !open.is_empty() {
         format!("{open}{s}\x1b[0m")
     } else {
@@ -155,17 +179,25 @@ fn leave_region() -> String {
     "\x1b[r".to_string()
 }
 
+/// One status-grid cell: character + Glk style + resolved colour + rendered
+/// Weight/Oblique attribute hints.
+type GridCell = (char, GlkStyle, StyleColour, StyleAttrs);
+
+/// An empty (space, unstyled) grid cell.
+const BLANK_CELL: GridCell =
+    (' ', GlkStyle::Normal, StyleColour { fg: None, bg: None, reverse: false }, StyleAttrs { weight: None, oblique: None });
+
 /// Render the pinned grid rows as ANSI: save cursor, redraw each grid row at its
 /// absolute position (cleared), then restore the cursor.
-fn render_grid(cells: &[Vec<(char, GlkStyle, StyleColour)>], width: u32, honor: bool, tty: bool) -> String {
+fn render_grid(cells: &[Vec<GridCell>], width: u32, honor: bool, tty: bool) -> String {
     let mut out = String::new();
     out.push_str("\x1b7"); // DECSC save cursor
     for (r, row) in cells.iter().enumerate() {
         out.push_str(&format!("\x1b[{};1H\x1b[2K", r + 1)); // move to row, clear line
         let mut line = String::new();
         for c in 0..width as usize {
-            let (ch, st, col) = row.get(c).copied().unwrap_or((' ', GlkStyle::Normal, StyleColour::default()));
-            line.push_str(&style_wrap(&ch.to_string(), st, col, honor, tty));
+            let (ch, st, col, at) = row.get(c).copied().unwrap_or(BLANK_CELL);
+            line.push_str(&style_wrap(&ch.to_string(), st, col, at, honor, tty));
         }
         out.push_str(line.trim_end());
     }
@@ -213,13 +245,16 @@ pub struct TerminalBackend {
     pending_word_style: GlkStyle,
     /// Resolved colour of the chars in `pending_word`; flushed like the style.
     pending_word_colour: StyleColour,
+    /// Rendered Weight/Oblique hints of the chars in `pending_word`; flushed
+    /// like the style.
+    pending_word_attrs: StyleAttrs,
     /// Whether to render the game's stylehint colours (`--no-game-colours` off).
     honor: bool,
     /// The tracked status grid window id (first TextGrid opened), if any.
     grid_win: Option<u32>,
     grid_rect: Rect,
-    /// Grid cell buffer `[row][col] -> (char, style, colour)`.
-    grid_cells: Vec<Vec<(char, GlkStyle, StyleColour)>>,
+    /// Grid cell buffer `[row][col] -> (char, style, colour, attr hints)`.
+    grid_cells: Vec<Vec<GridCell>>,
     /// Whether the ANSI scroll region is currently in effect.
     region_set: bool,
     /// The `(top, bottom)` bounds of the scroll region as last emitted. Used to
@@ -257,6 +292,7 @@ impl TerminalBackend {
             pending_word: String::new(),
             pending_word_style: GlkStyle::Normal,
             pending_word_colour: StyleColour::default(),
+            pending_word_attrs: StyleAttrs::default(),
             honor: true,
             grid_win: None,
             grid_rect: Rect::default(),
@@ -295,6 +331,7 @@ impl TerminalBackend {
             pending_word: String::new(),
             pending_word_style: GlkStyle::Normal,
             pending_word_colour: StyleColour::default(),
+            pending_word_attrs: StyleAttrs::default(),
             honor: true,
             grid_win: None,
             grid_rect: Rect::default(),
@@ -315,7 +352,7 @@ impl TerminalBackend {
         }
         for row in &mut self.grid_cells {
             if (row.len() as u32) < width {
-                row.resize(width as usize, (' ', GlkStyle::Normal, StyleColour::default()));
+                row.resize(width as usize, BLANK_CELL);
             }
         }
     }
@@ -332,7 +369,8 @@ impl TerminalBackend {
             let _ = self.out.write_all(b"\n");
             self.current_col = 0;
         }
-        let text = style_wrap(&self.pending_word, style, self.pending_word_colour, self.honor, self.is_tty);
+        let text =
+            style_wrap(&self.pending_word, style, self.pending_word_colour, self.pending_word_attrs, self.honor, self.is_tty);
         let _ = self.out.write_all(text.as_bytes());
         self.current_col += wlen;
         self.pending_word.clear();
@@ -360,7 +398,7 @@ impl TerminalBackend {
             result.push(ch);
             self.current_col += 1;
         }
-        let text = style_wrap(&result, style, self.pending_word_colour, self.honor, self.is_tty);
+        let text = style_wrap(&result, style, self.pending_word_colour, self.pending_word_attrs, self.honor, self.is_tty);
         let _ = self.out.write_all(text.as_bytes());
     }
 
@@ -392,7 +430,7 @@ impl TerminalBackend {
     /// Echo `cmd` in the Input style followed by a newline — the library echo a
     /// game expects when it does not reprint the command itself.
     fn emit_library_echo(&mut self, cmd: &str) {
-        let text = style_wrap(cmd, GlkStyle::Input, StyleColour::default(), self.honor, self.is_tty);
+        let text = style_wrap(cmd, GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), self.honor, self.is_tty);
         let _ = self.out.write_all(text.as_bytes());
         let _ = self.out.write_all(b"\n");
         self.current_col = 0;
@@ -480,10 +518,10 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
-        self.put_text_attr(win, style, StyleColour::default(), 0, s);
+        self.put_text_attr(win, style, StyleColour::default(), StyleAttrs::default(), 0, s);
     }
 
-    fn put_text_attr(&mut self, _win: u32, style: GlkStyle, colour: StyleColour, _link: u32, s: &str) {
+    fn put_text_attr(&mut self, _win: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, _link: u32, s: &str) {
         // When piped (not a TTY), pass through byte-identical — no buffering, no
         // wrap. `cols == 0` is the non-TTY sentinel for the soft_wrap helper and
         // is logged below but never used in the new char-by-char path.
@@ -532,13 +570,16 @@ impl GlkBackend for TerminalBackend {
                 _ => {
                     // On a mid-word style or colour change (rare) flush the old
                     // portion first so each run gets its own SGR wrap.
-                    if (self.pending_word_style != style || self.pending_word_colour != colour)
+                    if (self.pending_word_style != style
+                        || self.pending_word_colour != colour
+                        || self.pending_word_attrs != attrs)
                         && !self.pending_word.is_empty()
                     {
                         self.flush_pending_word();
                     }
                     self.pending_word_style = style;
                     self.pending_word_colour = colour;
+                    self.pending_word_attrs = attrs;
                     self.pending_word.push(ch);
                     // Overlong-word guard: if the accumulated word has reached the
                     // column width it can never fit on one line — hard-break it
@@ -552,10 +593,10 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
-        self.grid_put_attr(win, x, y, style, StyleColour::default(), 0, s);
+        self.grid_put_attr(win, x, y, style, StyleColour::default(), StyleAttrs::default(), 0, s);
     }
 
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, _link: u32, s: &str) {
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, _link: u32, s: &str) {
         if self.debug {
             eprintln!("[term] grid_put: win={win} x={x} y={y} len={}", s.chars().count());
         }
@@ -567,7 +608,7 @@ impl GlkBackend for TerminalBackend {
             let row = y as usize;
             let col = x as usize + i;
             if row < self.grid_cells.len() && col < self.grid_cells[row].len() {
-                self.grid_cells[row][col] = (ch, style, colour);
+                self.grid_cells[row][col] = (ch, style, colour, attrs);
             }
         }
         self.redraw_grid();
@@ -576,7 +617,7 @@ impl GlkBackend for TerminalBackend {
     fn grid_clear(&mut self, _win: u32) {
         for row in &mut self.grid_cells {
             for cell in row.iter_mut() {
-                *cell = (' ', GlkStyle::Normal, StyleColour::default());
+                *cell = BLANK_CELL;
             }
         }
         self.redraw_grid();
@@ -718,11 +759,31 @@ mod tests {
     #[test]
     fn sgr_maps_styles() {
         let none = StyleColour::default();
-        assert_eq!(sgr_set(GlkStyle::Normal), "");
-        assert_eq!(sgr_set(GlkStyle::Header), "\x1b[1m");
-        assert_eq!(style_wrap("hi", GlkStyle::Header, none, true, true), "\x1b[1mhi\x1b[0m");
-        assert_eq!(style_wrap("hi", GlkStyle::Header, none, true, false), "hi");
-        assert_eq!(style_wrap("hi", GlkStyle::Normal, none, true, true), "hi");
+        let noat = StyleAttrs::default();
+        assert_eq!(sgr_set(GlkStyle::Normal, noat), "");
+        assert_eq!(sgr_set(GlkStyle::Header, noat), "\x1b[1m");
+        assert_eq!(sgr_set(GlkStyle::Emphasized, noat), "\x1b[3m");
+        assert_eq!(sgr_set(GlkStyle::Alert, noat), "\x1b[1m\x1b[7m");
+        assert_eq!(style_wrap("hi", GlkStyle::Header, none, noat, true, true), "\x1b[1mhi\x1b[0m");
+        assert_eq!(style_wrap("hi", GlkStyle::Header, none, noat, true, false), "hi");
+        assert_eq!(style_wrap("hi", GlkStyle::Normal, none, noat, true, true), "hi");
+    }
+
+    #[test]
+    fn sgr_layers_weight_and_oblique_hints_over_class_defaults() {
+        // SQ-0317: a set hint overrides the class look; an unset hint keeps it.
+        let bold = StyleAttrs { weight: Some(1), oblique: None };
+        let unbold = StyleAttrs { weight: Some(0), oblique: None };
+        let italic = StyleAttrs { weight: None, oblique: Some(1) };
+        let upright = StyleAttrs { weight: None, oblique: Some(0) };
+        assert_eq!(sgr_set(GlkStyle::Normal, bold), "\x1b[1m", "weight hint adds bold");
+        assert_eq!(sgr_set(GlkStyle::Normal, italic), "\x1b[3m", "oblique hint adds italic");
+        assert_eq!(sgr_set(GlkStyle::Header, unbold), "", "weight 0 strips class bold");
+        assert_eq!(sgr_set(GlkStyle::Emphasized, upright), "", "oblique 0 strips class italic");
+        // "Lighter" (-1 as u32) has no terminal rendering -> plain.
+        assert_eq!(sgr_set(GlkStyle::Header, StyleAttrs { weight: Some(u32::MAX), oblique: None }), "");
+        // Hints layer with the untouched channel: bold hint + Emphasized's italic.
+        assert_eq!(sgr_set(GlkStyle::Emphasized, bold), "\x1b[1m\x1b[3m");
     }
 
     #[test]
@@ -730,14 +791,14 @@ mod tests {
         let fg_bg = StyleColour { fg: Some(0x00FF_8040), bg: Some(0x0011_2233), reverse: false };
         // fg -> 38;2;r;g;b, bg -> 48;2;r;g;b, honoured, wrapped for a TTY.
         assert_eq!(
-            style_wrap("x", GlkStyle::Normal, fg_bg, true, true),
+            style_wrap("x", GlkStyle::Normal, fg_bg, StyleAttrs::default(), true, true),
             "\x1b[38;2;255;128;64m\x1b[48;2;17;34;51mx\x1b[0m"
         );
         // --no-game-colours (honor=false) drops the colour entirely.
-        assert_eq!(style_wrap("x", GlkStyle::Normal, fg_bg, false, true), "x");
+        assert_eq!(style_wrap("x", GlkStyle::Normal, fg_bg, StyleAttrs::default(), false, true), "x");
         // reverse hint emits SGR 7 ahead of any colour.
         let rev = StyleColour { fg: None, bg: None, reverse: true };
-        assert_eq!(style_wrap("x", GlkStyle::Normal, rev, true, true), "\x1b[7mx\x1b[0m");
+        assert_eq!(style_wrap("x", GlkStyle::Normal, rev, StyleAttrs::default(), true, true), "\x1b[7mx\x1b[0m");
     }
 
     #[test]
@@ -953,7 +1014,7 @@ mod tests {
         // reprint, so the backend must echo the command itself (library echo).
         let (mut b, buf) = backend(true);
         b.arm_input_echo("look".into());
-        b.put_text_attr(1, GlkStyle::Normal, StyleColour::default(), 0, "You see nothing.");
+        b.put_text_attr(1, GlkStyle::Normal, StyleColour::default(), StyleAttrs::default(), 0, "You see nothing.");
         b.flush_out();
         let out = out_string(&buf);
         assert!(out.contains("look"), "library echo emitted: {out:?}");
@@ -966,7 +1027,7 @@ mod tests {
         // must NOT add a second copy.
         let (mut b, buf) = backend(true);
         b.arm_input_echo("look".into());
-        b.put_text_attr(1, GlkStyle::Input, StyleColour::default(), 0, "look");
+        b.put_text_attr(1, GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), 0, "look");
         b.flush_out();
         let out = out_string(&buf);
         assert_eq!(out.matches("look").count(), 1, "no duplicate command echo: {out:?}");

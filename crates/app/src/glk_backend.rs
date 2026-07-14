@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 
-use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, StyleColour, WinType};
+use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, StyleAttrs, StyleColour, WinType};
 
 use crate::engine::{
     BorderPref, BufferWindow, GridCell, GridWindow, ScreenModel, Split, StatusModel, WinNode,
@@ -42,17 +42,32 @@ pub fn glk_style_bits(style: GlkStyle) -> u8 {
     }
 }
 
-/// Resolve a Glk style class + its stylehint colour into the app's neutral
-/// `(style-bits, packed-fg, packed-bg)`. The reverse hint sets bit `0x01`;
-/// 24-bit RGB is carried losslessly via
+/// Resolve a Glk style class + its stylehint colour and rendered attribute
+/// hints into the app's neutral `(style-bits, packed-fg, packed-bg)`. The
+/// reverse hint sets bit `0x01`; 24-bit RGB is carried losslessly via
 /// [`ZColour::True24`](zvm::screen::ZColour::True24). Packed colours use
 /// [`crate::state::pack_zcolour`] (`0` = `ZColour::Default`).
+///
+/// The Weight/Oblique stylehints layer on top of the class's intrinsic bits
+/// (SQ-0317): a set hint overrides (Weight 1 → bold on, 0 → off; a "lighter"
+/// weight has no terminal rendering, so any non-1 value clears bold; Oblique
+/// 1 → italic on, other → off), an unset hint keeps the class default.
 ///
 /// Colour is recorded unconditionally — the `honor_game_colours` gate is applied
 /// at *render* time by `cell_style`/`draw_str_runs`, exactly like the Z-machine,
 /// so toggling it (F2) recolours already-drawn output too.
-fn resolve_glk_colour(style: GlkStyle, colour: StyleColour) -> (u8, u32, u32) {
+fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs) -> (u8, u32, u32) {
     let mut bits = glk_style_bits(style);
+    match attrs.weight {
+        Some(1) => bits |= 0x02,
+        Some(_) => bits &= !0x02,
+        None => {}
+    }
+    match attrs.oblique {
+        Some(1) => bits |= 0x04,
+        Some(_) => bits &= !0x04,
+        None => {}
+    }
     if colour.reverse {
         bits |= 0x01;
     }
@@ -697,24 +712,24 @@ impl GlkBackend for AppGlk {
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
-        self.put_text_attr(win, style, StyleColour::default(), 0, s);
+        self.put_text_attr(win, style, StyleColour::default(), StyleAttrs::default(), 0, s);
     }
 
-    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, link: u32, s: &str) {
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, link: u32, s: &str) {
         if Some(win) == self.primary {
             self.capture_heading(style, s);
         }
-        let (bits, fg, bg) = resolve_glk_colour(style, colour);
+        let (bits, fg, bg) = resolve_glk_colour(style, colour, attrs);
         let buf = self.buffers.entry(win).or_default();
         buf.log.push(BufElem::Text { bits, fg, bg, link, text: s.to_owned() });
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
-        self.grid_put_attr(win, x, y, style, StyleColour::default(), 0, s);
+        self.grid_put_attr(win, x, y, style, StyleColour::default(), StyleAttrs::default(), 0, s);
     }
 
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, link: u32, s: &str) {
-        let (bits, fg, bg) = resolve_glk_colour(style, colour);
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, link: u32, s: &str) {
+        let (bits, fg, bg) = resolve_glk_colour(style, colour, attrs);
         let g = self.grids.entry(win).or_default();
         for (i, ch) in s.chars().enumerate() {
             g.cells.insert((y, x + i as u32), (ch, bits, fg, bg, link));
@@ -1118,13 +1133,41 @@ mod tests {
         use zvm::screen::ZColour;
         // fg/bg become packed True24; the reverse hint sets bit 0x01.
         let sc = StyleColour { fg: Some(0x00AA_BBCC), bg: Some(0x0011_2233), reverse: true };
-        let (bits, fg, bg) = resolve_glk_colour(GlkStyle::Normal, sc);
+        let (bits, fg, bg) = resolve_glk_colour(GlkStyle::Normal, sc, StyleAttrs::default());
         assert_eq!(bits, 0x01);
         assert_eq!(fg, crate::state::pack_zcolour(ZColour::True24(0x00AA_BBCC)));
         assert_eq!(bg, crate::state::pack_zcolour(ZColour::True24(0x0011_2233)));
         // No hints set: only the style-class bits, no colour. (The honor gate is
         // applied at render time, not here.)
-        assert_eq!(resolve_glk_colour(GlkStyle::Header, StyleColour::default()), (0x02, 0, 0));
+        assert_eq!(
+            resolve_glk_colour(GlkStyle::Header, StyleColour::default(), StyleAttrs::default()),
+            (0x02, 0, 0)
+        );
+    }
+
+    #[test]
+    fn resolve_glk_colour_layers_weight_and_oblique_hints() {
+        // SQ-0317: a set hint overrides the class default; an unset hint keeps it.
+        let plain = StyleColour::default();
+        let bits = |style, attrs| resolve_glk_colour(style, plain, attrs).0;
+        // Weight 1 on Normal → bold added to a class with no intrinsic bits.
+        assert_eq!(bits(GlkStyle::Normal, StyleAttrs { weight: Some(1), oblique: None }), 0x02);
+        // Oblique 1 on Normal → italic.
+        assert_eq!(bits(GlkStyle::Normal, StyleAttrs { weight: None, oblique: Some(1) }), 0x04);
+        // Weight 0 on Header strips the class-intrinsic bold.
+        assert_eq!(bits(GlkStyle::Header, StyleAttrs { weight: Some(0), oblique: None }), 0);
+        // "Lighter" (-1) has no terminal rendering → treated as not-bold.
+        assert_eq!(
+            bits(GlkStyle::Header, StyleAttrs { weight: Some(u32::MAX), oblique: None }),
+            0
+        );
+        // No hints → class default preserved (Emphasized keeps its intrinsic look).
+        assert_eq!(
+            bits(GlkStyle::Emphasized, StyleAttrs::default()),
+            glk_style_bits(GlkStyle::Emphasized)
+        );
+        // Hints layer: oblique adds italic on top of Header's intrinsic bold.
+        assert_eq!(bits(GlkStyle::Header, StyleAttrs { weight: None, oblique: Some(1) }), 0x06);
     }
 
     #[test]
@@ -1133,7 +1176,7 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         let red = StyleColour { fg: Some(0x00FF_0000), bg: None, reverse: false };
-        glk.put_text_attr(1, GlkStyle::Normal, red, 0, "hi");
+        glk.put_text_attr(1, GlkStyle::Normal, red, StyleAttrs::default(), 0, "hi");
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "hi");
         assert_eq!(chunks.len(), 1);
@@ -1150,7 +1193,7 @@ mod tests {
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
         let blue_on_white = StyleColour { fg: Some(0x0000_00FF), bg: Some(0x00FF_FFFF), reverse: false };
-        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, 0, "X");
+        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, StyleAttrs::default(), 0, "X");
         let cell = glk.screen_model().grid().unwrap().cell(1, 1);
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, crate::state::pack_zcolour(ZColour::True24(0x0000_00FF)));
@@ -1164,8 +1207,8 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
-        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, StyleColour::default(), 42, "L");
-        glk.grid_put_attr(1, 1, 0, GlkStyle::Normal, StyleColour::default(), 0, "x");
+        glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, StyleColour::default(), StyleAttrs::default(), 42, "L");
+        glk.grid_put_attr(1, 1, 0, GlkStyle::Normal, StyleColour::default(), StyleAttrs::default(), 0, "x");
         assert_eq!(glk.screen_model().grid().unwrap().cell(1, 1).link, 42, "linked cell carries its link value");
         assert_eq!(glk.screen_model().grid().unwrap().cell(1, 2).link, 0, "an unlinked cell has link 0");
     }

@@ -460,16 +460,18 @@ pub trait GlkBackend {
     fn put_text(&mut self, _win: u32, _style: GlkStyle, _s: &str) {}
     /// Write `s` to a text-grid window's cells starting at `(x, y)`.
     fn grid_put(&mut self, _win: u32, _x: u32, _y: u32, _style: GlkStyle, _s: &str) {}
-    /// Append `s` to a text-buffer window with the colour resolved from the
-    /// active style hints. Defaults to the colourless [`GlkBackend::put_text`],
-    /// so backends that don't render colour need no change (mirrors the
-    /// Z-machine `Output::print_attr` seam).
-    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, _link: u32, s: &str) {
+    /// Append `s` to a text-buffer window with the colour and the rendered
+    /// non-colour attributes (Weight/Oblique) resolved from the active style
+    /// hints. Defaults to the colourless [`GlkBackend::put_text`], so backends
+    /// that don't render colour need no change (mirrors the Z-machine
+    /// `Output::print_attr` seam). `attrs` layers on top of the style class's
+    /// intrinsic look: a set hint overrides, an unset hint keeps the class default.
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, _colour: StyleColour, _attrs: StyleAttrs, _link: u32, s: &str) {
         self.put_text(win, style, s);
     }
-    /// Write `s` to a text-grid window with resolved colour and hyperlink value;
-    /// defaults to the colourless [`GlkBackend::grid_put`].
-    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, _colour: StyleColour, _link: u32, s: &str) {
+    /// Write `s` to a text-grid window with resolved colour, rendered attribute
+    /// hints, and hyperlink value; defaults to the colourless [`GlkBackend::grid_put`].
+    fn grid_put_attr(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, _colour: StyleColour, _attrs: StyleAttrs, _link: u32, s: &str) {
         self.grid_put(win, x, y, style, s);
     }
     /// Clear a text-grid window.
@@ -587,6 +589,9 @@ pub struct TestBackend {
     /// Styled output runs with their resolved colour `(style, colour, text)` per
     /// text-buffer window id, in print order (records the garglk override result).
     colour_runs: BTreeMap<u32, Vec<(GlkStyle, StyleColour, String)>>,
+    /// Styled output runs with their resolved rendered attribute hints
+    /// `(style, attrs, text)` per text-buffer window id, in print order.
+    attr_runs: BTreeMap<u32, Vec<(GlkStyle, StyleAttrs, String)>>,
     /// Grid cells per text-grid window id, keyed `(row, col) -> char`.
     grid: BTreeMap<u32, BTreeMap<(u32, u32), char>>,
     /// Last laid-out rect per window id.
@@ -629,6 +634,7 @@ impl TestBackend {
             runs: BTreeMap::new(),
             linked_runs: BTreeMap::new(),
             colour_runs: BTreeMap::new(),
+            attr_runs: BTreeMap::new(),
             grid: BTreeMap::new(),
             dims: BTreeMap::new(),
             fills: BTreeMap::new(),
@@ -689,6 +695,11 @@ impl TestBackend {
     /// recorded for one text-buffer window (reflects any garglk override).
     pub fn colour_runs(&self, win: u32) -> Vec<(GlkStyle, StyleColour, String)> {
         self.colour_runs.get(&win).cloned().unwrap_or_default()
+    }
+    /// The styled output runs with their resolved rendered attribute hints
+    /// `(style, attrs, text)` recorded for one text-buffer window.
+    pub fn attr_runs(&self, win: u32) -> Vec<(GlkStyle, StyleAttrs, String)> {
+        self.attr_runs.get(&win).cloned().unwrap_or_default()
     }
     /// All text-buffer windows' text concatenated in window-id order — the
     /// migration replacement for `BufferOutput::buf` (there is one window in the
@@ -754,6 +765,7 @@ impl GlkBackend for TestBackend {
         self.runs.remove(&id);
         self.linked_runs.remove(&id);
         self.colour_runs.remove(&id);
+        self.attr_runs.remove(&id);
         self.grid.remove(&id);
         self.dims.remove(&id);
     }
@@ -765,10 +777,11 @@ impl GlkBackend for TestBackend {
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
         self.runs.entry(win).or_default().push((style, s.to_string()));
     }
-    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, link: u32, s: &str) {
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, link: u32, s: &str) {
         self.runs.entry(win).or_default().push((style, s.to_string()));
         self.linked_runs.entry(win).or_default().push((style, link, s.to_string()));
         self.colour_runs.entry(win).or_default().push((style, colour, s.to_string()));
+        self.attr_runs.entry(win).or_default().push((style, attrs, s.to_string()));
     }
     fn grid_put(&mut self, win: u32, x: u32, y: u32, _style: GlkStyle, s: &str) {
         let cells = self.grid.entry(win).or_default();
@@ -789,6 +802,9 @@ impl GlkBackend for TestBackend {
             rs.clear();
         }
         if let Some(rs) = self.colour_runs.get_mut(&win) {
+            rs.clear();
+        }
+        if let Some(rs) = self.attr_runs.get_mut(&win) {
             rs.clear();
         }
     }
