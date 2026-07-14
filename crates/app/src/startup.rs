@@ -240,7 +240,7 @@ pub(crate) fn boot() -> BootResult {
                                     zs.machine.screen = scr;
                                 }
                             }
-                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs));
+                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para));
                             startup_history = ac.history;
                         }
                         Err(e) => {
@@ -408,11 +408,12 @@ pub(crate) fn boot() -> BootResult {
     }
 
     // If an archived transcript was loaded on startup, replace the fresh one.
-    if let Some((lines, kinds, runs)) = startup_transcript {
+    if let Some((lines, kinds, runs, para)) = startup_transcript {
         state.transcript = lines;
         state.clear_anchor = None;
         state.transcript_kinds = kinds;
         state.transcript_runs = runs;
+        state.transcript_para = para;
         state.reset_transcript_sidecars();
     }
     if !startup_history.is_empty() {

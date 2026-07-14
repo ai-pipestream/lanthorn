@@ -69,7 +69,7 @@ pub fn restore_engine_allowed(archive_engine: &str, current_engine: &str) -> Res
 }
 const HISTORY_INDEX: &str = "history/index.json";
 
-pub const CURRENT_FORMAT_VERSION: u32 = 2;
+pub const CURRENT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
@@ -95,6 +95,11 @@ struct TranscriptData {
     /// archives written before this field existed (back-compatible load).
     #[serde(default)]
     runs: Vec<Vec<crate::state::StyleRun>>,
+    /// Per-line Glk paragraph layout format, parallel to `lines` (SQ-0330).
+    /// Defaults to empty for archives written before this field existed → the
+    /// loader fills left/no-indent defaults.
+    #[serde(default)]
+    para: Vec<crate::state::ParaFmt>,
 }
 
 /// Z-machine screen state written to `screen.json` (zvm has no serde, so we
@@ -174,6 +179,9 @@ pub struct ArchiveContents {
     /// Parallel per-line Z-machine style runs (same length as `transcript`;
     /// empty per line for archives that pre-date this field).
     pub transcript_runs: Vec<Vec<crate::state::StyleRun>>,
+    /// Parallel per-line Glk paragraph layout (same length as `transcript`;
+    /// left/no-indent default for archives that pre-date this field). (SQ-0330)
+    pub transcript_para: Vec<crate::state::ParaFmt>,
     /// Per-turn rewind/replay history (empty for archives without `history/`).
     pub history: Vec<crate::history::TurnRecord>,
     /// Saved Z-machine screen state (None for archives without `screen.json`).
@@ -207,6 +215,7 @@ pub fn save_archive(
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
     transcript_runs: &[Vec<crate::state::StyleRun>],
+    transcript_para: &[crate::state::ParaFmt],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
@@ -216,7 +225,7 @@ pub fn save_archive(
         name: None,
         turns: 0,
         saved_at: String::new(),
-    }, transcript, transcript_kinds, transcript_runs, history, command_history)
+    }, transcript, transcript_kinds, transcript_runs, transcript_para, history, command_history)
 }
 
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
@@ -233,6 +242,7 @@ pub fn save_archive_meta(
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
     transcript_runs: &[Vec<crate::state::StyleRun>],
+    transcript_para: &[crate::state::ParaFmt],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
@@ -272,14 +282,16 @@ pub fn save_archive_meta(
     let mut lines: Vec<String> = Vec::new();
     let mut kinds: Vec<TranscriptKind> = Vec::new();
     let mut runs: Vec<Vec<crate::state::StyleRun>> = Vec::new();
+    let mut para: Vec<crate::state::ParaFmt> = Vec::new();
     for (i, (line, &k)) in transcript.iter().zip(transcript_kinds.iter()).enumerate() {
         if matches!(k, TranscriptKind::Story | TranscriptKind::Input) {
             lines.push(line.clone());
             kinds.push(k);
             runs.push(transcript_runs.get(i).cloned().unwrap_or_default());
+            para.push(transcript_para.get(i).copied().unwrap_or_default());
         }
     }
-    let td = TranscriptData { lines, kinds, runs };
+    let td = TranscriptData { lines, kinds, runs, para };
     let transcript_json =
         serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
@@ -404,26 +416,31 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     };
 
     // transcript.json — optional; older archives omit it, default to empty vecs.
-    let (transcript, transcript_kinds, transcript_runs) = match zip.by_name(ENTRY_TRANSCRIPT) {
+    let (transcript, transcript_kinds, transcript_runs, transcript_para) = match zip.by_name(ENTRY_TRANSCRIPT) {
         Ok(mut entry) => {
             let mut buf = String::new();
             entry.read_to_string(&mut buf)?;
             match serde_json::from_str::<TranscriptData>(&buf) {
                 Ok(td) => {
-                    // Keep runs length-synced with lines: archives that pre-date
-                    // the runs field (or with a mismatched length) get one empty
-                    // run vec per line.
+                    // Keep runs/para length-synced with lines: archives that
+                    // pre-date these fields (or with a mismatched length) get one
+                    // empty run vec / default ParaFmt per line.
                     let runs = if td.runs.len() == td.lines.len() {
                         td.runs
                     } else {
                         vec![Vec::new(); td.lines.len()]
                     };
-                    (td.lines, td.kinds, runs)
+                    let para = if td.para.len() == td.lines.len() {
+                        td.para
+                    } else {
+                        vec![crate::state::ParaFmt::default(); td.lines.len()]
+                    };
+                    (td.lines, td.kinds, runs, para)
                 }
-                Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+                Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             }
         }
-        Err(_) => (Vec::new(), Vec::new(), Vec::new()),
+        Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
 
     // command_history.json — optional; older archives omit it → empty vec.
@@ -510,7 +527,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, history, screen, aux, command_history, engine })
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, history, screen, aux, command_history, engine })
 }
 
 /// Read ONLY the `meta.json` entry from a save archive — avoids `load_archive`
@@ -614,7 +631,7 @@ mod tests {
         cmds: &[String],
     ) -> io::Result<()> {
         save_archive(path, mapper, &zvm_es(machine), Some(&machine.screen), &machine.aux_data,
-            transcript, kinds, runs, history, cmds)
+            transcript, kinds, runs, &[], history, cmds)
     }
 
     #[test]
@@ -728,6 +745,7 @@ mod tests {
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new() },
             &transcript,
             &kinds,
+            &[],
             &[],
             &[],
             &[],
@@ -926,6 +944,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
         )
         .expect("save_archive_meta");
 
@@ -1054,6 +1073,7 @@ mod tests {
                 lines: vec!["West of House".to_string(), "/help".to_string(), "You are standing...".to_string()],
                 kinds: vec![TranscriptKind::Story, TranscriptKind::Meta, TranscriptKind::Story],
                 runs: Vec::new(),
+                para: Vec::new(),
             };
             let transcript_json = serde_json::to_string(&td).unwrap();
             zip.start_file(ENTRY_TRANSCRIPT, options).unwrap();
@@ -1077,6 +1097,7 @@ mod tests {
             lines: vec!["a".into(), "b".into()],
             kinds: vec![TranscriptKind::Story, TranscriptKind::Input],
             runs: vec![vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0 }], vec![]],
+            para: Vec::new(),
         };
         let json = serde_json::to_string(&td).unwrap();
         let back: TranscriptData = serde_json::from_str(&json).unwrap();
@@ -1186,7 +1207,7 @@ mod tests {
         let es = zvm_es(&machine);
         let path = temp_archive_path("engine-save-rt");
         save_archive(&path, &small_mapper(), &es, Some(&machine.screen), &machine.aux_data,
-            &[], &[], &[], &[], &[]).expect("save");
+            &[], &[], &[], &[], &[], &[]).expect("save");
 
         assert_eq!(read_entry(&path, "game.qzl").as_deref(), Some(es.bytes.as_slice()),
             "game.qzl holds the EngineSave bytes");
@@ -1209,7 +1230,7 @@ mod tests {
         let es = EngineSave::new("glulx", 1, vec![9, 8, 7, 6]);
         let path = temp_archive_path("glulx-no-screen");
         save_archive(&path, &small_mapper(), &es, None, &BTreeMap::new(),
-            &[], &[], &[], &[], &[]).expect("save");
+            &[], &[], &[], &[], &[], &[]).expect("save");
 
         assert!(read_entry(&path, ENTRY_SCREEN).is_none(), "no screen.json for glulx");
         assert_eq!(read_entry(&path, ENTRY_ENGINE).as_deref(), Some(b"glulx".as_slice()));
@@ -1228,7 +1249,7 @@ mod tests {
         let zm = EngineSave::new(DEFAULT_ENGINE, 1, vec![1, 2, 3]);
         let zpath = temp_archive_path("entry-ext-zm");
         save_archive(&zpath, &small_mapper(), &zm, None, &BTreeMap::new(),
-            &[], &[], &[], &[], &[]).expect("save zm");
+            &[], &[], &[], &[], &[], &[]).expect("save zm");
         assert!(read_entry(&zpath, "game.qzl").is_some(), "Z-machine save entry is game.qzl");
         assert!(read_entry(&zpath, "game.sav").is_none(), "no legacy game.sav entry");
         assert!(read_entry(&zpath, "game.glksave").is_none());
@@ -1238,7 +1259,7 @@ mod tests {
         let gl = EngineSave::new("glulx", 1, vec![4, 5, 6]);
         let gpath = temp_archive_path("entry-ext-gl");
         save_archive(&gpath, &small_mapper(), &gl, None, &BTreeMap::new(),
-            &[], &[], &[], &[], &[]).expect("save gl");
+            &[], &[], &[], &[], &[], &[]).expect("save gl");
         assert!(read_entry(&gpath, "game.glksave").is_some(), "Glulx save entry is game.glksave");
         assert!(read_entry(&gpath, "game.qzl").is_none());
         assert!(read_entry(&gpath, "game.sav").is_none(), "no legacy game.sav entry");

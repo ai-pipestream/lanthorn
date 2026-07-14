@@ -185,7 +185,7 @@ type GridCell = (char, GlkStyle, StyleColour, StyleAttrs);
 
 /// An empty (space, unstyled) grid cell.
 const BLANK_CELL: GridCell =
-    (' ', GlkStyle::Normal, StyleColour { fg: None, bg: None, reverse: false }, StyleAttrs { weight: None, oblique: None });
+    (' ', GlkStyle::Normal, StyleColour { fg: None, bg: None, reverse: false }, StyleAttrs { weight: None, oblique: None, indent: None, para_indent: None, justify: None });
 
 /// Render the pinned grid rows as ANSI: save cursor, redraw each grid row at its
 /// absolute position (cleared), then restore the cursor.
@@ -781,16 +781,16 @@ mod tests {
     #[test]
     fn sgr_layers_weight_and_oblique_hints_over_class_defaults() {
         // SQ-0317: a set hint overrides the class look; an unset hint keeps it.
-        let bold = StyleAttrs { weight: Some(1), oblique: None };
-        let unbold = StyleAttrs { weight: Some(0), oblique: None };
-        let italic = StyleAttrs { weight: None, oblique: Some(1) };
-        let upright = StyleAttrs { weight: None, oblique: Some(0) };
+        let bold = StyleAttrs { weight: Some(1), ..Default::default() };
+        let unbold = StyleAttrs { weight: Some(0), ..Default::default() };
+        let italic = StyleAttrs { oblique: Some(1), ..Default::default() };
+        let upright = StyleAttrs { oblique: Some(0), ..Default::default() };
         assert_eq!(sgr_set(GlkStyle::Normal, bold), "\x1b[1m", "weight hint adds bold");
         assert_eq!(sgr_set(GlkStyle::Normal, italic), "\x1b[3m", "oblique hint adds italic");
         assert_eq!(sgr_set(GlkStyle::Header, unbold), "", "weight 0 strips class bold");
         assert_eq!(sgr_set(GlkStyle::Emphasized, upright), "", "oblique 0 strips class italic");
         // "Lighter" (-1 as u32) has no terminal rendering -> plain.
-        assert_eq!(sgr_set(GlkStyle::Header, StyleAttrs { weight: Some(u32::MAX), oblique: None }), "");
+        assert_eq!(sgr_set(GlkStyle::Header, StyleAttrs { weight: Some(u32::MAX), ..Default::default() }), "");
         // Hints layer with the untouched channel: bold hint + Emphasized's italic.
         assert_eq!(sgr_set(GlkStyle::Emphasized, bold), "\x1b[1m\x1b[3m");
     }

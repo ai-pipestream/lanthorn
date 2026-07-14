@@ -123,16 +123,21 @@ pub struct StyleColour {
 
 /// The non-colour stylehints this Glk subset records for `glk_style_distinguish`:
 /// `stylehint_Weight` (4) and `stylehint_Oblique` (5) — the bold / italic hints a
-/// terminal can render, so two styles set to different weights or obliques are
-/// visually distinguishable. `None` = no hint set. The remaining hints
-/// (Size, Indentation, ParaIndentation, Justification, Proportional) describe
-/// typographic properties a fixed-cell terminal cannot render, so they are not
-/// recorded and never make styles distinguishable. Plain data — keeps `gvm`
-/// zero-dependency.
+/// terminal can render — plus the paragraph layout hints `stylehint_Indentation`
+/// (0), `stylehint_ParaIndentation` (1) and `stylehint_Justification` (2), which a
+/// buffer window renders as leading-space padding. `None` = no hint set.
+/// Indentation and ParaIndentation may be negative (a hanging indent), so they are
+/// stored as `i32` (the `val` arrives as a u32 two's-complement bit pattern).
+/// The remaining hints (Size, Proportional) describe typographic properties a
+/// fixed-cell terminal cannot render, so they are not recorded and never make
+/// styles distinguishable. Plain data — keeps `gvm` zero-dependency.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StyleAttrs {
     pub weight: Option<u32>,
     pub oblique: Option<u32>,
+    pub indent: Option<i32>,
+    pub para_indent: Option<i32>,
+    pub justify: Option<u32>,
 }
 
 impl GlkStyle {
@@ -1333,6 +1338,9 @@ impl Model {
             }
             let sa = &mut self.style_attrs[row][styl as usize];
             match hint {
+                0 => sa.indent = Some(val as i32),
+                1 => sa.para_indent = Some(val as i32),
+                2 => sa.justify = Some(val),
                 4 => sa.weight = Some(val),
                 5 => sa.oblique = Some(val),
                 _ => {}
@@ -1355,6 +1363,9 @@ impl Model {
             }
             let sa = &mut self.style_attrs[row][styl as usize];
             match hint {
+                0 => sa.indent = None,
+                1 => sa.para_indent = None,
+                2 => sa.justify = None,
                 4 => sa.weight = None,
                 5 => sa.oblique = None,
                 _ => {}
@@ -1482,32 +1493,39 @@ impl Model {
 
     /// `glk_style_measure`: the value of style `hint` for style class `styl` in
     /// window `win`, if the model actually knows it (`None` = "unknown" — the
-    /// honest answer for hints this Glk subset does not track). Only the colour
-    /// hints are recorded, so only they can be measured: `stylehint_TextColor`
-    /// (7) and `stylehint_BackColor` (8) report a colour when one was set for
-    /// that style, and `stylehint_ReverseColor` (9) reports the effective flag.
-    /// Every other hint (size, weight, oblique, justification, indentation,
-    /// proportional) is untracked and honestly reported as unknown.
+    /// honest answer for hints this Glk subset does not track). Recorded hints
+    /// report their value: the layout hints `stylehint_Indentation` (0),
+    /// `stylehint_ParaIndentation` (1) and `stylehint_Justification` (2) when set
+    /// (as the raw u32 bit pattern the game supplied — indent/para_indent may be a
+    /// negative i32), and the colour hints `stylehint_TextColor` (7),
+    /// `stylehint_BackColor` (8) and `stylehint_ReverseColor` (9). Size (3),
+    /// Weight (4), Oblique (5) and Proportional (6) are honestly reported as
+    /// unknown here (Weight/Oblique are recorded for `style_distinguish` only).
     pub fn style_measure(&self, win: u32, styl: u32, hint: u32) -> Option<u32> {
         let wintype = self.window_type(win)?;
         if styl >= NUMSTYLES {
             return None;
         }
         let sc = self.style_colour(wintype, GlkStyle::from_num(styl));
+        let sa = self.style_attrs(wintype, GlkStyle::from_num(styl));
         match hint {
-            7 => sc.fg,                   // stylehint_TextColor
-            8 => sc.bg,                   // stylehint_BackColor
-            9 => Some(sc.reverse as u32), // stylehint_ReverseColor
-            _ => None,                    // untracked hint -> honestly unknown
+            0 => sa.indent.map(|v| v as u32),      // stylehint_Indentation
+            1 => sa.para_indent.map(|v| v as u32), // stylehint_ParaIndentation
+            2 => sa.justify,                       // stylehint_Justification
+            7 => sc.fg,                            // stylehint_TextColor
+            8 => sc.bg,                            // stylehint_BackColor
+            9 => Some(sc.reverse as u32),          // stylehint_ReverseColor
+            _ => None,                             // untracked hint -> unknown
         }
     }
 
     /// `glk_style_distinguish`: whether style classes `s1` and `s2` differ in a
     /// hint the model records and the terminal renders in window `win` —
     /// foreground/background colour or reverse-video (`style_colour`) or the
-    /// Weight / Oblique attributes (`style_attrs`). Hints a fixed-cell terminal
-    /// cannot render (Size, Indentation, Justification, Proportional) are not
-    /// recorded, so they never distinguish. Styles the model cannot tell apart
+    /// Weight / Oblique / Indentation / ParaIndentation / Justification attributes
+    /// (`style_attrs`). Hints a fixed-cell terminal cannot render (Size,
+    /// Proportional) are not recorded, so they never distinguish. Styles the model
+    /// cannot tell apart
     /// report `false` — the honest answer given the recorded hints (an intrinsic
     /// class difference like a bold Header comes from the host's style config,
     /// which this VM layer cannot see). Same style number, or an invalid window,
@@ -4649,8 +4667,9 @@ mod style_hint_tests {
     fn style_distinguish_compares_rendered_weight_and_oblique_not_ignored_hints() {
         // SQ-0317: Weight (4) and Oblique (5) are rendered attributes a terminal
         // can show (bold / italic), so a style differing only in one of them is
-        // distinguishable; Size/Indentation/Justification/Proportional are hints a
-        // fixed-cell terminal cannot render, so they never distinguish.
+        // distinguishable; Size (3) / Proportional (6) are hints a fixed-cell
+        // terminal cannot render, so they never distinguish. (Indentation and
+        // Justification DO distinguish now — see the dedicated test below.)
         let mut m = Model::new();
         let win = m.window_open(0, 0, 0, 3, 0).unwrap(); // wintype_TextBuffer=3
         // A Weight hint on User1 (style 9) makes it differ from the unhinted User2 (10).
@@ -4670,5 +4689,32 @@ mod style_hint_tests {
         m.set_style_hint(3, 10, 4, 1);
         m.set_style_hint(3, 9, 4, 1);
         assert!(!m.style_distinguish(win, 9, 10), "matching weight hints are indistinguishable");
+    }
+
+    #[test]
+    fn style_measure_reports_layout_hints_and_distinguish_flips_on_them() {
+        // SQ-0330: the paragraph layout hints Indentation (0), ParaIndentation (1)
+        // and Justification (2) are now recorded, measurable, and distinguishing.
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap(); // wintype_TextBuffer=3
+        // Set/measure round-trip for style_Header=3.
+        m.set_style_hint(3, 3, 0, 4); // Indentation = 4 cells
+        m.set_style_hint(3, 3, 2, 2); // Justification = Centered
+        assert_eq!(m.style_measure(win, 3, 0), Some(4), "Indentation measured");
+        assert_eq!(m.style_measure(win, 3, 2), Some(2), "Justification measured");
+        assert_eq!(m.style_measure(win, 3, 1), None, "unset ParaIndentation is unknown");
+        // ParaIndentation may be negative (a hanging indent): round-trips as the
+        // two's-complement u32 bit pattern.
+        m.set_style_hint(3, 3, 1, (-3i32) as u32);
+        assert_eq!(m.style_measure(win, 3, 1), Some((-3i32) as u32), "negative ParaIndentation");
+        // Justification difference distinguishes Header (centered) from Normal.
+        assert!(m.style_distinguish(win, 0, 3), "a differing justification distinguishes");
+        // Clearing the layout hints reverts to unknown and indistinguishable.
+        m.clear_style_hint(3, 3, 0);
+        m.clear_style_hint(3, 3, 1);
+        m.clear_style_hint(3, 3, 2);
+        assert_eq!(m.style_measure(win, 3, 0), None, "cleared Indentation is unknown");
+        assert_eq!(m.style_measure(win, 3, 2), None, "cleared Justification is unknown");
+        assert!(!m.style_distinguish(win, 0, 3), "cleared layout hints no longer distinguish");
     }
 }

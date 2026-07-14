@@ -273,7 +273,7 @@ fn post_turn_bookkeeping(
                     .unwrap_or(0),
             ),
         };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+        if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
             state.push_notice(&format!("[Auto-save failed: {}]", e));
         }
     }
@@ -407,8 +407,9 @@ pub(crate) fn apply_launch_resume(
             state.clear_anchor = None;
             state.transcript_kinds = kinds;
             // The launch-resume stash carries no style runs; keep the parallel
-            // vec length-synced (unstyled rows).
+            // vecs length-synced (unstyled, left/no-indent rows).
             state.transcript_runs = vec![Vec::new(); state.transcript.len()];
+            state.transcript_para = vec![app::state::ParaFmt::default(); state.transcript.len()];
             state.reset_transcript_sidecars();
             // Re-observe current location (same as Action::RestoreGame).
             reobserve_location(state, mapper, &*session, last_panes.map);
@@ -631,7 +632,7 @@ mod tests {
         };
         app::archive::save_archive_meta(
             &arc, &mapper::mapper::Mapper::default(), &save, None,
-            &std::collections::BTreeMap::new(), meta, &[], &[], &[], &[], &[],
+            &std::collections::BTreeMap::new(), meta, &[], &[], &[], &[], &[], &[],
         ).expect("write .babelmap with turns=42");
 
         // Fresh session + default state (turns start at 0), then launch-resume.

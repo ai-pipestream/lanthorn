@@ -234,6 +234,27 @@ pub struct StyleRun {
     pub link: u32, // Glk hyperlink value for this span (0 = no link)
 }
 
+/// Per-paragraph layout formatting for one transcript line, derived from the Glk
+/// paragraph stylehints (SQ-0330). A logical transcript line is one paragraph, so
+/// this is stored parallel to `transcript`. `Default` = left-flush, no indent —
+/// the Z-machine and any buffer that set no layout hints render exactly as before.
+/// The renderer turns these into LEADING-SPACE padding in the wrap (so
+/// selection/copy/search coordinates stay consistent with what is drawn).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParaFmt {
+    /// Left indent applied to every wrapped row of the paragraph, in cells.
+    #[serde(default)]
+    pub indent: u16,
+    /// Extra indent applied to the FIRST wrapped row only (Glk ParaIndentation);
+    /// may be negative for a hanging indent.
+    #[serde(default)]
+    pub para_indent: i16,
+    /// Justification: 0=left-flush (default), 1=fill (rendered as left for now),
+    /// 2=centered, 3=right-flush.
+    #[serde(default)]
+    pub justify: u8,
+}
+
 /// Encode a [`zvm::screen::ZColour`] as a packed `u32` for serde-safe storage in
 /// [`StyleRun`] (zvm is zero-dep and cannot derive serde).
 ///
@@ -1107,8 +1128,8 @@ pub type PendingResume =
     Option<(crate::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>;
 
 /// Transcript bundle loaded from an archive at startup: (lines, kinds, per-line
-/// style runs).
-pub type LoadedTranscript = Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>)>;
+/// style runs, per-line paragraph layout).
+pub type LoadedTranscript = Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>, Vec<ParaFmt>)>;
 
 /// Cache key for the wrapped-transcript product: every input the wrap output
 /// depends on. A change in any field forces a re-wrap; an unchanged key lets an
@@ -1270,6 +1291,11 @@ pub struct AppState {
     /// length). Empty for the common unstyled line. Populated only by game-turn
     /// output via `push_transcript_runs`; persisted in `transcript.json`.
     pub transcript_runs: Vec<Vec<StyleRun>>,
+    /// Per-line paragraph layout format, parallel to `transcript` (always same
+    /// length). `ParaFmt::default()` = left-flush, no indent (the Z-machine and
+    /// any buffer that set no Glk layout hints). Populated by `push_transcript_runs`
+    /// from each line's first content run; persisted in `transcript.json` (SQ-0330).
+    pub transcript_para: Vec<ParaFmt>,
     /// Optional inline image parallel to `transcript` (always same length).
     /// `Some` marks a logical unit that renders as an image band instead of
     /// text; its `transcript` entry is an empty placeholder. In-memory only
@@ -1635,6 +1661,7 @@ impl Default for AppState {
             transcript_kinds: Vec::new(),
             transcript_styles: Vec::new(),
             transcript_runs: Vec::new(),
+            transcript_para: Vec::new(),
             transcript_images: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             transcript_scroll: 0,
@@ -2247,12 +2274,14 @@ impl AppState {
         self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
+        self.transcript_para.resize(self.transcript.len(), ParaFmt::default()); // self-heal alignment
         self.transcript_images.resize(self.transcript.len(), None); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(None);
             self.transcript_runs.push(Vec::new());
+            self.transcript_para.push(ParaFmt::default());
             self.transcript_images.push(None);
         }
     }
@@ -2265,6 +2294,7 @@ impl AppState {
         self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
         self.transcript_images.resize(self.transcript.len(), None);
         let base = self.insert_above_prompt_at();
         for (k, line) in text.split('\n').enumerate() {
@@ -2275,6 +2305,7 @@ impl AppState {
                     self.transcript_kinds.insert(idx, kind);
                     self.transcript_styles.insert(idx, None);
                     self.transcript_runs.insert(idx, Vec::new());
+                    self.transcript_para.insert(idx, ParaFmt::default());
                     self.transcript_images.insert(idx, None);
                 }
                 None => {
@@ -2282,6 +2313,7 @@ impl AppState {
                     self.transcript_kinds.push(kind);
                     self.transcript_styles.push(None);
                     self.transcript_runs.push(Vec::new());
+                    self.transcript_para.push(ParaFmt::default());
                     self.transcript_images.push(None);
                 }
             }
@@ -2363,6 +2395,9 @@ impl AppState {
         if idx < self.transcript_runs.len() {
             self.transcript_runs.remove(idx);
         }
+        if idx < self.transcript_para.len() {
+            self.transcript_para.remove(idx);
+        }
         if idx < self.transcript_images.len() {
             self.transcript_images.remove(idx);
         }
@@ -2437,12 +2472,14 @@ impl AppState {
         self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None); // self-heal alignment
         self.transcript_runs.resize(self.transcript.len(), Vec::new()); // self-heal alignment
+        self.transcript_para.resize(self.transcript.len(), ParaFmt::default()); // self-heal alignment
         self.transcript_images.resize(self.transcript.len(), None); // self-heal alignment
         for line in text.split('\n') {
             self.transcript.push(line.to_owned());
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(Some(style));
             self.transcript_runs.push(Vec::new());
+            self.transcript_para.push(ParaFmt::default());
             self.transcript_images.push(None);
         }
     }
@@ -2453,6 +2490,7 @@ impl AppState {
         self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
         self.transcript_images.resize(self.transcript.len(), None);
         let base = self.insert_above_prompt_at();
         for (k, line) in text.split('\n').enumerate() {
@@ -2463,6 +2501,7 @@ impl AppState {
                     self.transcript_kinds.insert(idx, kind);
                     self.transcript_styles.insert(idx, Some(style));
                     self.transcript_runs.insert(idx, Vec::new());
+                    self.transcript_para.insert(idx, ParaFmt::default());
                     self.transcript_images.insert(idx, None);
                 }
                 None => {
@@ -2470,6 +2509,7 @@ impl AppState {
                     self.transcript_kinds.push(kind);
                     self.transcript_styles.push(Some(style));
                     self.transcript_runs.push(Vec::new());
+                    self.transcript_para.push(ParaFmt::default());
                     self.transcript_images.push(None);
                 }
             }
@@ -2486,7 +2526,7 @@ impl AppState {
         &mut self,
         text: &str,
         kind: TranscriptKind,
-        chunks: &[(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)],
+        chunks: &[(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, ParaFmt)],
     ) {
         // A turn with no new lower-window output (e.g. a read_char keypress that
         // only redrew the upper window) yields an empty string; appending it would
@@ -2498,6 +2538,7 @@ impl AppState {
         self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
         self.transcript_images.resize(self.transcript.len(), None);
 
         // Walk `text` char-by-char while consuming the chunk list in lockstep.
@@ -2507,22 +2548,25 @@ impl AppState {
         let mut fg = zvm::screen::ZColour::Default;
         let mut bg = zvm::screen::ZColour::Default;
         let mut link: u32 = 0;
+        let mut para = ParaFmt::default();
         // Advance to the next non-exhausted chunk when the current one is spent.
         // When chunks run out, treat the remainder as plain (bits 0, default
-        // colours, no link).
+        // colours, no link, default layout).
         let mut refill = |rem: &mut usize,
                           bits: &mut u8,
                           fg: &mut zvm::screen::ZColour,
                           bg: &mut zvm::screen::ZColour,
-                          link: &mut u32| {
+                          link: &mut u32,
+                          para: &mut ParaFmt| {
             while *rem == 0 {
                 match chunk_iter.next() {
-                    Some((c, b, f, bk, lk)) => {
+                    Some((c, b, f, bk, lk, pf)) => {
                         *rem = c;
                         *bits = b;
                         *fg = f;
                         *bg = bk;
                         *link = lk;
+                        *para = pf;
                     }
                     None => {
                         *rem = usize::MAX;
@@ -2530,6 +2574,7 @@ impl AppState {
                         *fg = zvm::screen::ZColour::Default;
                         *bg = zvm::screen::ZColour::Default;
                         *link = 0;
+                        *para = ParaFmt::default();
                         break;
                     }
                 }
@@ -2541,14 +2586,20 @@ impl AppState {
             // Consume the '\n' separator's chunk char (one per separator, i.e.
             // before every line except the first).
             if !first {
-                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para);
                 rem = rem.saturating_sub(1);
             }
             first = false;
 
+            // The paragraph's layout comes from the FIRST content run on the line
+            // (a paragraph is normally one style). `None` until the first char.
+            let mut line_para: Option<ParaFmt> = None;
             let mut runs: Vec<StyleRun> = Vec::new();
             for (col, _ch) in line.chars().enumerate() {
-                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para);
+                if line_para.is_none() {
+                    line_para = Some(para);
+                }
                 let pfg = pack_zcolour(fg);
                 let pbg = pack_zcolour(bg);
                 let has_style = bits != 0 || pfg != 0 || pbg != 0 || link != 0;
@@ -2567,6 +2618,7 @@ impl AppState {
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(None);
             self.transcript_runs.push(runs);
+            self.transcript_para.push(line_para.unwrap_or_default());
             self.transcript_images.push(None);
         }
     }
@@ -2577,11 +2629,13 @@ impl AppState {
         self.bump_transcript_gen();
         self.transcript_styles.resize(self.transcript.len(), None);
         self.transcript_runs.resize(self.transcript.len(), Vec::new());
+        self.transcript_para.resize(self.transcript.len(), ParaFmt::default());
         self.transcript_images.resize(self.transcript.len(), None);
         self.transcript.push(String::new());
         self.transcript_kinds.push(TranscriptKind::Story);
         self.transcript_styles.push(None);
         self.transcript_runs.push(Vec::new());
+        self.transcript_para.push(ParaFmt::default());
         self.transcript_images.push(Some(img));
     }
 
@@ -2906,9 +2960,9 @@ mod tests {
             scaled: None,
         };
         let elems = vec![
-            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0)] },
+            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default())] },
             TranscriptElem::Image(dummy),
-            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0)] },
+            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default())] },
         ];
         apply_transcript_elems(&mut st, &elems);
         assert_eq!(st.transcript, vec!["a".to_string(), "".to_string(), "b".to_string()]);
@@ -3089,7 +3143,7 @@ mod tests {
         s.push_transcript_runs(
             ">",
             TranscriptKind::Story,
-            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0)],
+            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default())],
         );
         s.append_to_last_transcript_line("look");
         assert_eq!(s.transcript.last().unwrap(), ">look");
@@ -3119,7 +3173,7 @@ mod tests {
         // as a separate pushed line — CounterfeitMonkey's shape.
         s.push_transcript_kind(">", TranscriptKind::Story);
         s.push_transcript_runs("look", TranscriptKind::Story,
-            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0)]);
+            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
         assert_eq!(s.transcript.len(), 2);
         s.merge_line_into_previous(1);
         // One line now: ">look", and the bold run is shifted past the ">".
@@ -3141,10 +3195,10 @@ mod tests {
         // A `>look` line where `>` has no run and "look" is bold with DEFAULT colour,
         // except a single char CM coloured red explicitly.
         s.push_transcript_runs(">look", TranscriptKind::Story, &[
-            (1, 0, ZColour::Default, ZColour::Default, 0),       // '>' — unstyled
-            (1, 2, ZColour::Default, ZColour::Default, 0),       // 'l' — bold, default colour
-            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0), // 'o' — bold + explicit red fg
-            (2, 2, ZColour::Default, ZColour::Default, 0),       // 'ok' — bold, default colour
+            (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),       // '>' — unstyled
+            (1, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),       // 'l' — bold, default colour
+            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0, ParaFmt::default()), // 'o' — bold + explicit red fg
+            (2, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),       // 'ok' — bold, default colour
         ]);
         s.fill_line_default_colours(0, black, white);
         // Every char now has fg/bg resolved; the '>' and default chars take black/white,
@@ -3263,6 +3317,28 @@ mod tests {
         assert_eq!(st.transcript[img_idx], "");
         assert_eq!(st.transcript_kinds[img_idx], TranscriptKind::Story);
         assert!(st.transcript_images.iter().filter(|o| o.is_some()).count() == 1);
+        assert_eq!(st.transcript_para.len(), n, "transcript_para stays length-synced");
+    }
+
+    #[test]
+    fn push_transcript_runs_captures_paragraph_layout_from_first_run() {
+        // SQ-0330: a chunk carrying a Centered ParaFmt sets the line's layout, and
+        // the parallel `transcript_para` stays length-synced. A default-layout line
+        // keeps the default ParaFmt (the Z-machine path).
+        let mut st = AppState::default();
+        let centered = ParaFmt { indent: 0, para_indent: 0, justify: 2 };
+        st.push_transcript_runs(
+            "plain\ncentered",
+            TranscriptKind::Story,
+            &[
+                (6, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default()), // "plain\n"
+                (8, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, centered),           // "centered"
+            ],
+        );
+        assert_eq!(st.transcript, vec!["plain".to_string(), "centered".to_string()]);
+        assert_eq!(st.transcript_para.len(), st.transcript.len());
+        assert_eq!(st.transcript_para[0], ParaFmt::default(), "first line is left/no-indent");
+        assert_eq!(st.transcript_para[1], centered, "second line takes its run's Centered layout");
     }
 
     #[test]
@@ -3299,7 +3375,7 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("ab cd", TranscriptKind::Story,
-            &[(2, 0x02, ZColour::Default, ZColour::Default, 0), (3, 0, ZColour::Default, ZColour::Default, 0)]);
+            &[(2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default()), (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
         assert_eq!(s.transcript.last().unwrap(), "ab cd");
         assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
@@ -3311,9 +3387,9 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("A\nB", TranscriptKind::Story,
-            &[(1, 0x02, ZColour::Default, ZColour::Default, 0),
-              (1, 0, ZColour::Default, ZColour::Default, 0),
-              (1, 0x02, ZColour::Default, ZColour::Default, 0)]);
+            &[(1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
+              (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default()),
+              (1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
         let n = s.transcript.len();
         assert_eq!(s.transcript[n - 2], "A");
         assert_eq!(s.transcript[n - 1], "B");
@@ -3330,8 +3406,8 @@ mod tests {
         // the two spans stay separate runs. (Unstyled/default spans emit no run,
         // which is why both spans here carry a nonzero link.)
         s.push_transcript_runs("link more", TranscriptKind::Story,
-            &[(4, 0, ZColour::Default, ZColour::Default, 42),
-              (5, 0, ZColour::Default, ZColour::Default, 99)]);
+            &[(4, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default()),
+              (5, 0, ZColour::Default, ZColour::Default, 99, ParaFmt::default())]);
         let runs = s.transcript_runs.last().unwrap();
         assert_eq!(runs.len(), 2, "differing links do not coalesce");
         assert_eq!((runs[0].start, runs[0].end, runs[0].link), (0, 4, 42));
@@ -3351,7 +3427,7 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("hello", TranscriptKind::Story,
-            &[(5, 0, ZColour::Default, ZColour::Default, 0)]);
+            &[(5, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default())]);
         assert!(s.transcript_runs.last().unwrap().is_empty());
     }
 
@@ -3392,7 +3468,7 @@ mod tests {
         // Thread colour through push_transcript_runs → StyleRun.
         let mut s = AppState::default();
         s.push_transcript_runs("ab", TranscriptKind::Story,
-            &[(2, 0x02, ZColour::Standard(3), ZColour::Default, 0)]);
+            &[(2, 0x02, ZColour::Standard(3), ZColour::Default, 0, ParaFmt::default())]);
         let run = s.transcript_runs.last().unwrap().first()
             .expect("coloured chunk must produce a StyleRun");
         assert_eq!(unpack_zcolour(run.fg), ZColour::Standard(3),

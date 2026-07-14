@@ -495,6 +495,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
         &kinds,
         &styles,
         &b.runs,
+        &b.para,
         &b.images,
         char_px,
         images_enabled,
@@ -616,6 +617,7 @@ mod tests {
         BufferWindow {
             lines: vec![line.to_string()],
             runs: vec![Vec::new()],
+            para: vec![crate::state::ParaFmt::default()],
             images: vec![None],
             scroll: 0,
             primary: false,
@@ -1082,6 +1084,7 @@ mod tests {
         let b = BufferWindow {
             lines: vec!["a".to_string(), String::new(), "b".to_string()],
             runs: vec![Vec::new(), Vec::new(), Vec::new()],
+            para: vec![crate::state::ParaFmt::default(); 3],
             images: vec![None, Some(dummy), None],
             scroll: 0,
             primary: false,

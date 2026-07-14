@@ -106,7 +106,7 @@ pub(crate) fn dispatch_slash_outcome(
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
-                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
+                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -123,7 +123,7 @@ pub(crate) fn dispatch_slash_outcome(
                                 .unwrap_or(0),
                         ),
                     };
-                    save_archive_meta(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history)
+                    save_archive_meta(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history)
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -172,6 +172,7 @@ pub(crate) fn dispatch_slash_outcome(
                             state.clear_anchor = None;
                             state.transcript_kinds = ac.transcript_kinds;
                             state.transcript_runs = ac.transcript_runs;
+                            state.transcript_para = ac.transcript_para;
                             state.reset_transcript_sidecars();
                             state.history = ac.history;
                             if !ac.command_history.is_empty() {

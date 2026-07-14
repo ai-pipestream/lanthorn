@@ -10,7 +10,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::style::Color;
 
 use crate::engine::{Introspect, StatusField, StatusModel};
-use crate::state::{AppState, Focus, StyleRun, TranscriptFilter, TranscriptKind};
+use crate::state::{AppState, Focus, ParaFmt, StyleRun, TranscriptFilter, TranscriptKind};
 use crate::render::paneframe::{draw_framed, BorderStyle};
 use super::draw_str_clipped;
 
@@ -333,6 +333,85 @@ fn rebase_runs(line_runs: Option<&Vec<StyleRun>>, start: usize, end: usize) -> V
     out
 }
 
+/// Shift every run in `runs` right by `pad` columns (added leading spaces), so a
+/// row's style runs stay aligned with its padded/justified text (SQ-0330).
+fn shift_runs(runs: Vec<StyleRun>, pad: u16) -> Vec<StyleRun> {
+    if pad == 0 {
+        return runs;
+    }
+    let p = pad as usize;
+    runs.into_iter()
+        .map(|mut r| {
+            r.start += p;
+            r.end += p;
+            r
+        })
+        .collect()
+}
+
+/// Wrap a Story/Input logical `line` into display rows honouring its Glk paragraph
+/// layout `pf` (SQ-0330). Returns one `(text, start, end, pad)` per wrapped row:
+/// `text` is the padded row (leading spaces already prepended), `[start, end)` are
+/// the row's char offsets in the ORIGINAL `line` (for run re-basing), and `pad` is
+/// the number of leading spaces added (so callers can shift the row's runs).
+///
+/// Layout is rendered purely as LEADING-SPACE padding so the drawn text, its runs,
+/// and selection/search coordinates stay consistent:
+/// - `indent` cells indent every row; `para_indent` adds to the FIRST row only
+///   (negative = hanging first line), clamped so a row still fits.
+/// - Justification pads within the row's usable width: Centered → half the slack,
+///   RightFlush → all of it, LeftFlush/LeftRight (fill) → none (fill is treated as
+///   left for now; full inter-word fill is out of scope).
+///
+/// A default `pf` (left, no indent) reduces to `wrap_line_ranges` with `pad == 0`,
+/// so the Z-machine path and un-hinted buffers render byte-identically.
+fn wrap_para_ranges(line: &str, width: u16, pf: ParaFmt) -> Vec<(String, usize, usize, u16)> {
+    // Fast path: the common no-layout case is exactly the old behaviour.
+    if pf == ParaFmt::default() || width == 0 {
+        return wrap_line_ranges(line, width)
+            .into_iter()
+            .map(|(t, s, e)| (t, s, e, 0))
+            .collect();
+    }
+    let wmax = width.saturating_sub(1); // always leave room for at least 1 char
+    let indent = pf.indent.min(wmax);
+    // Row-0 indent = indent + para_indent, clamped into [0, wmax].
+    let row0_indent = (indent as i32 + pf.para_indent as i32).clamp(0, wmax as i32) as u16;
+    let cont_w = width.saturating_sub(indent).max(1);
+    let first_w = width.saturating_sub(row0_indent).max(1);
+
+    // Wrap row 0 at first_w, then the remainder at cont_w, keeping original char
+    // offsets so runs re-base correctly.
+    let mut ranges: Vec<(String, usize, usize)> = wrap_line_ranges(line, first_w);
+    if ranges.len() > 1 && cont_w != first_w {
+        let second_start = ranges[1].1;
+        let remainder: String = line.chars().skip(second_start).collect();
+        ranges.truncate(1);
+        for (t, s, e) in wrap_line_ranges(&remainder, cont_w) {
+            ranges.push((t, s + second_start, e + second_start));
+        }
+    }
+
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(ri, (text, s, e))| {
+            let lead = if ri == 0 { row0_indent } else { indent };
+            let usable = if ri == 0 { first_w } else { cont_w };
+            let rowlen = text.chars().count() as u16;
+            let slack = usable.saturating_sub(rowlen);
+            let just_pad = match pf.justify {
+                2 => slack / 2,   // Centered
+                3 => slack,       // RightFlush
+                _ => 0,           // LeftFlush / LeftRight (fill → left for now)
+            };
+            let pad = lead + just_pad;
+            let padded = if pad == 0 { text } else { format!("{}{}", " ".repeat(pad as usize), text) };
+            (padded, s, e, pad)
+        })
+        .collect()
+}
+
 /// Like `wrap_line`, but every continuation row after the first is prefixed
 /// with `indent` spaces so wrapped text hangs under the first row's content.
 pub(crate) fn wrap_line_hanging(line: &str, width: u16, indent: u16) -> Vec<String> {
@@ -380,6 +459,7 @@ pub(crate) fn wrap_lines_kinded(
     kinds: &[TranscriptKind],
     styles: &[Style],
     runs: &[Vec<StyleRun>],
+    para: &[ParaFmt],
     images: &[Option<crate::inline_image::InlineImage>],
     char_px: (u16, u16),
     images_enabled: bool,
@@ -428,13 +508,17 @@ pub(crate) fn wrap_lines_kinded(
                         .collect()
                 }
                 TranscriptKind::Story | TranscriptKind::Input => {
-                    wrap_line_ranges(line, w)
+                    let pf = para.get(i).copied().unwrap_or_default();
+                    wrap_para_ranges(line, w, pf)
                         .into_iter()
-                        .map(|(row, start, end)| WrappedRow {
+                        .map(|(row, start, end, pad)| WrappedRow {
                             text: row,
                             kind,
                             style,
-                            runs: rebase_runs(line_runs, start, end),
+                            // Shift the row's runs right by the leading padding so
+                            // selection/copy/search coordinates match the padded
+                            // text that is actually drawn (SQ-0330).
+                            runs: shift_runs(rebase_runs(line_runs, start, end), pad),
                             band: None,
                         })
                         .collect()
@@ -456,6 +540,7 @@ pub(crate) fn anchor_wrapped_rows(
     kinds: &[TranscriptKind],
     styles: &[Style],
     runs: &[Vec<StyleRun>],
+    para: &[ParaFmt],
     images: &[Option<crate::inline_image::InlineImage>],
     char_px: (u16, u16),
     images_enabled: bool,
@@ -472,6 +557,7 @@ pub(crate) fn anchor_wrapped_rows(
             &kinds[..a.min(kinds.len())],
             &styles[..a.min(styles.len())],
             &runs[..a.min(runs.len())],
+            &para[..a.min(para.len())],
             &images[..a.min(images.len())],
             char_px,
             images_enabled,
@@ -535,6 +621,7 @@ pub(crate) fn visible_wrapped_lines_kinded(
     kinds: &[TranscriptKind],
     styles: &[Style],
     runs: &[Vec<StyleRun>],
+    para: &[ParaFmt],
     images: &[Option<crate::inline_image::InlineImage>],
     char_px: (u16, u16),
     images_enabled: bool,
@@ -546,11 +633,11 @@ pub(crate) fn visible_wrapped_lines_kinded(
     if rows == 0 || transcript.is_empty() {
         return (Vec::new(), 0, 0);
     }
-    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, images, char_px, images_enabled, width);
+    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, para, images, char_px, images_enabled, width);
     // Only the bottom (scroll == 0) view can top-anchor, so skip the extra wrap
     // of `[..a]` while scrolled back.
     let anchor_row = if scroll == 0 {
-        anchor_wrapped_rows(transcript, kinds, styles, runs, images, char_px, images_enabled, width, clear_anchor)
+        anchor_wrapped_rows(transcript, kinds, styles, runs, para, images, char_px, images_enabled, width, clear_anchor)
     } else {
         None
     };
@@ -1238,6 +1325,10 @@ fn render_middle(
             .iter()
             .map(|&i| state.transcript_runs.get(i).cloned().unwrap_or_default())
             .collect();
+        let filtered_para: Vec<ParaFmt> = visible_indices
+            .iter()
+            .map(|&i| state.transcript_para.get(i).copied().unwrap_or_default())
+            .collect();
         // Inline images parallel the filtered lines, indexed by the SAME visible
         // indices. Bands are only emitted when a game Picker is present (images
         // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.
@@ -1259,6 +1350,7 @@ fn render_middle(
             &filtered_kinds,
             &filtered_styles,
             &filtered_runs,
+            &filtered_para,
             &filtered_images,
             char_px,
             images_enabled,
@@ -1274,6 +1366,7 @@ fn render_middle(
             &filtered_kinds,
             &filtered_styles,
             &filtered_runs,
+            &filtered_para,
             &filtered_images,
             char_px,
             images_enabled,
@@ -1524,11 +1617,11 @@ mod tests {
         let line = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
         // Input: full width 8 (no gutter) → unsplit.
-        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], &[], (1, 1), false, 8);
+        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], &[], &[], (1, 1), false, 8);
         assert_eq!(i.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
         // Warning: wraps to width-2 = 6 like Meta; continuation gets 2-space
         // hanging indent (leading_spaces("abcdefgh")=0, .max(2)=2).
-        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], &[], (1, 1), false, 8);
+        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], &[], &[], (1, 1), false, 8);
         assert_eq!(w.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
     }
 
@@ -1547,7 +1640,7 @@ mod tests {
         let styles = vec![Style::default(); 3];
         let runs = vec![Vec::new(); 3];
         let images = vec![None, Some(dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp)), None];
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
         // 1 (hi) + 3 (band) + 1 (bye) = 5 rows.
         assert_eq!(rows.len(), 5);
         assert!(rows[0].band.is_none());
@@ -1564,7 +1657,7 @@ mod tests {
         let styles = vec![Style::default(); 2];
         let runs = vec![Vec::new(); 2];
         let images = vec![None, Some(dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp))];
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), false, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), false, 40);
         assert_eq!(rows.len(), 1); // only "hi"
     }
 
@@ -1576,8 +1669,8 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![Vec::new()];
         let images = vec![Some(dummy_img(800, 400, crate::inline_image::ImageAlign::InlineUp))];
-        let wide = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
-        let narrow = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 20);
+        let wide = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
+        let narrow = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 20);
         assert_eq!(wide.len(), 20);
         assert_eq!(narrow.len(), 10);
     }
@@ -1593,7 +1686,7 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![Vec::new()];
         let images = vec![Some(dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight))];
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
         assert_eq!(rows.len(), 3);
         for (expected_row, wr) in rows.iter().enumerate() {
             let band = wr.band.as_ref().unwrap();
@@ -1611,7 +1704,7 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![Vec::new()];
         let images = vec![Some(dummy_img(16, 8, crate::inline_image::ImageAlign::MarginRight))]; // 2x1 cells
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &images, (8, 8), true, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
         assert_eq!(rows[0].band.as_ref().unwrap().x_off, 38); // 40 - 2
     }
 
@@ -1821,7 +1914,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         // A linked line ("northgate" → link 42) followed by a plain line.
-        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42)]);
+        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default())]);
         state.push_transcript("plain text");
         state.focus = Focus::Game;
 
@@ -1853,7 +1946,7 @@ mod tests {
         state.config.honor_game_colours = true;
         state.push_transcript_runs(
             "hi", TranscriptKind::Story,
-            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0)],
+            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default())],
         );
         state.focus = Focus::Game;
         let area = Rect::new(0, 0, 40, 10);
@@ -1877,7 +1970,7 @@ mod tests {
         // Two black-on-white paragraphs separated by a blank line: the blank line
         // between them must also fill white, so the band is contiguous. (SQ-0263)
         use zvm::screen::ZColour;
-        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32);
+        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32, ParaFmt::default());
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.honor_game_colours = true;
@@ -1966,10 +2059,99 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0 }]]; // bold "BBBBB"
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], (1, 1), false, 5);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, 5);
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
         assert!(out[0].runs.is_empty());
         assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
+    }
+
+    // ── SQ-0330: Glk paragraph layout (indent / para_indent / justification) ──
+
+    #[test]
+    fn centered_line_is_padded_to_centre_and_shifts_runs() {
+        // "hi" (2 chars) centered in width 10 → (10-2)/2 = 4 leading spaces.
+        let lines = vec!["hi".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0 }]];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, 10);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "    hi", "text padded to centre");
+        // The bold run must move right by the 4 padding columns so selection/copy
+        // stays aligned with the drawn text.
+        assert_eq!(out[0].runs, vec![StyleRun { start: 4, end: 6, bits: 0x02, fg: 0, bg: 0, link: 0 }]);
+    }
+
+    #[test]
+    fn right_flush_line_pads_all_slack() {
+        let lines = vec!["hi".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 3 }];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 10);
+        assert_eq!(out[0].text, "        hi", "right-flush pads to the right edge");
+    }
+
+    #[test]
+    fn indented_paragraph_indents_every_wrapped_row() {
+        // indent=2, width 8 → usable 6; "AAAAA BBBBB" wraps to "AAAAA"/"BBBBB",
+        // each prefixed with 2 spaces.
+        let lines = vec!["AAAAA BBBBB".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let para = vec![ParaFmt { indent: 2, para_indent: 0, justify: 0 }];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 8);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].text, "  AAAAA");
+        assert_eq!(out[1].text, "  BBBBB");
+    }
+
+    #[test]
+    fn para_indent_adds_to_first_row_only() {
+        // indent=1, para_indent=2 → row 0 leads with 3 spaces, continuations with 1.
+        let lines = vec!["AAAAA BBBBB".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let para = vec![ParaFmt { indent: 1, para_indent: 2, justify: 0 }];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 10);
+        assert_eq!(out[0].text, "   AAAAA", "row 0 gets indent+para_indent");
+        assert_eq!(out[1].text, " BBBBB", "continuation gets only indent");
+    }
+
+    #[test]
+    fn default_para_fmt_renders_identically_to_no_layout() {
+        // The Z-machine path (default ParaFmt) must wrap byte-identically to the
+        // pre-SQ-0330 behaviour: no padding, unshifted runs.
+        let lines = vec!["AAAAA BBBBB".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0 }]];
+        let para = vec![ParaFmt::default()];
+        let with_para = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, 5);
+        let without = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, 5);
+        let texts_p: Vec<&str> = with_para.iter().map(|r| r.text.as_str()).collect();
+        let texts_n: Vec<&str> = without.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts_p, texts_n);
+        assert_eq!(with_para[1].runs, without[1].runs);
+    }
+
+    #[test]
+    fn selection_over_centered_line_copies_the_right_characters() {
+        // Simulate a copy: a selection picks columns [4, 6) of the padded row and
+        // must yield "hi" (the visible text), because the padding is real row text
+        // and the runs are shifted to match. A naive draw-time offset (not padding
+        // the text) would make column 4 land on a space.
+        let lines = vec!["hi".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 10);
+        let row = &out[0].text;
+        let sel: String = row.chars().skip(4).take(2).collect();
+        assert_eq!(sel, "hi", "columns [4,6) of the padded row are the visible text");
+        // Leading padding columns are spaces (selectable but blank).
+        assert_eq!(row.chars().take(4).collect::<String>(), "    ");
     }
 
     #[test]
@@ -2014,7 +2196,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story; 2];
         let styles = vec![Style::default(); 2];
         // width 5: "hello" + "world" + "test" + "short"
-        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], &[], (1, 1), false, 5);
+        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], &[], &[], (1, 1), false, 5);
         let rows: Vec<&str> = result.iter().map(|wr| wr.text.as_str()).collect();
         assert_eq!(rows, vec!["hello", "world", "test", "short"]);
     }
@@ -2026,10 +2208,10 @@ mod tests {
         // .max(2)=2).
         let transcript = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
-        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], &[], (1, 1), false, 8);
+        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], &[], &[], (1, 1), false, 8);
         assert_eq!(m.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
         assert!(m.iter().all(|wr| matches!(wr.kind, TranscriptKind::Meta)));
-        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], &[], (1, 1), false, 8);
+        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], &[], &[], (1, 1), false, 8);
         assert_eq!(s.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
     }
 
@@ -2039,7 +2221,7 @@ mod tests {
         // One logical line that wraps to 3 rows; its style must appear on all rows.
         let transcript = vec!["alpha beta gamma".to_string()];
         let styles = [Style::new().fg(Color::Magenta)];
-        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], &[], (1, 1), false, 5);
+        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], &[], &[], (1, 1), false, 5);
         assert!(rows.len() >= 3, "expected wrap to >= 3 rows, got {}", rows.len());
         assert!(rows.iter().all(|wr| wr.style.fg == Some(Color::Magenta)),
             "every wrapped row must carry the logical line's style");
@@ -2051,7 +2233,7 @@ mod tests {
         let transcript = vec!["abc".to_string(), "def".to_string(), "ghi".to_string()];
         let kinds = vec![TranscriptKind::Story; 3];
         let styles = vec![Style::default(); 3];
-        let (vis, total, first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
+        let (vis, total, first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 3, 0, 10, None);
         assert_eq!(vis.len(), 3);
         assert_eq!(total, 3, "total wrapped rows reported");
         assert_eq!(first, 0, "top visible row is absolute row 0");
@@ -2065,12 +2247,12 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         // scroll=1: end = 2-1=1, start = 1-1=0 → ["hello"]
-        let (vis, total, first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 1, 5, None);
+        let (vis, total, first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 1, 1, 5, None);
         assert_eq!(vis[0].text, "hello");
         assert_eq!(total, 2, "both wrapped rows counted");
         assert_eq!(first, 0, "scroll=1 window starts at row 0");
         // scroll=0: end=2, start=1 → ["world"]
-        let (vis2, _, first2) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 1, 0, 5, None);
+        let (vis2, _, first2) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 1, 0, 5, None);
         assert_eq!(vis2[0].text, "world");
         assert_eq!(first2, 1, "scroll=0 window starts at row 1");
     }
@@ -2082,7 +2264,7 @@ mod tests {
         let transcript: Vec<String> = (0..5).map(|i| format!("L{}", i)).collect();
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
-        let (vis, total, _first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 999, 10, None);
+        let (vis, total, _first) = visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 3, 999, 10, None);
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 3, "over-scroll still fills the viewport");
         assert_eq!(vis[0].text, "L0", "top line stays at the top");
@@ -2104,25 +2286,25 @@ mod tests {
         let kinds = vec![TranscriptKind::Story; 5];
         let styles = vec![Style::default(); 5];
         let (vis, total, _first) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, Some(3));
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 3, 0, 10, Some(3));
         assert_eq!(total, 5);
         assert_eq!(vis.len(), 2, "only post-clear lines returned (top-anchored)");
         assert_eq!(vis[0].text, "L3");
         assert_eq!(vis[1].text, "L4");
         // No anchor → full viewport, bottom-stick (history stays in view).
         let (vis2, _, _) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, None);
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 3, 0, 10, None);
         assert_eq!(vis2.len(), 3);
         assert_eq!(vis2[0].text, "L2", "bottom-stick pulls in the pre-clear line");
         // Scrolled up (scroll>0): anchor ignored so history is reachable.
         let (vis3, _, _) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 1, 10, Some(3));
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 3, 1, 10, Some(3));
         assert_eq!(vis3.len(), 3, "scrolled up ignores the clear anchor");
         assert_eq!(vis3[2].text, "L3");
         // Once post-clear content overflows the viewport, top-anchor stops
         // triggering and normal bottom-stick resumes (anchor at 0, 5 lines > 3).
         let (vis4, _, _) =
-            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], (1, 1), false, 3, 0, 10, Some(0));
+            visible_wrapped_lines_kinded(&transcript, &kinds, &styles, &[], &[], &[], (1, 1), false, 3, 0, 10, Some(0));
         assert_eq!(vis4.len(), 3);
         assert_eq!(vis4[2].text, "L4", "overflow → bottom-stick");
     }

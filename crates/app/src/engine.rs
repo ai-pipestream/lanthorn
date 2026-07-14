@@ -182,6 +182,8 @@ pub struct BufferWindow {
     pub lines: Vec<String>,
     /// Per-line style runs, parallel to [`lines`](Self::lines).
     pub runs: Vec<Vec<crate::state::StyleRun>>,
+    /// Per-line Glk paragraph layout, parallel to [`lines`](Self::lines) (SQ-0330).
+    pub para: Vec<crate::state::ParaFmt>,
     /// Optional inline image parallel to `lines` (always same length). `Some`
     /// marks a line that renders as an image band instead of text.
     pub images: Vec<Option<crate::inline_image::InlineImage>>,

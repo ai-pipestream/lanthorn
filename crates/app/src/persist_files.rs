@@ -99,6 +99,7 @@ pub fn save_named(
     transcript: &[String],
     transcript_kinds: &[crate::state::TranscriptKind],
     transcript_runs: &[Vec<crate::state::StyleRun>],
+    transcript_para: &[crate::state::ParaFmt],
 ) -> io::Result<()> {
     let slug = slugify(name);
     if slug.is_empty() {
@@ -118,7 +119,7 @@ pub fn save_named(
         saved_at,
     };
     // Named saves are separate slots; command history is per-game, not per-slot.
-    crate::archive::save_archive_meta(&path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs, &[], &[])
+    crate::archive::save_archive_meta(&path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs, transcript_para, &[], &[])
 }
 
 /// Remove a save file.
@@ -478,7 +479,7 @@ mod tests {
         mapper.observe(1, "Foyer", None);
 
         let ifid = "ZCODE-1-TEST00-0001";
-        super::save_named(&dir, ifid, "before-troll", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 42, &[], &[], &[])
+        super::save_named(&dir, ifid, "before-troll", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 42, &[], &[], &[], &[])
             .expect("save_named ok");
 
         // Path is `<slug>.babelmap` inside the game dir (no ifid in the name).
@@ -509,7 +510,7 @@ mod tests {
         let ifid = "ZCODE-1-TEST00-0009";
 
         // "Default" slugifies to "default" — reserved for the auto/singleton slot.
-        let err = super::save_named(&dir, ifid, "Default", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 1, &[], &[], &[])
+        let err = super::save_named(&dir, ifid, "Default", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 1, &[], &[], &[], &[])
             .expect_err("reserved slug must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(!dir.join("default.babelmap").exists(), "must not clobber the default slot");
@@ -526,15 +527,15 @@ mod tests {
 
         // Write the default archive (`default.babelmap`).
         let default_path = crate::storage::default_state_path(&dir);
-        crate::archive::save_archive(&default_path, &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, &[], &[], &[], &[], &[])
+        crate::archive::save_archive(&default_path, &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, &[], &[], &[], &[], &[], &[])
             .expect("default save ok");
 
         // Write two named saves.
-        super::save_named(&dir, ifid, "save-a", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 10, &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-a", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 10, &[], &[], &[], &[]).unwrap();
         // Small sleep between named saves so timestamps differ, but since we
         // can't sleep in tests, we directly patch the timestamps via the archive
         // — instead, just verify ordering constraint is maintained.
-        super::save_named(&dir, ifid, "save-b", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 20, &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-b", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 20, &[], &[], &[], &[]).unwrap();
 
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
@@ -623,7 +624,7 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0004";
 
-        super::save_named(&dir, ifid, "to-delete", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 5, &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "to-delete", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 5, &[], &[], &[], &[]).unwrap();
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1);
         let path = saves[0].path.clone();

@@ -2032,7 +2032,7 @@ fn main() {
                         format_rfc3339(secs)
                     },
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+                match save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[Game saved to {}]",
@@ -2064,6 +2064,7 @@ fn main() {
                                 state.clear_anchor = None;
                                 state.transcript_kinds = ac.transcript_kinds;
                                 state.transcript_runs = ac.transcript_runs;
+                                state.transcript_para = ac.transcript_para;
                                 state.reset_transcript_sidecars();
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
@@ -2222,6 +2223,7 @@ fn main() {
                             state.clear_anchor = None;
                             state.transcript_kinds = ac.transcript_kinds;
                             state.transcript_runs = ac.transcript_runs;
+                            state.transcript_para = ac.transcript_para;
                             state.reset_transcript_sidecars();
                             state.history = ac.history;
                             // Named-slot archives carry no command history; only
@@ -2279,8 +2281,9 @@ fn main() {
                                 state.clear_anchor = None;
                                 state.transcript_kinds = kinds;
                                 // History replay carries no style runs; keep the
-                                // parallel vec length-synced (unstyled rows).
+                                // parallel vecs length-synced (unstyled, left rows).
                                 state.transcript_runs = vec![Vec::new(); state.transcript.len()];
+                                state.transcript_para = vec![app::state::ParaFmt::default(); state.transcript.len()];
                                 state.reset_transcript_sidecars();
                                 state.turns = plan.turn;
                                 state.unsaved_progress = false; // resumed a past (saved) turn

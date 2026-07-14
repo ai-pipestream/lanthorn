@@ -47,7 +47,7 @@ pub(crate) fn exit_auto_save(
                 .unwrap_or(0),
         ),
     };
-    match save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history) {
+    match save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
         Ok(()) => {
             eprintln!("babelmap: map saved to {}", arc_file.display());
         }
@@ -87,7 +87,7 @@ pub(crate) fn quit_dialog_save(
                 .unwrap_or(0),
         ),
     };
-    let _ = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.history, &state.command_history);
+    let _ = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history);
 }
 
 // ── Pending config-write flush ────────────────────────────────────────────────

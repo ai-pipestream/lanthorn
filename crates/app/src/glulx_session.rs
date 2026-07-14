@@ -1164,7 +1164,7 @@ mod tests {
         assert_eq!(r.transcript, "Yhi");
         assert!(r.quit);
         assert!(
-            r.transcript_runs.iter().any(|&(_, bits, _, _, _)| bits == 0x02),
+            r.transcript_runs.iter().any(|&(_, bits, _, _, _, _)| bits == 0x02),
             "the Header-styled 'Y' contributes a bold run: {:?}",
             r.transcript_runs
         );
@@ -1727,7 +1727,7 @@ mod tests {
         path.push(format!("babelmap-glulx-arch-{}.babelmap", std::process::id()));
         let mapper = mapper::mapper::Mapper::default();
         crate::archive::save_archive(&path, &mapper, &es, None, &BTreeMap::new(),
-            &[], &[], &[], &[], &[]).expect("save archive");
+            &[], &[], &[], &[], &[], &[]).expect("save archive");
 
         let ac = crate::archive::load_archive(&path).expect("load archive");
         let _ = std::fs::remove_file(&path);

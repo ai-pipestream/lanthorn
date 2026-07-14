@@ -179,7 +179,7 @@ mod tests {
 
         let babelmap_path = std::env::temp_dir().join(format!("bm-t3-{}.babelmap", std::process::id()));
         app::archive::save_archive(&babelmap_path, &mapper::mapper::Mapper::default(), &save, None,
-            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[]).expect("write .babelmap");
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .babelmap");
 
         let mut fresh2 = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
         let outcome2 = super::restore_from_file(&babelmap_path, &mut fresh2).expect("restore .babelmap Save State");

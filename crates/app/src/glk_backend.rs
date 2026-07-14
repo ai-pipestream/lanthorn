@@ -28,7 +28,7 @@ use crate::state::StyleRun;
 /// runs (1 = reverse, 2 = bold, 4 = italic, 8 = fixed-pitch).
 pub fn glk_style_bits(style: GlkStyle) -> u8 {
     match style {
-        GlkStyle::Emphasized => 0x02,   // bold
+        GlkStyle::Emphasized => 0x04,   // italic (Glk emphasis, matching Gargoyle)
         GlkStyle::Header => 0x02,       // bold
         GlkStyle::Subheader => 0x02,    // bold
         GlkStyle::Input => 0x02,        // bold
@@ -77,6 +77,21 @@ fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs) -
     (bits, pack(colour.fg), pack(colour.bg))
 }
 
+/// Resolve the paragraph layout stylehints (`stylehint_Indentation`,
+/// `stylehint_ParaIndentation`, `stylehint_Justification`) recorded on a run's
+/// [`StyleAttrs`] into the app's neutral [`crate::state::ParaFmt`] (SQ-0330):
+/// indent clamped to `[0, u16::MAX]` cells, para_indent clamped to an `i16`
+/// (negative = hanging first line), justify clamped to `0..=3` (unknown → left).
+/// An unset hint defaults to 0 (left, no indent), so a buffer that set no layout
+/// hints — and the whole Z-machine path — renders exactly as before.
+fn resolve_glk_para(attrs: StyleAttrs) -> crate::state::ParaFmt {
+    crate::state::ParaFmt {
+        indent: attrs.indent.unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
+        para_indent: attrs.para_indent.unwrap_or(0).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        justify: attrs.justify.unwrap_or(0).min(3) as u8,
+    }
+}
+
 /// One `(fg, bg)` theme colour pair reported through `glk_style_measure`
 /// (SQ-0315): each channel `Some(0x00RRGGBB)` or `None` for terminal-default.
 pub type ThemePair = (Option<u32>, Option<u32>);
@@ -113,9 +128,9 @@ struct GridBuf {
 
 /// One entry in a text-buffer window's ordered output log.
 enum BufElem {
-    /// A run of printed text with its style bits, packed colours, and Glk
-    /// hyperlink value (0 = no link).
-    Text { bits: u8, fg: u32, bg: u32, link: u32, text: String },
+    /// A run of printed text with its style bits, packed colours, Glk hyperlink
+    /// value (0 = no link) and paragraph layout format (SQ-0330).
+    Text { bits: u8, fg: u32, bg: u32, link: u32, para: crate::state::ParaFmt, text: String },
     /// An image drawn into this buffer window (Glk `glk_image_draw`).
     Image(crate::inline_image::InlineImage),
 }
@@ -341,7 +356,7 @@ impl AppGlk {
     /// Drain the primary window's text printed since the last drain, as
     /// `(text, (char_count, bits, fg, bg) chunks)` for `push_transcript_runs`.
     /// fg/bg carry the resolved stylehint colour (24-bit via `ZColour::True24`).
-    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)>) {
+    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt)>) {
         let Some(pid) = self.primary else {
             return (String::new(), Vec::new());
         };
@@ -349,14 +364,14 @@ impl AppGlk {
             return (String::new(), Vec::new());
         };
         let mut text = String::new();
-        let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)> = Vec::new();
+        let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt)> = Vec::new();
         for elem in &buf.log[buf.drained..] {
-            let BufElem::Text { bits, fg, bg, link, text: s } = elem else { continue };
+            let BufElem::Text { bits, fg, bg, link, para, text: s } = elem else { continue };
             let n = s.chars().count();
             if n == 0 {
                 continue;
             }
-            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg), *link));
+            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg), *link, *para));
             text.push_str(s);
         }
         buf.drained = buf.log.len();
@@ -374,7 +389,7 @@ impl AppGlk {
         // char-count chunk shape `push_transcript_runs` expects:
         // (char_count, bits, fg, bg).
         let mut cur_text = String::new();
-        let mut cur_runs: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32)> = Vec::new();
+        let mut cur_runs: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt)> = Vec::new();
         let flush = |out: &mut Vec<TranscriptElem>, text: &mut String, runs: &mut Vec<_>| {
             if !text.is_empty() {
                 out.push(TranscriptElem::Text { text: std::mem::take(text), runs: std::mem::take(runs) });
@@ -384,13 +399,13 @@ impl AppGlk {
         };
         for elem in &buf.log[buf.drained..] {
             match elem {
-                BufElem::Text { bits, fg, bg, link, text } => {
+                BufElem::Text { bits, fg, bg, link, para, text } => {
                     let n = text.chars().count();
                     if n > 0 {
                         // Convert packed u32 colours back to ZColour to match
                         // the chunk type push_transcript_runs consumes.
                         let (f, b) = (crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg));
-                        cur_runs.push((n, *bits, f, b, *link));
+                        cur_runs.push((n, *bits, f, b, *link, *para));
                         cur_text.push_str(text);
                     }
                 }
@@ -600,9 +615,9 @@ impl AppGlk {
             return BufferWindow { primary: true, ..Default::default() };
         }
         let buf = self.buffers.get(&id);
-        let (lines, runs, images) = buf.map(|b| log_to_lines(&b.log)).unwrap_or_default();
+        let (lines, runs, para, images) = buf.map(|b| log_to_lines(&b.log)).unwrap_or_default();
         let scroll = buf.map(|b| b.scroll).unwrap_or(0);
-        BufferWindow { lines, runs, images, scroll, primary: false, bg: None, fg: None }
+        BufferWindow { lines, runs, para, images, scroll, primary: false, bg: None, fg: None }
     }
 }
 
@@ -615,22 +630,29 @@ impl AppGlk {
 /// and a fresh line is always started after it).
 fn log_to_lines(
     log: &[BufElem],
-) -> (Vec<String>, Vec<Vec<StyleRun>>, Vec<Option<crate::inline_image::InlineImage>>) {
+) -> (Vec<String>, Vec<Vec<StyleRun>>, Vec<crate::state::ParaFmt>, Vec<Option<crate::inline_image::InlineImage>>) {
+    use crate::state::ParaFmt;
     let mut lines: Vec<String> = vec![String::new()];
     let mut runs: Vec<Vec<StyleRun>> = vec![Vec::new()];
+    // Per-line layout; `None` until the first content char sets it from its run.
+    let mut para: Vec<Option<ParaFmt>> = vec![None];
     let mut images: Vec<Option<crate::inline_image::InlineImage>> = vec![None];
     for elem in log {
         match elem {
-            BufElem::Text { bits, fg, bg, link, text } => {
+            BufElem::Text { bits, fg, bg, link, para: pf, text } => {
                 for ch in text.chars() {
                     if ch == '\n' {
                         lines.push(String::new());
                         runs.push(Vec::new());
+                        para.push(None);
                         images.push(None);
                         continue;
                     }
                     let li = lines.len() - 1;
                     let col = lines[li].chars().count();
+                    if para[li].is_none() {
+                        para[li] = Some(*pf);
+                    }
                     lines[li].push(ch);
                     // A run is emitted whenever any styling is active (bits, a
                     // colour, or a hyperlink).
@@ -657,6 +679,7 @@ fn log_to_lines(
                 if !lines.last().map(|l| l.is_empty()).unwrap_or(true) {
                     lines.push(String::new());
                     runs.push(Vec::new());
+                    para.push(None);
                     images.push(None);
                 }
                 if let Some(last) = images.last_mut() {
@@ -665,11 +688,13 @@ fn log_to_lines(
                 // Always start a fresh line after the image.
                 lines.push(String::new());
                 runs.push(Vec::new());
+                para.push(None);
                 images.push(None);
             }
         }
     }
-    (lines, runs, images)
+    let para = para.into_iter().map(|p| p.unwrap_or_default()).collect();
+    (lines, runs, para, images)
 }
 
 // ── GlkBackend impl ────────────────────────────────────────────────────────────
@@ -737,8 +762,9 @@ impl GlkBackend for AppGlk {
             self.capture_heading(style, s);
         }
         let (bits, fg, bg) = resolve_glk_colour(style, colour, attrs);
+        let para = resolve_glk_para(attrs);
         let buf = self.buffers.entry(win).or_default();
-        buf.log.push(BufElem::Text { bits, fg, bg, link, text: s.to_owned() });
+        buf.log.push(BufElem::Text { bits, fg, bg, link, para, text: s.to_owned() });
     }
 
     fn grid_put(&mut self, win: u32, x: u32, y: u32, style: GlkStyle, s: &str) {
@@ -998,7 +1024,7 @@ mod tests {
     #[test]
     fn glk_styles_map_to_bits() {
         assert_eq!(glk_style_bits(GlkStyle::Normal), 0);
-        assert_eq!(glk_style_bits(GlkStyle::Emphasized), 0x02);
+        assert_eq!(glk_style_bits(GlkStyle::Emphasized), 0x04); // italic
         assert_eq!(glk_style_bits(GlkStyle::Header), 0x02);
         assert_eq!(glk_style_bits(GlkStyle::Alert), 0x03);
         assert_eq!(glk_style_bits(GlkStyle::Preformatted), 0x08);
@@ -1058,9 +1084,9 @@ mod tests {
             scaled: None,
         };
         let log = &mut glk.buffers.get_mut(&2).unwrap().log;
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "a\n".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), text: "a\n".into() });
         log.push(BufElem::Image(dummy));
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "b".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), text: "b".into() });
 
         let bw = glk.buffer_node(2);
         assert_eq!(bw.lines.len(), bw.runs.len());
@@ -1222,8 +1248,8 @@ mod tests {
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "You are here. Look!");
         assert_eq!(chunks, vec![
-            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32),
-            (5, 0x02u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32),
+            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32, crate::state::ParaFmt::default()),
+            (5, 0x04u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32, crate::state::ParaFmt::default()),
         ]);
         // A second drain returns only new text.
         glk.put_text(1, GlkStyle::Normal, " More.");
@@ -1281,14 +1307,14 @@ mod tests {
         let plain = StyleColour::default();
         let bits = |style, attrs| resolve_glk_colour(style, plain, attrs).0;
         // Weight 1 on Normal → bold added to a class with no intrinsic bits.
-        assert_eq!(bits(GlkStyle::Normal, StyleAttrs { weight: Some(1), oblique: None }), 0x02);
+        assert_eq!(bits(GlkStyle::Normal, StyleAttrs { weight: Some(1), ..Default::default() }), 0x02);
         // Oblique 1 on Normal → italic.
-        assert_eq!(bits(GlkStyle::Normal, StyleAttrs { weight: None, oblique: Some(1) }), 0x04);
+        assert_eq!(bits(GlkStyle::Normal, StyleAttrs { oblique: Some(1), ..Default::default() }), 0x04);
         // Weight 0 on Header strips the class-intrinsic bold.
-        assert_eq!(bits(GlkStyle::Header, StyleAttrs { weight: Some(0), oblique: None }), 0);
+        assert_eq!(bits(GlkStyle::Header, StyleAttrs { weight: Some(0), ..Default::default() }), 0);
         // "Lighter" (-1) has no terminal rendering → treated as not-bold.
         assert_eq!(
-            bits(GlkStyle::Header, StyleAttrs { weight: Some(u32::MAX), oblique: None }),
+            bits(GlkStyle::Header, StyleAttrs { weight: Some(u32::MAX), ..Default::default() }),
             0
         );
         // No hints → class default preserved (Emphasized keeps its intrinsic look).
@@ -1297,7 +1323,7 @@ mod tests {
             glk_style_bits(GlkStyle::Emphasized)
         );
         // Hints layer: oblique adds italic on top of Header's intrinsic bold.
-        assert_eq!(bits(GlkStyle::Header, StyleAttrs { weight: None, oblique: Some(1) }), 0x06);
+        assert_eq!(bits(GlkStyle::Header, StyleAttrs { oblique: Some(1), ..Default::default() }), 0x06);
     }
 
     #[test]
@@ -1310,10 +1336,25 @@ mod tests {
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "hi");
         assert_eq!(chunks.len(), 1);
-        let (n, _bits, fg, bg, _link) = chunks[0];
+        let (n, _bits, fg, bg, _link, _para) = chunks[0];
         assert_eq!(n, 2);
         assert_eq!(fg, ZColour::True24(0x00FF_0000), "24-bit fg carried losslessly");
         assert_eq!(bg, ZColour::Default);
+    }
+
+    #[test]
+    fn buffer_paragraph_layout_flows_to_transcript_chunk() {
+        // SQ-0330: the Glk paragraph stylehints on a run's StyleAttrs
+        // (Indentation / ParaIndentation / Justification) are carried into the
+        // drained transcript chunk's ParaFmt, ready for the wrap to render.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer);
+        let attrs = StyleAttrs { indent: Some(4), para_indent: Some(-2), justify: Some(2), ..Default::default() };
+        glk.put_text_attr(1, GlkStyle::Normal, StyleColour::default(), attrs, 0, "centered");
+        let (_text, chunks) = glk.take_transcript();
+        assert_eq!(chunks.len(), 1);
+        let para = chunks[0].5;
+        assert_eq!(para, crate::state::ParaFmt { indent: 4, para_indent: -2, justify: 2 });
     }
 
     #[test]
@@ -1474,10 +1515,10 @@ mod tests {
             scaled: None,
         };
         let log = &mut glk.buffers.get_mut(&pid).unwrap().log;
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "foo".into() });
-        log.push(BufElem::Text { bits: 0x02, fg: 0, bg: 0, link: 0, text: "bar".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), text: "foo".into() });
+        log.push(BufElem::Text { bits: 0x02, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), text: "bar".into() });
         log.push(BufElem::Image(dummy));
-        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, text: "baz".into() });
+        log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), text: "baz".into() });
 
         let elems = glk.take_transcript_elems();
         assert_eq!(elems.len(), 3, "coalesced Text, Image, trailing Text");
@@ -1485,7 +1526,7 @@ mod tests {
             crate::session::TranscriptElem::Text { text, runs } => {
                 assert_eq!(text, "foobar", "the two leading runs coalesce into one element");
                 assert_eq!(runs.len(), 2, "each source run kept as its own chunk, in order");
-                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0));
+                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, crate::state::ParaFmt::default()));
                 assert_eq!(runs[1].0, 3);
                 assert_eq!(runs[1].1, 0x02, "second chunk carries the different style bits");
             }

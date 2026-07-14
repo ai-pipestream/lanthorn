@@ -106,6 +106,7 @@ pub(crate) fn reset_game(
             state.clear_anchor = None;
             state.transcript_kinds.clear();
             state.transcript_runs.clear();
+            state.transcript_para.clear();
             state.transcript_scroll = 0;
             if clear_map {
                 *mapper = Mapper::default();

@@ -7617,7 +7617,7 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(
             runs[0].1,
-            crate::glk::StyleAttrs { weight: Some(1), oblique: None },
+            crate::glk::StyleAttrs { weight: Some(1), ..Default::default() },
             "weight hint carried on the run"
         );
         assert_eq!(runs[1].1, crate::glk::StyleAttrs::default(), "cleared hint → class default");
