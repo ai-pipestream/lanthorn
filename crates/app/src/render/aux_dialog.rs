@@ -94,6 +94,30 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
     })
 }
 
+// ── Aux-storage prompt keyboard routing ──────────────────────────────────────
+
+/// Action to take when a key is pressed while the aux-storage prompt is open.
+pub enum AuxDialogAction {
+    None,
+    Archive,
+    Global,
+}
+
+/// Aux-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button.
+/// Esc defaults to Archive (conservative: always resolves the prompt).
+pub fn aux_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> AuxDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => AuxDialogAction::Archive, // conservative default
+        KeyCode::Enter => match focus {
+            1 => AuxDialogAction::Global,
+            _ => AuxDialogAction::Archive, // focus 0 = Archive (default)
+        },
+        _ => AuxDialogAction::None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -127,5 +151,34 @@ mod tests {
         let mut rects = None;
         terminal.draw(|f| { rects = draw_aux_dialog(&state, f.area(), f.buffer_mut()); }).unwrap();
         assert!(rects.is_none(), "should return None when aux_prompt is false");
+    }
+
+    // ── aux_dialog_key_mapping ────────────────────────────────────────────────
+
+    #[test]
+    fn aux_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        // Esc → Archive (conservative default so prompt always resolves).
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Esc, 0), AuxDialogAction::Archive));
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Esc, 1), AuxDialogAction::Archive));
+        // Enter on focus 0 → Archive; Enter on focus 1 → Global.
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Enter, 0), AuxDialogAction::Archive));
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Enter, 1), AuxDialogAction::Global));
+        // Other keys → None.
+        assert!(matches!(aux_dialog_key_focused(KeyCode::Char('x'), 0), AuxDialogAction::None));
+    }
+
+    // ── aux_dialog_tab_then_enter_fires_global ────────────────────────────────
+
+    #[test]
+    fn aux_dialog_tab_then_enter_fires_global() {
+        use crossterm::event::KeyCode;
+        // buttons: [Archive(0), Global(1)], default focus 0.
+        // Tab -> focus 1 (Global); Enter on focus 1 -> Global.
+        let mut focus = 0usize;
+        focus = crate::input::cycle_focus(focus, 2, 1);
+        assert_eq!(focus, 1);
+        let act = aux_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, AuxDialogAction::Global));
     }
 }

@@ -83,6 +83,44 @@ pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
     })
 }
 
+// ── Launch dialog keyboard routing ────────────────────────────────────────────
+
+/// Action to take when a key is pressed while the launch dialog is open.
+pub enum LaunchDialogAction {
+    None,
+    Resume,
+    NewGame,
+}
+
+/// Map a key code to a LaunchDialogAction.
+/// 'r' or Enter → Resume; 'n' or Esc → New game.
+#[cfg_attr(not(test), allow(dead_code))]
+fn launch_dialog_key(code: crossterm::event::KeyCode) -> LaunchDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Char('r') | KeyCode::Enter => LaunchDialogAction::Resume,
+        KeyCode::Char('n') | KeyCode::Esc => LaunchDialogAction::NewGame,
+        _ => LaunchDialogAction::None,
+    }
+}
+
+/// Launch-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
+/// the existing accelerators.
+pub fn launch_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> LaunchDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => LaunchDialogAction::NewGame,
+        KeyCode::Char('r') => LaunchDialogAction::Resume,
+        KeyCode::Char('n') => LaunchDialogAction::NewGame,
+        KeyCode::Enter => match focus {
+            1 => LaunchDialogAction::NewGame,
+            _ => LaunchDialogAction::Resume, // focus 0 = Resume (default)
+        },
+        _ => LaunchDialogAction::None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -131,5 +169,32 @@ mod tests {
         let mut rects = None;
         terminal.draw(|f| { rects = draw_launch_dialog(&state, f.area(), f.buffer_mut()); }).unwrap();
         assert!(rects.is_none(), "dialog must not render when area is too small");
+    }
+
+    // ── launch_dialog_key ─────────────────────────────────────────────────────
+
+    #[test]
+    fn launch_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(launch_dialog_key(KeyCode::Char('r')), LaunchDialogAction::Resume));
+        assert!(matches!(launch_dialog_key(KeyCode::Enter), LaunchDialogAction::Resume));
+        assert!(matches!(launch_dialog_key(KeyCode::Char('n')), LaunchDialogAction::NewGame));
+        assert!(matches!(launch_dialog_key(KeyCode::Esc), LaunchDialogAction::NewGame));
+        assert!(matches!(launch_dialog_key(KeyCode::Char('x')), LaunchDialogAction::None));
+        assert!(matches!(launch_dialog_key(KeyCode::Left), LaunchDialogAction::None));
+    }
+
+    // ── launch_dialog_tab_then_enter_fires_focused ────────────────────────────
+
+    #[test]
+    fn launch_dialog_tab_then_enter_fires_focused() {
+        use crossterm::event::KeyCode;
+        // buttons: [Resume(0), New game(1)], default focus 0.
+        // Tab -> focus 1 (New game); Enter on focus 1 -> NewGame.
+        let mut focus = 0usize;
+        focus = crate::input::cycle_focus(focus, 2, 1);
+        assert_eq!(focus, 1);
+        let act = launch_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, LaunchDialogAction::NewGame));
     }
 }

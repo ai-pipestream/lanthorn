@@ -170,6 +170,26 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll })
 }
 
+// ── Hints panel keyboard routing ──────────────────────────────────────────────
+
+/// Routing decision for a key pressed while the hints panel is open.
+pub enum HintKeyKind {
+    /// Close the hints panel (Esc).
+    Close,
+    /// Route the key to the hint sub-session.
+    ToSession,
+}
+
+/// Map a key code to a HintKeyKind.
+/// Esc → Close; everything else → ToSession.
+pub fn hint_key_routes(code: crossterm::event::KeyCode) -> HintKeyKind {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc => HintKeyKind::Close,
+        _ => HintKeyKind::ToSession,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -262,5 +282,27 @@ mod tests {
             rects = draw_hints_panel(&state, f.area(), f.buffer_mut());
         }).unwrap();
         assert!(rects.is_none(), "draw_hints_panel must return None on very small terminals");
+    }
+
+    // ── hint_key_routes ───────────────────────────────────────────────────────
+
+    #[test]
+    fn hint_panel_keys_close_on_esc_else_route() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(hint_key_routes(KeyCode::Esc), HintKeyKind::Close));
+        assert!(matches!(hint_key_routes(KeyCode::Char('a')), HintKeyKind::ToSession));
+    }
+
+    /// Regression: Enter must route to the hint session input (ToSession), not Close.
+    /// The hints panel has a text input; Enter submits that input regardless of any
+    /// default-button decoration on the Close button.
+    #[test]
+    fn hints_enter_submits_input_not_close() {
+        use crossterm::event::KeyCode;
+        let routed = hint_key_routes(KeyCode::Enter);
+        assert!(
+            matches!(routed, HintKeyKind::ToSession),
+            "Enter must be routed to the hint session input (ToSession), not Close"
+        );
     }
 }

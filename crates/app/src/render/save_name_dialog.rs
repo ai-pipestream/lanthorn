@@ -94,6 +94,118 @@ pub fn draw_save_name_dialog(
     })
 }
 
+// ── Save-name dialog keyboard routing ─────────────────────────────────────────
+
+/// What a key press resolves to in the save-name dialog.
+pub enum SaveNameAction {
+    None,
+    Save,
+    Cancel,
+}
+
+/// Apply one key to the save-name dialog's field state machine and focus ring
+/// (0 = text field, 1 = Save, 2 = Cancel). Mutates `dlg.field`/`dlg.active` in
+/// place and returns the resolved action plus the new focus slot. Callers gate
+/// out Ctrl/Alt-modified printable chars before calling.
+///
+/// Field-focused behavior (see SQ-0289 table): a greyed placeholder (`active =
+/// false`) is adopted for editing by Tab/→/Home/End/←/Backspace/Delete (without
+/// advancing focus for Tab/→); typing a printable char starts fresh; Enter on the
+/// placeholder saves the default; in active mode Enter saves a non-empty value and
+/// reverts an empty one to the placeholder.
+pub fn save_name_dialog_key(
+    code: crossterm::event::KeyCode,
+    dlg: &mut crate::state::SaveNameDialog,
+    focus: usize,
+) -> (SaveNameAction, usize) {
+    use crossterm::event::KeyCode;
+    if focus == 0 {
+        // ── Text field focused ──
+        match code {
+            KeyCode::Esc => return (SaveNameAction::Cancel, focus),
+            KeyCode::Enter => {
+                if dlg.active && dlg.field.value.is_empty() {
+                    dlg.active = false; // empty: revert to placeholder
+                    return (SaveNameAction::None, focus);
+                }
+                return (SaveNameAction::Save, focus); // placeholder saves default
+            }
+            KeyCode::BackTab => return (SaveNameAction::None, 2), // reverse-wrap to Cancel
+            KeyCode::Tab => {
+                if dlg.active {
+                    return (SaveNameAction::None, 1); // advance to Save
+                }
+                dlg.active = true; // adopt default for editing
+                dlg.field.end();
+            }
+            KeyCode::Right => {
+                if dlg.active {
+                    dlg.field.right();
+                } else {
+                    dlg.active = true; // adopt default
+                    dlg.field.end();
+                }
+            }
+            KeyCode::Left => {
+                if !dlg.active {
+                    dlg.active = true;
+                    dlg.field.end();
+                }
+                dlg.field.left();
+            }
+            KeyCode::Home => {
+                dlg.active = true;
+                dlg.field.home();
+            }
+            KeyCode::End => {
+                dlg.active = true;
+                dlg.field.end();
+            }
+            KeyCode::Backspace => {
+                if !dlg.active {
+                    dlg.active = true;
+                    dlg.field.end();
+                }
+                dlg.field.backspace();
+            }
+            KeyCode::Delete => {
+                if !dlg.active {
+                    dlg.active = true;
+                    dlg.field.end();
+                }
+                dlg.field.delete();
+            }
+            KeyCode::Char(c) => {
+                if dlg.active {
+                    dlg.field.insert(c);
+                } else {
+                    // Typing on the placeholder starts fresh.
+                    dlg.field.set(String::new(), false);
+                    dlg.field.insert(c);
+                    dlg.active = true;
+                }
+            }
+            _ => {}
+        }
+        (SaveNameAction::None, focus)
+    } else {
+        // ── Save / Cancel button focused ──
+        match code {
+            KeyCode::Esc => (SaveNameAction::Cancel, focus),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if focus == 1 {
+                    (SaveNameAction::Save, focus)
+                } else {
+                    (SaveNameAction::Cancel, focus)
+                }
+            }
+            KeyCode::Tab | KeyCode::Right => (SaveNameAction::None, crate::input::cycle_focus(focus, 3, 1)),
+            KeyCode::BackTab | KeyCode::Left => (SaveNameAction::None, crate::input::cycle_focus(focus, 3, -1)),
+            _ => (SaveNameAction::None, focus),
+        }
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -129,5 +241,123 @@ mod tests {
         assert!(all.contains("Save State as"), "title present");
         assert!(all.contains("Name:"), "field label present");
         assert!(all.contains("2026-07-13 1432"), "default name prefilled");
+    }
+
+    // ── SQ-0289: save-name dialog field state machine ─────────────────────────
+
+    use crossterm::event::KeyCode;
+    use crate::state::SaveNameDialog;
+
+    fn sn_dialog() -> SaveNameDialog {
+        SaveNameDialog::new("2026-07-13 1432".to_string(), false)
+    }
+
+    #[test]
+    fn sn_placeholder_adopts_default_on_tab_and_right_without_advancing_focus() {
+        for code in [KeyCode::Tab, KeyCode::Right] {
+            let mut d = sn_dialog();
+            let (act, focus) = save_name_dialog_key(code, &mut d, 0);
+            assert!(matches!(act, SaveNameAction::None));
+            assert_eq!(focus, 0, "adopting the default must not advance focus");
+            assert!(d.active, "field becomes active");
+            assert_eq!(d.field.value, "2026-07-13 1432", "value keeps the default");
+            assert_eq!(d.field.cursor, d.field.char_len(), "caret at end");
+        }
+    }
+
+    #[test]
+    fn sn_typing_on_placeholder_starts_fresh() {
+        let mut d = sn_dialog();
+        let (act, focus) = save_name_dialog_key(KeyCode::Char('h'), &mut d, 0);
+        assert!(matches!(act, SaveNameAction::None));
+        assert_eq!(focus, 0);
+        assert!(d.active);
+        assert_eq!(d.field.value, "h");
+        assert_eq!(d.field.cursor, 1);
+        // Subsequent chars insert normally.
+        save_name_dialog_key(KeyCode::Char('i'), &mut d, 0);
+        assert_eq!(d.field.value, "hi");
+    }
+
+    #[test]
+    fn sn_enter_on_placeholder_saves_the_default() {
+        let mut d = sn_dialog();
+        let (act, _) = save_name_dialog_key(KeyCode::Enter, &mut d, 0);
+        assert!(matches!(act, SaveNameAction::Save));
+        assert_eq!(d.field.value, "2026-07-13 1432", "the default is what gets saved");
+    }
+
+    #[test]
+    fn sn_enter_active_empty_reverts_to_placeholder_and_nonempty_saves() {
+        let mut d = sn_dialog();
+        // Emptying the field: type then delete it all.
+        save_name_dialog_key(KeyCode::Char('x'), &mut d, 0);
+        save_name_dialog_key(KeyCode::Backspace, &mut d, 0);
+        assert!(d.field.value.is_empty() && d.active);
+        let (act, _) = save_name_dialog_key(KeyCode::Enter, &mut d, 0);
+        assert!(matches!(act, SaveNameAction::None), "empty Enter does not save");
+        assert!(!d.active, "reverts to placeholder");
+        // Now type a real name and Enter → Save.
+        save_name_dialog_key(KeyCode::Char('a'), &mut d, 0);
+        let (act2, _) = save_name_dialog_key(KeyCode::Enter, &mut d, 0);
+        assert!(matches!(act2, SaveNameAction::Save));
+        assert_eq!(d.field.value, "a");
+    }
+
+    #[test]
+    fn sn_backspace_and_home_adopt_default_for_editing() {
+        let mut d = sn_dialog();
+        let (_, _) = save_name_dialog_key(KeyCode::Backspace, &mut d, 0);
+        assert!(d.active, "backspace on placeholder adopts");
+        assert_eq!(d.field.value, "2026-07-13 143", "then deletes the last char");
+
+        let mut d2 = sn_dialog();
+        save_name_dialog_key(KeyCode::Home, &mut d2, 0);
+        assert!(d2.active);
+        assert_eq!(d2.field.cursor, 0, "Home adopts then moves to start");
+    }
+
+    #[test]
+    fn sn_field_focus_tab_and_shifttab_move_to_buttons() {
+        // Editing mode: Tab advances to Save (1); Shift-Tab wraps to Cancel (2).
+        let mut d = sn_dialog();
+        d.active = true;
+        let (act, focus) = save_name_dialog_key(KeyCode::Tab, &mut d, 0);
+        assert!(matches!(act, SaveNameAction::None));
+        assert_eq!(focus, 1);
+        let (_, focus2) = save_name_dialog_key(KeyCode::BackTab, &mut d, 0);
+        assert_eq!(focus2, 2, "Shift-Tab from the field reverse-wraps to Cancel");
+    }
+
+    #[test]
+    fn sn_active_right_moves_cursor_not_focus() {
+        let mut d = sn_dialog();
+        d.active = true;
+        d.field.home();
+        let (act, focus) = save_name_dialog_key(KeyCode::Right, &mut d, 0);
+        assert!(matches!(act, SaveNameAction::None));
+        assert_eq!(focus, 0, "Right in edit mode stays on the field");
+        assert_eq!(d.field.cursor, 1);
+    }
+
+    #[test]
+    fn sn_esc_cancels_from_field_or_button() {
+        let mut d = sn_dialog();
+        assert!(matches!(save_name_dialog_key(KeyCode::Esc, &mut d, 0).0, SaveNameAction::Cancel));
+        assert!(matches!(save_name_dialog_key(KeyCode::Esc, &mut d, 1).0, SaveNameAction::Cancel));
+    }
+
+    #[test]
+    fn sn_buttons_activate_and_cycle() {
+        let mut d = sn_dialog();
+        // Save button (focus 1): Enter/Space → Save.
+        assert!(matches!(save_name_dialog_key(KeyCode::Enter, &mut d, 1).0, SaveNameAction::Save));
+        assert!(matches!(save_name_dialog_key(KeyCode::Char(' '), &mut d, 1).0, SaveNameAction::Save));
+        // Cancel button (focus 2): Enter → Cancel.
+        assert!(matches!(save_name_dialog_key(KeyCode::Enter, &mut d, 2).0, SaveNameAction::Cancel));
+        // Tab cycles 1 → 2 → 0; Shift-Tab reverses.
+        assert_eq!(save_name_dialog_key(KeyCode::Tab, &mut d, 1).1, 2);
+        assert_eq!(save_name_dialog_key(KeyCode::Tab, &mut d, 2).1, 0);
+        assert_eq!(save_name_dialog_key(KeyCode::BackTab, &mut d, 1).1, 0);
     }
 }

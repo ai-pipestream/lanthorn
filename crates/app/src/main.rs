@@ -24,7 +24,12 @@ use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};
 use app::render::style_editor::StyleEditorRects;
 use app::render::dialog::{DialogRects, DialogStyle};
-use app::render::hints_panel::HintsPanelRects;
+use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
+use app::render::aux_dialog::{aux_dialog_key_focused, AuxDialogAction};
+use app::render::reset_dialog::{reset_dialog_key_focused, ResetDialogAction};
+use app::render::save_name_dialog::{save_name_dialog_key, SaveNameAction};
+use app::render::quit_dialog::{quit_dialog_key_focused, QuitDialogAction};
+use app::render::launch_dialog::{launch_dialog_key_focused, LaunchDialogAction};
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
@@ -2823,214 +2828,11 @@ fn dim_area(buf: &mut ratatui::buffer::Buffer, area: Rect) {
     }
 }
 
-// ── Hints panel keyboard routing ──────────────────────────────────────────────
-
-/// Routing decision for a key pressed while the hints panel is open.
-enum HintKeyKind {
-    /// Close the hints panel (Esc).
-    Close,
-    /// Route the key to the hint sub-session.
-    ToSession,
-}
-
-/// Map a key code to a HintKeyKind.
-/// Esc → Close; everything else → ToSession.
-fn hint_key_routes(code: crossterm::event::KeyCode) -> HintKeyKind {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Esc => HintKeyKind::Close,
-        _ => HintKeyKind::ToSession,
-    }
-}
-
 // ── Slash-command helper ──────────────────────────────────────────────────────
 
 /// Return true when `input` starts with the configured command `prefix` char.
 fn is_slash(input: &str, prefix: char) -> bool {
     input.starts_with(prefix)
-}
-
-// ── Reset dialog keyboard routing ─────────────────────────────────────────────
-
-/// Action to take when a key is pressed while the reset dialog is open.
-enum ResetDialogAction {
-    None,
-    ToggleClearMap,
-    ToggleDeleteData,
-    Confirm,
-    Cancel,
-}
-
-/// Map a key code to a ResetDialogAction (focus-agnostic accelerators only).
-/// Esc and 'c' cancel; Enter and 'r' confirm; Space toggles the clear-map box.
-#[cfg_attr(not(test), allow(dead_code))]
-fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
-        KeyCode::Enter | KeyCode::Char('r') => ResetDialogAction::Confirm,
-        KeyCode::Char(' ') => ResetDialogAction::ToggleClearMap,
-        _ => ResetDialogAction::None,
-    }
-}
-
-/// Reset-dialog keys with focus. Tab/BackTab are handled by the caller (which
-/// mutates dialog_focus over a 4-slot ring: 0 = clear-map checkbox, 1 = delete-data
-/// checkbox, 2 = Reset, 3 = Cancel). Space toggles the focused checkbox; Enter
-/// activates the focused button (or confirms when a checkbox is focused); 'r'/'c'
-/// stay as confirm/cancel accelerators.
-fn reset_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> ResetDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
-        KeyCode::Char('r') => ResetDialogAction::Confirm,
-        KeyCode::Char(' ') => match focus {
-            0 => ResetDialogAction::ToggleClearMap,
-            1 => ResetDialogAction::ToggleDeleteData,
-            _ => ResetDialogAction::None,
-        },
-        KeyCode::Enter => match focus {
-            3 => ResetDialogAction::Cancel,
-            _ => ResetDialogAction::Confirm, // checkboxes and Reset (focus 2) confirm
-        },
-        _ => ResetDialogAction::None,
-    }
-}
-
-// ── Save-name dialog keyboard routing ─────────────────────────────────────────
-
-/// What a key press resolves to in the save-name dialog.
-enum SaveNameAction {
-    None,
-    Save,
-    Cancel,
-}
-
-/// Apply one key to the save-name dialog's field state machine and focus ring
-/// (0 = text field, 1 = Save, 2 = Cancel). Mutates `dlg.field`/`dlg.active` in
-/// place and returns the resolved action plus the new focus slot. Callers gate
-/// out Ctrl/Alt-modified printable chars before calling.
-///
-/// Field-focused behavior (see SQ-0289 table): a greyed placeholder (`active =
-/// false`) is adopted for editing by Tab/→/Home/End/←/Backspace/Delete (without
-/// advancing focus for Tab/→); typing a printable char starts fresh; Enter on the
-/// placeholder saves the default; in active mode Enter saves a non-empty value and
-/// reverts an empty one to the placeholder.
-fn save_name_dialog_key(
-    code: crossterm::event::KeyCode,
-    dlg: &mut app::state::SaveNameDialog,
-    focus: usize,
-) -> (SaveNameAction, usize) {
-    use crossterm::event::KeyCode;
-    if focus == 0 {
-        // ── Text field focused ──
-        match code {
-            KeyCode::Esc => return (SaveNameAction::Cancel, focus),
-            KeyCode::Enter => {
-                if dlg.active && dlg.field.value.is_empty() {
-                    dlg.active = false; // empty: revert to placeholder
-                    return (SaveNameAction::None, focus);
-                }
-                return (SaveNameAction::Save, focus); // placeholder saves default
-            }
-            KeyCode::BackTab => return (SaveNameAction::None, 2), // reverse-wrap to Cancel
-            KeyCode::Tab => {
-                if dlg.active {
-                    return (SaveNameAction::None, 1); // advance to Save
-                }
-                dlg.active = true; // adopt default for editing
-                dlg.field.end();
-            }
-            KeyCode::Right => {
-                if dlg.active {
-                    dlg.field.right();
-                } else {
-                    dlg.active = true; // adopt default
-                    dlg.field.end();
-                }
-            }
-            KeyCode::Left => {
-                if !dlg.active {
-                    dlg.active = true;
-                    dlg.field.end();
-                }
-                dlg.field.left();
-            }
-            KeyCode::Home => {
-                dlg.active = true;
-                dlg.field.home();
-            }
-            KeyCode::End => {
-                dlg.active = true;
-                dlg.field.end();
-            }
-            KeyCode::Backspace => {
-                if !dlg.active {
-                    dlg.active = true;
-                    dlg.field.end();
-                }
-                dlg.field.backspace();
-            }
-            KeyCode::Delete => {
-                if !dlg.active {
-                    dlg.active = true;
-                    dlg.field.end();
-                }
-                dlg.field.delete();
-            }
-            KeyCode::Char(c) => {
-                if dlg.active {
-                    dlg.field.insert(c);
-                } else {
-                    // Typing on the placeholder starts fresh.
-                    dlg.field.set(String::new(), false);
-                    dlg.field.insert(c);
-                    dlg.active = true;
-                }
-            }
-            _ => {}
-        }
-        (SaveNameAction::None, focus)
-    } else {
-        // ── Save / Cancel button focused ──
-        match code {
-            KeyCode::Esc => (SaveNameAction::Cancel, focus),
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if focus == 1 {
-                    (SaveNameAction::Save, focus)
-                } else {
-                    (SaveNameAction::Cancel, focus)
-                }
-            }
-            KeyCode::Tab | KeyCode::Right => (SaveNameAction::None, app::input::cycle_focus(focus, 3, 1)),
-            KeyCode::BackTab | KeyCode::Left => (SaveNameAction::None, app::input::cycle_focus(focus, 3, -1)),
-            _ => (SaveNameAction::None, focus),
-        }
-    }
-}
-
-// ── Aux-storage prompt keyboard routing ──────────────────────────────────────
-
-/// Action to take when a key is pressed while the aux-storage prompt is open.
-enum AuxDialogAction {
-    None,
-    Archive,
-    Global,
-}
-
-/// Aux-dialog keys with button focus. Tab/BackTab are handled by the caller
-/// (which mutates dialog_focus); this maps Enter to the focused button.
-/// Esc defaults to Archive (conservative: always resolves the prompt).
-fn aux_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> AuxDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Esc => AuxDialogAction::Archive, // conservative default
-        KeyCode::Enter => match focus {
-            1 => AuxDialogAction::Global,
-            _ => AuxDialogAction::Archive, // focus 0 = Archive (default)
-        },
-        _ => AuxDialogAction::None,
-    }
 }
 
 // ── Quit dialog helpers ───────────────────────────────────────────────────────
@@ -3154,83 +2956,6 @@ fn should_prompt_save_on_quit(state: &AppState) -> bool {
     !state.config.auto_save && state.config.prompt_save_on_quit && state.unsaved_progress
 }
 
-/// Action to take when a key is pressed while the quit dialog is open.
-enum QuitDialogAction {
-    None,
-    Save,
-    Quit,
-    Cancel,
-}
-
-/// Map a key code to a QuitDialogAction.
-/// 's' or Enter → Save State & quit; 'q' → Quit without saving; Esc or 'c' → Cancel.
-#[cfg_attr(not(test), allow(dead_code))]
-fn quit_dialog_key(code: crossterm::event::KeyCode) -> QuitDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Char('s') | KeyCode::Enter => QuitDialogAction::Save,
-        KeyCode::Char('q') => QuitDialogAction::Quit,
-        KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
-        _ => QuitDialogAction::None,
-    }
-}
-
-/// Quit-dialog keys with button focus. Tab/BackTab are handled by the caller
-/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
-/// the existing accelerators.
-fn quit_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> QuitDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
-        KeyCode::Char('s') => QuitDialogAction::Save,
-        KeyCode::Char('q') => QuitDialogAction::Quit,
-        KeyCode::Enter => match focus {
-            1 => QuitDialogAction::Quit,
-            2 => QuitDialogAction::Cancel,
-            _ => QuitDialogAction::Save, // focus 0 = Save & quit (default)
-        },
-        _ => QuitDialogAction::None,
-    }
-}
-
-// ── Launch dialog helpers ─────────────────────────────────────────────────────
-
-/// Action to take when a key is pressed while the launch dialog is open.
-enum LaunchDialogAction {
-    None,
-    Resume,
-    NewGame,
-}
-
-/// Map a key code to a LaunchDialogAction.
-/// 'r' or Enter → Resume; 'n' or Esc → New game.
-#[cfg_attr(not(test), allow(dead_code))]
-fn launch_dialog_key(code: crossterm::event::KeyCode) -> LaunchDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Char('r') | KeyCode::Enter => LaunchDialogAction::Resume,
-        KeyCode::Char('n') | KeyCode::Esc => LaunchDialogAction::NewGame,
-        _ => LaunchDialogAction::None,
-    }
-}
-
-/// Launch-dialog keys with button focus. Tab/BackTab are handled by the caller
-/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
-/// the existing accelerators.
-fn launch_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> LaunchDialogAction {
-    use crossterm::event::KeyCode;
-    match code {
-        KeyCode::Esc => LaunchDialogAction::NewGame,
-        KeyCode::Char('r') => LaunchDialogAction::Resume,
-        KeyCode::Char('n') => LaunchDialogAction::NewGame,
-        KeyCode::Enter => match focus {
-            1 => LaunchDialogAction::NewGame,
-            _ => LaunchDialogAction::Resume, // focus 0 = Resume (default)
-        },
-        _ => LaunchDialogAction::None,
-    }
-}
-
 // ── Scroll-to-match helper ────────────────────────────────────────────────────
 
 /// Given a match at `match_visible_pos` (0-based) within `total_visible` visible rows,
@@ -3263,126 +2988,8 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
 
-    use super::{aux_dialog_key_focused, dim_area, hint_key_routes, is_slash, launch_dialog_key, launch_dialog_key_focused, quit_dialog_key, quit_dialog_key_focused, reset_dialog_key, reset_dialog_key_focused, save_name_dialog_key, scroll_for_match, should_prompt_save_on_quit, AuxDialogAction, HintKeyKind, LaunchDialogAction, QuitDialogAction, ResetDialogAction, SaveNameAction};
+    use super::{dim_area, is_slash, scroll_for_match, should_prompt_save_on_quit};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
-
-    // ── SQ-0289: save-name dialog field state machine ─────────────────────────
-
-    use crossterm::event::KeyCode;
-    use app::state::SaveNameDialog;
-
-    fn sn_dialog() -> SaveNameDialog {
-        SaveNameDialog::new("2026-07-13 1432".to_string(), false)
-    }
-
-    #[test]
-    fn sn_placeholder_adopts_default_on_tab_and_right_without_advancing_focus() {
-        for code in [KeyCode::Tab, KeyCode::Right] {
-            let mut d = sn_dialog();
-            let (act, focus) = save_name_dialog_key(code, &mut d, 0);
-            assert!(matches!(act, SaveNameAction::None));
-            assert_eq!(focus, 0, "adopting the default must not advance focus");
-            assert!(d.active, "field becomes active");
-            assert_eq!(d.field.value, "2026-07-13 1432", "value keeps the default");
-            assert_eq!(d.field.cursor, d.field.char_len(), "caret at end");
-        }
-    }
-
-    #[test]
-    fn sn_typing_on_placeholder_starts_fresh() {
-        let mut d = sn_dialog();
-        let (act, focus) = save_name_dialog_key(KeyCode::Char('h'), &mut d, 0);
-        assert!(matches!(act, SaveNameAction::None));
-        assert_eq!(focus, 0);
-        assert!(d.active);
-        assert_eq!(d.field.value, "h");
-        assert_eq!(d.field.cursor, 1);
-        // Subsequent chars insert normally.
-        save_name_dialog_key(KeyCode::Char('i'), &mut d, 0);
-        assert_eq!(d.field.value, "hi");
-    }
-
-    #[test]
-    fn sn_enter_on_placeholder_saves_the_default() {
-        let mut d = sn_dialog();
-        let (act, _) = save_name_dialog_key(KeyCode::Enter, &mut d, 0);
-        assert!(matches!(act, SaveNameAction::Save));
-        assert_eq!(d.field.value, "2026-07-13 1432", "the default is what gets saved");
-    }
-
-    #[test]
-    fn sn_enter_active_empty_reverts_to_placeholder_and_nonempty_saves() {
-        let mut d = sn_dialog();
-        // Emptying the field: type then delete it all.
-        save_name_dialog_key(KeyCode::Char('x'), &mut d, 0);
-        save_name_dialog_key(KeyCode::Backspace, &mut d, 0);
-        assert!(d.field.value.is_empty() && d.active);
-        let (act, _) = save_name_dialog_key(KeyCode::Enter, &mut d, 0);
-        assert!(matches!(act, SaveNameAction::None), "empty Enter does not save");
-        assert!(!d.active, "reverts to placeholder");
-        // Now type a real name and Enter → Save.
-        save_name_dialog_key(KeyCode::Char('a'), &mut d, 0);
-        let (act2, _) = save_name_dialog_key(KeyCode::Enter, &mut d, 0);
-        assert!(matches!(act2, SaveNameAction::Save));
-        assert_eq!(d.field.value, "a");
-    }
-
-    #[test]
-    fn sn_backspace_and_home_adopt_default_for_editing() {
-        let mut d = sn_dialog();
-        let (_, _) = save_name_dialog_key(KeyCode::Backspace, &mut d, 0);
-        assert!(d.active, "backspace on placeholder adopts");
-        assert_eq!(d.field.value, "2026-07-13 143", "then deletes the last char");
-
-        let mut d2 = sn_dialog();
-        save_name_dialog_key(KeyCode::Home, &mut d2, 0);
-        assert!(d2.active);
-        assert_eq!(d2.field.cursor, 0, "Home adopts then moves to start");
-    }
-
-    #[test]
-    fn sn_field_focus_tab_and_shifttab_move_to_buttons() {
-        // Editing mode: Tab advances to Save (1); Shift-Tab wraps to Cancel (2).
-        let mut d = sn_dialog();
-        d.active = true;
-        let (act, focus) = save_name_dialog_key(KeyCode::Tab, &mut d, 0);
-        assert!(matches!(act, SaveNameAction::None));
-        assert_eq!(focus, 1);
-        let (_, focus2) = save_name_dialog_key(KeyCode::BackTab, &mut d, 0);
-        assert_eq!(focus2, 2, "Shift-Tab from the field reverse-wraps to Cancel");
-    }
-
-    #[test]
-    fn sn_active_right_moves_cursor_not_focus() {
-        let mut d = sn_dialog();
-        d.active = true;
-        d.field.home();
-        let (act, focus) = save_name_dialog_key(KeyCode::Right, &mut d, 0);
-        assert!(matches!(act, SaveNameAction::None));
-        assert_eq!(focus, 0, "Right in edit mode stays on the field");
-        assert_eq!(d.field.cursor, 1);
-    }
-
-    #[test]
-    fn sn_esc_cancels_from_field_or_button() {
-        let mut d = sn_dialog();
-        assert!(matches!(save_name_dialog_key(KeyCode::Esc, &mut d, 0).0, SaveNameAction::Cancel));
-        assert!(matches!(save_name_dialog_key(KeyCode::Esc, &mut d, 1).0, SaveNameAction::Cancel));
-    }
-
-    #[test]
-    fn sn_buttons_activate_and_cycle() {
-        let mut d = sn_dialog();
-        // Save button (focus 1): Enter/Space → Save.
-        assert!(matches!(save_name_dialog_key(KeyCode::Enter, &mut d, 1).0, SaveNameAction::Save));
-        assert!(matches!(save_name_dialog_key(KeyCode::Char(' '), &mut d, 1).0, SaveNameAction::Save));
-        // Cancel button (focus 2): Enter → Cancel.
-        assert!(matches!(save_name_dialog_key(KeyCode::Enter, &mut d, 2).0, SaveNameAction::Cancel));
-        // Tab cycles 1 → 2 → 0; Shift-Tab reverses.
-        assert_eq!(save_name_dialog_key(KeyCode::Tab, &mut d, 1).1, 2);
-        assert_eq!(save_name_dialog_key(KeyCode::Tab, &mut d, 2).1, 0);
-        assert_eq!(save_name_dialog_key(KeyCode::BackTab, &mut d, 1).1, 0);
-    }
 
     // ── SQ-0297: map-export slash commands must actually write the file ────────
 
@@ -3979,18 +3586,6 @@ mod tests {
         assert!(!is_slash("/help", ';'));
     }
 
-    // ── reset_dialog_key_mapping ──────────────────────────────────────────────
-
-    #[test]
-    fn reset_dialog_key_mapping() {
-        use crossterm::event::KeyCode;
-        assert!(matches!(reset_dialog_key(KeyCode::Esc), ResetDialogAction::Cancel));
-        assert!(matches!(reset_dialog_key(KeyCode::Char('c')), ResetDialogAction::Cancel));
-        assert!(matches!(reset_dialog_key(KeyCode::Enter), ResetDialogAction::Confirm));
-        assert!(matches!(reset_dialog_key(KeyCode::Char('r')), ResetDialogAction::Confirm));
-        assert!(matches!(reset_dialog_key(KeyCode::Char(' ')), ResetDialogAction::ToggleClearMap));
-    }
-
     // ── should_prompt_save_on_quit ────────────────────────────────────────────
 
     #[test]
@@ -4021,33 +3616,6 @@ mod tests {
         assert!(!should_prompt_save_on_quit(&s), "prompt_save_on_quit=false => no prompt");
     }
 
-    // ── quit_dialog_key ───────────────────────────────────────────────────────
-
-    #[test]
-    fn quit_dialog_key_mapping() {
-        use crossterm::event::KeyCode;
-        assert!(matches!(quit_dialog_key(KeyCode::Char('s')), QuitDialogAction::Save));
-        assert!(matches!(quit_dialog_key(KeyCode::Enter), QuitDialogAction::Save));
-        assert!(matches!(quit_dialog_key(KeyCode::Char('q')), QuitDialogAction::Quit));
-        assert!(matches!(quit_dialog_key(KeyCode::Esc), QuitDialogAction::Cancel));
-        assert!(matches!(quit_dialog_key(KeyCode::Char('c')), QuitDialogAction::Cancel));
-        assert!(matches!(quit_dialog_key(KeyCode::Char('x')), QuitDialogAction::None));
-        assert!(matches!(quit_dialog_key(KeyCode::Left), QuitDialogAction::None));
-    }
-
-    // ── launch_dialog_key ─────────────────────────────────────────────────────
-
-    #[test]
-    fn launch_dialog_key_mapping() {
-        use crossterm::event::KeyCode;
-        assert!(matches!(launch_dialog_key(KeyCode::Char('r')), LaunchDialogAction::Resume));
-        assert!(matches!(launch_dialog_key(KeyCode::Enter), LaunchDialogAction::Resume));
-        assert!(matches!(launch_dialog_key(KeyCode::Char('n')), LaunchDialogAction::NewGame));
-        assert!(matches!(launch_dialog_key(KeyCode::Esc), LaunchDialogAction::NewGame));
-        assert!(matches!(launch_dialog_key(KeyCode::Char('x')), LaunchDialogAction::None));
-        assert!(matches!(launch_dialog_key(KeyCode::Left), LaunchDialogAction::None));
-    }
-
     // ── launch_dialog counts as overlay ──────────────────────────────────────
 
     #[test]
@@ -4058,110 +3626,6 @@ mod tests {
         assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
         s.launch_dialog = false;
         assert!(!s.any_overlay_open(), "launch_dialog false => any_overlay_open false");
-    }
-
-    // ── hint_key_routes ───────────────────────────────────────────────────────
-
-    #[test]
-    fn hint_panel_keys_close_on_esc_else_route() {
-        use crossterm::event::KeyCode;
-        assert!(matches!(hint_key_routes(KeyCode::Esc), HintKeyKind::Close));
-        assert!(matches!(hint_key_routes(KeyCode::Char('a')), HintKeyKind::ToSession));
-    }
-
-    /// Regression: Enter must route to the hint session input (ToSession), not Close.
-    /// The hints panel has a text input; Enter submits that input regardless of any
-    /// default-button decoration on the Close button.
-    #[test]
-    fn hints_enter_submits_input_not_close() {
-        use crossterm::event::KeyCode;
-        let routed = hint_key_routes(KeyCode::Enter);
-        assert!(
-            matches!(routed, HintKeyKind::ToSession),
-            "Enter must be routed to the hint session input (ToSession), not Close"
-        );
-    }
-
-    // ── reset_dialog_tab_then_enter_fires_focused ─────────────────────────────
-
-    #[test]
-    fn reset_dialog_tab_then_enter_fires_focused() {
-        use crossterm::event::KeyCode;
-        // Focus ring (4): 0 = clear-map checkbox, 1 = delete-data checkbox,
-        // 2 = Reset, 3 = Cancel. Default focus 0.
-        let mut focus = 0usize;
-        // Space on focus 0 toggles the clear-map checkbox.
-        assert!(matches!(reset_dialog_key_focused(KeyCode::Char(' '), focus), ResetDialogAction::ToggleClearMap));
-        // Tab -> focus 1 (delete-data checkbox); Space toggles delete-data.
-        focus = app::input::cycle_focus(focus, 4, 1);
-        assert_eq!(focus, 1);
-        assert!(matches!(reset_dialog_key_focused(KeyCode::Char(' '), focus), ResetDialogAction::ToggleDeleteData));
-        // Enter on a focused checkbox confirms.
-        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, focus), ResetDialogAction::Confirm));
-        // Tab to focus 3 (Cancel); Enter cancels.
-        focus = app::input::cycle_focus(focus, 4, 1); // 2 = Reset
-        focus = app::input::cycle_focus(focus, 4, 1); // 3 = Cancel
-        assert_eq!(focus, 3);
-        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, focus), ResetDialogAction::Cancel));
-        // Enter on focus 2 (Reset) confirms.
-        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, 2), ResetDialogAction::Confirm));
-    }
-
-    // ── aux_dialog_key_mapping ────────────────────────────────────────────────
-
-    #[test]
-    fn aux_dialog_key_mapping() {
-        use crossterm::event::KeyCode;
-        // Esc → Archive (conservative default so prompt always resolves).
-        assert!(matches!(aux_dialog_key_focused(KeyCode::Esc, 0), AuxDialogAction::Archive));
-        assert!(matches!(aux_dialog_key_focused(KeyCode::Esc, 1), AuxDialogAction::Archive));
-        // Enter on focus 0 → Archive; Enter on focus 1 → Global.
-        assert!(matches!(aux_dialog_key_focused(KeyCode::Enter, 0), AuxDialogAction::Archive));
-        assert!(matches!(aux_dialog_key_focused(KeyCode::Enter, 1), AuxDialogAction::Global));
-        // Other keys → None.
-        assert!(matches!(aux_dialog_key_focused(KeyCode::Char('x'), 0), AuxDialogAction::None));
-    }
-
-    // ── aux_dialog_tab_then_enter_fires_global ────────────────────────────────
-
-    #[test]
-    fn aux_dialog_tab_then_enter_fires_global() {
-        use crossterm::event::KeyCode;
-        // buttons: [Archive(0), Global(1)], default focus 0.
-        // Tab -> focus 1 (Global); Enter on focus 1 -> Global.
-        let mut focus = 0usize;
-        focus = app::input::cycle_focus(focus, 2, 1);
-        assert_eq!(focus, 1);
-        let act = aux_dialog_key_focused(KeyCode::Enter, focus);
-        assert!(matches!(act, AuxDialogAction::Global));
-    }
-
-    // ── quit_dialog_tab_then_enter_fires_focused ──────────────────────────────
-
-    #[test]
-    fn quit_dialog_tab_then_enter_fires_focused() {
-        use crossterm::event::KeyCode;
-        // buttons: [Save State & quit(0), Quit(1), Cancel(2)], default focus 0.
-        // Tab -> focus 1 (Quit); Enter on focus 1 -> Quit.
-        let mut focus = 0usize;
-        focus = app::input::cycle_focus(focus, 3, 1);
-        assert_eq!(focus, 1);
-        let act = quit_dialog_key_focused(KeyCode::Enter, focus);
-        assert!(matches!(act, QuitDialogAction::Quit));
-    }
-
-    // ── launch_dialog_tab_then_enter_fires_focused ────────────────────────────
-
-    #[test]
-    fn launch_dialog_tab_then_enter_fires_focused() {
-        use crossterm::event::KeyCode;
-        // buttons: [Resume(0), New game(1)], default focus 0.
-        // Tab -> focus 1 (New game); Enter on focus 1 -> NewGame.
-        let mut focus = 0usize;
-        focus = app::input::cycle_focus(focus, 2, 1);
-        assert_eq!(focus, 1);
-        let act = launch_dialog_key_focused(KeyCode::Enter, focus);
-        assert!(matches!(act, LaunchDialogAction::NewGame));
     }
 
     // The former app-level `key_to_zscii` and its unit tests were relocated into

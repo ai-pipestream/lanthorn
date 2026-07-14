@@ -87,6 +87,47 @@ pub fn draw_quit_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     })
 }
 
+// ── Quit dialog keyboard routing ──────────────────────────────────────────────
+
+/// Action to take when a key is pressed while the quit dialog is open.
+pub enum QuitDialogAction {
+    None,
+    Save,
+    Quit,
+    Cancel,
+}
+
+/// Map a key code to a QuitDialogAction.
+/// 's' or Enter → Save State & quit; 'q' → Quit without saving; Esc or 'c' → Cancel.
+#[cfg_attr(not(test), allow(dead_code))]
+fn quit_dialog_key(code: crossterm::event::KeyCode) -> QuitDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Char('s') | KeyCode::Enter => QuitDialogAction::Save,
+        KeyCode::Char('q') => QuitDialogAction::Quit,
+        KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
+        _ => QuitDialogAction::None,
+    }
+}
+
+/// Quit-dialog keys with button focus. Tab/BackTab are handled by the caller
+/// (which mutates dialog_focus); this maps Enter to the focused button and keeps
+/// the existing accelerators.
+pub fn quit_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> QuitDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc | KeyCode::Char('c') => QuitDialogAction::Cancel,
+        KeyCode::Char('s') => QuitDialogAction::Save,
+        KeyCode::Char('q') => QuitDialogAction::Quit,
+        KeyCode::Enter => match focus {
+            1 => QuitDialogAction::Quit,
+            2 => QuitDialogAction::Cancel,
+            _ => QuitDialogAction::Save, // focus 0 = Save & quit (default)
+        },
+        _ => QuitDialogAction::None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -137,5 +178,33 @@ mod tests {
         let mut rects = None;
         terminal.draw(|f| { rects = draw_quit_dialog(&state, f.area(), f.buffer_mut()); }).unwrap();
         assert!(rects.is_none(), "dialog must not render when area is too small");
+    }
+
+    // ── quit_dialog_key ───────────────────────────────────────────────────────
+
+    #[test]
+    fn quit_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(quit_dialog_key(KeyCode::Char('s')), QuitDialogAction::Save));
+        assert!(matches!(quit_dialog_key(KeyCode::Enter), QuitDialogAction::Save));
+        assert!(matches!(quit_dialog_key(KeyCode::Char('q')), QuitDialogAction::Quit));
+        assert!(matches!(quit_dialog_key(KeyCode::Esc), QuitDialogAction::Cancel));
+        assert!(matches!(quit_dialog_key(KeyCode::Char('c')), QuitDialogAction::Cancel));
+        assert!(matches!(quit_dialog_key(KeyCode::Char('x')), QuitDialogAction::None));
+        assert!(matches!(quit_dialog_key(KeyCode::Left), QuitDialogAction::None));
+    }
+
+    // ── quit_dialog_tab_then_enter_fires_focused ──────────────────────────────
+
+    #[test]
+    fn quit_dialog_tab_then_enter_fires_focused() {
+        use crossterm::event::KeyCode;
+        // buttons: [Save State & quit(0), Quit(1), Cancel(2)], default focus 0.
+        // Tab -> focus 1 (Quit); Enter on focus 1 -> Quit.
+        let mut focus = 0usize;
+        focus = crate::input::cycle_focus(focus, 3, 1);
+        assert_eq!(focus, 1);
+        let act = quit_dialog_key_focused(KeyCode::Enter, focus);
+        assert!(matches!(act, QuitDialogAction::Quit));
     }
 }

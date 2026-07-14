@@ -128,6 +128,53 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     })
 }
 
+// ── Reset dialog keyboard routing ─────────────────────────────────────────────
+
+/// Action to take when a key is pressed while the reset dialog is open.
+pub enum ResetDialogAction {
+    None,
+    ToggleClearMap,
+    ToggleDeleteData,
+    Confirm,
+    Cancel,
+}
+
+/// Map a key code to a ResetDialogAction (focus-agnostic accelerators only).
+/// Esc and 'c' cancel; Enter and 'r' confirm; Space toggles the clear-map box.
+#[cfg_attr(not(test), allow(dead_code))]
+fn reset_dialog_key(code: crossterm::event::KeyCode) -> ResetDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
+        KeyCode::Enter | KeyCode::Char('r') => ResetDialogAction::Confirm,
+        KeyCode::Char(' ') => ResetDialogAction::ToggleClearMap,
+        _ => ResetDialogAction::None,
+    }
+}
+
+/// Reset-dialog keys with focus. Tab/BackTab are handled by the caller (which
+/// mutates dialog_focus over a 4-slot ring: 0 = clear-map checkbox, 1 = delete-data
+/// checkbox, 2 = Reset, 3 = Cancel). Space toggles the focused checkbox; Enter
+/// activates the focused button (or confirms when a checkbox is focused); 'r'/'c'
+/// stay as confirm/cancel accelerators.
+pub fn reset_dialog_key_focused(code: crossterm::event::KeyCode, focus: usize) -> ResetDialogAction {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Esc | KeyCode::Char('c') => ResetDialogAction::Cancel,
+        KeyCode::Char('r') => ResetDialogAction::Confirm,
+        KeyCode::Char(' ') => match focus {
+            0 => ResetDialogAction::ToggleClearMap,
+            1 => ResetDialogAction::ToggleDeleteData,
+            _ => ResetDialogAction::None,
+        },
+        KeyCode::Enter => match focus {
+            3 => ResetDialogAction::Cancel,
+            _ => ResetDialogAction::Confirm, // checkboxes and Reset (focus 2) confirm
+        },
+        _ => ResetDialogAction::None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -152,5 +199,42 @@ mod tests {
         assert!(all.contains("Also clear the map"), "clear-map checkbox label present");
         assert!(all.contains("Delete saved progress"), "delete-data checkbox label present");
         assert!(all.contains("[ ]"), "unchecked box shown when reset flags are false");
+    }
+
+    // ── reset_dialog_key_mapping ──────────────────────────────────────────────
+
+    #[test]
+    fn reset_dialog_key_mapping() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(reset_dialog_key(KeyCode::Esc), ResetDialogAction::Cancel));
+        assert!(matches!(reset_dialog_key(KeyCode::Char('c')), ResetDialogAction::Cancel));
+        assert!(matches!(reset_dialog_key(KeyCode::Enter), ResetDialogAction::Confirm));
+        assert!(matches!(reset_dialog_key(KeyCode::Char('r')), ResetDialogAction::Confirm));
+        assert!(matches!(reset_dialog_key(KeyCode::Char(' ')), ResetDialogAction::ToggleClearMap));
+    }
+
+    // ── reset_dialog_tab_then_enter_fires_focused ─────────────────────────────
+
+    #[test]
+    fn reset_dialog_tab_then_enter_fires_focused() {
+        use crossterm::event::KeyCode;
+        // Focus ring (4): 0 = clear-map checkbox, 1 = delete-data checkbox,
+        // 2 = Reset, 3 = Cancel. Default focus 0.
+        let mut focus = 0usize;
+        // Space on focus 0 toggles the clear-map checkbox.
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Char(' '), focus), ResetDialogAction::ToggleClearMap));
+        // Tab -> focus 1 (delete-data checkbox); Space toggles delete-data.
+        focus = crate::input::cycle_focus(focus, 4, 1);
+        assert_eq!(focus, 1);
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Char(' '), focus), ResetDialogAction::ToggleDeleteData));
+        // Enter on a focused checkbox confirms.
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, focus), ResetDialogAction::Confirm));
+        // Tab to focus 3 (Cancel); Enter cancels.
+        focus = crate::input::cycle_focus(focus, 4, 1); // 2 = Reset
+        focus = crate::input::cycle_focus(focus, 4, 1); // 3 = Cancel
+        assert_eq!(focus, 3);
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, focus), ResetDialogAction::Cancel));
+        // Enter on focus 2 (Reset) confirms.
+        assert!(matches!(reset_dialog_key_focused(KeyCode::Enter, 2), ResetDialogAction::Confirm));
     }
 }
