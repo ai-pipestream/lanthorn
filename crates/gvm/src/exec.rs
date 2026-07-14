@@ -4124,6 +4124,21 @@ impl Machine {
                 break;
             }
         }
+        // Echo the completed line to the window's echo stream, if any: the input
+        // text (as stored, truncated to `maxlen`) followed by a newline, written
+        // straight to the echo stream — never to the window's own backend, so
+        // there is no visible double echo (Glk spec §3.6; cheapglk
+        // `gli_stream_echo_line`). Routed through `glk_stream_put` so a
+        // memory/file echo stream records it and any window echo stream forwards
+        // through the same depth-bounded machinery. Independent of
+        // `glk_set_echo_line_event`, which the spec notes is "unrelated to the
+        // window's echo stream".
+        let echo = self.glk.window_echo_stream(pi.win);
+        if echo != 0 {
+            let mut echoed: String = chars.iter().collect();
+            echoed.push('\n');
+            self.glk_stream_put(echo, &echoed);
+        }
         // Deliver the terminator keycode in val2 only if the game actually
         // registered it for this window; a normal Enter (or any other key)
         // reports 0 (Glk spec §4.2).
@@ -7492,6 +7507,58 @@ mod tests {
         let buf: String = (0..5).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
         assert_eq!(buf, "north");
         assert_eq!(read_event(&m, 0x100), (3, 1, 5, 0), "evtype_LineInput, win, count");
+    }
+
+    #[test]
+    fn line_input_echoes_line_and_newline_to_echo_stream() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event(win=1, buf=0x180, maxlen=10); select(@0x100).
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x400);
+        // Attach a Latin-1 memory echo stream at 0x300 to window 1.
+        let echo = m.glk.stream_open_memory(0x300, 64, false, 0);
+        m.glk.window_set_echo_stream(1, echo);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line("look");
+        step_to_event(&mut m);
+        // The echo stream recorded the input line plus a newline (Glk §3.6).
+        let echoed: String = (0..5).map(|i| m.mem.read8(0x300 + i).unwrap() as u8 as char).collect();
+        assert_eq!(echoed, "look\n", "echo stream records the input line + newline");
+    }
+
+    #[test]
+    fn line_input_uni_echoes_to_echo_stream() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event_uni(win=1, buf=0x180, maxlen=8); select(@0x100).
+        let mut body = glk_call(0x141, &[C8(1), C16(0x0180), C8(8), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x400);
+        // A Unicode (32-bit element) memory echo stream at 0x300.
+        let echo = m.glk.stream_open_memory(0x300, 32, true, 0);
+        m.glk.window_set_echo_stream(1, echo);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line("AB");
+        step_to_event(&mut m);
+        assert_eq!(m.mem.read32(0x300).unwrap(), b'A' as u32, "echo word 0 = 'A'");
+        assert_eq!(m.mem.read32(0x304).unwrap(), b'B' as u32, "echo word 1 = 'B'");
+        assert_eq!(m.mem.read32(0x308).unwrap(), '\n' as u32, "echo trailing newline");
+    }
+
+    #[test]
+    fn line_input_without_echo_stream_records_nothing() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x400);
+        // No echo stream set: 0x300 stays zero after input.
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line("look");
+        step_to_event(&mut m);
+        assert_eq!(m.mem.read8(0x300).unwrap(), 0, "no echo stream → nothing recorded");
     }
 
     #[test]
