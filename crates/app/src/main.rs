@@ -20,7 +20,7 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::input::{apply_action, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, Action, KeyResolve};
-use app::persist_files::{delete_save, list_saves, load_map, save_game_named, restore_game, save_named};
+use app::persist_files::{list_saves, load_map, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::dialog::{DialogRects, DialogStyle};
@@ -53,6 +53,7 @@ use app::slash::{self, SlashOutcome, TranscriptFilterArg};
 use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, TranscriptFilter, TranscriptKind};
 
 mod engine_helpers;
+mod ingame_io;
 mod lifecycle;
 mod loop_tick;
 mod picker_ui;
@@ -60,10 +61,14 @@ mod reset;
 mod startup;
 mod turn;
 
+use crate::ingame_io::{
+    handle_save_as, handle_saves_prompt, open_ingame_saves, resolve_filename_request,
+    resolve_ingame_dialog,
+};
 use crate::reset::reset_game;
 use crate::engine_helpers::{
-    engine_supports_save, engine_tag, glulx_session_opt, glulx_session_opt_mut, restore_error_msg,
-    restore_from_file, zvm_session_mut, zvm_session_opt, zvm_session_opt_mut, RestoreOutcome,
+    engine_supports_save, engine_tag, glulx_session_opt_mut, restore_error_msg, restore_from_file,
+    zvm_session_mut, zvm_session_opt, zvm_session_opt_mut, RestoreOutcome,
 };
 
 // ── Terminal restore helpers ──────────────────────────────────────────────────
@@ -3139,114 +3144,6 @@ fn resolve_pict_blorb(story_path: &std::path::Path, images: bool) -> Option<blor
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
-/// Handle a submitted saves-manager delete-confirm prompt.
-/// Called after apply_action stores the prompt in `state.saves_prompt_submitted`.
-fn handle_saves_prompt(
-    kind: PromptKind,
-    buf: String,
-    dir: &std::path::Path,
-    state: &mut AppState,
-) {
-    match kind {
-        PromptKind::ConfirmDeleteSave(path) => {
-            let confirmed = matches!(buf.trim().to_lowercase().as_str(), "y" | "yes");
-            if confirmed {
-                match delete_save(&path) {
-                    Ok(()) => {
-                        state.push_notice("[Save deleted]");
-                        if let Some(s) = &mut state.saves {
-                            s.entries = list_saves(dir);
-                            // Re-clamp the selection/offset to the new entry count.
-                            s.scroll.len(s.entries.len());
-                        }
-                    }
-                    Err(e) => {
-                        state.push_notice(&format!("[Delete failed: {}]", e));
-                    }
-                }
-            } else {
-                state.push_notice("[Delete cancelled]");
-            }
-        }
-        _ => {} // other prompt kinds are handled elsewhere
-    }
-}
-
-/// Handle a submitted save name (host "Save State" slot or in-game `@save`).
-/// Called directly from the save-name dialog submit. On success it refreshes the
-/// saves list; a host save also clears `unsaved_progress`, while an in-game save
-/// sets `ingame_resume_save` so the run loop resumes the VM. An empty name or a
-/// write error re-opens the dialog when in-game so the user can retry.
-fn handle_save_as(
-    buf: String,
-    dir: &std::path::Path,
-    ifid: &str,
-    mapper: &mut Mapper,
-    session: &mut dyn Engine,
-    state: &mut AppState,
-) {
-    let ingame = state.ingame_io == Some(app::session::PendingIo::Save);
-    if buf.is_empty() {
-        state.push_notice("[Save name cannot be empty]".to_string().as_str());
-        // In-game: stay pending — re-open the dialog so the user can retry.
-        if ingame {
-            state.save_name_dialog = Some(app::state::SaveNameDialog::new(
-                app::persist_files::default_save_name(),
-                true,
-            ));
-        }
-        return;
-    }
-    let result = if ingame {
-        // Game @save -> bare standard in-game save file (VM state only,
-        // call-stub resume). The Z-machine writes standard descriptor-PC
-        // Quetzal; Glulx writes `save_quetzal()` bytes (both land as
-        // `<ifid>-<slug>.qzl` so the in-game restore picker lists them).
-        match zvm_session_opt(&*session) {
-            Some(z) => save_game_named(dir, &buf, &z.machine).map(|_| ()),
-            None => {
-                let bytes = glulx_session_opt(&*session).map(|g| g.save_quetzal()).unwrap_or_default();
-                app::persist_files::save_game_named_bytes(dir, &buf, &bytes).map(|_| ())
-            }
-        }
-    } else {
-        // Host "Save State" named slot -> rich .babelmap archive.
-        save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs)
-    };
-    match result {
-        Ok(()) => {
-            state.push_notice(&format!("[Saved as: {}]", buf));
-            // A host Save-State named slot captures the current progress
-            // (an in-game @save writes a .qzl, a different mechanism).
-            if !ingame {
-                state.unsaved_progress = false;
-            }
-            // Refresh saves list.
-            if let Some(s) = &mut state.saves {
-                s.entries = list_saves(dir);
-            }
-            // In-game SAVE: flag-hop so the run loop resumes the VM
-            // (resume + recenter need session/mapper/last_panes scope).
-            if ingame {
-                state.ingame_resume_save = Some(true);
-            }
-        }
-        Err(e) => {
-            state.push_notice(&format!("[Save failed: {}]", e));
-            // In-game: stay pending — re-open the dialog so the user can retry.
-            if ingame {
-                state.save_name_dialog = Some(app::state::SaveNameDialog::new(
-                    app::persist_files::default_save_name(),
-                    true,
-                ));
-            }
-        }
-    }
-}
-
-/// Open the saves dialog in "in-game" mode for a game-initiated save/restore.
-/// SAVE: prompt for a save name (reuses the save-name dialog). RESTORE: open the
-/// saves list, including plain *.qzl files alongside *.babelmap saves.
 /// Whether the game echoed the just-submitted command itself at the start of its
 /// turn output (e.g. CounterfeitMonkey prints the command back in bold). Compared
 /// case-insensitively against the leading non-whitespace text, and only when the
@@ -3271,32 +3168,6 @@ fn game_echoes_command(transcript: &str, cmd: &str) -> bool {
     }
 }
 
-fn open_ingame_saves(
-    io: app::session::PendingIo,
-    game_dir: &std::path::Path,
-    state: &mut AppState,
-) {
-    use app::session::PendingIo;
-    state.ingame_io = Some(io);
-    state.dialog_focus = 0;
-    match io {
-        PendingIo::Save => {
-            // The game asked to SAVE: ask where via the save-name dialog. On submit
-            // -> resume_save(true); on cancel -> resume_save(false) (handled in the
-            // cancel resolver, which now watches save_name_dialog).
-            state.save_name_dialog = Some(app::state::SaveNameDialog::new(
-                app::persist_files::default_save_name(),
-                true,
-            ));
-        }
-        PendingIo::Restore => {
-            // The game asked to RESTORE: list babelmap saves + plain .qzl files.
-            let entries = combined_saves(game_dir);
-            state.saves = Some(SavesState { entries, scroll: Default::default() });
-        }
-    }
-}
-
 /// The current story's saves for the saves manager: `.babelmap` Save States and
 /// `.qzl` game saves in `game_dir` merged into one list, sorted newest-first by
 /// save time. RFC3339 timestamps sort chronologically as strings; untimestamped/
@@ -3306,116 +3177,6 @@ fn combined_saves(game_dir: &std::path::Path) -> Vec<app::persist_files::SaveInf
     entries.extend(app::persist_files::list_qzl(game_dir));
     entries.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
     entries
-}
-
-/// Resolve a pending in-game save/restore after the dialog interaction:
-/// (1) a flag-hopped successful SAVE resumes the VM; (2) an in-game overlay that
-/// closed without a confirm is treated as a cancel and resumes with failure.
-/// Re-opens the dialog for a chained request. Returns true if the app should quit.
-fn resolve_ingame_dialog(
-    session: &mut dyn Engine,
-    mapper: &mut Mapper,
-    state: &mut AppState,
-    game_dir: &std::path::Path,
-    ifid: &str,
-    map_area: Rect,
-) -> bool {
-    use app::session::PendingIo;
-
-    // (1) SAVE confirmed in handle_saves_prompt (flag-hop): resume here.
-    if let Some(wrote_ok) = state.ingame_resume_save.take() {
-        state.ingame_io = None;
-        let result = session.resume_save(wrote_ok);
-        let quit = turn::finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
-        if let Some(io) = state.ingame_io {
-            open_ingame_saves(io, game_dir, state);
-        }
-        return quit;
-    }
-
-    // (2) Cancel: an in-game overlay closed without a confirm.
-    if let Some(io) = state.ingame_io {
-        let overlay_open = match io {
-            PendingIo::Save => state.save_name_dialog.is_some(),
-            PendingIo::Restore => state.saves.is_some(),
-        };
-        if !overlay_open {
-            state.ingame_io = None;
-            let result = match io {
-                PendingIo::Save => session.resume_save(false),
-                PendingIo::Restore => session.resume_restore(None),
-            };
-            state.push_notice("[In-game save/restore cancelled]");
-            let quit = turn::finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
-            if let Some(io) = state.ingame_io {
-                open_ingame_saves(io, game_dir, state);
-            }
-            return quit;
-        }
-    }
-
-    false
-}
-
-/// Open the right modal for a game `create_by_prompt` filename request: a name-entry
-/// prompt (write / append / read-write), a file picker (read with existing files —
-/// Task 5), or an immediate cancel (read with no files). Sets AppState; the resolver
-/// later calls `resume_filename`.
-fn open_filename_modal(req: app::session::FilenameReq, session: &dyn Engine, state: &mut AppState) {
-    state.pending_filename = Some(req);
-    match app::state::filename_modal_for(req, session.file_names().len()) {
-        app::state::FilenameModal::NamePrompt => {
-            state.prompt = Some(app::state::Prompt {
-                kind: app::state::PromptKind::CreateFile,
-                buffer: String::new(),
-            });
-        }
-        app::state::FilenameModal::Picker => {
-            state.file_picker = Some(app::state::FilePickerState::new(session.file_names()));
-        }
-        app::state::FilenameModal::AutoCancel => {
-            state.pending_filename = None;
-            state.filename_submitted = Some(None);
-        }
-    }
-}
-
-/// Resume a suspended `create_by_prompt` once the player entered a name / cancelled
-/// via the flag-hop (`state.filename_submitted`), or cancelled by closing the modal
-/// (Esc leaves `pending_filename` set with no CreateFile prompt open). Mirrors
-/// `resolve_ingame_dialog`. Returns true if the app should quit.
-fn resolve_filename_request(
-    session: &mut dyn Engine,
-    mapper: &mut Mapper,
-    state: &mut AppState,
-    game_dir: &std::path::Path,
-    ifid: &str,
-    map_area: Rect,
-) -> bool {
-    if let Some(choice) = state.filename_submitted.take() {
-        state.pending_filename = None;
-        let result = session.resume_filename(choice);
-        let quit = turn::finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
-        if let Some(io) = state.ingame_io {
-            open_ingame_saves(io, game_dir, state);
-        }
-        return quit;
-    }
-    // Modal closed without a submit (Esc) while a request is still pending -> cancel.
-    if state.pending_filename.is_some()
-        && !matches!(&state.prompt, Some(p) if p.kind == app::state::PromptKind::CreateFile)
-        && state.file_picker.is_none()
-    {
-        state.pending_filename = None;
-        let result = session.resume_filename(None);
-        state.push_notice("[create_by_prompt cancelled]");
-        let quit = turn::finish_resumed_turn(result, mapper, state, session, game_dir, ifid, map_area);
-        if let Some(io) = state.ingame_io {
-            open_ingame_saves(io, game_dir, state);
-        }
-        return quit;
-    }
-    false
 }
 
 /// Format a Unix timestamp (seconds since epoch) as an RFC3339 UTC string.
