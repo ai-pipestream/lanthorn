@@ -34,6 +34,22 @@ fn is_hangul_syllable(cp: u32) -> bool {
     cp >= S_BASE && cp < S_BASE + S_COUNT
 }
 
+/// The Unicode titlecase mapping of `cp`, but only where it differs from the
+/// (std `char::to_uppercase`) uppercase mapping — the digraphs, iota-subscript
+/// Greek, Georgian, and the case ligatures. `None` means "titlecase == uppercase"
+/// so the caller uppercases instead. Used by `glk_buffer_to_title_case_uni` for
+/// the first character (Glk titlecases only buffer index 0).
+pub fn titlecase(cp: u32) -> Option<&'static [u32]> {
+    match t::TITLE_KEYS.binary_search(&cp) {
+        Ok(i) => {
+            let start = t::TITLE_OFF[i] as usize;
+            let end = t::TITLE_OFF[i + 1] as usize;
+            Some(&t::TITLE_DATA[start..end])
+        }
+        Err(_) => None,
+    }
+}
+
 /// Canonical combining class of a code point (0 for a starter).
 pub fn combining_class(cp: u32) -> u8 {
     match t::CCC_KEYS.binary_search(&cp) {

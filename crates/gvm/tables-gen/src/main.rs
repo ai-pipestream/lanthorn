@@ -2,13 +2,16 @@
 //!
 //! Parses the Unicode Character Database (UCD) and emits compact, sorted,
 //! binary-searchable tables that back gvm's NFD/NFC implementation
-//! (`glk_buffer_canon_decompose_uni` / `glk_buffer_canon_normalize_uni`).
-//! Hangul is handled algorithmically at runtime, so it needs no tables here.
+//! (`glk_buffer_canon_decompose_uni` / `glk_buffer_canon_normalize_uni`) and
+//! the titlecase mapping used by `glk_buffer_to_title_case_uni` (the only case
+//! operation Rust's std `char` methods do not cover). Hangul is handled
+//! algorithmically at runtime, so it needs no tables here.
 //!
 //! Usage:
-//!   1. Download the two pinned UCD files (see UNICODE_VERSION below):
+//!   1. Download the three pinned UCD files (see UNICODE_VERSION below):
 //!        https://www.unicode.org/Public/<VER>/ucd/UnicodeData.txt
 //!        https://www.unicode.org/Public/<VER>/ucd/CompositionExclusions.txt
+//!        https://www.unicode.org/Public/<VER>/ucd/SpecialCasing.txt
 //!      into some directory <UCD_DIR>. (The raw files are NOT committed.)
 //!   2. cargo run --manifest-path crates/gvm/tables-gen/Cargo.toml -- \
 //!          <UCD_DIR> crates/gvm/src/unicode_norm_tables.rs
@@ -43,11 +46,17 @@ fn main() {
         .expect("read UnicodeData.txt");
     let comp_excl = fs::read_to_string(ucd_dir.join("CompositionExclusions.txt"))
         .expect("read CompositionExclusions.txt");
+    let special_casing = fs::read_to_string(ucd_dir.join("SpecialCasing.txt"))
+        .expect("read SpecialCasing.txt");
 
     // ── Parse UnicodeData.txt ────────────────────────────────────────────────
-    // canonical single-level decomposition map + combining-class map.
+    // canonical single-level decomposition map + combining-class map, plus the
+    // simple (1:1) uppercase (field 12) and titlecase (field 14) mappings used
+    // to derive the titlecase table below.
     let mut raw_decomp: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut ccc: BTreeMap<u32, u8> = BTreeMap::new();
+    let mut simple_upper: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut simple_title: BTreeMap<u32, u32> = BTreeMap::new();
 
     for line in unicode_data.lines() {
         if line.is_empty() {
@@ -58,6 +67,14 @@ fn main() {
             continue;
         }
         let cp = u32::from_str_radix(f[0], 16).expect("cp hex");
+        // Simple case mappings (fields 12/14): recorded before the Hangul skip
+        // is irrelevant (Hangul has none), but only for non-Hangul we reach here.
+        if f.len() > 12 && !f[12].is_empty() {
+            simple_upper.insert(cp, u32::from_str_radix(f[12], 16).expect("upper hex"));
+        }
+        if f.len() > 14 && !f[14].is_empty() {
+            simple_title.insert(cp, u32::from_str_radix(f[14], 16).expect("title hex"));
+        }
         // Skip the algorithmic Hangul block — decomposed/composed at runtime.
         if is_hangul_syllable(cp) {
             continue;
@@ -152,16 +169,85 @@ fn main() {
         }
     }
 
+    // ── Full case mappings (SpecialCasing.txt) → titlecase table ─────────────
+    // SpecialCasing gives the full (possibly multi-char) lower/title/upper
+    // mappings. We only want *unconditional* entries (no locale/context in the
+    // condition field); locale-tailored casing is out of scope, exactly as
+    // Rust's std `char::to_uppercase` ignores it.
+    let mut full_upper: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut full_title: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let parse_seq = |s: &str| -> Vec<u32> {
+        s.split_whitespace()
+            .map(|h| u32::from_str_radix(h, 16).expect("case hex"))
+            .collect()
+    };
+    for line in special_casing.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split(';').map(str::trim).collect();
+        // <code>; <lower>; <title>; <upper>; (<condition>;)?
+        if parts.len() < 4 {
+            continue;
+        }
+        // A non-empty condition field marks a locale/context-tailored entry.
+        if parts.get(4).map(|c| !c.is_empty()).unwrap_or(false) {
+            continue;
+        }
+        let cp = u32::from_str_radix(parts[0], 16).expect("sc cp hex");
+        full_title.insert(cp, parse_seq(parts[2]));
+        full_upper.insert(cp, parse_seq(parts[3]));
+    }
+
+    // The correct full uppercase of a code point (what std `char::to_uppercase`
+    // produces): SpecialCasing full mapping if any, else the simple field-12
+    // mapping, else the code point itself.
+    let upper_of = |cp: u32| -> Vec<u32> {
+        if let Some(u) = full_upper.get(&cp) {
+            u.clone()
+        } else if let Some(&u) = simple_upper.get(&cp) {
+            vec![u]
+        } else {
+            vec![cp]
+        }
+    };
+    // The correct full titlecase: SpecialCasing full title if any, else the
+    // simple field-14 titlecase, else the uppercase mapping (Unicode default).
+    let title_of = |cp: u32| -> Vec<u32> {
+        if let Some(t) = full_title.get(&cp) {
+            t.clone()
+        } else if let Some(&t) = simple_title.get(&cp) {
+            vec![t]
+        } else {
+            upper_of(cp)
+        }
+    };
+    // Titlecase table = code points whose titlecase differs from their (std)
+    // uppercase mapping. For everything else, runtime falls back to
+    // `char::to_uppercase`, which is the Unicode-default titlecase.
+    let mut title_candidates: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    title_candidates.extend(simple_title.keys().copied());
+    title_candidates.extend(full_title.keys().copied());
+    let mut title_map: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    for &cp in &title_candidates {
+        let t = title_of(cp);
+        if t != upper_of(cp) {
+            title_map.insert(cp, t);
+        }
+    }
+
     // ── Emit ─────────────────────────────────────────────────────────────────
     let mut out = String::new();
     let cmd = "cargo run --manifest-path crates/gvm/tables-gen/Cargo.toml -- <UCD_DIR> crates/gvm/src/unicode_norm_tables.rs";
     writeln!(out, "// @generated by crates/gvm/tables-gen — DO NOT EDIT BY HAND.").unwrap();
     writeln!(out, "//").unwrap();
-    writeln!(out, "// Unicode canonical normalization tables (NFD/NFC data).").unwrap();
+    writeln!(out, "// Unicode canonical normalization tables (NFD/NFC data) + titlecase mapping.").unwrap();
     writeln!(out, "// Unicode version: {UNICODE_VERSION}").unwrap();
     writeln!(out, "// Source files (re-downloadable; NOT committed):").unwrap();
     writeln!(out, "//   https://www.unicode.org/Public/{UNICODE_VERSION}/ucd/UnicodeData.txt").unwrap();
     writeln!(out, "//   https://www.unicode.org/Public/{UNICODE_VERSION}/ucd/CompositionExclusions.txt").unwrap();
+    writeln!(out, "//   https://www.unicode.org/Public/{UNICODE_VERSION}/ucd/SpecialCasing.txt").unwrap();
     writeln!(out, "// Regenerate with:").unwrap();
     writeln!(out, "//   {cmd}").unwrap();
     writeln!(out, "//").unwrap();
@@ -214,14 +300,33 @@ fn main() {
     writeln!(out, "/// The composite code point for each `COMPOSE_KEYS` entry.").unwrap();
     emit_u32_slice(&mut out, "COMPOSE_VALS", &comp_vals);
 
+    // Titlecase mapping: TITLE_KEYS[i] titlecases to
+    // TITLE_DATA[TITLE_OFF[i]..TITLE_OFF[i+1]] (only entries whose titlecase
+    // differs from the uppercase mapping; all others fall back to uppercase).
+    let title_keys: Vec<u32> = title_map.keys().copied().collect();
+    let mut title_data: Vec<u32> = Vec::new();
+    let mut title_off: Vec<u32> = Vec::with_capacity(title_keys.len() + 1);
+    title_off.push(0);
+    for &cp in &title_keys {
+        title_data.extend_from_slice(&title_map[&cp]);
+        title_off.push(title_data.len() as u32);
+    }
+    writeln!(out, "/// Code points whose titlecase differs from their uppercase mapping, sorted.").unwrap();
+    emit_u32_slice(&mut out, "TITLE_KEYS", &title_keys);
+    writeln!(out, "/// Half-open [start, end) offsets into `TITLE_DATA`, one pair per key.").unwrap();
+    emit_u32_slice(&mut out, "TITLE_OFF", &title_off);
+    writeln!(out, "/// Flattened titlecase mappings (may be multi-character).").unwrap();
+    emit_u32_slice(&mut out, "TITLE_DATA", &title_data);
+
     fs::write(out_path, out).expect("write output");
     eprintln!(
-        "wrote {} (Unicode {UNICODE_VERSION}): {} decomps ({} data words), {} ccc, {} composites",
+        "wrote {} (Unicode {UNICODE_VERSION}): {} decomps ({} data words), {} ccc, {} composites, {} titlecase",
         out_path.display(),
         decomp_keys.len(),
         decomp_data.len(),
         ccc_keys.len(),
         comp_keys.len(),
+        title_keys.len(),
     );
 }
 

@@ -3856,7 +3856,13 @@ impl Machine {
                 let mut out = Vec::new();
                 for (i, c) in s.chars().enumerate() {
                     if i == 0 {
-                        out.extend(c.to_uppercase());
+                        // Titlecase the first char: a real Unicode titlecase
+                        // mapping (digraphs/Greek/ligatures where it differs
+                        // from uppercase), falling back to uppercase otherwise.
+                        match unicode_norm::titlecase(c as u32) {
+                            Some(seq) => out.extend(seq.iter().filter_map(|&cp| char::from_u32(cp))),
+                            None => out.extend(c.to_uppercase()),
+                        }
                     } else if lower_rest {
                         out.extend(c.to_lowercase());
                     } else {
@@ -8615,6 +8621,36 @@ mod tests {
         assert_eq!(m.mem.read32(0x100).unwrap(), 4, "result length");
         let got: String = (0..4).map(|i| char::from_u32(m.mem.read32(0x180 + i * 4).unwrap()).unwrap()).collect();
         assert_eq!(got, "hélo", "lower-cased in place (Unicode-aware)");
+    }
+
+    // SQ-0321: glk_buffer_to_title_case_uni (selector 0x0122) must titlecase the
+    // first char with a real Unicode titlecase mapping, not the uppercase one:
+    //   Ǆ (U+01C4) → ǅ (U+01C5), a titlecase digraph distinct from uppercase Ǆ;
+    //   ﬄ (U+FB04) → "Ffl" (multi-char, first-upper-rest-lower), not "FFL".
+    #[test]
+    fn glk_buffer_to_title_case_uni_uses_titlecase_not_uppercase() {
+        use asm::Op::{C16, C8, Mem16};
+        // "Ǆz": titlecase (rest unchanged) → "ǅz".
+        let mut body = glk_call(0x0122, &[C16(0x0180), C8(8), C8(2), C8(0)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, 0x01C4).unwrap(); // Ǆ
+            m.mem.write32(0x184, 0x007A).unwrap(); // z
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 2, "length unchanged");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0x01C5, "Ǆ → titlecase ǅ, not uppercase Ǆ");
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0x007A, "rest unchanged");
+
+        // "ﬄ": titlecase → "Ffl" (single ligature expands to three chars).
+        let mut body = glk_call(0x0122, &[C16(0x0180), C8(8), C8(1), C8(0)], Mem16(0x0100));
+        body.extend(asm::ins(0x120, &[]));
+        let m = run_with_ram(body, 0x200, |m| {
+            m.mem.write32(0x180, 0xFB04).unwrap(); // ﬄ
+        });
+        assert_eq!(m.mem.read32(0x100).unwrap(), 3, "ligature titlecases to 3 chars");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0x0046, "F");
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0x0066, "f (lower), not uppercase F");
+        assert_eq!(m.mem.read32(0x188).unwrap(), 0x006C, "l (lower)");
     }
 
     // glk_buffer_canon_decompose_uni (selector 0x0123): é (U+00E9) decomposes to
