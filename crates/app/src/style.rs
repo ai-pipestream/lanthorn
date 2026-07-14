@@ -1365,6 +1365,14 @@ pub fn write_style_full(
     doc.colors.selectors.insert("inventory:dock".to_string(),     style_to_decl(&cs.inventory_dock));
     doc.colors.selectors.insert("map_layer_tab".to_string(),      style_to_decl(&cs.map_layer_tab));
     doc.colors.selectors.insert("map_layer_tab_active".to_string(), style_to_decl(&cs.map_layer_tab_active));
+    doc.colors.selectors.insert("story_info".to_string(),         style_to_decl(&cs.story_info));
+    doc.colors.selectors.insert("story_info:title".to_string(),   style_to_decl(&cs.story_info_title));
+    doc.colors.selectors.insert("story_info:label".to_string(),   style_to_decl(&cs.story_info_label));
+    doc.colors.selectors.insert("story_info:value".to_string(),   style_to_decl(&cs.story_info_value));
+    doc.colors.selectors.insert("story_info:cover".to_string(),   style_to_decl(&cs.story_info_cover));
+    doc.colors.selectors.insert("story_badge".to_string(),        style_to_decl(&cs.story_badge));
+    doc.colors.selectors.insert("graphics".to_string(),           style_to_decl(&cs.graphics));
+    doc.colors.selectors.insert("inline_image".to_string(),       style_to_decl(&cs.inline_image));
     {
         let mut d = style_to_decl(&cs.status_header);
         if cs.status_header_style != paneframe::BorderStyle::None {
@@ -2013,6 +2021,42 @@ fg = "green"
     }
 
     #[test]
+    fn write_style_full_round_trips_story_info_and_badge_selectors() {
+        use ratatui::style::Color;
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap-story-info-rt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("story-info.toml");
+
+        // Distinct fg/bg colours on all six story-info/badge fields (colours only —
+        // terminal_default() carries a pre-existing BOLD on story_info_title that a
+        // fg/bg-only decl can't clear, per style_to_decl's additive-patch design).
+        let mut cs = crate::colors::ColorScheme::terminal_default();
+        cs.story_info        = cs.story_info.fg(Color::Rgb(1, 2, 3));
+        cs.story_info_title  = cs.story_info_title.fg(Color::Rgb(4, 5, 6));
+        cs.story_info_label  = cs.story_info_label.fg(Color::Rgb(7, 8, 9));
+        cs.story_info_value  = cs.story_info_value.fg(Color::Rgb(10, 11, 12));
+        cs.story_info_cover  = cs.story_info_cover.bg(Color::Rgb(13, 14, 15));
+        cs.story_badge       = cs.story_badge.fg(Color::Rgb(16, 17, 18));
+        let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        write_style_full(&path, &cs, &set).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc = parse_style_toml(&text).unwrap();
+        let (cs2, _set2, warnings) = resolve(&doc, &dir);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        assert_eq!(style_for_selector(&cs2, "story_info").fg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(style_for_selector(&cs2, "story_info:title").fg, Some(Color::Rgb(4, 5, 6)));
+        assert_eq!(style_for_selector(&cs2, "story_info:label").fg, Some(Color::Rgb(7, 8, 9)));
+        assert_eq!(style_for_selector(&cs2, "story_info:value").fg, Some(Color::Rgb(10, 11, 12)));
+        assert_eq!(style_for_selector(&cs2, "story_info:cover").bg, Some(Color::Rgb(13, 14, 15)));
+        assert_eq!(style_for_selector(&cs2, "story_badge").fg, Some(Color::Rgb(16, 17, 18)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn inventory_dock_selector_round_trips() {
         use ratatui::style::Color;
         // The selector maps to the inventory_dock field.
@@ -2213,6 +2257,16 @@ box_style = "rounded"
         write_style_full(&path, &cs, &set).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         let doc = parse_style_toml(&text).unwrap();
+        // Every SELECTOR_FIELDS entry must be emitted, or it silently drops out of
+        // exported themes. "border" is reserved/non-visual (no color field, never
+        // written) so it's the sole exclusion.
+        for sel in SELECTOR_FIELDS {
+            if *sel == "border" { continue; }
+            assert!(
+                doc.colors.selectors.contains_key(*sel),
+                "write_style_full never emits selector {sel:?}"
+            );
+        }
         // resolving the exported doc with NO base reproduces the same scheme
         let (cs2, set2, _w) = resolve(&doc, &dir);
         assert_eq!(cs2, cs);
