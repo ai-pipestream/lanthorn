@@ -9,7 +9,8 @@ use mapper::mapper::Mapper;
 use app::engine::Engine;
 use app::state::AppState;
 
-use crate::{format_rfc3339, save_archive_meta, zvm_session_opt};
+use crate::engine_helpers::zvm_session_opt;
+use crate::{format_rfc3339, save_archive_meta};
 
 /// Save on exit ONLY when auto_save is enabled. With auto_save off (the default),
 /// nothing is saved automatically — the user controls saving via the quit prompt's

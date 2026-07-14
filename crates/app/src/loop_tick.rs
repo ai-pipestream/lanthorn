@@ -220,7 +220,7 @@ pub(crate) fn refresh_engine_input(
     // this is a no-op for the vast majority of games (regression guard). Timed
     // input is a Z-machine-only concept (ZMSD): `zvm_session_opt` is `None` for
     // a Glulx engine, so the timer never arms there.
-    let timer_interval = crate::zvm_session_opt(session)
+    let timer_interval = crate::engine_helpers::zvm_session_opt(session)
         .and_then(|s| s.pending_timeout())
         .map(|(t, _)| Duration::from_millis(t as u64 * 100));
     let should_arm = state.config.honor_timed_input
@@ -238,7 +238,7 @@ pub(crate) fn refresh_engine_input(
     // when a Glulx game has requested a timer interval and no overlay covers
     // the pane; uses the same arm-once semantics (`next_input_deadline`) so the
     // deadline holds steady until it fires (the fire path below re-arms fresh).
-    let glk_timer_interval = crate::glulx_session_opt(session).and_then(|s| s.timer_interval());
+    let glk_timer_interval = crate::engine_helpers::glulx_session_opt(session).and_then(|s| s.timer_interval());
     let should_arm_glk_timer = !state.any_overlay_open() && glk_timer_interval.is_some();
     state.glulx_timer_next_fire = crate::turn::next_input_deadline(
         state.glulx_timer_next_fire,

@@ -28,9 +28,10 @@ use app::session::{apply_turn, GameSession, TurnResult};
 use app::state::AppState;
 use app::storage::{default_state_path, game_dir as story_game_dir, story_key};
 
+use crate::engine_helpers::{restore_error_msg, zvm_session_opt_mut};
 use crate::{
     install_panic_hook, install_termination_handlers, loading_line, picker_ui, resolve_pict_blorb,
-    restore_error_msg, restore_terminal, saves_dir, zvm_session_opt_mut,
+    restore_terminal, saves_dir,
 };
 
 /// Everything [`boot`] produces that `main()`'s event loop then owns: the boxed
