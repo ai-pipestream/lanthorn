@@ -12,7 +12,7 @@ use ratatui::layout::Rect;
 
 use app::archive::load_archive;
 use app::engine::Engine;
-use app::input::tidy_layer_silent;
+use app::tidy::tidy_layer_silent;
 use app::session::{apply_turn, TurnResult};
 use app::state::{AppState, SoundPulse, TidyJob, TranscriptKind};
 use app::storage::default_state_path;

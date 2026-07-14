@@ -13,7 +13,7 @@ use mapper::mapper::Mapper;
 
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
-use app::input::{apply_tidy_result, tidy_layer_silent, ApplyTidyOutcome};
+use app::tidy::{apply_tidy_result, tidy_layer_silent, ApplyTidyOutcome};
 use app::render::map::SOUND_PULSE_MS;
 use app::state::{AppState, TidyJob, TidyAnim, TranscriptKind};
 
