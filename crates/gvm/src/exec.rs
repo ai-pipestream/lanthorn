@@ -8788,6 +8788,31 @@ mod tests {
     }
 
     #[test]
+    fn glk_stream_open_resource_nonuni_utf8_decodes_text_chunk_with_clamp() {
+        // cheapglk cgstream.c: a TEXT chunk is UTF-8-decoded even on a
+        // NON-unicode stream; a decoded code point above 0xFF clamps to '?'.
+        // "é←" = U+00E9 (C3 A9, fits Latin-1) then U+2190 (E2 86 90, clamps).
+        let backend =
+            glk::TestBackend::new().with_data_resource(1, "é←".as_bytes().to_vec(), true);
+        let mut m = resource_machine(backend, 0x400);
+        let sid = m.glk_dispatch(0x0049, &[1, 0]).unwrap(); // open_resource (non-uni)
+        assert_ne!(sid, 0);
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0xE9, "é decoded from UTF-8");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'?' as u32, "U+2190 clamps to '?'");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0xFFFF_FFFF, "EOF");
+        // Position is the BYTE cursor: 2 (é) + 3 (←) = 5 bytes consumed.
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 5, "byte cursor after decode");
+
+        // Buffer-read variant decodes + clamps the same way.
+        let sid2 = m.glk_dispatch(0x0049, &[1, 0]).unwrap();
+        let n = m.glk_dispatch(0x0092, &[sid2, 0x300, 8]).unwrap(); // get_buffer_stream
+        assert_eq!(n, 2, "two decoded chars");
+        assert_eq!(m.mem.read8(0x300).unwrap(), 0xE9);
+        assert_eq!(m.mem.read8(0x301).unwrap(), b'?' as u32);
+        assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
     fn glk_stream_open_resource_uni_decodes_per_chunk_type() {
         // A TEXT chunk read as unicode decodes UTF-8; a BINA chunk read as
         // unicode takes 4 big-endian bytes per code point (cheapglk gtstream.c).

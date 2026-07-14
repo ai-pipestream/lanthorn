@@ -1044,8 +1044,10 @@ struct ResourceStream {
     pos: usize,
     /// `true` for a `_uni` stream (32-bit read elements); `false` for Latin-1.
     unicode: bool,
-    /// `true` for a `TEXT` chunk (UTF-8 when read as unicode); `false` for a
-    /// `BINA`/`FORM` binary chunk (raw byte / 4-byte big-endian when unicode).
+    /// `true` for a `TEXT` chunk — always UTF-8-decoded, with non-unicode reads
+    /// clamping code points above 0xFF to `'?'` (cheapglk `cgstream.c`); `false`
+    /// for a `BINA`/`FORM` binary chunk (raw byte / 4-byte big-endian when
+    /// unicode).
     text: bool,
 }
 
@@ -1976,23 +1978,28 @@ impl Model {
         }
     }
 
-    /// Read one character from a resource stream at its cursor, decoding per the
-    /// stream's encoding — a byte for a non-unicode stream; for a unicode stream,
-    /// 4-byte big-endian from a binary chunk or one UTF-8 code point from a text
-    /// chunk (matching cheapglk's `gtstream.c` resource reads) — advancing `pos`
-    /// past the consumed bytes and bumping the read count. `None` at end-of-file.
+    /// Read one character from a resource stream at its cursor, decoding per
+    /// the CHUNK type first (matching cheapglk `cgstream.c`): a `TEXT` chunk is
+    /// UTF-8-decoded regardless of the stream's unicode-ness — a non-unicode
+    /// read of a decoded code point above 0xFF clamps to `'?'` (cheapglk:
+    /// `if (!want_unicode && ch >= 0x100) return '?';`), counting one read per
+    /// decoded character. A binary (`BINA`/`FORM`) chunk reads raw bytes on a
+    /// non-unicode stream and 4-byte big-endian words on a unicode one.
+    /// Advances `pos` past the consumed bytes. `None` at end-of-file.
     pub fn resource_stream_read_char(&mut self, id: u32) -> Option<u32> {
         let rs = self.resource_streams.get(&id)?;
-        let (val, adv) = if !rs.unicode {
+        let (val, adv) = if rs.text {
+            let (cp, len) = Self::vfs_decode_utf8(&rs.data, rs.pos)?;
+            let cp = if !rs.unicode && cp > 0xFF { b'?' as u32 } else { cp };
+            (cp, len)
+        } else if !rs.unicode {
             (*rs.data.get(rs.pos)? as u32, 1)
-        } else if !rs.text {
+        } else {
             if rs.pos + 4 > rs.data.len() {
                 return None;
             }
             let b = &rs.data[rs.pos..rs.pos + 4];
             (u32::from_be_bytes([b[0], b[1], b[2], b[3]]), 4)
-        } else {
-            Self::vfs_decode_utf8(&rs.data, rs.pos)?
         };
         self.resource_streams.get_mut(&id).unwrap().pos += adv;
         if let Some(st) = self.stream_mut(id) {
@@ -3136,6 +3143,60 @@ mod layout_snap_tests {
             Some(0xABCD),
             "the stream's current link value survived the round-trip",
         );
+    }
+
+    // A pre-SQ-0308 (version 4) snapshot — no trailing resource_streams table,
+    // no stream-kind tag 4 — must still deserialize, with the resource table
+    // empty and all other state intact. Pinned wire bytes, hand-built to the v4
+    // layout, so this exercises the real `version == 4` compat gates rather
+    // than whatever `serialize()` currently emits.
+    #[test]
+    fn deserializes_pinned_version_4_snapshot_without_resource_table() {
+        let mut b = Vec::new();
+        let w = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_be_bytes());
+        w(&mut b, 4); // version 4 (pre resource streams)
+        w(&mut b, 0); // root window
+        w(&mut b, 1); // current stream
+        w(&mut b, 0); // window count
+        // One stream slot: a memory stream mid-read.
+        w(&mut b, 1); // stream count
+        w(&mut b, 1); // present
+        w(&mut b, 1); // id
+        w(&mut b, 7); // rock
+        w(&mut b, 0); // style Normal
+        w(&mut b, 0); // link
+        w(&mut b, 2); // read_count
+        w(&mut b, 3); // write_count
+        w(&mut b, 1); // kind = Memory
+        w(&mut b, 0x1000); // addr
+        w(&mut b, 64); // len
+        w(&mut b, 5); // pos
+        w(&mut b, 0); // unicode = false
+        // VFS: one file "f" = [9, 9].
+        w(&mut b, 1);
+        w(&mut b, 1);
+        b.push(b'f');
+        w(&mut b, 2);
+        b.extend_from_slice(&[9, 9]);
+        w(&mut b, 0); // fileref count
+        w(&mut b, 0); // file_streams count
+        // v4 ends HERE — no resource_streams table follows.
+
+        let m = Model::deserialize(&b).expect("a v4 snapshot still restores");
+        assert_eq!(m.current_stream(), 1);
+        assert_eq!(m.stream_rock(1), Some(7));
+        assert_eq!(
+            m.memory_stream_read_info(1),
+            Some((0x1000, 64, 5, false)),
+            "memory stream state intact"
+        );
+        assert_eq!(m.files.get("f").map(|v| v.as_slice()), Some(&[9u8, 9][..]), "VFS intact");
+        assert!(m.resource_streams.is_empty(), "no resource streams in a v4 snapshot");
+        assert_eq!(m.resource_stream_is_unicode(1), None, "stream 1 is Memory, not Resource");
+
+        // And the restored model re-serializes as v5, round-tripping cleanly.
+        let again = Model::deserialize(&m.serialize()).expect("v5 re-serialize round-trips");
+        assert_eq!(again.memory_stream_read_info(1), Some((0x1000, 64, 5, false)));
     }
 
     // mouse_windows enumerates only windows with an armed request.

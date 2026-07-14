@@ -86,7 +86,7 @@ Dispatch in `exec.rs` ~L2627 (`glk_gestalt` fn). `glk_gestalt_ext` (0x0005) dele
 | LineInputEcho | 17 | §4 | PARTIAL | Returns 0; `glk_set_echo_line_event` (0x0150) is a silent no-op | S | DEFER | NO |
 | LineTerminators | 18 | §4 | MISSING | Returns 0; `glk_set_terminators_line_event` (0x0151) is a silent no-op | M | ADD-soon | NO |
 | LineTerminatorKey | 19 | §4 | MISSING | Returns 0; val2 of line-input events is always 0 | M | ADD-soon | NO |
-| DateTime | 20 | §4 | DONE | Returns 1; full date/time selector family 0x0160–0x016F (UTC-only local; SQ-0308) | — | — | — |
+| DateTime | 20 | §4 | DONE | Returns 1; full date/time selector family 0x0160–0x016F (UTC-only local; Wave-5 T1) | — | — | — |
 | Sound2 | 21 | §4 | MISSING | Returns 0 | L | DEFER | NO |
 | ResourceStream | 22 | §4 | DONE | Returns 1; `glk_stream_open_resource` (0x0049) and `_uni` (0x013A — this audit's 0x014A was wrong) implemented (SQ-0308) | — | — | — |
 | GraphicsCharInput | 23 | §4 | MISSING | Returns 0 | M | DEFER | NO |
@@ -317,7 +317,7 @@ All hyperlink API functions fall to the diagnostic arm: `glk_set_hyperlink` (0x0
 
 ### 4i. Date and Time (Glk spec §11)
 
-Implemented (SQ-0308): `glk_current_time` (0x0160), `glk_current_simple_time` (0x0161), and the date conversion functions (0x0168–0x016F), via the zero-dep `glk::datetime` module. `_local` selectors are UTC (no tz database — documented limitation).
+Implemented (Wave-5 T1): `glk_current_time` (0x0160), `glk_current_simple_time` (0x0161), and the date conversion functions (0x0168–0x016F), via the zero-dep `glk::datetime` module. `_local` selectors are UTC (no tz database — documented limitation).
 
 | Feature | Glk spec § | Status | Effort | Rec | Already tracked? |
 |---|---|---|---|---|---|
