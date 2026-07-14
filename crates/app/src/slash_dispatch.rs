@@ -200,9 +200,10 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Reset { map: reset_map, data: reset_data } => {
-            // Source-aware: a key press (e.g. F5) opens the confirmation dialog with
-            // its checkboxes; a typed `/reset-game [map] [data]` acts immediately.
-            if from_key {
+            // A key press (e.g. F5) or a bare `/reset-game` opens the confirmation
+            // dialog with its map/data checkboxes; an explicit-token form
+            // (`/reset-game map`, `data`, or both) acts immediately as typed.
+            if from_key || (!reset_map && !reset_data) {
                 apply_action(Action::ResetGame, state, mapper);
             } else {
                 reset_game(session, mapper, state, story_bytes, story_path, game_dir, reset_map, reset_data);

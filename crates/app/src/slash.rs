@@ -146,7 +146,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "restore-state [name]", description: "restore an emulator Save State, optionally a named slot",
         dispatch: |a| SlashOutcome::Load(a.first().map(|s| s.to_string())) },
     CommandSpec { name: "reset-game", category: Category::Game, context: Context::Global,
-        usage: "reset-game [map] [data]", description: "restart the game; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
+        usage: "reset-game [map] [data]", description: "restart the game — bare opens the options dialog; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
         dispatch: |a| SlashOutcome::Reset { map: a.iter().any(|t| *t == "map"), data: a.iter().any(|t| *t == "data") } },
     CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
         usage: "quit", description: "exit babelmap",
