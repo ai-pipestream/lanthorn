@@ -67,7 +67,7 @@ Dispatch in `exec.rs` ~L2627 (`glk_gestalt` fn). `glk_gestalt_ext` (0x0005) dele
 
 | Selector | Value | Glk spec § | Current | Notes | Effort | Rec | Already tracked? |
 |---|---|---|---|---|---|---|---|
-| Version | 0 | §4 | DONE | Returns 0x0000_0705 (Glk 0.7.5) | — | — | — |
+| Version | 0 | §4 | DONE | Returns 0x0000_0706 (Glk 0.7.6; Wave-5) | — | — | — |
 | CharInput | 1 | §4 | DONE | Returns 1 (with val=any key → 1) | — | — | — |
 | LineInput | 2 | §4 | DONE | Returns 1 | — | — | — |
 | CharOutput | 3 | §4 | PARTIAL | Returns 2 (ExactPrint) for any char; `glk_gestalt_ext` arr/len ignored | S | DEFER | NO |
@@ -87,7 +87,7 @@ Dispatch in `exec.rs` ~L2627 (`glk_gestalt` fn). `glk_gestalt_ext` (0x0005) dele
 | LineTerminators | 18 | §4 | MISSING | Returns 0; `glk_set_terminators_line_event` (0x0151) is a silent no-op | M | ADD-soon | NO |
 | LineTerminatorKey | 19 | §4 | MISSING | Returns 0; val2 of line-input events is always 0 | M | ADD-soon | NO |
 | DateTime | 20 | §4 | DONE | Returns 1; full date/time selector family 0x0160–0x016F (UTC-only local; Wave-5 T1) | — | — | — |
-| Sound2 | 21 | §4 | MISSING | Returns 0 | L | DEFER | NO |
+| Sound2 | 21 | §4 | DONE | Returns 1 (follows sound_enabled); extended suite `glk_schannel_create_ext` (0x00F4), `_play_multi` (0x00F7), `_set_volume_ext` (0x00FD), `_pause` (0x00FE), `_unpause` (0x00FF) + evtype_VolumeNotify (9) implemented (SQ-0308) | — | — | — |
 | ResourceStream | 22 | §4 | DONE | Returns 1; `glk_stream_open_resource` (0x0049) and `_uni` (0x013A — this audit's 0x014A was wrong) implemented (SQ-0308) | — | — | — |
 | GraphicsCharInput | 23 | §4 | MISSING | Returns 0 | M | DEFER | NO |
 | GlkDisp (dispatch API) | N/A | §16 | MISSING | Glulx Glk dispatch interface; not a standard gestalt selector — tested by glulxercise `gidispa` group | M | SKIP | YES – TODO.md gidispa |

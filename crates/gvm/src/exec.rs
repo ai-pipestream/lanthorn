@@ -4343,9 +4343,9 @@ impl Machine {
         self.deliver_arrange();
     }
 
-    /// The Glk version this layer implements (0.7.5), reported by
+    /// The Glk version this layer implements (0.7.6), reported by
     /// `glk_gestalt(gestalt_Version)`.
-    const GLK_VERSION: u32 = 0x0000_0705;
+    const GLK_VERSION: u32 = 0x0000_0706;
 
     /// Answer a `glk_gestalt` query. Truthful for what 3a-1 implements: output +
     /// Unicode are supported; graphics is supported conditionally (per
@@ -7372,11 +7372,11 @@ mod tests {
         body.extend(glk_call(0x05, &[C8(0), C8(0), Zero, C8(0)], Mem16(0x0110))); // gestalt_ext Version
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |_| {});
-        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0705, "glk version 0.7.5");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0706, "glk version 0.7.6");
         assert_eq!(m.mem.read32(0x104).unwrap(), 2, "CharOutput = ExactPrint");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "Unicode supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 1, "LineInput supported (3a-2)");
-        assert_eq!(m.mem.read32(0x110).unwrap(), 0x0000_0705, "gestalt_ext mirrors gestalt");
+        assert_eq!(m.mem.read32(0x110).unwrap(), 0x0000_0706, "gestalt_ext mirrors gestalt");
     }
 
     #[test]
@@ -9056,7 +9056,7 @@ mod tests {
         body.extend(glk_call(0x04, &[C8(22), C8(0)], Mem16(0x0128)));   // ResourceStream
         body.extend(asm::ins(0x120, &[]));
         let m = run_with_ram(body, 0x200, |_| {});
-        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0705, "Version 0.7.5");
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0706, "Version 0.7.6");
         assert_eq!(m.mem.read32(0x104).unwrap(), 1, "CharInput supported");
         assert_eq!(m.mem.read32(0x108).unwrap(), 1, "LineInput supported");
         assert_eq!(m.mem.read32(0x10C).unwrap(), 2, "CharOutput = ExactPrint");
