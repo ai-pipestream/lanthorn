@@ -959,8 +959,11 @@ pub enum StreamKind {
     /// A window's output stream (text routed to that window).
     Window(u32),
     /// A Glulx-memory stream: bytes/words land in main memory `[addr, addr+len)`.
-    /// `unicode` selects 32-bit elements; `pos` is the element cursor.
-    Memory { addr: u32, len: u32, pos: u32, unicode: bool },
+    /// `unicode` selects 32-bit elements; `pos` is the element cursor; `hiwater`
+    /// is the write high-water mark (`bufeof` in cheapglk) — the largest element
+    /// index ever written, capped at `len`. `seekmode_End` and the seek clamp are
+    /// relative to `hiwater`, not `len`.
+    Memory { addr: u32, len: u32, pos: u32, unicode: bool, hiwater: u32 },
     /// A file stream over the in-memory VFS. `unicode` selects the on-file
     /// encoding (4-byte-BE / UTF-8 vs 1 byte per char); the mutable name/mode/pos
     /// state lives in [`Model::file_streams`] keyed by stream id so this stays `Copy`.
@@ -1089,6 +1092,11 @@ struct FileRef {
     /// serialized (defaults to `false` on snapshot restore).
     by_prompt: bool,
 }
+
+/// Glk `filemode_Write` (garglk `glk.h`): a pure output stream. Used to seed a
+/// memory stream's write high-water mark (empty at open, vs the whole buffer).
+#[allow(non_upper_case_globals)]
+const filemode_Write: u32 = 1;
 
 /// Glk `fileusage_TextMode` bit (garglk `glk.h`): when set on a fileref's usage,
 /// a file stream over it uses the text encoding (UTF-8 for unicode streams);
@@ -2052,9 +2060,13 @@ impl Model {
     // ── streams ───────────────────────────────────────────────────────────────
 
     /// Open a Glulx-memory stream over `[addr, addr+len)` (in elements).
-    /// `unicode` selects 32-bit elements. Returns the stream id.
-    pub fn stream_open_memory(&mut self, addr: u32, len: u32, unicode: bool, rock: u32) -> u32 {
-        self.alloc_stream(StreamKind::Memory { addr, len, pos: 0, unicode }, rock)
+    /// `unicode` selects 32-bit elements. `fmode` seeds the write high-water
+    /// mark: a pure write stream (`filemode_Write`) starts empty (`hiwater = 0`),
+    /// any other mode treats the whole buffer as content (`hiwater = len`) — the
+    /// cheapglk `bufeof` init. Returns the stream id.
+    pub fn stream_open_memory(&mut self, addr: u32, len: u32, unicode: bool, fmode: u32, rock: u32) -> u32 {
+        let hiwater = if fmode == filemode_Write { 0 } else { len };
+        self.alloc_stream(StreamKind::Memory { addr, len, pos: 0, unicode, hiwater }, rock)
     }
 
     /// `glk_stream_open_file[_uni]`: open a file stream over the VFS blob named by
@@ -2293,13 +2305,17 @@ impl Model {
         match self.stream(id).map(|s| s.kind) {
             Some(StreamKind::Memory { .. }) => {
                 if let Some(s) = self.stream_mut(id) {
-                    if let StreamKind::Memory { len, pos: ref mut p, .. } = s.kind {
+                    if let StreamKind::Memory { hiwater, pos: ref mut p, .. } = s.kind {
+                        // cheapglk `cgstream.c`: seekmode_End is relative to the
+                        // write high-water mark (`bufeof`), and the result is
+                        // clamped to `[0, hiwater]` for every mode — not to the
+                        // buffer capacity.
                         let base = match seekmode {
                             1 => *p as i64,
-                            2 => len as i64,
+                            2 => hiwater as i64,
                             _ => 0,
                         };
-                        let np = (base + pos as i64).clamp(0, len as i64);
+                        let np = (base + pos as i64).clamp(0, hiwater as i64);
                         *p = np as u32;
                     }
                 }
@@ -2367,7 +2383,7 @@ impl Model {
     /// is not a memory stream. Used by the stream-read selectors in exec.rs.
     pub fn memory_stream_read_info(&self, id: u32) -> Option<(u32, u32, u32, bool)> {
         match self.stream(id)?.kind {
-            StreamKind::Memory { addr, len, pos, unicode } => Some((addr, len, pos, unicode)),
+            StreamKind::Memory { addr, len, pos, unicode, .. } => Some((addr, len, pos, unicode)),
             _ => None,
         }
     }
@@ -2503,8 +2519,12 @@ impl Model {
     /// written the bytes), bumping the write count.
     pub fn memory_stream_advance(&mut self, id: u32, n: u32) {
         if let Some(s) = self.stream_mut(id) {
-            if let StreamKind::Memory { ref mut pos, .. } = s.kind {
+            if let StreamKind::Memory { ref mut pos, ref mut hiwater, len, .. } = s.kind {
                 *pos = pos.saturating_add(n);
+                // Grow the write high-water mark to the new cursor, capped at the
+                // buffer capacity (writes past the end store nothing — cheapglk
+                // caps `bufeof` at `bufend`).
+                *hiwater = (*hiwater).max((*pos).min(len));
             }
             s.write_count = s.write_count.saturating_add(n);
         }
@@ -2786,7 +2806,10 @@ impl Model {
                             w(&mut out, 0);
                             w(&mut out, win);
                         }
-                        StreamKind::Memory { addr, len, pos, unicode } => {
+                        // `hiwater` is not persisted (kept out of the wire format
+                        // to avoid a version bump); it is reconstructed from the
+                        // cursor on deserialize — see below.
+                        StreamKind::Memory { addr, len, pos, unicode, .. } => {
                             w(&mut out, 1);
                             w(&mut out, addr);
                             w(&mut out, len);
@@ -2932,7 +2955,13 @@ impl Model {
             let write_count = r.u32()?;
             let kind = match r.u32()? {
                 0 => StreamKind::Window(r.u32()?),
-                1 => StreamKind::Memory { addr: r.u32()?, len: r.u32()?, pos: r.u32()?, unicode: r.u32()? != 0 },
+                1 => {
+                    let (addr, len, pos, unicode) = (r.u32()?, r.u32()?, r.u32()?, r.u32()? != 0);
+                    // hiwater is not in the wire format; approximate it by the
+                    // cursor (exact for a sequentially-written stream, which is
+                    // the realistic case for a memory stream open at save time).
+                    StreamKind::Memory { addr, len, pos, unicode, hiwater: pos }
+                }
                 // The cursor (name/mode/pos/usage) is restored from the
                 // `file_streams` table below, keyed by this stream's id.
                 2 => StreamKind::File { unicode: r.u32()? != 0 },
@@ -3547,7 +3576,7 @@ mod style_hint_tests {
         let sid = m.window_stream(buf).unwrap();
         m.set_stream_zcolors(sid, 0x00AABBCC, Model::ZCOLOR_CURRENT);
         // A fresh memory stream carries no override.
-        let other = m.stream_open_memory(0, 0, false, 0);
+        let other = m.stream_open_memory(0, 0, false, 1, 0);
         assert_eq!(m.stream_style_colour(other, WinType::TextBuffer, GlkStyle::Normal), StyleColour::default());
     }
 
@@ -3900,7 +3929,7 @@ mod style_hint_tests {
     fn file_memory_and_window_streams_coexist_through_snapshot() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root (+ window stream)
-        let mem = m.stream_open_memory(0x1000, 64, false, 0x7);
+        let mem = m.stream_open_memory(0x1000, 64, false, 1, 0x7);
         let f = m.fileref_create(0x00, "d".to_string(), 0);
         let fsid = m.stream_open_file(f, FM_WRITE, false, 0);
         m.file_stream_write(fsid, "Z");
@@ -4095,7 +4124,7 @@ mod style_hint_tests {
     fn echo_stream_set_and_get_round_trip() {
         let mut m = Model::new();
         let win = m.window_open(0, 0, 0, 3, 0).unwrap();
-        let mem = m.stream_open_memory(0x1000, 64, false, 0);
+        let mem = m.stream_open_memory(0x1000, 64, false, 1, 0);
         assert_eq!(m.window_echo_stream(win), 0, "no echo by default");
         m.window_set_echo_stream(win, mem);
         assert_eq!(m.window_echo_stream(win), mem, "get returns the set echo stream");
@@ -4116,7 +4145,7 @@ mod style_hint_tests {
     fn closing_echo_stream_stops_the_window_echoing() {
         let mut m = Model::new();
         let win = m.window_open(0, 0, 0, 3, 0).unwrap();
-        let mem = m.stream_open_memory(0x1000, 64, false, 0);
+        let mem = m.stream_open_memory(0x1000, 64, false, 1, 0);
         m.window_set_echo_stream(win, mem);
         m.stream_close(mem);
         assert_eq!(m.window_echo_stream(win), 0, "closed echo stream is unhooked");

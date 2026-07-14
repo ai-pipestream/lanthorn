@@ -2515,7 +2515,7 @@ impl Machine {
                     self.echo_depth -= 1;
                 }
             }
-            StreamKind::Memory { addr, len, pos, unicode } => {
+            StreamKind::Memory { addr, len, pos, unicode, .. } => {
                 let elsize = if unicode { 4 } else { 1 };
                 let mut p = pos;
                 for ch in s.chars() {
@@ -3005,8 +3005,8 @@ impl Machine {
                 next
             }
             0x0041 => self.glk.stream_rock(a(0)).unwrap_or(0), // glk_stream_get_rock
-            0x0043 => self.glk.stream_open_memory(a(0), a(1), false, a(3)), // open_memory(addr,len,fmode,rock)
-            0x0139 => self.glk.stream_open_memory(a(0), a(1), true, a(3)),  // open_memory_uni
+            0x0043 => self.glk.stream_open_memory(a(0), a(1), false, a(2), a(3)), // open_memory(addr,len,fmode,rock)
+            0x0139 => self.glk.stream_open_memory(a(0), a(1), true, a(2), a(3)),  // open_memory_uni
             0x0042 => self.glk.stream_open_file(a(0), a(1), false, a(2)),   // open_file(fref,fmode,rock)
             0x0138 => self.glk.stream_open_file(a(0), a(1), true, a(2)),    // open_file_uni
             0x0049 => {
@@ -6831,7 +6831,7 @@ mod tests {
         let buf = m.glk.window_open(0, 0, 0, 3, 0xB0).unwrap(); // root TextBuffer
         let grid = m.glk.window_open(buf, 0x12, 3, 4, 0x61).unwrap(); // grid above, fixed 3
         m.glk.relayout(80, 24, (1, 1));
-        let mem_stream = m.glk.stream_open_memory(0x180, 16, false, 0x5E);
+        let mem_stream = m.glk.stream_open_memory(0x180, 16, false, 3, 0x5E); // ReadWrite: seekable
         m.glk.stream_set_position(mem_stream, 5, 0);
         let grid_stream = m.glk.window_stream(grid).unwrap();
         let buf_stream = m.glk.window_stream(buf).unwrap();
@@ -6902,7 +6902,7 @@ mod tests {
         let snap = m.save_state();
         // Diverge the model: split a grid, open a memory stream, change current.
         let grid = m.glk.window_open(buf, 0x12, 2, 4, 0).unwrap();
-        let extra = m.glk.stream_open_memory(0x180, 8, false, 0);
+        let extra = m.glk.stream_open_memory(0x180, 8, false, 1, 0);
         m.glk.set_current_stream(extra);
         assert_ne!(m.glk.current_stream(), buf_stream);
         assert!(m.glk.window_type(grid).is_some());
@@ -7401,6 +7401,42 @@ mod tests {
     }
 
     #[test]
+    fn memory_stream_seek_end_uses_write_high_water_mark() {
+        // SQ-0324: seekmode_End (and the seek clamp) on a memory stream is
+        // relative to the write high-water mark (`bufeof`), not the buffer
+        // capacity (cheapglk `cgstream.c`).
+        let mut m = resource_machine(glk::TestBackend::new(), 0x400);
+        // open_memory over a 128-element byte buffer, fmode = Write (hiwater 0).
+        let sid = m.glk_dispatch(0x0043, &[0x300, 128, 1, 0]).unwrap();
+        for _ in 0..29 {
+            m.glk_dispatch(0x0081, &[sid, b'x' as u32]).unwrap(); // put_char_stream
+        }
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 29, "wrote 29 bytes");
+
+        // seekmode_End (2), offset -1 → high-water(29) - 1 = 28, NOT len(128) - 1.
+        m.glk_dispatch(0x0045, &[sid, (-1i32) as u32, 2]).unwrap();
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 28, "End is relative to hiwater, not capacity");
+
+        // seekmode_End, offset 0 → exactly the high-water mark.
+        m.glk_dispatch(0x0045, &[sid, 0, 2]).unwrap();
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 29);
+
+        // A positive End offset clamps to hiwater, not to the buffer capacity.
+        m.glk_dispatch(0x0045, &[sid, 50, 2]).unwrap();
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 29, "clamped to hiwater(29), not len(128)");
+
+        // seekmode_Start past the high-water mark clamps there too.
+        m.glk_dispatch(0x0045, &[sid, 100, 0]).unwrap();
+        assert_eq!(m.glk_dispatch(0x0046, &[sid]).unwrap(), 29, "Start clamps to hiwater");
+
+        // A Read-mode memory stream treats the whole buffer as content, so
+        // seekmode_End lands at len (cheapglk seeds `bufeof = bufend`).
+        let rsid = m.glk_dispatch(0x0043, &[0x300, 128, 2, 0]).unwrap(); // fmode = Read
+        m.glk_dispatch(0x0045, &[rsid, 0, 2]).unwrap();
+        assert_eq!(m.glk_dispatch(0x0046, &[rsid]).unwrap(), 128, "Read-mode End is the full buffer");
+    }
+
+    #[test]
     fn glk_stream_current_and_explicit_routing() {
         use asm::Op::{C16, C8, Mem16, Zero};
         // open_memory -> stream 2; current stays the window (stream 1).
@@ -7675,7 +7711,7 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let mut m = machine_ram(body, 0x400);
         // Attach a Latin-1 memory echo stream at 0x300 to window 1.
-        let echo = m.glk.stream_open_memory(0x300, 64, false, 0);
+        let echo = m.glk.stream_open_memory(0x300, 64, false, 1, 0);
         m.glk.window_set_echo_stream(1, echo);
         assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
         m.supply_line("look");
@@ -7694,7 +7730,7 @@ mod tests {
         body.extend(asm::ins(0x120, &[]));
         let mut m = machine_ram(body, 0x400);
         // A Unicode (32-bit element) memory echo stream at 0x300.
-        let echo = m.glk.stream_open_memory(0x300, 32, true, 0);
+        let echo = m.glk.stream_open_memory(0x300, 32, true, 1, 0);
         m.glk.window_set_echo_stream(1, echo);
         assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
         m.supply_line("AB");
