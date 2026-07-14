@@ -6,6 +6,7 @@ pub mod paneframe;
 pub mod filebrowser;
 pub mod gallery;
 pub mod graphics;
+pub mod hintbar;
 pub mod hints_panel;
 pub mod history;
 pub mod inline_image;
