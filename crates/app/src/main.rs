@@ -21,17 +21,9 @@ use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::input::{apply_action, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, Action, KeyResolve};
 use app::persist_files::{list_saves, restore_game};
-use app::render::config_screen::draw_config_screen;
-use app::render::style_editor::{draw_style_editor, StyleEditorRects};
+use app::render::style_editor::StyleEditorRects;
 use app::render::dialog::{DialogRects, DialogStyle};
-use app::render::filebrowser::draw_file_browser;
-use app::render::gallery::draw_gallery;
-use app::render::hints_panel::{draw_hints_panel, HintsPanelRects};
-use app::render::launch_dialog::draw_launch_dialog;
-use app::render::quit_dialog::draw_quit_dialog;
-use app::render::aux_dialog::draw_aux_dialog;
-use app::render::reset_dialog::draw_reset_dialog;
-use app::render::hotkeys::draw_hotkey_dialog;
+use app::render::hints_panel::HintsPanelRects;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
@@ -40,9 +32,6 @@ use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
 use app::render::room_info::draw_room_info;
-use app::render::saves::draw_saves;
-use app::render::file_picker::draw_file_picker;
-use app::render::history::draw_history;
 use app::render::screen::render_story_pane;
 use app::render::draw_str_clipped;
 use app::engine::Engine;
@@ -57,6 +46,7 @@ mod engine_helpers;
 mod ingame_io;
 mod lifecycle;
 mod loop_tick;
+mod overlays;
 mod picker_ui;
 mod reset;
 mod slash_dispatch;
@@ -277,14 +267,7 @@ fn draw_frame(
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
-    let mut aux_dialog_rects_out: Option<app::render::aux_dialog::AuxDialogRects> = None;
-    let mut reset_dialog_rects_out: Option<app::render::reset_dialog::ResetDialogRects> = None;
-    let mut save_name_dialog_rects_out: Option<app::render::save_name_dialog::SaveNameDialogRects> = None;
-    let mut quit_dialog_rects_out: Option<app::render::quit_dialog::QuitDialogRects> = None;
-    let mut launch_dialog_rects_out: Option<app::render::launch_dialog::LaunchDialogRects> = None;
-    let mut hints_panel_rects_out: Option<HintsPanelRects> = None;
-    let mut style_editor_rects_out: Option<StyleEditorRects> = None;
-    let mut glyph_picker_rects_out: Option<app::render::glyph_picker::GlyphPickerRects> = None;
+    let mut overlay_rects: Option<overlays::OverlayRects> = None;
     let mut verb_hits = app::render::verbmenu::VerbMenuHits::default();
     let mut modal_list_viewport: usize = 0;
     let mut transcript_max_scroll: u16 = 0;
@@ -635,91 +618,19 @@ fn draw_frame(
         }
         draw_str_clipped(buf, pane_layout.help_row.x, pane_layout.help_row.y, &help_text, help_style, pane_layout.help_row);
 
-        // Modal dialogs center within the graphics-free text region (story text +
-        // map together), never over a Glulx graphics window — the terminal image
-        // protocol would otherwise overpaint them (SQ-0203). No graphics → `full`.
-        // Clamp to gvm's content bounding box so the graphics-rect walk matches the
-        // clamped composite render (the snap-margin has no windows). (SQ-0303)
-        let story_bbox = app::render::screen::content_bounds(&screen_model, story_area);
-        let dialog_area = app::render::screen::dialog_bounds(&screen_model, story_bbox, full);
-
-        // ── Hotkey dialog overlay — drawn over everything ─────────────────────
-        if state.hotkey_dialog {
-            dialog_rects_out = draw_hotkey_dialog(state, dialog_area, buf);
-        }
-
-        // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
-        if state.gallery.is_some() {
-            if let Some(dr) = draw_gallery(state, dialog_area, buf) {
-                dialog_rects_out = Some(dr);
-            }
-        }
-
-        // ── Saves-manager overlay — drawn after gallery ───────────────────────
-        if state.saves.is_some() {
-            dialog_rects_out = draw_saves(state, dialog_area, buf, &mut modal_list_viewport);
-        }
-
-        // ── Replay/rewind overlay ─────────────────────────────────────────────
-        if state.replay.is_some() {
-            dialog_rects_out = draw_history(state, dialog_area, buf, &mut modal_list_viewport);
-        }
-
-        // ── File-browser overlay — drawn after saves ──────────────────────────
-        if state.file_browser.is_some() {
-            dialog_rects_out = draw_file_browser(state, dialog_area, buf, &mut modal_list_viewport);
-        }
-
-        // ── VFS file picker overlay (read-mode create_by_prompt) ──────────────
-        if state.file_picker.is_some() {
-            dialog_rects_out = draw_file_picker(state, dialog_area, buf, &mut modal_list_viewport);
-        }
-
-        // ── Config screen overlay — drawn after other modals ──────────────────
-        if state.config_screen.is_some() {
-            dialog_rects_out = draw_config_screen(state, dialog_area, buf, &mut modal_list_viewport);
-        }
-
-        // ── Style editor overlay — full-screen, drawn after config screen ──────
-        if state.style_editor.is_some() {
-            style_editor_rects_out = draw_style_editor(state, dialog_area, buf);
-        }
-
-        // ── Glyph-picker modal — drawn over the style editor ──────────────────
-        if state.glyph_picker.is_some() {
-            glyph_picker_rects_out = app::render::glyph_picker::draw_glyph_picker(state, dialog_area, buf);
-        }
-
-        // ── Aux-storage prompt — drawn over everything ────────────────────────
-        if state.aux_prompt {
-            aux_dialog_rects_out = draw_aux_dialog(state, dialog_area, buf);
-        }
-
-        // ── Reset dialog overlay — drawn over everything ───────────────────────
-        if state.reset_dialog {
-            reset_dialog_rects_out = draw_reset_dialog(state, dialog_area, buf);
-        }
-
-        // ── Save-name dialog overlay — drawn over everything ───────────────────
-        if state.save_name_dialog.is_some() {
-            save_name_dialog_rects_out =
-                app::render::save_name_dialog::draw_save_name_dialog(state, dialog_area, buf);
-        }
-
-        // ── Quit dialog overlay — drawn over everything ────────────────────────
-        if state.quit_dialog {
-            quit_dialog_rects_out = draw_quit_dialog(state, dialog_area, buf);
-        }
-
-        // ── Launch dialog overlay — drawn over everything ──────────────────────
-        if state.launch_dialog {
-            launch_dialog_rects_out = draw_launch_dialog(state, dialog_area, buf);
-        }
-
-        // ── Hints panel overlay — drawn after other overlays ───────────────────
-        if state.hints.is_some() {
-            hints_panel_rects_out = draw_hints_panel(state, dialog_area, buf);
-        }
+        // The z-ordered modal/overlay ladder now lives in `overlays::draw_all`
+        // (SQ-0306). It seeds `dialog` from the pre-ladder map/story draws
+        // (tidy panel / room info / inspector) and returns the per-overlay
+        // hit-rects that `draw_frame` splices into `PaneRects` below.
+        overlay_rects = Some(overlays::draw_all(
+            state,
+            &screen_model,
+            story_area,
+            full,
+            buf,
+            dialog_rects_out.take(),
+            &mut modal_list_viewport,
+        ));
 
         // Story-pane text-selection highlight + copy extraction now happen inside
         // render_middle (render/transcript.rs), which has the full wrapped-row set
@@ -754,7 +665,9 @@ fn draw_frame(
         }
     })?;
 
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: dialog_rects_out, aux_dialog: aux_dialog_rects_out, reset_dialog: reset_dialog_rects_out, save_name_dialog: save_name_dialog_rects_out, quit_dialog: quit_dialog_rects_out, launch_dialog: launch_dialog_rects_out, hints_panel: hints_panel_rects_out, style_editor: style_editor_rects_out, verb_menu: verb_hits, glyph_picker: glyph_picker_rects_out, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    // The draw closure runs exactly once, so the overlay ladder always ran.
+    let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, save_name_dialog: overlay_rects.save_name_dialog, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
