@@ -272,15 +272,14 @@ pub fn hint_bar(
 /// `map` is `Rect::default()` when the layout hides the map (TranscriptFull).
 /// `story` is `Rect::default()` when the layout hides the story (MapFull).
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
-/// `layer_tabs` pairs each visible layer tab with its hit-rect (for future click-to-switch).
+/// `layer_tabs` pairs each visible layer tab with its hit-rect (click switches layers).
 /// `dialog` holds the last-drawn dialog chrome rects for mouse hit-testing.
 struct PaneRects {
     map: Rect,
     story: Rect,
     room_rects: Vec<(RoomId, Rect)>,
-    /// Hit-rects for each layer tab, paired with the layer id.
-    /// Populated but not yet consumed; reserved for a future click-to-switch feature.
-    #[allow(dead_code)]
+    /// Hit-rects for each layer tab, paired with the layer id; the mouse
+    /// handler hit-tests these to switch the viewed layer on click.
     layer_tabs: Vec<(LayerId, Rect)>,
     /// Active dialog chrome rects (when a dialog is open).
     pub dialog: Option<DialogRects>,
@@ -303,10 +302,10 @@ struct PaneRects {
     /// Hit-rects for the glyph-picker modal (when open).
     pub glyph_picker: Option<app::render::glyph_picker::GlyphPickerRects>,
     /// Per-frame map from rendered story-pane cell `(col, row)` → Glk hyperlink
-    /// value. Built during transcript render; hit-tested on click (Task 3).
-    /// Empty when nothing on screen is linked. Story-pane cells share the Glk
-    /// screen frame, so these coords are directly click-comparable.
-    #[allow(dead_code)]
+    /// value. Built during transcript render; the mouse handler hit-tests these
+    /// on click to deliver the hyperlink event. Empty when nothing on screen is
+    /// linked. Story-pane cells share the Glk screen frame, so these coords are
+    /// directly click-comparable.
     pub transcript_links: Vec<((u16, u16), u32)>,
     /// Largest meaningful `transcript_scroll` this frame (total wrapped rows −
     /// viewport). The loop clamps `state.transcript_scroll` to this so the view
