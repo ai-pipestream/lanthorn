@@ -3251,10 +3251,11 @@ impl Machine {
             0x0122 => self.glk_buffer_case_uni(a(0), a(1), a(2), CaseOp::Title { lower_rest: a(3) != 0 })?,
             0x00B0 => { self.glk.set_style_hint(a(0), a(1), a(2), a(3)); 0 } // glk_stylehint_set
             0x00B1 => { self.glk.clear_style_hint(a(0), a(1), a(2)); 0 }     // glk_stylehint_clear
-            // glk_style_distinguish: hints only. The backend's default colours
-            // (SQ-0315) are per-window-type base colours, identical across style
-            // classes, so they can never make two styles distinguishable — the
-            // model's hint-based answer already is the honest one.
+            // glk_style_distinguish: compares the rendered stylehints the model
+            // records — colour/reverse plus Weight/Oblique (SQ-0317). The backend's
+            // default colours (SQ-0315) are per-window-type base colours, identical
+            // across style classes, so they can never make two styles
+            // distinguishable — the model's hint-based answer is the honest one.
             0x00B2 => self.glk.style_distinguish(a(0), a(1), a(2)) as u32,
             0x00B3 => {
                 // glk_style_measure(win, styl, hint, result*) -> 1 if known + stored.

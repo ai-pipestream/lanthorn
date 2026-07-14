@@ -121,6 +121,20 @@ pub struct StyleColour {
     pub reverse: bool,
 }
 
+/// The non-colour stylehints this Glk subset records for `glk_style_distinguish`:
+/// `stylehint_Weight` (4) and `stylehint_Oblique` (5) — the bold / italic hints a
+/// terminal can render, so two styles set to different weights or obliques are
+/// visually distinguishable. `None` = no hint set. The remaining hints
+/// (Size, Indentation, ParaIndentation, Justification, Proportional) describe
+/// typographic properties a fixed-cell terminal cannot render, so they are not
+/// recorded and never make styles distinguishable. Plain data — keeps `gvm`
+/// zero-dependency.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StyleAttrs {
+    pub weight: Option<u32>,
+    pub oblique: Option<u32>,
+}
+
 impl GlkStyle {
     /// Map a style number to a class (out-of-range falls back to Normal).
     pub fn from_num(v: u32) -> GlkStyle {
@@ -1049,6 +1063,9 @@ pub struct Model {
     /// Colour style hints, indexed `[row][style]` where row 0 = text-buffer and
     /// row 1 = text-grid (see [`Model::hint_row`]). Set via `glk_stylehint_set`.
     style_hints: [[StyleColour; NUMSTYLES as usize]; 2],
+    /// Non-colour rendered stylehints (Weight, Oblique), same `[row][style]`
+    /// indexing as `style_hints`. Compared by `glk_style_distinguish`.
+    style_attrs: [[StyleAttrs; NUMSTYLES as usize]; 2],
     /// Pixel size of one character cell (w, h), set by `relayout` for graphics
     /// fixed-split conversion. (1,1) until the backend reports otherwise.
     char_px: (u32, u32),
@@ -1128,6 +1145,7 @@ impl Model {
             cur_stream: 0,
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
+            style_attrs: [[StyleAttrs::default(); NUMSTYLES as usize]; 2],
             char_px: (1, 1),
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
@@ -1147,9 +1165,10 @@ impl Model {
         }
     }
 
-    /// Record a `glk_stylehint_set(wintype, styl, hint, val)`. Only the colour
-    /// hints are kept: TextColor (7), BackColor (8), ReverseColor (9); other
-    /// hints and out-of-range styles are ignored.
+    /// Record a `glk_stylehint_set(wintype, styl, hint, val)`. The rendered hints
+    /// are kept: TextColor (7), BackColor (8), ReverseColor (9) as colour, and
+    /// Weight (4) / Oblique (5) as attributes; other hints and out-of-range
+    /// styles are ignored.
     pub fn set_style_hint(&mut self, wintype: u32, styl: u32, hint: u32, val: u32) {
         if styl >= NUMSTYLES {
             return;
@@ -1162,10 +1181,16 @@ impl Model {
                 9 => sc.reverse = val != 0,
                 _ => {}
             }
+            let sa = &mut self.style_attrs[row][styl as usize];
+            match hint {
+                4 => sa.weight = Some(val),
+                5 => sa.oblique = Some(val),
+                _ => {}
+            }
         }
     }
 
-    /// Undo a `glk_stylehint_clear(wintype, styl, hint)` for a colour hint.
+    /// Undo a `glk_stylehint_clear(wintype, styl, hint)` for a recorded hint.
     pub fn clear_style_hint(&mut self, wintype: u32, styl: u32, hint: u32) {
         if styl >= NUMSTYLES {
             return;
@@ -1176,6 +1201,12 @@ impl Model {
                 7 => sc.fg = None,
                 8 => sc.bg = None,
                 9 => sc.reverse = false,
+                _ => {}
+            }
+            let sa = &mut self.style_attrs[row][styl as usize];
+            match hint {
+                4 => sa.weight = None,
+                5 => sa.oblique = None,
                 _ => {}
             }
         }
@@ -1189,6 +1220,17 @@ impl Model {
             WinType::Pair | WinType::Graphics => return StyleColour::default(),
         };
         self.style_hints[row][style as usize]
+    }
+
+    /// Resolve the non-colour rendered attributes (Weight, Oblique) active for
+    /// `style` in a window of type `wintype`.
+    pub fn style_attrs(&self, wintype: WinType, style: GlkStyle) -> StyleAttrs {
+        let row = match wintype {
+            WinType::TextBuffer => 0,
+            WinType::TextGrid => 1,
+            WinType::Pair | WinType::Graphics => return StyleAttrs::default(),
+        };
+        self.style_attrs[row][style as usize]
     }
 
     // ── Gargoyle garglk_* colour overrides ──────────────────────────────────────
@@ -1271,12 +1313,15 @@ impl Model {
     }
 
     /// `glk_style_distinguish`: whether style classes `s1` and `s2` differ in a
-    /// hint the model records and the terminal renders (foreground/background
-    /// colour or reverse-video) in window `win`. Styles the model cannot tell
-    /// apart report `false` — the honest answer given only the recorded colour
-    /// hints (an intrinsic class difference like a bold Header is decided by the
-    /// host's style config, which this VM layer cannot see). Same style number,
-    /// or an invalid window, is likewise not distinguishable.
+    /// hint the model records and the terminal renders in window `win` —
+    /// foreground/background colour or reverse-video (`style_colour`) or the
+    /// Weight / Oblique attributes (`style_attrs`). Hints a fixed-cell terminal
+    /// cannot render (Size, Indentation, Justification, Proportional) are not
+    /// recorded, so they never distinguish. Styles the model cannot tell apart
+    /// report `false` — the honest answer given the recorded hints (an intrinsic
+    /// class difference like a bold Header comes from the host's style config,
+    /// which this VM layer cannot see). Same style number, or an invalid window,
+    /// is likewise not distinguishable.
     pub fn style_distinguish(&self, win: u32, s1: u32, s2: u32) -> bool {
         let Some(wintype) = self.window_type(win) else {
             return false;
@@ -1284,8 +1329,9 @@ impl Model {
         if s1 == s2 {
             return false;
         }
-        self.style_colour(wintype, GlkStyle::from_num(s1))
-            != self.style_colour(wintype, GlkStyle::from_num(s2))
+        let (a, b) = (GlkStyle::from_num(s1), GlkStyle::from_num(s2));
+        self.style_colour(wintype, a) != self.style_colour(wintype, b)
+            || self.style_attrs(wintype, a) != self.style_attrs(wintype, b)
     }
 
     // ── slot accessors ────────────────────────────────────────────────────────
@@ -2891,6 +2937,7 @@ impl Model {
             cur_stream,
             events: std::collections::VecDeque::new(),
             style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
+            style_attrs: [[StyleAttrs::default(); NUMSTYLES as usize]; 2],
             char_px: (1, 1),
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
@@ -3963,5 +4010,32 @@ mod style_hint_tests {
         // Reverse-only difference also distinguishes.
         m.set_style_hint(3, 4, 9, 1); // style_Subheader=4 ReverseColor on
         assert!(m.style_distinguish(win, 0, 4), "a reverse-video difference distinguishes");
+    }
+
+    #[test]
+    fn style_distinguish_compares_rendered_weight_and_oblique_not_ignored_hints() {
+        // SQ-0317: Weight (4) and Oblique (5) are rendered attributes a terminal
+        // can show (bold / italic), so a style differing only in one of them is
+        // distinguishable; Size/Indentation/Justification/Proportional are hints a
+        // fixed-cell terminal cannot render, so they never distinguish.
+        let mut m = Model::new();
+        let win = m.window_open(0, 0, 0, 3, 0).unwrap(); // wintype_TextBuffer=3
+        // A Weight hint on User1 (style 9) makes it differ from the unhinted User2 (10).
+        m.set_style_hint(3, 9, 4, 1); // stylehint_Weight = bold
+        assert!(m.style_distinguish(win, 9, 10), "a differing weight hint distinguishes");
+        // Clearing it makes them indistinguishable again.
+        m.clear_style_hint(3, 9, 4);
+        assert!(!m.style_distinguish(win, 9, 10), "clearing the weight hint un-distinguishes");
+        // An Oblique difference also distinguishes.
+        m.set_style_hint(3, 9, 5, 1); // stylehint_Oblique = italic
+        assert!(m.style_distinguish(win, 9, 10), "a differing oblique hint distinguishes");
+        m.clear_style_hint(3, 9, 5);
+        // An unrendered hint (Size = 3) set differently does NOT distinguish.
+        m.set_style_hint(3, 9, 3, 20); // stylehint_Size — ignored
+        assert!(!m.style_distinguish(win, 9, 10), "an unrendered size hint never distinguishes");
+        // Identical styles with the same hints are never distinguishable.
+        m.set_style_hint(3, 10, 4, 1);
+        m.set_style_hint(3, 9, 4, 1);
+        assert!(!m.style_distinguish(win, 9, 10), "matching weight hints are indistinguishable");
     }
 }
